@@ -1,0 +1,28 @@
+# Brimir - Comandos de Instalação Manual
+# Execute estes comandos um por vez no PowerShell como Administrador
+
+# 1. Instalar CMake
+winget install --id Kitware.CMake -e --accept-package-agreements --accept-source-agreements
+
+# 2. Instalar Ninja
+winget install --id Ninja-build.Ninja -e --accept-package-agreements --accept-source-agreements
+
+# 3. Instalar Visual Studio Build Tools 2022
+# IMPORTANTE: Quando o instalador abrir, selecione "Desenvolvimento para desktop com C++"
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-package-agreements --accept-source-agreements
+
+# Depois da instalação:
+# 1. Feche todas as janelas do PowerShell
+# 2. Abra um novo PowerShell
+# 3. Execute os comandos de verificação abaixo
+
+# ===== VERIFICAÇÃO (executar em PowerShell normal após instalar) =====
+
+cmake --version
+ninja --version
+
+# Para testar o compilador C++, abra "Developer PowerShell for VS 2022" e execute:
+cl
+
+# Se todos os comandos funcionarem, você está pronto para começar!
+

@@ -1,0 +1,143 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+out/
+dist/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+*.cmake
+
+# Compiled objects
+*.o
+*.obj
+*.lo
+*.slo
+*.ko
+*.elf
+
+# Libraries
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+*.lib
+*.lai
+*.la
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Platform-specific
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+*.vcxproj.user
+*.suo
+*.user
+
+# vcpkg
+vcpkg_installed/
+vcpkg/downloads/
+vcpkg/buildtrees/
+vcpkg/packages/
+
+# Dependencies
+vendor/
+third_party/
+node_modules/
+
+# ROMs and BIOS (should not be committed)
+*.bin
+*.bios
+roms/
+*.chd
+*.cue
+*.iso
+*.ccd
+*.img
+*.mds
+*.mdf
+*.m3u
+
+# Save states and saves
+*.srm
+*.state
+*.sav
+saves/
+states/
+
+# Logs
+*.log
+logs/
+
+# Core files
+core
+core.*
+
+# Testing
+tests/roms/
+tests/bios/
+*.coverage
+coverage/
+
+# Documentation build
+docs/_build/
+docs/html/
+docs/latex/
+doxygen/
+
+# Packaging
+*.deb
+*.rpm
+*.tar.gz
+*.tar.xz
+*.zip
+packaging/output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Python (for scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+pip-log.txt
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Generated files
+version.h
+build_info.h
+
+# Profile data
+profile/
+*.prof
+*.profdata
+

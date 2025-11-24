@@ -1,0 +1,6 @@
+[submodule "src/ymir"]
+	path = src/ymir
+	url = https://github.com/StrikerX3/Ymir.git
+[submodule "vcpkg"]
+	path = vcpkg
+	url = https://github.com/microsoft/vcpkg.git
