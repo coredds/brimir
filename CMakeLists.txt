@@ -42,6 +42,12 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # Add cmake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src/ymir/cmake")
+
+# Include Ymir's VS helpers if on MSVC
+if (MSVC)
+    include(VSHelpers)
+endif()
 
 # Compiler warnings
 if(MSVC)
@@ -54,20 +60,12 @@ endif()
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Subdirectories - Ymir emulator core
-# Configure Ymir options before adding subdirectory
-set(Ymir_INCLUDE_PACKAGING OFF CACHE BOOL "" FORCE)
-set(Ymir_DEV_BUILD ON CACHE BOOL "" FORCE)
-set(Ymir_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-set(Ymir_ENABLE_SANDBOX OFF CACHE BOOL "" FORCE)
-set(Ymir_ENABLE_YMDASM OFF CACHE BOOL "" FORCE)
-set(Ymir_ENABLE_DEVLOG OFF CACHE BOOL "" FORCE)
-set(Ymir_ENABLE_DEV_ASSERTIONS OFF CACHE BOOL "" FORCE)
-set(Ymir_ENABLE_IMGUI_DEMO OFF CACHE BOOL "" FORCE)
-set(Ymir_ENABLE_UPDATE_CHECKS OFF CACHE BOOL "" FORCE)
+# Subdirectories - Ymir emulator core dependencies
+# Only include what ymir-core actually needs (skip imgui/SDL3)
+include(cmake/YmirDeps.cmake)
 
-# Add Ymir - only build the core library
-add_subdirectory(src/ymir EXCLUDE_FROM_ALL)
+# Add only Ymir's core library (not apps or tests)
+add_subdirectory(src/ymir/libs EXCLUDE_FROM_ALL)
 
 # Bridge layer - adapts Ymir to libretro
 add_subdirectory(src/bridge)
