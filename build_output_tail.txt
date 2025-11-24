@@ -1,0 +1,100 @@
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2907,57): warning C4244:         ] [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2926,56): warning C4244: '=': convers├úo de 'T' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2926,56): warning C4244:         with [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2926,56): warning C4244:         [ [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2926,56): warning C4244:             T=uint16 [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2926,56): warning C4244:         ] [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2927,57): warning C4244: '=': convers├úo de 'T' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2927,57): warning C4244:         with [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2927,57): warning C4244:         [ [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2927,57): warning C4244:             T=uint16 [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2927,57): warning C4244:         ] [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2943,56): warning C4244: '=': convers├úo de 'T' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2943,56): warning C4244:         with [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2943,56): warning C4244:         [ [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2943,56): warning C4244:             T=uint16 [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(2943,56): warning C4244:         ] [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3000,82): warning C4244: '=': convers├úo de 'int' para '_Ty', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3000,82): warning C4244:         with [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3000,82): warning C4244:         [ [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3000,82): warning C4244:             _Ty=uint8 [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3000,82): warning C4244:         ] [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3001,83): warning C4244: '=': convers├úo de 'int' para '_Ty', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3001,83): warning C4244:         with [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3001,83): warning C4244:         [ [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3001,83): warning C4244:             _Ty=uint8 [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3001,83): warning C4244:         ] [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3054,64): warning C4244: '=': convers├úo de 'int' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3055,65): warning C4244: '=': convers├úo de 'int' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3066,64): warning C4244: '=': convers├úo de 'int' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3067,65): warning C4244: '=': convers├úo de 'int' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3077,64): warning C4244: '=': convers├úo de 'int' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3088,69): warning C4244: '=': convers├úo de 'int' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp2_regs.hpp(3089,70): warning C4244: '=': convers├úo de 'int' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\slope.hpp(108,23): warning C4146: operador menos un├írio aplicado a tipo unsigned, resultado permanece unsigned [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\slope.hpp(155,16): warning C4244: 'return': convers├úo de 'const sint32' para 'uint8', poss├¡vel perda de dados [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp.hpp(535,58): warning C4324: 'ymir::vdp::VDP::VDPRenderContext::VDP1': a estrutura foi preenchida devido ao especificador de alinhamento [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp.hpp(659,41): warning C4324: 'ymir::vdp::VDP': a estrutura foi preenchida devido ao especificador de alinhamento [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp.hpp(835,5): warning C4324: 'ymir::vdp::VDP::LayerState': a estrutura foi preenchida devido ao especificador de alinhamento [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp.hpp(897,46): warning C4324: 'ymir::vdp::VDP::VRAMFetcher': a estrutura foi preenchida devido ao especificador de alinhamento [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\hw\vdp\vdp.hpp(1101,74): warning C4324: 'ymir::vdp::VDP': a estrutura foi preenchida devido ao especificador de alinhamento [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\bus.hpp(347,1): warning C4324: 'ymir::sys::Bus<27,16>::MemoryPage': a estrutura foi preenchida devido ao especificador de alinhamento [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+      C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\bus.hpp(347,1):
+      o contexto de instancia├º├úo do modelo (o mais antigo primeiro) ├®
+          C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\saturn.hpp(412,17):
+          consulte a refer├¬ncia ├á instancia├º├úo 'ymir::sys::Bus<27,16>' do modelo da classe que est├í sendo compilada
+          C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\bus.hpp(317,25):
+          enquanto compila a classe 'ymir::sys::Bus<27,16>::MemoryPage'
+  
+C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\bus.hpp(347,1): warning C4324: 'ymir::sys::Bus<28,19>::MemoryPage': a estrutura foi preenchida devido ao especificador de alinhamento [C:\Users\david\projects\Brimir\build\src\ymir\libs\ymir-core\ymir-core.vcxproj]
+  (compilando o arquivo fonte '../../../../../src/ymir/libs/ymir-core/src/ymir/ymir.cpp')
+      C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\bus.hpp(347,1):
+      o contexto de instancia├º├úo do modelo (o mais antigo primeiro) ├®
+          C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\saturn.hpp(425,17):
+          consulte a refer├¬ncia ├á instancia├º├úo 'ymir::sys::Bus<28,19>' do modelo da classe que est├í sendo compilada
+          C:\Users\david\projects\Brimir\src\ymir\libs\ymir-core\include\ymir\sys\bus.hpp(317,25):
+          enquanto compila a classe 'ymir::sys::Bus<28,19>::MemoryPage'
+  
+  Verificando fontes para depend├¬ncias de m├│dulo...
+  brimir_libretro_api.vcxproj -> C:\Users\david\projects\Brimir\build\src\libretro\brimir_libretro_api.dir\Release\brimir_libretro_api.lib

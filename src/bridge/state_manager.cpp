@@ -5,3 +5,12 @@
 // TODO: Implement save state serialization/deserialization
 // Wrap Ymir's save state functionality for libretro
 
+namespace brimir {
+namespace state {
+
+// Placeholder implementation
+// Will be expanded in Phase 1 Week 3-4
+
+} // namespace state
+} // namespace brimir
+

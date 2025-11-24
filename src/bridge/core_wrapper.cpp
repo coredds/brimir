@@ -60,28 +60,35 @@ bool CoreWrapper::LoadGame(const char* path) {
     try {
         std::filesystem::path gamePath(path);
         
-        // Use Ymir's loader to load the disc
-        auto result = ymir::media::loader::Load(gamePath);
+        // Create a Disc object and load the disc image into it
+        ymir::media::Disc disc;
         
-        if (!result.has_value()) {
+        // Callback for loader messages (can log these via libretro later)
+        auto loaderCallback = [](ymir::media::MessageType type, std::string message) {
+            // TODO: Forward to libretro logging
+        };
+        
+        // Use Ymir's loader to load the disc
+        bool success = ymir::media::LoadDisc(gamePath, disc, false, loaderCallback);
+        
+        if (!success || disc.sessions.empty()) {
             return false;
         }
 
         // Load the disc into the emulator
-        m_saturn->LoadDisc(std::move(result.value()));
+        m_saturn->LoadDisc(std::move(disc));
         m_saturn->CloseTray();
         
         // Auto-detect region from disc
-        auto& disc = m_saturn->GetDisc();
-        if (disc.IsLoaded()) {
-            const auto& header = disc.GetHeader();
-            m_saturn->AutodetectRegion(header.areaCodes);
+        const auto& loadedDisc = m_saturn->GetDisc();
+        if (!loadedDisc.sessions.empty()) {
+            m_saturn->AutodetectRegion(loadedDisc.header.compatAreaCode);
         }
         
         m_gameLoaded = true;
         return true;
         
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         return false;
     }
 }

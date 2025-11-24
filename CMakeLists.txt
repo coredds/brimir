@@ -64,7 +64,18 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Only include what ymir-core actually needs (skip imgui/SDL3)
 include(cmake/YmirDeps.cmake)
 
-# Add only Ymir's core library (not apps or tests)
+# Set Ymir version variables (normally set by src/ymir/CMakeLists.txt project() command)
+set(Ymir_VERSION_MAJOR 0)
+set(Ymir_VERSION_MINOR 2)
+set(Ymir_VERSION_PATCH 1)
+set(Ymir_VERSION_PRERELEASE "")
+set(Ymir_VERSION_BUILD "")
+set(Ymir_VERSION "0.2.1")
+set(Ymir_DEV_BUILD ON)
+set(Ymir_ENABLE_DEVLOG ON)
+set(Ymir_ENABLE_DEV_ASSERTIONS OFF)
+
+# Add only Ymir's core library (not full project to avoid vendor conflicts)
 add_subdirectory(src/ymir/libs EXCLUDE_FROM_ALL)
 
 # Bridge layer - adapts Ymir to libretro
