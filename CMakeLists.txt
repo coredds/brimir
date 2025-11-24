@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.28)
 
 # Project information
 project(Brimir
@@ -55,9 +55,19 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Subdirectories - Ymir emulator core
-# Note: We'll need to adapt Ymir's CMakeLists or create a wrapper
-# TODO: Re-enable after analyzing Ymir's build system
-# add_subdirectory(src/ymir EXCLUDE_FROM_ALL)
+# Configure Ymir options before adding subdirectory
+set(Ymir_INCLUDE_PACKAGING OFF CACHE BOOL "" FORCE)
+set(Ymir_DEV_BUILD ON CACHE BOOL "" FORCE)
+set(Ymir_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(Ymir_ENABLE_SANDBOX OFF CACHE BOOL "" FORCE)
+set(Ymir_ENABLE_YMDASM OFF CACHE BOOL "" FORCE)
+set(Ymir_ENABLE_DEVLOG OFF CACHE BOOL "" FORCE)
+set(Ymir_ENABLE_DEV_ASSERTIONS OFF CACHE BOOL "" FORCE)
+set(Ymir_ENABLE_IMGUI_DEMO OFF CACHE BOOL "" FORCE)
+set(Ymir_ENABLE_UPDATE_CHECKS OFF CACHE BOOL "" FORCE)
+
+# Add Ymir - only build the core library
+add_subdirectory(src/ymir EXCLUDE_FROM_ALL)
 
 # Bridge layer - adapts Ymir to libretro
 add_subdirectory(src/bridge)
@@ -72,8 +82,7 @@ add_library(brimir_libretro SHARED
 )
 
 # Link with Ymir core
-# TODO: Determine exact Ymir target name after examining Ymir's CMakeLists
-# target_link_libraries(brimir_libretro PRIVATE ymir_core)
+target_link_libraries(brimir_libretro PRIVATE ymir::ymir-core)
 
 # Set output name based on platform
 if(BRIMIR_PLATFORM_WINDOWS)

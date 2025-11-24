@@ -3,8 +3,11 @@
 // Licensed under GPL-3.0
 
 #include "libretro.h"
+#include "brimir/core_wrapper.hpp"
+
 #include <cstdio>
 #include <cstring>
+#include <memory>
 
 // Libretro callbacks
 static retro_log_printf_t log_cb = nullptr;
@@ -14,6 +17,9 @@ static retro_audio_sample_batch_t audio_batch_cb = nullptr;
 static retro_input_poll_t input_poll_cb = nullptr;
 static retro_input_state_t input_state_cb = nullptr;
 static retro_environment_t environ_cb = nullptr;
+
+// Core instance
+static std::unique_ptr<brimir::CoreWrapper> g_core;
 
 // Helper function for logging
 static void brimir_log(retro_log_level level, const char* fmt, ...) {
@@ -67,10 +73,23 @@ RETRO_API void retro_set_input_state(retro_input_state_t cb) {
 RETRO_API void retro_init(void) {
     brimir_log(RETRO_LOG_INFO, "Brimir initializing...");
     brimir_log(RETRO_LOG_INFO, "Based on Ymir emulator by StrikerX3");
+    
+    // Create core instance
+    g_core = std::make_unique<brimir::CoreWrapper>();
+    
+    if (!g_core->Initialize()) {
+        brimir_log(RETRO_LOG_ERROR, "Failed to initialize core");
+        g_core.reset();
+    }
 }
 
 RETRO_API void retro_deinit(void) {
     brimir_log(RETRO_LOG_INFO, "Brimir shutting down");
+    
+    if (g_core) {
+        g_core->Shutdown();
+        g_core.reset();
+    }
 }
 
 RETRO_API unsigned retro_api_version(void) {
@@ -106,48 +125,67 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) 
 
 RETRO_API void retro_reset(void) {
     brimir_log(RETRO_LOG_INFO, "Reset requested");
+    
+    if (g_core) {
+        g_core->Reset();
+    }
 }
 
 RETRO_API void retro_run(void) {
-    // TODO: Implement main emulation loop
-    // For now, just output a black frame
+    if (!g_core) {
+        return;
+    }
     
+    // Poll input
     if (input_poll_cb) {
         input_poll_cb();
     }
     
-    // Black frame buffer
-    static uint16_t frame_buf[704 * 512];
-    memset(frame_buf, 0, sizeof(frame_buf));
+    // Run one frame of emulation
+    g_core->RunFrame();
     
+    // Output video
     if (video_cb) {
-        video_cb(frame_buf, 320, 224, 320 * sizeof(uint16_t));
+        const void* fb = g_core->GetFramebuffer();
+        unsigned int width = g_core->GetFramebufferWidth();
+        unsigned int height = g_core->GetFramebufferHeight();
+        unsigned int pitch = g_core->GetFramebufferPitch();
+        
+        video_cb(fb, width, height, pitch);
     }
     
-    // Silent audio
+    // Output audio
     if (audio_batch_cb) {
-        int16_t silence[735 * 2] = {0}; // ~735 samples per frame at 44.1kHz
-        audio_batch_cb(silence, 735);
+        int16_t audio_buffer[2048 * 2]; // Stereo buffer
+        size_t samples = g_core->GetAudioSamples(audio_buffer, 2048);
+        if (samples > 0) {
+            audio_batch_cb(audio_buffer, samples);
+        }
     }
 }
 
 RETRO_API size_t retro_serialize_size(void) {
-    // TODO: Implement save states
-    return 0;
+    if (!g_core) {
+        return 0;
+    }
+    
+    return g_core->GetStateSize();
 }
 
 RETRO_API bool retro_serialize(void* data, size_t size) {
-    // TODO: Implement save state serialization
-    (void)data;
-    (void)size;
-    return false;
+    if (!g_core) {
+        return false;
+    }
+    
+    return g_core->SaveState(data, size);
 }
 
 RETRO_API bool retro_unserialize(const void* data, size_t size) {
-    // TODO: Implement save state deserialization
-    (void)data;
-    (void)size;
-    return false;
+    if (!g_core) {
+        return false;
+    }
+    
+    return g_core->LoadState(data, size);
 }
 
 RETRO_API void retro_cheat_reset(void) {
@@ -167,6 +205,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
     
+    if (!g_core) {
+        brimir_log(RETRO_LOG_ERROR, "Core not initialized");
+        return false;
+    }
+    
     brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path ? game->path : "unknown");
     
     // Set pixel format
@@ -176,9 +219,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
     
-    // TODO: Actually load the game using Ymir
-    brimir_log(RETRO_LOG_INFO, "Game loading not yet implemented");
+    // Load the game
+    if (!g_core->LoadGame(game->path)) {
+        brimir_log(RETRO_LOG_ERROR, "Failed to load game");
+        return false;
+    }
     
+    brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
     return true;
 }
 
@@ -192,7 +239,10 @@ RETRO_API bool retro_load_game_special(unsigned game_type, const struct retro_ga
 
 RETRO_API void retro_unload_game(void) {
     brimir_log(RETRO_LOG_INFO, "Unloading game");
-    // TODO: Implement game unloading
+    
+    if (g_core) {
+        g_core->UnloadGame();
+    }
 }
 
 RETRO_API unsigned retro_get_region(void) {

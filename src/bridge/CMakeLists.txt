@@ -14,6 +14,6 @@ target_include_directories(brimir_bridge PUBLIC
 
 target_compile_features(brimir_bridge PUBLIC cxx_std_20)
 
-# Link with Ymir (will be configured after examining Ymir's build system)
-# target_link_libraries(brimir_bridge PRIVATE ymir_core)
+# Link with Ymir core
+target_link_libraries(brimir_bridge PRIVATE ymir::ymir-core)
 
