@@ -51,8 +51,19 @@ endif()
 
 # Compiler warnings
 if(MSVC)
-    add_compile_options(/W4 /WX-)
+    # Default to W4 warnings for our code
+    add_compile_options(/W4)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    
+    # Suppress common external library warnings
+    # These will be applied to Ymir and vendor libraries
+    set(EXTERNAL_WARNINGS
+        /wd4244  # Type conversion (int to smaller type)
+        /wd4100  # Unreferenced parameter
+        /wd4201  # Nameless struct/union
+        /wd4324  # Structure padding
+        /wd4458  # Declaration hides class member
+    )
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -77,6 +88,22 @@ set(Ymir_ENABLE_DEV_ASSERTIONS OFF)
 
 # Add only Ymir's core library (not full project to avoid vendor conflicts)
 add_subdirectory(src/ymir/libs EXCLUDE_FROM_ALL)
+
+# Suppress warnings for Ymir and vendor libraries (external code)
+if(MSVC AND DEFINED EXTERNAL_WARNINGS)
+    if(TARGET ymir-core)
+        target_compile_options(ymir-core PRIVATE ${EXTERNAL_WARNINGS})
+    endif()
+    if(TARGET xxHash)
+        target_compile_options(xxHash PRIVATE ${EXTERNAL_WARNINGS})
+    endif()
+    if(TARGET lz4)
+        target_compile_options(lz4 PRIVATE ${EXTERNAL_WARNINGS})
+    endif()
+    if(TARGET chdr-static)
+        target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS})
+    endif()
+endif()
 
 # Bridge layer - adapts Ymir to libretro
 add_subdirectory(src/bridge)

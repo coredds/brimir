@@ -35,8 +35,8 @@ bool CoreWrapper::Initialize() {
         
         m_initialized = true;
         return true;
-    } catch (const std::exception& e) {
-        // Log error
+    } catch (const std::exception&) {
+        // Failed to create Saturn instance
         m_saturn.reset();
         return false;
     }
@@ -64,7 +64,7 @@ bool CoreWrapper::LoadGame(const char* path) {
         ymir::media::Disc disc;
         
         // Callback for loader messages (can log these via libretro later)
-        auto loaderCallback = [](ymir::media::MessageType type, std::string message) {
+        auto loaderCallback = [](ymir::media::MessageType /*type*/, std::string /*message*/) {
             // TODO: Forward to libretro logging
         };
         
