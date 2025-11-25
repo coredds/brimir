@@ -23,6 +23,14 @@ Named after the primordial giant in Norse mythology (complementing "Ymir"), Brim
 
 Core features are implemented and tested with 82 comprehensive test cases. The core achieves consistent 60 FPS emulation on modern hardware. Expansion cartridge support is functional but has some limitations (see Known Issues below).
 
+## Demo
+
+**See Brimir in action:**
+
+[![Sega Rally on Brimir](https://img.youtube.com/vi/akkdVZk8GUY/0.jpg)](https://www.youtube.com/watch?v=akkdVZk8GUY)
+
+Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?v=akkdVZk8GUY) - demonstrating smooth 60 FPS gameplay with the libretro core.
+
 ## Features
 
 ### Core Emulation
