@@ -24,6 +24,17 @@
 #include <thread>
 #include <chrono>
 
+// Undefine any Windows macros that might interfere
+#ifdef DRAM8Mbit
+#undef DRAM8Mbit
+#endif
+#ifdef DRAM32Mbit
+#undef DRAM32Mbit
+#endif
+#ifdef DRAM48Mbit
+#undef DRAM48Mbit
+#endif
+
 namespace brimir {
 
 CoreWrapper::CoreWrapper()
@@ -223,7 +234,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             return false;
         }
 
-        // Load the disc into the emulator
+        // Load the disc into the emulator first
         try {
             m_saturn->LoadDisc(std::move(disc));
         } catch (const std::exception& e) {
@@ -232,6 +243,62 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         } catch (...) {
             m_lastError = "Unknown exception during Saturn LoadDisc";
             return false;
+        }
+        
+        // Detect and insert required cartridge AFTER loading disc but BEFORE closing tray
+        // The cartridge must be inserted before the BIOS initializes
+        const auto& discForCartridge = m_saturn->GetDisc();
+        if (!discForCartridge.sessions.empty()) {
+            // Get game info from Ymir's database
+            const ymir::db::GameInfo* gameInfo = ymir::db::GetGameInfo(
+                discForCartridge.header.productNumber,
+                m_saturn->GetDiscHash()
+            );
+            
+            if (gameInfo && gameInfo->cartridge != ymir::db::Cartridge::None) {
+                // Set up cartridge RAM save path
+                std::filesystem::path gameFileName = gamePath.stem();
+                if (save_directory && save_directory[0] != '\0') {
+                    m_cartridgePath = std::filesystem::path(save_directory) / (gameFileName.string() + ".cart");
+                } else {
+                    m_cartridgePath = std::filesystem::path(save_directory) / (gameFileName.string() + ".cart");
+                }
+                
+                // Insert the appropriate cartridge
+                try {
+                    switch (gameInfo->cartridge) {
+                    case ymir::db::Cartridge::DRAM8Mbit:
+                        m_saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
+                        m_hasCartridge = true;
+                        // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
+                        break;
+                    case ymir::db::Cartridge::DRAM32Mbit:
+                        m_saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>();
+                        m_hasCartridge = true;
+                        // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
+                        break;
+                    case ymir::db::Cartridge::DRAM48Mbit:
+                        m_saturn->InsertCartridge<ymir::cart::DRAM48MbitCartridge>();
+                        m_hasCartridge = true;
+                        // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
+                        break;
+                    default:
+                        // Other cartridge types (ROM, BackupRAM) not yet supported
+                        break;
+                    }
+                    
+                    // Do a HARD reset after inserting cartridge to force BIOS reboot
+                    // This is necessary because the BIOS has already initialized
+                    m_saturn->Reset(true);
+                    
+                } catch (const std::exception& e) {
+                    m_lastError = std::string("Exception inserting cartridge: ") + e.what();
+                    // Don't fail - game might still work without cartridge
+                } catch (...) {
+                    m_lastError = "Unknown exception inserting cartridge";
+                    // Don't fail - game might still work without cartridge
+                }
+            }
         }
         
         // Close the tray to start execution
@@ -292,6 +359,11 @@ void CoreWrapper::UnloadGame() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     
+    // TODO: Save cartridge RAM if present
+    // if (m_hasCartridge) {
+    //     SaveCartridgeRAM();
+    // }
+    
     // Save SMPC persistent data (RTC clock!) before unloading
     // This preserves the date/time the user set (system-wide, not per-game)
     if (!m_smpcPath.empty()) {
@@ -311,6 +383,10 @@ void CoreWrapper::UnloadGame() {
     // Eject disc
     m_saturn->EjectDisc();
     m_gameLoaded = false;
+    
+    // Reset cartridge state
+    m_hasCartridge = false;
+    m_cartridgePath.clear();
     
     // Don't clear SRAM buffer - RetroArch needs to save it!
     // m_sramData will persist until next game load
@@ -919,6 +995,110 @@ void CoreWrapper::SetAutodetectRegion(bool enable) {
     m_saturn->configuration.system.autodetectRegion = enable;
 }
 
+// TODO: Fix MSVC compilation errors
+/*
+bool CoreWrapper::LoadCartridgeRAM() {
+    if (!m_hasCartridge || m_cartridgePath.empty()) {
+        return false;
+    }
+    
+    // Check if save file exists
+    if (!std::filesystem::exists(m_cartridgePath)) {
+        return false;  // No save file yet, that's OK
+    }
+    
+    try {
+        // Read the cartridge RAM file
+        std::ifstream file(m_cartridgePath, std::ios::binary);
+        if (!file) {
+            return false;
+        }
+        
+        // Get file size
+        file.seekg(0, std::ios::end);
+        size_t fileSize = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        // Read data
+        std::vector<uint8_t> data(fileSize);
+        file.read(reinterpret_cast<char*>(data.data()), fileSize);
+        
+        // Get cartridge and load RAM based on type
+        auto& cartSlot = m_saturn->GetCartridgeSlot();
+        using CartType = ymir::cart::CartType;
+        const auto cartType = cartSlot.GetCartridgeType();
+        
+        constexpr size_t size8 = 1024 * 1024;
+        constexpr size_t size32 = 4 * 1024 * 1024;
+        constexpr size_t size48 = 6 * 1024 * 1024;
+        
+        if (cartType == CartType::DRAM8Mbit && fileSize == size8) {
+            auto* cart8 = static_cast<ymir::cart::DRAM8MbitCartridge*>(&cartSlot.GetCartridge());
+            cart8->LoadRAM(std::span<const uint8_t, size8>(data.data(), size8));
+            return true;
+        } else if (cartType == CartType::DRAM32Mbit && fileSize == size32) {
+            auto* cart32 = static_cast<ymir::cart::DRAM32MbitCartridge*>(&cartSlot.GetCartridge());
+            cart32->LoadRAM(std::span<const uint8_t, size32>(data.data(), size32));
+            return true;
+        } else if (cartType == CartType::DRAM48Mbit && fileSize == size48) {
+            auto* cart48 = static_cast<ymir::cart::DRAM48MbitCartridge*>(&cartSlot.GetCartridge());
+            cart48->LoadRAM(std::span<const uint8_t, size48>(data.data(), size48));
+            return true;
+        }
+        
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+void CoreWrapper::SaveCartridgeRAM() {
+    if (!m_hasCartridge || m_cartridgePath.empty()) {
+        return;
+    }
+    
+    try {
+        // Get cartridge and save RAM based on type
+        auto& cartSlot = m_saturn->GetCartridgeSlot();
+        using CartType = ymir::cart::CartType;
+        const auto cartType = cartSlot.GetCartridgeType();
+        
+        std::vector<uint8_t> data;
+        
+        if (cartType == CartType::DRAM8Mbit) {
+            constexpr size_t size8 = 1024 * 1024;
+            data.resize(size8);
+            auto* cart8 = static_cast<ymir::cart::DRAM8MbitCartridge*>(&cartSlot.GetCartridge());
+            cart8->DumpRAM(std::span<uint8_t, size8>(data.data(), size8));
+        } else if (cartType == CartType::DRAM32Mbit) {
+            constexpr size_t size32 = 4 * 1024 * 1024;
+            data.resize(size32);
+            auto* cart32 = static_cast<ymir::cart::DRAM32MbitCartridge*>(&cartSlot.GetCartridge());
+            cart32->DumpRAM(std::span<uint8_t, size32>(data.data(), size32));
+        } else if (cartType == CartType::DRAM48Mbit) {
+            constexpr size_t size48 = 6 * 1024 * 1024;
+            data.resize(size48);
+            auto* cart48 = static_cast<ymir::cart::DRAM48MbitCartridge*>(&cartSlot.GetCartridge());
+            cart48->DumpRAM(std::span<uint8_t, size48>(data.data(), size48));
+        } else {
+            return;
+        }
+        
+        // Ensure parent directory exists
+        std::filesystem::create_directories(m_cartridgePath.parent_path());
+        
+        // Write to file
+        std::ofstream file(m_cartridgePath, std::ios::binary);
+        if (file) {
+            file.write(reinterpret_cast<const char*>(data.data()), data.size());
+        }
+    } catch (...) {
+        // Ignore errors - save will be retried next time
+    }
+}
+
+
+*/
 
 } // namespace brimir
 

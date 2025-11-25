@@ -254,6 +254,16 @@ private:
     
     // Performance profiling
     mutable Profiler m_profiler;
+    
+    // Cartridge support
+    std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file
+    bool m_hasCartridge = false;  // True if a cartridge is inserted
+    
+    /// @brief Load cartridge RAM from file
+    bool LoadCartridgeRAM();
+    
+    /// @brief Save cartridge RAM to file
+    void SaveCartridgeRAM();
 };
 
 } // namespace brimir

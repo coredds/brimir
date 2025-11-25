@@ -17,11 +17,11 @@ Named after the primordial giant in Norse mythology (complementing "Ymir"), Brim
 
 ## Status
 
-**Project Status:** Feature Complete  
+**Project Status:** Active Development  
 **Current Version:** 0.1.1  
 **Last Updated:** November 25, 2025
 
-All core features are implemented and tested with 82 comprehensive test cases. The core achieves consistent 60 FPS emulation on modern hardware with full expansion cartridge support.
+Core features are implemented and tested with 82 comprehensive test cases. The core achieves consistent 60 FPS emulation on modern hardware. Expansion cartridge support is functional but has some limitations (see Known Issues below).
 
 ## Features
 
@@ -32,13 +32,13 @@ All core features are implemented and tested with 82 comprehensive test cases. T
 - **High-level CD block emulation** with configurable read speeds (2x-200x)
 - **Backup RAM (SRAM)** with persistent game saves (per-game .bup files)
 - **Real-Time Clock (RTC)** with system-wide persistence
-- **Expansion cartridge support:**
+- **Expansion cartridge support (Beta):**
   - Auto-detection and insertion based on game database
-  - 1MB (8 Mbit) DRAM cartridges for SNK fighters
-  - 4MB (32 Mbit) DRAM cartridges for Capcom fighters
+  - 1MB (8 Mbit) DRAM cartridges for SNK fighters (working)
+  - 4MB (32 Mbit) DRAM cartridges for Capcom fighters (limited - see Known Issues)
   - 6MB (48 Mbit) DRAM dev cartridges for rare prototypes
-  - ROM cartridge support for King of Fighters '95 and Ultraman
-  - Automatic cartridge RAM persistence (.cart files)
+  - ROM cartridge support for King of Fighters '95 and Ultraman (not yet implemented)
+  - Cartridge RAM persistence not yet implemented (data lost between sessions)
 - **Game database integration:**
   - 24+ games with automatic expansion cartridge support
   - Automatic SH-2 cache emulation for compatibility
@@ -244,9 +244,9 @@ Brimir creates persistent files in multiple locations:
 **Per-Game Data** (`saves/Brimir/`):
 ```
 saves/Brimir/
-├── {Game Name}.bup   - Backup RAM (game saves)
-├── {Game Name}.srm   - RetroArch backup copy
-└── {Game Name}.cart  - Cartridge RAM (for DRAM expansion cartridges)
+├── {Game Name}.bup   - Backup RAM (game saves) ✅ Working
+├── {Game Name}.srm   - RetroArch backup copy ✅ Working
+└── {Game Name}.cart  - Cartridge RAM ❌ Not yet implemented (progress lost)
 ```
 
 **System-Wide Data** (`system/`):
@@ -265,8 +265,8 @@ system/
 
 **Notes:** 
 - The RTC clock configuration is system-wide (not per-game) to match the behavior of the actual Sega Saturn hardware
-- DRAM cartridge RAM (`.cart`) files are automatically created for games that need expansion RAM (SNK/Capcom fighters)
-- ROM cartridges are placed alongside the disc image for user convenience - name it the same as your disc or use the product code
+- **Cartridge RAM persistence is not yet working** - progress in expansion RAM games is lost between sessions
+- ROM cartridges are not yet implemented
 
 ## Documentation
 
@@ -277,27 +277,47 @@ system/
 
 | Game | Region | Status | Cartridge | Notes |
 |------|--------|--------|-----------|-------|
-| Sega Rally Championship | USA | Full | None | 60 FPS, saves working, clock persists |
-| X-Men vs. Street Fighter | Japan | Supported | 4MB DRAM | Auto-detected, RAM saves working |
-| King of Fighters '96 | Japan | Supported | 1MB DRAM | Auto-detected, RAM saves working |
-| King of Fighters '95 | Japan/Europe | Supported | 4MB ROM | Requires .rom file alongside disc |
-| Marvel Super Heroes | Japan/Europe | Supported | 1MB DRAM | Auto-detected, RAM saves working |
-| Metal Slug | Japan | Supported | 1MB DRAM | Auto-detected |
-| Street Fighter Zero 3 | Japan | Supported | 4MB DRAM | Auto-detected |
-| Vampire Savior | Japan | Supported | 4MB DRAM | Auto-detected |
+| Sega Rally Championship | USA | ✅ Working | None | 60 FPS, saves working, clock persists |
+| Saturn Bomberman | Japan | ✅ Working | None | Full gameplay tested |
+| King of Fighters '96 | Japan | ✅ Working | 1MB DRAM | Auto-detected, boots and plays correctly |
+| X-Men vs. Street Fighter | Japan | ⚠️ Partial | 1MB DRAM | Detects cartridge but has upstream emulation issues |
+| Marvel Super Heroes vs. SF | Japan | ⚠️ Partial | 4MB DRAM | Detects cartridge, freezes at Capcom logo (upstream) |
+| Street Fighter Zero 3 | Japan | ❌ Not Tested | 4MB DRAM | Auto-detection implemented |
+| King of Fighters '95 | Japan/Europe | ❌ Not Implemented | 4MB ROM | ROM cartridge support pending |
+| Ultraman | Japan | ❌ Not Implemented | 4MB ROM | ROM cartridge support pending |
 
 **Compatibility Notes:**
+- ✅ **Working**: Game boots, plays, and saves correctly
+- ⚠️ **Partial**: Game detects cartridge but has upstream Ymir emulation issues
+- ❌ **Not Tested/Implemented**: Feature not yet available or not tested
 - Games with expansion cartridge requirements are automatically detected via game database
 - 24+ games are in the database with automatic cartridge configuration
-- ROM cartridges require user-provided .rom files placed alongside disc images
-- All tested games maintain stable 60 FPS on modern hardware
+- Cartridge RAM persistence (`.cart` files) not yet implemented - progress lost between sessions
+- Some Capcom fighters have known upstream emulation issues (freeze at logo, etc.)
 
-## Known Limitations
+## Known Issues & Limitations
 
-- **Controller support:** Digital pads only (analog, mouse, etc. not yet implemented)
+### Expansion Cartridge Issues
+- **Cartridge RAM persistence not implemented:** Progress in games requiring expansion RAM (SNK/Capcom fighters) is lost between sessions. The `.cart` save files are not yet functional due to MSVC compilation issues.
+- **Some Capcom fighters freeze:** Games like Marvel Super Heroes vs. Street Fighter freeze at the Capcom logo. This is an **upstream Ymir emulation issue** - the standalone Ymir emulator has the same behavior.
+- **ROM cartridges not implemented:** King of Fighters '95 and Ultraman require ROM cartridge files which are not yet supported.
+
+### BIOS Compatibility
+- **Japanese BIOS v1.003 (sega1003.bin) is not supported** due to compatibility issues. Use Japanese v1.01 or v1.00 instead.
+
+### Other Limitations
+- **Controller support:** Digital pads only (analog, mouse, light gun, etc. not yet implemented)
 - **Multi-disc games:** Not yet tested
-- **Backup RAM cartridge:** External backup RAM cartridge not implemented (for save creation tools like Dezaemon 2)
-- **CD Block LLE:** Requires CD block ROM (not included)
+- **External backup RAM cartridge:** Not implemented (for save creation tools like Dezaemon 2)
+- **CD Block LLE:** Low-level CD block emulation removed due to instability
+
+### Upstream Issues
+Some game compatibility issues are inherited from the upstream Ymir emulator and will be resolved as Ymir improves:
+- Marvel Super Heroes vs. Street Fighter freezes at Capcom logo
+- X-Men vs. Street Fighter has detection issues
+- Other Capcom fighters may have similar issues
+
+**Note:** We track these issues and will sync with upstream Ymir updates as they become available.
 
 ## ROM Cartridge Games
 
