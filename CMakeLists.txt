@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 # Project information
 project(Brimir
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "Sega Saturn emulation libretro core based on Ymir"
     LANGUAGES CXX C
 )
@@ -19,6 +19,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BRIMIR_BUILD_TESTS "Build tests" OFF)
 option(BRIMIR_STATIC_LINK "Static linking" OFF)
 option(BRIMIR_LTO "Enable Link-Time Optimization" OFF)
+
+# Use fmt as header-only to avoid DLL dependency
+add_compile_definitions(FMT_HEADER_ONLY=1)
 
 # Build type
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -103,6 +106,37 @@ if(MSVC AND DEFINED EXTERNAL_WARNINGS)
     if(TARGET chdr-static)
         target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS})
     endif()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # GCC/Clang warning suppressions for external code
+    set(EXTERNAL_WARNINGS_GCC
+        -Wno-maybe-uninitialized
+        -Wno-unused-parameter
+        -Wno-unused-variable
+        -Wno-sign-compare
+        -Wno-missing-field-initializers
+        -Wno-pedantic
+        -Wno-uninitialized
+        -Wno-overflow
+        -Wno-comment
+        -Wno-error=inline  # Don't error on inline failures
+    )
+    if(TARGET ymir-core)
+        target_compile_options(ymir-core PRIVATE ${EXTERNAL_WARNINGS_GCC})
+        # Force-include header to override FORCE_INLINE before Ymir headers
+        target_compile_options(ymir-core PRIVATE 
+            -include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/force_inline_override.h
+            -Wno-attributes
+        )
+    endif()
+    if(TARGET xxHash)
+        target_compile_options(xxHash PRIVATE ${EXTERNAL_WARNINGS_GCC})
+    endif()
+    if(TARGET lz4)
+        target_compile_options(lz4 PRIVATE ${EXTERNAL_WARNINGS_GCC})
+    endif()
+    if(TARGET chdr-static)
+        target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS_GCC})
+    endif()
 endif()
 
 # Bridge layer - adapts Ymir to libretro
@@ -156,6 +190,9 @@ endif()
 if(BRIMIR_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+    message(STATUS "Building with tests enabled")
+else()
+    message(STATUS "Building without tests (use -DBRIMIR_BUILD_TESTS=ON to enable)")
 endif()
 
 # Installation

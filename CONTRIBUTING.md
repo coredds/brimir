@@ -54,14 +54,13 @@ Before contributing, ensure you have:
 
 3. **Accounts:**
    - GitHub account
-   - (Optional) Discord for real-time discussion
 
 ### Setting Up Development Environment
 
 1. **Fork the repository:**
    ```bash
    # Click "Fork" on GitHub, then clone your fork
-   git clone https://github.com/YOUR_USERNAME/brimir.git
+   git clone https://github.com/coredds/brimir.git
    cd brimir
    ```
 
@@ -79,7 +78,7 @@ Before contributing, ensure you have:
 
 4. **Add upstream remote:**
    ```bash
-   git remote add upstream https://github.com/ORIGINAL_OWNER/brimir.git
+   git remote add upstream https://github.com/coredds/brimir.git
    ```
 
 ## Development Process
@@ -89,7 +88,7 @@ Before contributing, ensure you have:
 - Look for issues labeled `good first issue` for beginner-friendly tasks
 - Check `help wanted` label for areas needing assistance
 - Review the [PRD.md](PRD.md) for planned features
-- Ask in Discussions or Discord if you're unsure where to start
+- Ask in Discussions if you're unsure where to start
 
 ### Creating a New Issue
 
@@ -349,7 +348,7 @@ cd build
 ctest
 
 # Run specific test
-./tests/unit/test_input_manager
+./tests/unit/test_core_wrapper
 ```
 
 ### Writing Tests
@@ -419,7 +418,6 @@ When testing with actual games:
 
 - **GitHub Issues:** Bug reports, feature requests
 - **GitHub Discussions:** General questions, ideas
-- **Discord:** Real-time chat (link TBD)
 - **Email:** For sensitive issues only
 
 ### Getting Help
@@ -427,7 +425,6 @@ When testing with actual games:
 - Search existing documentation first
 - Check closed issues for similar problems
 - Ask in Discussions for general questions
-- Use Discord for quick questions
 - Be patient and respectful
 
 ### Recognizing Contributors
@@ -464,10 +461,9 @@ When submitting a PR, you certify that:
 
 If you have questions not covered here:
 - Open a Discussion on GitHub
-- Ask in Discord
 - Contact maintainers directly
 
-Thank you for contributing to Brimir! 🎮
+Thank you for contributing to Brimir!
 
 ---
 

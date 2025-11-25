@@ -66,9 +66,14 @@ vendor/
 third_party/
 node_modules/
 
-# ROMs and BIOS (should not be committed)
-*.bin
+# ROMs and BIOS files (NEVER commit copyrighted content!)
+# BIOS files
+*.bin         # Sega Saturn BIOS (sega_101.bin, mpr-17933.bin, etc.)
 *.bios
+system/       # RetroArch system directory
+bios/
+
+# ROM images
 roms/
 *.chd
 *.cue
@@ -83,6 +88,8 @@ roms/
 *.srm
 *.state
 *.sav
+*.bup         # Ymir backup RAM files
+*.smpc        # Ymir SMPC persistent data (RTC)
 saves/
 states/
 
@@ -94,16 +101,29 @@ logs/
 core
 core.*
 
-# Testing
+# Testing (exclude copyrighted test materials)
 tests/roms/
 tests/bios/
+tests/system/
+
+# Test fixtures - BIOS and ROM files
+tests/fixtures/*.bin      # BIOS files (sega_101.bin, sega_100.bin, etc.)
+tests/fixtures/*.bios
+tests/fixtures/*.iso
+tests/fixtures/*.cue
+tests/fixtures/*.chd
+tests/fixtures/*.ccd
+tests/fixtures/*.mds
+tests/fixtures/games/
+
+# Test coverage
 *.coverage
 coverage/
 
-# Documentation build
-docs/_build/
-docs/html/
-docs/latex/
+# Documentation (not required for build)
+docs/
+
+# Documentation build artifacts
 doxygen/
 
 # Packaging

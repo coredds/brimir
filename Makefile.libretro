@@ -95,11 +95,7 @@ endif
 SOURCES_CXX := \
 	src/libretro/libretro.cpp \
 	src/libretro/options.cpp \
-	src/bridge/core_wrapper.cpp \
-	src/bridge/input_manager.cpp \
-	src/bridge/audio_manager.cpp \
-	src/bridge/video_manager.cpp \
-	src/bridge/state_manager.cpp
+	src/bridge/core_wrapper.cpp
 
 # Object files
 OBJECTS := $(SOURCES_CXX:.cpp=.o)

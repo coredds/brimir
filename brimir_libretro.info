@@ -1,0 +1,44 @@
+# Software Information
+display_name = "Sega - Saturn (Brimir)"
+display_version = "0.1.1"
+authors = "coredds"
+categories = "Emulator"
+license = "GPLv3"
+permissions = ""
+supported_extensions = "cue|chd|iso|ccd|mds"
+
+# Hardware Information
+manufacturer = "Sega"
+systemname = "Saturn"
+systemid = "saturn"
+
+# Libretro Features
+supports_no_game = "false"
+database = "Sega - Saturn"
+savestate = "true"
+savestate_features = "serialized"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "true"
+core_options = "true"
+core_options_version = "1.0"
+load_subsystem = "false"
+hw_render = "false"
+needs_fullpath = "false"
+disk_control = "false"
+
+# Firmware / BIOS
+firmware_count = "2"
+firmware0_desc = "Saturn BIOS - US (sega_101.bin)"
+firmware0_path = "sega_101.bin"
+firmware0_opt = "false"
+firmware1_desc = "Saturn BIOS - EU (sega_100.bin)"
+firmware1_path = "sega_100.bin"
+firmware1_opt = "true"
+
+# Notes
+notes = "(!) sega_101.bin (md5): f273555d7d91e8a5a6bfd9bcf066331c|(!) sega_100.bin (md5): 2aba43c2f1526c5e898dfe1cafbfc53a|Based on the Ymir Saturn emulator.|Requires Saturn BIOS ROM (place in system directory).|Japanese BIOS files (Sega Saturn BIOS v1.00/v1.01 (JAP).bin) are also supported.|Note: sega1003.bin (JP v1.003) is NOT supported due to compatibility issues.|Visit https://github.com/coredds/brimir for more information."
+
+description = "Brimir is a libretro core for Sega Saturn emulation, based on the Ymir emulator. It provides accurate emulation of the Sega Saturn hardware with support for game discs in various formats. The core requires a Saturn BIOS ROM to function."
+
