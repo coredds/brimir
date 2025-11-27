@@ -73,9 +73,9 @@ $biosFiles = @(
     "mpr-17933.bin", 
     "sega_100.bin", 
     "Sega Saturn BIOS (EUR).bin",
-    "sega1003.bin", 
     "Sega Saturn BIOS v1.01 (JAP).bin", 
     "Sega Saturn BIOS v1.00 (JAP).bin"
+    # Note: sega1003.bin (JP v1.003) is NOT supported and excluded from deployment
 )
 $biosFound = 0
 $biosMissing = 0

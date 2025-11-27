@@ -20,11 +20,18 @@ Place Saturn BIOS files here for local testing. These files are **NOT included**
 - **MD5**: `2aba43c2f1526c5e898dfe1cafbfc53a`
 - **Region**: Europe / PAL
 
-#### Japanese BIOS
-- **Filename**: `sega1003.bin`
+#### Japanese BIOS (v1.01 - Recommended)
+- **Filename**: `Sega Saturn BIOS v1.01 (JAP).bin`
 - **Size**: 524,288 bytes (512 KB)
-- **MD5**: `3240872c70984b6cbfda1586cab68dbe`
 - **Region**: Japan
+- **Note**: Preferred Japanese BIOS for best compatibility
+
+#### Japanese BIOS (v1.00 - Alternative)
+- **Filename**: `Sega Saturn BIOS v1.00 (JAP).bin`
+- **Size**: 524,288 bytes (512 KB)
+- **Region**: Japan
+
+**⚠️ WARNING**: Do NOT use `sega1003.bin` (Japanese v1.003) - this version is not supported due to compatibility issues with the emulator core.
 
 ### Test Disc Images (Optional for game loading tests)
 
@@ -36,11 +43,12 @@ You can also place test disc images here:
 
 ```
 tests/fixtures/
-├── README.md           (this file)
-├── sega_101.bin        (US BIOS - provide yourself)
-├── sega_100.bin        (EU BIOS - provide yourself)
-├── sega1003.bin        (JP BIOS - provide yourself)
-└── games/              (optional test games)
+├── README.md                              (this file)
+├── sega_101.bin                           (US BIOS - provide yourself)
+├── sega_100.bin                           (EU BIOS - provide yourself)
+├── Sega Saturn BIOS v1.01 (JAP).bin      (JP BIOS - provide yourself)
+├── Sega Saturn BIOS v1.00 (JAP).bin      (JP BIOS alt - provide yourself)
+└── games/                                 (optional test games)
     ├── test_game.cue
     └── test_game.bin
 ```
@@ -99,6 +107,7 @@ tests/fixtures/games/
 ```
 
 Only this README file is tracked in git.
+
 
 
 

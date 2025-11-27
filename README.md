@@ -233,15 +233,19 @@ cp brimir_libretro.info ~/.config/retroarch/info/
 
 Brimir requires Sega Saturn BIOS ROMs. Place them in RetroArch's `system/` directory:
 
-| File | Region | Size | MD5 (optional) |
-|------|--------|------|----------------|
-| `sega_101.bin` | Japan | 512 KB | - |
-| `mpr-17933.bin` | Japan | 512 KB | - |
-| `sega1003.bin` | Japan (1.01) | 512 KB | - |
-| `sega_100.bin` | USA | 512 KB | - |
-| `mpr-17951.bin` | Europe | 512 KB | - |
+| File | Region | Version | Size |
+|------|--------|---------|------|
+| `Sega Saturn BIOS v1.01 (JAP).bin` | Japan | v1.01 | 512 KB |
+| `Sega Saturn BIOS v1.00 (JAP).bin` | Japan | v1.00 | 512 KB |
+| `sega_101.bin` | USA | v1.01a | 512 KB |
+| `mpr-17933.bin` | USA | v1.00 | 512 KB |
+| `sega_100.bin` | Europe | v1.00a | 512 KB |
+| `mpr-17951.bin` | Europe | v1.00 | 512 KB |
+| `Sega Saturn BIOS (EUR).bin` | Europe | - | 512 KB |
 
 The core auto-detects available BIOS files and allows selection via **Quick Menu → Options → System Settings → BIOS**.
+
+**⚠️ IMPORTANT:** Japanese BIOS v1.003 (`sega1003.bin`) is **NOT supported** due to compatibility issues. Do not use this version. Use Japanese v1.01 or v1.00 instead.
 
 **Note:** You must obtain BIOS files legally from your own Saturn console or official sources.
 
@@ -311,7 +315,7 @@ system/
 - **ROM cartridges not implemented:** King of Fighters '95 and Ultraman require ROM cartridge files which are not yet supported.
 
 ### BIOS Compatibility
-- **Japanese BIOS v1.003 (sega1003.bin) is not supported** due to compatibility issues. Use Japanese v1.01 or v1.00 instead.
+- **Japanese BIOS v1.003 (sega1003.bin) is NOT supported** - This early Japanese BIOS version has compatibility issues with the emulator core. If you have this version, replace it with Japanese v1.01 (`Sega Saturn BIOS v1.01 (JAP).bin`) or v1.00 (`Sega Saturn BIOS v1.00 (JAP).bin`) instead.
 
 ### Other Limitations
 - **Controller support:** Digital pads only (analog, mouse, light gun, etc. not yet implemented)
