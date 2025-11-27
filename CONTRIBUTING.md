@@ -71,7 +71,7 @@ Before contributing, ensure you have:
 
 3. **Set up build environment:**
    ```bash
-   # See COMPILING.md for detailed instructions
+   # See README.md for detailed build instructions
    cmake -B build -S .
    cmake --build build
    ```
@@ -87,7 +87,7 @@ Before contributing, ensure you have:
 
 - Look for issues labeled `good first issue` for beginner-friendly tasks
 - Check `help wanted` label for areas needing assistance
-- Review the [PRD.md](PRD.md) for planned features
+- Review the [ROADMAP.md](docs/ROADMAP.md) for planned features
 - Ask in Discussions if you're unsure where to start
 
 ### Creating a New Issue
@@ -404,12 +404,12 @@ When testing with actual games:
 
 3. **User Documentation:**
    - README.md: Project overview
-   - COMPILING.md: Build instructions
-   - User guides in docs/
+   - docs/guides/QUICKSTART.md: Setup and build instructions
+   - User guides in docs/guides/
 
 4. **Developer Documentation:**
-   - ARCHITECTURE.md: System design
-   - PRD.md: Requirements and roadmap
+   - docs/development/ARCHITECTURE.md: System design
+   - docs/ROADMAP.md: Development roadmap
    - This file (CONTRIBUTING.md)
 
 ## Community

@@ -9,9 +9,11 @@ dist/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-install_manifest.txt
+install_manifest.cmake
 CTestTestfile.cmake
 *.cmake
+# But allow CMake modules in cmake/
+!cmake/*.cmake
 
 # Compiled objects
 *.o
@@ -120,11 +122,12 @@ tests/fixtures/games/
 *.coverage
 coverage/
 
-# Documentation (not required for build)
-docs/
-
-# Documentation build artifacts
+# Documentation build artifacts (generated docs only)
+docs/_build/
+docs/html/
+docs/latex/
 doxygen/
+site/
 
 # Packaging
 *.deb

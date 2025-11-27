@@ -21,7 +21,33 @@ Named after the primordial giant in Norse mythology (complementing "Ymir"), Brim
 **Current Version:** 0.1.2  
 **Last Updated:** November 27, 2025
 
-Core features are implemented and tested with 82 comprehensive test cases. The core achieves consistent 60 FPS emulation on modern hardware. Expansion cartridge support is functional but has some limitations (see Known Issues below).
+### Implementation Status
+
+**✅ Fully Working:**
+- Core emulation with Ymir integration
+- Multiple disc formats (CHD, BIN/CUE, ISO, CCD, MDS, BIN)
+- BIOS support (7 versions with auto-detection)
+- Save states with full serialization
+- SRAM (Backup RAM) with persistent storage
+- Real-Time Clock (RTC) system-wide persistence
+- Video output (RGB565, dynamic resolution, deinterlacing)
+- Audio output (44.1 kHz stereo)
+- Controller support (digital pads, 2 players)
+- DRAM expansion cartridges (1MB/4MB/6MB) with auto-detection
+- Game database integration (24+ games)
+- Comprehensive test suite (82 test cases)
+
+**⚠️ Partial/Limited:**
+- Expansion cartridge RAM persistence (not yet saving between sessions)
+- ROM cartridge detection (planned but not implemented)
+
+**❌ Not Yet Implemented:**
+- Analog controllers, mouse, light gun
+- Multi-disc game support
+- External backup RAM cartridge
+- Achievement support
+
+**Performance:** Consistent 60 FPS on modern hardware at all resolutions.
 
 ## Demo
 
@@ -40,13 +66,13 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 - **High-level CD block emulation** with configurable read speeds (2x-200x)
 - **Backup RAM (SRAM)** with persistent game saves (per-game .bup files)
 - **Real-Time Clock (RTC)** with system-wide persistence
-- **Expansion cartridge support (Beta):**
+- **Expansion cartridge support:**
   - Auto-detection and insertion based on game database
-  - 1MB (8 Mbit) DRAM cartridges for SNK fighters (working)
-  - 4MB (32 Mbit) DRAM cartridges for Capcom fighters (limited - see Known Issues)
-  - 6MB (48 Mbit) DRAM dev cartridges for rare prototypes
-  - ROM cartridge support for King of Fighters '95 and Ultraman (not yet implemented)
-  - Cartridge RAM persistence not yet implemented (data lost between sessions)
+  - 1MB (8 Mbit) DRAM cartridges for SNK fighters (✅ working)
+  - 4MB (32 Mbit) DRAM cartridges for Capcom fighters (✅ working, some games have upstream emulation issues)
+  - 6MB (48 Mbit) DRAM dev cartridges for rare prototypes (✅ working)
+  - ⚠️ Cartridge RAM persistence not yet implemented (progress lost between sessions)
+  - ❌ ROM cartridges not yet implemented (KOF'95, Ultraman not playable)
 - **Game database integration:**
   - 24+ games with automatic expansion cartridge support
   - Automatic SH-2 cache emulation for compatibility
@@ -294,23 +320,28 @@ system/
 └── brimir_saturn_rtc.smpc  - Real-Time Clock configuration (shared across all games)
 ```
 
-**ROM Cartridges** (alongside game disc image):
-```
-{Game Folder}/
-├── game.cue          - Disc image
-├── game.bin          - Disc data
-└── game.rom          - ROM cartridge (4MB, required for KOF'95/Ultraman)
-```
-
 **Notes:** 
 - The RTC clock configuration is system-wide (not per-game) to match the behavior of the actual Sega Saturn hardware
 - **Cartridge RAM persistence is not yet working** - progress in expansion RAM games is lost between sessions
-- ROM cartridges are not yet implemented
+- **ROM cartridges are not yet implemented** - KOF'95 and Ultraman cannot be played
 
 ## Documentation
 
-- **[CHANGELOG.md](CHANGELOG.md)** - Version history
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** - How to contribute
+### Main Documentation
+- **[README.md](README.md)** (this file) - Project overview and quick start
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and release notes
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - How to contribute code and report bugs
+
+### User Guides
+- **[Quick Start Guide](docs/guides/QUICKSTART.md)** - Installation and setup for users and developers
+- **[BIOS Guide](docs/guides/BIOS.md)** - BIOS file requirements and compatibility
+- **[Testing Guide](docs/guides/TESTING.md)** - How to test the core in RetroArch
+
+### Developer Documentation
+- **[Architecture](docs/development/ARCHITECTURE.md)** - Technical design and architecture
+- **[Performance](docs/development/PERFORMANCE.md)** - Performance optimizations and benchmarks
+- **[Testing Strategy](docs/development/TESTING_STRATEGY.md)** - Testing approach and infrastructure
+- **[Roadmap](docs/ROADMAP.md)** - Development roadmap and future plans
 
 ## Tested Games
 
@@ -338,9 +369,9 @@ system/
 ## Known Issues & Limitations
 
 ### Expansion Cartridge Issues
-- **Cartridge RAM persistence not implemented:** Progress in games requiring expansion RAM (SNK/Capcom fighters) is lost between sessions. The `.cart` save files are not yet functional due to MSVC compilation issues.
+- **Cartridge RAM persistence not implemented:** Progress in games requiring expansion RAM (SNK/Capcom fighters) is lost between sessions. The `.cart` save files are not yet functional.
+- **ROM cartridges not implemented:** King of Fighters '95 and Ultraman require 4MB ROM cartridge files which are not yet supported. These games cannot be played until ROM cartridge support is added.
 - **Some Capcom fighters freeze:** Games like Marvel Super Heroes vs. Street Fighter freeze at the Capcom logo. This is an **upstream Ymir emulation issue** - the standalone Ymir emulator has the same behavior.
-- **ROM cartridges not implemented:** King of Fighters '95 and Ultraman require ROM cartridge files which are not yet supported.
 
 ### BIOS Compatibility
 - **Japanese BIOS v1.003 (sega1003.bin) is NOT supported** - This early Japanese BIOS version has compatibility issues with the emulator core. If you have this version, replace it with Japanese v1.01 (`Sega Saturn BIOS v1.01 (JAP).bin`) or v1.00 (`Sega Saturn BIOS v1.00 (JAP).bin`) instead.
@@ -359,26 +390,19 @@ Some game compatibility issues are inherited from the upstream Ymir emulator and
 
 **Note:** We track these issues and will sync with upstream Ymir updates as they become available.
 
-## ROM Cartridge Games
+## ROM Cartridge Games (Not Yet Supported)
 
-Two games require special ROM cartridge files to run:
+Two games require special ROM cartridge files which are **not yet implemented**:
 
 **King of Fighters '95** (Europe: MK-81088, Japan: T-3101G)
-- Requires a 4MB ROM cartridge file
-- Place `{game}.rom` alongside your disc image
-- ROM must be a verified dump matching the expected hash
+- Requires a 4MB ROM cartridge file (not yet supported)
+- Game will not be playable until ROM cartridge support is added
 
 **Ultraman: Hikari no Kyojin Densetsu** (Japan: T-13308G)
-- Requires a 4MB ROM cartridge file
-- Place `{game}.rom` alongside your disc image
-- ROM must be a verified dump matching the expected hash
+- Requires a 4MB ROM cartridge file (not yet supported)
+- Game will not be playable until ROM cartridge support is added
 
-The core will automatically detect these games and load the ROM cartridge if found. Supported naming patterns:
-- `{disc_name}.rom` (e.g., `kof95.rom` for `kof95.cue`)
-- `{product_code}.rom` (e.g., `T-3101G.rom`)
-- `rom.rom` or `cartridge.rom` (generic fallback)
-
-**Note:** You must legally obtain ROM cartridge dumps from your own hardware.
+**Note:** ROM cartridge support is planned for a future release. These games are currently not playable in Brimir.
 
 ## Contributing
 
