@@ -76,9 +76,9 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 - **Performance Settings:** SH-2 cache emulation
 
 ### Platform Support
-- Windows 10+ (x86-64) - Fully tested
-- Linux (x86-64) - Builds successfully
-- macOS (Intel, Apple Silicon) - Builds successfully
+- Windows 10+ (x86-64) - Fully tested ✅
+- Linux (x86-64) - Fully tested ✅ (Clang recommended, GCC supported)
+- macOS (Intel, Apple Silicon) - Not yet tested ⚠️
 
 ## Building
 
@@ -93,7 +93,9 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 
 **Linux:**
 - **CMake 3.20+**
-- **GCC 11+** or **Clang 14+**
+- **Clang 14+** (recommended) or **GCC 11+**
+  - Clang handles inline attributes better than GCC
+  - Install: `sudo apt install clang` (Ubuntu/Debian)
 - **Git** with submodules support
 - **vcpkg** (included as submodule)
 
@@ -115,7 +117,7 @@ PowerShell -ExecutionPolicy Bypass -File .\setup-env.ps1
 
 **Outputs:**
 - Windows: `build\bin\Release\brimir_libretro.dll`
-- Linux: `build-linux\lib\libbrimir_libretro.so`
+- Linux: `build-linux\lib\brimir_libretro.so`
 
 ### Quick Start (Windows - Single Platform)
 
@@ -128,7 +130,7 @@ PowerShell -ExecutionPolicy Bypass -File .\setup-env.ps1
 ```
 
 **Windows Output:** `build\bin\Release\brimir_libretro.dll`  
-**Linux Output:** `build-linux\lib\libbrimir_libretro.so`
+**Linux Output:** `build-linux\lib\brimir_libretro.so`
 
 ### Quick Start (Linux Native)
 
@@ -137,19 +139,19 @@ PowerShell -ExecutionPolicy Bypass -File .\setup-env.ps1
 git clone --recursive https://github.com/coredds/brimir.git
 cd Brimir
 
-# 2. Install dependencies
-sudo apt install build-essential cmake git  # Ubuntu/Debian
+# 2. Install dependencies (with Clang - recommended)
+sudo apt install build-essential clang cmake git  # Ubuntu/Debian
 # OR
-sudo dnf install gcc-c++ cmake git          # Fedora
+sudo dnf install clang gcc-c++ cmake git           # Fedora
 # OR
-sudo pacman -S base-devel cmake git         # Arch
+sudo pacman -S base-devel clang cmake git          # Arch
 
 # 3. Build the core
 chmod +x build.sh
 ./build.sh
 ```
 
-**Output:** `build-linux/lib/libbrimir_libretro.so`
+**Output:** `build-linux/lib/brimir_libretro.so`
 
 ### Manual Build (Windows)
 

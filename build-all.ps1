@@ -8,7 +8,8 @@ param(
     [string]$BuildType = "Release",
     [switch]$WindowsOnly = $false,
     [switch]$LinuxOnly = $false,
-    [switch]$Tests = $false
+    [switch]$Tests = $false,
+    [switch]$UseGCC = $false  # Use Clang by default for Linux, set this to use GCC
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +33,9 @@ if ($buildWindows -and $buildLinux) {
 
 Write-Host "Build Type: $BuildType" -ForegroundColor White
 Write-Host "Tests: $(if ($Tests) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
+if ($buildLinux) {
+    Write-Host "Linux Compiler: $(if ($UseGCC) { 'GCC' } else { 'Clang (recommended)' })" -ForegroundColor White
+}
 Write-Host ""
 
 $startTime = Get-Date
@@ -73,8 +77,10 @@ if ($buildLinux) {
     Write-Host ""
     
     try {
-        $testFlag = if ($Tests) { "-Tests" } else { "" }
-        & .\build-wsl.ps1 -BuildType $BuildType $testFlag
+        $params = @("-BuildType", $BuildType)
+        if ($Tests) { $params += "-Tests" }
+        if ($UseGCC) { $params += "-UseGCC" }
+        & .\build-wsl.ps1 @params
         if ($LASTEXITCODE -eq 0) {
             $buildResults["Linux"] = "✓ Success"
             Write-Host ""
@@ -126,9 +132,9 @@ if ($buildWindows -and (Test-Path "build\bin\Release\brimir_libretro.dll")) {
     Write-Host "           Info: brimir_libretro.info" -ForegroundColor Gray
 }
 
-if ($buildLinux -and (Test-Path "build-linux\lib\libbrimir_libretro.so")) {
-    $linuxSize = (Get-Item "build-linux\lib\libbrimir_libretro.so").Length / 1MB
-    Write-Host "  Linux:   build-linux\lib\libbrimir_libretro.so" -ForegroundColor White
+if ($buildLinux -and (Test-Path "build-linux\lib\brimir_libretro.so")) {
+    $linuxSize = (Get-Item "build-linux\lib\brimir_libretro.so").Length / 1MB
+    Write-Host "  Linux:   build-linux\lib\brimir_libretro.so" -ForegroundColor White
     Write-Host "           Size: $([math]::Round($linuxSize, 2)) MB" -ForegroundColor Gray
     Write-Host "           Info: brimir_libretro.info" -ForegroundColor Gray
 }

@@ -122,11 +122,12 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
     if(TARGET ymir-core)
         target_compile_options(ymir-core PRIVATE ${EXTERNAL_WARNINGS_GCC})
-        # Force-include header to override FORCE_INLINE before Ymir headers
-        target_compile_options(ymir-core PRIVATE 
-            -include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/force_inline_override.h
-            -Wno-attributes
-        )
+        # Disable aggressive force-inlining on Linux to avoid compiler errors
+        # Pass Ymir_DISABLE_FORCE_INLINE via compile option instead of compile_definitions
+        # to ensure it's evaluated before inline.hpp
+        target_compile_options(ymir-core PRIVATE -DYmir_DISABLE_FORCE_INLINE)
+        # Enable Position Independent Code for linking with shared libraries
+        set_target_properties(ymir-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
     endif()
     if(TARGET xxHash)
         target_compile_options(xxHash PRIVATE ${EXTERNAL_WARNINGS_GCC})
@@ -150,6 +151,11 @@ add_library(brimir_libretro SHARED
     $<TARGET_OBJECTS:brimir_bridge>
     $<TARGET_OBJECTS:brimir_libretro_api>
 )
+
+# Enable Position Independent Code for shared libraries on Linux
+set_target_properties(brimir_libretro PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(brimir_bridge PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(brimir_libretro_api PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Link with Ymir core
 target_link_libraries(brimir_libretro PRIVATE ymir::ymir-core)

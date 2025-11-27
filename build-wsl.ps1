@@ -6,7 +6,8 @@
 
 param(
     [string]$BuildType = "Release",
-    [switch]$Tests = $false
+    [switch]$Tests = $false,
+    [switch]$UseGCC = $false  # Use Clang by default, set this to use GCC instead
 )
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -36,17 +37,19 @@ Write-Host ""
 # Set up environment variables for the build
 $env:BUILD_TYPE = $BuildType
 $env:ENABLE_TESTS = if ($Tests) { "ON" } else { "OFF" }
+$env:USE_CLANG = if ($UseGCC) { "NO" } else { "YES" }
 
 Write-Host "Build configuration:" -ForegroundColor Yellow
 Write-Host "  Build Type: $BuildType" -ForegroundColor White
 Write-Host "  Tests:      $($env:ENABLE_TESTS)" -ForegroundColor White
+Write-Host "  Compiler:   $(if ($UseGCC) { 'GCC' } else { 'Clang (recommended)' })" -ForegroundColor White
 Write-Host ""
 
 # Run the Linux build script in WSL
 Write-Host "Starting Linux build in WSL..." -ForegroundColor Yellow
 Write-Host ""
 
-wsl bash -c "cd '$wslPath' && export BUILD_TYPE='$BuildType' && export ENABLE_TESTS='$($env:ENABLE_TESTS)' && ./build.sh"
+wsl bash -c "cd '$wslPath' && export BUILD_TYPE='$BuildType' && export ENABLE_TESTS='$($env:ENABLE_TESTS)' && export USE_CLANG='$($env:USE_CLANG)' && ./build.sh"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
@@ -61,7 +64,7 @@ Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 
 # Check if output exists
-$linuxOutput = Join-Path $projectPath "build-linux\lib\libbrimir_libretro.so"
+$linuxOutput = Join-Path $projectPath "build-linux\lib\brimir_libretro.so"
 if (Test-Path $linuxOutput) {
     $fileSize = (Get-Item $linuxOutput).Length / 1MB
     Write-Host "Output:" -ForegroundColor Cyan
@@ -69,7 +72,7 @@ if (Test-Path $linuxOutput) {
     Write-Host "  - Size: $([math]::Round($fileSize, 2)) MB" -ForegroundColor White
 } else {
     Write-Host "Warning: Output file not found at expected location" -ForegroundColor Yellow
-    Write-Host "Check: build-linux/lib/libbrimir_libretro.so" -ForegroundColor Yellow
+    Write-Host "Check: build-linux/lib/brimir_libretro.so" -ForegroundColor Yellow
 }
 
 Write-Host ""

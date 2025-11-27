@@ -15,6 +15,7 @@ BUILD_DIR="build-linux"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 ENABLE_TESTS="${ENABLE_TESTS:-OFF}"
 NUM_JOBS="${NUM_JOBS:-$(nproc)}"
+USE_CLANG="${USE_CLANG:-YES}"  # Use Clang by default (better inline handling than GCC)
 
 # Colors for output
 RED='\033[0;31m'
@@ -53,10 +54,28 @@ fi
 
 if ! command -v g++ &> /dev/null && ! command -v clang++ &> /dev/null; then
     print_error "No C++ compiler found!"
-    echo "Install with: sudo apt install build-essential (Ubuntu/Debian)"
-    echo "             sudo dnf install gcc-c++ (Fedora)"
-    echo "             sudo pacman -S base-devel (Arch)"
+    echo "Install with: sudo apt install build-essential clang (Ubuntu/Debian)"
+    echo "             sudo dnf install gcc-c++ clang (Fedora)"
+    echo "             sudo pacman -S base-devel clang (Arch)"
     exit 1
+fi
+
+# Prefer Clang over GCC for better inline attribute handling
+if [ "$USE_CLANG" = "YES" ]; then
+    if command -v clang++ &> /dev/null; then
+        export CC=clang
+        export CXX=clang++
+        print_success "Using Clang compiler"
+    else
+        print_warning "Clang not found, falling back to GCC"
+        print_warning "Install Clang with: sudo apt install clang"
+        export CC=gcc
+        export CXX=g++
+    fi
+else
+    export CC=gcc
+    export CXX=g++
+    print_success "Using GCC compiler"
 fi
 
 print_success "All required tools found"
@@ -121,7 +140,7 @@ echo ""
 echo "Build Type:     $BUILD_TYPE"
 echo "Build Directory: $BUILD_DIR"
 echo "Output:"
-echo "  - Core library: $BUILD_DIR/lib/libbrimir_libretro.so"
+echo "  - Core library: $BUILD_DIR/lib/brimir_libretro.so"
 if [ "$ENABLE_TESTS" = "ON" ]; then
     echo "  - Unit tests:   $BUILD_DIR/tests/unit/"
 fi
@@ -141,6 +160,6 @@ print_success "Build process complete!"
 echo ""
 echo "Next steps:"
 echo "  - Install: sudo make -C build-linux install"
-echo "  - Or copy: cp build-linux/lib/libbrimir_libretro.so ~/.config/retroarch/cores/"
+echo "  - Or copy: cp build-linux/lib/brimir_libretro.so ~/.config/retroarch/cores/"
 echo ""
 
