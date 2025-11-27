@@ -83,13 +83,23 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 ## Building
 
 ### Prerequisites
+
+**Windows:**
 - **CMake 3.20+**
-- **C++20 compiler:** MSVC 2022 17.0+, GCC 11+, or Clang 14+
-- **Visual Studio Build Tools 2022** (Windows)
+- **Visual Studio Build Tools 2022** (MSVC 17.0+)
+- **Git** with submodules support
+- **WSL (Windows Subsystem for Linux)** - Required for Linux builds on Windows
+- **vcpkg** (included as submodule)
+
+**Linux:**
+- **CMake 3.20+**
+- **GCC 11+** or **Clang 14+**
 - **Git** with submodules support
 - **vcpkg** (included as submodule)
 
-### Quick Start (Windows)
+### Quick Start (Windows - Both Platforms)
+
+Build both Windows and Linux versions using WSL:
 
 ```powershell
 # 1. Clone with submodules
@@ -99,13 +109,28 @@ cd Brimir
 # 2. Run automated setup (installs Visual Studio Build Tools if needed)
 PowerShell -ExecutionPolicy Bypass -File .\setup-env.ps1
 
-# 3. Build the core
-.\build.ps1
+# 3. Build both Windows and Linux versions
+.\build-all.ps1
 ```
 
-The compiled core will be in `build/src/libretro/brimir_libretro.dll`.
+**Outputs:**
+- Windows: `build\bin\Release\brimir_libretro.dll`
+- Linux: `build-linux\lib\libbrimir_libretro.so`
 
-### Quick Start (Linux)
+### Quick Start (Windows - Single Platform)
+
+```powershell
+# Build Windows only
+.\build.ps1
+
+# Build Linux only (requires WSL)
+.\build-wsl.ps1
+```
+
+**Windows Output:** `build\bin\Release\brimir_libretro.dll`  
+**Linux Output:** `build-linux\lib\libbrimir_libretro.so`
+
+### Quick Start (Linux Native)
 
 ```bash
 # 1. Clone with submodules
@@ -124,7 +149,7 @@ chmod +x build.sh
 ./build.sh
 ```
 
-The compiled core will be in `build/src/libretro/libbrimir_libretro.so`.
+**Output:** `build-linux/lib/libbrimir_libretro.so`
 
 ### Manual Build (Windows)
 

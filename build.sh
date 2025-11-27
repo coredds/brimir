@@ -121,7 +121,7 @@ echo ""
 echo "Build Type:     $BUILD_TYPE"
 echo "Build Directory: $BUILD_DIR"
 echo "Output:"
-echo "  - Core library: $BUILD_DIR/src/libretro/libbrimir_libretro.so"
+echo "  - Core library: $BUILD_DIR/lib/libbrimir_libretro.so"
 if [ "$ENABLE_TESTS" = "ON" ]; then
     echo "  - Unit tests:   $BUILD_DIR/tests/unit/"
 fi
@@ -141,6 +141,6 @@ print_success "Build process complete!"
 echo ""
 echo "Next steps:"
 echo "  - Install: sudo make -C build-linux install"
-echo "  - Or copy: cp build-linux/src/libretro/libbrimir_libretro.so ~/.config/retroarch/cores/"
+echo "  - Or copy: cp build-linux/lib/libbrimir_libretro.so ~/.config/retroarch/cores/"
 echo ""
 
