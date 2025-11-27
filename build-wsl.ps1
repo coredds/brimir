@@ -49,7 +49,11 @@ Write-Host ""
 Write-Host "Starting Linux build in WSL..." -ForegroundColor Yellow
 Write-Host ""
 
-wsl bash -c "cd '$wslPath' && export BUILD_TYPE='$BuildType' && export ENABLE_TESTS='$($env:ENABLE_TESTS)' && export USE_CLANG='$($env:USE_CLANG)' && ./build.sh"
+$buildTypeValue = if ($BuildType) { $BuildType } else { "Release" }
+$enableTestsValue = if ($Tests) { "ON" } else { "OFF" }
+$useClangValue = if ($UseGCC) { "NO" } else { "YES" }
+
+wsl bash -c "cd '$wslPath' && export BUILD_TYPE='$buildTypeValue' && export ENABLE_TESTS='$enableTestsValue' && export USE_CLANG='$useClangValue' && ./build.sh"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
