@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.2] - 2025-11-27
+
+### Added
+- **Input Descriptors** - Full RetroArch controller remapping support
+  - Added `RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS` implementation
+  - Proper button labels for Saturn controller (A, B, C, X, Y, Z, L, R, Start)
+  - Descriptors for both Player 1 and Player 2
+  - Fixes `input_descriptors = "true"` claim in `.info` file
+  - Enables proper button remapping in RetroArch's controller configuration UI
+
+- **Deinterlacing Support** - New core option for interlaced video modes
+  - Added "Deinterlacing" option in Video Settings (enabled by default)
+  - Fixes high-resolution interlaced menu rendering (e.g., Panzer Dragoon Zwei)
+  - Users can disable for minor performance gain in progressive-only games
+  - Added `SetDeinterlacing()` method to CoreWrapper
+
+### Changed
+- **Deinterlacing Default** - Now enabled by default (was disabled for performance)
+  - Necessary for games with hi-res interlaced menus (704x480 interlaced)
+  - Panzer Dragoon Zwei menus now render correctly
+
+### Fixed
+- **Interlaced Menu Rendering** - Games using hi-res interlaced modes for menus now display correctly
+  - Panzer Dragoon Zwei: 640x224 progressive gameplay + 704x480 interlaced menus both work
+  - Other games with similar resolution switching patterns benefit
+
+### Tested Games
+- ✅ **Panzer Dragoon Zwei** - Gameplay excellent, hi-res interlaced menus now supported
+- ✅ **King of Fighters '96** - Confirmed fully playable with 1MB DRAM expansion
+- ✅ **Street Fighter Zero 3** - Confirmed fully playable with 4MB DRAM expansion
+
+### Documentation
+- **BIOS Compatibility** - Clarified that Japanese BIOS v1.003 (`sega1003.bin`) is NOT supported
+  - Removed from supported BIOS table
+  - Added prominent warning in BIOS Requirements section
+  - Updated all documentation to recommend JP v1.01 or v1.00 instead
+  - Removed from deployment scripts
+- **Core Options** - Updated to document deinterlacing setting
+- **Game Compatibility** - Updated tested games list with latest test results
+
+---
+
 ## [0.1.0] - 2025-11-25
 
 ### Added

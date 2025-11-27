@@ -18,8 +18,8 @@ Named after the primordial giant in Norse mythology (complementing "Ymir"), Brim
 ## Status
 
 **Project Status:** Active Development  
-**Current Version:** 0.1.1  
-**Last Updated:** November 25, 2025
+**Current Version:** 0.1.2  
+**Last Updated:** November 27, 2025
 
 Core features are implemented and tested with 82 comprehensive test cases. The core achieves consistent 60 FPS emulation on modern hardware. Expansion cartridge support is functional but has some limitations (see Known Issues below).
 
