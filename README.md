@@ -291,10 +291,10 @@ system/
 |------|--------|--------|-----------|-------|
 | Sega Rally Championship | USA | ✅ Working | None | 60 FPS, saves working, clock persists |
 | Saturn Bomberman | Japan | ✅ Working | None | Full gameplay tested |
-| King of Fighters '96 | Japan | ✅ Working | 1MB DRAM | Auto-detected, boots and plays correctly |
+| King of Fighters '96 | Japan | ✅ Working | 1MB DRAM | Auto-detected, fully playable with 1MB RAM expansion |
+| Street Fighter Zero 3 | Japan | ✅ Working | 4MB DRAM | Auto-detected, fully playable with 4MB RAM expansion |
 | X-Men vs. Street Fighter | Japan | ⚠️ Partial | 1MB DRAM | Detects cartridge but has upstream emulation issues |
 | Marvel Super Heroes vs. SF | Japan | ⚠️ Partial | 4MB DRAM | Detects cartridge, freezes at Capcom logo (upstream) |
-| Street Fighter Zero 3 | Japan | ❌ Not Tested | 4MB DRAM | Auto-detection implemented |
 | King of Fighters '95 | Japan/Europe | ❌ Not Implemented | 4MB ROM | ROM cartridge support pending |
 | Ultraman | Japan | ❌ Not Implemented | 4MB ROM | ROM cartridge support pending |
 
