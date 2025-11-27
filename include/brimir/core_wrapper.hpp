@@ -187,6 +187,10 @@ public:
     /// @param enable True to enable autodetect
     void SetAutodetectRegion(bool enable);
     
+    /// @brief Set deinterlacing mode
+    /// @param enable True to enable deinterlacing
+    void SetDeinterlacing(bool enable);
+    
     /// @brief Get profiling report
     /// @return Performance profiling data as string
     std::string GetProfilingReport() const { return m_profiler.GetReport(); }

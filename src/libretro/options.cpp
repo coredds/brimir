@@ -82,6 +82,20 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "auto"
     },
     {
+        "brimir_deinterlacing",
+        "Deinterlacing",
+        nullptr,
+        "Enable deinterlacing for interlaced video modes (used in some game menus like Panzer Dragoon Zwei). Disable for slightly better performance in progressive-only games.",
+        nullptr,
+        "video",
+        {
+            { "enabled", "Enabled" },
+            { "disabled", "Disabled" },
+            { nullptr, nullptr }
+        },
+        "enabled"
+    },
+    {
         "brimir_frameskip",
         "Frameskip",
         nullptr,

@@ -69,8 +69,9 @@ bool CoreWrapper::Initialize() {
         m_saturn->configuration.video.threadedDeinterlacer = true;
         m_saturn->configuration.video.includeVDP1InRenderThread = false;
         
-        // Disable deinterlacing for maximum performance (same as standalone "Recommended")
-        m_saturn->VDP.SetDeinterlaceRender(false);
+        // Enable deinterlacing by default for games with interlaced hi-res menus (e.g., Panzer Dragoon Zwei)
+        // This can be disabled via core option for slightly better performance in progressive-only games
+        m_saturn->VDP.SetDeinterlaceRender(true);
         
         // Enable transparent mesh for better visuals (same as standalone "Recommended")
         m_saturn->VDP.SetTransparentMeshes(true);
@@ -993,6 +994,14 @@ void CoreWrapper::SetAutodetectRegion(bool enable) {
     }
 
     m_saturn->configuration.system.autodetectRegion = enable;
+}
+
+void CoreWrapper::SetDeinterlacing(bool enable) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+
+    m_saturn->VDP.SetDeinterlaceRender(enable);
 }
 
 // TODO: Fix MSVC compilation errors

@@ -69,7 +69,7 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 - **Profiling support** for performance monitoring and diagnostics
 
 ### Core Options
-- **Video Settings:** Threaded VDP, deinterlacing, transparent meshes
+- **Video Settings:** Deinterlacing (for hi-res interlaced menus), threaded VDP, transparent meshes
 - **Audio Settings:** Interpolation mode (linear/nearest)
 - **System Settings:** BIOS selection, region, video standard (NTSC/PAL)
 - **Media Settings:** CD read speed (2x-200x), autodetect region
@@ -291,6 +291,7 @@ system/
 |------|--------|--------|-----------|-------|
 | Sega Rally Championship | USA | ✅ Working | None | 60 FPS, saves working, clock persists |
 | Saturn Bomberman | Japan | ✅ Working | None | Full gameplay tested |
+| Panzer Dragoon Zwei | USA/Europe/Japan | ✅ Working | None | Gameplay excellent, hi-res interlaced menus supported |
 | King of Fighters '96 | Japan | ✅ Working | 1MB DRAM | Auto-detected, fully playable with 1MB RAM expansion |
 | Street Fighter Zero 3 | Japan | ✅ Working | 4MB DRAM | Auto-detected, fully playable with 4MB RAM expansion |
 | X-Men vs. Street Fighter | Japan | ⚠️ Partial | 1MB DRAM | Detects cartridge but has upstream emulation issues |
