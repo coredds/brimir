@@ -77,9 +77,11 @@ if ($buildLinux) {
     Write-Host ""
     
     try {
-        $params = @("-BuildType", $BuildType)
-        if ($Tests) { $params += "-Tests" }
-        if ($UseGCC) { $params += "-UseGCC" }
+        $params = @{
+            BuildType = $BuildType
+        }
+        if ($Tests) { $params['Tests'] = $true }
+        if ($UseGCC) { $params['UseGCC'] = $true }
         & .\build-wsl.ps1 @params
         if ($LASTEXITCODE -eq 0) {
             $buildResults["Linux"] = "✓ Success"

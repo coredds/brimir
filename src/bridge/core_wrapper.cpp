@@ -24,6 +24,11 @@
 #include <thread>
 #include <chrono>
 
+// SIMD intrinsics
+#if defined(_M_X64) || defined(__x86_64__)
+#include <emmintrin.h>  // SSE2
+#endif
+
 // Undefine any Windows macros that might interfere
 #ifdef DRAM8Mbit
 #undef DRAM8Mbit
@@ -739,33 +744,48 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         m_framebuffer.resize(pixelCount);
     }
 
-    // Convert from XBGR8888 to RGB565
+    // Convert from XBGR8888 to RGB565 with SIMD acceleration
     {
         ScopedTimer convTimer(m_profiler, "PixelConversion");
         
-        // Use manual loop unrolling for better performance on high-res frames
         const uint32_t* src = fb;
         uint16_t* dst = m_framebuffer.data();
-        
-        // Process 4 pixels at a time (manual unrolling for better ILP)
         size_t i = 0;
-        const size_t unroll4 = pixelCount & ~3;  // Round down to multiple of 4
         
-        for (; i < unroll4; i += 4) {
-            // Process 4 pixels with independent operations (allows CPU to parallelize)
-            uint32_t p0 = src[i + 0];
-            uint32_t p1 = src[i + 1];
-            uint32_t p2 = src[i + 2];
-            uint32_t p3 = src[i + 3];
+#if defined(_M_X64) || defined(__x86_64__)
+    #if defined(__SSE2__) || defined(_M_X64)
+        // SSE2: Process 4 pixels at a time
+        // XBGR8888 -> RGB565: extract R5G6B5 bits and pack
+        for (; i + 4 <= pixelCount; i += 4) {
+            __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&src[i]));
             
-            // Convert each pixel independently (compiler can vectorize this)
-            dst[i + 0] = ((p0 & 0x0000F8) << 8) | ((p0 & 0x00FC00) >> 5) | ((p0 & 0xF80000) >> 19);
-            dst[i + 1] = ((p1 & 0x0000F8) << 8) | ((p1 & 0x00FC00) >> 5) | ((p1 & 0xF80000) >> 19);
-            dst[i + 2] = ((p2 & 0x0000F8) << 8) | ((p2 & 0x00FC00) >> 5) | ((p2 & 0xF80000) >> 19);
-            dst[i + 3] = ((p3 & 0x0000F8) << 8) | ((p3 & 0x00FC00) >> 5) | ((p3 & 0xF80000) >> 19);
+            // Extract Blue (bits 19-23) -> position 0-4
+            __m128i b = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0xF80000)), 19);
+            
+            // Extract Green (bits 10-15) -> position 5-10
+            __m128i g = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x00FC00)), 5);
+            
+            // Extract Red (bits 3-7) -> position 11-15
+            __m128i r = _mm_slli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x0000F8)), 8);
+            
+            // Combine into 32-bit RGB565 values (each is 0x0000XXXX)
+            __m128i rgb565_32 = _mm_or_si128(_mm_or_si128(r, g), b);
+            
+            // Pack 4x 32-bit to 4x 16-bit
+            // SSE2 doesn't have _mm_packus_epi32 (unsigned pack), so extract manually
+            // Extract lower 16 bits from each 32-bit lane and store directly
+            uint32_t temp[4];
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(temp), rgb565_32);
+            
+            dst[i + 0] = static_cast<uint16_t>(temp[0]);
+            dst[i + 1] = static_cast<uint16_t>(temp[1]);
+            dst[i + 2] = static_cast<uint16_t>(temp[2]);
+            dst[i + 3] = static_cast<uint16_t>(temp[3]);
         }
+    #endif
+#endif
         
-        // Handle remaining pixels (0-3)
+        // Scalar fallback for remaining pixels
         for (; i < pixelCount; ++i) {
             uint32_t pixel = src[i];
             dst[i] = ((pixel & 0x0000F8) << 8) | ((pixel & 0x00FC00) >> 5) | ((pixel & 0xF80000) >> 19);

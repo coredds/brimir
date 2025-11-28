@@ -11,22 +11,31 @@ Write-Host "===================" -ForegroundColor Cyan
 Write-Host ""
 
 # Initialize Visual Studio environment
-$vsPath = & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-if (-not $vsPath) {
-    Write-Host "ERROR: Visual Studio not found!" -ForegroundColor Red
-    exit 1
+$vswherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not (Test-Path $vswherePath)) {
+    Write-Host "ERROR: vswhere.exe not found at: $vswherePath" -ForegroundColor Red
+    Write-Host "Trying to build without VS environment setup..." -ForegroundColor Yellow
+    $vsPath = $null
+} else {
+    $vsPath = & $vswherePath -latest -property installationPath
+    if (-not $vsPath) {
+        Write-Host "WARNING: Visual Studio not found, trying without environment setup" -ForegroundColor Yellow
+    }
 }
 
-Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Green
+if ($vsPath) {
+    Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Green
 
-# Import VS environment
-$vcvarsPath = Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1"
-if (Test-Path $vcvarsPath) {
-    Write-Host "Loading Visual Studio environment..." -ForegroundColor Yellow
-    & $vcvarsPath -Arch $Arch
+    # Import VS environment
+    $vcvarsPath = Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1"
+    if (Test-Path $vcvarsPath) {
+        Write-Host "Loading Visual Studio environment..." -ForegroundColor Yellow
+        & $vcvarsPath -Arch $Arch
+    } else {
+        Write-Host "WARNING: Cannot find VS DevShell script, continuing anyway" -ForegroundColor Yellow
+    }
 } else {
-    Write-Host "ERROR: Cannot find VS DevShell script!" -ForegroundColor Red
-    exit 1
+    Write-Host "Continuing without Visual Studio environment..." -ForegroundColor Yellow
 }
 
 # Configure CMake

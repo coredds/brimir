@@ -122,12 +122,8 @@ tests/fixtures/games/
 *.coverage
 coverage/
 
-# Documentation build artifacts (generated docs only)
-docs/_build/
-docs/html/
-docs/latex/
-doxygen/
-site/
+# Documentation
+docs/
 
 # Packaging
 *.deb

@@ -127,7 +127,8 @@ print_success "Configuration complete"
 # Build
 print_info "Building Brimir core (using $NUM_JOBS jobs)..."
 
-cmake --build "$BUILD_DIR" --config "$BUILD_TYPE" --parallel "$NUM_JOBS"
+# Note: Makefiles don't use --config, only multi-config generators like VS do
+cmake --build "$BUILD_DIR" --parallel "$NUM_JOBS"
 
 print_success "Build complete"
 
