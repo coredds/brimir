@@ -2,16 +2,23 @@
 
 <p align="center">
   <strong>Sega Saturn Emulation for libretro</strong><br>
-  <em>A high-performance libretro core based on the Ymir emulator</em>
+  <em>A performance-focused libretro core powered by Ymir</em>
 </p>
 
 ---
 
 ## Overview
 
-**Brimir** is a libretro core wrapper for the [Ymir Sega Saturn emulator](https://github.com/StrikerX3/Ymir) by [StrikerX3](https://github.com/StrikerX3), bringing Ymir's accurate and feature-rich Sega Saturn emulation to RetroArch and other libretro frontends.
+**Brimir** is a high-performance libretro core for Sega Saturn emulation, built on [Ymir](https://github.com/StrikerX3/Ymir) by [StrikerX3](https://github.com/StrikerX3). While maintaining Ymir's cycle-accurate architecture, Brimir serves as an active development testbed focused on performance optimizations and platform-specific enhancements.
 
-**All emulation work is done by Ymir.** Brimir provides the libretro API integration layer.
+### Project Goals
+
+- **Performance**: Optimize for modern hardware and target entry-level retro handhelds
+- **Compatibility**: Achieve broad game compatibility through targeted fixes and enhancements
+- **Accuracy**: Maintain Ymir's cycle-accurate foundation while allowing performance-focused optimizations
+- **Platform Reach**: Enable full-speed Saturn emulation on devices like the Trimui Smart Pro S
+
+All changes respect Ymir's GPL-3.0 license and architectural design. Performance improvements and compatibility fixes may be contributed upstream where applicable.
 
 ## Demo
 
@@ -21,9 +28,14 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 
 ## Features
 
+### Performance & Optimizations (v0.1.3)
+- **60+ FPS @ 704x448i** high-resolution interlaced modes (2.4× faster than v0.1.2)
+- **Mednafen-competitive performance** through tile-row caching and SIMD optimizations
+- **Platform-optimized builds** with AVX2/SSE2/NEON support
+- **Pixel-perfect accuracy** maintained through all optimizations
+
 ### Core Emulation
-- **Accurate hardware emulation** via Ymir's cycle-accurate core
-- **High-resolution performance:** 60 FPS @ 704x448i (v0.1.3)
+- **Cycle-accurate foundation** via Ymir architecture
 - **Multiple disc formats:** CHD, BIN/CUE, ISO, CCD, MDS
 - **7 BIOS versions supported:** US, EU, JP variants with auto-detection
 - **Backup RAM (SRAM)** with persistent game saves
@@ -133,6 +145,19 @@ The core auto-detects available BIOS files. You must obtain BIOS files legally f
 | King of Fighters '96 | ✅ Working | 1MB DRAM auto-detected |
 | Street Fighter Zero 3 | ✅ Working | 4MB DRAM auto-detected |
 
+## Development Roadmap
+
+### 2026 Goals
+
+**Primary Target**: Full-speed Saturn emulation on entry-level retro handhelds
+
+- **SH-2 JIT Compiler**: Dynamic recompilation for CPU-intensive games
+- **Target Platform**: Trimui Smart Pro S and similar devices
+- **Performance Targets**: 60 FPS gameplay on ARM-based handhelds
+- **Optimization Focus**: Platform-specific tuning while maintaining accuracy
+
+See [ROADMAP.md](docs/ROADMAP.md) for detailed feature timeline.
+
 ## Known Limitations
 
 - **Cartridge RAM persistence:** Not yet implemented - progress lost between sessions
@@ -155,8 +180,9 @@ GPL-3.0 - See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- **[Ymir](https://github.com/StrikerX3/Ymir)** by [StrikerX3](https://github.com/StrikerX3) - All emulation credit goes to Ymir
+- **[Ymir](https://github.com/StrikerX3/Ymir)** by [StrikerX3](https://github.com/StrikerX3) - Foundation and architectural reference for all emulation
 - **[libretro](https://github.com/libretro)** - The platform making this integration possible
+- **[Mednafen](https://mednafen.github.io/)** - Performance optimization insights and techniques
 - **Sega Saturn community** - For preservation and documentation efforts
 
 ## Support
@@ -174,6 +200,6 @@ GPL-3.0 - See [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <strong>Powered by <a href="https://github.com/StrikerX3/Ymir">Ymir</a></strong><br>
-  Made for the Sega Saturn community
+  <strong>Built on <a href="https://github.com/StrikerX3/Ymir">Ymir</a></strong><br>
+  Performance-optimized for modern platforms and retro handhelds
 </p>

@@ -2,6 +2,12 @@
 
 Thank you for your interest in contributing to Brimir! This document provides guidelines and information for contributors.
 
+## About Brimir
+
+Brimir is a performance-focused fork of the Ymir emulator for the libretro ecosystem. While we maintain Ymir's cycle-accurate architecture and respect its GPL-3.0 license, Brimir actively develops performance optimizations and platform-specific enhancements. Our goal is to enable full-speed Saturn emulation on modern platforms and entry-level retro handhelds through techniques like JIT compilation and targeted optimizations.
+
+Contributions that improve performance, compatibility, or platform reach while maintaining reasonable accuracy are especially welcome.
+
 ## Table of Contents
 
 - [Code of Conduct](#code-of-conduct)

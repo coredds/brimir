@@ -2,29 +2,34 @@
 
 This document outlines the development roadmap for the Brimir libretro core.
 
-**Last Updated:** 2025-11-27  
-**Current Version:** 0.1.2
+**Last Updated:** 2025-11-29  
+**Current Version:** 0.1.3
 
 ---
 
 ## Overview
 
-Brimir development follows semantic versioning with phased releases:
+Brimir is a performance-focused fork of Ymir for libretro, targeting modern platforms and entry-level retro handhelds. Development follows semantic versioning with phased releases:
 
 ```
-Phase 1: Foundation          → v0.1.2 (Complete)
-Phase 2: Extended Features   → v0.2.0 (Planned)
-Phase 3: Production Release  → v1.0.0 (Goal)
+Phase 1: Foundation & Performance  → v0.1.3 (Complete)
+Phase 2: Extended Features         → v0.2.0 (Planned)
+Phase 3: JIT & Handheld Support    → v0.3.0 (Goal)
+Phase 4: Production Release        → v1.0.0 (Goal)
 ```
+
+### Primary Goal for 2026
+
+**Enable full-speed Saturn emulation on entry-level retro handhelds** through SH-2 JIT compilation and platform-specific optimizations, targeting the Trimui Smart Pro S as the reference platform.
 
 ---
 
-## Phase 1: Foundation → v0.1.2 (COMPLETE)
+## Phase 1: Foundation & Performance → v0.1.3 (COMPLETE)
 
-**Goal:** Create a fully functional core with essential features
+**Goal:** Create a fully functional core with high-performance rendering
 
 ### Completed Features
-- Ymir emulator integration
+- Ymir emulator integration with active performance enhancements
 - CMake + vcpkg build system
 - Complete libretro API implementation
 - Video output (RGB565, dynamic resolution, deinterlacing)
@@ -38,26 +43,26 @@ Phase 3: Production Release  → v1.0.0 (Goal)
 - Core options (BIOS, region, video, audio, performance)
 - DRAM expansion cartridge support (1MB/4MB/6MB) with auto-detection
 - Game database integration (24+ games)
-- Performance optimizations (60 FPS at all resolutions)
 - 82 comprehensive test cases
 - Deployment automation
 - Comprehensive documentation
 
-### Performance Achievements
-- Consistent 60 FPS at 320×224 (gameplay)
-- Consistent 60 FPS at 704×480 (menus)
-- Zero frame drops during resolution changes
-- Optimized SRAM, video, and audio pipelines
-- Deinterlacing support for hi-res interlaced modes
+### Performance Achievements (v0.1.3)
+- **60+ FPS @ 704×448i** high-resolution interlaced modes (2.4× faster than v0.1.2)
+- **Mednafen-competitive performance** through VDP2 tile-row caching
+- **SIMD optimizations** for window masking (AVX2/SSE2/NEON)
+- **Pixel-perfect accuracy** maintained through all optimizations
+- Cross-platform force-inlining for consistent performance
+- Clean production build (profiling overhead removed)
 
 ### Tested Games
-- Sega Rally Championship (USA) - Full compatibility
-- Saturn Bomberman (Japan) - Full compatibility
-- Panzer Dragoon Zwei (USA/Europe/Japan) - Full compatibility with hi-res interlaced menus
+- Sega Rally Championship (USA) - Full compatibility, 60 FPS
+- Saturn Bomberman (Japan) - Full compatibility, 60 FPS
+- Panzer Dragoon Zwei (USA/Europe/Japan) - Full compatibility, 60+ FPS @ 704×448i menus
 - King of Fighters '96 (Japan) - Full compatibility with 1MB DRAM expansion
 - Street Fighter Zero 3 (Japan) - Full compatibility with 4MB DRAM expansion
 
-**Status:** v0.1.2 released November 27, 2025
+**Status:** v0.1.3 released November 29, 2025
 
 ---
 
@@ -115,7 +120,48 @@ Phase 3: Production Release  → v1.0.0 (Goal)
 
 ---
 
-## Phase 3: Production Release → v1.0.0 (GOAL)
+## Phase 3: JIT & Handheld Optimization → v0.3.0 (2026 GOAL)
+
+**Goal:** Enable full-speed emulation on entry-level retro handhelds
+
+### Target Features
+- **SH-2 JIT Compiler**
+  - [ ] Dynamic recompilation for master SH-2
+  - [ ] Dynamic recompilation for slave SH-2
+  - [ ] ARM target code generation (ARMv7, ARMv8)
+  - [ ] x86-64 code generation
+  - [ ] Cache management and invalidation
+  - [ ] Compatibility testing (accuracy vs performance modes)
+
+- **Handheld Platform Optimization**
+  - [ ] Target: Trimui Smart Pro S (ARM Cortex-A53)
+  - [ ] NEON SIMD optimizations for VDP rendering
+  - [ ] Memory footprint reduction for limited RAM
+  - [ ] Battery-friendly performance profiles
+  - [ ] Resolution scaling for small screens
+
+- **Performance Profiling**
+  - [ ] Frame-by-frame performance analysis
+  - [ ] CPU hotspot identification
+  - [ ] Memory bandwidth optimization
+  - [ ] Cache efficiency improvements
+
+- **Platform Builds**
+  - [ ] ARM64 Linux builds
+  - [ ] ARM32 Linux builds (if needed)
+  - [ ] Performance benchmarks per platform
+  - [ ] Automated testing on target hardware
+
+### Target Performance
+- 60 FPS gameplay on Trimui Smart Pro S (Cortex-A53 @ 1.5 GHz)
+- 90%+ games playable at full speed with JIT enabled
+- Graceful degradation for accuracy mode (40-50 FPS without JIT)
+
+**Estimated Timeline:** Q2-Q3 2026
+
+---
+
+## Phase 4: Production Release → v1.0.0 (GOAL)
 
 **Goal:** Production-ready core with broad compatibility
 
@@ -195,19 +241,21 @@ These are potential features for future releases:
 
 ---
 
-## Upstream Ymir Tracking
+## Relationship with Upstream Ymir
 
-Brimir tracks the Ymir emulator project:
+Brimir is an active fork focused on performance and platform optimization:
 
-- **Current Ymir Version:** Commit `[hash]` (November 2025)
-- **Update Cadence:** Monthly check for upstream changes
-- **Integration Strategy:** Evaluate impact, test, merge
+- **Foundation:** Built on Ymir's cycle-accurate architecture
+- **License:** All changes respect Ymir's GPL-3.0 license
+- **Upstream Contributions:** Performance and compatibility fixes may be contributed back where applicable
+- **Independent Development:** JIT compiler and handheld optimizations developed specifically for Brimir
+- **Update Strategy:** Periodically evaluate upstream changes for integration
 
-### Notable Ymir Features to Track
-- SH-2 JIT compiler (performance boost)
-- Hardware rendering backend
-- Additional peripheral support
-- Accuracy improvements
+### Development Philosophy
+- Maintain architectural compatibility with Ymir
+- Prioritize performance and platform reach
+- Allow reasonable accuracy trade-offs for speed (user-configurable)
+- Document all deviations from reference implementation
 
 ---
 
@@ -217,9 +265,11 @@ Brimir tracks the Ymir emulator project:
 |---------|-------------|--------|
 | 0.1.0 | 2025-11-25 | Released |
 | 0.1.1 | 2025-11-25 | Released |
-| 0.1.2 | 2025-11-27 | Released (Current) |
+| 0.1.2 | 2025-11-27 | Released |
+| 0.1.3 | 2025-11-29 | Released (Current) |
 | 0.2.0 | 2026-Q1 | Planned |
-| 1.0.0 | 2026-Q2 | Goal |
+| 0.3.0 | 2026-Q2-Q3 | Planned (JIT) |
+| 1.0.0 | 2026-Q4 | Goal |
 
 ---
 

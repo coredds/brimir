@@ -38,6 +38,6 @@ firmware1_path = "sega_100.bin"
 firmware1_opt = "true"
 
 # Notes
-notes = "(!) sega_101.bin (md5): f273555d7d91e8a5a6bfd9bcf066331c|(!) sega_100.bin (md5): 2aba43c2f1526c5e898dfe1cafbfc53a|Based on the Ymir Saturn emulator.|Requires Saturn BIOS ROM (place in system directory).|Japanese BIOS files (Sega Saturn BIOS v1.00/v1.01 (JAP).bin) are also supported.|Note: sega1003.bin (JP v1.003) is NOT supported due to compatibility issues.|Visit https://github.com/coredds/brimir for more information."
+notes = "(!) sega_101.bin (md5): f273555d7d91e8a5a6bfd9bcf066331c|(!) sega_100.bin (md5): 2aba43c2f1526c5e898dfe1cafbfc53a|Performance-focused fork built on Ymir.|Optimized for modern platforms and retro handhelds.|Requires Saturn BIOS ROM (place in system directory).|Japanese BIOS files (Sega Saturn BIOS v1.00/v1.01 (JAP).bin) are also supported.|Note: sega1003.bin (JP v1.003) is NOT supported due to compatibility issues.|Visit https://github.com/coredds/brimir for more information."
 
-description = "Brimir is a libretro core for Sega Saturn emulation, based on the Ymir emulator. It provides accurate emulation of the Sega Saturn hardware with support for game discs in various formats. The core requires a Saturn BIOS ROM to function."
+description = "Brimir is a high-performance libretro core for Sega Saturn emulation, built on Ymir's cycle-accurate foundation. Features Mednafen-competitive rendering performance (60+ FPS @ 704x448i) through tile-row caching and SIMD optimizations. Active development focuses on platform-specific enhancements and future JIT support for entry-level retro handhelds. The core requires a Saturn BIOS ROM to function."
