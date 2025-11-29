@@ -191,6 +191,10 @@ public:
     /// @param enable True to enable deinterlacing
     void SetDeinterlacing(bool enable);
     
+    /// @brief Set deinterlacing mode (new optimized modes)
+    /// @param mode Mode string: "current", "weave", "blend", "bob", "none"
+    void SetDeinterlacingMode(const char* mode);
+    
     /// @brief Get profiling report
     /// @return Performance profiling data as string
     std::string GetProfilingReport() const { return m_profiler.GetReport(); }

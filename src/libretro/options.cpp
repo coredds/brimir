@@ -96,6 +96,26 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "enabled"
     },
     {
+        "brimir_deinterlace_mode",
+        "Deinterlacing Mode",
+        nullptr,
+        "Method for deinterlacing high-resolution modes. "
+        "Blend (recommended) renders both fields and blends them for smooth output with minimal performance cost (~0.5ms). "
+        "Weave shows one field per frame (fastest, authentic to CRT but shows combing). "
+        "Current uses the original Ymir threaded renderer (most accurate but slowest, ~7ms overhead).",
+        nullptr,
+        "video",
+        {
+            { "blend", "Blend (Recommended)" },
+            { "weave", "Weave (Fastest)" },
+            { "bob", "Bob (Smooth Motion)" },
+            { "current", "Current (Accurate)" },
+            { "none", "None (Native Interlacing)" },
+            { nullptr, nullptr }
+        },
+        "blend"
+    },
+    {
         "brimir_frameskip",
         "Frameskip",
         nullptr,

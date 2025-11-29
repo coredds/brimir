@@ -1024,6 +1024,26 @@ void CoreWrapper::SetDeinterlacing(bool enable) {
     m_saturn->VDP.SetDeinterlaceRender(enable);
 }
 
+void CoreWrapper::SetDeinterlacingMode(const char* mode) {
+    if (!m_initialized || !m_saturn || !mode) {
+        return;
+    }
+
+    using DeinterlaceMode = ymir::vdp::DeinterlaceMode;
+    
+    if (strcmp(mode, "blend") == 0) {
+        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Blend);
+    } else if (strcmp(mode, "weave") == 0) {
+        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Weave);
+    } else if (strcmp(mode, "bob") == 0) {
+        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Bob);
+    } else if (strcmp(mode, "current") == 0) {
+        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Current);
+    } else if (strcmp(mode, "none") == 0) {
+        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::None);
+    }
+}
+
 // TODO: Fix MSVC compilation errors
 /*
 bool CoreWrapper::LoadCartridgeRAM() {
