@@ -63,6 +63,6 @@ Write-Host "============================================" -ForegroundColor Green
 Write-Host "BUILD SUCCESSFUL!" -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "Output: build\$BuildType\brimir_libretro.dll" -ForegroundColor Cyan
+Write-Host "Output: build\bin\$BuildType\brimir_libretro.dll" -ForegroundColor Cyan
 Write-Host ""
 

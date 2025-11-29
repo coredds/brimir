@@ -122,10 +122,6 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
     if(TARGET ymir-core)
         target_compile_options(ymir-core PRIVATE ${EXTERNAL_WARNINGS_GCC})
-        # Disable aggressive force-inlining on Linux to avoid compiler errors
-        # Pass Ymir_DISABLE_FORCE_INLINE via compile option instead of compile_definitions
-        # to ensure it's evaluated before inline.hpp
-        target_compile_options(ymir-core PRIVATE -DYmir_DISABLE_FORCE_INLINE)
         # Enable Position Independent Code for linking with shared libraries
         set_target_properties(ymir-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
     endif()

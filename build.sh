@@ -15,7 +15,7 @@ BUILD_DIR="build-linux"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 ENABLE_TESTS="${ENABLE_TESTS:-OFF}"
 NUM_JOBS="${NUM_JOBS:-$(nproc)}"
-USE_CLANG="${USE_CLANG:-YES}"  # Use Clang by default (better inline handling than GCC)
+USE_CLANG="${USE_CLANG:-YES}"  # Use Clang by default (required for force-inline optimizations)
 
 # Colors for output
 RED='\033[0;31m'
@@ -60,22 +60,27 @@ if ! command -v g++ &> /dev/null && ! command -v clang++ &> /dev/null; then
     exit 1
 fi
 
-# Prefer Clang over GCC for better inline attribute handling
+# Require Clang for force-inline optimizations (matches Windows MSVC behavior)
 if [ "$USE_CLANG" = "YES" ]; then
     if command -v clang++ &> /dev/null; then
         export CC=clang
         export CXX=clang++
         print_success "Using Clang compiler"
     else
-        print_warning "Clang not found, falling back to GCC"
-        print_warning "Install Clang with: sudo apt install clang"
-        export CC=gcc
-        export CXX=g++
+        print_error "Clang not found but required for optimal performance"
+        echo "Install Clang with:"
+        echo "  Ubuntu/Debian: sudo apt install clang"
+        echo "  Fedora:        sudo dnf install clang"
+        echo "  Arch:          sudo pacman -S clang"
+        echo ""
+        echo "To use GCC instead (not recommended, slower): USE_CLANG=NO ./build.sh"
+        exit 1
     fi
 else
     export CC=gcc
     export CXX=g++
-    print_success "Using GCC compiler"
+    print_warning "Using GCC compiler - force-inline optimizations disabled"
+    print_warning "Performance may be reduced. Use Clang for best results."
 fi
 
 print_success "All required tools found"
