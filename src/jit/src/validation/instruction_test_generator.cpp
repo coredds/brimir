@@ -190,6 +190,223 @@ inline uint16_t RTS() {
     return 0x000B;
 }
 
+/**
+ * @brief Encode JSR @Rn (jump to subroutine)
+ */
+inline uint16_t JSR(uint8_t n) {
+    return 0x400B | (n << 8);
+}
+
+/**
+ * @brief Encode JMP @Rn
+ */
+inline uint16_t JMP(uint8_t n) {
+    return 0x402B | (n << 8);
+}
+
+/**
+ * @brief Encode BRAF Rn (branch far)
+ */
+inline uint16_t BRAF(uint8_t n) {
+    return 0x0023 | (n << 8);
+}
+
+/**
+ * @brief Encode BSRF Rn (branch to subroutine far)
+ */
+inline uint16_t BSRF(uint8_t n) {
+    return 0x0003 | (n << 8);
+}
+
+/**
+ * @brief Encode TST Rm, Rn
+ */
+inline uint16_t TST(uint8_t m, uint8_t n) {
+    return 0x2008 | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode NEG Rm, Rn
+ */
+inline uint16_t NEG(uint8_t m, uint8_t n) {
+    return 0x600B | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode NEGC Rm, Rn (negate with carry)
+ */
+inline uint16_t NEGC(uint8_t m, uint8_t n) {
+    return 0x600A | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode EXTS.B Rm, Rn (sign extend byte)
+ */
+inline uint16_t EXTSB(uint8_t m, uint8_t n) {
+    return 0x600E | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode EXTS.W Rm, Rn (sign extend word)
+ */
+inline uint16_t EXTSW(uint8_t m, uint8_t n) {
+    return 0x600F | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode EXTU.B Rm, Rn (zero extend byte)
+ */
+inline uint16_t EXTUB(uint8_t m, uint8_t n) {
+    return 0x600C | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode EXTU.W Rm, Rn (zero extend word)
+ */
+inline uint16_t EXTUW(uint8_t m, uint8_t n) {
+    return 0x600D | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode SWAP.B Rm, Rn (swap bytes)
+ */
+inline uint16_t SWAPB(uint8_t m, uint8_t n) {
+    return 0x6008 | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode SWAP.W Rm, Rn (swap words)
+ */
+inline uint16_t SWAPW(uint8_t m, uint8_t n) {
+    return 0x6009 | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode XTRCT Rm, Rn (extract)
+ */
+inline uint16_t XTRCT(uint8_t m, uint8_t n) {
+    return 0x200D | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode MUL.L Rm, Rn
+ */
+inline uint16_t MULL(uint8_t m, uint8_t n) {
+    return 0x0007 | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode MULS.W Rm, Rn (signed multiply)
+ */
+inline uint16_t MULSW(uint8_t m, uint8_t n) {
+    return 0x200F | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode MULU.W Rm, Rn (unsigned multiply)
+ */
+inline uint16_t MULUW(uint8_t m, uint8_t n) {
+    return 0x200E | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode DMULS.L Rm, Rn (signed 64-bit multiply)
+ */
+inline uint16_t DMULSL(uint8_t m, uint8_t n) {
+    return 0x300D | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode DMULU.L Rm, Rn (unsigned 64-bit multiply)
+ */
+inline uint16_t DMULUL(uint8_t m, uint8_t n) {
+    return 0x3005 | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode DIV0S Rm, Rn
+ */
+inline uint16_t DIV0S(uint8_t m, uint8_t n) {
+    return 0x2007 | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode DIV0U
+ */
+inline uint16_t DIV0U() {
+    return 0x0019;
+}
+
+/**
+ * @brief Encode DIV1 Rm, Rn
+ */
+inline uint16_t DIV1(uint8_t m, uint8_t n) {
+    return 0x3004 | (n << 8) | (m << 4);
+}
+
+/**
+ * @brief Encode DT Rn (decrement and test)
+ */
+inline uint16_t DT(uint8_t n) {
+    return 0x4010 | (n << 8);
+}
+
+/**
+ * @brief Encode ROTL Rn (rotate left)
+ */
+inline uint16_t ROTL(uint8_t n) {
+    return 0x4004 | (n << 8);
+}
+
+/**
+ * @brief Encode ROTR Rn (rotate right)
+ */
+inline uint16_t ROTR(uint8_t n) {
+    return 0x4005 | (n << 8);
+}
+
+/**
+ * @brief Encode ROTCL Rn (rotate left through carry)
+ */
+inline uint16_t ROTCL(uint8_t n) {
+    return 0x4024 | (n << 8);
+}
+
+/**
+ * @brief Encode ROTCR Rn (rotate right through carry)
+ */
+inline uint16_t ROTCR(uint8_t n) {
+    return 0x4025 | (n << 8);
+}
+
+/**
+ * @brief Encode SETT (set T-bit)
+ */
+inline uint16_t SETT() {
+    return 0x0018;
+}
+
+/**
+ * @brief Encode CLRT (clear T-bit)
+ */
+inline uint16_t CLRT() {
+    return 0x0008;
+}
+
+/**
+ * @brief Encode CLRMAC (clear MAC register)
+ */
+inline uint16_t CLRMAC() {
+    return 0x0028;
+}
+
+/**
+ * @brief Encode MOVT Rn (move T-bit to register)
+ */
+inline uint16_t MOVT(uint8_t n) {
+    return 0x0029 | (n << 8);
+}
+
 } // namespace sh2
 
 // -----------------------------------------------------------------------------
@@ -579,6 +796,263 @@ std::vector<TestCase> InstructionTestGenerator::GenerateCMPTests() {
     return tests;
 }
 
+std::vector<TestCase> InstructionTestGenerator::GenerateExtensionTests() {
+    std::vector<TestCase> tests;
+    
+    // Test sign/zero extension instructions
+    for (uint8_t src = 0; src < 8; src++) {
+        for (uint8_t dst = 0; dst < 8; dst++) {
+            // EXTS.B
+            {
+                TestCase test;
+                test.name = "EXTS_B_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "EXTS.B R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 13000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::EXTSB(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // EXTS.W
+            {
+                TestCase test;
+                test.name = "EXTS_W_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "EXTS.W R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 14000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::EXTSW(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // EXTU.B
+            {
+                TestCase test;
+                test.name = "EXTU_B_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "EXTU.B R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 15000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::EXTUB(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // EXTU.W
+            {
+                TestCase test;
+                test.name = "EXTU_W_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "EXTU.W R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 16000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::EXTUW(src, dst)};
+                tests.push_back(test);
+            }
+        }
+    }
+    
+    return tests;
+}
+
+std::vector<TestCase> InstructionTestGenerator::GenerateSwapTests() {
+    std::vector<TestCase> tests;
+    
+    for (uint8_t src = 0; src < 8; src++) {
+        for (uint8_t dst = 0; dst < 8; dst++) {
+            // SWAP.B
+            {
+                TestCase test;
+                test.name = "SWAP_B_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "SWAP.B R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 17000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::SWAPB(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // SWAP.W
+            {
+                TestCase test;
+                test.name = "SWAP_W_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "SWAP.W R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 18000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::SWAPW(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // XTRCT
+            {
+                TestCase test;
+                test.name = "XTRCT_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "XTRCT R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 19000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::XTRCT(src, dst)};
+                tests.push_back(test);
+            }
+        }
+    }
+    
+    return tests;
+}
+
+std::vector<TestCase> InstructionTestGenerator::GenerateMultiplyTests() {
+    std::vector<TestCase> tests;
+    
+    for (uint8_t src = 0; src < 4; src++) {
+        for (uint8_t dst = 0; dst < 4; dst++) {
+            // MUL.L
+            {
+                TestCase test;
+                test.name = "MUL_L_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "MUL.L R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 20000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::MULL(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // MULS.W
+            {
+                TestCase test;
+                test.name = "MULS_W_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "MULS.W R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 21000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::MULSW(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // MULU.W
+            {
+                TestCase test;
+                test.name = "MULU_W_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "MULU.W R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 22000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::MULUW(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // DMULS.L
+            {
+                TestCase test;
+                test.name = "DMULS_L_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "DMULS.L R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 23000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::DMULSL(src, dst)};
+                tests.push_back(test);
+            }
+            
+            // DMULU.L
+            {
+                TestCase test;
+                test.name = "DMULU_L_R" + std::to_string(src) + "_R" + std::to_string(dst);
+                test.description = "DMULU.L R" + std::to_string(src) + ", R" + std::to_string(dst);
+                test.initial_state = CreateRandomState(src * 16 + dst + 24000);
+                test.initial_state.PC = 0x06004000;
+                test.code = {sh2::DMULUL(src, dst)};
+                tests.push_back(test);
+            }
+        }
+    }
+    
+    return tests;
+}
+
+std::vector<TestCase> InstructionTestGenerator::GenerateRotateTests() {
+    std::vector<TestCase> tests;
+    
+    for (uint8_t reg = 0; reg < 8; reg++) {
+        // ROTL
+        {
+            TestCase test;
+            test.name = "ROTL_R" + std::to_string(reg);
+            test.description = "ROTL R" + std::to_string(reg);
+            test.initial_state = CreateRandomState(reg + 25000);
+            test.initial_state.PC = 0x06004000;
+            test.code = {sh2::ROTL(reg)};
+            tests.push_back(test);
+        }
+        
+        // ROTR
+        {
+            TestCase test;
+            test.name = "ROTR_R" + std::to_string(reg);
+            test.description = "ROTR R" + std::to_string(reg);
+            test.initial_state = CreateRandomState(reg + 26000);
+            test.initial_state.PC = 0x06004000;
+            test.code = {sh2::ROTR(reg)};
+            tests.push_back(test);
+        }
+        
+        // ROTCL
+        {
+            TestCase test;
+            test.name = "ROTCL_R" + std::to_string(reg);
+            test.description = "ROTCL R" + std::to_string(reg);
+            test.initial_state = CreateRandomState(reg + 27000);
+            test.initial_state.PC = 0x06004000;
+            test.code = {sh2::ROTCL(reg)};
+            tests.push_back(test);
+        }
+        
+        // ROTCR
+        {
+            TestCase test;
+            test.name = "ROTCR_R" + std::to_string(reg);
+            test.description = "ROTCR R" + std::to_string(reg);
+            test.initial_state = CreateRandomState(reg + 28000);
+            test.initial_state.PC = 0x06004000;
+            test.code = {sh2::ROTCR(reg)};
+            tests.push_back(test);
+        }
+    }
+    
+    return tests;
+}
+
+std::vector<TestCase> InstructionTestGenerator::GenerateFlagTests() {
+    std::vector<TestCase> tests;
+    
+    // SETT
+    {
+        TestCase test;
+        test.name = "SETT";
+        test.description = "SETT - Set T-bit to 1";
+        test.initial_state = CreateRandomState(29000);
+        test.initial_state.PC = 0x06004000;
+        test.initial_state.T = false;  // Start with T=0
+        test.code = {sh2::SETT()};
+        tests.push_back(test);
+    }
+    
+    // CLRT
+    {
+        TestCase test;
+        test.name = "CLRT";
+        test.description = "CLRT - Clear T-bit to 0";
+        test.initial_state = CreateRandomState(30000);
+        test.initial_state.PC = 0x06004000;
+        test.initial_state.T = true;  // Start with T=1
+        test.code = {sh2::CLRT()};
+        tests.push_back(test);
+    }
+    
+    // MOVT
+    for (uint8_t reg = 0; reg < 8; reg++) {
+        TestCase test;
+        test.name = "MOVT_R" + std::to_string(reg);
+        test.description = "MOVT R" + std::to_string(reg);
+        test.initial_state = CreateRandomState(reg + 31000);
+        test.initial_state.PC = 0x06004000;
+        test.initial_state.T = (reg & 1) != 0;  // Alternate T-bit
+        test.code = {sh2::MOVT(reg)};
+        tests.push_back(test);
+    }
+    
+    return tests;
+}
+
 std::vector<TestCase> InstructionTestGenerator::GenerateAllInstructionTests() {
     std::vector<TestCase> all_tests;
     
@@ -586,13 +1060,28 @@ std::vector<TestCase> InstructionTestGenerator::GenerateAllInstructionTests() {
     std::vector<std::string> instructions = {
         "NOP", "MOV", "ADD", "SUB", "AND", "OR", "XOR", "NOT",
         "SHLL", "CMP"
-        // TODO: Add more instructions
     };
     
     for (const auto& instr : instructions) {
         auto tests = GenerateForInstruction(instr);
         all_tests.insert(all_tests.end(), tests.begin(), tests.end());
     }
+    
+    // Add new instruction families
+    auto ext_tests = GenerateExtensionTests();
+    all_tests.insert(all_tests.end(), ext_tests.begin(), ext_tests.end());
+    
+    auto swap_tests = GenerateSwapTests();
+    all_tests.insert(all_tests.end(), swap_tests.begin(), swap_tests.end());
+    
+    auto mul_tests = GenerateMultiplyTests();
+    all_tests.insert(all_tests.end(), mul_tests.begin(), mul_tests.end());
+    
+    auto rot_tests = GenerateRotateTests();
+    all_tests.insert(all_tests.end(), rot_tests.begin(), rot_tests.end());
+    
+    auto flag_tests = GenerateFlagTests();
+    all_tests.insert(all_tests.end(), flag_tests.begin(), flag_tests.end());
     
     return all_tests;
 }
