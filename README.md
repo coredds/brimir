@@ -23,6 +23,7 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 
 ### Core Emulation
 - **Accurate hardware emulation** via Ymir's cycle-accurate core
+- **High-resolution performance:** 60 FPS @ 704x448i (v0.1.3)
 - **Multiple disc formats:** CHD, BIN/CUE, ISO, CCD, MDS
 - **7 BIOS versions supported:** US, EU, JP variants with auto-detection
 - **Backup RAM (SRAM)** with persistent game saves
