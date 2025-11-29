@@ -4,11 +4,84 @@
  */
 
 #include "../../include/jit_test_framework.hpp"
+#include "../../include/ymir_sh2_wrapper.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <algorithm>
+#include <iostream>
 
 namespace brimir::jit::test {
+
+// ============================================================================
+// Helper Functions: State Conversion
+// ============================================================================
+
+// Convert our test SH2State to Ymir's SH2StateSnapshot
+static ::jit::SH2StateSnapshot ConvertToYmirState(const SH2State& state) {
+    ::jit::SH2StateSnapshot snapshot{};
+    
+    // Copy registers
+    std::copy(std::begin(state.R), std::end(state.R), snapshot.R.begin());
+    
+    // Copy control registers
+    snapshot.PC = state.PC;
+    snapshot.PR = state.PR;
+    snapshot.GBR = state.GBR;
+    snapshot.VBR = state.VBR;
+    
+    // Copy MAC registers
+    snapshot.MACH = state.MACH;
+    snapshot.MACL = state.MACL;
+    
+    // Copy SR and extract flags
+    snapshot.SR = state.SR;
+    snapshot.T = state.T;
+    snapshot.S = (state.SR >> 1) & 1;
+    snapshot.ILevel = (state.SR >> 4) & 0xF;
+    snapshot.Q = (state.SR >> 8) & 1;
+    snapshot.M = (state.SR >> 9) & 1;
+    
+    // Copy delay slot state
+    snapshot.inDelaySlot = state.delay_slot;
+    snapshot.delaySlotTarget = state.delay_target;
+    
+    // Copy cycles
+    snapshot.cycles = state.cycles;
+    
+    return snapshot;
+}
+
+// Convert Ymir's SH2StateSnapshot to our test SH2State
+static SH2State ConvertFromYmirState(const ::jit::SH2StateSnapshot& snapshot) {
+    SH2State state{};
+    
+    // Copy registers
+    std::copy(snapshot.R.begin(), snapshot.R.end(), std::begin(state.R));
+    
+    // Copy control registers
+    state.PC = snapshot.PC;
+    state.PR = snapshot.PR;
+    state.GBR = snapshot.GBR;
+    state.VBR = snapshot.VBR;
+    
+    // Copy MAC registers
+    state.MACH = snapshot.MACH;
+    state.MACL = snapshot.MACL;
+    
+    // Copy SR and flags
+    state.SR = snapshot.SR;
+    state.T = snapshot.T;
+    
+    // Copy delay slot state
+    state.delay_slot = snapshot.inDelaySlot;
+    state.delay_target = snapshot.delaySlotTarget;
+    
+    // Copy cycles
+    state.cycles = snapshot.cycles;
+    
+    return state;
+}
 
 // -----------------------------------------------------------------------------
 // SH2State Implementation
@@ -339,22 +412,45 @@ std::pair<SH2State, uint64_t> DualExecutionHarness::ExecuteOnInterpreter(
     const std::vector<uint16_t>& code,
     const std::vector<TestCase::MemoryRegion>& memory
 ) {
-    // TODO: Implement interpreter execution
-    // 1. Create isolated SH-2 instance
-    // 2. Load initial state
-    // 3. Setup memory regions
-    // 4. Execute code
-    // 5. Capture final state
-    // 6. Return state + cycle count
+    // Create isolated SH-2 instance with Ymir interpreter
+    ::jit::YmirSH2Wrapper sh2;
     
-    // Placeholder:
-    SH2State final_state = initial;
-    uint64_t cycles = 0;
+    // Reset to clean state
+    sh2.Reset(initial.PC);
     
-    // This will be implemented when we integrate with Ymir's SH-2
-    throw std::runtime_error("ExecuteOnInterpreter: Not yet implemented (Phase 2)");
+    // Load initial CPU state
+    auto ymirState = ConvertToYmirState(initial);
+    sh2.RestoreState(ymirState);
     
-    return {final_state, cycles};
+    // Setup memory regions (test data)
+    for (const auto& region : memory) {
+        sh2.WriteMemory(region.address, region.data.data(), region.data.size());
+    }
+    
+    // Write test code to memory starting at PC
+    uint32_t codeAddr = initial.PC;
+    for (uint16_t instruction : code) {
+        sh2.WriteInstruction(codeAddr, instruction);
+        codeAddr += 2;  // SH-2 instructions are 2 bytes
+    }
+    
+    // Execute the code (execute N instructions)
+    sh2.ResetCycles();
+    sh2.ExecuteInstructions(code.size());
+    
+    // Capture final state
+    auto finalYmirState = sh2.CaptureState();
+    SH2State finalState = ConvertFromYmirState(finalYmirState);
+    
+    // Get cycle count
+    uint64_t cycles = sh2.GetCycles();
+    
+    if (m_verbose) {
+        std::cout << "  Interpreter executed " << code.size() << " instructions in " 
+                  << cycles << " cycles\n";
+    }
+    
+    return {finalState, cycles};
 }
 
 std::pair<SH2State, uint64_t> DualExecutionHarness::ExecuteOnJIT(
