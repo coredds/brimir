@@ -2,40 +2,46 @@
 
 <p align="center">
   <strong>Sega Saturn Emulation for libretro</strong><br>
-  <em>A performance-focused libretro core powered by Ymir</em>
+  <em>Windows x64 Performance-Focused Core</em>
 </p>
 
 ---
 
 ## Overview
 
-**Brimir** is a high-performance libretro core for Sega Saturn emulation, built on [Ymir](https://github.com/StrikerX3/Ymir) by [StrikerX3](https://github.com/StrikerX3). While maintaining Ymir's cycle-accurate architecture, Brimir serves as an active development testbed focused on performance optimizations and platform-specific enhancements.
+**Brimir** is a high-performance libretro core for Sega Saturn emulation, forked from [Ymir](https://github.com/StrikerX3/Ymir) by [StrikerX3](https://github.com/StrikerX3). Brimir maintains cycle-accurate emulation while focusing on performance optimizations and Windows x64 support.
+
+### Current Focus: Windows x64 Stability
+
+> **Note**: Brimir currently supports **Windows x64 with MSVC only**. Linux and ARM platforms will be reintroduced after establishing a stable Windows build.
 
 ### Project Goals
 
-- **Performance**: Optimize for modern hardware and target entry-level retro handhelds
-- **Compatibility**: Achieve broad game compatibility through targeted fixes and enhancements
-- **Accuracy**: Maintain Ymir's cycle-accurate foundation while allowing performance-focused optimizations
-- **Platform Reach**: Enable full-speed Saturn emulation on devices like the Trimui Smart Pro S
+- **Performance**: Optimize for modern Windows x64 hardware
+- **Compatibility**: Achieve broad game compatibility through targeted fixes
+- **Accuracy**: Maintain cycle-accurate emulation foundation
+- **Stability**: Perfect Windows x64 support before platform expansion
+- **Future**: JIT compilation for 3-10× performance improvement
 
-All changes respect Ymir's GPL-3.0 license and architectural design. Performance improvements and compatibility fixes may be contributed upstream where applicable.
+Brimir respects the GPL-3.0 license. The codebase is a complete fork for independent development.
 
 ## Demo
 
 [![Sega Rally on Brimir](https://img.youtube.com/vi/akkdVZk8GUY/0.jpg)](https://www.youtube.com/watch?v=akkdVZk8GUY)
 
-Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?v=akkdVZk8GUY) - smooth 60 FPS gameplay.
+Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?v=akkdVZk8GUY) - smooth 60 FPS gameplay on Windows x64.
 
 ## Features
 
-### Performance & Optimizations (v0.1.3)
-- **60+ FPS @ 704x448i** high-resolution interlaced modes (2.4× faster than v0.1.2)
-- **Mednafen-competitive performance** through tile-row caching and SIMD optimizations
-- **Platform-optimized builds** with AVX2/SSE2/NEON support
+### Performance & Optimizations (v0.2.1)
+- **60+ FPS @ 704x448i** high-resolution interlaced modes
+- **SSE2/AVX2 SIMD optimizations** for VDP rendering
+- **Template-based interpreter** with aggressive inlining
+- **Decode table optimization** for SH-2 execution
 - **Pixel-perfect accuracy** maintained through all optimizations
 
 ### Core Emulation
-- **Cycle-accurate foundation** via Ymir architecture
+- **Cycle-accurate SH-2 interpreter** with hardware optimizations
 - **Multiple disc formats:** CHD, BIN/CUE, ISO, CCD, MDS
 - **7 BIOS versions supported:** US, EU, JP variants with auto-detection
 - **Backup RAM (SRAM)** with persistent game saves
@@ -54,152 +60,181 @@ Watch [Sega Rally Championship running on Brimir](https://www.youtube.com/watch?
 - **Core options** for video, audio, and system configuration
 
 ### Platform Support
-- Windows 10+ (x86-64) ✅
-- Linux (x86-64) ✅
-- macOS - Not yet tested
+- ✅ **Windows 10+ (x86-64)** - Primary platform
+- 🚧 **Linux** - Planned for Q2 2025
+- 🚧 **macOS** - Planned for Q4 2025
+- 🚧 **ARM64** - Planned for Q3 2025
 
 ## Building
 
-### Prerequisites
+### Prerequisites (Windows x64)
 
-**Windows:**
-- CMake 3.20+
-- Visual Studio Build Tools 2022
-- Git with submodules
-
-**Linux:**
-- CMake 3.20+
-- Clang 14+ or GCC 11+
-- Git with submodules
+- **CMake 3.28+**
+- **Visual Studio 2022** (Build Tools or Community Edition)
+- **Git with submodules**
+- **Windows 10 or later**
 
 ### Quick Build
 
-**Windows:**
 ```powershell
+# Clone repository
 git clone --recursive https://github.com/coredds/brimir.git
 cd Brimir
+
+# Build
 .\build.ps1
 ```
 
-**Linux:**
-```bash
-git clone --recursive https://github.com/coredds/brimir.git
-cd Brimir
-chmod +x build.sh
-./build.sh
+### Manual Build
+
+```powershell
+# Configure
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+# Build
+cmake --build build --config Release
+
+# Output: build\bin\Release\brimir_libretro.dll
 ```
 
-**Build Outputs:**
-- Windows: `build\bin\Release\brimir_libretro.dll`
-- Linux: `build-linux/lib/brimir_libretro.so`
+### Build Options
+
+```powershell
+# Enable Link-Time Optimization (LTO)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBRIMIR_LTO=ON
+
+# Build with tests
+cmake -S . -B build -DBRIMIR_BUILD_TESTS=ON
+
+# Build JIT test framework (for development)
+cmake -S . -B build -DBUILD_JIT_TESTS=ON
+```
 
 ## Installation
 
 ### RetroArch (Windows)
 
-1. Copy the core:
+1. **Build or download** `brimir_libretro.dll`
+2. **Copy to RetroArch cores folder:**
    ```
-   C:\RetroArch-Win64\cores\brimir_libretro.dll
+   C:\RetroArch\cores\brimir_libretro.dll
    ```
-
-2. Copy core info:
+3. **Copy info file:**
    ```
-   C:\RetroArch-Win64\info\brimir_libretro.info
+   C:\RetroArch\info\brimir_libretro.info
    ```
+4. **Restart RetroArch** and select Brimir under Sega Saturn
 
-3. Add BIOS files to `C:\RetroArch-Win64\system\`
+### Manual Install
 
-### RetroArch (Linux)
-
-```bash
-# Copy core
-cp build-linux/lib/brimir_libretro.so ~/.config/retroarch/cores/
-
-# Copy core info
-cp brimir_libretro.info ~/.config/retroarch/info/
+```powershell
+.\deploy-retroarch.ps1
 ```
 
-Then add BIOS files to your RetroArch system directory.
+This script will:
+- Build the core
+- Copy DLL to RetroArch cores directory
+- Copy info file to RetroArch info directory
 
-### BIOS Requirements
+## Requirements
 
-Place Sega Saturn BIOS files in RetroArch's `system/` directory:
+### BIOS Files
 
-| File | Region | Size |
-|------|--------|------|
-| `sega_101.bin` | USA | 512 KB |
-| `Sega Saturn BIOS v1.01 (JAP).bin` | Japan | 512 KB |
-| `sega_100.bin` | Europe | 512 KB |
+Place BIOS files in RetroArch's `system/` directory. Brimir supports:
 
-The core auto-detects available BIOS files. You must obtain BIOS files legally from your own Saturn console.
+| Region | Filename | MD5 |
+|--------|----------|-----|
+| US | `sega_101.bin` | 85ec9ca47d8f6807718151cbcca8b964 |
+| JP | `saturn_bios.bin` | af5828fdff51384f99b3c4926be27762 |
+| EU | `saturn_bios_eu.bin` | ... |
 
-**⚠️ Note:** Japanese BIOS v1.003 (`sega1003.bin`) is NOT supported.
+Auto-detection will choose the best BIOS for your game region.
 
-## Tested Games
+## Development Status
 
-| Game | Status | Notes |
-|------|--------|-------|
-| Sega Rally Championship | ✅ Working | 60 FPS, saves working |
-| Panzer Dragoon Zwei | ✅ Working | Hi-res menus supported |
-| Saturn Bomberman | ✅ Working | Full gameplay tested |
-| King of Fighters '96 | ✅ Working | 1MB DRAM auto-detected |
-| Street Fighter Zero 3 | ✅ Working | 4MB DRAM auto-detected |
+### Completed ✅
+- [x] Core emulation (SH-2, VDP1/VDP2, SCSP, CD-ROM)
+- [x] Windows x64 MSVC build system
+- [x] Performance optimizations (templates, SIMD, decode tables)
+- [x] Simplified project structure
+- [x] libretro API integration
+- [x] Save states and backup RAM
 
-## Development Roadmap
+### In Progress 🚧
+- [ ] Project organization evaluation
+- [ ] Documentation updates
+- [ ] Performance profiling
 
-### 2026 Goals
+### Planned 📋
+- [ ] **Q1 2025**: JIT test framework API updates
+- [ ] **Q2 2025**: Linux x64 support
+- [ ] **Q2 2025**: JIT compiler implementation (IR & x86-64 backend)
+- [ ] **Q3 2025**: ARM64 support with NEON optimizations
+- [ ] **Q4 2025**: macOS support
 
-**Primary Target**: Full-speed Saturn emulation on entry-level retro handhelds
+## Performance
 
-- **SH-2 JIT Compiler**: Dynamic recompilation for CPU-intensive games
-- **Target Platform**: Trimui Smart Pro S and similar devices
-- **Performance Targets**: 60 FPS gameplay on ARM-based handhelds
-- **Optimization Focus**: Platform-specific tuning while maintaining accuracy
+### Current (Optimized Interpreter)
+- **Execution speed**: ~50-100 MHz SH-2 equivalent
+- **Overhead**: ~10-20 host instructions per SH-2 instruction
+- **SIMD**: VDP uses SSE2/AVX2 for pixel processing
+- **Real-world**: 60 FPS in most games at native resolution
 
-See [ROADMAP.md](docs/ROADMAP.md) for detailed feature timeline.
+### Future (with JIT)
+- **Expected speedup**: 3-10× over interpreter
+- **Target**: Full-speed on entry-level handhelds
+- **Timeline**: Q2-Q4 2025
 
-## Known Limitations
+## Documentation
 
-- **Cartridge RAM persistence:** Not yet implemented - progress lost between sessions
-- **ROM cartridges:** Not implemented (KOF'95, Ultraman not playable)
-- **Controllers:** Digital pads only (no analog/mouse/light gun)
-- **Some Capcom fighters:** May freeze (upstream Ymir issue)
-
-## Contributing
-
-Contributions are welcome! Please:
-- Report bugs with detailed reproduction steps
-- Test games and report compatibility
-- Submit pull requests for improvements
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## License
-
-GPL-3.0 - See [LICENSE](LICENSE) for details.
+- [Performance Verification](docs/PERFORMANCE_VERIFICATION.md) - Optimization analysis
+- [SH-2 Interpreter Status](docs/SH2_INTERPRETER_STATUS.md) - Interpreter details
+- [Project Simplification](docs/PROJECT_SIMPLIFICATION.md) - Windows-only focus
+- [JIT Status](src/jit/STATUS.md) - JIT development roadmap
+- [SH-2 JIT Evaluation](docs/SH2_JIT_EVALUATION.md) - JIT design
+- [SH-2 JIT Roadmap](docs/SH2_JIT_ROADMAP.md) - Implementation plan
 
 ## Acknowledgments
 
-- **[Ymir](https://github.com/StrikerX3/Ymir)** by [StrikerX3](https://github.com/StrikerX3) - Foundation and architectural reference for all emulation
-- **[libretro](https://github.com/libretro)** - The platform making this integration possible
-- **[Mednafen](https://mednafen.github.io/)** - Performance optimization insights and techniques
-- **Sega Saturn community** - For preservation and documentation efforts
+### Foundation and Inspiration
+- **[Ymir](https://github.com/StrikerX3/Ymir)** by [StrikerX3](https://github.com/StrikerX3) - Foundation, architectural reference, and cycle-accurate SH-2 interpreter
+- **[Mednafen](https://mednafen.github.io/)** - Reference implementation and accuracy testing
+- **[Yabause](https://yabause.org/)** - SH-2 dynarec architecture study
+
+### Libraries
+- **fmt** - Fast formatting library
+- **mio** - Memory-mapped I/O
+- **xxHash** - Fast hashing
+- **lz4** - Compression
+- **libchdr** - CHD disc format support
+- **concurrentqueue** - Lock-free queue
+
+## License
+
+Brimir is licensed under the **GNU General Public License v3.0** (GPL-3.0).
+
+This is a complete fork of Ymir, respecting its GPL-3.0 license and acknowledging its foundation.
+
+See [LICENSE](LICENSE) for full text.
+
+## Contributing
+
+We welcome contributions! Current focus areas:
+- Windows x64 optimization
+- Game compatibility fixes
+- Performance profiling
+- Documentation improvements
+
+For Linux/ARM contributions, please wait until Q2 2025 when platform support is reintroduced.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Support
 
-**Support the upstream emulator:**
-- **Support StrikerX3:** [Patreon](https://www.patreon.com/StrikerX3)
-- **Star Ymir:** [https://github.com/StrikerX3/Ymir](https://github.com/StrikerX3/Ymir)
-
-## Links
-
-- **Ymir Repository:** [https://github.com/StrikerX3/Ymir](https://github.com/StrikerX3/Ymir)
-- **RetroArch:** [https://www.retroarch.com](https://www.retroarch.com)
-- **libretro:** [https://github.com/libretro](https://github.com/libretro)
+- **Issues**: [GitHub Issues](https://github.com/coredds/brimir/issues)
+- **Discord**: Coming soon
+- **Forum**: RetroArch forums
 
 ---
 
-<p align="center">
-  <strong>Built on <a href="https://github.com/StrikerX3/Ymir">Ymir</a></strong><br>
-  Performance-optimized for modern platforms and retro handhelds
-</p>
+**Note**: Brimir is under active development with a focus on Windows x64 stability. Cross-platform support will return in future releases.

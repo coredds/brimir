@@ -4,7 +4,7 @@
  */
 
 #include "../../include/jit_test_framework.hpp"
-#include "../../include/ymir_sh2_wrapper.hpp"
+#include "../../include/brimir_sh2_wrapper.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cstring>

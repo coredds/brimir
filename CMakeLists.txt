@@ -3,11 +3,20 @@ cmake_minimum_required(VERSION 3.28)
 # Project information
 project(Brimir
     VERSION 0.1.3
-    DESCRIPTION "Sega Saturn emulation libretro core based on Ymir"
+    DESCRIPTION "Sega Saturn emulation libretro core - Windows x64 MSVC"
     LANGUAGES CXX C
 )
 
-# C++20 required (inherited from Ymir)
+# Platform check - Windows x64 MSVC only
+if(NOT WIN32)
+    message(FATAL_ERROR "Brimir currently supports Windows x64 only. Linux/macOS support planned for future releases.")
+endif()
+
+if(NOT MSVC)
+    message(FATAL_ERROR "Brimir requires MSVC (Visual Studio 2022 or later). GCC/Clang support planned for future releases.")
+endif()
+
+# C++20 required
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -29,15 +38,6 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-# Platform detection
-if(WIN32)
-    set(BRIMIR_PLATFORM_WINDOWS TRUE)
-elseif(APPLE)
-    set(BRIMIR_PLATFORM_MACOS TRUE)
-elseif(UNIX)
-    set(BRIMIR_PLATFORM_LINUX TRUE)
-endif()
-
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -45,102 +45,81 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # Add cmake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src/ymir/cmake")
 
-# Include Ymir's VS helpers if on MSVC
-if (MSVC)
-    include(VSHelpers)
-endif()
+# Include Visual Studio helpers
+include(VSHelpers)
 
-# Compiler warnings
-if(MSVC)
-    # Default to W4 warnings for our code
-    add_compile_options(/W4)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-    
-    # Suppress common external library warnings
-    # These will be applied to Ymir and vendor libraries
-    set(EXTERNAL_WARNINGS
-        /wd4244  # Type conversion (int to smaller type)
-        /wd4100  # Unreferenced parameter
-        /wd4201  # Nameless struct/union
-        /wd4324  # Structure padding
-        /wd4458  # Declaration hides class member
-    )
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
+# MSVC Compiler configuration
+# Default to W4 warnings for our code
+add_compile_options(/W4)
+add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+add_compile_definitions(NOMINMAX)  # Prevent Windows min/max macros from interfering
+
+# Suppress common external library warnings
+set(EXTERNAL_WARNINGS
+    /wd4244  # Type conversion (int to smaller type)
+    /wd4100  # Unreferenced parameter
+    /wd4201  # Nameless struct/union
+    /wd4324  # Structure padding
+    /wd4458  # Declaration hides class member
+)
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Subdirectories - Ymir emulator core dependencies
-# Only include what ymir-core actually needs (skip imgui/SDL3)
+# Subdirectories - Core emulator library dependencies
 include(cmake/YmirDeps.cmake)
 
-# Set Ymir version variables (normally set by src/ymir/CMakeLists.txt project() command)
-set(Ymir_VERSION_MAJOR 0)
-set(Ymir_VERSION_MINOR 2)
-set(Ymir_VERSION_PATCH 1)
-set(Ymir_VERSION_PRERELEASE "")
-set(Ymir_VERSION_BUILD "")
-set(Ymir_VERSION "0.2.1")
-set(Ymir_DEV_BUILD ON)
-set(Ymir_ENABLE_DEVLOG ON)
-set(Ymir_ENABLE_DEV_ASSERTIONS OFF)
+# Set Brimir core version variables
+set(Brimir_VERSION_MAJOR 0)
+set(Brimir_VERSION_MINOR 2)
+set(Brimir_VERSION_PATCH 1)
+set(Brimir_VERSION_PRERELEASE "")
+set(Brimir_VERSION_BUILD "")
+set(Brimir_VERSION "0.2.1")
+set(Brimir_DEV_BUILD ON)
+set(Brimir_ENABLE_DEVLOG ON)
+set(Brimir_ENABLE_DEV_ASSERTIONS OFF)
 
-# Add only Ymir's core library (not full project to avoid vendor conflicts)
-add_subdirectory(src/ymir/libs EXCLUDE_FROM_ALL)
+# Add core emulator library
+add_subdirectory(src/core)
 
-# Suppress warnings for Ymir and vendor libraries (external code)
-if(MSVC AND DEFINED EXTERNAL_WARNINGS)
-    if(TARGET ymir-core)
-        target_compile_options(ymir-core PRIVATE ${EXTERNAL_WARNINGS})
-    endif()
-    if(TARGET xxHash)
-        target_compile_options(xxHash PRIVATE ${EXTERNAL_WARNINGS})
-    endif()
-    if(TARGET lz4)
-        target_compile_options(lz4 PRIVATE ${EXTERNAL_WARNINGS})
-    endif()
-    if(TARGET chdr-static)
-        target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS})
-    endif()
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # GCC/Clang warning suppressions for external code
-    set(EXTERNAL_WARNINGS_GCC
-        -Wno-maybe-uninitialized
-        -Wno-unused-parameter
-        -Wno-unused-variable
-        -Wno-sign-compare
-        -Wno-missing-field-initializers
-        -Wno-pedantic
-        -Wno-uninitialized
-        -Wno-overflow
-        -Wno-comment
-        -Wno-error=inline  # Don't error on inline failures
-    )
-    if(TARGET ymir-core)
-        target_compile_options(ymir-core PRIVATE ${EXTERNAL_WARNINGS_GCC})
-        # Enable Position Independent Code for linking with shared libraries
-        set_target_properties(ymir-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    endif()
-    if(TARGET xxHash)
-        target_compile_options(xxHash PRIVATE ${EXTERNAL_WARNINGS_GCC})
-    endif()
-    if(TARGET lz4)
-        target_compile_options(lz4 PRIVATE ${EXTERNAL_WARNINGS_GCC})
-    endif()
-    if(TARGET chdr-static)
-        target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS_GCC})
-    endif()
+# Suppress warnings for core and vendor libraries
+if(TARGET brimir-core)
+    target_compile_options(brimir-core PRIVATE ${EXTERNAL_WARNINGS})
+endif()
+if(TARGET xxHash)
+    target_compile_options(xxHash PRIVATE ${EXTERNAL_WARNINGS})
+endif()
+if(TARGET lz4)
+    target_compile_options(lz4 PRIVATE ${EXTERNAL_WARNINGS})
+endif()
+if(TARGET chdr-static)
+    target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS})
 endif()
 
-# Bridge layer - adapts Ymir to libretro
+# Bridge layer - adapts core to libretro
 add_subdirectory(src/bridge)
 
 # Libretro API implementation
 add_subdirectory(src/libretro)
+
+# Tools (benchmarking, testing utilities)
+add_subdirectory(tools)
+
+# JIT (optional - enable with -DBUILD_JIT_TESTS=ON)
+option(BUILD_JIT_TESTS "Build JIT test framework and tests" OFF)
+option(BRIMIR_ENABLE_JIT_TESTING "Enable JIT testing interface (adds test-only methods to SH2)" OFF)
+
+if(BRIMIR_ENABLE_JIT_TESTING)
+    add_compile_definitions(BRIMIR_ENABLE_JIT_TESTING)
+    message(STATUS "JIT testing interface enabled")
+endif()
+
+if(BUILD_JIT_TESTS)
+    message(STATUS "Building JIT test framework")
+    add_subdirectory(src/jit)
+endif()
 
 # Main libretro core library
 add_library(brimir_libretro SHARED
@@ -148,34 +127,15 @@ add_library(brimir_libretro SHARED
     $<TARGET_OBJECTS:brimir_libretro_api>
 )
 
-# Enable Position Independent Code for shared libraries on Linux
-set_target_properties(brimir_libretro PROPERTIES POSITION_INDEPENDENT_CODE ON)
-set_target_properties(brimir_bridge PROPERTIES POSITION_INDEPENDENT_CODE ON)
-set_target_properties(brimir_libretro_api PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Link with Brimir core
+target_link_libraries(brimir_libretro PRIVATE brimir::brimir-core)
 
-# Link with Ymir core
-target_link_libraries(brimir_libretro PRIVATE ymir::ymir-core)
-
-# Set output name based on platform
-if(BRIMIR_PLATFORM_WINDOWS)
-    set_target_properties(brimir_libretro PROPERTIES
-        OUTPUT_NAME "brimir_libretro"
-        SUFFIX ".dll"
-        PREFIX ""
-    )
-elseif(BRIMIR_PLATFORM_MACOS)
-    set_target_properties(brimir_libretro PROPERTIES
-        OUTPUT_NAME "brimir_libretro"
-        SUFFIX ".dylib"
-        PREFIX ""
-    )
-else()
-    set_target_properties(brimir_libretro PROPERTIES
-        OUTPUT_NAME "brimir_libretro"
-        SUFFIX ".so"
-        PREFIX ""
-    )
-endif()
+# Set output name - Windows DLL
+set_target_properties(brimir_libretro PROPERTIES
+    OUTPUT_NAME "brimir_libretro"
+    SUFFIX ".dll"
+    PREFIX ""
+)
 
 # Link-Time Optimization
 if(BRIMIR_LTO)
@@ -199,7 +159,6 @@ endif()
 
 # Installation
 install(TARGETS brimir_libretro
-    LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
 
@@ -211,11 +170,11 @@ install(FILES resources/info/brimir_libretro.info
 message(STATUS "")
 message(STATUS "Brimir Configuration:")
 message(STATUS "  Version: ${PROJECT_VERSION}")
+message(STATUS "  Platform: Windows x64")
+message(STATUS "  Compiler: MSVC")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build tests: ${BRIMIR_BUILD_TESTS}")
 message(STATUS "  Static linking: ${BRIMIR_STATIC_LINK}")
 message(STATUS "  LTO: ${BRIMIR_LTO}")
-message(STATUS "  Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "")
-

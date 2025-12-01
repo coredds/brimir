@@ -16,7 +16,7 @@
 #include "brimir/profiler.hpp"
 
 // Forward declarations to avoid including Ymir headers here
-namespace ymir {
+namespace brimir {
 struct Saturn;
 
 namespace core::config::sys {
@@ -151,11 +151,11 @@ public:
 
     /// @brief Set the video standard (NTSC/PAL)
     /// @param standard Video standard to use
-    void SetVideoStandard(ymir::core::config::sys::VideoStandard standard);
+    void SetVideoStandard(brimir::core::config::sys::VideoStandard standard);
 
     /// @brief Get the current video standard
     /// @return Current video standard
-    ymir::core::config::sys::VideoStandard GetVideoStandard() const;
+    brimir::core::config::sys::VideoStandard GetVideoStandard() const;
 
     /// @brief Check if the emulator is initialized
     /// @return true if initialized
@@ -173,7 +173,7 @@ public:
 
     /// @brief Get the Ymir Saturn instance (for advanced access)
     /// @return Pointer to Saturn instance, or nullptr if not initialized
-    ymir::Saturn* GetSaturn() { return m_saturn.get(); }
+    brimir::Saturn* GetSaturn() { return m_saturn.get(); }
 
     /// @brief Set audio interpolation mode
     /// @param mode Interpolation mode: "linear" or "nearest"
@@ -212,7 +212,7 @@ private:
     /// @brief Convert XRGB8888 to RGB565
     static uint16_t ConvertXRGB8888toRGB565(uint32_t color);
 
-    std::unique_ptr<ymir::Saturn> m_saturn;
+    std::unique_ptr<brimir::Saturn> m_saturn;
     bool m_initialized = false;
     bool m_gameLoaded = false;
     bool m_iplLoaded = false;
@@ -231,22 +231,22 @@ private:
     size_t m_audioRingReadPos = 0;
     
     // Video standard
-    ymir::core::config::sys::VideoStandard m_videoStandard;
+    brimir::core::config::sys::VideoStandard m_videoStandard;
 
     // Input devices (raw pointers owned by Saturn's SMPC)
-    ymir::peripheral::ControlPad* m_controller1 = nullptr;
-    ymir::peripheral::ControlPad* m_controller2 = nullptr;
+    brimir::peripheral::ControlPad* m_controller1 = nullptr;
+    brimir::peripheral::ControlPad* m_controller2 = nullptr;
     
     // Button states for each port (stored for peripheral callback)
     uint16_t m_port1Buttons = 0;
     uint16_t m_port2Buttons = 0;
     
     // Peripheral report callbacks
-    void OnPeripheralReport1(ymir::peripheral::PeripheralReport& report);
-    void OnPeripheralReport2(ymir::peripheral::PeripheralReport& report);
+    void OnPeripheralReport1(brimir::peripheral::PeripheralReport& report);
+    void OnPeripheralReport2(brimir::peripheral::PeripheralReport& report);
     
     // Convert libretro button mask to Saturn Button enum
-    static ymir::peripheral::Button ConvertLibretroButtons(uint16_t retroButtons);
+    static brimir::peripheral::Button ConvertLibretroButtons(uint16_t retroButtons);
     
     // Last error message from operations (for debugging)
     std::string m_lastError;

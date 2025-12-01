@@ -14,12 +14,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Dependencies
 # ==============================================================================
 
-# Find Ymir (assuming it's in src/ymir)
-set(YMIR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../ymir")
-
-# Include Ymir headers
+# Include Brimir core headers
 include_directories(
-    ${YMIR_ROOT}/libs/ymir-core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../core/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -33,23 +30,22 @@ include_directories(
 # )
 
 # ==============================================================================
-# Ymir SH-2 Wrapper for Testing
+# Brimir SH-2 Wrapper for Testing
 # ==============================================================================
 
-add_library(ymir-sh2-wrapper
-    src/validation/ymir_sh2_wrapper.cpp
-    include/ymir_sh2_wrapper.hpp
+add_library(brimir-sh2-wrapper
+    src/validation/brimir_sh2_wrapper.cpp
+    include/brimir_sh2_wrapper.hpp
 )
 
-target_include_directories(ymir-sh2-wrapper PUBLIC
+target_include_directories(brimir-sh2-wrapper PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${YMIR_ROOT}/libs/ymir-core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../core/include
 )
 
-# Link against Ymir core
-# Note: Adjust this based on actual Ymir build structure
-target_link_libraries(ymir-sh2-wrapper PRIVATE
-    # ymir-core  # Uncomment when available
+# Link against Brimir core
+target_link_libraries(brimir-sh2-wrapper PUBLIC
+    brimir::brimir-core
 )
 
 # ==============================================================================
@@ -71,7 +67,7 @@ target_include_directories(jit-test-framework PUBLIC
 )
 
 target_link_libraries(jit-test-framework PUBLIC
-    ymir-sh2-wrapper
+    brimir-sh2-wrapper
 )
 
 # ==============================================================================
@@ -84,7 +80,7 @@ add_executable(jit-tests
 
 target_link_libraries(jit-tests PRIVATE
     jit-test-framework
-    ymir-sh2-wrapper
+    brimir-sh2-wrapper
 )
 
 # ==============================================================================
@@ -99,4 +95,3 @@ target_link_libraries(jit-tests PRIVATE
 
 enable_testing()
 add_test(NAME JITValidationTests COMMAND jit-tests)
-

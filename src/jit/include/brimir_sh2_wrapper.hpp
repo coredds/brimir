@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file ymir_sh2_wrapper.hpp
+ * @file brimir_sh2_wrapper.hpp
  * @brief Isolated SH-2 wrapper for JIT testing
  * 
  * Provides a minimal, controlled environment for executing SH-2 code
@@ -15,16 +15,19 @@
  * - Executes single instructions or blocks
  */
 
-#include <ymir/core/types.hpp>
+#include <brimir/core/types.hpp>
 #include <cstdint>
 #include <array>
 #include <memory>
 #include <vector>
 
-// Forward declarations to avoid pulling in all of Ymir
-namespace ymir {
+// Forward declarations to avoid pulling in all of Brimir
+namespace brimir {
     namespace core { class Scheduler; }
-    namespace sys { class SH2Bus; }
+    namespace sys { 
+        // SH2Bus is actually a type alias for Bus<27, 16>, so we can't forward declare it
+        // We'll need to include the header in the implementation file
+    }
     namespace sh2 { class SH2; }
 }
 

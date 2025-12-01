@@ -1,0 +1,48 @@
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║                                                                       ║
+║          SH-2 INTERPRETER MICROBENCHMARK SUITE                        ║
+║                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+Optimizations applied:
+  • Byte swap: _byteswap_ulong() [MSVC intrinsic]
+  • Bit extract: _bextr_u32() [BMI2 instruction]
+
+Generating 10000000 test values...
+Ready.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Benchmark                                  Time (ns/op)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Byte Swap Operations:
+Byte Swap 16-bit                                0.49 ns/op (10000000 iterations)
+Byte Swap 32-bit                                0.40 ns/op (10000000 iterations)
+Byte Swap 64-bit                                1.61 ns/op (10000000 iterations)
+
+Bit Extraction Operations:
+Bit Extract [4:7] (4-bit)                       0.80 ns/op (10000000 iterations)
+Bit Extract [0:7] (8-bit)                       0.61 ns/op (10000000 iterations)
+Bit Extract [0:11] (12-bit)                     0.76 ns/op (10000000 iterations)
+
+Instruction Decode:
+Instruction Decode (SH-2)                       1.33 ns/op (10000000 iterations)
+
+Memory Access (with endian conversion):
+Memory Read 32-bit (with endian swap)           0.51 ns/op (10000000 iterations)
+Memory Write 32-bit (with endian swap)          0.43 ns/op (10000000 iterations)
+
+Combined Operations:
+Instruction Fetch (read + decode)               1.00 ns/op (10000000 iterations)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Benchmark complete!
+
+Expected results (vs non-intrinsic implementation):
+  • Byte swap: ~1-2 ns/op (4× faster)
+  • Bit extract: ~1-2 ns/op (2× faster)
+  • Instruction decode: ~4-6 ns/op (2-3× faster)
+  • Memory read/write: ~2-4 ns/op (3-4× faster)
+

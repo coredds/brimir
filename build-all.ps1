@@ -1,156 +1,173 @@
-# Build Brimir for both Windows and Linux
-# Copyright (C) 2025 coredds
-# Licensed under GPL-3.0
-#
-# This script builds both Windows (native) and Linux (via WSL) versions
+#Requires -Version 5.0
+
+<#
+.SYNOPSIS
+    Build all Brimir components (core, libretro, tools, JIT)
+
+.DESCRIPTION
+    Complete build script with options for Release/Debug, JIT tests, and benchmarks
+
+.PARAMETER BuildType
+    Build type: Release or Debug (default: Release)
+
+.PARAMETER WithJIT
+    Include JIT test framework
+
+.PARAMETER WithBenchmarks
+    Build and run benchmarks after successful build
+
+.PARAMETER Clean
+    Clean build directory before building
+
+.EXAMPLE
+    .\build-all.ps1
+    Standard Release build
+
+.EXAMPLE
+    .\build-all.ps1 -BuildType Debug
+    Debug build
+
+.EXAMPLE
+    .\build-all.ps1 -WithJIT
+    Build with JIT test framework
+
+.EXAMPLE
+    .\build-all.ps1 -WithBenchmarks
+    Build and run performance benchmarks
+
+.EXAMPLE
+    .\build-all.ps1 -Clean
+    Clean rebuild
+#>
 
 param(
+    [ValidateSet("Release", "Debug")]
     [string]$BuildType = "Release",
-    [switch]$WindowsOnly = $false,
-    [switch]$LinuxOnly = $false,
-    [switch]$Tests = $false,
-    [switch]$UseGCC = $false  # Use Clang by default for Linux, set this to use GCC
+    
+    [switch]$WithJIT,
+    [switch]$WithBenchmarks,
+    [switch]$Clean
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Brimir Multi-Platform Build" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
+# Configuration
+$BuildDir = "build"
+$CMakeGenerator = "Visual Studio 17 2022"
 
-# Determine what to build
-$buildWindows = !$LinuxOnly
-$buildLinux = !$WindowsOnly
+# Banner
+Write-Host "`n╔═══════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║                                                                       ║" -ForegroundColor Cyan
+Write-Host "║                    BRIMIR BUILD SYSTEM                                ║" -ForegroundColor Cyan
+Write-Host "║                                                                       ║" -ForegroundColor Cyan
+Write-Host "╚═══════════════════════════════════════════════════════════════════════╝`n" -ForegroundColor Cyan
 
-if ($buildWindows -and $buildLinux) {
-    Write-Host "Building for: Windows + Linux" -ForegroundColor Green
-} elseif ($buildWindows) {
-    Write-Host "Building for: Windows only" -ForegroundColor Green
-} else {
-    Write-Host "Building for: Linux only" -ForegroundColor Green
+Write-Host "Configuration:" -ForegroundColor Yellow
+Write-Host "  Build Type: $BuildType" -ForegroundColor White
+Write-Host "  JIT Tests:  $(if ($WithJIT) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
+Write-Host "  Benchmarks: $(if ($WithBenchmarks) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
+Write-Host "  Clean:      $(if ($Clean) { 'Yes' } else { 'No' })`n" -ForegroundColor White
+
+# Step 1: Clean if requested
+if ($Clean -and (Test-Path $BuildDir)) {
+    Write-Host "Cleaning build directory..." -ForegroundColor Yellow
+    Remove-Item -Recurse -Force $BuildDir
+    Write-Host "✅ Clean complete`n" -ForegroundColor Green
 }
 
-Write-Host "Build Type: $BuildType" -ForegroundColor White
-Write-Host "Tests: $(if ($Tests) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
-if ($buildLinux) {
-    Write-Host "Linux Compiler: $(if ($UseGCC) { 'GCC' } else { 'Clang (recommended)' })" -ForegroundColor White
+# Step 2: CMake Configure
+Write-Host "Configuring CMake..." -ForegroundColor Yellow
+
+$CMakeArgs = @(
+    "-S", ".",
+    "-B", $BuildDir,
+    "-G", $CMakeGenerator,
+    "-DCMAKE_BUILD_TYPE=$BuildType"
+)
+
+if ($WithJIT) {
+    $CMakeArgs += "-DBUILD_JIT_TESTS=ON"
 }
-Write-Host ""
 
-$startTime = Get-Date
-$buildResults = @{}
+& cmake @CMakeArgs 2>&1 | Out-Null
 
-# Build Windows version
-if ($buildWindows) {
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "Building Windows Version" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
-    
-    try {
-        & .\build.ps1 -BuildType $BuildType
-        if ($LASTEXITCODE -eq 0) {
-            $buildResults["Windows"] = "✓ Success"
-            Write-Host ""
-            Write-Host "✓ Windows build completed successfully" -ForegroundColor Green
-        } else {
-            $buildResults["Windows"] = "✗ Failed"
-            Write-Host ""
-            Write-Host "✗ Windows build failed" -ForegroundColor Red
-        }
-    } catch {
-        $buildResults["Windows"] = "✗ Failed (Exception: $($_.Exception.Message))"
-        Write-Host ""
-        Write-Host "✗ Windows build failed with exception" -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Red
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "❌ CMake configuration failed!" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "✅ Configuration complete`n" -ForegroundColor Green
+
+# Step 3: Build
+Write-Host "Building Brimir ($BuildType)..." -ForegroundColor Yellow
+Write-Host "This may take several minutes...`n" -ForegroundColor Gray
+
+$BuildStart = Get-Date
+
+cmake --build $BuildDir --config $BuildType 2>&1 | ForEach-Object {
+    if ($_ -match "error C") {
+        Write-Host $_ -ForegroundColor Red
+    } elseif ($_ -match "warning C") {
+        Write-Host $_ -ForegroundColor Yellow
+    } elseif ($_ -match "Building") {
+        Write-Host $_ -ForegroundColor Cyan
     }
 }
 
-# Build Linux version via WSL
-if ($buildLinux) {
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "Building Linux Version (via WSL)" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
-    
-    try {
-        $params = @{
-            BuildType = $BuildType
-        }
-        if ($Tests) { $params['Tests'] = $true }
-        if ($UseGCC) { $params['UseGCC'] = $true }
-        & .\build-wsl.ps1 @params
-        if ($LASTEXITCODE -eq 0) {
-            $buildResults["Linux"] = "✓ Success"
-            Write-Host ""
-            Write-Host "✓ Linux build completed successfully" -ForegroundColor Green
-        } else {
-            $buildResults["Linux"] = "✗ Failed"
-            Write-Host ""
-            Write-Host "✗ Linux build failed" -ForegroundColor Red
-        }
-    } catch {
-        $buildResults["Linux"] = "✗ Failed (Exception: $($_.Exception.Message))"
-        Write-Host ""
-        Write-Host "✗ Linux build failed with exception" -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Red
+$BuildEnd = Get-Date
+$BuildTime = ($BuildEnd - $BuildStart).TotalSeconds
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`n❌ Build failed!" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "`n✅ Build successful (took $($BuildTime.ToString('F1'))s)`n" -ForegroundColor Green
+
+# Step 4: Check outputs
+Write-Host "Checking build outputs..." -ForegroundColor Yellow
+
+$Outputs = @{
+    "Libretro Core" = "$BuildDir\bin\$BuildType\brimir_libretro.dll"
+    "Benchmark Tool" = "$BuildDir\bin\$BuildType\$BuildType\benchmark_sh2.exe"
+}
+
+if ($WithJIT) {
+    $Outputs["SH2 Wrapper"] = "$BuildDir\src\jit\$BuildType\brimir-sh2-wrapper.lib"
+}
+
+$AllFound = $true
+foreach ($output in $Outputs.GetEnumerator()) {
+    if (Test-Path $output.Value) {
+        $Size = (Get-Item $output.Value).Length / 1MB
+        Write-Host "  ✅ $($output.Key): $($Size.ToString('F2')) MB" -ForegroundColor Green
+    } else {
+        Write-Host "  ❌ $($output.Key): Not found" -ForegroundColor Red
+        $AllFound = $false
     }
+}
+
+if (-not $AllFound) {
+    Write-Host "`n⚠️  Some outputs missing. Build may have been incomplete." -ForegroundColor Yellow
+}
+
+# Step 5: Run benchmarks if requested
+if ($WithBenchmarks -and (Test-Path "$BuildDir\bin\$BuildType\$BuildType\benchmark_sh2.exe")) {
+    Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+    Write-Host "RUNNING BENCHMARKS" -ForegroundColor Yellow
+    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`n" -ForegroundColor Cyan
+    
+    & .\tools\run_benchmarks.ps1 -Save
 }
 
 # Summary
-$endTime = Get-Date
-$duration = $endTime - $startTime
+Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+Write-Host "BUILD COMPLETE" -ForegroundColor Green
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
 
-Write-Host ""
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Build Summary" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-
-foreach ($platform in $buildResults.Keys | Sort-Object) {
-    $result = $buildResults[$platform]
-    if ($result -like "*Success*") {
-        Write-Host "$platform : $result" -ForegroundColor Green
-    } else {
-        Write-Host "$platform : $result" -ForegroundColor Red
-    }
-}
-
-Write-Host ""
-Write-Host "Total time: $($duration.ToString('mm\:ss'))" -ForegroundColor Cyan
-Write-Host ""
-
-# List outputs
-Write-Host "Build outputs:" -ForegroundColor Yellow
-Write-Host ""
-
-if ($buildWindows -and (Test-Path "build\bin\Release\brimir_libretro.dll")) {
-    $winSize = (Get-Item "build\bin\Release\brimir_libretro.dll").Length / 1MB
-    Write-Host "  Windows: build\bin\Release\brimir_libretro.dll" -ForegroundColor White
-    Write-Host "           Size: $([math]::Round($winSize, 2)) MB" -ForegroundColor Gray
-    Write-Host "           Info: brimir_libretro.info" -ForegroundColor Gray
-}
-
-if ($buildLinux -and (Test-Path "build-linux\lib\brimir_libretro.so")) {
-    $linuxSize = (Get-Item "build-linux\lib\brimir_libretro.so").Length / 1MB
-    Write-Host "  Linux:   build-linux\lib\brimir_libretro.so" -ForegroundColor White
-    Write-Host "           Size: $([math]::Round($linuxSize, 2)) MB" -ForegroundColor Gray
-    Write-Host "           Info: brimir_libretro.info" -ForegroundColor Gray
-}
-
-Write-Host ""
-
-# Check for failures
-$failures = $buildResults.Values | Where-Object { $_ -like "*Failed*" }
-if ($failures) {
-    Write-Host "⚠ Some builds failed. Check the output above for details." -ForegroundColor Yellow
-    exit 1
-} else {
-    Write-Host "✓ All builds completed successfully!" -ForegroundColor Green
-    exit 0
-}
-
+Write-Host "`nQuick Start:" -ForegroundColor Yellow
+Write-Host "  • Libretro DLL: $BuildDir\bin\$BuildType\brimir_libretro.dll" -ForegroundColor White
+Write-Host "  • Run benchmarks: .\tools\run_benchmarks.ps1" -ForegroundColor White
+Write-Host "  • Documentation: docs\QUICK_START.md" -ForegroundColor White
+Write-Host "`n"
 

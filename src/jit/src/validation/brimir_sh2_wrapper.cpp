@@ -1,10 +1,10 @@
-#include "ymir_sh2_wrapper.hpp"
+#include "brimir_sh2_wrapper.hpp"
 
 // Ymir includes
-#include <ymir/hw/sh2/sh2.hpp>
-#include <ymir/core/scheduler.hpp>
-#include <ymir/sys/bus.hpp>
-#include <ymir/sys/system_features.hpp>
+#include <brimir/hw/sh2/sh2.hpp>
+#include <brimir/core/scheduler.hpp>
+#include <brimir/sys/bus.hpp>
+#include <brimir/sys/system_features.hpp>
 
 #include <sstream>
 #include <cstring>
@@ -127,23 +127,25 @@ std::string SH2StateSnapshot::Diff(const SH2StateSnapshot& other) const {
 // ============================================================================
 
 struct YmirSH2Wrapper::Impl {
-    ymir::core::Scheduler scheduler;
-    ymir::sys::SH2Bus bus;
-    ymir::sys::SystemFeatures features;
-    std::unique_ptr<ymir::sh2::SH2> sh2;
+    brimir::core::Scheduler scheduler;
+    brimir::sys::SH2Bus bus;
+    brimir::sys::SystemFeatures features;
+    std::unique_ptr<brimir::sh2::SH2> sh2;
+    std::vector<uint8_t>* ram; // Pointer to wrapper's RAM
     
-    Impl()
+    Impl(std::vector<uint8_t>* ramPtr)
         : scheduler()
         , bus()
         , features()
         , sh2(nullptr)
+        , ram(ramPtr)
     {
-        // Create minimal system features (no special hardware)
-        features.hasSTV = false;
-        features.hasVDP2_FBE = false;
+        // Create minimal system features for testing
+        features.enableDebugTracing = false;
+        features.emulateSH2Cache = false;
         
         // Create SH-2 instance (slave, for testing)
-        sh2 = std::make_unique<ymir::sh2::SH2>(scheduler, bus, false, features);
+        sh2 = std::make_unique<brimir::sh2::SH2>(scheduler, bus, false, features);
     }
 };
 
@@ -152,13 +154,70 @@ struct YmirSH2Wrapper::Impl {
 // ============================================================================
 
 YmirSH2Wrapper::YmirSH2Wrapper(size_t ramSize)
-    : m_impl(std::make_unique<Impl>())
+    : m_impl(nullptr)
     , m_ram(ramSize, 0)
     , m_cycleCount(0)
 {
+    // Initialize implementation with pointer to our RAM
+    m_impl = std::make_unique<Impl>(&m_ram);
+    
     // Map RAM to bus starting at 0x00000000
-    // For testing, we map the entire RAM as a simple array
-    m_impl->bus.MapArray(0x00000000, ramSize - 1, m_ram.data(), m_ram.size());
+    // Use function handlers since MapArray requires compile-time sized std::array
+    auto read8 = [](uint32 address, void* ctx) -> uint8 {
+        auto* ram = static_cast<std::vector<uint8_t>*>(ctx);
+        if (address < ram->size()) {
+            return (*ram)[address];
+        }
+        return 0xFF; // Open bus
+    };
+    
+    auto read16 = [](uint32 address, void* ctx) -> uint16 {
+        auto* ram = static_cast<std::vector<uint8_t>*>(ctx);
+        if (address + 1 < ram->size()) {
+            return (uint16((*ram)[address]) << 8) | uint16((*ram)[address + 1]);
+        }
+        return 0xFFFF; // Open bus
+    };
+    
+    auto read32 = [](uint32 address, void* ctx) -> uint32 {
+        auto* ram = static_cast<std::vector<uint8_t>*>(ctx);
+        if (address + 3 < ram->size()) {
+            return (uint32((*ram)[address]) << 24) | 
+                   (uint32((*ram)[address + 1]) << 16) |
+                   (uint32((*ram)[address + 2]) << 8) | 
+                   uint32((*ram)[address + 3]);
+        }
+        return 0xFFFFFFFF; // Open bus
+    };
+    
+    auto write8 = [](uint32 address, uint8 value, void* ctx) {
+        auto* ram = static_cast<std::vector<uint8_t>*>(ctx);
+        if (address < ram->size()) {
+            (*ram)[address] = value;
+        }
+    };
+    
+    auto write16 = [](uint32 address, uint16 value, void* ctx) {
+        auto* ram = static_cast<std::vector<uint8_t>*>(ctx);
+        if (address + 1 < ram->size()) {
+            (*ram)[address] = uint8(value >> 8);
+            (*ram)[address + 1] = uint8(value);
+        }
+    };
+    
+    auto write32 = [](uint32 address, uint32 value, void* ctx) {
+        auto* ram = static_cast<std::vector<uint8_t>*>(ctx);
+        if (address + 3 < ram->size()) {
+            (*ram)[address] = uint8(value >> 24);
+            (*ram)[address + 1] = uint8(value >> 16);
+            (*ram)[address + 2] = uint8(value >> 8);
+            (*ram)[address + 3] = uint8(value);
+        }
+    };
+    
+    // Map RAM handlers
+    m_impl->bus.MapBoth(0x00000000, uint32(ramSize - 1), &m_ram, 
+                        read8, read16, read32, write8, write16, write32);
     
     // Map the SH-2's memory handlers to the bus
     m_impl->sh2->MapMemory(m_impl->bus);

@@ -1,0 +1,45 @@
+# JIT Integration Test Runner
+# This is a simplified CMakeLists for building the test runner
+
+cmake_minimum_required(VERSION 3.20)
+project(BrimirJITIntegration CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Find brimir-core
+find_package(brimir-core REQUIRED)
+
+# Test runner executable
+add_executable(jit-test-runner
+    test_runner.cpp
+    src/jit_integration.cpp
+    src/jit_test_generator.cpp
+    src/jit_validator.cpp
+    src/sh2_spec.cpp
+    src/jit_x64_codebuffer.cpp
+    src/jit_x64_codegen.cpp
+    src/jit_x64_register_alloc.cpp
+)
+
+target_include_directories(jit-test-runner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../core/include
+)
+
+target_link_libraries(jit-test-runner PRIVATE
+    brimir::brimir-core
+)
+
+# Enable warnings
+if(MSVC)
+    target_compile_options(jit-test-runner PRIVATE /W4)
+else()
+    target_compile_options(jit-test-runner PRIVATE -Wall -Wextra)
+endif()
+
+# Output
+message(STATUS "JIT Test Runner configured")
+message(STATUS "  Build: cmake --build build --target jit-test-runner")
+message(STATUS "  Run: ./build/jit-test-runner")
+
