@@ -3,6 +3,10 @@
 
 message(STATUS "Adding core library dependencies")
 
+# fmt - formatting library (header-only)
+message(STATUS "==> fmt")
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/fmt EXCLUDE_FROM_ALL)
+
 # mio - memory mapped I/O
 message(STATUS "==> mio")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/mio EXCLUDE_FROM_ALL)
