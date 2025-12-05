@@ -138,6 +138,7 @@ tmp/
 temp/
 *.tmp
 *.temp
+cmake_output.txt
 
 # Python (for scripts)
 __pycache__/
