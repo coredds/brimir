@@ -70,16 +70,16 @@ Before contributing, ensure you have:
    cd brimir
    ```
 
-2. **Initialize submodules:**
-   ```bash
-   git submodule update --init --recursive
+2. **Install build tools (Windows):**
+   ```powershell
+   # Run as Administrator
+   .\setup-env.ps1
    ```
 
-3. **Set up build environment:**
-   ```bash
-   # See README.md for detailed build instructions
-   cmake -B build -S .
-   cmake --build build
+3. **Build the project:**
+   ```powershell
+   # Standard build command - use this for all builds
+   powershell -ExecutionPolicy Bypass -File .\build-all.ps1 -Clean
    ```
 
 4. **Add upstream remote:**
@@ -344,10 +344,9 @@ Closes #42
 
 ### Running Tests
 
-```bash
-# Build with tests enabled
-cmake -B build -S . -DBRIMIR_BUILD_TESTS=ON
-cmake --build build
+```powershell
+# Build with tests enabled using the standard build script
+powershell -ExecutionPolicy Bypass -File .\build-all.ps1 -Clean -WithJIT
 
 # Run all tests
 cd build

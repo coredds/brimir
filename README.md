@@ -20,21 +20,56 @@ Brimir is a libretro core for Sega Saturn emulation, currently focused on Window
 ## Build Requirements
 
 - Windows 10/11 (x64)
-- Visual Studio 2022 or later
+- Visual Studio 2022 Build Tools (with "Desktop development with C++" workload)
 - CMake 3.28+
-- C++20 compiler support
+- Ninja (recommended, installed automatically with VS Build Tools)
+
+### Quick Install
+
+Run in PowerShell as Administrator:
+```powershell
+.\setup-env.ps1
+```
 
 ## Building
 
+**Standard build command** (use this for all builds):
+
 ```powershell
-# Configure
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-
-# Build
-cmake --build build --config Release
-
-# Output: build\bin\Release\brimir_libretro.dll
+powershell -ExecutionPolicy Bypass -File .\build-all.ps1 -Clean
 ```
+
+### Build Options
+
+| Option | Description |
+|--------|-------------|
+| `-Clean` | Clean rebuild (removes build directory first) |
+| `-BuildType Debug` | Build in Debug mode (default: Release) |
+| `-WithJIT` | Include JIT test framework |
+| `-WithBenchmarks` | Run benchmarks after build |
+
+### Examples
+
+```powershell
+# Standard release build
+.\build-all.ps1
+
+# Clean release build
+.\build-all.ps1 -Clean
+
+# Debug build
+.\build-all.ps1 -BuildType Debug
+
+# Build with JIT tests
+.\build-all.ps1 -WithJIT
+
+# Full rebuild with benchmarks
+.\build-all.ps1 -Clean -WithBenchmarks
+```
+
+### Output
+
+After successful build: `build\brimir_libretro.dll`
 
 ## Installation
 

@@ -1,4 +1,4 @@
-# Build directories
+    # Build directories
 build/
 build-*/
 cmake-build-*/
@@ -63,8 +63,8 @@ vcpkg/downloads/
 vcpkg/buildtrees/
 vcpkg/packages/
 
-# Dependencies
-vendor/
+# Dependencies (node only - vendor/ is tracked for this project)
+# vendor/  # Tracked - contains vendored C++ libraries
 third_party/
 node_modules/
 
@@ -99,9 +99,9 @@ states/
 *.log
 logs/
 
-# Core files
-core
-core.*
+# Core dump files (Unix) - be specific to avoid ignoring src/core/
+/core
+core.[0-9]*
 
 # Testing (exclude copyrighted test materials)
 tests/roms/
@@ -122,8 +122,8 @@ tests/fixtures/games/
 *.coverage
 coverage/
 
-# Documentation
-docs/
+# Documentation (generated only - docs/ is tracked)
+# docs/  # Tracked - contains project documentation
 
 # Packaging
 *.deb

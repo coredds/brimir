@@ -1,0 +1,30 @@
+#pragma once
+
+/**
+@file
+@brief Internal callback definitions used by the SH-1.
+*/
+
+#include <brimir/core/types.hpp>
+
+#include <brimir/util/callback.hpp>
+
+namespace brimir::sh1 {
+
+/// @brief Receive a bit from one of the SH-1's SCI channels.
+using CbSerialRx = util::RequiredCallback<bool()>;
+
+/// @brief Send a bit to one of the SH-1's SCI channels.
+using CbSerialTx = util::RequiredCallback<void(bool bit)>;
+
+/// @brief Invoked to raise an IRQ signal on the SH-1.
+using CBAssertIRQ = util::RequiredCallback<void()>;
+
+/// @brief Invoked to set the DREQ0/1# signals on the SH-1.
+using CBSetDREQn = util::RequiredCallback<void(bool level)>;
+
+/// @brief Invoked to step a DMA channel on the SH-1 until the specified number of bytes have been transferred or the
+/// DREQ# signal is deasserted.
+using CBStepDMAC = util::RequiredCallback<void(uint32 bytes)>;
+
+} // namespace brimir::sh1

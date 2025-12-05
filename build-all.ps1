@@ -53,121 +53,133 @@ $ErrorActionPreference = "Stop"
 
 # Configuration
 $BuildDir = "build"
-$CMakeGenerator = "Visual Studio 17 2022"
+$VsVcVars = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 # Banner
-Write-Host "`n╔═══════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║                                                                       ║" -ForegroundColor Cyan
-Write-Host "║                    BRIMIR BUILD SYSTEM                                ║" -ForegroundColor Cyan
-Write-Host "║                                                                       ║" -ForegroundColor Cyan
-Write-Host "╚═══════════════════════════════════════════════════════════════════════╝`n" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "=======================================================================" -ForegroundColor Cyan
+Write-Host "                    BRIMIR BUILD SYSTEM                                " -ForegroundColor Cyan
+Write-Host "=======================================================================" -ForegroundColor Cyan
+Write-Host ""
 
 Write-Host "Configuration:" -ForegroundColor Yellow
 Write-Host "  Build Type: $BuildType" -ForegroundColor White
 Write-Host "  JIT Tests:  $(if ($WithJIT) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
 Write-Host "  Benchmarks: $(if ($WithBenchmarks) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
-Write-Host "  Clean:      $(if ($Clean) { 'Yes' } else { 'No' })`n" -ForegroundColor White
+Write-Host "  Clean:      $(if ($Clean) { 'Yes' } else { 'No' })" -ForegroundColor White
+Write-Host ""
 
 # Step 1: Clean if requested
 if ($Clean -and (Test-Path $BuildDir)) {
     Write-Host "Cleaning build directory..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force $BuildDir
-    Write-Host "✅ Clean complete`n" -ForegroundColor Green
+    Write-Host "[OK] Clean complete" -ForegroundColor Green
+    Write-Host ""
 }
 
-# Step 2: CMake Configure
-Write-Host "Configuring CMake..." -ForegroundColor Yellow
+# Step 2: Set up Visual Studio environment and run CMake + Build
+Write-Host "Setting up Visual Studio environment and building..." -ForegroundColor Yellow
+Write-Host "This may take several minutes..." -ForegroundColor Gray
+Write-Host ""
 
-$CMakeArgs = @(
-    "-S", ".",
-    "-B", $BuildDir,
-    "-G", $CMakeGenerator,
-    "-DCMAKE_BUILD_TYPE=$BuildType"
-)
-
+$CMakeArgs = "-S . -B $BuildDir -G Ninja -DCMAKE_BUILD_TYPE=$BuildType -Wno-dev"
 if ($WithJIT) {
-    $CMakeArgs += "-DBUILD_JIT_TESTS=ON"
+    $CMakeArgs += " -DBUILD_JIT_TESTS=ON"
 }
-
-& cmake @CMakeArgs 2>&1 | Out-Null
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "❌ CMake configuration failed!" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "✅ Configuration complete`n" -ForegroundColor Green
-
-# Step 3: Build
-Write-Host "Building Brimir ($BuildType)..." -ForegroundColor Yellow
-Write-Host "This may take several minutes...`n" -ForegroundColor Gray
 
 $BuildStart = Get-Date
 
-cmake --build $BuildDir --config $BuildType 2>&1 | ForEach-Object {
-    if ($_ -match "error C") {
-        Write-Host $_ -ForegroundColor Red
-    } elseif ($_ -match "warning C") {
-        Write-Host $_ -ForegroundColor Yellow
-    } elseif ($_ -match "Building") {
-        Write-Host $_ -ForegroundColor Cyan
-    }
-}
+# Create temp batch file for build
+$TempBat = Join-Path $env:TEMP "brimir_build_$([guid]::NewGuid().ToString('N')).bat"
+$BatchContent = @(
+    "@echo off",
+    "call `"$VsVcVars`"",
+    "if errorlevel 1 exit /b 1",
+    "cmake $CMakeArgs",
+    "if errorlevel 1 exit /b 1",
+    "cmake --build $BuildDir"
+)
+$BatchContent | Out-File -FilePath $TempBat -Encoding ASCII
+
+# Run the batch file
+cmd /c $TempBat
+$BuildExitCode = $LASTEXITCODE
+
+# Cleanup
+Remove-Item $TempBat -ErrorAction SilentlyContinue
 
 $BuildEnd = Get-Date
 $BuildTime = ($BuildEnd - $BuildStart).TotalSeconds
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "`n❌ Build failed!" -ForegroundColor Red
+if ($BuildExitCode -ne 0) {
+    Write-Host ""
+    Write-Host "[FAILED] Build failed!" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "`n✅ Build successful (took $($BuildTime.ToString('F1'))s)`n" -ForegroundColor Green
+Write-Host ""
+Write-Host "[OK] Build successful (took $($BuildTime.ToString('F1'))s)" -ForegroundColor Green
+Write-Host ""
 
-# Step 4: Check outputs
+# Step 3: Check outputs
 Write-Host "Checking build outputs..." -ForegroundColor Yellow
 
+# Ninja puts outputs in build\bin, VS puts them in build\bin\Release
+$DllPath = "$BuildDir\bin\brimir_libretro.dll"
+if (-not (Test-Path $DllPath)) {
+    $DllPath = "$BuildDir\bin\$BuildType\brimir_libretro.dll"
+}
+if (-not (Test-Path $DllPath)) {
+    $DllPath = "$BuildDir\brimir_libretro.dll"
+}
+
 $Outputs = @{
-    "Libretro Core" = "$BuildDir\bin\$BuildType\brimir_libretro.dll"
-    "Benchmark Tool" = "$BuildDir\bin\$BuildType\$BuildType\benchmark_sh2.exe"
+    "Libretro Core" = $DllPath
 }
 
 if ($WithJIT) {
-    $Outputs["SH2 Wrapper"] = "$BuildDir\src\jit\$BuildType\brimir-sh2-wrapper.lib"
+    $Outputs["SH2 Wrapper"] = "$BuildDir\libbrimir-sh2-wrapper.a"
 }
 
 $AllFound = $true
 foreach ($output in $Outputs.GetEnumerator()) {
     if (Test-Path $output.Value) {
         $Size = (Get-Item $output.Value).Length / 1MB
-        Write-Host "  ✅ $($output.Key): $($Size.ToString('F2')) MB" -ForegroundColor Green
+        Write-Host "  [OK] $($output.Key): $($Size.ToString('F2')) MB" -ForegroundColor Green
     } else {
-        Write-Host "  ❌ $($output.Key): Not found" -ForegroundColor Red
+        Write-Host "  [MISSING] $($output.Key): Not found" -ForegroundColor Red
         $AllFound = $false
     }
 }
 
 if (-not $AllFound) {
-    Write-Host "`n⚠️  Some outputs missing. Build may have been incomplete." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "[WARNING] Some outputs missing. Build may have been incomplete." -ForegroundColor Yellow
 }
 
-# Step 5: Run benchmarks if requested
-if ($WithBenchmarks -and (Test-Path "$BuildDir\bin\$BuildType\$BuildType\benchmark_sh2.exe")) {
-    Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+# Step 4: Run benchmarks if requested
+$BenchmarkPath = "$BuildDir\bin\Release\benchmark_sh2.exe"
+if (-not (Test-Path $BenchmarkPath)) {
+    $BenchmarkPath = "$BuildDir\bin\benchmark_sh2.exe"
+}
+if ($WithBenchmarks -and (Test-Path $BenchmarkPath)) {
+    Write-Host ""
+    Write-Host "=======================================================================" -ForegroundColor Cyan
     Write-Host "RUNNING BENCHMARKS" -ForegroundColor Yellow
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`n" -ForegroundColor Cyan
+    Write-Host "=======================================================================" -ForegroundColor Cyan
+    Write-Host ""
     
     & .\tools\run_benchmarks.ps1 -Save
 }
 
 # Summary
-Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "=======================================================================" -ForegroundColor Cyan
 Write-Host "BUILD COMPLETE" -ForegroundColor Green
-Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+Write-Host "=======================================================================" -ForegroundColor Cyan
 
-Write-Host "`nQuick Start:" -ForegroundColor Yellow
-Write-Host "  • Libretro DLL: $BuildDir\bin\$BuildType\brimir_libretro.dll" -ForegroundColor White
-Write-Host "  • Run benchmarks: .\tools\run_benchmarks.ps1" -ForegroundColor White
-Write-Host "  • Documentation: docs\QUICK_START.md" -ForegroundColor White
-Write-Host "`n"
-
+Write-Host ""
+Write-Host "Quick Start:" -ForegroundColor Yellow
+Write-Host "  Libretro DLL: $DllPath" -ForegroundColor White
+Write-Host "  Run benchmarks: .\tools\run_benchmarks.ps1" -ForegroundColor White
+Write-Host ""

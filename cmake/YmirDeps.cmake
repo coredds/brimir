@@ -17,11 +17,11 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/concurrentqueue EXCLUDE_FROM
 
 # xxHash - hashing library
 message(STATUS "==> xxHash")
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/xxHash EXCLUDE_FROM_ALL)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/xxHash/build/cmake EXCLUDE_FROM_ALL)
 
 # lz4 - compression
 message(STATUS "==> lz4")
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/lz4 EXCLUDE_FROM_ALL)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/lz4/build/cmake EXCLUDE_FROM_ALL)
 
 # libchdr - CHD support
 message(STATUS "==> libchdr")

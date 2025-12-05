@@ -1,0 +1,56 @@
+#pragma once
+
+/**
+@file
+@brief Development-time assertions.
+
+Defines the following macros:
+- `BRIMIR_DEV_ASSERT(bool)`: checks for a precondition, breaking into the debugger if it fails.
+- `BRIMIR_DEV_CHECK()`: breaks into the debugger immediately.
+
+These macros are useful to check for unexpected or unimplemented cases.
+
+Development assertions must be enabled by defining the `BRIMIR_DEV_ASSERTIONS` macro with a truthy value.
+*/
+
+/**
+@def BRIMIR_DEV_ASSERT
+@brief Performs a development-time assertion, breaking into the debugger if the condition fails.
+@param[in] condition the condition to check
+*/
+
+/**
+@def BRIMIR_DEV_CHECK
+@brief Breaks into the debugger immediately.
+*/
+
+#if BRIMIR_DEV_ASSERTIONS
+    #if __has_builtin(__builtin_debugtrap)
+        #define BRIMIR_DEV_ASSERT(cond)      \
+            do {                           \
+                if (!(cond)) {             \
+                    __builtin_debugtrap(); \
+                }                          \
+            } while (false)
+
+        #define BRIMIR_DEV_CHECK()       \
+            do {                       \
+                __builtin_debugtrap(); \
+            } while (false)
+    #elif defined(_MSC_VER)
+        #define BRIMIR_DEV_ASSERT(cond) \
+            do {                      \
+                if (!(cond)) {        \
+                    __debugbreak();   \
+                }                     \
+            } while (false)
+
+        #define BRIMIR_DEV_CHECK() \
+            do {                 \
+                __debugbreak();  \
+            } while (false)
+    #endif
+#else
+    #define BRIMIR_DEV_ASSERT(cond)
+    #define BRIMIR_DEV_CHECK()
+#endif
