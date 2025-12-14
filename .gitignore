@@ -57,6 +57,10 @@ Desktop.ini
 *.suo
 *.user
 
+# Cursor AI configuration (contains API keys and project-specific rules)
+.cursorrules
+query_saturn.py
+
 # vcpkg
 vcpkg_installed/
 vcpkg/downloads/
@@ -138,7 +142,6 @@ tmp/
 temp/
 *.tmp
 *.temp
-cmake_output.txt
 
 # Python (for scripts)
 __pycache__/

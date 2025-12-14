@@ -941,7 +941,7 @@ struct VDP2Regs {
         accessPatternsDirty |= ReadCHCTLA() != value;
 
         bgParams[1].cellSizeShift = bit::extract<0>(value);
-        bgParams[1].bitmap = bit::extract<0, 1>(value) == 0b01;  // Bits 1:0 = 01b for bitmap mode
+        bgParams[1].bitmap = bit::extract<0, 1>(value) == 0b10;  // Bits 1:0 = 10b for bitmap mode (BMEN=1, CHSZ=0)
         bgParams[1].bmsz = bit::extract<2, 3>(value);
         bgParams[1].charDoubleHeight = bit::test<3>(value);  // Bit 3: 8×16 char patterns in interlaced mode
         bgParams[1].colorFormat = static_cast<ColorFormat>(bit::extract<4, 6>(value));
@@ -949,7 +949,7 @@ struct VDP2Regs {
         bgParams[1].rbgPageBaseAddressesDirty = true;
 
         bgParams[2].cellSizeShift = bit::extract<8>(value);
-        bgParams[2].bitmap = bit::extract<8, 9>(value) == 0b01;  // Bits 9:8 = 01b for bitmap mode
+        bgParams[2].bitmap = bit::extract<8, 9>(value) == 0b10;  // Bits 9:8 = 10b for bitmap mode (BMEN=1, CHSZ=0)
         bgParams[2].bmsz = bit::extract<10, 11>(value);
         bgParams[2].charDoubleHeight = bit::test<11>(value);  // Bit 11: 8×16 char patterns in interlaced mode
         bgParams[2].colorFormat = static_cast<ColorFormat>(bit::extract<12, 13>(value));
@@ -1011,7 +1011,7 @@ struct VDP2Regs {
         bgParams[4].UpdateCHCTL();
 
         bgParams[0].cellSizeShift = bit::extract<8>(value);
-        bgParams[0].bitmap = bit::extract<8, 9>(value) == 0b01;  // Bits 9:8 = 01b for bitmap mode
+        bgParams[0].bitmap = bit::extract<8, 9>(value) == 0b10;  // Bits 9:8 = 10b for bitmap mode (BMEN=1, CHSZ=0)
         bgParams[0].bmsz = bit::extract<10>(value);
         bgParams[0].charDoubleHeight = bit::test<11>(value);  // Bit 11: 8×16 char patterns in interlaced mode (RBG0, reserved bit)
         bgParams[0].colorFormat = static_cast<ColorFormat>(bit::extract<12, 14>(value));

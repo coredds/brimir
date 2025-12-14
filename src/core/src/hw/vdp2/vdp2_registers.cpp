@@ -392,8 +392,14 @@ void WriteReg(uint32 address, uint16 value) {
 }
 
 // =============================================================================
-// VRAM Access (Write functions only - Read functions are in vdp2_helpers.cpp)
+// VRAM Access
 // =============================================================================
+
+uint8 ReadVRAM8(uint32 address) {
+    const uint32 offset = address & (VRAM_SIZE - 1);
+    const uint16 word = VRAM[offset >> 1];
+    return (offset & 1) ? (word & 0xFF) : (word >> 8);
+}
 
 void WriteVRAM8(uint32 address, uint8 value) {
     const uint32 offset = address & (VRAM_SIZE - 1);
@@ -403,6 +409,11 @@ void WriteVRAM8(uint32 address, uint8 value) {
     } else {
         word = (word & 0x00FF) | (value << 8);
     }
+}
+
+uint16 ReadVRAM16(uint32 address) {
+    const uint32 offset = (address & (VRAM_SIZE - 1)) >> 1;
+    return VRAM[offset];
 }
 
 void WriteVRAM16(uint32 address, uint16 value) {

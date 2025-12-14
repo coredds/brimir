@@ -3,8 +3,10 @@
 
 message(STATUS "Adding core library dependencies")
 
-# fmt - formatting library (header-only)
+# fmt - formatting library
 message(STATUS "==> fmt")
+set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/fmt EXCLUDE_FROM_ALL)
 
 # mio - memory mapped I/O

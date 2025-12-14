@@ -18,17 +18,7 @@ namespace brimir::vdp2 {
 // =============================================================================
 // VRAM Access
 // =============================================================================
-
-uint8 ReadVRAM8(uint32 addr) {
-    const uint32 offset = addr & (VRAM_SIZE - 1);
-    const uint16 word = VRAM[offset >> 1];
-    return (offset & 1) ? (word & 0xFF) : (word >> 8);
-}
-
-uint16 ReadVRAM16(uint32 addr) {
-    const uint32 offset = (addr & (VRAM_SIZE - 1)) >> 1;
-    return VRAM[offset];
-}
+// Note: ReadVRAM8/16/32 and WriteVRAM8/16/32 are defined in vdp2_registers.cpp
 
 uint32 ReadVRAM32(uint32 addr) {
     const uint32 offset = (addr & (VRAM_SIZE - 1)) >> 1;

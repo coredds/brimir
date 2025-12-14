@@ -65,7 +65,7 @@ void VDP1::Init()
 {
     devlog::info<grp::vdp1>("Initializing...");
     
-    // Initialize lookup tables (Mednafen style)
+    // Initialize lookup tables (Mednafen style) - defined in vdp1_helpers.cpp
     InitGouraudLUT();
     
     // Map VRAM to bus

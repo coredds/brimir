@@ -1,4 +1,4 @@
-## Create the library target (static - linked into libretro DLL)
+## Create the library target (STATIC for internal linking)
 add_library(brimir-core STATIC
     include/brimir/brimir.hpp
     include/brimir/version.hpp
@@ -334,7 +334,7 @@ target_link_libraries(brimir-core PUBLIC
     fmt::fmt
     mio
     concurrentqueue
-    xxHash::xxhash
+    xxhash  # xxHash exports 'xxhash' target from build/cmake
     chdr-static
 )
 if (WIN32)

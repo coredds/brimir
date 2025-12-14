@@ -4321,6 +4321,8 @@ FORCE_INLINE void VDP::VDP2DrawSpritePixel(uint32 x, const SpriteParams &params,
     }
 
     if (params.mixedFormat) {
+        // Mixed format: framebuffer can contain both palette (MSB=0) and RGB (MSB=1) data
+        // Source: VDP2 User's Manual, ST-058-R2-060194.pdf, Section 9.1
         const uint16 spriteDataValue = util::ReadBE<uint16>(&spriteFB[(spriteFBOffset * sizeof(uint16)) & 0x3FFFE]);
         if (bit::test<15>(spriteDataValue)) {
             // RGB data
@@ -6987,37 +6989,15 @@ FORCE_INLINE VDP::Pixel VDP::VDP2FetchBitmapPixel(const BGParams &bgParams, uint
 
     Pixel pixel{};
 
-    auto [ix, iy] = dotCoord;
+    auto [dotX, dotY] = dotCoord;
     
-    // Mednafen bitmap logic - EXACT replica
-    // BMWShift = ((BMSize & 2) ? 10 : 9);
-    // BMWMask = (1U << BMWShift) - 8;
-    // BMHMask = (BMSize & 1) ? 0x1FF : 0xFF;
-    const uint32 BMWShift = ((bgParams.bmsz & 2) ? 10 : 9);
-    const uint32 BMWMask = (1U << BMWShift) - 8;
-    const uint32 BMHMask = (bgParams.bmsz & 1) ? 0x1FF : 0xFF;
+    // Ymir approach: Wrap coordinates using bitmap size (power of 2)
+    // Source: Ymir vdp.cpp lines 6358-6362
+    dotX &= bgParams.bitmapSizeH - 1;
+    dotY &= bgParams.bitmapSizeV - 1;
     
-    // Wrap coordinates
-    const uint32 ix_wrapped = ix & BMWMask;
-    const uint32 iy_wrapped = iy & BMHMask;
-    
-    // Get BPP for this color format
-    constexpr uint32 bpp = (colorFormat == ColorFormat::Palette16) ? 4 :
-                           (colorFormat == ColorFormat::Palette256) ? 8 :
-                           (colorFormat == ColorFormat::Palette2048 || colorFormat == ColorFormat::RGB555) ? 16 : 32;
-    
-    // Calculate VRAM address for 8-pixel block (Mednafen line 343)
-    // cg_addr = (BMOffset + ((((ix & BMWMask) + ((iy & BMHMask) << BMWShift)) * TA_bpp) >> 4)) & 0x3FFFF;
-    // NOTE: bitmapBaseAddress is in BYTES, but Mednafen's BMOffset and cg_addr are in WORDS
-    // Convert bitmapBaseAddress to words by dividing by 2
-    const uint32 BMOffset = bitmapBaseAddress >> 1;  // Convert bytes to words
-    const uint32 cg_addr = (BMOffset + ((((ix_wrapped) + (iy_wrapped << BMWShift)) * bpp) >> 4)) & 0x3FFFF;
-    
-    // Get pixel offset within 8-pixel block (Mednafen line 1482-1483)
-    // uint32 cellx = (ix ^ tf.cellx_xor) where cellx_xor = (ix &~ 0x7)
-    // This simplifies to: cellx = ix & 0x7
-    const uint32 cellx = ix & 0x7;
-    
+    // Calculate linear pixel offset
+    const uint32 dotOffset = dotX + dotY * bgParams.bitmapSizeH;
     const uint32 palNum = bgParams.supplBitmapPalNum;
 
     // Determine special color calculation flag
@@ -7035,74 +7015,54 @@ FORCE_INLINE VDP::Pixel VDP::VDP2FetchBitmapPixel(const BGParams &bgParams, uint
         util::unreachable();
     };
 
-    // Fetch 8-pixel block from VRAM (Mednafen approach - line 428)
-    // Mednafen: tile_vrb = &VRAM[cg_addr];
-    // NOTE: Mednafen's VRAM is uint16[] in native endian
-    // Brimir's VRAM is uint8[] in big-endian, so use VDP2ReadRendererVRAM like character rendering
-    uint16 tile_vrb_data[8];
-    
-    // cg_addr is in words, multiply by 2 to get byte address
-    // NOTE: Mednafen does NOT apply any bank offset for bitmaps!
-    const uint32 vram_byte_addr = (cg_addr * 2) & 0x7FFFF;
-    
-    // Read 8 words (16 bytes) using VDP2ReadRendererVRAM (handles big-endian correctly)
-    // NOTE: Always read for bitmaps - don't check charPatAccess as it may be wrong for bitmap banks
-    for (int i = 0; i < 8; i++) {
-        tile_vrb_data[i] = VDP2ReadRendererVRAM<uint16>(vram_byte_addr + i * 2);
-    }
-    
-    // Read pixel from block (Mednafen line 1483, 1520-1531)
-    // const uint16* vrb = &tf.tile_vrb[((cellx * TA_bpp) >> 4)];
-    const uint16* vrb = &tile_vrb_data[((cellx * bpp) >> 4)];
-    
+    // Ymir approach: Calculate address per-pixel based on color format
+    // Source: Ymir vdp.cpp lines 6399-6444
     uint8 colorData;
     if constexpr (colorFormat == ColorFormat::Palette16) {
-        // Mednafen line 1527: dcc = (tmp >> (((cellx & 3) ^ 3) << 2)) & 0x0F;
-        uint32 tmp = vrb[0];
-        uint32 dcc = (tmp >> (((cellx & 3) ^ 3) << 2)) & 0x0F;
-        const uint32 colorIndex = palNum | dcc;
-        colorData = bit::extract<1, 3>(dcc);
+        // 4 bits per pixel, 2 pixels per byte
+        const uint32 dotAddress = bitmapBaseAddress + (dotOffset >> 1u);
+        const uint8 dotData = VDP2ReadRendererVRAM<uint8>(dotAddress);
+        const uint8 pixelData = (dotData >> ((~dotX & 1) * 4)) & 0xF;
+        const uint32 colorIndex = palNum | pixelData;
+        colorData = bit::extract<1, 3>(pixelData);
         pixel.color = VDP2FetchCRAMColor<colorMode>(bgParams.cramOffset, colorIndex);
-        pixel.transparent = bgParams.enableTransparency && dcc == 0;
+        pixel.transparent = bgParams.enableTransparency && pixelData == 0;
         pixel.specialColorCalc = getSpecialColorCalcFlag(colorData, pixel.color.msb);
 
     } else if constexpr (colorFormat == ColorFormat::Palette256) {
-        // Mednafen line 1525: dcc = (tmp >> (((cellx & 1) ^ 1) << 3)) & 0xFF;
-        uint32 tmp = vrb[0];
-        uint32 dcc = (tmp >> (((cellx & 1) ^ 1) << 3)) & 0xFF;
-        const uint32 colorIndex = palNum | dcc;
-        colorData = bit::extract<1, 3>(dcc);
+        // 8 bits per pixel, 1 byte per pixel
+        const uint32 dotAddress = bitmapBaseAddress + dotOffset;
+        const uint8 dotData = VDP2ReadRendererVRAM<uint8>(dotAddress);
+        const uint32 colorIndex = palNum | dotData;
+        colorData = bit::extract<1, 3>(dotData);
         pixel.color = VDP2FetchCRAMColor<colorMode>(bgParams.cramOffset, colorIndex);
-        pixel.transparent = bgParams.enableTransparency && dcc == 0;
+        pixel.transparent = bgParams.enableTransparency && dotData == 0;
         pixel.specialColorCalc = getSpecialColorCalcFlag(colorData, pixel.color.msb);
 
     } else if constexpr (colorFormat == ColorFormat::Palette2048) {
-        // Mednafen line 1523: dcc = tmp & 0x7FF;
-        uint32 tmp = vrb[0];
-        uint32 dcc = tmp & 0x7FF;
-        colorData = bit::extract<1, 3>(tmp);
-        pixel.color = VDP2FetchCRAMColor<colorMode>(bgParams.cramOffset, dcc);
-        pixel.transparent = bgParams.enableTransparency && dcc == 0;
+        // 16 bits per pixel
+        const uint32 dotAddress = bitmapBaseAddress + dotOffset * sizeof(uint16);
+        const uint16 dotData = VDP2ReadRendererVRAM<uint16>(dotAddress);
+        const uint32 colorIndex = dotData & 0x7FF;
+        colorData = bit::extract<1, 3>(dotData);
+        pixel.color = VDP2FetchCRAMColor<colorMode>(bgParams.cramOffset, colorIndex);
+        pixel.transparent = bgParams.enableTransparency && (dotData & 0x7FF) == 0;
         pixel.specialColorCalc = getSpecialColorCalcFlag(colorData, pixel.color.msb);
 
     } else if constexpr (colorFormat == ColorFormat::RGB555) {
-        // Mednafen line 1508-1510:
-        // uint32 tmp = vrb[0];
-        // rgb24 = rgb15_to_rgb24(tmp & 0x7FFF);
-        // opaque = (bool)(tmp & 0x8000);
-        uint32 tmp = vrb[0];
-        pixel.color = ConvertRGB555to888(Color555{.u16 = static_cast<uint16>(tmp & 0x7FFF)});
-        pixel.transparent = bgParams.enableTransparency && !(tmp & 0x8000);
+        // 16 bits per pixel
+        const uint32 dotAddress = bitmapBaseAddress + dotOffset * sizeof(uint16);
+        const uint16 dotData = VDP2ReadRendererVRAM<uint16>(dotAddress);
+        pixel.color = ConvertRGB555to888(Color555{.u16 = static_cast<uint16>(dotData & 0x7FFF)});
+        pixel.transparent = bgParams.enableTransparency && !(dotData & 0x8000);
         pixel.specialColorCalc = getSpecialColorCalcFlag(0b111, true);
 
     } else if constexpr (colorFormat == ColorFormat::RGB888) {
-        // Mednafen line 1501-1503:
-        // uint32 tmp = (vrb[0] << 16) | vrb[1];
-        // rgb24 = tmp & 0xFFFFFF;
-        // opaque = (bool)(tmp & 0x80000000);
-        uint32 tmp = (vrb[0] << 16) | vrb[1];
-        pixel.color.u32 = tmp & 0xFFFFFF;
-        pixel.transparent = bgParams.enableTransparency && !(tmp & 0x80000000);
+        // 32 bits per pixel
+        const uint32 dotAddress = bitmapBaseAddress + dotOffset * sizeof(uint32);
+        const uint32 dotData = VDP2ReadRendererVRAM<uint32>(dotAddress);
+        pixel.color.u32 = dotData & 0xFFFFFF;
+        pixel.transparent = bgParams.enableTransparency && !(dotData & 0x80000000);
         pixel.specialColorCalc = getSpecialColorCalcFlag(0b111, true);
     }
 
@@ -7146,14 +7106,30 @@ FLATTEN FORCE_INLINE SpriteData VDP::VDP2FetchSpriteData(const SpriteFB &fb, uin
     const VDP2Regs &regs2 = VDP2GetRegs();
 
     const uint8 type = regs2.spriteParams.type;
+    
+    // DEBUG: Log sprite read configuration once
+    static bool logged = false;
+    if (!logged && type >= 8) {
+        devlog::info<grp::vdp2_render>("VIDEO MODE: VDP1={}x{} {}bpp (TVM={}{}{}) | VDP2 SpriteType=0x{:X} Mixed={}",
+            regs1.fbSizeH, regs1.fbSizeV, regs1.pixel8Bits ? 8 : 16,
+            regs1.hdtvEnable, regs1.fbRotEnable, regs1.pixel8Bits,
+            type, regs2.spriteParams.mixedFormat);
+        logged = true;
+    }
+    
     if (type < 8) {
+        // Word sprite types (0-7): read 16-bit data
         return VDP2FetchWordSpriteData(fb, fbOffset * sizeof(uint16), type);
     } else {
-        // Adjust the offset if VDP1 used 16-bit data.
-        // The majority of games actually set these two parameters properly, but there's *always* an exception...
+        // Byte sprite types (8-15): read 8-bit data
+        // fbOffset is a PIXEL offset, but the framebuffer is a BYTE array
+        // When VDP1 framebuffer is in 16-bit mode, pixels are stored as 2 bytes each
+        // So we must convert pixel offset to byte offset
         if (!regs1.pixel8Bits) {
-            fbOffset = fbOffset * sizeof(uint16) + 1;
+            // 16-bit framebuffer: convert pixel offset to byte offset (2 bytes per pixel)
+            fbOffset = fbOffset * sizeof(uint16);
         }
+        // If 8-bit framebuffer: pixel offset == byte offset (1 byte per pixel)
         return VDP2FetchByteSpriteData(fb, fbOffset, type);
     }
 }
@@ -7318,10 +7294,11 @@ FORCE_INLINE uint32 VDP::VDP2GetY(uint32 y) const {
     const VDP2Regs &regs = VDP2GetRegs();
 
     if (regs.TVMD.IsInterlaced() && !m_exclusiveMonitor) {
-        // Use m_renderingField (which toggles per frame) instead of TVSTAT.ODD
-        // This ensures we render alternating fields for true weave interlacing
-        // If deinterlace=true (double rendering), always use 0; otherwise use m_renderingField
-        return (y << 1) | (deinterlace ? 0 : m_renderingField);
+        // Ymir approach: Use TVSTAT.ODD for field selection
+        // When deinterlace=true (rendering both fields), use altField parameter to select field
+        // When deinterlace=false (single field), use TVSTAT.ODD
+        // Source: Ymir vdp.cpp line 6658
+        return (y << 1) | (regs.TVSTAT.ODD & !deinterlace);
     } else {
         return y;
     }
