@@ -193,6 +193,10 @@ public:
     /// @param enable True to enable autodetect
     void SetAutodetectRegion(bool enable);
     
+    /// @brief Set renderer type
+    /// @param renderer Renderer string: "software", "vulkan"
+    void SetRenderer(const char* renderer);
+    
     /// @brief Set deinterlacing mode
     /// @param enable True to enable deinterlacing
     void SetDeinterlacing(bool enable);

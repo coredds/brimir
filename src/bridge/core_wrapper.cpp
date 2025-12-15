@@ -1032,6 +1032,22 @@ void CoreWrapper::SetAutodetectRegion(bool enable) {
     m_saturn->configuration.system.autodetectRegion = enable;
 }
 
+void CoreWrapper::SetRenderer(const char* renderer) {
+    if (!m_initialized || !m_saturn || !renderer) {
+        return;
+    }
+
+    // TODO: Implement GPU renderer selection
+    // For now, only software renderer is fully implemented
+    if (strcmp(renderer, "vulkan") == 0) {
+        // GPU renderer will be enabled in future update
+        // m_saturn->VDP.SetGPURenderer(true);
+    } else {
+        // Software renderer (default)
+        // m_saturn->VDP.SetGPURenderer(false);
+    }
+}
+
 void CoreWrapper::SetDeinterlacing(bool enable) {
     if (!m_initialized || !m_saturn) {
         return;

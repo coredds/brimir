@@ -552,6 +552,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_core->SetAutodetectRegion(autodetect_region);
     brimir_log(RETRO_LOG_INFO, "Autodetect region: %s", autodetect_region ? "enabled" : "disabled");
     
+    const char* renderer_str = get_option_value("brimir_renderer", "software");
+    g_core->SetRenderer(renderer_str);
+    brimir_log(RETRO_LOG_INFO, "Renderer: %s", renderer_str);
+    
     const char* deinterlacing_str = get_option_value("brimir_deinterlacing", "enabled");
     bool deinterlacing = strcmp(deinterlacing_str, "enabled") == 0;
     g_core->SetDeinterlacing(deinterlacing);

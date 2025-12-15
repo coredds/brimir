@@ -82,6 +82,23 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "auto"
     },
     {
+        "brimir_renderer",
+        "Renderer",
+        nullptr,
+        "Choose between software or GPU (Vulkan) rendering. "
+        "Software: Accurate, compatible, optimized. "
+        "Vulkan: Experimental GPU acceleration with potential for higher performance and upscaling. "
+        "Requires Vulkan support. Falls back to software if unavailable.",
+        nullptr,
+        "video",
+        {
+            { "software", "Software" },
+            { "vulkan", "Vulkan (Experimental)" },
+            { nullptr, nullptr }
+        },
+        "software"
+    },
+    {
         "brimir_deinterlacing",
         "Deinterlacing",
         nullptr,
