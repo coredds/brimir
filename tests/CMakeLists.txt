@@ -11,6 +11,10 @@ add_executable(brimir_tests
     unit/test_memory_components.cpp
     unit/test_scu_components.cpp
     unit/test_smpc_operations.cpp
+    unit/test_sh2_cpu.cpp
+    unit/test_vdp_components.cpp
+    unit/test_cd_operations.cpp
+    unit/test_scsp_audio.cpp
     unit/test_video_output.cpp
     unit/test_audio_output.cpp
     unit/test_input_handling.cpp
