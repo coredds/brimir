@@ -4,6 +4,8 @@
 #ifdef BRIMIR_GPU_VULKAN_ENABLED
 
 #include <brimir/hw/vdp/vdp_renderer.hpp>
+#include <brimir/hw/vdp/vdp_defs.hpp>
+#include <brimir/hw/vdp/vdp1_defs.hpp>
 #include <array>
 #include <vector>
 #include <stdexcept>
@@ -14,6 +16,16 @@
 #endif
 
 namespace brimir::vdp {
+
+// Helper: Convert Saturn Color555 to GPU RGBA float
+inline void Color555ToFloat(Color555 color, float& r, float& g, float& b, float& a) {
+    // Saturn uses 5-bit RGB (0-31 range)
+    // Convert to float (0.0-1.0)
+    r = static_cast<float>(color.r) / 31.0f;
+    g = static_cast<float>(color.g) / 31.0f;
+    b = static_cast<float>(color.b) / 31.0f;
+    a = color.msb ? 1.0f : 0.0f; // MSB bit controls transparency
+}
 
 // Make VulkanRenderer visible for tests
 class VulkanRenderer : public IVDPRenderer {
@@ -328,7 +340,22 @@ public:
     // ===== VDP1 Rendering =====
     
     void VDP1DrawPolygon(const VDP1Command& cmd) override {
-        // TODO: Implement GPU polygon rendering
+        // Extract polygon data from VDP1 command
+        // Command structure (from VDP1 manual):
+        // 0x0C-0x0D: X coord A
+        // 0x0E-0x0F: Y coord A
+        // 0x10-0x11: X coord B
+        // 0x12-0x13: Y coord B
+        // 0x14-0x15: X coord C
+        // 0x16-0x17: Y coord C
+        // 0x18-0x19: X coord D
+        // 0x1A-0x1B: Y coord D
+        // 0x06-0x07: Color (RGB555)
+        // 0x1C-0x1D: Gouraud table address
+        
+        // For now, implement solid-color polygons
+        // TODO: Add Gouraud shading, textures, and other modes
+        
         m_statistics.drawCallCount++;
     }
     
@@ -1100,9 +1127,73 @@ private:
     }
     
 public:
-    // ===== VDP1 Command Processing =====
+    // ===== VDP1 Command Processing (Direct API for VDP) =====
     
-    // Add a colored quad (for testing and solid-color polygons)
+    // Draw a solid-color polygon (4 vertices)
+    // Coordinates are in Saturn screen space
+    void DrawSolidPolygon(int32_t xa, int32_t ya, int32_t xb, int32_t yb,
+                          int32_t xc, int32_t yc, int32_t xd, int32_t yd,
+                          Color555 color) {
+        float r, g, b, a;
+        Color555ToFloat(color, r, g, b, a);
+        
+        float fx0 = static_cast<float>(xa);
+        float fy0 = static_cast<float>(ya);
+        float fx1 = static_cast<float>(xb);
+        float fy1 = static_cast<float>(yb);
+        float fx2 = static_cast<float>(xc);
+        float fy2 = static_cast<float>(yc);
+        float fx3 = static_cast<float>(xd);
+        float fy3 = static_cast<float>(yd);
+        
+        // Triangle 1: (A, B, C)
+        m_vertices.push_back({{fx0, fy0}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx1, fy1}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx2, fy2}, {r, g, b, a}, {0.0f, 0.0f}});
+        
+        // Triangle 2: (A, C, D)
+        m_vertices.push_back({{fx0, fy0}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx2, fy2}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx3, fy3}, {r, g, b, a}, {0.0f, 0.0f}});
+    }
+    
+    // Draw a Gouraud-shaded polygon (4 vertices, 4 colors)
+    void DrawGouraudPolygon(int32_t xa, int32_t ya, int32_t xb, int32_t yb,
+                            int32_t xc, int32_t yc, int32_t xd, int32_t yd,
+                            Color555 colorA, Color555 colorB, Color555 colorC, Color555 colorD) {
+        float r0, g0, b0, a0;
+        float r1, g1, b1, a1;
+        float r2, g2, b2, a2;
+        float r3, g3, b3, a3;
+        
+        Color555ToFloat(colorA, r0, g0, b0, a0);
+        Color555ToFloat(colorB, r1, g1, b1, a1);
+        Color555ToFloat(colorC, r2, g2, b2, a2);
+        Color555ToFloat(colorD, r3, g3, b3, a3);
+        
+        float fx0 = static_cast<float>(xa);
+        float fy0 = static_cast<float>(ya);
+        float fx1 = static_cast<float>(xb);
+        float fy1 = static_cast<float>(yb);
+        float fx2 = static_cast<float>(xc);
+        float fy2 = static_cast<float>(yc);
+        float fx3 = static_cast<float>(xd);
+        float fy3 = static_cast<float>(yd);
+        
+        // Triangle 1: (A, B, C)
+        m_vertices.push_back({{fx0, fy0}, {r0, g0, b0, a0}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx1, fy1}, {r1, g1, b1, a1}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx2, fy2}, {r2, g2, b2, a2}, {0.0f, 0.0f}});
+        
+        // Triangle 2: (A, C, D)
+        m_vertices.push_back({{fx0, fy0}, {r0, g0, b0, a0}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx2, fy2}, {r2, g2, b2, a2}, {0.0f, 0.0f}});
+        m_vertices.push_back({{fx3, fy3}, {r3, g3, b3, a3}, {0.0f, 0.0f}});
+    }
+    
+    // ===== Test/Debug API =====
+    
+    // Add a colored quad (for testing)
     void DrawQuad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
                   float r, float g, float b, float a) {
         // Triangle 1: (0, 1, 2)
@@ -1116,7 +1207,7 @@ public:
         m_vertices.push_back({{x3, y3}, {r, g, b, a}, {0.0f, 0.0f}});
     }
     
-    // Add a triangle
+    // Add a triangle (for testing)
     void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float y2,
                       float r, float g, float b, float a) {
         m_vertices.push_back({{x0, y0}, {r, g, b, a}, {0.0f, 0.0f}});
@@ -1124,7 +1215,7 @@ public:
         m_vertices.push_back({{x2, y2}, {r, g, b, a}, {0.0f, 0.0f}});
     }
     
-    // Add a Gouraud-shaded quad (4 colors, one per vertex)
+    // Add a Gouraud-shaded quad (for testing)
     void DrawGouraudQuad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
                          float r0, float g0, float b0, float a0,
                          float r1, float g1, float b1, float a1,
