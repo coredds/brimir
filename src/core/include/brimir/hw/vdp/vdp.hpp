@@ -711,10 +711,10 @@ private:
 
     // Deinterlacing mode: Weave (Mednafen-style single-field rendering)
     // Renders one field per frame, weave combines with previous frame's field
-    // Default to Blend mode for optimal performance
-    // Blend mode provides smooth progressive output with minimal overhead (~0.5ms vs ~7ms for Current)
-    // Source: Performance analysis shows 31% faster rendering with Blend vs Current mode
-    DeinterlaceMode m_deinterlaceMode = DeinterlaceMode::Blend;
+    // Default to Bob mode for optimal performance and no scanlines
+    // Bob mode duplicates the current field to opposite lines (no scanlines, 60 FPS)
+    // This provides a complete image without artifacts while maintaining performance
+    DeinterlaceMode m_deinterlaceMode = DeinterlaceMode::Bob;
 
     // Current field for weave/bob modes (0 or 1)
     int m_currentField = 0;

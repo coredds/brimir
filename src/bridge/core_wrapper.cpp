@@ -74,11 +74,11 @@ bool CoreWrapper::Initialize() {
         // Note: threadedDeinterlacer will be set by SetDeinterlaceMode() below
         m_saturn->configuration.video.includeVDP1InRenderThread = false;
         
-        // Set Blend mode for optimal deinterlacing performance
-        // Blend mode uses efficient post-process blending (no per-scanline rendering overhead)
-        // This is much faster than Current mode and provides smooth output
+        // Set Bob mode for optimal deinterlacing performance
+        // Bob duplicates current field to both even/odd lines (no scanlines, 60 FPS)
+        // This provides complete image without artifacts and maintains performance
         // Note: SetDeinterlaceMode() now controls m_deinterlaceRender automatically
-        m_saturn->VDP.SetDeinterlaceMode(brimir::vdp::DeinterlaceMode::Blend);
+        m_saturn->VDP.SetDeinterlaceMode(brimir::vdp::DeinterlaceMode::Bob);
         
         // Enable transparent mesh for better visuals (same as standalone "Recommended")
         m_saturn->VDP.SetTransparentMeshes(true);
