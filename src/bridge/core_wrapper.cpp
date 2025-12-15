@@ -735,62 +735,76 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         return;
     }
 
-    // Update dimensions
-    m_fbWidth = width;
-    m_fbHeight = height;
-    m_fbPitch = width * 2; // RGB565 is 2 bytes per pixel
+    // Get overscan cropping parameters
+    const uint32_t visibleWidth = m_saturn->VDP.GetVisibleWidth();
+    const uint32_t visibleHeight = m_saturn->VDP.GetVisibleHeight();
+    const uint32_t xOffset = m_saturn->VDP.GetHOverscanOffset();
+    const uint32_t yOffset = m_saturn->VDP.GetVOverscanOffset();
+    
+    // Update output dimensions (visible area after cropping)
+    m_fbWidth = visibleWidth;
+    m_fbHeight = visibleHeight;
+    m_fbPitch = visibleWidth * 2; // RGB565 is 2 bytes per pixel
 
     // Resize framebuffer if needed
-    size_t pixelCount = static_cast<size_t>(width) * height;
+    size_t pixelCount = static_cast<size_t>(visibleWidth) * visibleHeight;
     if (m_framebuffer.size() < pixelCount) {
         m_framebuffer.resize(pixelCount);
     }
 
     // Convert from XBGR8888 to RGB565 with SIMD acceleration
+    // Apply overscan cropping during conversion
     {
         ScopedTimer convTimer(m_profiler, "PixelConversion");
         
-        const uint32_t* src = fb;
         uint16_t* dst = m_framebuffer.data();
-        size_t i = 0;
         
+        // Process line by line to handle overscan cropping
+        for (uint32_t y = 0; y < visibleHeight; ++y) {
+            const uint32_t srcY = y + yOffset;
+            const uint32_t* srcLine = fb + (srcY * width) + xOffset;
+            uint16_t* dstLine = dst + (y * visibleWidth);
+            
+            size_t i = 0;
+            
 #if defined(_M_X64) || defined(__x86_64__)
     #if defined(__SSE2__) || defined(_M_X64)
-        // SSE2: Process 4 pixels at a time
-        // XBGR8888 -> RGB565: extract R5G6B5 bits and pack
-        for (; i + 4 <= pixelCount; i += 4) {
-            __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&src[i]));
-            
-            // Extract Blue (bits 19-23) -> position 0-4
-            __m128i b = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0xF80000)), 19);
-            
-            // Extract Green (bits 10-15) -> position 5-10
-            __m128i g = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x00FC00)), 5);
-            
-            // Extract Red (bits 3-7) -> position 11-15
-            __m128i r = _mm_slli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x0000F8)), 8);
-            
-            // Combine into 32-bit RGB565 values (each is 0x0000XXXX)
-            __m128i rgb565_32 = _mm_or_si128(_mm_or_si128(r, g), b);
-            
-            // Pack 4x 32-bit to 4x 16-bit
-            // SSE2 doesn't have _mm_packus_epi32 (unsigned pack), so extract manually
-            // Extract lower 16 bits from each 32-bit lane and store directly
-            uint32_t temp[4];
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(temp), rgb565_32);
-            
-            dst[i + 0] = static_cast<uint16_t>(temp[0]);
-            dst[i + 1] = static_cast<uint16_t>(temp[1]);
-            dst[i + 2] = static_cast<uint16_t>(temp[2]);
-            dst[i + 3] = static_cast<uint16_t>(temp[3]);
-        }
+            // SSE2: Process 4 pixels at a time
+            // XBGR8888 -> RGB565: extract R5G6B5 bits and pack
+            for (; i + 4 <= visibleWidth; i += 4) {
+                __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srcLine[i]));
+                
+                // Extract Blue (bits 19-23) -> position 0-4
+                __m128i b = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0xF80000)), 19);
+                
+                // Extract Green (bits 10-15) -> position 5-10
+                __m128i g = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x00FC00)), 5);
+                
+                // Extract Red (bits 3-7) -> position 11-15
+                __m128i r = _mm_slli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x0000F8)), 8);
+                
+                // Combine into 32-bit RGB565 values (each is 0x0000XXXX)
+                __m128i rgb565_32 = _mm_or_si128(_mm_or_si128(r, g), b);
+                
+                // Pack 4x 32-bit to 4x 16-bit
+                // SSE2 doesn't have _mm_packus_epi32 (unsigned pack), so extract manually
+                // Extract lower 16 bits from each 32-bit lane and store directly
+                uint32_t temp[4];
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(temp), rgb565_32);
+                
+                dstLine[i + 0] = static_cast<uint16_t>(temp[0]);
+                dstLine[i + 1] = static_cast<uint16_t>(temp[1]);
+                dstLine[i + 2] = static_cast<uint16_t>(temp[2]);
+                dstLine[i + 3] = static_cast<uint16_t>(temp[3]);
+            }
     #endif
 #endif
-        
-        // Scalar fallback for remaining pixels
-        for (; i < pixelCount; ++i) {
-            uint32_t pixel = src[i];
-            dst[i] = ((pixel & 0x0000F8) << 8) | ((pixel & 0x00FC00) >> 5) | ((pixel & 0xF80000) >> 19);
+            
+            // Scalar fallback for remaining pixels
+            for (; i < visibleWidth; ++i) {
+                uint32_t pixel = srcLine[i];
+                dstLine[i] = ((pixel & 0x0000F8) << 8) | ((pixel & 0x00FC00) >> 5) | ((pixel & 0xF80000) >> 19);
+            }
         }
     }
 }
@@ -1032,6 +1046,33 @@ void CoreWrapper::SetHorizontalBlend(bool enable) {
     }
 
     m_saturn->VDP.SetHorizontalBlend(enable);
+}
+
+void CoreWrapper::SetHorizontalOverscan(bool enable) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+
+    m_saturn->VDP.SetHorizontalOverscan(enable);
+}
+
+void CoreWrapper::SetVerticalOverscan(bool enable) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+
+    m_saturn->VDP.SetVerticalOverscan(enable);
+}
+
+void CoreWrapper::GetVisibleResolution(uint32_t& width, uint32_t& height) const {
+    if (!m_initialized || !m_saturn) {
+        width = 320;
+        height = 224;
+        return;
+    }
+
+    width = m_saturn->VDP.GetVisibleWidth();
+    height = m_saturn->VDP.GetVisibleHeight();
 }
 
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {

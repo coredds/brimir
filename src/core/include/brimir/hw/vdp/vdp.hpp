@@ -156,6 +156,50 @@ public:
         return m_horizontalBlend;
     }
 
+    // Enable/disable overscan display (Mednafen-style ss.h_overscan, ss.v_overscan)
+    // When disabled, crops ~8 pixels from edges for cleaner image
+    void SetHorizontalOverscan(bool enable) {
+        m_showHOverscan = enable;
+    }
+
+    bool GetHorizontalOverscan() const {
+        return m_showHOverscan;
+    }
+
+    void SetVerticalOverscan(bool enable) {
+        m_showVOverscan = enable;
+    }
+
+    bool GetVerticalOverscan() const {
+        return m_showVOverscan;
+    }
+
+    // Get visible resolution after overscan cropping
+    uint32 GetVisibleWidth() const {
+        if (m_showHOverscan) {
+            return m_HRes;
+        }
+        // Crop 8 pixels from each side (16 total)
+        return m_HRes > 16 ? m_HRes - 16 : m_HRes;
+    }
+
+    uint32 GetVisibleHeight() const {
+        if (m_showVOverscan) {
+            return m_VRes;
+        }
+        // Crop 8 pixels from top and bottom (16 total)
+        return m_VRes > 16 ? m_VRes - 16 : m_VRes;
+    }
+
+    // Get overscan crop offsets (for copying framebuffer to output)
+    uint32 GetHOverscanOffset() const {
+        return m_showHOverscan ? 0 : 8;
+    }
+
+    uint32 GetVOverscanOffset() const {
+        return m_showVOverscan ? 0 : 8;
+    }
+
     // Enable or disable transparent mesh rendering enhancement.
     void SetTransparentMeshes(bool enable) {
         m_transparentMeshes = enable;
@@ -732,6 +776,11 @@ private:
     // Horizontal blend filter for interlaced modes (Mednafen ss.h_blend style)
     // Reduces combing artifacts in high-res interlaced content
     bool m_horizontalBlend = false;
+    
+    // Overscan display flags (Mednafen ss.h_overscan, ss.v_overscan style)
+    // When true, show full rendered area. When false, crop edges for cleaner image.
+    bool m_showHOverscan = true;  // Mednafen default: enabled
+    bool m_showVOverscan = true;  // Mednafen default: enabled
     
     // Field value captured during rendering (used for weave to avoid field mismatch)
     uint32 m_renderingField = 0;

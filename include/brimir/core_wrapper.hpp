@@ -199,6 +199,19 @@ public:
     /// @param enable True to enable horizontal blending in high-res interlaced modes
     void SetHorizontalBlend(bool enable);
     
+    /// @brief Set horizontal overscan display (Mednafen ss.h_overscan style)
+    /// @param enable True to show full horizontal area, false to crop edges
+    void SetHorizontalOverscan(bool enable);
+    
+    /// @brief Set vertical overscan display (Mednafen ss.v_overscan style)
+    /// @param enable True to show full vertical area, false to crop edges
+    void SetVerticalOverscan(bool enable);
+    
+    /// @brief Get visible framebuffer dimensions after overscan cropping
+    /// @param width Output: visible width
+    /// @param height Output: visible height
+    void GetVisibleResolution(uint32_t& width, uint32_t& height) const;
+    
     /// @brief Get profiling report
     /// @return Performance profiling data as string
     std::string GetProfilingReport() const { return m_profiler.GetReport(); }

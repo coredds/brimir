@@ -136,6 +136,36 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "enabled"
     },
     {
+        "brimir_h_overscan",
+        "Horizontal Overscan",
+        nullptr,
+        "Show horizontal overscan area. Many Saturn games render content in this region. "
+        "Mednafen default: Enabled. Disable to crop ~8 pixels from each side for cleaner edges.",
+        nullptr,
+        "video",
+        {
+            { "enabled", "Enabled (Mednafen Default)" },
+            { "disabled", "Disabled (Crop Edges)" },
+            { nullptr, nullptr }
+        },
+        "enabled"
+    },
+    {
+        "brimir_v_overscan",
+        "Vertical Overscan",
+        nullptr,
+        "Show vertical overscan area. Reveals full vertical rendering. "
+        "Mednafen default: Enabled. Disable to crop ~8 pixels from top/bottom for cleaner edges.",
+        nullptr,
+        "video",
+        {
+            { "enabled", "Enabled (Mednafen Default)" },
+            { "disabled", "Disabled (Crop Edges)" },
+            { nullptr, nullptr }
+        },
+        "enabled"
+    },
+    {
         "brimir_frameskip",
         "Frameskip",
         nullptr,

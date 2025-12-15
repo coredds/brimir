@@ -566,6 +566,16 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_core->SetHorizontalBlend(horizontal_blend);
     brimir_log(RETRO_LOG_INFO, "Horizontal blend: %s", horizontal_blend ? "enabled" : "disabled");
     
+    const char* h_overscan_str = get_option_value("brimir_h_overscan", "enabled");
+    bool h_overscan = strcmp(h_overscan_str, "enabled") == 0;
+    g_core->SetHorizontalOverscan(h_overscan);
+    brimir_log(RETRO_LOG_INFO, "Horizontal overscan: %s", h_overscan ? "enabled" : "disabled");
+    
+    const char* v_overscan_str = get_option_value("brimir_v_overscan", "enabled");
+    bool v_overscan = strcmp(v_overscan_str, "enabled") == 0;
+    g_core->SetVerticalOverscan(v_overscan);
+    brimir_log(RETRO_LOG_INFO, "Vertical overscan: %s", v_overscan ? "enabled" : "disabled");
+    
     return true;
 }
 
