@@ -7,6 +7,7 @@ add_executable(brimir_tests
     main.cpp
     # Core wrapper tests
     unit/test_core_wrapper.cpp
+    unit/test_hardware_access.cpp
     unit/test_video_output.cpp
     unit/test_audio_output.cpp
     unit/test_input_handling.cpp
