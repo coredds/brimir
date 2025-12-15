@@ -5558,38 +5558,59 @@ FORCE_INLINE void VDP::VDP2ComposeLine(uint32 y, bool altField) {
             continue;
         }
 
+        // OPTIMIZED: Unrolled insertion loop for better performance
+        // The insertion loop has fixed size (3 slots), so we can fully unroll it
+        // and eliminate redundant checks and array accesses
+        const auto layerIdx = static_cast<LayerIndex>(layer);
+        const bool isSprite = (layer == LYR_Sprite);
+        
         for (uint32 x = 0; x < m_HRes; x++) {
-            if (state.pixels.transparent[x]) {
+            // Combined early-exit checks (better branch prediction)
+            if (state.pixels.transparent[x]) [[unlikely]] {
                 continue;
             }
             const uint8 priority = state.pixels.priority[x];
-            if (priority == 0) {
+            if (priority == 0) [[unlikely]] {
                 continue;
             }
-            if (layer == LYR_Sprite) {
-                if (m_spriteLayerAttrs[altField].normalShadow[x]) {
-                    continue;
-                }
+            if (isSprite && m_spriteLayerAttrs[altField].normalShadow[x]) [[unlikely]] {
+                continue;
             }
 
             // Insert the layer into the appropriate position in the stack
             // - Higher priority beats lower priority
             // - If same priority, lower Layer index beats higher Layer index
             // - layers[0] is topmost (first) layer
-            std::array<LayerIndex, 3> &layers = scanline_layers[x];
-            std::array<uint8, 3> &layerPrios = scanline_layerPrios[x];
-            for (int i = 0; i < 3; i++) {
-                if (priority > layerPrios[i] || (priority == layerPrios[i] && layer < layers[i])) {
-                    // Push layers back
-                    for (int j = 2; j > i; j--) {
-                        layers[j] = layers[j - 1];
-                        layerPrios[j] = layerPrios[j - 1];
-                    }
-                    layers[i] = static_cast<LayerIndex>(layer);
-                    layerPrios[i] = priority;
-                    break;
-                }
+            
+            // OPTIMIZATION: Load array references once, unroll insertion loop
+            LayerIndex* const layers = scanline_layers[x].data();
+            uint8* const layerPrios = scanline_layerPrios[x].data();
+            
+            // Unrolled insertion: Check position 0 (topmost)
+            if (priority > layerPrios[0] || (priority == layerPrios[0] && layerIdx < layers[0])) {
+                // Insert at position 0, shift others down
+                layers[2] = layers[1];
+                layers[1] = layers[0];
+                layers[0] = layerIdx;
+                layerPrios[2] = layerPrios[1];
+                layerPrios[1] = layerPrios[0];
+                layerPrios[0] = priority;
             }
+            // Check position 1
+            else if (priority > layerPrios[1] || (priority == layerPrios[1] && layerIdx < layers[1])) {
+                // Insert at position 1, shift position 2 down
+                layers[2] = layers[1];
+                layers[1] = layerIdx;
+                layerPrios[2] = layerPrios[1];
+                layerPrios[1] = priority;
+            }
+            // Check position 2
+            else if (priority > layerPrios[2] || (priority == layerPrios[2] && layerIdx < layers[2])) {
+                // Insert at position 2 (no shift needed)
+                layers[2] = layerIdx;
+                layerPrios[2] = priority;
+            }
+            // else: priority too low, don't insert
         }
     }
 

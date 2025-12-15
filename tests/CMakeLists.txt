@@ -10,6 +10,8 @@ add_executable(brimir_tests
     main.cpp
     # Basic smoke tests
     unit/test_basic.cpp
+    # VDP priority and compositing tests
+    unit/test_vdp_priority.cpp
     # Core wrapper tests (disabled until fixed)
     # unit/test_core_wrapper.cpp
     # unit/test_hardware_access.cpp
