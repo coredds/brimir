@@ -18,12 +18,15 @@
 namespace brimir::vdp {
 
 // Helper: Convert Saturn Color555 to GPU RGBA float
+// Matches VDP's ConvertRGB555to888() from vdp_defs.hpp line 74
 inline void Color555ToFloat(Color555 color, float& r, float& g, float& b, float& a) {
     // Saturn uses 5-bit RGB (0-31 range)
-    // Convert to float (0.0-1.0)
-    r = static_cast<float>(color.r) / 31.0f;
-    g = static_cast<float>(color.g) / 31.0f;
-    b = static_cast<float>(color.b) / 31.0f;
+    // VDP expands by left-shifting by 3: val << 3 (0-248 range)
+    // Convert to float: (val << 3) / 255.0
+    // This matches the real VDP behavior exactly
+    r = static_cast<float>(color.r << 3) / 255.0f;
+    g = static_cast<float>(color.g << 3) / 255.0f;
+    b = static_cast<float>(color.b << 3) / 255.0f;
     // For solid-color polygons, always use full opacity
     // MSB bit is used for texture transparency, not vertex colors
     a = 1.0f;
