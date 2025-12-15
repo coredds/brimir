@@ -5,16 +5,27 @@ find_package(Catch2 3 CONFIG REQUIRED)
 # Test executable
 add_executable(brimir_tests
     main.cpp
+    # Core wrapper tests
     unit/test_core_wrapper.cpp
     unit/test_video_output.cpp
     unit/test_audio_output.cpp
     unit/test_input_handling.cpp
+    # BIOS tests
     unit/test_bios.cpp
     unit/test_bios_integration.cpp
+    unit/test_bios_boot_sequence.cpp
+    # Game loading tests
     unit/test_game_loading.cpp
     unit/test_save_states.cpp
     unit/test_cartridge_support.cpp
     unit/test_sram_persistence.cpp
+    # Hardware-accurate tests (documentation-based)
+    unit/test_sh2_cache.cpp
+    unit/test_vdp_registers.cpp
+    unit/test_memory_map.cpp
+    unit/test_scu_dma.cpp
+    # Regression tests
+    unit/test_regressions.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
