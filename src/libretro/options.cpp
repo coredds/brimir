@@ -85,11 +85,13 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_deinterlacing",
         "Deinterlacing",
         nullptr,
-        "Enable deinterlacing for interlaced video modes (used in some game menus like Panzer Dragoon Zwei). Disable for slightly better performance in progressive-only games.",
+        "Enable deinterlacing for interlaced video modes. Many games use interlaced high-res modes for menus (Panzer Dragoon Zwei, Grandia, etc). "
+        "RECOMMENDED: Keep enabled. Uses optimized single-field rendering (Bob mode) for 60 FPS with no scanlines. "
+        "Disable only for progressive-only games to skip post-processing.",
         nullptr,
         "video",
         {
-            { "enabled", "Enabled" },
+            { "enabled", "Enabled (Recommended)" },
             { "disabled", "Disabled" },
             { nullptr, nullptr }
         },
@@ -99,21 +101,22 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_deinterlace_mode",
         "Deinterlacing Mode",
         nullptr,
-        "Method for deinterlacing high-resolution modes. "
-        "Blend (recommended) renders both fields and blends them for smooth output with minimal performance cost (~0.5ms). "
-        "Weave shows one field per frame (fastest, authentic to CRT but shows combing). "
-        "Current uses the original Ymir threaded renderer (most accurate but slowest, ~7ms overhead).",
+        "Method for deinterlacing interlaced video modes (menus in Panzer Dragoon, Grandia, etc). "
+        "Bob (RECOMMENDED): Duplicates current field to both lines - 60 FPS, no scanlines, smooth. Best for libretro. "
+        "Weave: Shows alternating fields - 60 FPS, authentic CRT look with scanlines. "
+        "Blend: Blends both fields - 60 FPS, may show ghosting. "
+        "Current: Legacy dual-field threaded renderer - more accurate but slower (~45 FPS).",
         nullptr,
         "video",
         {
-            { "blend", "Blend (Recommended)" },
-            { "weave", "Weave (Fastest)" },
-            { "bob", "Bob (Smooth Motion)" },
-            { "current", "Current (Accurate)" },
+            { "bob", "Bob (Recommended - No Scanlines, 60 FPS)" },
+            { "weave", "Weave (CRT Authentic, Scanlines)" },
+            { "blend", "Blend (Ghosting Effect)" },
+            { "current", "Current (Accurate, Slower)" },
             { "none", "None (Native Interlacing)" },
             { nullptr, nullptr }
         },
-        "blend"
+        "bob"
     },
     {
         "brimir_frameskip",

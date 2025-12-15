@@ -557,7 +557,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_core->SetDeinterlacing(deinterlacing);
     brimir_log(RETRO_LOG_INFO, "Deinterlacing: %s", deinterlacing ? "enabled" : "disabled");
     
-    const char* deinterlace_mode = get_option_value("brimir_deinterlace_mode", "blend");
+    const char* deinterlace_mode = get_option_value("brimir_deinterlace_mode", "bob");
     g_core->SetDeinterlacingMode(deinterlace_mode);
     brimir_log(RETRO_LOG_INFO, "Deinterlacing mode: %s", deinterlace_mode);
     

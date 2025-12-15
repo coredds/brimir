@@ -68,19 +68,19 @@ bool CoreWrapper::Initialize() {
         // We'll set the path later when the game loads (need game name for per-game saves)
         // For now, just mark as uninitialized
         
-        // Configure Ymir with threaded VDP for performance (same as standalone app's recommended settings)
-        // Threaded VDP is actually FASTER despite async callbacks
+        // Configure Brimir with optimized settings for libretro
+        // Threaded VDP provides better frame pacing and async rendering
         m_saturn->configuration.video.threadedVDP = true;
         // Note: threadedDeinterlacer will be set by SetDeinterlaceMode() below
         m_saturn->configuration.video.includeVDP1InRenderThread = false;
         
-        // Set Bob mode for optimal deinterlacing performance
-        // Bob duplicates current field to both even/odd lines (no scanlines, 60 FPS)
-        // This provides complete image without artifacts and maintains performance
-        // Note: SetDeinterlaceMode() now controls m_deinterlaceRender automatically
+        // Enable deinterlacing with Bob mode for optimal libretro performance
+        // Bob mode: 60 FPS, no scanlines, no shader required - ideal for RetroArch
+        // Many games use interlaced hi-res menus (Panzer Dragoon Zwei, Grandia, etc)
+        // Note: SetDeinterlaceMode() controls both m_deinterlaceRender and m_threadedDeinterlacer
         m_saturn->VDP.SetDeinterlaceMode(brimir::vdp::DeinterlaceMode::Bob);
         
-        // Enable transparent mesh for better visuals (same as standalone "Recommended")
+        // Enable transparent mesh for accurate VDP1 rendering
         m_saturn->VDP.SetTransparentMeshes(true);
         
         // Set up VDP render callback to capture framebuffer
