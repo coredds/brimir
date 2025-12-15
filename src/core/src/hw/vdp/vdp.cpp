@@ -1490,6 +1490,48 @@ void VDP::BeginVPhaseBlankingAndSync() {
             }
         }
         
+        // Horizontal blend filter for interlaced modes (Mednafen ss.h_blend style)
+        // Reduces combing artifacts in high-res content by blending adjacent horizontal pixels
+        // Only apply for high-resolution modes (>=640 width) where combing is most visible
+        if (m_horizontalBlend && m_HRes >= 640) {
+            #ifdef BRIMIR_ENABLE_VDP_PROFILING
+            auto hblendStart = std::chrono::high_resolution_clock::now();
+            #endif
+            
+            // Weighted 3-tap horizontal blur: (prev + 2*curr + next) / 4
+            // Preserves more detail than simple average while still reducing combing
+            for (uint32 y = 0; y < m_VRes; y++) {
+                uint32* line = &m_framebuffer[y * m_HRes];
+                
+                // Process line from right to left to avoid overwriting source pixels
+                // Store first pixel result (needs special handling for x=0)
+                uint32 prevColor = line[0];
+                for (uint32 x = 1; x < m_HRes - 1; x++) {
+                    const uint32 leftColor = line[x - 1];
+                    const uint32 centerColor = line[x];
+                    const uint32 rightColor = line[x + 1];
+                    
+                    // Blend each channel separately (XRGB8888 format)
+                    const uint32 r = ((leftColor & 0x00FF0000) + 2 * (centerColor & 0x00FF0000) + (rightColor & 0x00FF0000)) >> 2;
+                    const uint32 g = ((leftColor & 0x0000FF00) + 2 * (centerColor & 0x0000FF00) + (rightColor & 0x0000FF00)) >> 2;
+                    const uint32 b = ((leftColor & 0x000000FF) + 2 * (centerColor & 0x000000FF) + (rightColor & 0x000000FF)) >> 2;
+                    
+                    line[x] = 0xFF000000 | (r & 0x00FF0000) | (g & 0x0000FF00) | (b & 0x000000FF);
+                }
+                
+                // Edge pixels: use simple duplication (no blend)
+                // Edges don't benefit much from blending anyway
+            }
+            
+            #ifdef BRIMIR_ENABLE_VDP_PROFILING
+            auto hblendEnd = std::chrono::high_resolution_clock::now();
+            auto hblendTime = std::chrono::duration_cast<std::chrono::microseconds>(hblendEnd - hblendStart).count();
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Horizontal blend time: %.3f ms\n", hblendTime / 1000.0);
+            m_profiler.WriteDiagnostic(buf);
+            #endif
+        }
+        
         // Diagnostic: Count non-black pixels AFTER deinterlacing
         uint32 nonBlackAfter = 0;
         for (uint32 i = 0; i < m_HRes * m_VRes; i++) {

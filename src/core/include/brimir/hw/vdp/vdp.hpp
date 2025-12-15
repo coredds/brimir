@@ -146,6 +146,16 @@ public:
         return m_deinterlaceMode;
     }
 
+    // Enable/disable horizontal blend filter for interlaced modes (Mednafen-style ss.h_blend)
+    // Reduces combing artifacts in high-res interlaced content by blending adjacent horizontal pixels
+    void SetHorizontalBlend(bool enable) {
+        m_horizontalBlend = enable;
+    }
+
+    bool GetHorizontalBlend() const {
+        return m_horizontalBlend;
+    }
+
     // Enable or disable transparent mesh rendering enhancement.
     void SetTransparentMeshes(bool enable) {
         m_transparentMeshes = enable;
@@ -718,6 +728,10 @@ private:
 
     // Current field for weave/bob modes (0 or 1)
     int m_currentField = 0;
+    
+    // Horizontal blend filter for interlaced modes (Mednafen ss.h_blend style)
+    // Reduces combing artifacts in high-res interlaced content
+    bool m_horizontalBlend = false;
     
     // Field value captured during rendering (used for weave to avoid field mismatch)
     uint32 m_renderingField = 0;

@@ -1026,6 +1026,14 @@ void CoreWrapper::SetDeinterlacing(bool enable) {
     m_saturn->VDP.SetDeinterlaceRender(enable);
 }
 
+void CoreWrapper::SetHorizontalBlend(bool enable) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+
+    m_saturn->VDP.SetHorizontalBlend(enable);
+}
+
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {
     if (!m_initialized || !m_saturn || !mode) {
         return;

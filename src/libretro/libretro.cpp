@@ -561,6 +561,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_core->SetDeinterlacingMode(deinterlace_mode);
     brimir_log(RETRO_LOG_INFO, "Deinterlacing mode: %s", deinterlace_mode);
     
+    const char* horizontal_blend_str = get_option_value("brimir_horizontal_blend", "enabled");
+    bool horizontal_blend = strcmp(horizontal_blend_str, "enabled") == 0;
+    g_core->SetHorizontalBlend(horizontal_blend);
+    brimir_log(RETRO_LOG_INFO, "Horizontal blend: %s", horizontal_blend ? "enabled" : "disabled");
+    
     return true;
 }
 

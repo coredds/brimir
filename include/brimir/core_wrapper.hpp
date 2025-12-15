@@ -195,6 +195,10 @@ public:
     /// @param mode Mode string: "current", "weave", "blend", "bob", "none"
     void SetDeinterlacingMode(const char* mode);
     
+    /// @brief Set horizontal blend filter for interlaced modes (Mednafen ss.h_blend style)
+    /// @param enable True to enable horizontal blending in high-res interlaced modes
+    void SetHorizontalBlend(bool enable);
+    
     /// @brief Get profiling report
     /// @return Performance profiling data as string
     std::string GetProfilingReport() const { return m_profiler.GetReport(); }
