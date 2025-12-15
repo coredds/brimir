@@ -34,6 +34,10 @@ class ControlPad;
 struct PeripheralReport;
 enum class Button : uint16_t;
 }
+
+namespace vdp {
+class IVDPRenderer;
+}
 }
 
 namespace brimir {
@@ -243,6 +247,9 @@ private:
     bool m_initialized = false;
     bool m_gameLoaded = false;
     bool m_iplLoaded = false;
+    
+    // GPU renderer (optional, nullptr if using software rendering)
+    std::unique_ptr<brimir::vdp::IVDPRenderer> m_gpuRenderer;
 
     // Video framebuffer info (will be updated from Ymir's VDP)
     unsigned int m_fbWidth = 320;

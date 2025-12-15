@@ -248,6 +248,10 @@ public:
 
     // Detemrines if a layer is forcibly disabled.
     bool IsLayerEnabled(Layer layer) const;
+    
+    // GPU renderer support
+    void SetGPURenderer(class IVDPRenderer* renderer, bool enable);
+    bool IsUsingGPURenderer() const { return m_useGPURenderer; }
 
 private:
     VDPState m_state;
@@ -255,6 +259,10 @@ private:
     // Cached CRAM colors converted from RGB555 to RGB888.
     // Only valid when color RAM mode is one of the RGB555 modes.
     alignas(16) std::array<Color888, kVDP2CRAMSize / sizeof(uint16)> m_CRAMCache;
+    
+    // GPU renderer (optional, nullptr if using software rendering)
+    class IVDPRenderer* m_gpuRenderer = nullptr;
+    bool m_useGPURenderer = false;
 
     CBHBlankStateChange m_cbHBlankStateChange;
     CBVBlankStateChange m_cbVBlankStateChange;

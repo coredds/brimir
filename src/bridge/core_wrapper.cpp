@@ -15,6 +15,8 @@
 #include <brimir/hw/cart/cart_impl_dram.hpp>
 #include <brimir/hw/cart/cart_impl_rom.hpp>
 #include <brimir/core/hash.hpp>
+#include <brimir/hw/vdp/vdp_renderer.hpp>
+#include <brimir/hw/vdp/gpu/vulkan_renderer.hpp>
 
 #include <cstring>
 #include <filesystem>
@@ -1037,14 +1039,25 @@ void CoreWrapper::SetRenderer(const char* renderer) {
         return;
     }
 
-    // TODO: Implement GPU renderer selection
-    // For now, only software renderer is fully implemented
     if (strcmp(renderer, "vulkan") == 0) {
-        // GPU renderer will be enabled in future update
-        // m_saturn->VDP.SetGPURenderer(true);
+        // Create Vulkan renderer if not already created
+        if (!m_gpuRenderer) {
+            m_gpuRenderer = brimir::vdp::CreateRenderer(brimir::vdp::RendererType::Vulkan);
+            if (!m_gpuRenderer) {
+                // Failed to create Vulkan renderer, fall back to software
+                m_saturn->VDP.SetGPURenderer(nullptr, false);
+                return;
+            }
+        }
+        
+        // Enable GPU rendering
+        m_saturn->VDP.SetGPURenderer(m_gpuRenderer.get(), true);
     } else {
         // Software renderer (default)
-        // m_saturn->VDP.SetGPURenderer(false);
+        m_saturn->VDP.SetGPURenderer(nullptr, false);
+        
+        // Optionally destroy GPU renderer to free resources
+        // m_gpuRenderer.reset();
     }
 }
 

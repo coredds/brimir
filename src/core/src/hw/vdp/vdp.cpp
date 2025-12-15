@@ -1,6 +1,8 @@
 #include <brimir/hw/vdp/vdp.hpp>
 #include <brimir/hw/vdp/vdp_simd.hpp>
 #include <brimir/vdp_profiling.hpp>
+#include <brimir/hw/vdp/vdp_renderer.hpp>
+#include <brimir/hw/vdp/gpu/vulkan_renderer.hpp>
 
 #include <brimir/util/bit_ops.hpp>
 #include <brimir/util/constexpr_for.hpp>
@@ -831,6 +833,21 @@ void VDP::SetLayerEnabled(Layer layer, bool enabled) {
 
 bool VDP::IsLayerEnabled(Layer layer) const {
     return m_layerRendered[static_cast<size_t>(layer)];
+}
+
+void VDP::SetGPURenderer(IVDPRenderer* renderer, bool enable) {
+    m_gpuRenderer = renderer;
+    m_useGPURenderer = enable && (renderer != nullptr);
+    
+    if (m_useGPURenderer && m_gpuRenderer) {
+        // Initialize GPU renderer if needed
+        if (!m_gpuRenderer->Initialize()) {
+            devlog::warn<grp::vdp1>("Failed to initialize GPU renderer, falling back to software");
+            m_useGPURenderer = false;
+        } else {
+            devlog::info<grp::vdp1>("GPU renderer enabled");
+        }
+    }
 }
 
 void VDP::OnPhaseUpdateEvent(core::EventContext &eventContext, void *userContext) {
@@ -2946,6 +2963,16 @@ void VDP::VDP1Cmd_DrawPolygon(uint32 cmdAddress, VDP1Command::Control control) {
     const sint32 xd = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x18)) + ctx.localCoordX;
     const sint32 yd = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1A)) + ctx.localCoordY;
     const uint32 gouraudTable = static_cast<uint32>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1C)) << 3u;
+    
+    // GPU rendering path (if enabled)
+    // TODO: Implement GPU polygon rendering
+    // For now, GPU renderer is not yet integrated with VDP1 commands
+    // This will be enabled in a future update once the renderer interface
+    // includes the necessary VDP1 command methods
+    if (false && m_gpuRenderer && m_useGPURenderer) {
+        // GPU rendering will be implemented here
+        // return; // Skip software rendering
+    }
 
     const sint32 doubleV = ctx.doubleV;
     const CoordS32 coordA{xa, ya << doubleV};
