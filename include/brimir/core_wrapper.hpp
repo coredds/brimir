@@ -15,7 +15,13 @@
 
 #include "brimir/profiler.hpp"
 
-// Forward declarations to avoid including Ymir headers here
+// Include Saturn headers for test access
+// Note: Only include in test builds to keep libretro API clean
+#ifdef BRIMIR_BUILD_TESTS
+#include <brimir/sys/saturn.hpp>
+#endif
+
+// Forward declarations to avoid including Ymir headers in libretro builds
 namespace brimir {
 struct Saturn;
 
