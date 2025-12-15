@@ -115,6 +115,25 @@ public:
         m_statistics.drawCallCount++;
     }
     
+    // ===== Simplified Drawing API =====
+    
+    void DrawSolidPolygon(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                          int32_t x2, int32_t y2, int32_t x3, int32_t y3,
+                          Color555 color) override {
+        // Software renderer doesn't use this API
+        // Actual rendering is done through VDP directly
+        m_statistics.drawCallCount++;
+    }
+    
+    void DrawGouraudPolygon(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                            int32_t x2, int32_t y2, int32_t x3, int32_t y3,
+                            Color555 colorA, Color555 colorB,
+                            Color555 colorC, Color555 colorD) override {
+        // Software renderer doesn't use this API
+        // Actual rendering is done through VDP directly
+        m_statistics.drawCallCount++;
+    }
+    
     // ===== VDP2 Rendering =====
     
     void VDP2DrawBackground(int layer, const VDP2LayerState& state) override {

@@ -1133,7 +1133,7 @@ public:
     // Coordinates are in Saturn screen space
     void DrawSolidPolygon(int32_t xa, int32_t ya, int32_t xb, int32_t yb,
                           int32_t xc, int32_t yc, int32_t xd, int32_t yd,
-                          Color555 color) {
+                          Color555 color) override {
         float r, g, b, a;
         Color555ToFloat(color, r, g, b, a);
         
@@ -1160,7 +1160,7 @@ public:
     // Draw a Gouraud-shaded polygon (4 vertices, 4 colors)
     void DrawGouraudPolygon(int32_t xa, int32_t ya, int32_t xb, int32_t yb,
                             int32_t xc, int32_t yc, int32_t xd, int32_t yd,
-                            Color555 colorA, Color555 colorB, Color555 colorC, Color555 colorD) {
+                            Color555 colorA, Color555 colorB, Color555 colorC, Color555 colorD) override {
         float r0, g0, b0, a0;
         float r1, g1, b1, a1;
         float r2, g2, b2, a2;

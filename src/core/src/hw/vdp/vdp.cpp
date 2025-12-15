@@ -2965,13 +2965,22 @@ void VDP::VDP1Cmd_DrawPolygon(uint32 cmdAddress, VDP1Command::Control control) {
     const uint32 gouraudTable = static_cast<uint32>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1C)) << 3u;
     
     // GPU rendering path (if enabled)
-    // TODO: Implement GPU polygon rendering
-    // For now, GPU renderer is not yet integrated with VDP1 commands
-    // This will be enabled in a future update once the renderer interface
-    // includes the necessary VDP1 command methods
-    if (false && m_gpuRenderer && m_useGPURenderer) {
-        // GPU rendering will be implemented here
-        // return; // Skip software rendering
+    if (m_gpuRenderer && m_useGPURenderer) {
+        if (mode.gouraudEnable) {
+            // Gouraud shading: read 4 colors from gouraud table
+            Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
+            Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
+            Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
+            Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
+            
+            m_gpuRenderer->DrawGouraudPolygon(xa, ya, xb, yb, xc, yc, xd, yd,
+                                              colorA, colorB, colorC, colorD);
+        } else {
+            // Solid color polygon
+            Color555 color555{.u16 = color};
+            m_gpuRenderer->DrawSolidPolygon(xa, ya, xb, yb, xc, yc, xd, yd, color555);
+        }
+        return; // Skip software rendering
     }
 
     const sint32 doubleV = ctx.doubleV;

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include "vdp_defs.hpp"
 
 namespace brimir::vdp {
 
@@ -110,6 +111,19 @@ public:
     
     /// Draw VDP1 polyline
     virtual void VDP1DrawPolyline(const VDP1Command& cmd) = 0;
+    
+    // ===== Simplified Drawing API (for direct GPU access) =====
+    
+    /// Draw a solid-color polygon (Color555 format)
+    virtual void DrawSolidPolygon(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                                  int32_t x2, int32_t y2, int32_t x3, int32_t y3,
+                                  Color555 color) = 0;
+    
+    /// Draw a Gouraud-shaded polygon (Color555 format for each vertex)
+    virtual void DrawGouraudPolygon(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                                    int32_t x2, int32_t y2, int32_t x3, int32_t y3,
+                                    Color555 colorA, Color555 colorB,
+                                    Color555 colorC, Color555 colorD) = 0;
     
     // ===== VDP2 Rendering (Backgrounds) =====
     
