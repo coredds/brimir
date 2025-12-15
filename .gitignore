@@ -129,6 +129,13 @@ coverage/
 # Documentation
 docs/
 
+# Block all root-level markdown files except standard ones
+/*.md
+!README.md
+!CONTRIBUTING.md
+!CHANGELOG.md
+!LICENSE.md
+
 # Packaging
 *.deb
 *.rpm
