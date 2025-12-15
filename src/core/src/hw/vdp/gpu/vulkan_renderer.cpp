@@ -15,7 +15,8 @@
 
 namespace brimir::vdp {
 
-class VulkanRenderer final : public IVDPRenderer {
+// Make VulkanRenderer visible for tests
+class VulkanRenderer : public IVDPRenderer {
 public:
     VulkanRenderer() = default;
     ~VulkanRenderer() override {
@@ -74,7 +75,13 @@ public:
                 return false;
             }
             
-            // Step 8: Allocate command buffer
+            // Step 8: Create vertex buffer
+            if (!CreateVertexBuffer()) {
+                Shutdown();
+                return false;
+            }
+            
+            // Step 9: Allocate command buffer
             if (!AllocateCommandBuffer()) {
                 Shutdown();
                 return false;
@@ -82,6 +89,9 @@ public:
             
             // Allocate CPU-side framebuffer for readback
             m_framebuffer.resize(m_width * m_height);
+            
+            // Reserve space for vertices (typical VDP1 frame has ~1000 polygons)
+            m_vertices.reserve(6000);  // ~1000 quads = 6000 vertices
             
             m_initialized = true;
             return true;
@@ -158,6 +168,17 @@ public:
                 m_stagingMemory = VK_NULL_HANDLE;
             }
             
+            // Destroy vertex buffer
+            if (m_vertexBuffer) {
+                vkDestroyBuffer(m_device, m_vertexBuffer, nullptr);
+                m_vertexBuffer = VK_NULL_HANDLE;
+            }
+            
+            if (m_vertexBufferMemory) {
+                vkFreeMemory(m_device, m_vertexBufferMemory, nullptr);
+                m_vertexBufferMemory = VK_NULL_HANDLE;
+            }
+            
             if (m_commandPool) {
                 vkDestroyCommandPool(m_device, m_commandPool, nullptr);
                 m_commandPool = VK_NULL_HANDLE;
@@ -215,10 +236,40 @@ public:
         renderPassInfo.pClearValues = &clearColor;
         
         vkCmdBeginRenderPass(m_commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        
+        // Bind pipeline
+        vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline);
+        
+        // Bind vertex buffer
+        VkBuffer vertexBuffers[] = {m_vertexBuffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(m_commandBuffer, 0, 1, vertexBuffers, offsets);
+        
+        // Clear vertices for this frame
+        m_vertices.clear();
     }
     
     void EndFrame() override {
         if (!m_initialized) return;
+        
+        // Upload vertex data if we have any
+        if (!m_vertices.empty()) {
+            UploadVertexData();
+            
+            // Set push constants
+            PushConstants pc;
+            pc.screenSize[0] = static_cast<float>(m_width);
+            pc.screenSize[1] = static_cast<float>(m_height);
+            pc.flags = 0;  // No texture, no effects for now
+            pc.priority = 0;
+            
+            vkCmdPushConstants(m_commandBuffer, m_pipelineLayout,
+                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                             0, sizeof(PushConstants), &pc);
+            
+            // Draw all vertices
+            vkCmdDraw(m_commandBuffer, static_cast<uint32_t>(m_vertices.size()), 1, 0, 0);
+        }
         
         // End render pass
         vkCmdEndRenderPass(m_commandBuffer);
@@ -442,6 +493,26 @@ private:
     VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
     VkShaderModule m_vertShaderModule = VK_NULL_HANDLE;
     VkShaderModule m_fragShaderModule = VK_NULL_HANDLE;
+    
+    // Vertex buffer resources
+    VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;
+    size_t m_vertexBufferSize = 0;
+    
+    // VDP1 vertex data
+    struct VDP1Vertex {
+        float pos[2];      // x, y
+        float color[4];    // r, g, b, a
+        float texCoord[2]; // u, v
+    };
+    std::vector<VDP1Vertex> m_vertices;
+    
+    // Push constants structure
+    struct PushConstants {
+        float screenSize[2];
+        uint32_t flags;
+        uint32_t priority;
+    };
     
     // Initialization helpers
     bool CreateInstance() {
@@ -972,6 +1043,102 @@ private:
         }
         
         return shaderModule;
+    }
+    
+    bool CreateVertexBuffer() {
+        // Create a dynamic vertex buffer (64KB initial size, can grow)
+        m_vertexBufferSize = 64 * 1024;  // 64KB = ~2000 vertices
+        
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = m_vertexBufferSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        
+        if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &m_vertexBuffer) != VK_SUCCESS) {
+            return false;
+        }
+        
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(m_device, m_vertexBuffer, &memRequirements);
+        
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits,
+                                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        
+        if (vkAllocateMemory(m_device, &allocInfo, nullptr, &m_vertexBufferMemory) != VK_SUCCESS) {
+            return false;
+        }
+        
+        vkBindBufferMemory(m_device, m_vertexBuffer, m_vertexBufferMemory, 0);
+        
+        return true;
+    }
+    
+    void UploadVertexData() {
+        size_t dataSize = m_vertices.size() * sizeof(VDP1Vertex);
+        
+        // Resize buffer if needed
+        if (dataSize > m_vertexBufferSize) {
+            // Destroy old buffer
+            vkDestroyBuffer(m_device, m_vertexBuffer, nullptr);
+            vkFreeMemory(m_device, m_vertexBufferMemory, nullptr);
+            
+            // Create larger buffer
+            m_vertexBufferSize = dataSize * 2;  // Double size for growth
+            CreateVertexBuffer();
+        }
+        
+        // Map memory and copy data
+        void* data;
+        vkMapMemory(m_device, m_vertexBufferMemory, 0, dataSize, 0, &data);
+        std::memcpy(data, m_vertices.data(), dataSize);
+        vkUnmapMemory(m_device, m_vertexBufferMemory);
+    }
+    
+public:
+    // ===== VDP1 Command Processing =====
+    
+    // Add a colored quad (for testing and solid-color polygons)
+    void DrawQuad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+                  float r, float g, float b, float a) {
+        // Triangle 1: (0, 1, 2)
+        m_vertices.push_back({{x0, y0}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x1, y1}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x2, y2}, {r, g, b, a}, {0.0f, 0.0f}});
+        
+        // Triangle 2: (0, 2, 3)
+        m_vertices.push_back({{x0, y0}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x2, y2}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x3, y3}, {r, g, b, a}, {0.0f, 0.0f}});
+    }
+    
+    // Add a triangle
+    void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float y2,
+                      float r, float g, float b, float a) {
+        m_vertices.push_back({{x0, y0}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x1, y1}, {r, g, b, a}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x2, y2}, {r, g, b, a}, {0.0f, 0.0f}});
+    }
+    
+    // Add a Gouraud-shaded quad (4 colors, one per vertex)
+    void DrawGouraudQuad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+                         float r0, float g0, float b0, float a0,
+                         float r1, float g1, float b1, float a1,
+                         float r2, float g2, float b2, float a2,
+                         float r3, float g3, float b3, float a3) {
+        // Triangle 1
+        m_vertices.push_back({{x0, y0}, {r0, g0, b0, a0}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x1, y1}, {r1, g1, b1, a1}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x2, y2}, {r2, g2, b2, a2}, {0.0f, 0.0f}});
+        
+        // Triangle 2
+        m_vertices.push_back({{x0, y0}, {r0, g0, b0, a0}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x2, y2}, {r2, g2, b2, a2}, {0.0f, 0.0f}});
+        m_vertices.push_back({{x3, y3}, {r3, g3, b3, a3}, {0.0f, 0.0f}});
     }
 };
 
