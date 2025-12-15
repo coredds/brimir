@@ -24,7 +24,9 @@ inline void Color555ToFloat(Color555 color, float& r, float& g, float& b, float&
     r = static_cast<float>(color.r) / 31.0f;
     g = static_cast<float>(color.g) / 31.0f;
     b = static_cast<float>(color.b) / 31.0f;
-    a = color.msb ? 1.0f : 0.0f; // MSB bit controls transparency
+    // For solid-color polygons, always use full opacity
+    // MSB bit is used for texture transparency, not vertex colors
+    a = 1.0f;
 }
 
 // Make VulkanRenderer visible for tests
@@ -807,6 +809,25 @@ private:
         
         vkBeginCommandBuffer(commandBuffer, &beginInfo);
         
+        // Transition framebuffer image from COLOR_ATTACHMENT_OPTIMAL to TRANSFER_SRC_OPTIMAL
+        VkImageMemoryBarrier fbBarrier{};
+        fbBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        fbBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        fbBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        fbBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fbBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        fbBarrier.image = m_framebufferImage;
+        fbBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        fbBarrier.subresourceRange.baseMipLevel = 0;
+        fbBarrier.subresourceRange.levelCount = 1;
+        fbBarrier.subresourceRange.baseArrayLayer = 0;
+        fbBarrier.subresourceRange.layerCount = 1;
+        fbBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        fbBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &fbBarrier);
+        
         // Transition staging image to transfer dst
         VkImageMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -847,6 +868,15 @@ private:
         
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        
+        // Transition framebuffer back to COLOR_ATTACHMENT_OPTIMAL for next frame
+        fbBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        fbBarrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        fbBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        fbBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &fbBarrier);
         
         vkEndCommandBuffer(commandBuffer);
         

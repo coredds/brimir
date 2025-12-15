@@ -20,6 +20,8 @@ add_executable(brimir_tests
     unit/test_gpu_rendering.cpp
     # GPU validation tests (GPU vs Software comparison)
     unit/test_gpu_validation.cpp
+    # GPU debug tests
+    unit/test_gpu_debug.cpp
     # Core wrapper tests (disabled until fixed)
     # unit/test_core_wrapper.cpp
     # unit/test_hardware_access.cpp

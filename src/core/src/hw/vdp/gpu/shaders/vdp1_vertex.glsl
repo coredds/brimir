@@ -18,8 +18,9 @@ layout(push_constant) uniform PushConstants {
 
 void main() {
     // Convert Saturn screen coordinates to Vulkan NDC [-1, 1]
+    // Saturn: (0,0) = top-left, Vulkan NDC: (-1,-1) = top-left
     vec2 ndc = (inPosition / pc.screenSize) * 2.0 - 1.0;
-    ndc.y = -ndc.y;  // Flip Y (Vulkan top-left vs Saturn top-left)
+    // No Y flip needed - both Saturn and Vulkan use top-left origin
     
     gl_Position = vec4(ndc, 0.0, 1.0);
     fragColor = inColor;
