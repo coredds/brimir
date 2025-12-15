@@ -280,6 +280,8 @@ add_library(brimir-core STATIC
 
     src/hw/vdp/vdp.cpp
     src/hw/vdp/vdp_profiler.cpp
+    src/hw/vdp/vdp_renderer.cpp
+    src/hw/vdp/software_renderer.cpp
 
     # New VDP1 (Mednafen-inspired)
     src/hw/vdp1/vdp1.cpp
