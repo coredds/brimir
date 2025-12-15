@@ -12,6 +12,8 @@ add_executable(brimir_tests
     unit/test_basic.cpp
     # VDP priority and compositing tests
     unit/test_vdp_priority.cpp
+    # VDP color calculation tests
+    unit/test_vdp_color_calc.cpp
     # Core wrapper tests (disabled until fixed)
     # unit/test_core_wrapper.cpp
     # unit/test_hardware_access.cpp

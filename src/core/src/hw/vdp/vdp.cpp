@@ -5819,19 +5819,25 @@ FORCE_INLINE void VDP::VDP2ComposeLine(uint32 y, bool altField) {
             Color888SatAddMasked(framebufferOutput, layer0ColorCalcEnabled, layer0Pixels, layer1Pixels);
         } else {
             // Gather color ratio info
+            // OPTIMIZED: Hoist invariant values and improve branch prediction
             alignas(16) std::array<uint8, kMaxResH> scanline_ratio;
+            
+            // Hoist invariant ratios
+            const uint8 backRatio = regs.backScreenParams.colorCalcRatio;
+            const uint8 lineRatio = regs.lineScreenParams.colorCalcRatio;
+            const uint32 ratioLayerIndex = colorCalcParams.useSecondScreenRatio;
+            
             for (uint32 x = 0; x < m_HRes; x++) {
-                if (!layer0ColorCalcEnabled[x]) {
+                if (!layer0ColorCalcEnabled[x]) [[likely]] {
                     scanline_ratio[x] = 0;
                     continue;
                 }
 
-                const LayerIndex layer = scanline_layers[x][colorCalcParams.useSecondScreenRatio];
+                const LayerIndex layer = scanline_layers[x][ratioLayerIndex];
                 switch (layer) {
                 case LYR_Sprite: scanline_ratio[x] = m_spriteLayerAttrs[altField].colorCalcRatio[x]; break;
                 case LYR_Back:
-                    scanline_ratio[x] = layer0LineColorEnabled[x] ? regs.lineScreenParams.colorCalcRatio
-                                                                  : regs.backScreenParams.colorCalcRatio;
+                    scanline_ratio[x] = layer0LineColorEnabled[x] ? lineRatio : backRatio;
                     break;
                 default: scanline_ratio[x] = regs.bgParams[layer - LYR_RBG0].colorCalcRatio; break;
                 }
@@ -5853,26 +5859,37 @@ FORCE_INLINE void VDP::VDP2ComposeLine(uint32 y, bool altField) {
     }
 
     // Gather shadow data
+    // OPTIMIZED: Hoist invariant checks and improve cache locality
     alignas(16) std::array<bool, kMaxResH> layer0ShadowEnabled;
+    
+    // Hoist invariant check
+    const bool checkMSBShadow = !regs.spriteParams.useSpriteWindow;
+    const bool backShadowEnable = regs.backScreenParams.shadowEnable;
+    
+    // Cache sprite data pointers for better locality
+    const uint8* spritePriorities = m_layerStates[altField][LYR_Sprite].pixels.priority.data();
+    const bool* normalShadows = m_spriteLayerAttrs[altField].normalShadow.data();
+    const bool* shadowOrWindows = m_spriteLayerAttrs[altField].shadowOrWindow.data();
+    
     for (uint32 x = 0; x < m_HRes; x++) {
         // Sprite layer is beneath top layer
-        if (m_layerStates[altField][LYR_Sprite].pixels.priority[x] < scanline_layerPrios[x][0]) {
+        if (spritePriorities[x] < scanline_layerPrios[x][0]) [[likely]] {
             layer0ShadowEnabled[x] = false;
             continue;
         }
 
         // Sprite layer doesn't have shadow
-        const bool isNormalShadow = m_spriteLayerAttrs[altField].normalShadow[x];
-        const bool isMSBShadow = !regs.spriteParams.useSpriteWindow && m_spriteLayerAttrs[altField].shadowOrWindow[x];
-        if (!isNormalShadow && !isMSBShadow) {
+        const bool isNormalShadow = normalShadows[x];
+        const bool isMSBShadow = checkMSBShadow && shadowOrWindows[x];
+        if (!isNormalShadow && !isMSBShadow) [[likely]] {
             layer0ShadowEnabled[x] = false;
             continue;
         }
 
         const LayerIndex layer = scanline_layers[x][0];
         switch (layer) {
-        case LYR_Sprite: layer0ShadowEnabled[x] = m_spriteLayerAttrs[altField].shadowOrWindow[x]; break;
-        case LYR_Back: layer0ShadowEnabled[x] = regs.backScreenParams.shadowEnable; break;
+        case LYR_Sprite: layer0ShadowEnabled[x] = shadowOrWindows[x]; break;
+        case LYR_Back: layer0ShadowEnabled[x] = backShadowEnable; break;
         default: layer0ShadowEnabled[x] = regs.bgParams[layer - LYR_RBG0].shadowEnable; break;
         }
     }
@@ -5884,9 +5901,27 @@ FORCE_INLINE void VDP::VDP2ComposeLine(uint32 y, bool altField) {
     }
 
     // Gather color offset info
+    // OPTIMIZED: Check if all pixels use same layer (common case)
     alignas(16) std::array<bool, kMaxResH> layer0ColorOffsetEnabled;
-    for (uint32 x = 0; x < m_HRes; x++) {
-        layer0ColorOffsetEnabled[x] = regs.colorOffsetEnable[scanline_layers[x][0]];
+    
+    // Fast path: Check if all pixels have same top layer
+    const LayerIndex firstLayer = scanline_layers[0][0];
+    bool allSameLayer = true;
+    for (uint32 x = 1; x < m_HRes && allSameLayer; x++) {
+        if (scanline_layers[x][0] != firstLayer) {
+            allSameLayer = false;
+        }
+    }
+    
+    if (allSameLayer) [[likely]] {
+        // All pixels use same layer - use fast fill
+        const bool offsetEnabled = regs.colorOffsetEnable[firstLayer];
+        std::fill_n(layer0ColorOffsetEnabled.begin(), m_HRes, offsetEnabled);
+    } else {
+        // Mixed layers - use per-pixel lookup
+        for (uint32 x = 0; x < m_HRes; x++) {
+            layer0ColorOffsetEnabled[x] = regs.colorOffsetEnable[scanline_layers[x][0]];
+        }
     }
 
     // Apply color offset if enabled
