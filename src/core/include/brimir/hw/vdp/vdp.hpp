@@ -146,7 +146,7 @@ public:
         return m_deinterlaceMode;
     }
 
-    // Enable/disable horizontal blend filter for interlaced modes (Mednafen-style ss.h_blend)
+    // Enable/disable horizontal blend filter for interlaced modes
     // Reduces combing artifacts in high-res interlaced content by blending adjacent horizontal pixels
     void SetHorizontalBlend(bool enable) {
         m_horizontalBlend = enable;
@@ -156,8 +156,8 @@ public:
         return m_horizontalBlend;
     }
 
-    // Enable/disable overscan display (Mednafen-style ss.h_overscan, ss.v_overscan)
-    // When disabled, crops ~8 pixels from edges for cleaner image
+    // Enable/disable overscan display
+    // When disabled, crops 8 pixels from edges for cleaner image
     void SetHorizontalOverscan(bool enable) {
         m_showHOverscan = enable;
     }
@@ -773,14 +773,15 @@ private:
     // Current field for weave/bob modes (0 or 1)
     int m_currentField = 0;
     
-    // Horizontal blend filter for interlaced modes (Mednafen ss.h_blend style)
+    // Horizontal blend filter for interlaced modes
     // Reduces combing artifacts in high-res interlaced content
+    // Default: OFF (user can enable via core option)
     bool m_horizontalBlend = false;
     
-    // Overscan display flags (Mednafen ss.h_overscan, ss.v_overscan style)
+    // Overscan display flags
     // When true, show full rendered area. When false, crop edges for cleaner image.
-    bool m_showHOverscan = true;  // Mednafen default: enabled
-    bool m_showVOverscan = true;  // Mednafen default: enabled
+    bool m_showHOverscan = true;  // Default: enabled (show full area)
+    bool m_showVOverscan = true;  // Default: enabled (show full area)
     
     // Field value captured during rendering (used for weave to avoid field mismatch)
     uint32 m_renderingField = 0;

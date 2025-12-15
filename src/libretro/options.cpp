@@ -85,14 +85,14 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_deinterlacing",
         "Deinterlacing",
         nullptr,
-        "Enable deinterlacing for interlaced video modes. Many games use interlaced high-res modes for menus (Panzer Dragoon Zwei, Grandia, etc). "
-        "RECOMMENDED: Keep enabled. Uses optimized single-field rendering (Bob mode) for 60 FPS with no scanlines. "
+        "Enable deinterlacing for interlaced video modes. Many games use interlaced high-res modes for menus. "
+        "Uses optimized single-field rendering for 60 FPS with no scanlines. "
         "Disable only for progressive-only games to skip post-processing.",
         nullptr,
         "video",
         {
-            { "enabled", "Enabled (Recommended)" },
-            { "disabled", "Disabled" },
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
             { nullptr, nullptr }
         },
         "enabled"
@@ -101,19 +101,20 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_deinterlace_mode",
         "Deinterlacing Mode",
         nullptr,
-        "Method for deinterlacing interlaced video modes (menus in Panzer Dragoon, Grandia, etc). "
-        "Bob (RECOMMENDED): Duplicates current field to both lines - 60 FPS, no scanlines, smooth. Best for libretro. "
-        "Weave: Shows alternating fields - 60 FPS, authentic CRT look with scanlines. "
-        "Blend: Blends both fields - 60 FPS, may show ghosting. "
-        "Current: Legacy dual-field threaded renderer - more accurate but slower (~45 FPS).",
+        "Method for deinterlacing interlaced video modes. "
+        "Bob: Duplicates current field to both lines (60 FPS, no scanlines, smooth). "
+        "Weave: Shows alternating fields (60 FPS, CRT-style with scanlines). "
+        "Blend: Blends both fields (60 FPS, may show ghosting). "
+        "Current: Legacy dual-field renderer (more accurate but slower, ~45 FPS). "
+        "None: No deinterlacing (native interlaced output).",
         nullptr,
         "video",
         {
-            { "bob", "Bob (Recommended - No Scanlines, 60 FPS)" },
-            { "weave", "Weave (CRT Authentic, Scanlines)" },
-            { "blend", "Blend (Ghosting Effect)" },
-            { "current", "Current (Accurate, Slower)" },
-            { "none", "None (Native Interlacing)" },
+            { "bob", "Bob" },
+            { "weave", "Weave" },
+            { "blend", "Blend" },
+            { "current", "Current" },
+            { "none", "None" },
             { nullptr, nullptr }
         },
         "bob"
@@ -122,30 +123,29 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_horizontal_blend",
         "Horizontal Blend (Interlaced)",
         nullptr,
-        "Apply horizontal blur filter in high-res interlaced modes (>=640 width) to reduce combing artifacts. "
-        "Inspired by Mednafen's ss.h_blend. Blends adjacent horizontal pixels for sharper perceived image. "
-        "RECOMMENDED: Enable with Bob mode for smoothest interlaced output. "
-        "Minimal performance impact (<1ms) on modern hardware.",
+        "Apply horizontal blur filter in high-res interlaced modes (640+ width) to reduce combing artifacts. "
+        "Blends adjacent horizontal pixels for smoother perceived image. "
+        "Recommended with Bob deinterlacing mode. Minimal performance impact (<1ms).",
         nullptr,
         "video",
         {
-            { "enabled", "Enabled (Recommended)" },
-            { "disabled", "Disabled" },
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
             { nullptr, nullptr }
         },
-        "enabled"
+        "disabled"
     },
     {
         "brimir_h_overscan",
         "Horizontal Overscan",
         nullptr,
         "Show horizontal overscan area. Many Saturn games render content in this region. "
-        "Mednafen default: Enabled. Disable to crop ~8 pixels from each side for cleaner edges.",
+        "Disable to crop 8 pixels from each side for cleaner edges.",
         nullptr,
         "video",
         {
-            { "enabled", "Enabled (Mednafen Default)" },
-            { "disabled", "Disabled (Crop Edges)" },
+            { "disabled", "OFF (Crop 8px)" },
+            { "enabled", "ON (Full Width)" },
             { nullptr, nullptr }
         },
         "enabled"
@@ -155,12 +155,12 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "Vertical Overscan",
         nullptr,
         "Show vertical overscan area. Reveals full vertical rendering. "
-        "Mednafen default: Enabled. Disable to crop ~8 pixels from top/bottom for cleaner edges.",
+        "Disable to crop 8 pixels from top/bottom for cleaner edges.",
         nullptr,
         "video",
         {
-            { "enabled", "Enabled (Mednafen Default)" },
-            { "disabled", "Disabled (Crop Edges)" },
+            { "disabled", "OFF (Crop 8px)" },
+            { "enabled", "ON (Full Height)" },
             { nullptr, nullptr }
         },
         "enabled"
@@ -185,12 +185,13 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_autodetect_region",
         "Auto-Detect Region from Disc",
         nullptr,
-        "Automatically set console region based on loaded game disc. When enabled, the Console Region setting is overridden by the disc's region code.",
+        "Automatically set console region based on loaded game disc. "
+        "When enabled, the Console Region setting is overridden by the disc's region code.",
         nullptr,
         "system",
         {
-            { "enabled", "Enabled" },
-            { "disabled", "Disabled" },
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
             { nullptr, nullptr }
         },
         "enabled"
@@ -199,12 +200,13 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_audio_interpolation",
         "Audio Interpolation",
         nullptr,
-        "Sample interpolation method. Linear is hardware accurate. Nearest Neighbor is faster but introduces aliasing.",
+        "Sample interpolation method. Linear is hardware accurate. "
+        "Nearest Neighbor is faster but introduces aliasing.",
         nullptr,
         "audio",
         {
-            { "linear", "Linear (Accurate)" },
-            { "nearest", "Nearest Neighbor (Fast)" },
+            { "linear", "Linear" },
+            { "nearest", "Nearest" },
             { nullptr, nullptr }
         },
         "linear"
@@ -213,11 +215,12 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_cd_speed",
         "CD Read Speed",
         nullptr,
-        "CD-ROM read speed multiplier. Higher values reduce loading times but may break some games. 2x matches real hardware.",
+        "CD-ROM read speed multiplier. Higher values reduce loading times but may break some games. "
+        "2x matches real hardware.",
         nullptr,
         "media",
         {
-            { "2", "2x (Accurate)" },
+            { "2", "2x" },
             { "4", "4x" },
             { "6", "6x" },
             { "8", "8x" },

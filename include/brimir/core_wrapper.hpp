@@ -195,15 +195,15 @@ public:
     /// @param mode Mode string: "current", "weave", "blend", "bob", "none"
     void SetDeinterlacingMode(const char* mode);
     
-    /// @brief Set horizontal blend filter for interlaced modes (Mednafen ss.h_blend style)
+    /// @brief Set horizontal blend filter for interlaced modes
     /// @param enable True to enable horizontal blending in high-res interlaced modes
     void SetHorizontalBlend(bool enable);
     
-    /// @brief Set horizontal overscan display (Mednafen ss.h_overscan style)
+    /// @brief Set horizontal overscan display
     /// @param enable True to show full horizontal area, false to crop edges
     void SetHorizontalOverscan(bool enable);
     
-    /// @brief Set vertical overscan display (Mednafen ss.v_overscan style)
+    /// @brief Set vertical overscan display
     /// @param enable True to show full vertical area, false to crop edges
     void SetVerticalOverscan(bool enable);
     
