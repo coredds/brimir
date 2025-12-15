@@ -121,23 +121,25 @@ public:
     }
 
     // Set the deinterlacing mode
-    // Note: This only affects behavior; actual enable/disable is controlled by SetDeinterlaceRender()
     void SetDeinterlaceMode(DeinterlaceMode mode) {
         m_deinterlaceMode = mode;
         
-        // Optimization: Disable threaded deinterlacer for Blend/Weave modes
-        // These modes use efficient post-process blending instead of per-scanline synchronization
-        // This eliminates ~7ms of thread synchronization overhead (39% of frame time)
-        if (mode == DeinterlaceMode::Blend || mode == DeinterlaceMode::Weave) {
-            m_threadedDeinterlacer = false;
+        // CRITICAL: Blend/Weave modes use post-process deinterlacing (lines 1379-1491 in vdp.cpp)
+        // This ONLY runs when m_deinterlaceRender = false
+        // If m_deinterlaceRender = true, we hit the expensive dual-field per-scanline path (lines 1722-1728)
+        // which renders EVERY scanline twice (slower than threaded!)
+        if (mode == DeinterlaceMode::Blend || mode == DeinterlaceMode::Weave || mode == DeinterlaceMode::Bob) {
+            m_deinterlaceRender = false;  // Enable efficient post-process path
+            m_threadedDeinterlacer = false;  // No threading needed
         } else if (mode == DeinterlaceMode::Current) {
-            // Current mode uses the legacy threaded approach
+            // Current mode uses active dual-field rendering with threading
+            m_deinterlaceRender = true;
             m_threadedDeinterlacer = true;
+        } else if (mode == DeinterlaceMode::None) {
+            // No deinterlacing at all
+            m_deinterlaceRender = false;
+            m_threadedDeinterlacer = false;
         }
-        // Bob and None modes don't need threading either
-        
-        // Don't modify m_deinterlaceRender here - let SetDeinterlaceRender() control it
-        // This prevents the mode setting from overriding an explicit disable
     }
 
     DeinterlaceMode GetDeinterlaceMode() const {
