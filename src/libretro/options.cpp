@@ -125,29 +125,34 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "Filtering method used when upscaling the software-rendered frame. "
         "Nearest: Sharp pixel edges, no blurring. "
         "Bilinear: Smooth but can look blurry. "
-        "Sharp Bilinear: Best of both - smooth with sharp pixel edges.",
+        "Sharp Bilinear: Best of both - smooth with sharp pixel edges. "
+        "FSR: AMD FidelityFX Super Resolution 1.0 - edge-adaptive upscaling for highest quality.",
         nullptr,
         "video",
         {
             { "sharp_bilinear", "Sharp Bilinear" },
             { "nearest", "Nearest" },
             { "bilinear", "Bilinear" },
+            { "fsr", "FSR 1.0 (Edge Adaptive)" },
             { nullptr, nullptr }
         },
         "sharp_bilinear"
     },
     {
-        "brimir_fxaa",
-        "FXAA Anti-Aliasing (GPU Only)",
+        "brimir_sharpening",
+        "Sharpening / Post-Processing (GPU Only)",
         nullptr,
-        "Apply Fast Approximate Anti-Aliasing to the upscaled output. "
-        "Smooths jagged edges at minimal performance cost. "
-        "Best combined with 2x or higher internal resolution.",
+        "Post-processing pass applied after upscaling. "
+        "OFF: No post-processing. "
+        "FXAA: Fast Approximate Anti-Aliasing - smooths jagged edges. "
+        "RCAS: Robust Contrast-Adaptive Sharpening (FSR 1.0) - sharpens edges without artifacts. "
+        "Best combined with FSR upscaling for full FSR quality.",
         nullptr,
         "video",
         {
             { "disabled", "OFF" },
-            { "enabled", "ON" },
+            { "fxaa", "FXAA" },
+            { "rcas", "RCAS Sharpening (FSR 1.0)" },
             { nullptr, nullptr }
         },
         "disabled"

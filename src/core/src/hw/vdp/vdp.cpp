@@ -11,6 +11,7 @@
 #include <brimir/util/thread_name.hpp>
 #include <brimir/util/unreachable.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cstdlib>
 #include <limits>
@@ -2202,6 +2203,16 @@ FORCE_INLINE void VDP::VDP1SwapFramebuffer() {
 void VDP::VDP1BeginFrame() {
     devlog::trace<grp::vdp1_render>("Begin VDP1 frame on framebuffer {}", VDP1GetDisplayFBIndex() ^ 1);
 
+    // Clear GPU VDP1 command buffer and texture atlas for this frame
+    if (m_gpuVDP1Enabled) {
+        m_gpuVDP1Commands.clear();
+        m_gpuVDP1AtlasData.clear();
+        m_gpuVDP1AtlasHeight = 0;
+        m_gpuVDP1AtlasCursorX = 0;
+        m_gpuVDP1AtlasCursorY = 0;
+        m_gpuVDP1AtlasRowHeight = 0;
+    }
+
     // TODO: setup rendering
     // TODO: figure out VDP1 timings
 
@@ -2238,11 +2249,25 @@ void VDP::VDP1BeginFrame() {
 void VDP::VDP1EndFrame() {
     devlog::trace<grp::vdp1_render>("End VDP1 frame on framebuffer {}", VDP1GetDisplayFBIndex() ^ 1);
     
-    // End GPU renderer frame (if enabled)
-    // GPU VDP1 rendering currently disabled
-    // if (m_gpuRenderer && m_useGPURenderer) {
-    //     m_gpuRenderer->EndFrame();
-    // }
+    // GPU VDP1: Commands have been captured during VDP1 draw functions.
+    // Rendering is deferred to OnFrameComplete (core_wrapper) to avoid
+    // threading issues with shared Vulkan command buffers.
+    
+    // Normalize texture atlas UVs now that the final atlas height is known.
+    // UVs were stored as pixel coordinates during capture to avoid invalidation
+    // as the atlas grew. Now we divide by the final atlas dimensions.
+    if (m_gpuVDP1Enabled && m_gpuVDP1AtlasHeight > 0) {
+        const float invW = 1.0f / static_cast<float>(m_gpuVDP1AtlasWidth);
+        const float invH = 1.0f / static_cast<float>(m_gpuVDP1AtlasHeight);
+        for (auto& cmd : m_gpuVDP1Commands) {
+            if (cmd.textured) {
+                for (auto& uv : cmd.uvs) {
+                    uv[0] *= invW;
+                    uv[1] *= invH;
+                }
+            }
+        }
+    }
     
     m_VDP1RenderContext.rendering = false;
     m_VDP1TimingPenaltyCycles = 0;
@@ -3040,6 +3065,208 @@ void VDP::VDP1DecodeAndRenderTextureGPU(uint32 cmdAddress, VDP1Command::Control 
                                      control.flipH, control.flipV);
 }
 
+// Pack a decoded texture into the per-frame atlas and compute UV coordinates
+void VDP::VDP1PackTextureIntoAtlas(const uint32* texData, uint32 texW, uint32 texH,
+                                    std::array<float, 2> (&uvs)[4], bool flipH, bool flipV) {
+    if (texW == 0 || texH == 0) return;
+    
+    // Check if texture fits in current row
+    if (m_gpuVDP1AtlasCursorX + texW > m_gpuVDP1AtlasWidth) {
+        // Start new row
+        m_gpuVDP1AtlasCursorX = 0;
+        m_gpuVDP1AtlasCursorY += m_gpuVDP1AtlasRowHeight;
+        m_gpuVDP1AtlasRowHeight = 0;
+    }
+    
+    // Update row height
+    if (texH > m_gpuVDP1AtlasRowHeight) {
+        m_gpuVDP1AtlasRowHeight = texH;
+    }
+    
+    // Calculate required atlas height
+    uint32 requiredHeight = m_gpuVDP1AtlasCursorY + m_gpuVDP1AtlasRowHeight;
+    
+    // Grow atlas data if needed
+    if (requiredHeight > m_gpuVDP1AtlasHeight) {
+        m_gpuVDP1AtlasHeight = requiredHeight;
+        m_gpuVDP1AtlasData.resize(m_gpuVDP1AtlasWidth * m_gpuVDP1AtlasHeight, 0);
+    }
+    
+    // Copy texels into atlas
+    uint32 atlasX = m_gpuVDP1AtlasCursorX;
+    uint32 atlasY = m_gpuVDP1AtlasCursorY;
+    for (uint32 y = 0; y < texH; ++y) {
+        uint32 dstOffset = (atlasY + y) * m_gpuVDP1AtlasWidth + atlasX;
+        uint32 srcOffset = y * texW;
+        std::memcpy(&m_gpuVDP1AtlasData[dstOffset], &texData[srcOffset], texW * sizeof(uint32));
+    }
+    
+    // Store UV coordinates as pixel coordinates (will be normalized later in VDP1EndFrame
+    // once the final atlas height is known, to avoid invalidation as atlas grows)
+    float u0 = static_cast<float>(atlasX);
+    float v0 = static_cast<float>(atlasY);
+    float u1 = static_cast<float>(atlasX + texW);
+    float v1 = static_cast<float>(atlasY + texH);
+    
+    // Apply flip
+    if (flipH) std::swap(u0, u1);
+    if (flipV) std::swap(v0, v1);
+    
+    // UV corners: A=top-left, B=top-right, C=bottom-right, D=bottom-left
+    uvs[0] = {u0, v0}; // A
+    uvs[1] = {u1, v0}; // B
+    uvs[2] = {u1, v1}; // C
+    uvs[3] = {u0, v1}; // D
+    
+    // Advance cursor
+    m_gpuVDP1AtlasCursorX += texW;
+}
+
+// GPU VDP1 Phase 2: Decode texture and capture as a textured GPU command
+void VDP::VDP1CaptureTexturedSpriteGPU(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
+                                        VDP1GPUCommand::Type type,
+                                        sint32 xa, sint32 ya, sint32 xb, sint32 yb,
+                                        sint32 xc, sint32 yc, sint32 xd, sint32 yd) {
+    const VDP1Command::DrawMode mode{.u16 = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x04)};
+    const uint16 colorBank = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x06);
+    const uint32 charAddr = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x08) * 8u;
+    
+    const uint32 texW = size.H * 8;
+    const uint32 texH = size.V;
+    
+    if (texW == 0 || texH == 0 || texW > 256 || texH > 256) return;
+    
+    // Decode texture into temporary buffer (reuse existing decode logic)
+    std::vector<uint32> texData(texW * texH);
+    
+    for (uint32 v = 0; v < texH; ++v) {
+        for (uint32 u = 0; u < texW; ++u) {
+            uint32 charIndex = v * texW + u;
+            uint16 colorIdx = 0;
+            uint32 rgba = 0xFF000000;  // Opaque black default
+            bool transparent = false;
+            
+            auto readCRAM = [this](uint32 cramIdx) -> uint16 {
+                const uint8* cram = m_renderingContext.vdp2.CRAM.data();
+                uint32 addr = (cramIdx & 0x7FF) * 2;
+                return static_cast<uint16>(cram[addr]) | (static_cast<uint16>(cram[addr + 1]) << 8);
+            };
+            
+            switch (mode.colorMode) {
+            case 0: { // 4 bpp, 16 colors, bank mode
+                uint8 byte = VDP1ReadRendererVRAM<uint8>(charAddr + (charIndex >> 1));
+                colorIdx = (byte >> ((~u & 1) * 4)) & 0xF;
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx |= colorBank & 0xFFF0;
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 1: { // 4 bpp, 16 colors, lookup table mode
+                uint8 byte = VDP1ReadRendererVRAM<uint8>(charAddr + (charIndex >> 1));
+                colorIdx = (byte >> ((~u & 1) * 4)) & 0xF;
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    uint16 color555 = VDP1ReadRendererVRAM<uint16>(colorIdx * 2 + colorBank * 8);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 2: { // 8 bpp, 64 colors, bank mode
+                colorIdx = VDP1ReadRendererVRAM<uint8>(charAddr + charIndex);
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx = (colorIdx & 0x3F) | (colorBank & 0xFFC0);
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 3: { // 8 bpp, 128 colors, bank mode
+                colorIdx = VDP1ReadRendererVRAM<uint8>(charAddr + charIndex);
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx = (colorIdx & 0x7F) | (colorBank & 0xFF80);
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 4: { // 8 bpp, 256 colors, bank mode
+                colorIdx = VDP1ReadRendererVRAM<uint8>(charAddr + charIndex);
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx = colorIdx | (colorBank & 0xFF00);
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 5: { // 16 bpp, 32768 colors, RGB mode
+                uint32 addr = (charAddr & ~0xF) + charIndex * 2;
+                uint16 color555 = VDP1ReadRendererVRAM<uint16>(addr);
+                transparent = (color555 == 0);
+                if (!transparent) {
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            
+            if (transparent && !mode.transparentPixelDisable) {
+                rgba = 0x00000000;  // Fully transparent
+            }
+            
+            texData[v * texW + u] = rgba;
+        }
+    }
+    
+    // Pack into texture atlas and get UV coordinates
+    VDP1GPUCommand gpuCmd{};
+    gpuCmd.type = type;
+    gpuCmd.textured = true;
+    gpuCmd.vertices[0] = {static_cast<float>(xa), static_cast<float>(ya)};
+    gpuCmd.vertices[1] = {static_cast<float>(xb), static_cast<float>(yb)};
+    gpuCmd.vertices[2] = {static_cast<float>(xc), static_cast<float>(yc)};
+    gpuCmd.vertices[3] = {static_cast<float>(xd), static_cast<float>(yd)};
+    
+    // White vertex color for textured sprites (texture provides color)
+    std::array<float, 4> white = {1.0f, 1.0f, 1.0f, 1.0f};
+    gpuCmd.colors[0] = gpuCmd.colors[1] = gpuCmd.colors[2] = gpuCmd.colors[3] = white;
+    
+    // Flags
+    gpuCmd.flags = 0;
+    if (mode.meshEnable) gpuCmd.flags |= 0x1;
+    if (mode.colorCalcBits & 1) gpuCmd.flags |= 0x2; // half-transparent
+    
+    // Pack texture into atlas and set UVs
+    VDP1PackTextureIntoAtlas(texData.data(), texW, texH, gpuCmd.uvs, control.flipH, control.flipV);
+    
+    m_gpuVDP1Commands.push_back(gpuCmd);
+}
+
 template <bool deinterlace, bool transparentMeshes>
 FORCE_INLINE void VDP::VDP1PlotTexturedQuad(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
                                             CoordS32 coordA, CoordS32 coordB, CoordS32 coordC, CoordS32 coordD) {
@@ -3143,10 +3370,11 @@ void VDP::VDP1Cmd_DrawNormalSprite(uint32 cmdAddress, VDP1Command::Control contr
     const CoordS32 coordC{rx, by << doubleV};
     const CoordS32 coordD{lx, by << doubleV};
 
-    // GPU sprite rendering currently disabled - causes artifacts and performance issues
-    // if (m_gpuRenderer && m_useGPURenderer && charSizeH > 0 && charSizeV > 0) {
-    //     VDP1DecodeAndRenderTextureGPU(cmdAddress, control, size, lx, ty, rx, ty, rx, by, lx, by);
-    // }
+    // GPU VDP1 Phase 2: Capture textured sprite for high-res GPU rendering
+    if (m_gpuVDP1Enabled && charSizeH > 0 && charSizeV > 0) {
+        VDP1CaptureTexturedSpriteGPU(cmdAddress, control, size, VDP1GPUCommand::Type::NormalSprite,
+                                      lx, ty, rx, ty, rx, by, lx, by);
+    }
 
     VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
 }
@@ -3247,10 +3475,11 @@ void VDP::VDP1Cmd_DrawScaledSprite(uint32 cmdAddress, VDP1Command::Control contr
     devlog::trace<grp::vdp1_cmd>("[{:05X}] Draw scaled sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
                                  cmdAddress, qxa, qya, qxb, qyb, qxc, qyc, qxd, qyd);
 
-    // GPU sprite rendering currently disabled
-    // if (m_gpuRenderer && m_useGPURenderer) {
-    //     VDP1DecodeAndRenderTextureGPU(cmdAddress, control, size, qxa, qya, qxb, qyb, qxc, qyc, qxd, qyd);
-    // }
+    // GPU VDP1 Phase 2: Capture textured sprite for high-res GPU rendering
+    if (m_gpuVDP1Enabled) {
+        VDP1CaptureTexturedSpriteGPU(cmdAddress, control, size, VDP1GPUCommand::Type::ScaledSprite,
+                                      qxa, qya, qxb, qyb, qxc, qyc, qxd, qyd);
+    }
 
     VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
 }
@@ -3283,10 +3512,13 @@ void VDP::VDP1Cmd_DrawDistortedSprite(uint32 cmdAddress, VDP1Command::Control co
     devlog::trace<grp::vdp1_cmd>("[{:05X}] Draw distorted sprite: {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d}",
                                  cmdAddress, xa, ya, xb, yb, xc, yc, xd, yd);
 
-    // GPU sprite rendering currently disabled
-    // if (m_gpuRenderer && m_useGPURenderer) {
-    //     VDP1DecodeAndRenderTextureGPU(cmdAddress, control, size, xa, ya, xb, yb, xc, yc, xd, yd);
-    // }
+    // GPU VDP1 Phase 2: Capture textured sprite for high-res GPU rendering
+    // Note: VDP1 DistortedSprite vertex order is A=TL, B=TR, C=BL, D=BR
+    // Our UV mapping expects TL, TR, BR, BL, so we swap C and D here
+    if (m_gpuVDP1Enabled) {
+        VDP1CaptureTexturedSpriteGPU(cmdAddress, control, size, VDP1GPUCommand::Type::DistortedSprite,
+                                      xa, ya, xb, yb, xd, yd, xc, yc);
+    }
 
     VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
 }
@@ -3336,32 +3568,76 @@ void VDP::VDP1Cmd_DrawPolygon(uint32 cmdAddress, VDP1Command::Control control) {
 
     QuadStepper quad{coordA, coordB, coordC, coordD};
 
+    // Read Gouraud colors if enabled (needed for both capture and software rasterization)
+    Color555 gouraudA{}, gouraudB{}, gouraudC{}, gouraudD{};
     if (mode.gouraudEnable) {
-        Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
-        Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
-        Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
-        Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
+        gouraudA.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u);
+        gouraudB.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u);
+        gouraudC.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u);
+        gouraudD.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u);
 
-        devlog::trace<grp::vdp1_cmd>("Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})", (uint8)colorA.r,
-                                     (uint8)colorA.g, (uint8)colorA.b, (uint8)colorB.r, (uint8)colorB.g,
-                                     (uint8)colorB.b, (uint8)colorC.r, (uint8)colorC.g, (uint8)colorC.b,
-                                     (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
+        devlog::trace<grp::vdp1_cmd>("Gouraud colors: ({},{},{}) ({},{},{}) ({},{},{}) ({},{},{})", (uint8)gouraudA.r,
+                                     (uint8)gouraudA.g, (uint8)gouraudA.b, (uint8)gouraudB.r, (uint8)gouraudB.g,
+                                     (uint8)gouraudB.b, (uint8)gouraudC.r, (uint8)gouraudC.g, (uint8)gouraudC.b,
+                                     (uint8)gouraudD.r, (uint8)gouraudD.g, (uint8)gouraudD.b);
 
-        quad.SetupGouraud(colorA, colorB, colorC, colorD);
-        
-        // GPU polygon rendering currently disabled
-        // if (m_gpuRenderer && m_useGPURenderer) {
-        //     m_gpuRenderer->DrawGouraudPolygon(xa, ya, xb, yb, xc, yc, xd, yd,
-        //                                        colorA, colorB, colorC, colorD);
-        // }
+        quad.SetupGouraud(gouraudA, gouraudB, gouraudC, gouraudD);
     }
-    // else {
-    //     // GPU rendering for solid color polygon (no Gouraud)
-    //     if (m_gpuRenderer && m_useGPURenderer) {
-    //         Color555 solidColor{.u16 = color};
-    //         m_gpuRenderer->DrawSolidPolygon(xa, ya, xb, yb, xc, yc, xd, yd, solidColor);
-    //     }
-    // }
+
+    // GPU VDP1: Capture polygon geometry for high-res re-rendering
+    if (m_gpuVDP1Enabled) {
+        VDP1GPUCommand gpuCmd{};
+        gpuCmd.type = VDP1GPUCommand::Type::Polygon;
+        gpuCmd.vertices[0] = {static_cast<float>(xa), static_cast<float>(ya)};
+        gpuCmd.vertices[1] = {static_cast<float>(xb), static_cast<float>(yb)};
+        gpuCmd.vertices[2] = {static_cast<float>(xc), static_cast<float>(yc)};
+        gpuCmd.vertices[3] = {static_cast<float>(xd), static_cast<float>(yd)};
+        gpuCmd.flags = 0;
+        if (mode.meshEnable) gpuCmd.flags |= 0x1;
+        if (mode.colorCalcBits & 1) gpuCmd.flags |= 0x2; // half-transparent
+        if (mode.gouraudEnable) gpuCmd.flags |= 0x8;
+
+        if (mode.gouraudEnable) {
+            // Gouraud: base color modulated by per-vertex Gouraud colors
+            // The base color from CMDCOLR is used for the spriteFB, Gouraud offsets are additive
+            // For GPU rendering, convert Gouraud colors directly to float RGBA
+            auto c555toFloat = [](Color555 c) -> std::array<float, 4> {
+                return {static_cast<float>(c.r << 3) / 255.0f,
+                        static_cast<float>(c.g << 3) / 255.0f,
+                        static_cast<float>(c.b << 3) / 255.0f,
+                        1.0f};
+            };
+            // For Gouraud polygons, the base color is written to spriteFB and Gouraud is an offset.
+            // For GPU rendering, we use the Gouraud colors as vertex colors since they represent
+            // the visual contribution at each vertex.
+            Color555 baseColor{.u16 = color};
+            float br = static_cast<float>(baseColor.r << 3) / 255.0f;
+            float bg = static_cast<float>(baseColor.g << 3) / 255.0f;
+            float bb = static_cast<float>(baseColor.b << 3) / 255.0f;
+            auto addGouraud = [&](Color555 g) -> std::array<float, 4> {
+                // Gouraud values are offsets: add to base and clamp
+                return {std::clamp(br + static_cast<float>(g.r << 3) / 255.0f - 0.5f, 0.0f, 1.0f),
+                        std::clamp(bg + static_cast<float>(g.g << 3) / 255.0f - 0.5f, 0.0f, 1.0f),
+                        std::clamp(bb + static_cast<float>(g.b << 3) / 255.0f - 0.5f, 0.0f, 1.0f),
+                        1.0f};
+            };
+            gpuCmd.colors[0] = addGouraud(gouraudA);
+            gpuCmd.colors[1] = addGouraud(gouraudB);
+            gpuCmd.colors[2] = addGouraud(gouraudC);
+            gpuCmd.colors[3] = addGouraud(gouraudD);
+        } else {
+            // Flat color: convert RGB555 to float RGBA
+            Color555 c{.u16 = color};
+            std::array<float, 4> flatColor = {
+                static_cast<float>(c.r << 3) / 255.0f,
+                static_cast<float>(c.g << 3) / 255.0f,
+                static_cast<float>(c.b << 3) / 255.0f,
+                1.0f
+            };
+            gpuCmd.colors[0] = gpuCmd.colors[1] = gpuCmd.colors[2] = gpuCmd.colors[3] = flatColor;
+        }
+        m_gpuVDP1Commands.push_back(gpuCmd);
+    }
 
     // Optimization for the case where the quad goes outside the system clipping area.
     // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
@@ -3421,6 +3697,26 @@ void VDP::VDP1Cmd_DrawPolylines(uint32 cmdAddress, VDP1Command::Control control)
 
     if (VDP1IsQuadSystemClipped<deinterlace>(coordA, coordB, coordC, coordD)) {
         return;
+    }
+
+    // GPU VDP1: Capture polyline geometry for high-res re-rendering
+    if (m_gpuVDP1Enabled) {
+        VDP1GPUCommand gpuCmd{};
+        gpuCmd.type = VDP1GPUCommand::Type::Polyline;
+        gpuCmd.vertices[0] = {static_cast<float>(xa), static_cast<float>(ya)};
+        gpuCmd.vertices[1] = {static_cast<float>(xb), static_cast<float>(yb)};
+        gpuCmd.vertices[2] = {static_cast<float>(xc), static_cast<float>(yc)};
+        gpuCmd.vertices[3] = {static_cast<float>(xd), static_cast<float>(yd)};
+        Color555 c{.u16 = color};
+        std::array<float, 4> flatColor = {
+            static_cast<float>(c.r << 3) / 255.0f,
+            static_cast<float>(c.g << 3) / 255.0f,
+            static_cast<float>(c.b << 3) / 255.0f, 1.0f
+        };
+        gpuCmd.colors[0] = gpuCmd.colors[1] = gpuCmd.colors[2] = gpuCmd.colors[3] = flatColor;
+        gpuCmd.flags = 0;
+        if (mode.meshEnable) gpuCmd.flags |= 0x1;
+        m_gpuVDP1Commands.push_back(gpuCmd);
     }
 
     VDP1LineParams lineParams{
@@ -3500,6 +3796,26 @@ void VDP::VDP1Cmd_DrawLine(uint32 cmdAddress, VDP1Command::Control control) {
 
     if (VDP1IsLineSystemClipped<deinterlace>(coordA, coordB)) {
         return;
+    }
+
+    // GPU VDP1: Capture line geometry for high-res re-rendering
+    if (m_gpuVDP1Enabled) {
+        VDP1GPUCommand gpuCmd{};
+        gpuCmd.type = VDP1GPUCommand::Type::Line;
+        gpuCmd.vertices[0] = {static_cast<float>(xa), static_cast<float>(ya)};
+        gpuCmd.vertices[1] = {static_cast<float>(xb), static_cast<float>(yb)};
+        gpuCmd.vertices[2] = gpuCmd.vertices[1]; // unused
+        gpuCmd.vertices[3] = gpuCmd.vertices[0]; // unused
+        Color555 c{.u16 = color};
+        std::array<float, 4> flatColor = {
+            static_cast<float>(c.r << 3) / 255.0f,
+            static_cast<float>(c.g << 3) / 255.0f,
+            static_cast<float>(c.b << 3) / 255.0f, 1.0f
+        };
+        gpuCmd.colors[0] = gpuCmd.colors[1] = gpuCmd.colors[2] = gpuCmd.colors[3] = flatColor;
+        gpuCmd.flags = 0;
+        if (mode.meshEnable) gpuCmd.flags |= 0x1;
+        m_gpuVDP1Commands.push_back(gpuCmd);
     }
 
     VDP1LineParams lineParams{

@@ -6,6 +6,7 @@
 #include <brimir/hw/vdp/vdp_renderer.hpp>
 #include <brimir/hw/vdp/vdp_defs.hpp>
 #include <brimir/hw/vdp/vdp1_defs.hpp>
+#include <brimir/hw/vdp/vdp.hpp>
 #include "shaders/embedded_shaders.hpp"
 #include <array>
 #include <vector>
@@ -296,6 +297,8 @@ public:
             
             // Cleanup GPU Full Pipeline layer resources
             DestroyLayerRenderTargets();
+            
+            // GPU VDP1 hi-res resources removed (approach abandoned)
             
             // Cleanup upscale resources
             DestroyUpscaleResources();
@@ -798,8 +801,9 @@ public:
             return false;
         }
         
-        // Determine if FXAA pass should run
-        const bool doFXAA = m_fxaaEnabled && m_fxaaResourcesCreated && m_fxaaPipeline && m_fxaaDescriptorSet;
+        // Determine if second pass (FXAA or RCAS) should run
+        const bool doFXAA = m_fxaaEnabled && m_fxaaResourcesCreated && m_fxaaDescriptorSet &&
+                            ((m_sharpeningMode == 1 && m_fxaaPipeline) || (m_sharpeningMode == 2 && m_rcasPipeline));
         
         // Continue command buffer (started in UploadSoftwareFramebuffer, or fresh if resized)
         // Begin upscale render pass
@@ -865,27 +869,29 @@ public:
         
         vkCmdEndRenderPass(m_commandBuffer);
         
-        // === FXAA Pass (optional second pass) ===
+        // === Second Pass: FXAA or RCAS (optional) ===
         if (doFXAA) {
-            // Begin FXAA render pass (renders from intermediate to final output)
-            VkRenderPassBeginInfo fxaaPassInfo{};
-            fxaaPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            fxaaPassInfo.renderPass = m_fxaaRenderPass;
-            fxaaPassInfo.framebuffer = m_fxaaOutputFramebuffer;
-            fxaaPassInfo.renderArea.extent = {finalWidth, finalHeight};
+            // Begin second pass (renders from intermediate to final output)
+            VkRenderPassBeginInfo secondPassInfo{};
+            secondPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            secondPassInfo.renderPass = m_fxaaRenderPass;
+            secondPassInfo.framebuffer = m_fxaaOutputFramebuffer;
+            secondPassInfo.renderArea.extent = {finalWidth, finalHeight};
             
-            vkCmdBeginRenderPass(m_commandBuffer, &fxaaPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBeginRenderPass(m_commandBuffer, &secondPassInfo, VK_SUBPASS_CONTENTS_INLINE);
             
-            vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fxaaPipeline);
+            // Select pipeline: FXAA (mode 1) or RCAS (mode 2)
+            VkPipeline secondPassPipeline = (m_sharpeningMode == 2) ? m_rcasPipeline : m_fxaaPipeline;
+            vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, secondPassPipeline);
             
             vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
             vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
             
-            // Bind FXAA descriptor set (samples intermediate texture)
+            // Bind descriptor set (samples intermediate texture)
             vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_upscalePipelineLayout, 0, 1, &m_fxaaDescriptorSet, 0, nullptr);
             
-            // Push constants for FXAA (only outputSize matters for texel size)
+            // Push constants (outputSize matters for texel size calculation)
             vkCmdPushConstants(m_commandBuffer, m_upscalePipelineLayout,
                 VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
             
@@ -893,6 +899,9 @@ public:
             
             vkCmdEndRenderPass(m_commandBuffer);
         }
+        
+        // VDP1 inline overlay was removed (quad-as-triangle issues).
+        // GPU post-processing (FSR) is used instead.
         
         // Copy render target to staging buffer for CPU readback
         if (m_upscaledStagingBuffer) {
@@ -998,6 +1007,25 @@ public:
     
     uint32_t GetUpscaledPitch() const override {
         return GetUpscaledWidth() * sizeof(uint32_t);
+    }
+    
+    // ===== GPU VDP1 High-Res Rendering (stubs - approach abandoned) =====
+    
+    void SubmitVDP1Commands(const struct VDP1GPUCommand* commands, size_t count) override {
+        (void)commands; (void)count; // No-op: GPU VDP1 rendering removed
+    }
+    
+    bool RenderVDP1Frame(uint32_t fbWidth, uint32_t fbHeight) override {
+        (void)fbWidth; (void)fbHeight;
+        return false; // GPU VDP1 rendering removed
+    }
+    
+    const uint32_t* GetVDP1HiResBuffer() const override { return nullptr; }
+    uint32_t GetVDP1HiResWidth() const override { return 0; }
+    uint32_t GetVDP1HiResHeight() const override { return 0; }
+    
+    void UploadVDP1TextureAtlas(const uint32_t* data, uint32_t width, uint32_t height) override {
+        (void)data; (void)width; (void)height; // No-op: GPU VDP1 rendering removed
     }
     
     // ===== VDP1 Rendering =====
@@ -1223,14 +1251,23 @@ public:
     }
     
     void SetFXAA(bool enable) override {
-        if (m_fxaaEnabled == enable) return;
-        m_fxaaEnabled = enable;
+        // Legacy interface: enable/disable second pass
+        SetSharpeningMode(enable ? 1 : 0);
+    }
+    
+    void SetSharpeningMode(uint32_t mode) override {
+        // mode: 0 = off, 1 = FXAA, 2 = RCAS
+        bool needSecondPass = (mode > 0);
+        bool hadSecondPass = m_fxaaEnabled;
         
-        // Trigger FXAA resource creation/destruction on next frame
+        m_sharpeningMode = mode;
+        m_fxaaEnabled = needSecondPass;
+        
+        // Trigger resource creation/destruction on next frame
         if (m_currentUpscaleWidth > 0 && m_currentUpscaleHeight > 0) {
-            if (enable && !m_fxaaResourcesCreated) {
+            if (needSecondPass && !m_fxaaResourcesCreated) {
                 CreateFXAAResources(m_currentUpscaleWidth, m_currentUpscaleHeight);
-            } else if (!enable && m_fxaaResourcesCreated) {
+            } else if (!needSecondPass && m_fxaaResourcesCreated) {
                 vkQueueWaitIdle(m_graphicsQueue);
                 DestroyFXAAResources();
             }
@@ -1324,6 +1361,7 @@ private:
     float m_brightnessValue = 1.0f;
     float m_gammaValue = 1.0f;
     bool m_fxaaEnabled = false;
+    uint32_t m_sharpeningMode = 0;  // 0 = off, 1 = FXAA, 2 = RCAS
     void* m_hwContext = nullptr;  // Frontend's hardware context (unused for now)
     
     // GPU Full Pipeline state
@@ -1379,6 +1417,7 @@ private:
     VkRenderPass m_fxaaRenderPass = VK_NULL_HANDLE;               // FXAA -> final output (finalLayout=TRANSFER_SRC)
     VkFramebuffer m_fxaaOutputFramebuffer = VK_NULL_HANDLE;       // final output framebuffer for FXAA pass
     VkPipeline m_fxaaPipeline = VK_NULL_HANDLE;
+    VkPipeline m_rcasPipeline = VK_NULL_HANDLE;        // FSR 1.0 RCAS sharpening pipeline
     VkDescriptorPool m_fxaaDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet m_fxaaDescriptorSet = VK_NULL_HANDLE;
     VkSampler m_fxaaSampler = VK_NULL_HANDLE;
@@ -1422,9 +1461,9 @@ private:
     
     // VDP1 vertex data
     struct VDP1Vertex {
-        float pos[2];      // x, y
-        float color[4];    // r, g, b, a
-        float texCoord[2]; // u, v
+        float pos[2];          // x, y (location 0)
+        float color[4];        // r, g, b, a (location 1)
+        float texCoord[2];     // u, v (location 2)
     };
     std::vector<VDP1Vertex> m_vertices;
     std::vector<VDP1Vertex> m_texturedVertices;  // Separate buffer for textured draws
@@ -1527,6 +1566,9 @@ private:
     VkDeviceMemory m_vdp1SpriteVertexMemory = VK_NULL_HANDLE;
     void* m_vdp1SpriteVertexMapped = nullptr;
     static constexpr size_t kMaxVDP1SpriteVertices = 16384;  // ~2700 quads
+    
+    // GPU VDP1 hi-res rendering state removed (approach abandoned)
+    // FSR 1.0 spatial upscaling is used instead.
     
     // VDP2 NBG layer pipeline
     VkPipeline m_nbgPipeline = VK_NULL_HANDLE;
@@ -3434,6 +3476,103 @@ private:
             vkDestroyShaderModule(m_device, fragModule, nullptr);
         }
         
+        // Create RCAS pipeline (same infrastructure as FXAA, different fragment shader)
+        if (!m_rcasPipeline) {
+            VkShaderModuleCreateInfo vertShaderInfo{};
+            vertShaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            vertShaderInfo.codeSize = shaders::upscale_vert_size;
+            vertShaderInfo.pCode = reinterpret_cast<const uint32_t*>(shaders::upscale_vert_data);
+            
+            VkShaderModule vertModule;
+            if (vkCreateShaderModule(m_device, &vertShaderInfo, nullptr, &vertModule) != VK_SUCCESS) {
+                return false;
+            }
+            
+            VkShaderModuleCreateInfo fragShaderInfo{};
+            fragShaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            fragShaderInfo.codeSize = shaders::fsr_rcas_frag_size;
+            fragShaderInfo.pCode = reinterpret_cast<const uint32_t*>(shaders::fsr_rcas_frag_data);
+            
+            VkShaderModule fragModule;
+            if (vkCreateShaderModule(m_device, &fragShaderInfo, nullptr, &fragModule) != VK_SUCCESS) {
+                vkDestroyShaderModule(m_device, vertModule, nullptr);
+                return false;
+            }
+            
+            VkPipelineShaderStageCreateInfo shaderStages[2]{};
+            shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            shaderStages[0].module = vertModule;
+            shaderStages[0].pName = "main";
+            shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            shaderStages[1].module = fragModule;
+            shaderStages[1].pName = "main";
+            
+            VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+            vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            
+            VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+            inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            
+            VkPipelineViewportStateCreateInfo viewportState{};
+            viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewportState.viewportCount = 1;
+            viewportState.scissorCount = 1;
+            
+            VkPipelineRasterizationStateCreateInfo rasterizer{};
+            rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            rasterizer.cullMode = VK_CULL_MODE_NONE;
+            rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            rasterizer.lineWidth = 1.0f;
+            
+            VkPipelineMultisampleStateCreateInfo multisampling{};
+            multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            
+            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+            colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            colorBlendAttachment.blendEnable = VK_FALSE;
+            
+            VkPipelineColorBlendStateCreateInfo colorBlending{};
+            colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            colorBlending.attachmentCount = 1;
+            colorBlending.pAttachments = &colorBlendAttachment;
+            
+            VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+            VkPipelineDynamicStateCreateInfo dynamicState{};
+            dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamicState.dynamicStateCount = 2;
+            dynamicState.pDynamicStates = dynamicStates;
+            
+            VkGraphicsPipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipelineInfo.stageCount = 2;
+            pipelineInfo.pStages = shaderStages;
+            pipelineInfo.pVertexInputState = &vertexInputInfo;
+            pipelineInfo.pInputAssemblyState = &inputAssembly;
+            pipelineInfo.pViewportState = &viewportState;
+            pipelineInfo.pRasterizationState = &rasterizer;
+            pipelineInfo.pMultisampleState = &multisampling;
+            pipelineInfo.pColorBlendState = &colorBlending;
+            pipelineInfo.pDynamicState = &dynamicState;
+            pipelineInfo.layout = m_upscalePipelineLayout;  // Same layout as FXAA
+            pipelineInfo.renderPass = m_fxaaRenderPass;      // Same render pass as FXAA
+            pipelineInfo.subpass = 0;
+            
+            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_rcasPipeline) != VK_SUCCESS) {
+                vkDestroyShaderModule(m_device, vertModule, nullptr);
+                vkDestroyShaderModule(m_device, fragModule, nullptr);
+                return false;
+            }
+            
+            vkDestroyShaderModule(m_device, vertModule, nullptr);
+            vkDestroyShaderModule(m_device, fragModule, nullptr);
+        }
+        
         m_fxaaResourcesCreated = true;
         return true;
     }
@@ -3473,6 +3612,10 @@ private:
         if (m_fxaaPipeline) {
             vkDestroyPipeline(m_device, m_fxaaPipeline, nullptr);
             m_fxaaPipeline = VK_NULL_HANDLE;
+        }
+        if (m_rcasPipeline) {
+            vkDestroyPipeline(m_device, m_rcasPipeline, nullptr);
+            m_rcasPipeline = VK_NULL_HANDLE;
         }
         if (m_fxaaRenderPass) {
             vkDestroyRenderPass(m_device, m_fxaaRenderPass, nullptr);
@@ -4488,4 +4631,3 @@ std::unique_ptr<IVDPRenderer> CreateVulkanRenderer() {
 } // namespace brimir::vdp
 
 #endif // BRIMIR_GPU_VULKAN_ENABLED
-

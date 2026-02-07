@@ -135,6 +135,23 @@ public:
         return m_width * sizeof(uint32_t);  // Return native pitch
     }
     
+    // ===== GPU VDP1 High-Res Rendering (not used by software renderer) =====
+    
+    void SubmitVDP1Commands(const struct VDP1GPUCommand* commands, size_t count) override {
+        (void)commands; (void)count;
+    }
+    
+    bool RenderVDP1Frame(uint32_t fbWidth, uint32_t fbHeight) override {
+        (void)fbWidth; (void)fbHeight;
+        return false;
+    }
+    
+    const uint32_t* GetVDP1HiResBuffer() const override { return nullptr; }
+    uint32_t GetVDP1HiResWidth() const override { return 0; }
+    uint32_t GetVDP1HiResHeight() const override { return 0; }
+    
+    void UploadVDP1TextureAtlas(const uint32_t*, uint32_t, uint32_t) override {}
+    
     // ===== VDP1 Rendering =====
     
     void VDP1DrawPolygon(const VDP1Command& cmd) override {
@@ -331,6 +348,11 @@ public:
     void SetFXAA(bool enable) override {
         // Not supported by software renderer
         (void)enable;
+    }
+    
+    void SetSharpeningMode(uint32_t mode) override {
+        // Not supported by software renderer
+        (void)mode;
     }
     
     void SetMSAA(uint32_t samples) override {

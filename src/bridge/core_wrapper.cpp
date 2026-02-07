@@ -825,11 +825,28 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
     if (m_useGPUUpscaling && m_gpuRenderer && m_internalScale > 1) {
         ScopedTimer gpuTimer(m_profiler, "GPUUpscale");
         
+        // GPU VDP1: Submit captured commands and texture atlas to GPU renderer
+        // BEFORE RenderUpscaled, because the VDP1 overlay is rendered inline.
+        if (m_saturn->VDP.IsGPUVDP1Enabled()) {
+            const auto& gpuCmds = m_saturn->VDP.GetGPUVDP1Commands();
+            if (!gpuCmds.empty()) {
+                m_gpuRenderer->SubmitVDP1Commands(gpuCmds.data(), gpuCmds.size());
+                
+                // Upload texture atlas if textured sprites were captured
+                const uint32_t* atlasData = m_saturn->VDP.GetGPUVDP1AtlasData();
+                uint32_t atlasW = m_saturn->VDP.GetGPUVDP1AtlasWidth();
+                uint32_t atlasH = m_saturn->VDP.GetGPUVDP1AtlasHeight();
+                if (atlasData && atlasH > 0) {
+                    m_gpuRenderer->UploadVDP1TextureAtlas(atlasData, atlasW, atlasH);
+                }
+            }
+        }
+        
         // Upload the XRGB8888 framebuffer to GPU
         m_gpuRenderer->UploadSoftwareFramebuffer(
             m_framebuffer.data(), visibleWidth, visibleHeight, visibleWidth * 4);
         
-        // Render upscaled version
+        // Render upscaled version (includes inline VDP1 overlay if commands were submitted)
         if (m_gpuRenderer->RenderUpscaled()) {
             // Use renderer's buffer directly (valid until next RenderUpscaled call)
             const void* upscaledData = m_gpuRenderer->GetUpscaledFramebuffer();
@@ -1168,6 +1185,9 @@ void CoreWrapper::SetInternalResolution(uint32_t scale) {
         m_gpuRenderer->SetInternalScale(scale);
     }
     
+    // Enable GPU VDP1 high-res rendering when scale > 1 and GPU renderer is available
+    m_saturn->VDP.SetGPUVDP1Enabled(gpuActive && scale > 1, scale);
+    
     // Auto-enable upscaling when scale > 1
     if (scale > 1) {
         m_useGPUUpscaling = true;
@@ -1202,6 +1222,8 @@ void CoreWrapper::SetUpscaleFilter(const char* mode) {
         filterMode = 1;
     } else if (std::strcmp(mode, "sharp_bilinear") == 0) {
         filterMode = 2;
+    } else if (std::strcmp(mode, "fsr") == 0) {
+        filterMode = 3; // FSR 1.0 EASU
     }
     
     m_upscaleFilter = filterMode;
@@ -1235,6 +1257,21 @@ void CoreWrapper::SetFXAA(bool enable) {
     m_fxaa = enable;
     if (m_gpuRenderer) {
         m_gpuRenderer->SetFXAA(enable);
+    }
+}
+
+void CoreWrapper::SetSharpeningMode(const char* mode) {
+    if (!mode) return;
+    
+    uint32_t sharpeningMode = 0; // default: off
+    if (std::strcmp(mode, "fxaa") == 0) {
+        sharpeningMode = 1;
+    } else if (std::strcmp(mode, "rcas") == 0) {
+        sharpeningMode = 2;
+    }
+    
+    if (m_gpuRenderer) {
+        m_gpuRenderer->SetSharpeningMode(sharpeningMode);
     }
 }
 

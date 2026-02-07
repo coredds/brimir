@@ -189,6 +189,37 @@ public:
     /// Get upscaled framebuffer pitch (bytes per row)
     virtual uint32_t GetUpscaledPitch() const = 0;
     
+    // ===== GPU VDP1 High-Res Rendering =====
+    // These methods support true GPU VDP1 rendering where captured geometry
+    // is re-rasterized at internal resolution for sharp polygon edges.
+    
+    /// Submit captured VDP1 commands for GPU rendering
+    /// @param commands Array of captured VDP1 draw commands
+    /// @param count Number of commands
+    virtual void SubmitVDP1Commands(const struct VDP1GPUCommand* commands, size_t count) = 0;
+    
+    /// Render submitted VDP1 commands at internal resolution
+    /// @param fbWidth VDP1 framebuffer width (native)
+    /// @param fbHeight VDP1 framebuffer height (native)
+    /// @return true if rendering succeeded
+    virtual bool RenderVDP1Frame(uint32_t fbWidth, uint32_t fbHeight) = 0;
+    
+    /// Get GPU-rendered VDP1 high-res buffer
+    /// @return Pointer to XRGB8888 buffer, or nullptr if not available
+    virtual const uint32_t* GetVDP1HiResBuffer() const = 0;
+    
+    /// Get GPU VDP1 high-res buffer width
+    virtual uint32_t GetVDP1HiResWidth() const = 0;
+    
+    /// Get GPU VDP1 high-res buffer height
+    virtual uint32_t GetVDP1HiResHeight() const = 0;
+    
+    /// Upload VDP1 texture atlas (Phase 2: textured sprites)
+    /// @param data Pointer to RGBA8888 atlas data
+    /// @param width Atlas width in pixels
+    /// @param height Atlas height in pixels
+    virtual void UploadVDP1TextureAtlas(const uint32_t* data, uint32_t width, uint32_t height) = 0;
+    
     // ===== VDP1 Rendering (Sprites/Polygons to Sprite Layer) =====
     
     /// Draw VDP1 polygon
@@ -305,6 +336,9 @@ public:
     
     /// Enable/disable FXAA anti-aliasing
     virtual void SetFXAA(bool enable) = 0;
+    
+    /// Set sharpening/post-processing mode (0 = off, 1 = FXAA, 2 = RCAS)
+    virtual void SetSharpeningMode(uint32_t mode) = 0;
     
     /// Enable/disable MSAA (if supported)
     virtual void SetMSAA(uint32_t samples) = 0;

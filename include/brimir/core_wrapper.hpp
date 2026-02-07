@@ -242,6 +242,10 @@ public:
     /// @param enable True to enable FXAA
     void SetFXAA(bool enable);
     
+    /// Set sharpening/post-processing mode
+    /// @param mode "disabled", "fxaa", or "rcas"
+    void SetSharpeningMode(const char* mode);
+    
     /// @brief Set horizontal blend filter for interlaced modes
     /// @param enable True to enable horizontal blending in high-res interlaced modes
     void SetHorizontalBlend(bool enable);

@@ -71,5 +71,11 @@ Write-Host "FXAA shaders:" -ForegroundColor Yellow
 if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ fxaa.frag.spv" -ForegroundColor Green }
 else { Write-Error "Failed to compile fxaa.frag.glsl"; exit 1 }
 
+# FSR 1.0 RCAS shaders (reuses upscale.vert.glsl as vertex shader)
+Write-Host "FSR RCAS shaders:" -ForegroundColor Yellow
+& $glslc -fshader-stage=fragment fsr_rcas.frag.glsl -o fsr_rcas.frag.spv
+if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ fsr_rcas.frag.spv" -ForegroundColor Green }
+else { Write-Error "Failed to compile fsr_rcas.frag.glsl"; exit 1 }
+
 Write-Host ""
 Write-Host "All shaders compiled successfully!" -ForegroundColor Green

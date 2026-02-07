@@ -669,8 +669,18 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     const char* upscale_filter = get_option_value("brimir_upscale_filter", "sharp_bilinear");
     g_core->SetUpscaleFilter(upscale_filter);
     
-    bool fxaa_enabled = std::strcmp(get_option_value("brimir_fxaa", "disabled"), "enabled") == 0;
-    g_core->SetFXAA(fxaa_enabled);
+    // Sharpening mode (replaces old FXAA toggle)
+    const char* sharpening = get_option_value("brimir_sharpening", "disabled");
+    g_core->SetSharpeningMode(sharpening);
+    
+    // Legacy FXAA option support (backwards compat)
+    if (std::strcmp(sharpening, "disabled") == 0) {
+        // Check legacy brimir_fxaa option for backwards compatibility
+        bool fxaa_enabled = std::strcmp(get_option_value("brimir_fxaa", "disabled"), "enabled") == 0;
+        if (fxaa_enabled) {
+            g_core->SetFXAA(true);
+        }
+    }
     
     bool scanlines_enabled = std::strcmp(get_option_value("brimir_scanlines", "disabled"), "enabled") == 0;
     g_core->SetScanlines(scanlines_enabled);
