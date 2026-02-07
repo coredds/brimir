@@ -40,22 +40,6 @@
 
 namespace brimir::vdp {
 
-// GPU VDP1 command captured for high-res re-rendering
-struct VDP1GPUCommand {
-    enum class Type : uint8_t { Polygon, Line, Polyline, NormalSprite, ScaledSprite, DistortedSprite };
-    Type type;
-    // 4 vertices in Saturn screen coords (signed, local-coord-adjusted)
-    std::array<float, 2> vertices[4];
-    // Per-vertex RGBA color (flat or Gouraud)
-    std::array<float, 4> colors[4];
-    // Texture info (Phase 2: textured sprites)
-    uint32_t textureKey = 0;                  // Reserved for future texture caching
-    std::array<float, 2> uvs[4] = {};         // UV coordinates into texture atlas
-    // Flags: bit 0 = mesh, bit 1 = half-transparent, bit 2 = MSB shadow, bit 3 = gouraud
-    uint32_t flags = 0;
-    bool textured = false;                    // True for textured sprites
-};
-
 // Deinterlacing modes for high-resolution interlaced output
 enum class DeinterlaceMode {
     // Legacy mode: Active dual-field rendering with threaded synchronization
@@ -284,33 +268,6 @@ public:
     // GPU renderer support
     void SetGPURenderer(class IVDPRenderer* renderer, bool enable);
     bool IsUsingGPURenderer() const { return m_useGPURenderer; }
-    
-    // GPU VDP1 high-res rendering
-    void SetGPUVDP1Enabled(bool enabled, uint32 scale) {
-        m_gpuVDP1Enabled = enabled && scale > 1;
-        m_gpuVDP1Scale = scale;
-    }
-    bool IsGPUVDP1Enabled() const { return m_gpuVDP1Enabled; }
-    uint32 GetGPUVDP1Scale() const { return m_gpuVDP1Scale; }
-    const std::vector<VDP1GPUCommand>& GetGPUVDP1Commands() const { return m_gpuVDP1Commands; }
-    
-    // GPU VDP1 texture atlas (Phase 2: textured sprites)
-    const uint32* GetGPUVDP1AtlasData() const { return m_gpuVDP1AtlasData.empty() ? nullptr : m_gpuVDP1AtlasData.data(); }
-    uint32 GetGPUVDP1AtlasWidth() const { return m_gpuVDP1AtlasWidth; }
-    uint32 GetGPUVDP1AtlasHeight() const { return m_gpuVDP1AtlasHeight; }
-    
-    // Get VDP1 framebuffer dimensions (needed by GPU VDP1 rendering)
-    uint32 GetVDP1FBWidth() const { return m_state.regs1.fbSizeH; }
-    uint32 GetVDP1FBHeight() const { return m_state.regs1.fbSizeV; }
-    
-    // Get VDP1 VRAM for texture upload
-    const uint8* GetVDP1VRAM() const {
-        return m_state.VRAM1.data();
-    }
-    
-    size_t GetVDP1VRAMSize() const {
-        return m_state.VRAM1.size();
-    }
 
 private:
     VDPState m_state;
@@ -815,11 +772,6 @@ private:
     T VDP2ReadRendererCRAM(uint32 address);
 
     Color888 VDP2ReadRendererColor5to8(uint32 address) const;
-    
-    // VDP1 Color RAM access for palette lookups
-    // Returns pointer to VDP2 CRAM (used by VDP1 for palette colors)
-    const uint8* GetVDP1ColorRAM() const { return m_renderingContext.vdp2.CRAM.data(); }
-    size_t GetVDP1ColorRAMSize() const { return m_renderingContext.vdp2.CRAM.size(); }
 
     // Enables deinterlacing of double-density interlace frames in the renderer.
     // When false, double-density interlace mode is rendered normally - only even or odd lines are updated every frame.
@@ -871,26 +823,6 @@ private:
 
     // Render a full interlaced frame using bob mode
     void RenderInterlacedFrame_Bob();
-
-    // ---- GPU VDP1 high-res rendering ----
-    // When enabled, VDP1 draw commands are captured and re-rendered by the GPU at internal resolution.
-    // The software path still runs for accurate priority/shadow/window compositing; the GPU output
-    // provides a visual upgrade via overlay compositing in OnFrameComplete.
-    bool m_gpuVDP1Enabled = false;
-    uint32 m_gpuVDP1Scale = 1;                        // Internal resolution multiplier (1 = disabled)
-    std::vector<VDP1GPUCommand> m_gpuVDP1Commands;    // Commands captured this frame
-    
-    // Texture atlas for GPU VDP1 textured sprites (Phase 2)
-    std::vector<uint32> m_gpuVDP1AtlasData;           // RGBA8888 texels for all sprites this frame
-    static constexpr uint32 m_gpuVDP1AtlasWidth = 2048; // Atlas texture width (fixed)
-    uint32 m_gpuVDP1AtlasHeight = 0;                  // Current atlas height (grows per frame)
-    uint32 m_gpuVDP1AtlasCursorX = 0;                 // Current packing X position
-    uint32 m_gpuVDP1AtlasCursorY = 0;                 // Current packing Y position
-    uint32 m_gpuVDP1AtlasRowHeight = 0;               // Tallest sprite in current row
-    
-    // Helper: pack a decoded texture into the atlas and return UV coordinates
-    void VDP1PackTextureIntoAtlas(const uint32* texData, uint32 texW, uint32 texH,
-                                  std::array<float, 2> (&uvs)[4], bool flipH, bool flipV);
 
     // Enables rendering of meshes as transparent polygons.
     // When false, mesh polygons are rendered as checkerboard patterns, exactly like a real Saturn.
@@ -989,11 +921,6 @@ private:
         // Used when transparent meshes are enabled.
         // Indexing: [altFB][drawFB]
         std::array<std::array<SpriteFB, 2>, 2> meshFB;
-        
-        // Temporary texture buffer for GPU texture decoding
-        // Max size: 504x255 (largest sprite in 4bpp mode) * 4 bytes = ~500KB
-        static constexpr size_t kMaxTextureSize = 512 * 256;
-        std::array<uint32, kMaxTextureSize> gpuTextureBuffer;
     } m_VDP1RenderContext;
 
     struct VDP1PixelParams {
@@ -1523,17 +1450,6 @@ private:
     TPL_TRAITS void VDP1PlotTexturedQuad(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
                                          CoordS32 coordA, CoordS32 coordB, CoordS32 coordC, CoordS32 coordD);
     
-    // GPU sprite rendering helper (old path, sends directly to GPU renderer)
-    void VDP1DecodeAndRenderTextureGPU(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
-                                        sint32 xa, sint32 ya, sint32 xb, sint32 yb,
-                                        sint32 xc, sint32 yc, sint32 xd, sint32 yd);
-    
-    // GPU VDP1 Phase 2: Decode texture, pack into atlas, and capture as GPU command
-    void VDP1CaptureTexturedSpriteGPU(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
-                                       VDP1GPUCommand::Type type,
-                                       sint32 xa, sint32 ya, sint32 xb, sint32 yb,
-                                       sint32 xc, sint32 yc, sint32 xd, sint32 yd);
-
     // Individual VDP1 command processors
 
     TPL_TRAITS void VDP1Cmd_DrawNormalSprite(uint32 cmdAddress, VDP1Command::Control control);

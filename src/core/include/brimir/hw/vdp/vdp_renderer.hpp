@@ -1,19 +1,12 @@
 // Brimir - VDP Renderer Abstraction
-// Allows switching between Software and GPU renderers
+// Provides GPU upscaling and post-processing of software-rendered output
 
 #pragma once
 
 #include <cstdint>
 #include <memory>
-#include <span>
-#include "vdp_defs.hpp"
 
 namespace brimir::vdp {
-
-// Forward declarations
-struct VDP1Command;
-struct VDP2LayerState;
-struct VDP2RotationState;
 
 // Renderer types
 enum class RendererType {
@@ -33,54 +26,12 @@ enum class RendererFeature {
     ComputeShaders,        // Has compute shader support
     FastDeinterlacing,     // GPU-accelerated deinterlacing
     PostProcessing,        // Can apply post-process effects
-    FullPipeline,          // GPU handles VDP1+VDP2+compositing (Approach 3)
 };
 
 // Framebuffer format
 enum class FramebufferFormat {
     RGB565,    // 16-bit (Libretro default)
     XRGB8888,  // 32-bit (GPU native)
-};
-
-// GPU layer indices (matching Saturn VDP2 layer order)
-enum class GPULayer : uint8_t {
-    Back = 0,       // Back screen (solid color or per-line)
-    NBG3 = 1,       // Normal Background 3 (lowest priority BG)
-    NBG2 = 2,       // Normal Background 2
-    NBG1 = 3,       // Normal Background 1 / EXBG
-    NBG0 = 4,       // Normal Background 0 / RBG1
-    RBG0 = 5,       // Rotation Background 0
-    Sprite = 6,     // VDP1 Sprite layer
-    LineColor = 7,  // Line color screen
-    Count = 8
-};
-
-// GPU layer configuration
-struct GPULayerConfig {
-    bool enabled = false;
-    uint8_t priority = 0;           // 0-7, higher = on top
-    bool transparencyEnabled = true;
-    bool colorCalcEnabled = false;
-    uint8_t colorCalcRatio = 31;    // 0-31 blend ratio
-    
-    // For scroll layers
-    int32_t scrollX = 0;            // Fixed point 11.8
-    int32_t scrollY = 0;
-    int32_t scrollIncX = 0x100;     // 1.0 in fixed point
-    int32_t scrollIncY = 0x100;
-    
-    // For bitmap layers
-    bool isBitmap = false;
-    uint32_t bitmapWidth = 512;
-    uint32_t bitmapHeight = 256;
-    uint32_t bitmapAddress = 0;
-    
-    // For pattern layers
-    uint32_t patternNameAddress = 0;
-    uint32_t characterAddress = 0;
-    uint8_t characterSize = 0;      // 0 = 1x1 cell, 1 = 2x2 cells
-    uint8_t colorFormat = 0;        // ColorFormat enum value
-    uint32_t cramOffset = 0;
 };
 
 // Renderer capabilities
@@ -90,7 +41,6 @@ struct RendererCapabilities {
     bool supportsAntiAliasing;
     bool supportsTextureFiltering;
     bool supportsComputeShaders;
-    bool supportsFullPipeline;      // Can do VDP1+VDP2+compositor on GPU
     uint32_t maxTextureSize;
     uint32_t maxInternalScale;      // Max upscale factor (1x, 2x, 4x, 8x)
 };
@@ -135,33 +85,8 @@ public:
     /// Get framebuffer format
     virtual FramebufferFormat GetFramebufferFormat() const = 0;
     
-    // ===== Memory Synchronization (GPU Full Pipeline) =====
-    
-    /// Upload VDP1 VRAM to GPU texture
-    /// @param data Pointer to VDP1 VRAM (512KB)
-    /// @param size Size in bytes
-    virtual void SyncVDP1VRAM(const uint8_t* data, size_t size) = 0;
-    
-    /// Upload VDP2 VRAM to GPU texture
-    /// @param data Pointer to VDP2 VRAM (512KB, 4 banks of 128KB)
-    /// @param size Size in bytes
-    virtual void SyncVDP2VRAM(const uint8_t* data, size_t size) = 0;
-    
-    /// Upload Color RAM to GPU texture
-    /// @param data Pointer to CRAM (4KB)
-    /// @param size Size in bytes
-    /// @param mode CRAM color mode (0=RGB555x1024, 1=RGB555x2048, 2=RGB888x1024)
-    virtual void SyncCRAM(const uint8_t* data, size_t size, uint8_t mode) = 0;
-    
-    /// Upload VDP1 framebuffer to GPU (for sprite layer)
-    /// @param data Pointer to sprite framebuffer (256KB)
-    /// @param size Size in bytes
-    /// @param is8bit True if 8-bit pixel mode, false if 16-bit
-    virtual void SyncVDP1Framebuffer(const uint8_t* data, size_t size, bool is8bit) = 0;
-    
     // ===== GPU Upscaling (Hybrid Mode) =====
     // These methods enable GPU upscaling of software-rendered output
-    // without requiring full GPU VDP1/VDP2 rendering
     
     /// Upload software-rendered framebuffer to GPU for upscaling
     /// @param data Pointer to XRGB8888 framebuffer
@@ -189,125 +114,6 @@ public:
     /// Get upscaled framebuffer pitch (bytes per row)
     virtual uint32_t GetUpscaledPitch() const = 0;
     
-    // ===== GPU VDP1 High-Res Rendering =====
-    // These methods support true GPU VDP1 rendering where captured geometry
-    // is re-rasterized at internal resolution for sharp polygon edges.
-    
-    /// Submit captured VDP1 commands for GPU rendering
-    /// @param commands Array of captured VDP1 draw commands
-    /// @param count Number of commands
-    virtual void SubmitVDP1Commands(const struct VDP1GPUCommand* commands, size_t count) = 0;
-    
-    /// Render submitted VDP1 commands at internal resolution
-    /// @param fbWidth VDP1 framebuffer width (native)
-    /// @param fbHeight VDP1 framebuffer height (native)
-    /// @return true if rendering succeeded
-    virtual bool RenderVDP1Frame(uint32_t fbWidth, uint32_t fbHeight) = 0;
-    
-    /// Get GPU-rendered VDP1 high-res buffer
-    /// @return Pointer to XRGB8888 buffer, or nullptr if not available
-    virtual const uint32_t* GetVDP1HiResBuffer() const = 0;
-    
-    /// Get GPU VDP1 high-res buffer width
-    virtual uint32_t GetVDP1HiResWidth() const = 0;
-    
-    /// Get GPU VDP1 high-res buffer height
-    virtual uint32_t GetVDP1HiResHeight() const = 0;
-    
-    /// Upload VDP1 texture atlas (Phase 2: textured sprites)
-    /// @param data Pointer to RGBA8888 atlas data
-    /// @param width Atlas width in pixels
-    /// @param height Atlas height in pixels
-    virtual void UploadVDP1TextureAtlas(const uint32_t* data, uint32_t width, uint32_t height) = 0;
-    
-    // ===== VDP1 Rendering (Sprites/Polygons to Sprite Layer) =====
-    
-    /// Draw VDP1 polygon
-    virtual void VDP1DrawPolygon(const VDP1Command& cmd) = 0;
-    
-    /// Draw VDP1 normal sprite
-    virtual void VDP1DrawSprite(const VDP1Command& cmd) = 0;
-    
-    /// Draw VDP1 scaled sprite
-    virtual void VDP1DrawScaledSprite(const VDP1Command& cmd) = 0;
-    
-    /// Draw VDP1 distorted sprite
-    virtual void VDP1DrawDistortedSprite(const VDP1Command& cmd) = 0;
-    
-    /// Draw VDP1 line
-    virtual void VDP1DrawLine(const VDP1Command& cmd) = 0;
-    
-    /// Draw VDP1 polyline
-    virtual void VDP1DrawPolyline(const VDP1Command& cmd) = 0;
-    
-    // ===== Simplified Drawing API (direct GPU primitives) =====
-    
-    /// Draw a solid-color polygon (Color555 format)
-    virtual void DrawSolidPolygon(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                                  int32_t x2, int32_t y2, int32_t x3, int32_t y3,
-                                  Color555 color) = 0;
-    
-    /// Draw a Gouraud-shaded polygon (Color555 format for each vertex)
-    virtual void DrawGouraudPolygon(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                                    int32_t x2, int32_t y2, int32_t x3, int32_t y3,
-                                    Color555 colorA, Color555 colorB,
-                                    Color555 colorC, Color555 colorD) = 0;
-    
-    /// Draw a textured quad (pre-decoded RGBA texture)
-    virtual void DrawTexturedQuad(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                                  int32_t x2, int32_t y2, int32_t x3, int32_t y3,
-                                  const uint32_t* textureData, uint32_t texWidth, uint32_t texHeight,
-                                  bool flipH, bool flipV) = 0;
-    
-    /// Draw a line (rendered as thin quad at high resolution)
-    virtual void DrawLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1, Color555 color) = 0;
-    
-    /// Draw a line with Gouraud shading
-    virtual void DrawGouraudLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                                  Color555 colorA, Color555 colorB) = 0;
-    
-    // ===== VDP2 Layer Rendering (GPU Full Pipeline) =====
-    
-    /// Configure a VDP2 layer
-    virtual void SetLayerConfig(GPULayer layer, const GPULayerConfig& config) = 0;
-    
-    /// Render VDP2 normal background layer to its render target
-    /// @param layer Which NBG layer (NBG0-NBG3)
-    /// @param y Scanline Y coordinate (for line-based effects)
-    virtual void RenderNBGLayer(GPULayer layer, uint32_t y) = 0;
-    
-    /// Render VDP2 rotation background layer to its render target
-    /// @param layer Which RBG layer (RBG0)
-    /// @param y Scanline Y coordinate
-    virtual void RenderRBGLayer(GPULayer layer, uint32_t y) = 0;
-    
-    /// Render back screen
-    /// @param color Back color (RGB888)
-    virtual void RenderBackLayer(uint32_t color) = 0;
-    
-    // ===== Compositing (GPU Full Pipeline) =====
-    
-    /// Composite all layers according to priority
-    /// This is the final pass that blends all layer render targets
-    virtual void CompositeLayers() = 0;
-    
-    /// Apply color calculation (blending, transparency)
-    virtual void ApplyColorCalculation() = 0;
-    
-    /// Apply deinterlacing
-    virtual void ApplyDeinterlacing() = 0;
-    
-    // ===== Legacy VDP2 interface (for software renderer compatibility) =====
-    
-    /// Draw VDP2 background layer (NBG0, NBG1, etc.)
-    virtual void VDP2DrawBackground(int layer, const VDP2LayerState& state) = 0;
-    
-    /// Draw VDP2 rotation layer (RBG0, RBG1)
-    virtual void VDP2DrawRotation(int layer, const VDP2RotationState& state) = 0;
-    
-    /// Draw VDP2 sprite layer
-    virtual void VDP2DrawSpriteLayer(const VDP2LayerState& state) = 0;
-    
     // ===== Configuration =====
     
     /// Set internal rendering scale (1x, 2x, 4x, 8x)
@@ -319,14 +125,11 @@ public:
     /// Set output resolution (for upscaling)
     virtual void SetOutputResolution(uint32_t width, uint32_t height) = 0;
     
-    /// Enable/disable texture filtering
-    virtual void SetTextureFiltering(bool enable) = 0;
-    
-    /// Set upscale filter mode (0=nearest, 1=bilinear, 2=sharp bilinear)
+    /// Set upscale filter mode (0=nearest, 1=bilinear, 2=sharp bilinear, 3=FSR)
     virtual void SetUpscaleFilter(uint32_t mode) = 0;
     
-    /// Enable/disable scanline effect
-    virtual void SetScanlines(bool enable) = 0;
+    /// Enable/disable color debanding
+    virtual void SetDebanding(bool enable) = 0;
     
     /// Set brightness multiplier (1.0 = normal)
     virtual void SetBrightness(float brightness) = 0;
@@ -339,9 +142,6 @@ public:
     
     /// Set sharpening/post-processing mode (0 = off, 1 = FXAA, 2 = RCAS)
     virtual void SetSharpeningMode(uint32_t mode) = 0;
-    
-    /// Enable/disable MSAA (if supported)
-    virtual void SetMSAA(uint32_t samples) = 0;
     
     /// Enable/disable wireframe mode (GPU only, for debugging)
     virtual void SetWireframeMode(bool enable) = 0;
@@ -371,12 +171,9 @@ public:
         uint64_t drawCallCount;
         uint64_t triangleCount;
         uint64_t textureUploadCount;
-        uint64_t vramSyncCount;
-        uint64_t cramSyncCount;
         float lastFrameTime;      // milliseconds
         float averageFrameTime;
         float gpuTimeMs;          // GPU-side rendering time
-        float compositeTimeMs;    // Compositor pass time
     };
     
     virtual Statistics GetStatistics() const = 0;

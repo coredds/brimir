@@ -209,7 +209,7 @@ RETRO_API unsigned retro_api_version(void) {
 RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "Brimir";
-    info->library_version = "0.1.2-GPU";  // Added -GPU to verify DLL version
+    info->library_version = "0.2.2";
     info->need_fullpath = true;
     info->valid_extensions = "chd|cue|bin|iso|ccd|img|mds|mdf|m3u";
 }
@@ -682,8 +682,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
     }
     
-    bool scanlines_enabled = std::strcmp(get_option_value("brimir_scanlines", "disabled"), "enabled") == 0;
-    g_core->SetScanlines(scanlines_enabled);
+    // Color debanding
+    bool debanding_enabled = std::strcmp(get_option_value("brimir_debanding", "disabled"), "enabled") == 0;
+    g_core->SetDebanding(debanding_enabled);
     
     float brightness = static_cast<float>(atof(get_option_value("brimir_brightness", "1.0")));
     g_core->SetBrightness(brightness);

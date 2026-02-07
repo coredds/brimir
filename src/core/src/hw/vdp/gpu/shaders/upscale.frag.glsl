@@ -1,5 +1,6 @@
 // Brimir - Software Framebuffer Upscaling Fragment Shader
 // Supports: Nearest, Bilinear, Sharp Bilinear, and FSR 1.0 EASU
+// Post-processing: color debanding, brightness, gamma
 // Based on AMD FidelityFX Super Resolution 1.0 (MIT license)
 #version 450
 
@@ -10,12 +11,12 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform sampler2D softwareFramebuffer;
 
 layout(push_constant) uniform UpscaleConstants {
-    vec2 inputSize;     // Native resolution (e.g., 320x224)
-    vec2 outputSize;    // Upscaled resolution (e.g., 1280x896)
-    uint filterMode;    // 0 = nearest, 1 = bilinear, 2 = sharp bilinear, 3 = FSR EASU
-    uint scanlines;     // 0 = off, 1 = on
-    float brightness;   // 1.0 = normal
-    float gamma;        // 1.0 = linear
+    vec2 inputSize;         // Native resolution (e.g., 320x224)
+    vec2 outputSize;        // Upscaled resolution (e.g., 1280x896)
+    uint filterMode;        // 0 = nearest, 1 = bilinear, 2 = sharp bilinear, 3 = FSR EASU
+    float brightness;       // 1.0 = normal
+    float gamma;            // 1.0 = linear
+    uint debanding;         // 0 = off, 1 = on
 } pc;
 
 // ===== Utility functions =====
@@ -26,18 +27,39 @@ vec4 sharpBilinear(sampler2D tex, vec2 uv, vec2 texSize) {
     vec2 texPos = uv * texSize;
     vec2 texFloor = floor(texPos - 0.5) + 0.5;
     vec2 texFrac = texPos - texFloor;
-    
+
     // Sharpen the interpolation curve
     vec2 sharpFrac = smoothstep(0.0, 1.0, texFrac);
-    
+
     vec2 sharpPos = (texFloor + sharpFrac) * texelSize;
     return texture(tex, sharpPos);
 }
 
-// Simple scanline effect
-float scanlineIntensity(float y, float outputHeight) {
-    float line = mod(y * outputHeight, 2.0);
-    return mix(1.0, 0.7, smoothstep(0.0, 1.0, line));
+// ===== Color debanding =====
+
+// Screen-space hash for pseudo-random noise (no texture needed)
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Triangular-distributed noise: two uniform samples subtracted
+// Concentrates near zero, so it's less visible than uniform noise
+float triangularNoise(vec2 p) {
+    float r1 = hash(p);
+    float r2 = hash(p + vec2(1.0, 0.0));
+    return r1 - r2; // range [-1, 1], triangular distribution centered at 0
+}
+
+// Apply debanding: add noise scaled to RGB555 quantization step
+vec3 deband(vec3 color, vec2 fragCoord) {
+    // Saturn RGB555: 5 bits per channel = 31 steps, step size = 1/31
+    const float stepSize = 1.0 / 31.0;
+    // Add half-step triangular noise to each channel independently
+    vec3 noise;
+    noise.r = triangularNoise(fragCoord);
+    noise.g = triangularNoise(fragCoord + vec2(0.0, 1.0));
+    noise.b = triangularNoise(fragCoord + vec2(1.0, 1.0));
+    return color + noise * (stepSize * 0.5);
 }
 
 // ===== FSR 1.0 EASU (Edge Adaptive Spatial Upsampling) =====
@@ -131,28 +153,23 @@ vec3 FsrEasu(sampler2D tex, vec2 uv, vec2 inputSize, vec2 outputSize) {
     // Texture max size (our framebuffer is uploaded into a fixed-size texture)
     vec2 textureMaxSize = vec2(704.0, 512.0);
     vec2 texelSize = 1.0 / textureMaxSize;
-    
-    // Map output pixel to input position
-    vec2 pp = uv * outputSize / textureMaxSize;  // Position in texture space [0,1]
-    pp = pp * textureMaxSize;  // Position in texel space
-    
-    // Actually, map the output pixel to the input image coordinates
-    // The input image occupies [0, inputSize/textureMaxSize] in UV space
-    vec2 inputTexelPos = uv * inputSize;  // Position in input texels
-    
+
+    // Map output pixel to input image coordinates
+    vec2 inputTexelPos = uv * inputSize;
+
     // Get the integer position and fractional part
     vec2 fp = floor(inputTexelPos - 0.5);
     vec2 frac = inputTexelPos - 0.5 - fp;
-    
+
     // 12-tap kernel sampling pattern (sample from input texture at texel centers)
     //   b c
     // e f g h
     // i j k l
     //   n o
-    
+
     // Sample colors (convert texel positions to UV)
     #define SAMPLE(x, y) texture(tex, (fp + vec2(x, y) + 0.5) / textureMaxSize).rgb
-    
+
     vec3 bC = SAMPLE( 0.0, -1.0);
     vec3 cC = SAMPLE( 1.0, -1.0);
     vec3 eC = SAMPLE(-1.0,  0.0);
@@ -165,9 +182,9 @@ vec3 FsrEasu(sampler2D tex, vec2 uv, vec2 inputSize, vec2 outputSize) {
     vec3 lC = SAMPLE( 2.0,  1.0);
     vec3 nC = SAMPLE( 0.0,  2.0);
     vec3 oC = SAMPLE( 1.0,  2.0);
-    
+
     #undef SAMPLE
-    
+
     // Compute luma for direction analysis
     float bL = RGBToLuma(bC);
     float cL = RGBToLuma(cC);
@@ -181,7 +198,7 @@ vec3 FsrEasu(sampler2D tex, vec2 uv, vec2 inputSize, vec2 outputSize) {
     float lL = RGBToLuma(lC);
     float nL = RGBToLuma(nC);
     float oL = RGBToLuma(oC);
-    
+
     // Direction and length analysis (4-quadrant bilinear)
     vec2 dir = vec2(0.0);
     float len = 0.0;
@@ -189,7 +206,7 @@ vec3 FsrEasu(sampler2D tex, vec2 uv, vec2 inputSize, vec2 outputSize) {
     FsrEasuSet(dir, len, frac, false, true,  false, false, cL, fL, gL, hL, kL);
     FsrEasuSet(dir, len, frac, false, false, true,  false, fL, iL, jL, kL, nL);
     FsrEasuSet(dir, len, frac, false, false, false, true,  gL, jL, kL, lL, oL);
-    
+
     // Normalize direction
     float dirR = dir.x * dir.x + dir.y * dir.y;
     bool zro = dirR < (1.0 / 32768.0);
@@ -197,19 +214,19 @@ vec3 FsrEasu(sampler2D tex, vec2 uv, vec2 inputSize, vec2 outputSize) {
     dirR = zro ? 1.0 : dirR;
     dir.x = zro ? 1.0 : dir.x;
     dir *= vec2(dirR);
-    
+
     // Transform length
     len = len * 0.5;
     len *= len;
-    
+
     // Stretch kernel
     float stretch = (dir.x * dir.x + dir.y * dir.y) * APrxLoRcpF1(max(abs(dir.x), abs(dir.y)));
     vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
-    
+
     // Negative lobe strength and clipping
     float lob = 0.5 + (0.21 - 0.5) * len;  // 1/4 - 0.04 = 0.21
     float clp = APrxLoRcpF1(lob);
-    
+
     // Accumulate 12 taps (operating on RGB)
     vec3 aC = vec3(0.0);
     float aW = 0.0;
@@ -225,15 +242,15 @@ vec3 FsrEasu(sampler2D tex, vec2 uv, vec2 inputSize, vec2 outputSize) {
     FsrEasuTap(aC, aW, vec2( 2.0, 1.0) - frac, dir, len2, lob, clp, lC);
     FsrEasuTap(aC, aW, vec2( 0.0, 2.0) - frac, dir, len2, lob, clp, nC);
     FsrEasuTap(aC, aW, vec2( 1.0, 2.0) - frac, dir, len2, lob, clp, oC);
-    
+
     // Normalize
     vec3 result = aC / aW;
-    
+
     // Dering: clamp to min/max of 4 nearest texels
     vec3 min4 = min(min(fC, gC), min(jC, kC));
     vec3 max4 = max(max(fC, gC), max(jC, kC));
     result = clamp(result, min4, max4);
-    
+
     return clamp(result, 0.0, 1.0);
 }
 
@@ -241,17 +258,17 @@ vec3 FsrEasu(sampler2D tex, vec2 uv, vec2 inputSize, vec2 outputSize) {
 
 void main() {
     vec2 uv = fragTexCoord;
-    
+
     // The input texture is max size (704x512), but actual content is smaller
     vec2 textureMaxSize = vec2(704.0, 512.0);
     vec2 uvScale = pc.inputSize / textureMaxSize;
     vec2 scaledUV = uv * uvScale;
-    
+
     // Clamp UVs to valid content range
     scaledUV = clamp(scaledUV, vec2(0.0), uvScale);
-    
+
     vec4 color;
-    
+
     if (pc.filterMode == 0u) {
         // Nearest neighbor (sharp pixels)
         color = texture(softwareFramebuffer, scaledUV);
@@ -265,16 +282,15 @@ void main() {
         // FSR 1.0 EASU (edge-adaptive upscaling)
         color = vec4(FsrEasu(softwareFramebuffer, uv, pc.inputSize, pc.outputSize), 1.0);
     }
-    
-    // Apply scanlines if enabled
-    if (pc.scanlines != 0u) {
-        float scanline = scanlineIntensity(fragTexCoord.y, pc.outputSize.y);
-        color.rgb *= scanline;
+
+    // Apply debanding
+    if (pc.debanding != 0u) {
+        color.rgb = deband(color.rgb, gl_FragCoord.xy);
     }
-    
+
     // Apply brightness and gamma
     color.rgb *= pc.brightness;
-    color.rgb = pow(color.rgb, vec3(1.0 / pc.gamma));
-    
+    color.rgb = pow(max(color.rgb, vec3(0.0)), vec3(1.0 / pc.gamma));
+
     outColor = vec4(color.rgb, 1.0);
 }

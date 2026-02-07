@@ -825,23 +825,6 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
     if (m_useGPUUpscaling && m_gpuRenderer && m_internalScale > 1) {
         ScopedTimer gpuTimer(m_profiler, "GPUUpscale");
         
-        // GPU VDP1: Submit captured commands and texture atlas to GPU renderer
-        // BEFORE RenderUpscaled, because the VDP1 overlay is rendered inline.
-        if (m_saturn->VDP.IsGPUVDP1Enabled()) {
-            const auto& gpuCmds = m_saturn->VDP.GetGPUVDP1Commands();
-            if (!gpuCmds.empty()) {
-                m_gpuRenderer->SubmitVDP1Commands(gpuCmds.data(), gpuCmds.size());
-                
-                // Upload texture atlas if textured sprites were captured
-                const uint32_t* atlasData = m_saturn->VDP.GetGPUVDP1AtlasData();
-                uint32_t atlasW = m_saturn->VDP.GetGPUVDP1AtlasWidth();
-                uint32_t atlasH = m_saturn->VDP.GetGPUVDP1AtlasHeight();
-                if (atlasData && atlasH > 0) {
-                    m_gpuRenderer->UploadVDP1TextureAtlas(atlasData, atlasW, atlasH);
-                }
-            }
-        }
-        
         // Upload the XRGB8888 framebuffer to GPU
         m_gpuRenderer->UploadSoftwareFramebuffer(
             m_framebuffer.data(), visibleWidth, visibleHeight, visibleWidth * 4);
@@ -1185,9 +1168,6 @@ void CoreWrapper::SetInternalResolution(uint32_t scale) {
         m_gpuRenderer->SetInternalScale(scale);
     }
     
-    // Enable GPU VDP1 high-res rendering when scale > 1 and GPU renderer is available
-    m_saturn->VDP.SetGPUVDP1Enabled(gpuActive && scale > 1, scale);
-    
     // Auto-enable upscaling when scale > 1
     if (scale > 1) {
         m_useGPUUpscaling = true;
@@ -1232,10 +1212,10 @@ void CoreWrapper::SetUpscaleFilter(const char* mode) {
     }
 }
 
-void CoreWrapper::SetScanlines(bool enable) {
-    m_scanlines = enable;
+void CoreWrapper::SetDebanding(bool enable) {
+    m_debanding = enable;
     if (m_gpuRenderer) {
-        m_gpuRenderer->SetScanlines(enable);
+        m_gpuRenderer->SetDebanding(enable);
     }
 }
 

@@ -226,9 +226,9 @@ public:
     /// @param mode Filter string: "nearest", "bilinear", "sharp_bilinear"
     void SetUpscaleFilter(const char* mode);
     
-    /// @brief Enable/disable scanline effect (GPU Only)
-    /// @param enable True to enable scanlines
-    void SetScanlines(bool enable);
+    /// @brief Enable/disable color debanding (GPU Only)
+    /// @param enable True to enable debanding
+    void SetDebanding(bool enable);
     
     /// @brief Set brightness multiplier (GPU Only)
     /// @param brightness Brightness value (0.8 - 1.2)
@@ -307,7 +307,7 @@ private:
 
     // GPU post-processing settings
     uint32_t m_upscaleFilter = 2;       // 0=nearest, 1=bilinear, 2=sharp bilinear
-    bool m_scanlines = false;
+    bool m_debanding = false;
     float m_brightness = 1.0f;
     float m_gamma = 1.0f;
     bool m_fxaa = false;

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 # Project information
 project(Brimir
-    VERSION 0.1.3
+    VERSION 0.2.2
     DESCRIPTION "Sega Saturn emulation libretro core - Windows x64 MSVC"
     LANGUAGES CXX C
 )
@@ -73,10 +73,10 @@ include(cmake/YmirDeps.cmake)
 # Set Brimir core version variables
 set(Brimir_VERSION_MAJOR 0)
 set(Brimir_VERSION_MINOR 2)
-set(Brimir_VERSION_PATCH 1)
+set(Brimir_VERSION_PATCH 2)
 set(Brimir_VERSION_PRERELEASE "")
 set(Brimir_VERSION_BUILD "")
-set(Brimir_VERSION "0.2.1")
+set(Brimir_VERSION "0.2.2")
 set(Brimir_DEV_BUILD ON)
 set(Brimir_ENABLE_DEVLOG ON)
 set(Brimir_ENABLE_DEV_ASSERTIONS OFF)

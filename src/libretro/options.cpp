@@ -158,10 +158,12 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "disabled"
     },
     {
-        "brimir_scanlines",
-        "Scanlines (GPU Only)",
+        "brimir_debanding",
+        "Color Debanding (GPU Only)",
         nullptr,
-        "Overlay a scanline effect on the upscaled output for a retro CRT look.",
+        "Reduce color banding artifacts from Saturn's RGB555 palette (32 shades per channel). "
+        "Adds subtle noise to smooth out visible color steps in gradients and shadows. "
+        "Most noticeable on sky gradients and dark areas.",
         nullptr,
         "video",
         {

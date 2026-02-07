@@ -178,3 +178,7 @@ profile/
 *.prof
 *.profdata
 
+# Machine-specific utility scripts
+deploy-retroarch.ps1
+check_gpu_dependencies.ps1
+
