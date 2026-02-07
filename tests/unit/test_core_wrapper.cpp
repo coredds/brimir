@@ -244,6 +244,6 @@ TEST_CASE("CoreWrapper pixel format", "[core][unit]") {
         // RETRO_PIXEL_FORMAT_XRGB8888 = 1
         // RETRO_PIXEL_FORMAT_RGB565   = 2
         
-        REQUIRE(format == 2);  // RGB565
+        REQUIRE(format == 1);  // XRGB8888
     }
 }

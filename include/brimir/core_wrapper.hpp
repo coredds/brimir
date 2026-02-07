@@ -197,9 +197,22 @@ public:
     /// @param enable True to enable autodetect
     void SetAutodetectRegion(bool enable);
     
+    /// @brief Set hardware render context (for Vulkan)
+    /// @param hw_render Pointer to retro_hw_render_callback
+    void SetHWContext(void* hw_render);
+    
     /// @brief Set renderer type
     /// @param renderer Renderer string: "software", "vulkan"
     void SetRenderer(const char* renderer);
+    void SetInternalResolution(uint32_t scale); // 1x, 2x, 4x, 8x (GPU only)
+    void SetWireframeMode(bool enable);         // GPU only - visual verification
+    const char* GetActiveRenderer() const;      // Returns "Software" or "Vulkan"
+    bool IsGPURendererActive() const;
+    const char* GetLastRendererError() const;   // Get last GPU initialization error
+    
+    /// @brief Enable or disable GPU upscaling of software framebuffer
+    /// @param enable True to enable GPU upscaling
+    void SetGPUUpscaling(bool enable);
     
     /// @brief Set deinterlacing mode
     /// @param enable True to enable deinterlacing
@@ -208,6 +221,26 @@ public:
     /// @brief Set deinterlacing mode (new optimized modes)
     /// @param mode Mode string: "current", "weave", "blend", "bob", "none"
     void SetDeinterlacingMode(const char* mode);
+    
+    /// @brief Set upscale filter mode (GPU Only)
+    /// @param mode Filter string: "nearest", "bilinear", "sharp_bilinear"
+    void SetUpscaleFilter(const char* mode);
+    
+    /// @brief Enable/disable scanline effect (GPU Only)
+    /// @param enable True to enable scanlines
+    void SetScanlines(bool enable);
+    
+    /// @brief Set brightness multiplier (GPU Only)
+    /// @param brightness Brightness value (0.8 - 1.2)
+    void SetBrightness(float brightness);
+    
+    /// @brief Set gamma correction (GPU Only)
+    /// @param gamma Gamma value (0.8 - 2.2)
+    void SetGamma(float gamma);
+    
+    /// @brief Enable/disable FXAA anti-aliasing (GPU Only)
+    /// @param enable True to enable FXAA
+    void SetFXAA(bool enable);
     
     /// @brief Set horizontal blend filter for interlaced modes
     /// @param enable True to enable horizontal blending in high-res interlaced modes
@@ -250,14 +283,31 @@ private:
     
     // GPU renderer (optional, nullptr if using software rendering)
     std::unique_ptr<brimir::vdp::IVDPRenderer> m_gpuRenderer;
+    std::string m_lastRendererError;
 
     // Video framebuffer info (will be updated from Ymir's VDP)
     unsigned int m_fbWidth = 320;
     unsigned int m_fbHeight = 224;
-    unsigned int m_fbPitch = 320 * 2; // RGB565 = 2 bytes per pixel
-    unsigned int m_pixelFormat = 2;   // RGB565
-    std::vector<uint16_t> m_framebuffer;
+    unsigned int m_fbPitch = 320 * 4; // XRGB8888 = 4 bytes per pixel
+    unsigned int m_pixelFormat = 1;   // XRGB8888
+    std::vector<uint32_t> m_framebuffer;  // XRGB8888 (0x00RRGGBB)
+    
+    // GPU upscaling state
+    bool m_useGPUUpscaling = false;       // True if GPU upscaling is active
+    bool m_upscaledFrameReady = false;    // True if upscaled frame is available
+    uint32_t m_internalScale = 1;         // Internal resolution scale factor
+    std::vector<uint32_t> m_upscaledFramebuffer;  // Upscaled output (XRGB8888)
+    unsigned int m_upscaledWidth = 0;
+    unsigned int m_upscaledHeight = 0;
+    unsigned int m_upscaledPitch = 0;
 
+    // GPU post-processing settings
+    uint32_t m_upscaleFilter = 2;       // 0=nearest, 1=bilinear, 2=sharp bilinear
+    bool m_scanlines = false;
+    float m_brightness = 1.0f;
+    float m_gamma = 1.0f;
+    bool m_fxaa = false;
+    
     // Audio ring buffer for efficient batching (power of 2 for fast modulo)
     static constexpr size_t kAudioRingBufferSize = 4096;
     std::array<int16_t, kAudioRingBufferSize> m_audioRingBuffer;
@@ -284,6 +334,9 @@ private:
     
     // Last error message from operations (for debugging)
     std::string m_lastError;
+    
+    // Hardware render context (if negotiated)
+    void* m_hwRenderCallback = nullptr;
     
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;

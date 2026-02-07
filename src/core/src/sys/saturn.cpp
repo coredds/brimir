@@ -2,6 +2,7 @@
 
 #include <brimir/db/game_db.hpp>
 
+#include <brimir/util/bitmask_enum.hpp>
 #include <brimir/util/dev_log.hpp>
 
 #include <bit>
@@ -115,7 +116,7 @@ Saturn::Saturn()
     SCU.MapCallbacks(masterSH2.CbExtIntr, slaveSH2.CbExtIntr);
     VDP.MapCallbacks(SCU.CbHBlankStateChange, SCU.CbVBlankStateChange, SCU.CbTriggerSpriteDrawEnd,
                      SMPC.CbTriggerOptimizedINTBACKRead, SMPC.CbTriggerVBlankIN);
-    SMPC.MapCallbacks(SCU.CbTriggerSystemManager, SCU.CbTriggerPad);
+    SMPC.MapCallbacks(SCU.CbTriggerSystemManager, SCU.CbTriggerPad, VDP.CbExternalLatch);
     SCSP.MapCallbacks(SCU.CbTriggerSoundRequest);
     SH1.SetSCI0Callbacks(CDDrive.CbSerialRx, CDDrive.CbSerialTx);
     CDDrive.MapCallbacks(SH1.CbSetCOMSYNCn, SH1.CbSetCOMREQn, SH1.CbCDBDataSector, SCSP.CbCDDASector,
@@ -281,8 +282,11 @@ void Saturn::LoadDisc(media::Disc &&disc) {
 
     // Apply game-specific settings if needed
     const db::GameInfo *info = db::GetGameInfo(m_disc.header.productNumber, m_fs.GetHash());
-    ConfigureAccessCycles(info && info->fastBusTimings);
-    ForceSH2CacheEmulation(info && info->sh2Cache);
+    auto hasFlag = [&](db::GameInfo::Flags flag) { return info && BitmaskEnum(info->flags).AnyOf(flag); };
+    ConfigureAccessCycles(hasFlag(db::GameInfo::Flags::FastBusTimings));
+    ForceSH2CacheEmulation(hasFlag(db::GameInfo::Flags::ForceSH2Cache));
+    SCSP.SetCPUClockShift(hasFlag(db::GameInfo::Flags::FastMC68EC000) ? 1 : 0);
+    VDP.SetStallVDP1OnVRAMWrites(hasFlag(db::GameInfo::Flags::StallVDP1OnVRAMWrites));
 }
 
 void Saturn::EjectDisc() {

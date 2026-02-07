@@ -14,14 +14,14 @@ add_executable(brimir_tests
     unit/test_vdp_priority.cpp
     # VDP color calculation tests
     unit/test_vdp_color_calc.cpp
-    # GPU infrastructure tests
-    unit/test_gpu_infrastructure.cpp
     # GPU rendering tests
     unit/test_gpu_rendering.cpp
-    # GPU validation tests (GPU vs Software comparison)
+    # GPU validation tests (GPU vs VDP comparison)
     unit/test_gpu_validation.cpp
     # GPU debug tests
     unit/test_gpu_debug.cpp
+    # GPU architecture tests (all-or-nothing rendering)
+    unit/test_gpu_architecture.cpp
     # Core wrapper tests (disabled until fixed)
     # unit/test_core_wrapper.cpp
     # unit/test_hardware_access.cpp

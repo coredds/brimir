@@ -23,19 +23,19 @@ TEST_CASE("Video output framebuffer conversion", "[video][unit]") {
         REQUIRE(height <= 512);  // Max Saturn V resolution
     }
     
-    SECTION("Framebuffer pitch is correct for RGB565") {
+    SECTION("Framebuffer pitch is correct for XRGB8888") {
         auto width = core.GetFramebufferWidth();
         auto pitch = core.GetFramebufferPitch();
         
-        // RGB565 is 2 bytes per pixel
-        REQUIRE(pitch == width * 2);
+        // XRGB8888 is 4 bytes per pixel
+        REQUIRE(pitch == width * 4);
     }
     
-    SECTION("Pixel format is RGB565") {
+    SECTION("Pixel format is XRGB8888") {
         auto format = core.GetPixelFormat();
         
-        // libretro RGB565 format = 2
-        REQUIRE(format == 2);
+        // libretro XRGB8888 format = 1
+        REQUIRE(format == 1);
     }
     
     SECTION("Framebuffer pointer is valid after init") {
@@ -48,8 +48,8 @@ TEST_CASE("Video output pixel format", "[video][unit]") {
     CoreWrapper core;
     core.Initialize();
     
-    SECTION("Uses RGB565 format") {
-        REQUIRE(core.GetPixelFormat() == 2);
+    SECTION("Uses XRGB8888 format") {
+        REQUIRE(core.GetPixelFormat() == 1);
     }
 }
 
@@ -73,8 +73,8 @@ TEST_CASE("Video output frame dimensions", "[video][unit]") {
         auto width = core.GetFramebufferWidth();
         auto pitch = core.GetFramebufferPitch();
         
-        // For RGB565, pitch should be width * 2
-        REQUIRE(pitch == width * 2);
+        // For XRGB8888, pitch should be width * 4
+        REQUIRE(pitch == width * 4);
     }
 }
 
@@ -103,7 +103,7 @@ TEST_CASE("Video output framebuffer access", "[video][unit]") {
         // Basic sanity checks
         REQUIRE(width > 0);
         REQUIRE(height > 0);
-        REQUIRE(pitch >= width * 2);  // At least width * bytes_per_pixel
+        REQUIRE(pitch >= width * 4);  // At least width * bytes_per_pixel (XRGB8888)
     }
 }
 

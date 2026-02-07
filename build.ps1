@@ -7,7 +7,8 @@ param(
     [string]$Generator = "Ninja",
     [switch]$Clean,
     [switch]$Reconfigure,
-    [switch]$Target
+    [switch]$Target,
+    [switch]$GPU
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,6 +97,14 @@ if ($Reconfigure -or -not (Test-Path "build/CMakeCache.txt")) {
     # Add architecture for Visual Studio generators
     if ($Generator -like "Visual Studio*") {
         $cmakeArgs += @("-A", $Arch)
+    }
+    
+    # Enable GPU (Vulkan) rendering if requested
+    if ($GPU) {
+        Write-Host "  GPU Rendering: ENABLED (Vulkan)" -ForegroundColor Cyan
+        $cmakeArgs += @("-DBRIMIR_GPU_VULKAN=ON")
+    } else {
+        Write-Host "  GPU Rendering: Disabled (use -GPU to enable)" -ForegroundColor DarkGray
     }
     
     & cmake @cmakeArgs

@@ -147,8 +147,8 @@ void VDP::Reset(bool hard) {
     m_HRes = 320;
     m_VRes = 224;
     m_exclusiveMonitor = false;
-    m_displayEnabled = false;
-    m_borderColorMode = false;
+    m_state.regs2.displayEnabledLatch = false;
+    m_state.regs2.borderColorModeLatch = false;
 
     m_state.Reset(hard);
     if (hard) {
@@ -386,23 +386,50 @@ template <bool debug>
 void VDP::Advance(uint64 cycles) {
     if (!m_effectiveRenderVDP1InVDP2Thread) {
         if (m_VDP1RenderContext.rendering) {
-            if (cycles <= m_VDP1TimingPenaltyCycles) {
-                m_VDP1TimingPenaltyCycles -= cycles;
+            // Give VDP1 more cycles to compensate for optimizations not accounted for in cost estimates
+            // TODO: include cycle counts for gouraud shading, transparent sprites, per-pixel costs, etc.
+            cycles <<= 2;
+
+            if (cycles <= m_VDP1RenderContext.spilloverCycles) {
+                // Not enough cycles to cover the overspending from last iteration.
+                m_VDP1RenderContext.spilloverCycles -= cycles;
                 return;
             }
 
-            // HACK: slow down VDP1 commands to avoid freezes on Virtua Racing and Dragon Ball Z
-            // TODO: use this counter in the threaded renderer
-            // TODO: proper cycle counting
-            static constexpr uint64 kCyclesPerCommand = 500; // FIXME: pulled out of thin air
+            // Apply timing penalty from external VRAM writes or PTM=1 trigger
+            if (m_VDP1TimingPenaltyCycles > 0) {
+                if (cycles <= m_VDP1TimingPenaltyCycles) {
+                    m_VDP1TimingPenaltyCycles -= cycles;
+                    return;
+                } else {
+                    cycles -= m_VDP1TimingPenaltyCycles;
+                    m_VDP1TimingPenaltyCycles = 0;
+                }
+            }
 
-            m_VDP1RenderContext.cycleCount += cycles - m_VDP1TimingPenaltyCycles;
-            const uint64 steps = m_VDP1RenderContext.cycleCount / kCyclesPerCommand;
-            m_VDP1RenderContext.cycleCount %= kCyclesPerCommand;
-            m_VDP1TimingPenaltyCycles = 0;
+            // Our budget is however many cycles we've been requested to run minus the spillover from a previous command.
+            uint64 cycleBudget = cycles - m_VDP1RenderContext.spilloverCycles;
+            m_VDP1RenderContext.spilloverCycles = 0;
+            while (cycleBudget > 0 && m_VDP1RenderContext.rendering) {
+                // Read the command to estimate timing cost before processing
+                auto &cmdAddress = m_state.regs1.currCommandAddress;
+                const VDP1Command::Control control{.u16 = VDP1ReadRendererVRAM<uint16>(cmdAddress)};
 
-            for (uint64 i = 0; i < steps; i++) {
+                // Every command costs 16 cycles to fetch, even if skipped
+                uint64 cmdCost = 16;
+                if (!control.end && !control.skip) {
+                    cmdCost += VDP1CalcCommandTiming(cmdAddress, control);
+                }
+
+                // Process the command (rendering + navigation)
                 (this->*m_fnVDP1ProcessCommand)();
+
+                if (cmdCost >= cycleBudget) {
+                    // Spent all available cycles. Store excess cycles.
+                    m_VDP1RenderContext.spilloverCycles = cmdCost - cycleBudget;
+                    break;
+                }
+                cycleBudget -= cmdCost;
             }
         }
     }
@@ -446,6 +473,11 @@ FORCE_INLINE void VDP::VDP1WriteVRAM(uint32 address, T value) {
     util::WriteBE<T>(&m_state.VRAM1[address], value);
     if (m_effectiveRenderVDP1InVDP2Thread) {
         m_renderingContext.EnqueueEvent(VDPRenderEvent::VDP1VRAMWrite<T>(address, value));
+    }
+    if constexpr (!poke) {
+        if (m_stallVDP1OnVRAMWrites && m_VDP1RenderContext.rendering) {
+            m_VDP1TimingPenaltyCycles += kVDP1TimingPenaltyPerWrite;
+        }
     }
 }
 
@@ -502,6 +534,10 @@ FORCE_INLINE void VDP::VDP1WriteReg(uint32 address, uint16 value) {
             devlog::trace<grp::vdp1_regs>("Write to PTM={:d}", m_state.regs1.plotTrigger);
             if (m_state.regs1.plotTrigger == 0b01) {
                 VDP1BeginFrame();
+
+                // HACK: insert a delay to dodge some timing issues with games that trigger drawing too early
+                // (e.g.: Fighter's History Dynamite, Cyberbots - Fullmetal Madness)
+                m_VDP1TimingPenaltyCycles += 1500;
             }
         }
         break;
@@ -711,8 +747,8 @@ void VDP::SaveState(state::VDPState &state) const {
     state.renderer.displayFB = m_state.displayFB;
     state.renderer.vdp1Done = m_renderingContext.vdp1Done;
 
-    state.displayEnabled = m_displayEnabled;
-    state.borderColorMode = m_borderColorMode;
+    state.displayEnabled = m_state.regs2.displayEnabledLatch;
+    state.borderColorMode = m_state.regs2.borderColorModeLatch;
 }
 
 bool VDP::ValidateState(const state::VDPState &state) const {
@@ -807,8 +843,8 @@ void VDP::LoadState(const state::VDPState &state) {
     m_renderingContext.displayFB = state.renderer.displayFB;
     m_renderingContext.vdp1Done = state.renderer.vdp1Done;
 
-    m_displayEnabled = state.displayEnabled;
-    m_borderColorMode = state.borderColorMode;
+    m_state.regs2.displayEnabledLatch = state.displayEnabled;
+    m_state.regs2.borderColorModeLatch = state.borderColorMode;
 
     UpdateResolution<true>();
 
@@ -855,6 +891,15 @@ void VDP::OnPhaseUpdateEvent(core::EventContext &eventContext, void *userContext
     vdp.UpdatePhase();
     const uint64 cycles = vdp.GetPhaseCycles();
     eventContext.Reschedule(cycles);
+}
+
+void VDP::ExternalLatch(uint16 x, uint16 y) {
+    if (m_state.regs2.EXTEN.EXLTEN) {
+        // TODO: why do we need to tweak the coords here? And why shift by 2 instead of 1?
+        m_state.regs2.WriteHCNT((x + 64u) << 2u);
+        m_state.regs2.VCNTLatch = y + 16u;
+        m_state.regs2.TVSTAT.EXLTFG = x < m_HRes && y < m_VRes;
+    }
 }
 
 void VDP::SetVideoStandard(VideoStandard videoStandard) {
@@ -1130,7 +1175,7 @@ void VDP::UpdateResolution() {
         case InterlaceMode::SingleDensity: devlog::info<grp::vdp2>("Single-density interlace mode"); break;
         case InterlaceMode::DoubleDensity: devlog::info<grp::vdp2>("Double-density interlace mode"); break;
         }
-        devlog::info<grp::vdp2>("Dot clock mult = {}, display {}", dotClockMult, (m_displayEnabled ? "ON" : "OFF"));
+        devlog::info<grp::vdp2>("Dot clock mult = {}, display {}", dotClockMult, (m_state.regs2.displayEnabledLatch ? "ON" : "OFF"));
     }
 }
 
@@ -1260,6 +1305,7 @@ void VDP::BeginHPhaseLeftBorder() {
 
         // Reset cycles spent by VDP1 this frame
         m_VDP1RenderContext.cyclesSpent = 0;
+        m_VDP1RenderContext.spilloverCycles = 0;
 
         // End VBlank erase if in progress
         if (m_VDP1RenderContext.doVBlankErase) {
@@ -1633,6 +1679,14 @@ void VDP::BeginVPhaseBlankingAndSync() {
     m_profiler.EndFrame();
 #endif
     
+    // NOTE: GPU renderer overlay was removed here.
+    // The GPU overlay approach breaks Saturn's priority-based compositing.
+    // VDP1 writes packed data (palette index + priority bits) to spriteFB,
+    // and VDP2DrawSpriteLine extracts priorities for correct layer compositing.
+    // GPU rendering to a separate framebuffer loses priority information.
+    // For correct Saturn emulation, software VDP1 rendering is used instead.
+    // GPU could be used for post-processing/upscaling the final output.
+    
     m_cbFrameComplete(m_framebuffer.data(), m_HRes, m_VRes);
 
     // Begin erasing display framebuffer during display
@@ -1665,8 +1719,7 @@ void VDP::BeginVPhaseTopBorder() {
     UpdateResolution<true>();
 
     // Latch TVMD flags
-    m_displayEnabled = m_state.regs2.TVMD.DISP;
-    m_borderColorMode = m_state.regs2.TVMD.BDCLMD;
+    m_state.regs2.LatchTVMD();
 
     // TODO: draw border
 }
@@ -2165,6 +2218,17 @@ void VDP::VDP1BeginFrame() {
     m_VDP1RenderContext.doubleV =
         m_deinterlaceRender && regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity && !regs1.dblInterlaceEnable;
 
+    // Begin GPU renderer frame (if enabled)
+    // NOTE: Currently the GPU renderer is disabled for VDP1/VDP2 rendering.
+    // The software rendering path is used for correctness (priority handling).
+    // GPU full pipeline (Approach 3) is in development but NOT active.
+    // GPU VDP1 rendering currently disabled - causes rendering artifacts
+    // The GPU overlay approach doesn't integrate properly with VDP2 compositing
+    // TODO: Implement proper GPU-based VDP1+VDP2 pipeline
+    // if (m_gpuRenderer && m_useGPURenderer) {
+    //     m_gpuRenderer->BeginFrame();
+    // }
+
     m_VDP1RenderContext.rendering = true;
     if (m_effectiveRenderVDP1InVDP2Thread) {
         m_renderingContext.EnqueueEvent(VDPRenderEvent::VDP1BeginFrame());
@@ -2173,6 +2237,13 @@ void VDP::VDP1BeginFrame() {
 
 void VDP::VDP1EndFrame() {
     devlog::trace<grp::vdp1_render>("End VDP1 frame on framebuffer {}", VDP1GetDisplayFBIndex() ^ 1);
+    
+    // End GPU renderer frame (if enabled)
+    // GPU VDP1 rendering currently disabled
+    // if (m_gpuRenderer && m_useGPURenderer) {
+    //     m_gpuRenderer->EndFrame();
+    // }
+    
     m_VDP1RenderContext.rendering = false;
     m_VDP1TimingPenaltyCycles = 0;
 
@@ -2185,14 +2256,139 @@ void VDP::VDP1EndFrame() {
     }
 }
 
+FORCE_INLINE uint64 VDP::VDP1CalcCommandTiming(uint32 cmdAddress, VDP1Command::Control control) {
+    uint64 cycles = 0;
+
+    // HACK: rough cost estimates
+
+    auto lineTiming = [&](CoordS32 coordA, CoordS32 coordB) -> uint32 {
+        const uint32 width = abs(coordB.x() - coordA.x());
+        const uint32 height = abs(coordB.y() - coordA.y());
+        return std::max(width, height);
+    };
+
+    auto quadTiming = [&](CoordS32 coordA, CoordS32 coordB, CoordS32 coordC, CoordS32 coordD) -> uint32 {
+        uint32 quadCycles = 0;
+        QuadStepper quad{coordA, coordB, coordC, coordD};
+        for (; quad.CanStep(); quad.Step()) {
+            const CoordS32 coordL = quad.LeftEdge().Coord();
+            const CoordS32 coordR = quad.RightEdge().Coord();
+            quadCycles += lineTiming(coordL, coordR);
+        }
+        return quadCycles;
+    };
+
+    auto simpleQuadTiming = [&](uint32 width, uint32 height) -> uint32 { return width * height; };
+
+    using enum VDP1Command::CommandType;
+
+    switch (control.command) {
+    case DrawNormalSprite: //
+    {
+        const VDP1Command::Size size{.u16 = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0A)};
+        const uint32 charSizeH = size.H * 8;
+        const uint32 charSizeV = size.V;
+        cycles += simpleQuadTiming(std::max(charSizeH, 1u), std::max(charSizeV, 1u));
+        break;
+    }
+
+    case DrawScaledSprite: //
+    {
+        uint32 width;
+        const uint8 zoomPointH = bit::extract<0, 1>(control.zoomPoint);
+        if (zoomPointH == 0) {
+            const sint32 xa = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0C));
+            const sint32 xc = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x14));
+            width = abs(xc - xa);
+        } else {
+            const sint32 xb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x10));
+            width = abs(xb);
+        }
+
+        uint32 height;
+        const uint8 zoomPointV = bit::extract<2, 3>(control.zoomPoint);
+        if (zoomPointV == 0) {
+            const sint32 ya = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0E));
+            const sint32 yc = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x16));
+            height = abs(yc - ya);
+        } else {
+            const sint32 yb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x12));
+            height = abs(yb);
+        }
+
+        cycles += simpleQuadTiming(width, height);
+        break;
+    }
+    case DrawDistortedSprite: [[fallthrough]];
+    case DrawDistortedSpriteAlt: [[fallthrough]];
+    case DrawPolygon: //
+    {
+        const sint32 xa = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0C));
+        const sint32 ya = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0E));
+        const sint32 xb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x10));
+        const sint32 yb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x12));
+        const sint32 xc = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x14));
+        const sint32 yc = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x16));
+        const sint32 xd = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x18));
+        const sint32 yd = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1A));
+
+        const CoordS32 coordA{xa, ya};
+        const CoordS32 coordB{xb, yb};
+        const CoordS32 coordC{xc, yc};
+        const CoordS32 coordD{xd, yd};
+
+        cycles += quadTiming(coordA, coordB, coordC, coordD);
+        break;
+    }
+
+    case DrawPolylines: [[fallthrough]];
+    case DrawPolylinesAlt: //
+    {
+        const sint32 xa = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0C));
+        const sint32 ya = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0E));
+        const sint32 xb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x10));
+        const sint32 yb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x12));
+        const sint32 xc = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x14));
+        const sint32 yc = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x16));
+        const sint32 xd = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x18));
+        const sint32 yd = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1A));
+
+        const CoordS32 coordA{xa, ya};
+        const CoordS32 coordB{xb, yb};
+        const CoordS32 coordC{xc, yc};
+        const CoordS32 coordD{xd, yd};
+
+        cycles += lineTiming(coordA, coordB);
+        cycles += lineTiming(coordB, coordC);
+        cycles += lineTiming(coordC, coordD);
+        cycles += lineTiming(coordD, coordA);
+        break;
+    }
+    case DrawLine: //
+    {
+        const sint32 xa = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0C));
+        const sint32 ya = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0E));
+        const sint32 xb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x10));
+        const sint32 yb = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x12));
+
+        const CoordS32 coordA{xa, ya};
+        const CoordS32 coordB{xb, yb};
+
+        cycles += lineTiming(coordA, coordB);
+        break;
+    }
+
+    default: break;
+    }
+
+    return cycles;
+}
+
 template <bool deinterlace, bool transparentMeshes>
 void VDP::VDP1ProcessCommand() {
     static constexpr uint32 kNoReturn = ~0;
 
     if (!m_VDP1RenderContext.rendering) {
-        return;
-    }
-    if (m_VDP1RenderContext.cyclesSpent >= kVDP1CycleBudgetPerFrame) {
         return;
     }
 
@@ -2708,6 +2904,142 @@ bool VDP::VDP1PlotTexturedLine(CoordS32 coord1, CoordS32 coord2, VDP1TexturedLin
     return plotted;
 }
 
+// GPU sprite rendering: decode texture and send to GPU renderer
+void VDP::VDP1DecodeAndRenderTextureGPU(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
+                                         sint32 xa, sint32 ya, sint32 xb, sint32 yb,
+                                         sint32 xc, sint32 yc, sint32 xd, sint32 yd) {
+    if (!m_gpuRenderer) return;
+    
+    const VDP1Command::DrawMode mode{.u16 = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x04)};
+    const uint16 colorBank = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x06);
+    const uint32 charAddr = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x08) * 8u;
+    
+    const uint32 texW = size.H * 8;
+    const uint32 texH = size.V;
+    
+    if (texW == 0 || texH == 0 || texW > 256 || texH > 256) return;
+    
+    // Allocate temporary texture buffer
+    std::vector<uint32> texData(texW * texH);
+    
+    // Decode texture based on color mode
+    for (uint32 v = 0; v < texH; ++v) {
+        for (uint32 u = 0; u < texW; ++u) {
+            uint32 charIndex = v * texW + u;
+            uint16 colorIdx = 0;
+            uint32 rgba = 0xFF000000;  // Opaque black default
+            bool transparent = false;
+            
+            // Helper lambda to read CRAM color
+            auto readCRAM = [this](uint32 cramIdx) -> uint16 {
+                const uint8* cram = m_renderingContext.vdp2.CRAM.data();
+                uint32 addr = (cramIdx & 0x7FF) * 2;
+                return static_cast<uint16>(cram[addr]) | (static_cast<uint16>(cram[addr + 1]) << 8);
+            };
+            
+            switch (mode.colorMode) {
+            case 0: // 4 bpp, 16 colors, bank mode
+            {
+                uint8 byte = VDP1ReadRendererVRAM<uint8>(charAddr + (charIndex >> 1));
+                colorIdx = (byte >> ((~u & 1) * 4)) & 0xF;
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx |= colorBank & 0xFFF0;
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 1: // 4 bpp, 16 colors, lookup table mode
+            {
+                uint8 byte = VDP1ReadRendererVRAM<uint8>(charAddr + (charIndex >> 1));
+                colorIdx = (byte >> ((~u & 1) * 4)) & 0xF;
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    uint16 color555 = VDP1ReadRendererVRAM<uint16>(colorIdx * 2 + colorBank * 8);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 2: // 8 bpp, 64 colors, bank mode
+            {
+                colorIdx = VDP1ReadRendererVRAM<uint8>(charAddr + charIndex);
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx = (colorIdx & 0x3F) | (colorBank & 0xFFC0);
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 3: // 8 bpp, 128 colors, bank mode
+            {
+                colorIdx = VDP1ReadRendererVRAM<uint8>(charAddr + charIndex);
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx = (colorIdx & 0x7F) | (colorBank & 0xFF80);
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 4: // 8 bpp, 256 colors, bank mode
+            {
+                colorIdx = VDP1ReadRendererVRAM<uint8>(charAddr + charIndex);
+                transparent = (colorIdx == 0);
+                if (!transparent) {
+                    colorIdx = colorIdx | (colorBank & 0xFF00);
+                    uint16 color555 = readCRAM(colorIdx);
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            case 5: // 16 bpp, 32768 colors, RGB mode
+            {
+                uint32 addr = (charAddr & ~0xF) + charIndex * 2;
+                uint16 color555 = VDP1ReadRendererVRAM<uint16>(addr);
+                transparent = (color555 == 0);
+                if (!transparent) {
+                    uint8 r = (color555 & 0x1F) << 3;
+                    uint8 g = ((color555 >> 5) & 0x1F) << 3;
+                    uint8 b = ((color555 >> 10) & 0x1F) << 3;
+                    rgba = (0xFF << 24) | (b << 16) | (g << 8) | r;
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            
+            if (transparent && !mode.transparentPixelDisable) {
+                rgba = 0x00000000;  // Fully transparent
+            }
+            
+            texData[v * texW + u] = rgba;
+        }
+    }
+    
+    // Send to GPU renderer
+    m_gpuRenderer->DrawTexturedQuad(xa, ya, xb, yb, xc, yc, xd, yd,
+                                     texData.data(), texW, texH,
+                                     control.flipH, control.flipV);
+}
+
 template <bool deinterlace, bool transparentMeshes>
 FORCE_INLINE void VDP::VDP1PlotTexturedQuad(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
                                             CoordS32 coordA, CoordS32 coordB, CoordS32 coordC, CoordS32 coordD) {
@@ -2801,6 +3133,9 @@ void VDP::VDP1Cmd_DrawNormalSprite(uint32 cmdAddress, VDP1Command::Control contr
     const sint32 rx = xa + std::max(charSizeH, 1u) - 1u; // right X
     const sint32 by = ya + std::max(charSizeV, 1u) - 1u; // bottom Y
 
+    devlog::trace<grp::vdp1_cmd>("[{:05X}] Draw normal sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
+                                 cmdAddress, lx, ty, rx, ty, rx, by, lx, by);
+
     const sint32 doubleV = ctx.doubleV;
 
     const CoordS32 coordA{lx, ty << doubleV};
@@ -2808,8 +3143,10 @@ void VDP::VDP1Cmd_DrawNormalSprite(uint32 cmdAddress, VDP1Command::Control contr
     const CoordS32 coordC{rx, by << doubleV};
     const CoordS32 coordD{lx, by << doubleV};
 
-    devlog::trace<grp::vdp1_cmd>("[{:05X}] Draw normal sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
-                                 cmdAddress, lx, ty, rx, ty, rx, by, lx, by);
+    // GPU sprite rendering currently disabled - causes artifacts and performance issues
+    // if (m_gpuRenderer && m_useGPURenderer && charSizeH > 0 && charSizeV > 0) {
+    //     VDP1DecodeAndRenderTextureGPU(cmdAddress, control, size, lx, ty, rx, ty, rx, by, lx, by);
+    // }
 
     VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
 }
@@ -2910,6 +3247,11 @@ void VDP::VDP1Cmd_DrawScaledSprite(uint32 cmdAddress, VDP1Command::Control contr
     devlog::trace<grp::vdp1_cmd>("[{:05X}] Draw scaled sprite: {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d} {:3d}x{:<3d}",
                                  cmdAddress, qxa, qya, qxb, qyb, qxc, qyc, qxd, qyd);
 
+    // GPU sprite rendering currently disabled
+    // if (m_gpuRenderer && m_useGPURenderer) {
+    //     VDP1DecodeAndRenderTextureGPU(cmdAddress, control, size, qxa, qya, qxb, qyb, qxc, qyc, qxd, qyd);
+    // }
+
     VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
 }
 
@@ -2941,6 +3283,11 @@ void VDP::VDP1Cmd_DrawDistortedSprite(uint32 cmdAddress, VDP1Command::Control co
     devlog::trace<grp::vdp1_cmd>("[{:05X}] Draw distorted sprite: {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d} {:6d}x{:<6d}",
                                  cmdAddress, xa, ya, xb, yb, xc, yc, xd, yd);
 
+    // GPU sprite rendering currently disabled
+    // if (m_gpuRenderer && m_useGPURenderer) {
+    //     VDP1DecodeAndRenderTextureGPU(cmdAddress, control, size, xa, ya, xb, yb, xc, yc, xd, yd);
+    // }
+
     VDP1PlotTexturedQuad<deinterlace, transparentMeshes>(cmdAddress, control, size, coordA, coordB, coordC, coordD);
 }
 
@@ -2964,24 +3311,9 @@ void VDP::VDP1Cmd_DrawPolygon(uint32 cmdAddress, VDP1Command::Control control) {
     const sint32 yd = bit::sign_extend<13>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1A)) + ctx.localCoordY;
     const uint32 gouraudTable = static_cast<uint32>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x1C)) << 3u;
     
-    // GPU rendering path (if enabled)
-    if (m_gpuRenderer && m_useGPURenderer) {
-        if (mode.gouraudEnable) {
-            // Gouraud shading: read 4 colors from gouraud table
-            Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};
-            Color555 colorB{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 2u)};
-            Color555 colorC{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 4u)};
-            Color555 colorD{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 6u)};
-            
-            m_gpuRenderer->DrawGouraudPolygon(xa, ya, xb, yb, xc, yc, xd, yd,
-                                              colorA, colorB, colorC, colorD);
-        } else {
-            // Solid color polygon
-            Color555 color555{.u16 = color};
-            m_gpuRenderer->DrawSolidPolygon(xa, ya, xb, yb, xc, yc, xd, yd, color555);
-        }
-        return; // Skip software rendering
-    }
+    // NOTE: GPU polygon rendering path disabled for correct priority handling.
+    // Polygons write to spriteFB with color data, and VDP2 extracts priority bits for compositing.
+    // See VDP1Cmd_DrawNormalSprite for detailed explanation.
 
     const sint32 doubleV = ctx.doubleV;
     const CoordS32 coordA{xa, ya << doubleV};
@@ -3016,7 +3348,20 @@ void VDP::VDP1Cmd_DrawPolygon(uint32 cmdAddress, VDP1Command::Control control) {
                                      (uint8)colorD.r, (uint8)colorD.g, (uint8)colorD.b);
 
         quad.SetupGouraud(colorA, colorB, colorC, colorD);
+        
+        // GPU polygon rendering currently disabled
+        // if (m_gpuRenderer && m_useGPURenderer) {
+        //     m_gpuRenderer->DrawGouraudPolygon(xa, ya, xb, yb, xc, yc, xd, yd,
+        //                                        colorA, colorB, colorC, colorD);
+        // }
     }
+    // else {
+    //     // GPU rendering for solid color polygon (no Gouraud)
+    //     if (m_gpuRenderer && m_useGPURenderer) {
+    //         Color555 solidColor{.u16 = color};
+    //         m_gpuRenderer->DrawSolidPolygon(xa, ya, xb, yb, xc, yc, xd, yd, solidColor);
+    //     }
+    // }
 
     // Optimization for the case where the quad goes outside the system clipping area.
     // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
@@ -3091,6 +3436,22 @@ void VDP::VDP1Cmd_DrawPolylines(uint32 cmdAddress, VDP1Command::Control control)
                                  (uint8)A.b, (uint8)B.r, (uint8)B.g, (uint8)B.b, (uint8)C.r, (uint8)C.g, (uint8)C.b,
                                  (uint8)D.r, (uint8)D.g, (uint8)D.b);
 
+    // GPU polyline rendering currently disabled
+    // if (m_gpuRenderer && m_useGPURenderer) {
+    //     if (mode.gouraudEnable) {
+    //         m_gpuRenderer->DrawGouraudLine(xa, coordA.y(), xb, coordB.y(), A, B);
+    //         m_gpuRenderer->DrawGouraudLine(xb, coordB.y(), xc, coordC.y(), B, C);
+    //         m_gpuRenderer->DrawGouraudLine(xc, coordC.y(), xd, coordD.y(), C, D);
+    //         m_gpuRenderer->DrawGouraudLine(xd, coordD.y(), xa, coordA.y(), D, A);
+    //     } else {
+    //         Color555 lineColor{.u16 = color};
+    //         m_gpuRenderer->DrawLine(xa, coordA.y(), xb, coordB.y(), lineColor);
+    //         m_gpuRenderer->DrawLine(xb, coordB.y(), xc, coordC.y(), lineColor);
+    //         m_gpuRenderer->DrawLine(xc, coordC.y(), xd, coordD.y(), lineColor);
+    //         m_gpuRenderer->DrawLine(xd, coordD.y(), xa, coordA.y(), lineColor);
+    //     }
+    // }
+
     if (mode.gouraudEnable) {
         lineParams.gouraudLeft = A;
         lineParams.gouraudRight = B;
@@ -3155,7 +3516,19 @@ void VDP::VDP1Cmd_DrawLine(uint32 cmdAddress, VDP1Command::Control control) {
 
         devlog::trace<grp::vdp1_cmd>("Gouraud colors: ({},{},{}) ({},{},{})", (uint8)colorA.r, (uint8)colorA.g,
                                      (uint8)colorA.b, (uint8)colorB.r, (uint8)colorB.g, (uint8)colorB.b);
+        
+        // GPU line rendering currently disabled
+        // if (m_gpuRenderer && m_useGPURenderer) {
+        //     m_gpuRenderer->DrawGouraudLine(xa, ya << doubleV, xb, yb << doubleV, colorA, colorB);
+        // }
     }
+    // else {
+    //     // GPU solid color line rendering at high resolution
+    //     if (m_gpuRenderer && m_useGPURenderer) {
+    //         Color555 lineColor{.u16 = color};
+    //         m_gpuRenderer->DrawLine(xa, ya << doubleV, xb, yb << doubleV, lineColor);
+    //     }
+    // }
 
     VDP1PlotLine<false, deinterlace, transparentMeshes>(coordA, coordB, lineParams);
 }
@@ -4068,7 +4441,7 @@ FORCE_INLINE void VDP::VDP2CalcAccessPatterns(VDP2Regs &regs2) {
 FORCE_INLINE void VDP::VDP2PrepareLine(uint32 y) {
     // Don't waste time processing anything if the display is disabled
     // TODO: check if this is how the real VDP2 behaves
-    if (!m_displayEnabled) [[unlikely]] {
+    if (!m_state.regs2.displayEnabledLatch) [[unlikely]] {
         return;
     }
 
@@ -5553,9 +5926,9 @@ FORCE_INLINE void VDP::VDP2ComposeLine(uint32 y, bool altField) {
     if (y > g_maxComposeFBLine) g_maxComposeFBLine = y;
     #endif
 
-    if (!m_displayEnabled || !regs.TVMD.DISP) {
+    if (!m_state.regs2.displayEnabledLatch || !regs.TVMD.DISP) {
         uint32 color = 0xFF000000;
-        if (m_borderColorMode) {
+        if (m_state.regs2.borderColorModeLatch) {
             color |= m_lineBackLayerState.backColor.u32;
         }
         std::fill_n(&m_framebuffer[y * m_HRes], m_HRes, color);
@@ -7104,10 +7477,12 @@ FORCE_INLINE VDP::Pixel VDP::VDP2FetchCharacterPixel(const BGParams &bgParams, C
     if (bgParams.priorityMode == PriorityMode::PerCharacter) {
         pixel.priority &= ~1;
         pixel.priority |= (uint8)ch.specPriority;
-    } else if (bgParams.priorityMode == PriorityMode::PerDot && ch.specPriority) {
+    } else if (bgParams.priorityMode == PriorityMode::PerDot) {
+        pixel.priority &= ~1;
         if constexpr (IsPaletteColorFormat(colorFormat)) {
-            pixel.priority &= ~1;
-            pixel.priority |= static_cast<uint8>(specFuncCode.colorMatches[colorData]);
+            if (ch.specPriority) {
+                pixel.priority |= static_cast<uint8>(specFuncCode.colorMatches[colorData]);
+            }
         }
     }
 
@@ -7235,39 +7610,6 @@ FORCE_INLINE Color888 VDP::VDP2FetchCRAMColor(uint32 cramOffset, uint32 colorInd
     }
 }
 
-FLATTEN FORCE_INLINE SpriteData VDP::VDP2FetchSpriteData(const SpriteFB &fb, uint32 fbOffset) {
-    const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-
-    const uint8 type = regs2.spriteParams.type;
-    
-    // DEBUG: Log sprite read configuration once
-    static bool logged = false;
-    if (!logged && type >= 8) {
-        devlog::info<grp::vdp2_render>("VIDEO MODE: VDP1={}x{} {}bpp (TVM={}{}{}) | VDP2 SpriteType=0x{:X} Mixed={}",
-            regs1.fbSizeH, regs1.fbSizeV, regs1.pixel8Bits ? 8 : 16,
-            regs1.hdtvEnable, regs1.fbRotEnable, regs1.pixel8Bits,
-            type, regs2.spriteParams.mixedFormat);
-        logged = true;
-    }
-    
-    if (type < 8) {
-        // Word sprite types (0-7): read 16-bit data
-        return VDP2FetchWordSpriteData(fb, fbOffset * sizeof(uint16), type);
-    } else {
-        // Byte sprite types (8-15): read 8-bit data
-        // fbOffset is a PIXEL offset, but the framebuffer is a BYTE array
-        // When VDP1 framebuffer is in 16-bit mode, pixels are stored as 2 bytes each
-        // So we must convert pixel offset to byte offset
-        if (!regs1.pixel8Bits) {
-            // 16-bit framebuffer: convert pixel offset to byte offset (2 bytes per pixel)
-            fbOffset = fbOffset * sizeof(uint16);
-        }
-        // If 8-bit framebuffer: pixel offset == byte offset (1 byte per pixel)
-        return VDP2FetchByteSpriteData(fb, fbOffset, type);
-    }
-}
-
 // Determines the type of sprite data (if any) based on color data.
 //
 // colorData is the raw color data.
@@ -7287,15 +7629,34 @@ FORCE_INLINE static SpriteData::Special GetSpecialPattern(uint16 rawData) {
     }
 }
 
-FORCE_INLINE SpriteData VDP::VDP2FetchWordSpriteData(const SpriteFB &fb, uint32 fbOffset, uint8 type) {
-    assert(type < 8);
+FLATTEN FORCE_INLINE SpriteData VDP::VDP2FetchSpriteData(const SpriteFB &fb, uint32 fbOffset) {
+    const VDP1Regs &regs1 = VDP1GetRegs();
+    const VDP2Regs &regs2 = VDP2GetRegs();
 
-    const VDP2Regs &regs = VDP2GetRegs();
+    // Adjust offset based on VDP1 data size.
+    // The majority of games actually set the sprite readout size to match the VDP1 sprite data size, but there's
+    // *always* an exception...
+    // 8-bit VDP1 data vs. 16-bit readout: NBA Live 98
+    // 16-bit VDP1 data vs. 8-bit readout: I Love Donald Duck
+    const uint8 type = regs2.spriteParams.type;
+    uint16 rawData;
+    if (regs1.pixel8Bits) {
+        rawData = fb[fbOffset & 0x3FFFF];
+        if (type < 8 && rawData != 0) {
+            rawData |= 0xFF00;
+        }
+    } else {
+        fbOffset *= sizeof(uint16);
+        if (type >= 8) {
+            ++fbOffset;
+        }
+        rawData = util::ReadBE<uint16>(&fb[fbOffset & 0x3FFFE]);
+    }
 
-    const uint16 rawData = util::ReadBE<uint16>(&fb[fbOffset & 0x3FFFE]);
+    // Sprite types 0-7 are 16-bit, 8-15 are 8-bit
 
     SpriteData data{};
-    switch (regs.spriteParams.type) {
+    switch (type) {
     case 0x0:
         data.colorData = bit::extract<0, 10>(rawData);
         data.colorCalcRatio = bit::extract<11, 13>(rawData);
@@ -7357,19 +7718,7 @@ FORCE_INLINE SpriteData VDP::VDP2FetchWordSpriteData(const SpriteFB &fb, uint32 
         data.shadowOrWindow = bit::test<15>(rawData);
         data.special = GetSpecialPattern<8>(rawData);
         break;
-    }
-    return data;
-}
 
-FORCE_INLINE SpriteData VDP::VDP2FetchByteSpriteData(const SpriteFB &fb, uint32 fbOffset, uint8 type) {
-    assert(type >= 8);
-
-    const VDP2Regs &regs = VDP2GetRegs();
-
-    const uint8 rawData = fb[fbOffset & 0x3FFFF];
-
-    SpriteData data{};
-    switch (regs.spriteParams.type) {
     case 0x8:
         data.colorData = bit::extract<0, 6>(rawData);
         data.priority = bit::extract<7>(rawData);

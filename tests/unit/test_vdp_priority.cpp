@@ -17,24 +17,24 @@ TEST_CASE("VDP framebuffer consistency", "[vdp][priority][critical]") {
         uint32_t h = core.GetFramebufferHeight();
         
         // Capture first frame
-        std::vector<uint16_t> frame1(w * h);
-        const uint16_t* fb_rgb565 = static_cast<const uint16_t*>(fb1);
-        std::copy(fb_rgb565, fb_rgb565 + (w * h), frame1.begin());
+        std::vector<uint32_t> frame1(w * h);
+        const uint32_t* fb_xrgb = static_cast<const uint32_t*>(fb1);
+        std::copy(fb_xrgb, fb_xrgb + (w * h), frame1.begin());
         
         // Reset and run again
         core.Reset();
         core.Initialize();
         core.RunFrame();
         auto* fb2 = core.GetFramebuffer();
-        const uint16_t* fb_rgb565_2 = static_cast<const uint16_t*>(fb2);
+        const uint32_t* fb_xrgb_2 = static_cast<const uint32_t*>(fb2);
         
         // Should produce identical output (deterministic rendering)
         bool identical = true;
         for (size_t i = 0; i < w * h && identical; i++) {
-            if (frame1[i] != fb_rgb565_2[i]) {
+            if (frame1[i] != fb_xrgb_2[i]) {
                 identical = false;
                 INFO("First mismatch at pixel " << i << ": " 
-                     << std::hex << frame1[i] << " vs " << fb_rgb565_2[i]);
+                     << std::hex << frame1[i] << " vs " << fb_xrgb_2[i]);
             }
         }
         
@@ -60,11 +60,11 @@ TEST_CASE("VDP multiple frames produce output", "[vdp][priority]") {
             
             // Check framebuffer has some non-black pixels
             // (unless it's a blank screen, which is also valid)
-            const uint16_t* fb_rgb565 = static_cast<const uint16_t*>(fb);
+            const uint32_t* fb_xrgb = static_cast<const uint32_t*>(fb);
             
             bool hasOutput = false;
             for (uint32_t i = 0; i < w * h; i++) {
-                if (fb_rgb565[i] != 0) {
+                if ((fb_xrgb[i] & 0x00FFFFFF) != 0) {
                     hasOutput = true;
                     break;
                 }

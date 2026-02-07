@@ -106,8 +106,12 @@ private:
         }
     }
 
-    uint8 WritePDR(uint8 ddr, uint8 value) {
-        return m_peripheral->WritePDR(ddr, value);
+    uint8 WritePDR(uint8 ddr, uint8 value, bool exle) {
+        return m_peripheral->WritePDR(ddr, value, exle);
+    }
+
+    bool GetExternalLatchCoordinates(uint16 &x, uint16 &y) const {
+        return m_peripheral->GetExternalLatchCoordinates(x, y);
     }
 };
 

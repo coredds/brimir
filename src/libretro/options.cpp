@@ -88,7 +88,8 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "Choose between software or GPU (Vulkan) rendering. "
         "Software: Accurate, compatible, optimized. "
         "Vulkan: Experimental GPU acceleration with potential for higher performance and upscaling. "
-        "Requires Vulkan support. Falls back to software if unavailable.",
+        "Requires Vulkan support. Falls back to software if unavailable. "
+        "CHECK LOG to verify GPU is active!",
         nullptr,
         "video",
         {
@@ -97,6 +98,108 @@ static struct retro_core_option_v2_definition option_defs[] = {
             { nullptr, nullptr }
         },
         "software"
+    },
+    {
+        "brimir_internal_resolution",
+        "Internal Resolution (GPU Only)",
+        nullptr,
+        "Render at higher internal resolution for sharper graphics. "
+        "GPU ONLY - If this works, GPU rendering is active! "
+        "Software renderer will ignore this setting. "
+        "Higher values improve quality but reduce performance.",
+        nullptr,
+        "video",
+        {
+            { "1", "1x (Native)" },
+            { "2", "2x (Sharp)" },
+            { "4", "4x (Very Sharp)" },
+            { "8", "8x (Maximum)" },
+            { nullptr, nullptr }
+        },
+        "1"
+    },
+    {
+        "brimir_upscale_filter",
+        "Upscale Filter (GPU Only)",
+        nullptr,
+        "Filtering method used when upscaling the software-rendered frame. "
+        "Nearest: Sharp pixel edges, no blurring. "
+        "Bilinear: Smooth but can look blurry. "
+        "Sharp Bilinear: Best of both - smooth with sharp pixel edges.",
+        nullptr,
+        "video",
+        {
+            { "sharp_bilinear", "Sharp Bilinear" },
+            { "nearest", "Nearest" },
+            { "bilinear", "Bilinear" },
+            { nullptr, nullptr }
+        },
+        "sharp_bilinear"
+    },
+    {
+        "brimir_fxaa",
+        "FXAA Anti-Aliasing (GPU Only)",
+        nullptr,
+        "Apply Fast Approximate Anti-Aliasing to the upscaled output. "
+        "Smooths jagged edges at minimal performance cost. "
+        "Best combined with 2x or higher internal resolution.",
+        nullptr,
+        "video",
+        {
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
+            { nullptr, nullptr }
+        },
+        "disabled"
+    },
+    {
+        "brimir_scanlines",
+        "Scanlines (GPU Only)",
+        nullptr,
+        "Overlay a scanline effect on the upscaled output for a retro CRT look.",
+        nullptr,
+        "video",
+        {
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
+            { nullptr, nullptr }
+        },
+        "disabled"
+    },
+    {
+        "brimir_brightness",
+        "Brightness (GPU Only)",
+        nullptr,
+        "Adjust output brightness. 1.0 is default.",
+        nullptr,
+        "video",
+        {
+            { "0.8", "0.8" },
+            { "0.9", "0.9" },
+            { "1.0", "1.0 (Default)" },
+            { "1.1", "1.1" },
+            { "1.2", "1.2" },
+            { nullptr, nullptr }
+        },
+        "1.0"
+    },
+    {
+        "brimir_gamma",
+        "Gamma Correction (GPU Only)",
+        nullptr,
+        "Adjust gamma curve. 1.0 is linear (default). Higher values brighten dark areas.",
+        nullptr,
+        "video",
+        {
+            { "0.8", "0.8" },
+            { "1.0", "1.0 (Default)" },
+            { "1.2", "1.2" },
+            { "1.4", "1.4" },
+            { "1.8", "1.8" },
+            { "2.2", "2.2 (sRGB)" },
+            { nullptr, nullptr }
+        },
+        "1.0"
     },
     {
         "brimir_deinterlacing",

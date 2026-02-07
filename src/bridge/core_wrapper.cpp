@@ -265,7 +265,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                 m_saturn->GetDiscHash()
             );
             
-            if (gameInfo && gameInfo->cartridge != brimir::db::Cartridge::None) {
+            if (gameInfo && gameInfo->GetCartridge() != brimir::db::Cartridge::None) {
                 // Set up cartridge RAM save path
                 std::filesystem::path gameFileName = gamePath.stem();
                 if (save_directory && save_directory[0] != '\0') {
@@ -276,7 +276,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                 
                 // Insert the appropriate cartridge
                 try {
-                    switch (gameInfo->cartridge) {
+                    switch (gameInfo->GetCartridge()) {
                     case brimir::db::Cartridge::DRAM8Mbit:
                         m_saturn->InsertCartridge<brimir::cart::DRAM8MbitCartridge>();
                         m_hasCartridge = true;
@@ -602,24 +602,37 @@ bool CoreWrapper::LoadIPLFromFile(const char* path) {
 
 
 const void* CoreWrapper::GetFramebuffer() const {
-    // Return the converted RGB565 framebuffer
+    // Return GPU upscaled framebuffer directly (no copy), or software framebuffer
+    if (m_upscaledFrameReady && m_gpuRenderer) {
+        const void* upscaled = m_gpuRenderer->GetUpscaledFramebuffer();
+        if (upscaled) return upscaled;
+    }
     return m_framebuffer.data();
 }
 
 unsigned int CoreWrapper::GetFramebufferWidth() const {
+    if (m_upscaledFrameReady && m_upscaledWidth > 0) {
+        return m_upscaledWidth;
+    }
     return m_fbWidth;
 }
 
 unsigned int CoreWrapper::GetFramebufferHeight() const {
+    if (m_upscaledFrameReady && m_upscaledHeight > 0) {
+        return m_upscaledHeight;
+    }
     return m_fbHeight;
 }
 
 unsigned int CoreWrapper::GetFramebufferPitch() const {
+    if (m_upscaledFrameReady && m_upscaledPitch > 0) {
+        return m_upscaledPitch;  // Already in bytes (XRGB8888)
+    }
     return m_fbPitch;
 }
 
 unsigned int CoreWrapper::GetPixelFormat() const {
-    return m_pixelFormat;  // 2 = RGB565
+    return m_pixelFormat;  // 1 = XRGB8888
 }
 
 size_t CoreWrapper::GetAudioSamples(int16_t* buffer, size_t max_samples) {
@@ -746,7 +759,7 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
     // Update output dimensions (visible area after cropping)
     m_fbWidth = visibleWidth;
     m_fbHeight = visibleHeight;
-    m_fbPitch = visibleWidth * 2; // RGB565 is 2 bytes per pixel
+    m_fbPitch = visibleWidth * 4; // XRGB8888 = 4 bytes per pixel
 
     // Resize framebuffer if needed
     size_t pixelCount = static_cast<size_t>(visibleWidth) * visibleHeight;
@@ -754,50 +767,43 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         m_framebuffer.resize(pixelCount);
     }
 
-    // Convert from XBGR8888 to RGB565 with SIMD acceleration
-    // Apply overscan cropping during conversion
+    // Convert from VDP's XBGR8888 (0x00BBGGRR) to libretro XRGB8888 (0x00RRGGBB)
+    // This is a lossless R<->B channel swap, replacing the old lossy RGB565 conversion
     {
         ScopedTimer convTimer(m_profiler, "PixelConversion");
         
-        uint16_t* dst = m_framebuffer.data();
+        uint32_t* dst = m_framebuffer.data();
         
         // Process line by line to handle overscan cropping
         for (uint32_t y = 0; y < visibleHeight; ++y) {
             const uint32_t srcY = y + yOffset;
             const uint32_t* srcLine = fb + (srcY * width) + xOffset;
-            uint16_t* dstLine = dst + (y * visibleWidth);
+            uint32_t* dstLine = dst + (y * visibleWidth);
             
             size_t i = 0;
             
 #if defined(_M_X64) || defined(__x86_64__)
     #if defined(__SSE2__) || defined(_M_X64)
             // SSE2: Process 4 pixels at a time
-            // XBGR8888 -> RGB565: extract R5G6B5 bits and pack
+            // XBGR8888 (0x00BBGGRR) -> XRGB8888 (0x00RRGGBB): swap R and B channels
+            const __m128i maskRB = _mm_set1_epi32(0x00FF00FF);  // R and B channel mask
+            const __m128i maskG  = _mm_set1_epi32(0x0000FF00);  // G channel mask
+            
             for (; i + 4 <= visibleWidth; i += 4) {
                 __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srcLine[i]));
                 
-                // Extract Blue (bits 19-23) -> position 0-4
-                __m128i b = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0xF80000)), 19);
+                // Extract R (bits 0-7) and B (bits 16-23)
+                __m128i rb = _mm_and_si128(pixels, maskRB);
+                // Swap R and B: shift R left by 16, B right by 16
+                __m128i rb_swapped = _mm_or_si128(_mm_slli_epi32(rb, 16), _mm_srli_epi32(rb, 16));
+                // Keep only the valid swapped bits (mask out overflow from shift)
+                rb_swapped = _mm_and_si128(rb_swapped, maskRB);
+                // Keep G channel as-is
+                __m128i g = _mm_and_si128(pixels, maskG);
+                // Combine: swapped R/B + original G
+                __m128i result = _mm_or_si128(rb_swapped, g);
                 
-                // Extract Green (bits 10-15) -> position 5-10
-                __m128i g = _mm_srli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x00FC00)), 5);
-                
-                // Extract Red (bits 3-7) -> position 11-15
-                __m128i r = _mm_slli_epi32(_mm_and_si128(pixels, _mm_set1_epi32(0x0000F8)), 8);
-                
-                // Combine into 32-bit RGB565 values (each is 0x0000XXXX)
-                __m128i rgb565_32 = _mm_or_si128(_mm_or_si128(r, g), b);
-                
-                // Pack 4x 32-bit to 4x 16-bit
-                // SSE2 doesn't have _mm_packus_epi32 (unsigned pack), so extract manually
-                // Extract lower 16 bits from each 32-bit lane and store directly
-                uint32_t temp[4];
-                _mm_storeu_si128(reinterpret_cast<__m128i*>(temp), rgb565_32);
-                
-                dstLine[i + 0] = static_cast<uint16_t>(temp[0]);
-                dstLine[i + 1] = static_cast<uint16_t>(temp[1]);
-                dstLine[i + 2] = static_cast<uint16_t>(temp[2]);
-                dstLine[i + 3] = static_cast<uint16_t>(temp[3]);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(&dstLine[i]), result);
             }
     #endif
 #endif
@@ -805,7 +811,33 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
             // Scalar fallback for remaining pixels
             for (; i < visibleWidth; ++i) {
                 uint32_t pixel = srcLine[i];
-                dstLine[i] = ((pixel & 0x0000F8) << 8) | ((pixel & 0x00FC00) >> 5) | ((pixel & 0xF80000) >> 19);
+                // Swap R (bits 0-7) and B (bits 16-23), keep G (bits 8-15)
+                uint32_t r = pixel & 0x000000FF;
+                uint32_t g = pixel & 0x0000FF00;
+                uint32_t b = pixel & 0x00FF0000;
+                dstLine[i] = (r << 16) | g | (b >> 16);
+            }
+        }
+    }
+    
+    // GPU upscaling: upload software-rendered frame to GPU and upscale
+    m_upscaledFrameReady = false;
+    if (m_useGPUUpscaling && m_gpuRenderer && m_internalScale > 1) {
+        ScopedTimer gpuTimer(m_profiler, "GPUUpscale");
+        
+        // Upload the XRGB8888 framebuffer to GPU
+        m_gpuRenderer->UploadSoftwareFramebuffer(
+            m_framebuffer.data(), visibleWidth, visibleHeight, visibleWidth * 4);
+        
+        // Render upscaled version
+        if (m_gpuRenderer->RenderUpscaled()) {
+            // Use renderer's buffer directly (valid until next RenderUpscaled call)
+            const void* upscaledData = m_gpuRenderer->GetUpscaledFramebuffer();
+            if (upscaledData) {
+                m_upscaledWidth = m_gpuRenderer->GetUpscaledWidth();
+                m_upscaledHeight = m_gpuRenderer->GetUpscaledHeight();
+                m_upscaledPitch = m_gpuRenderer->GetUpscaledPitch();
+                m_upscaledFrameReady = true;
             }
         }
     }
@@ -1034,30 +1066,62 @@ void CoreWrapper::SetAutodetectRegion(bool enable) {
     m_saturn->configuration.system.autodetectRegion = enable;
 }
 
+void CoreWrapper::SetHWContext(void* hw_render) {
+    m_hwRenderCallback = hw_render;
+}
+
 void CoreWrapper::SetRenderer(const char* renderer) {
     if (!m_initialized || !m_saturn || !renderer) {
         return;
     }
 
+    brimir::vdp::RendererType type = brimir::vdp::RendererType::Software;
     if (strcmp(renderer, "vulkan") == 0) {
-        // Create Vulkan renderer if not already created
+        type = brimir::vdp::RendererType::Vulkan;
+    } else if (strcmp(renderer, "software") == 0) {
+        type = brimir::vdp::RendererType::Software;
+    } else {
+        type = brimir::vdp::RendererType::Software;
+    }
+
+    // Check availability
+    if (type != brimir::vdp::RendererType::Software) {
+        bool available = brimir::vdp::IsRendererAvailable(type);
+        if (!available) {
+            type = brimir::vdp::RendererType::Software;
+        }
+    }
+
+    if (type == brimir::vdp::RendererType::Software) {
+        m_gpuRenderer.reset(); // Destroy GPU renderer if switching to software
+        m_saturn->VDP.SetGPURenderer(nullptr, false);
+    } else {
+        // Try to create GPU renderer
+        m_gpuRenderer = brimir::vdp::CreateRenderer(type);
+        
         if (!m_gpuRenderer) {
-            m_gpuRenderer = brimir::vdp::CreateRenderer(brimir::vdp::RendererType::Vulkan);
-            if (!m_gpuRenderer) {
-                // Failed to create Vulkan renderer, fall back to software
-                m_saturn->VDP.SetGPURenderer(nullptr, false);
-                return;
-            }
+            // CreateRenderer returned null
+            m_saturn->VDP.SetGPURenderer(nullptr, false);
+            return;
         }
         
-        // Enable GPU rendering
-        m_saturn->VDP.SetGPURenderer(m_gpuRenderer.get(), true);
-    } else {
-        // Software renderer (default)
-        m_saturn->VDP.SetGPURenderer(nullptr, false);
+        // Pass hardware context if available
+        if (m_hwRenderCallback) {
+            // The renderer will handle the type internally
+            m_gpuRenderer->SetHWContext(m_hwRenderCallback);
+        }
         
-        // Optionally destroy GPU renderer to free resources
-        // m_gpuRenderer.reset();
+        // Try to initialize
+        bool initSuccess = m_gpuRenderer->Initialize();
+        
+        if (initSuccess) {
+            m_saturn->VDP.SetGPURenderer(m_gpuRenderer.get(), true);
+        } else {
+            // Initialize failed - store error for libretro to log
+            m_lastRendererError = m_gpuRenderer->GetLastError();
+            m_gpuRenderer.reset();
+            m_saturn->VDP.SetGPURenderer(nullptr, false);
+        }
     }
 }
 
@@ -1083,6 +1147,125 @@ void CoreWrapper::SetHorizontalOverscan(bool enable) {
     }
 
     m_saturn->VDP.SetHorizontalOverscan(enable);
+}
+
+void CoreWrapper::SetInternalResolution(uint32_t scale) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+
+    // Clamp to valid range
+    if (scale < 1) scale = 1;
+    if (scale > 8) scale = 8;
+    
+    // Store scale locally for CPU upscaling
+    m_internalScale = scale;
+
+    // Check if GPU renderer is active (just check our local pointer)
+    bool gpuActive = (m_gpuRenderer != nullptr);
+    
+    if (gpuActive) {
+        m_gpuRenderer->SetInternalScale(scale);
+    }
+    
+    // Auto-enable upscaling when scale > 1
+    if (scale > 1) {
+        m_useGPUUpscaling = true;
+    } else {
+        m_useGPUUpscaling = false;
+    }
+    // Note: Logging happens in libretro layer
+}
+
+void CoreWrapper::SetGPUUpscaling(bool enable) {
+    if (!m_initialized) {
+        return;
+    }
+    
+    // Only enable if we have a GPU renderer
+    if (enable && m_gpuRenderer) {
+        m_useGPUUpscaling = true;
+    } else {
+        m_useGPUUpscaling = false;
+        m_upscaledFrameReady = false;
+    }
+    // If GPU not active, silently ignore (libretro will log warning)
+}
+
+void CoreWrapper::SetUpscaleFilter(const char* mode) {
+    if (!mode) return;
+    
+    uint32_t filterMode = 2; // default: sharp bilinear
+    if (std::strcmp(mode, "nearest") == 0) {
+        filterMode = 0;
+    } else if (std::strcmp(mode, "bilinear") == 0) {
+        filterMode = 1;
+    } else if (std::strcmp(mode, "sharp_bilinear") == 0) {
+        filterMode = 2;
+    }
+    
+    m_upscaleFilter = filterMode;
+    if (m_gpuRenderer) {
+        m_gpuRenderer->SetUpscaleFilter(filterMode);
+    }
+}
+
+void CoreWrapper::SetScanlines(bool enable) {
+    m_scanlines = enable;
+    if (m_gpuRenderer) {
+        m_gpuRenderer->SetScanlines(enable);
+    }
+}
+
+void CoreWrapper::SetBrightness(float brightness) {
+    m_brightness = brightness;
+    if (m_gpuRenderer) {
+        m_gpuRenderer->SetBrightness(brightness);
+    }
+}
+
+void CoreWrapper::SetGamma(float gamma) {
+    m_gamma = gamma;
+    if (m_gpuRenderer) {
+        m_gpuRenderer->SetGamma(gamma);
+    }
+}
+
+void CoreWrapper::SetFXAA(bool enable) {
+    m_fxaa = enable;
+    if (m_gpuRenderer) {
+        m_gpuRenderer->SetFXAA(enable);
+    }
+}
+
+void CoreWrapper::SetWireframeMode(bool enable) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+
+    if (m_gpuRenderer) {
+        m_gpuRenderer->SetWireframeMode(enable);
+    }
+}
+
+const char* CoreWrapper::GetActiveRenderer() const {
+    if (!m_initialized || !m_saturn) {
+        return "Unknown";
+    }
+    
+    return (m_gpuRenderer != nullptr) ? "Vulkan" : "Software";
+}
+
+bool CoreWrapper::IsGPURendererActive() const {
+    if (!m_initialized || !m_saturn) {
+        return false;
+    }
+    
+    return (m_gpuRenderer != nullptr);
+}
+
+const char* CoreWrapper::GetLastRendererError() const {
+    return m_lastRendererError.c_str();
 }
 
 void CoreWrapper::SetVerticalOverscan(bool enable) {

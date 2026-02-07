@@ -15,12 +15,16 @@ namespace brimir::vdp {
 struct VDP2Regs {
     void Reset() {
         TVMD.u16 = 0x0;
+        displayEnabledLatch = false;
+        borderColorModeLatch = false;
         TVSTAT.u16 &= ~0xFFFE; // Preserve PAL flag
         EXTEN.u16 = 0x0;
         HCNT = 0x0;
         VCNT = 0x0;
         VCNTShift = 0;
         VCNTSkip = 0;
+        VCNTLatch = 0x3FF;
+        VCNTLatched = false;
         vramControl.Reset();
         VRSIZE.u16 = 0x0;
         cyclePatterns.Reset();
@@ -370,6 +374,13 @@ struct VDP2Regs {
 
     // 180000   TVMD    TV Screen Mode
     RegTVMD TVMD;
+    bool displayEnabledLatch = false;  // Latched TVMD.DISP
+    bool borderColorModeLatch = false; // Latched TVMD.BDCLMD
+
+    FORCE_INLINE void LatchTVMD() {
+        displayEnabledLatch = TVMD.DISP;
+        borderColorModeLatch = TVMD.BDCLMD;
+    }
 
     FORCE_INLINE uint16 ReadTVMD() const {
         return TVMD.u16;
@@ -394,13 +405,15 @@ struct VDP2Regs {
     }
 
     // 180004   TVSTAT  Screen Status (read-only)
-    RegTVSTAT TVSTAT;
+    mutable RegTVSTAT TVSTAT;
 
     FORCE_INLINE uint16 ReadTVSTAT() const {
         uint16 value = TVSTAT.u16;
         if (TVMD.IsInterlaced()) {
             value ^= 0x2; // for some reason ODD is read inverted
         }
+        VCNTLatched = TVSTAT.EXLTFG;
+        TVSTAT.EXLTFG = 0;
         return value;
     }
 
@@ -457,8 +470,13 @@ struct VDP2Regs {
     uint16 VCNT;
     uint16 VCNTShift;
     uint16 VCNTSkip;
+    uint16 VCNTLatch;         // Vertical counter latched by external signal
+    mutable bool VCNTLatched; // Whether the vertical counter is currently latched
 
     FORCE_INLINE uint16 ReadVCNT() const {
+        if (VCNTLatched) {
+            return VCNTLatch << VCNTShift;
+        }
         return (VCNT << VCNTShift) + VCNTSkip;
     }
 

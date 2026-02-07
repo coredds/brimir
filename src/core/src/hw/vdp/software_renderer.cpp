@@ -83,6 +83,58 @@ public:
         return FramebufferFormat::XRGB8888;
     }
     
+    // ===== Memory Synchronization (not used by software renderer) =====
+    
+    void SyncVDP1VRAM(const uint8_t* data, size_t size) override {
+        // Software renderer doesn't need VRAM sync - VDP handles it directly
+        (void)data; (void)size;
+    }
+    
+    void SyncVDP2VRAM(const uint8_t* data, size_t size) override {
+        // Software renderer doesn't need VRAM sync - VDP handles it directly
+        (void)data; (void)size;
+    }
+    
+    void SyncCRAM(const uint8_t* data, size_t size, uint8_t mode) override {
+        // Software renderer doesn't need CRAM sync - VDP handles it directly
+        (void)data; (void)size; (void)mode;
+    }
+    
+    void SyncVDP1Framebuffer(const uint8_t* data, size_t size, bool is8bit) override {
+        // Software renderer doesn't need FB sync - VDP handles it directly
+        (void)data; (void)size; (void)is8bit;
+    }
+    
+    // ===== GPU Upscaling (not supported by software renderer) =====
+    
+    void UploadSoftwareFramebuffer(const uint32_t* data, uint32_t width, 
+                                   uint32_t height, uint32_t pitch) override {
+        // Software renderer doesn't support GPU upscaling
+        (void)data; (void)width; (void)height; (void)pitch;
+    }
+    
+    bool RenderUpscaled() override {
+        // Software renderer doesn't support GPU upscaling - always return false
+        return false;
+    }
+    
+    const void* GetUpscaledFramebuffer() const override {
+        // Not supported - return nullptr
+        return nullptr;
+    }
+    
+    uint32_t GetUpscaledWidth() const override {
+        return m_width;  // Return native size
+    }
+    
+    uint32_t GetUpscaledHeight() const override {
+        return m_height;  // Return native size
+    }
+    
+    uint32_t GetUpscaledPitch() const override {
+        return m_width * sizeof(uint32_t);  // Return native pitch
+    }
+    
     // ===== VDP1 Rendering =====
     
     void VDP1DrawPolygon(const VDP1Command& cmd) override {
@@ -149,7 +201,62 @@ public:
         m_statistics.triangleCount += 2;
     }
     
-    // ===== VDP2 Rendering =====
+    void DrawTexturedQuad(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                          int32_t x2, int32_t y2, int32_t x3, int32_t y3,
+                          const uint32_t* textureData, uint32_t texWidth, uint32_t texHeight,
+                          bool flipH, bool flipV) override {
+        // Software renderer: not used for textured rendering
+        // VDP handles textured rendering directly
+        // This is just a fallback/stub implementation
+        if (!textureData || texWidth == 0 || texHeight == 0) {
+            return;
+        }
+        
+        // Sample center pixel as representative color
+        uint32_t centerPixel = textureData[(texHeight / 2) * texWidth + (texWidth / 2)];
+        
+        // Draw as solid color quad
+        DrawTriangle(x0, y0, x1, y1, x2, y2, centerPixel, centerPixel, centerPixel);
+        DrawTriangle(x0, y0, x2, y2, x3, y3, centerPixel, centerPixel, centerPixel);
+        
+        m_statistics.drawCallCount++;
+        m_statistics.triangleCount += 2;
+    }
+    
+    void DrawLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1, Color555 color) override {
+        // Software renderer: lines are handled by VDP directly
+        (void)x0; (void)y0; (void)x1; (void)y1; (void)color;
+    }
+    
+    void DrawGouraudLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                          Color555 colorA, Color555 colorB) override {
+        // Software renderer: lines are handled by VDP directly
+        (void)x0; (void)y0; (void)x1; (void)y1; (void)colorA; (void)colorB;
+    }
+    
+    // ===== VDP2 Layer Rendering (GPU Full Pipeline - not used by software) =====
+    
+    void SetLayerConfig(GPULayer layer, const GPULayerConfig& config) override {
+        // Software renderer doesn't use layer configs
+        (void)layer; (void)config;
+    }
+    
+    void RenderNBGLayer(GPULayer layer, uint32_t y) override {
+        // Software renderer doesn't use per-layer rendering
+        (void)layer; (void)y;
+    }
+    
+    void RenderRBGLayer(GPULayer layer, uint32_t y) override {
+        // Software renderer doesn't use per-layer rendering
+        (void)layer; (void)y;
+    }
+    
+    void RenderBackLayer(uint32_t color) override {
+        // Software renderer doesn't use per-layer rendering
+        (void)color;
+    }
+    
+    // ===== Legacy VDP2 interface =====
     
     void VDP2DrawBackground(int layer, const VDP2LayerState& state) override {
         // TODO: Forward to actual VDP implementation
@@ -185,18 +292,62 @@ public:
     void SetInternalScale(uint32_t scale) override {
         // Software renderer doesn't support upscaling
         m_internalScale = 1;
+        (void)scale;
     }
     
     uint32_t GetInternalScale() const override {
         return m_internalScale;
     }
     
+    void SetOutputResolution(uint32_t width, uint32_t height) override {
+        // Software renderer uses native resolution only
+        (void)width; (void)height;
+    }
+    
     void SetTextureFiltering(bool enable) override {
         // Not supported by software renderer
     }
     
+    void SetUpscaleFilter(uint32_t mode) override {
+        // Not supported by software renderer
+        (void)mode;
+    }
+    
+    void SetScanlines(bool enable) override {
+        // Not supported by software renderer
+        (void)enable;
+    }
+    
+    void SetBrightness(float brightness) override {
+        // Not supported by software renderer
+        (void)brightness;
+    }
+    
+    void SetGamma(float gamma) override {
+        // Not supported by software renderer
+        (void)gamma;
+    }
+    
+    void SetFXAA(bool enable) override {
+        // Not supported by software renderer
+        (void)enable;
+    }
+    
     void SetMSAA(uint32_t samples) override {
         // Not supported by software renderer
+    }
+    
+    void SetWireframeMode(bool enable) override {
+        // Not supported by software renderer
+    }
+    
+    void SetHWContext(void* hw_context) override {
+        // Not needed by software renderer
+        (void)hw_context;
+    }
+    
+    const char* GetLastError() const override {
+        return "No error (software renderer)";
     }
     
     // ===== Capabilities =====
@@ -212,6 +363,7 @@ public:
         caps.supportsAntiAliasing = false;
         caps.supportsTextureFiltering = false;
         caps.supportsComputeShaders = false;
+        caps.supportsFullPipeline = false;  // Software uses VDP's native rendering
         caps.maxTextureSize = 1024;  // Arbitrary for software
         caps.maxInternalScale = 1;
         return caps;
@@ -290,7 +442,8 @@ private:
         if (y0 == y2) return;
         
         // Scanline rasterization
-        for (int32_t y = y0; y <= y2; ++y) {
+        // Use < y2 (not <=) to match GPU's top-left fill rule
+        for (int32_t y = y0; y < y2; ++y) {
             if (y < 0 || y >= static_cast<int32_t>(m_height)) continue;
             
             // Calculate X bounds for this scanline
@@ -301,16 +454,18 @@ private:
                 // Top half (y0 -> y1 and y0 -> y2)
                 float t1 = (y1 > y0) ? static_cast<float>(y - y0) / (y1 - y0) : 0.0f;
                 float t2 = (y2 > y0) ? static_cast<float>(y - y0) / (y2 - y0) : 0.0f;
-                xStart = static_cast<int32_t>(x0 + t1 * (x1 - x0));
-                xEnd = static_cast<int32_t>(x0 + t2 * (x2 - x0));
+                // Round to nearest integer (+ 0.5f) for better GPU match
+                xStart = static_cast<int32_t>(x0 + t1 * (x1 - x0) + 0.5f);
+                xEnd = static_cast<int32_t>(x0 + t2 * (x2 - x0) + 0.5f);
                 colorStart = LerpColor(color0, color1, t1);
                 colorEnd = LerpColor(color0, color2, t2);
             } else {
                 // Bottom half (y1 -> y2 and y0 -> y2)
                 float t1 = (y2 > y1) ? static_cast<float>(y - y1) / (y2 - y1) : 0.0f;
                 float t2 = (y2 > y0) ? static_cast<float>(y - y0) / (y2 - y0) : 0.0f;
-                xStart = static_cast<int32_t>(x1 + t1 * (x2 - x1));
-                xEnd = static_cast<int32_t>(x0 + t2 * (x2 - x0));
+                // Round to nearest integer (+ 0.5f) for better GPU match
+                xStart = static_cast<int32_t>(x1 + t1 * (x2 - x1) + 0.5f);
+                xEnd = static_cast<int32_t>(x0 + t2 * (x2 - x0) + 0.5f);
                 colorStart = LerpColor(color1, color2, t1);
                 colorEnd = LerpColor(color0, color2, t2);
             }
@@ -321,7 +476,8 @@ private:
             }
             
             // Draw horizontal span
-            for (int32_t x = xStart; x <= xEnd; ++x) {
+            // Use < xEnd (not <=) to match GPU's top-left fill rule
+            for (int32_t x = xStart; x < xEnd; ++x) {
                 if (x >= 0 && x < static_cast<int32_t>(m_width)) {
                     float t = (xEnd > xStart) ? static_cast<float>(x - xStart) / (xEnd - xStart) : 0.0f;
                     uint32_t color = LerpColor(colorStart, colorEnd, t);
@@ -332,6 +488,7 @@ private:
     }
     
     // Linear interpolate between two XRGB8888 colors
+    // Uses proper rounding to match GPU interpolation
     uint32_t LerpColor(uint32_t color0, uint32_t color1, float t) {
         if (color0 == color1) return color0;  // Optimization for solid colors
         
@@ -343,9 +500,10 @@ private:
         uint8_t g1 = (color1 >> 8) & 0xFF;
         uint8_t b1 = color1 & 0xFF;
         
-        uint8_t r = static_cast<uint8_t>(r0 + t * (r1 - r0));
-        uint8_t g = static_cast<uint8_t>(g0 + t * (g1 - g0));
-        uint8_t b = static_cast<uint8_t>(b0 + t * (b1 - b0));
+        // Use proper rounding (+ 0.5f before truncation) to match GPU
+        uint8_t r = static_cast<uint8_t>(r0 + t * (r1 - r0) + 0.5f);
+        uint8_t g = static_cast<uint8_t>(g0 + t * (g1 - g0) + 0.5f);
+        uint8_t b = static_cast<uint8_t>(b0 + t * (b1 - b0) + 0.5f);
         
         return 0xFF000000 | (r << 16) | (g << 8) | b;
     }

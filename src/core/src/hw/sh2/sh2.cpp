@@ -13,9 +13,7 @@
 #include <string_view>
 
 // x64 intrinsics for optimized carry flag and bit manipulation
-#ifdef _MSC_VER
-    #include <intrin.h>
-#endif
+// MSVC intrinsics removed - portable code is equally well optimized by modern compilers
 
 namespace brimir::sh2 {
 
@@ -1897,7 +1895,13 @@ FORCE_INLINE bool SH2::CheckWatchpoint(const DecodedMemAccesses::Access &access)
     case AccType::AtDispPC: address = (PC & ~(access.size - 1)) + access.disp; break;
     }
 
-    if (!m_watchpoints.contains(address)) {
+    auto it = m_watchpoints.find(address);
+    if (it == m_watchpoints.end()) {
+        return false;
+    }
+
+    const auto wtptFlags = it->second;
+    if (wtptFlags == debug::WatchpointFlags::None) {
         return false;
     }
 
@@ -1909,7 +1913,7 @@ FORCE_INLINE bool SH2::CheckWatchpoint(const DecodedMemAccesses::Access &access)
     default: return false; // should never happen
     }
 
-    if (BitmaskEnum(m_watchpoints.at(address)).AnyOf(flags)) {
+    if (BitmaskEnum(wtptFlags).AnyOf(flags)) {
         m_debugBreakMgr->SignalDebugBreak(
             debug::DebugBreakInfo::SH2Watchpoint(IsMaster(), access.write, access.size, address, PC));
         return true;
@@ -3066,20 +3070,10 @@ FORCE_INLINE uint64 SH2::ADDI(const DecodedArgs &args) {
 // addc Rm, Rn
 template <bool delaySlot>
 FORCE_INLINE uint64 SH2::ADDC(const DecodedArgs &args) {
-    // Optimized with x86 ADC (add with carry) intrinsic
-    #ifdef _MSC_VER
-        unsigned char carry_in = SR.T ? 1 : 0;
-        unsigned int result = 0;
-        unsigned char carry_out = _addcarry_u32(carry_in, R[args.rn], R[args.rm], &result);
-        R[args.rn] = result;
-        SR.T = carry_out;
-    #else
-        // Fallback for non-MSVC (GCC/Clang - for future Linux support)
-        const uint32 tmp1 = R[args.rn] + R[args.rm];
-        const uint32 tmp0 = R[args.rn];
-        R[args.rn] = tmp1 + SR.T;
-        SR.T = (tmp0 > tmp1) || (tmp1 > R[args.rn]);
-    #endif
+    const uint32 tmp1 = R[args.rn] + R[args.rm];
+    const uint32 tmp0 = R[args.rn];
+    R[args.rn] = tmp1 + SR.T;
+    SR.T = (tmp0 > tmp1) || (tmp1 > R[args.rn]);
     AdvancePC<delaySlot>();
     return 1;
 }
@@ -3315,20 +3309,10 @@ FORCE_INLINE uint64 SH2::SUB(const DecodedArgs &args) {
 // subc Rm, Rn
 template <bool delaySlot>
 FORCE_INLINE uint64 SH2::SUBC(const DecodedArgs &args) {
-    // Optimized with x86 SBB (subtract with borrow) intrinsic
-    #ifdef _MSC_VER
-        unsigned char borrow_in = SR.T ? 1 : 0;
-        unsigned int result = 0;
-        unsigned char borrow_out = _subborrow_u32(borrow_in, R[args.rn], R[args.rm], &result);
-        R[args.rn] = result;
-        SR.T = borrow_out;
-    #else
-        // Fallback for non-MSVC (GCC/Clang - for future Linux support)
-        const uint32 tmp1 = R[args.rn] - R[args.rm];
-        const uint32 tmp0 = R[args.rn];
-        R[args.rn] = tmp1 - SR.T;
-        SR.T = (tmp0 < tmp1) || (tmp1 < R[args.rn]);
-    #endif
+    const uint32 tmp1 = R[args.rn] - R[args.rm];
+    const uint32 tmp0 = R[args.rn];
+    R[args.rn] = tmp1 - SR.T;
+    SR.T = (tmp0 < tmp1) || (tmp1 < R[args.rn]);
     AdvancePC<delaySlot>();
     return 1;
 }

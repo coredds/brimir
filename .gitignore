@@ -57,8 +57,9 @@ Desktop.ini
 *.suo
 *.user
 
-# Cursor AI configuration (contains API keys and project-specific rules)
+# Cursor AI configuration
 .cursorrules
+.cursor/
 query_saturn.py
 
 # vcpkg
@@ -161,6 +162,12 @@ pip-log.txt
 *.bak
 *.backup
 *~
+
+# Compiled shader bytecode (regenerated from .glsl via compile_shaders.ps1)
+*.spv
+
+# Benchmark output
+benchmark_results/
 
 # Generated files
 version.h

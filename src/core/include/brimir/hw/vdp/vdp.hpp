@@ -11,6 +11,8 @@
 #include "vdp_internal_callbacks.hpp"
 #include "vdp_profiler.hpp"
 
+#include <brimir/hw/smpc/smpc_internal_callbacks.hpp>
+
 #include "slope.hpp"
 
 #include <brimir/core/configuration.hpp>
@@ -91,6 +93,19 @@ public:
     void SetRenderCallback(CBFrameComplete callback) {
         m_cbFrameComplete = callback;
     }
+
+    /// @brief Enables or disables VDP1 VRAM write stalling.
+    /// When enabled, each VDP1 VRAM write adds a timing penalty to VDP1 drawing.
+    /// @param stall whether to stall VDP1 on VRAM writes
+    void SetStallVDP1OnVRAMWrites(bool stall) {
+        m_stallVDP1OnVRAMWrites = stall;
+    }
+
+private:
+    void ExternalLatch(uint16 x, uint16 y);
+
+public:
+    const smpc::CBExternalLatch CbExternalLatch = util::MakeClassMemberRequiredCallback<&VDP::ExternalLatch>(this);
 
     void SetVDP1DrawCallback(CBVDP1DrawFinished callback) {
         m_cbVDP1DrawFinished = callback;
@@ -252,6 +267,15 @@ public:
     // GPU renderer support
     void SetGPURenderer(class IVDPRenderer* renderer, bool enable);
     bool IsUsingGPURenderer() const { return m_useGPURenderer; }
+    
+    // Get VDP1 VRAM for texture upload
+    const uint8* GetVDP1VRAM() const {
+        return m_state.VRAM1.data();
+    }
+    
+    size_t GetVDP1VRAMSize() const {
+        return m_state.VRAM1.size();
+    }
 
 private:
     VDPState m_state;
@@ -287,10 +311,10 @@ private:
     void EnableThreadedVDP(bool enable);
     void IncludeVDP1RenderInVDPThread(bool enable);
 
-    // Hacky VDP1 command execution timing penalty accrued from external writes to VRAM
-    // TODO: count pulled out of thin air
+    // VDP1 command execution timing penalty accrued from external writes to VRAM
     static constexpr uint64 kVDP1TimingPenaltyPerWrite = 22;
     uint64 m_VDP1TimingPenaltyCycles; // accumulated cycle penalty
+    bool m_stallVDP1OnVRAMWrites = false; // enabled via GameDB for games like Mega Man X3
 
     // -------------------------------------------------------------------------
     // Frontend callbacks
@@ -378,9 +402,7 @@ private:
     uint32 m_VRes; // Vertical display resolution
     bool m_exclusiveMonitor;
 
-    // Latched TVMD flags
-    bool m_displayEnabled;  // Display enabled (derived from TVMD.DISP)
-    bool m_borderColorMode; // Border color mode (derived from TVMD.BDCLMD)
+    // Latched TVMD flags are stored in m_state.regs2.displayEnabledLatch and borderColorModeLatch
     
     // Frame counter for testing
     uint64 m_frameNumber = 0;
@@ -758,6 +780,11 @@ private:
     T VDP2ReadRendererCRAM(uint32 address);
 
     Color888 VDP2ReadRendererColor5to8(uint32 address) const;
+    
+    // VDP1 Color RAM access for palette lookups
+    // Returns pointer to VDP2 CRAM (used by VDP1 for palette colors)
+    const uint8* GetVDP1ColorRAM() const { return m_renderingContext.vdp2.CRAM.data(); }
+    size_t GetVDP1ColorRAMSize() const { return m_renderingContext.vdp2.CRAM.size(); }
 
     // Enables deinterlacing of double-density interlace frames in the renderer.
     // When false, double-density interlace mode is rendered normally - only even or odd lines are updated every frame.
@@ -865,6 +892,7 @@ private:
             eraseY3 = 0;
 
             cycleCount = 0;
+            spilloverCycles = 0;
         }
 
         // System clipping dimensions
@@ -893,6 +921,10 @@ private:
         // Command processing cycle counter
         uint64 cycleCount;
 
+        // Command processing cycles spilled over from previous executions.
+        // Deducted from future executions to compensate for overshooting the target cycle count.
+        uint64 spilloverCycles;
+
         // Cycle spent on pixel rendering on this frame.
         // This is a stopgap solution for games that horrendously abuse the VDP1 until proper cycle counting and
         // rendering continuation is implemented.
@@ -902,6 +934,11 @@ private:
         // Used when transparent meshes are enabled.
         // Indexing: [altFB][drawFB]
         std::array<std::array<SpriteFB, 2>, 2> meshFB;
+        
+        // Temporary texture buffer for GPU texture decoding
+        // Max size: 504x255 (largest sprite in 4bpp mode) * 4 bytes = ~500KB
+        static constexpr size_t kMaxTextureSize = 512 * 256;
+        std::array<uint32, kMaxTextureSize> gpuTextureBuffer;
     } m_VDP1RenderContext;
 
     struct VDP1PixelParams {
@@ -1410,6 +1447,9 @@ private:
     // Processes a single commmand from the VDP1 command table.
     TPL_TRAITS void VDP1ProcessCommand();
 
+    // Calculates the timing cost of the VDP1 command at the given address.
+    uint64 VDP1CalcCommandTiming(uint32 cmdAddress, VDP1Command::Control control);
+
     TPL_DEINTERLACE bool VDP1IsPixelClipped(CoordS32 coord, bool userClippingEnable, bool clippingMode) const;
 
     TPL_DEINTERLACE bool VDP1IsPixelUserClipped(CoordS32 coord) const;
@@ -1427,6 +1467,11 @@ private:
     TPL_TRAITS bool VDP1PlotTexturedLine(CoordS32 coord1, CoordS32 coord2, VDP1TexturedLineParams &lineParams);
     TPL_TRAITS void VDP1PlotTexturedQuad(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
                                          CoordS32 coordA, CoordS32 coordB, CoordS32 coordC, CoordS32 coordD);
+    
+    // GPU sprite rendering helper
+    void VDP1DecodeAndRenderTextureGPU(uint32 cmdAddress, VDP1Command::Control control, VDP1Command::Size size,
+                                        sint32 xa, sint32 ya, sint32 xb, sint32 yb,
+                                        sint32 xc, sint32 yc, sint32 xd, sint32 yd);
 
     // Individual VDP1 command processors
 
@@ -1808,18 +1853,6 @@ private:
 
     // Fetches 16-bit sprite data based on the current sprite mode.
     //
-    // fb is the VDP1 framebuffer to read sprite data from.
-    // fbOffset is the offset into the framebuffer (in bytes) where the sprite data is located.
-    // type is the sprite type (between 0 and 7).
-    SpriteData VDP2FetchWordSpriteData(const SpriteFB &fb, uint32 fbOffset, uint8 type);
-
-    // Fetches 8-bit sprite data based on the current sprite mode.
-    //
-    // fb is the VDP1 framebuffer to read sprite data from.
-    // fbOffset is the offset into the framebuffer (in bytes) where the sprite data is located.
-    // type is the sprite type (between 8 and 15).
-    SpriteData VDP2FetchByteSpriteData(const SpriteFB &fb, uint32 fbOffset, uint8 type);
-
     // Retrieves the Y display coordinate based on the current interlace mode.
     //
     // y is the Y coordinate to translate

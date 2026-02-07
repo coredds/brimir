@@ -11,7 +11,7 @@ TEST_CASE("VDP color calculation determinism", "[vdp][color][critical]") {
     
     if (core.Initialize()) {
         // Run multiple frames
-        std::vector<std::vector<uint16_t>> frameBuffers;
+        std::vector<std::vector<uint32_t>> frameBuffers;
         
         for (int i = 0; i < 5; i++) {
             core.RunFrame();
@@ -20,9 +20,9 @@ TEST_CASE("VDP color calculation determinism", "[vdp][color][critical]") {
             uint32_t w = core.GetFramebufferWidth();
             uint32_t h = core.GetFramebufferHeight();
             
-            std::vector<uint16_t> frame(w * h);
-            const uint16_t* fb_rgb565 = static_cast<const uint16_t*>(fb);
-            std::copy(fb_rgb565, fb_rgb565 + (w * h), frame.begin());
+            std::vector<uint32_t> frame(w * h);
+            const uint32_t* fb_xrgb = static_cast<const uint32_t*>(fb);
+            std::copy(fb_xrgb, fb_xrgb + (w * h), frame.begin());
             
             frameBuffers.push_back(std::move(frame));
         }
@@ -42,11 +42,11 @@ TEST_CASE("VDP color calculation determinism", "[vdp][color][critical]") {
             uint32_t w = core.GetFramebufferWidth();
             uint32_t h = core.GetFramebufferHeight();
             
-            const uint16_t* fb_rgb565 = static_cast<const uint16_t*>(fb);
+            const uint32_t* fb_xrgb = static_cast<const uint32_t*>(fb);
             
             bool matches = true;
             for (size_t j = 0; j < w * h && matches; j++) {
-                if (frameBuffers[i][j] != fb_rgb565[j]) {
+                if (frameBuffers[i][j] != fb_xrgb[j]) {
                     matches = false;
                 }
             }
@@ -68,27 +68,27 @@ TEST_CASE("VDP framebuffer pixel format", "[vdp][color]") {
         uint32_t w = core.GetFramebufferWidth();
         uint32_t h = core.GetFramebufferHeight();
         
-        const uint16_t* fb_rgb565 = static_cast<const uint16_t*>(fb);
+        const uint32_t* fb_xrgb = static_cast<const uint32_t*>(fb);
         
-        // Check that pixels are in valid RGB565 format
-        // RGB565: RRRRRGGGGGGBBBBB (5-6-5 bits)
+        // Check that pixels are in valid XRGB8888 format
+        // XRGB8888: 0x00RRGGBB (X bits should be 0)
         bool hasValidPixels = true;
         uint32_t nonBlackCount = 0;
         
         for (uint32_t i = 0; i < w * h; i++) {
-            uint16_t pixel = fb_rgb565[i];
+            uint32_t pixel = fb_xrgb[i];
             
             // Extract components
-            uint16_t r = (pixel >> 11) & 0x1F;  // 5 bits
-            uint16_t g = (pixel >> 5) & 0x3F;   // 6 bits
-            uint16_t b = pixel & 0x1F;          // 5 bits
+            uint32_t r = (pixel >> 16) & 0xFF;  // 8 bits
+            uint32_t g = (pixel >> 8) & 0xFF;   // 8 bits
+            uint32_t b = pixel & 0xFF;           // 8 bits
             
             // Components should be in valid ranges
-            REQUIRE(r <= 31);
-            REQUIRE(g <= 63);
-            REQUIRE(b <= 31);
+            REQUIRE(r <= 255);
+            REQUIRE(g <= 255);
+            REQUIRE(b <= 255);
             
-            if (pixel != 0) {
+            if ((pixel & 0x00FFFFFF) != 0) {
                 nonBlackCount++;
             }
         }
@@ -192,11 +192,11 @@ TEST_CASE("VDP zero-content frame handling", "[vdp][color]") {
         
         // Should handle empty/zero-content frames gracefully
         // (either all black, or border color, both are valid)
-        const uint16_t* fb_rgb565 = static_cast<const uint16_t*>(fb);
+        const uint32_t* fb_xrgb = static_cast<const uint32_t*>(fb);
         
         // Check first and last pixels exist
-        uint16_t firstPixel = fb_rgb565[0];
-        uint16_t lastPixel = fb_rgb565[w * h - 1];
+        uint32_t firstPixel = fb_xrgb[0];
+        uint32_t lastPixel = fb_xrgb[w * h - 1];
         
         // Just verify no crash and valid data
         INFO("First pixel: 0x" << std::hex << firstPixel);
