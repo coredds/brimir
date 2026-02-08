@@ -76,7 +76,7 @@ static uint16 GetRawReg(uint32 offset) {
 }
 
 // CRAM access (Saturn format: bits 10-14=R, 5-9=G, 0-4=B)
-static uint32 ReadCRAM_RGB555(uint16 index) {
+uint32 ReadCRAM_RGB555(uint16 index) {
     uint16 c = CRAM[index & 0x7FF];
     // Saturn VDP2 RGB555: bits 10-14=Red, 5-9=Green, 0-4=Blue
     uint32 b = ((c & 0x001F) << 3) | ((c & 0x001F) >> 2);
