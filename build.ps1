@@ -8,10 +8,14 @@ param(
     [switch]$Clean,
     [switch]$Reconfigure,
     [switch]$Target,
-    [switch]$GPU
+    [switch]$GPU = $true,
+    [switch]$NoGPU
 )
 
 $ErrorActionPreference = "Stop"
+
+# NoGPU overrides GPU
+if ($NoGPU) { $GPU = $false }
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -99,12 +103,12 @@ if ($Reconfigure -or -not (Test-Path "build/CMakeCache.txt")) {
         $cmakeArgs += @("-A", $Arch)
     }
     
-    # Enable GPU (Vulkan) rendering if requested
+    # GPU (Vulkan) rendering
     if ($GPU) {
         Write-Host "  GPU Rendering: ENABLED (Vulkan)" -ForegroundColor Cyan
         $cmakeArgs += @("-DBRIMIR_GPU_VULKAN=ON")
     } else {
-        Write-Host "  GPU Rendering: Disabled (use -GPU to enable)" -ForegroundColor DarkGray
+        Write-Host "  GPU Rendering: Disabled (use default or remove -NoGPU to enable)" -ForegroundColor DarkGray
     }
     
     & cmake @cmakeArgs

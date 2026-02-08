@@ -1,0 +1,104 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.0
+        with:
+          vulkan-query-version: 1.3.290.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+
+      - name: Configure CMake
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBRIMIR_GPU_VULKAN=ON
+
+      - name: Build
+        run: cmake --build build --config Release --target brimir_libretro
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp build/bin/Release/brimir_libretro.dll artifact/
+          cp resources/info/brimir_libretro.info artifact/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brimir-windows-x64
+          path: artifact/
+
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build libvulkan-dev
+
+      - name: Configure CMake
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_GPU_VULKAN=ON
+
+      - name: Build
+        run: cmake --build build --config Release --target brimir_libretro --parallel $(nproc)
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp build/lib/brimir_libretro.so artifact/ 2>/dev/null || cp build/bin/brimir_libretro.so artifact/
+          cp resources/info/brimir_libretro.info artifact/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brimir-linux-x64
+          path: artifact/
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: brimir-windows-x64
+          path: windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: brimir-linux-x64
+          path: linux
+
+      - name: Package releases
+        run: |
+          cd windows && zip -r ../brimir-${{ github.ref_name }}-windows-x64.zip . && cd ..
+          cd linux && tar czf ../brimir-${{ github.ref_name }}-linux-x64.tar.gz . && cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            brimir-${{ github.ref_name }}-windows-x64.zip
+            brimir-${{ github.ref_name }}-linux-x64.tar.gz
+          generate_release_notes: true

@@ -3,18 +3,9 @@ cmake_minimum_required(VERSION 3.28)
 # Project information
 project(Brimir
     VERSION 0.2.2
-    DESCRIPTION "Sega Saturn emulation libretro core - Windows x64 MSVC"
+    DESCRIPTION "Sega Saturn emulation libretro core"
     LANGUAGES CXX C
 )
-
-# Platform check - Windows x64 MSVC only
-if(NOT WIN32)
-    message(FATAL_ERROR "Brimir currently supports Windows x64 only. Linux/macOS support planned for future releases.")
-endif()
-
-if(NOT MSVC)
-    message(FATAL_ERROR "Brimir requires MSVC (Visual Studio 2022 or later). GCC/Clang support planned for future releases.")
-endif()
 
 # C++20 required
 set(CMAKE_CXX_STANDARD 20)
@@ -46,23 +37,37 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Add cmake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-# Include Visual Studio helpers
-include(VSHelpers)
+# Include Visual Studio helpers (MSVC only)
+if(MSVC)
+    include(VSHelpers)
+endif()
 
-# MSVC Compiler configuration
-# Default to W4 warnings for our code
-add_compile_options(/W4)
-add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-add_compile_definitions(NOMINMAX)  # Prevent Windows min/max macros from interfering
+# Compiler configuration
+if(MSVC)
+    # MSVC warnings
+    add_compile_options(/W4)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(NOMINMAX)
 
-# Suppress common external library warnings
-set(EXTERNAL_WARNINGS
-    /wd4244  # Type conversion (int to smaller type)
-    /wd4100  # Unreferenced parameter
-    /wd4201  # Nameless struct/union
-    /wd4324  # Structure padding
-    /wd4458  # Declaration hides class member
-)
+    # Suppress common external library warnings
+    set(EXTERNAL_WARNINGS
+        /wd4244  # Type conversion (int to smaller type)
+        /wd4100  # Unreferenced parameter
+        /wd4201  # Nameless struct/union
+        /wd4324  # Structure padding
+        /wd4458  # Declaration hides class member
+    )
+else()
+    # GCC/Clang warnings
+    add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
+
+    set(EXTERNAL_WARNINGS
+        -Wno-conversion
+        -Wno-unused-parameter
+        -Wno-missing-field-initializers
+        -Wno-sign-compare
+    )
+endif()
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -132,12 +137,25 @@ add_library(brimir_libretro SHARED
 # Link with Brimir core
 target_link_libraries(brimir_libretro PRIVATE brimir::brimir-core)
 
-# Set output name - Windows DLL
-set_target_properties(brimir_libretro PROPERTIES
-    OUTPUT_NAME "brimir_libretro"
-    SUFFIX ".dll"
-    PREFIX ""
-)
+# Platform-specific link dependencies
+if(UNIX)
+    target_link_libraries(brimir_libretro PRIVATE pthread dl)
+endif()
+
+# Set output name
+if(WIN32)
+    set_target_properties(brimir_libretro PROPERTIES
+        OUTPUT_NAME "brimir_libretro"
+        SUFFIX ".dll"
+        PREFIX ""
+    )
+else()
+    set_target_properties(brimir_libretro PROPERTIES
+        OUTPUT_NAME "brimir_libretro"
+        SUFFIX ".so"
+        PREFIX ""
+    )
+endif()
 
 # Link-Time Optimization
 if(BRIMIR_LTO)
@@ -172,8 +190,8 @@ install(FILES resources/info/brimir_libretro.info
 message(STATUS "")
 message(STATUS "Brimir Configuration:")
 message(STATUS "  Version: ${PROJECT_VERSION}")
-message(STATUS "  Platform: Windows x64")
-message(STATUS "  Compiler: MSVC")
+message(STATUS "  Platform: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}")
+message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build tests: ${BRIMIR_BUILD_TESTS}")
