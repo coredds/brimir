@@ -15,6 +15,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Export compile commands for IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Required for linking static libraries into shared libraries on Linux
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # Options
 option(BRIMIR_BUILD_TESTS "Build tests" OFF)
 option(BRIMIR_STATIC_LINK "Static linking" OFF)
