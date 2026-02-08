@@ -1,19 +1,20 @@
-    # Build directories
-build/
-build-*/
+# Build directories
+/build/
+/build-*/
 cmake-build-*/
-out/
-dist/
+/out/
+/dist/
 
-# CMake
+# Vendor build artifacts (keep vendor cmake configs tracked via git add -f)
+vendor/**/build/
+!vendor/**/build/cmake/
+
+# CMake generated files
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 install_manifest.cmake
 CTestTestfile.cmake
-*.cmake
-# But allow CMake modules in cmake/
-!cmake/*.cmake
 
 # Compiled objects
 *.o
