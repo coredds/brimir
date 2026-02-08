@@ -59,7 +59,13 @@ if(MSVC)
     )
 else()
     # GCC/Clang warnings
-    add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
+    add_compile_options(
+        -Wall -Wextra
+        -Wno-unused-parameter
+        -Wno-missing-field-initializers
+        -Wno-sign-compare
+        -Wno-unused-function
+    )
 
     set(EXTERNAL_WARNINGS
         -Wno-conversion
