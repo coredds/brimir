@@ -770,22 +770,24 @@ public:
         vkQueueWaitIdle(m_graphicsQueue);
         
         // Readback to CPU buffer - direct memcpy since B8G8R8A8 matches XRGB8888
+        bool readbackOk = false;
         if (m_upscaledStagingBuffer) {
             const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(finalWidth) * finalHeight * 4;
-            
-            // If using HOST_CACHED (non-coherent), invalidate before reading
-            if (m_upscaledStagingIsCached) {
-                VkMappedMemoryRange range{};
-                range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-                range.memory = m_upscaledStagingMemory;
-                range.offset = 0;
-                range.size = VK_WHOLE_SIZE;
-                vkInvalidateMappedMemoryRanges(m_device, 1, &range);
-            }
             
             void* mappedData = nullptr;
             if (vkMapMemory(m_device, m_upscaledStagingMemory, 0,
                             bufferSize, 0, &mappedData) == VK_SUCCESS) {
+                
+                // If using HOST_CACHED (non-coherent), invalidate AFTER mapping
+                // so the CPU cache sees the GPU-written data
+                if (m_upscaledStagingIsCached) {
+                    VkMappedMemoryRange range{};
+                    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+                    range.memory = m_upscaledStagingMemory;
+                    range.offset = 0;
+                    range.size = VK_WHOLE_SIZE;
+                    vkInvalidateMappedMemoryRanges(m_device, 1, &range);
+                }
                 
                 m_upscaledFramebuffer.resize(finalWidth * finalHeight);
                 
@@ -795,21 +797,20 @@ public:
                             static_cast<size_t>(finalWidth) * finalHeight * sizeof(uint32_t));
                 
                 vkUnmapMemory(m_device, m_upscaledStagingMemory);
+                readbackOk = true;
             }
         }
         
         m_softwareFramebufferDirty = false;
-        m_upscaledReady = true;
         
-        static bool s_logSuccess = false;
-        if (!s_logSuccess) { 
-            printf("[VkUpscale] SUCCESS: %ux%u -> %ux%u, fb size=%zu\n", 
-                   m_softwareWidth, m_softwareHeight, 
-                   m_currentUpscaleWidth, m_currentUpscaleHeight,
-                   m_upscaledFramebuffer.size()); 
-            s_logSuccess = true; 
+        if (readbackOk) {
+            m_upscaledReady = true;
+            return true;
+        } else {
+            // Readback failed - don't mark as ready, fall back to software framebuffer
+            m_upscaledReady = false;
+            return false;
         }
-        return true;
     }
     
     const void* GetUpscaledFramebuffer() const override {

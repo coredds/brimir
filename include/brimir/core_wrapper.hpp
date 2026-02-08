@@ -300,7 +300,6 @@ private:
     bool m_useGPUUpscaling = false;       // True if GPU upscaling is active
     bool m_upscaledFrameReady = false;    // True if upscaled frame is available
     uint32_t m_internalScale = 1;         // Internal resolution scale factor
-    std::vector<uint32_t> m_upscaledFramebuffer;  // Upscaled output (XRGB8888)
     unsigned int m_upscaledWidth = 0;
     unsigned int m_upscaledHeight = 0;
     unsigned int m_upscaledPitch = 0;

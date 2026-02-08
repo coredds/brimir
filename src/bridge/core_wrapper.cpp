@@ -602,8 +602,8 @@ bool CoreWrapper::LoadIPLFromFile(const char* path) {
 
 
 const void* CoreWrapper::GetFramebuffer() const {
-    // Return GPU upscaled framebuffer directly (no copy), or software framebuffer
-    if (m_upscaledFrameReady && m_gpuRenderer) {
+    // Return GPU upscaled framebuffer if available, or software framebuffer
+    if (m_upscaledFrameReady && m_gpuRenderer && m_upscaledWidth > 0) {
         const void* upscaled = m_gpuRenderer->GetUpscaledFramebuffer();
         if (upscaled) return upscaled;
     }
@@ -626,7 +626,7 @@ unsigned int CoreWrapper::GetFramebufferHeight() const {
 
 unsigned int CoreWrapper::GetFramebufferPitch() const {
     if (m_upscaledFrameReady && m_upscaledPitch > 0) {
-        return m_upscaledPitch;  // Already in bytes (XRGB8888)
+        return m_upscaledPitch;
     }
     return m_fbPitch;
 }
@@ -829,9 +829,8 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         m_gpuRenderer->UploadSoftwareFramebuffer(
             m_framebuffer.data(), visibleWidth, visibleHeight, visibleWidth * 4);
         
-        // Render upscaled version (includes inline VDP1 overlay if commands were submitted)
+        // Render upscaled version
         if (m_gpuRenderer->RenderUpscaled()) {
-            // Use renderer's buffer directly (valid until next RenderUpscaled call)
             const void* upscaledData = m_gpuRenderer->GetUpscaledFramebuffer();
             if (upscaledData) {
                 m_upscaledWidth = m_gpuRenderer->GetUpscaledWidth();

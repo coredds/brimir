@@ -58,6 +58,16 @@ file(READ "${SHADER_DIR}/vdp1_sprite.frag.spv" VDP1_SPRITE_FRAG_HEX HEX)
 string(LENGTH "${VDP1_SPRITE_FRAG_HEX}" VDP1_SPRITE_FRAG_SIZE_HEX)
 math(EXPR VDP1_SPRITE_FRAG_SIZE "${VDP1_SPRITE_FRAG_SIZE_HEX} / 2")
 
+# Read FXAA shader
+file(READ "${SHADER_DIR}/fxaa.frag.spv" FXAA_FRAG_HEX HEX)
+string(LENGTH "${FXAA_FRAG_HEX}" FXAA_FRAG_SIZE_HEX)
+math(EXPR FXAA_FRAG_SIZE "${FXAA_FRAG_SIZE_HEX} / 2")
+
+# Read FSR RCAS shader
+file(READ "${SHADER_DIR}/fsr_rcas.frag.spv" FSR_RCAS_FRAG_HEX HEX)
+string(LENGTH "${FSR_RCAS_FRAG_HEX}" FSR_RCAS_FRAG_SIZE_HEX)
+math(EXPR FSR_RCAS_FRAG_SIZE "${FSR_RCAS_FRAG_SIZE_HEX} / 2")
+
 # Convert hex to C++ array format
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," VERT_SHADER_DATA "${VERT_SHADER_HEX}")
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," FRAG_SHADER_DATA "${FRAG_SHADER_HEX}")
@@ -71,6 +81,8 @@ string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," UPSCALE_VERT_DATA "${UPSCALE_
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," UPSCALE_FRAG_DATA "${UPSCALE_FRAG_HEX}")
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," VDP1_SPRITE_VERT_DATA "${VDP1_SPRITE_VERT_HEX}")
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," VDP1_SPRITE_FRAG_DATA "${VDP1_SPRITE_FRAG_HEX}")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," FXAA_FRAG_DATA "${FXAA_FRAG_HEX}")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," FSR_RCAS_FRAG_DATA "${FSR_RCAS_FRAG_HEX}")
 
 # Remove trailing comma
 string(REGEX REPLACE ",$" "" VERT_SHADER_DATA "${VERT_SHADER_DATA}")
@@ -85,6 +97,8 @@ string(REGEX REPLACE ",$" "" UPSCALE_VERT_DATA "${UPSCALE_VERT_DATA}")
 string(REGEX REPLACE ",$" "" UPSCALE_FRAG_DATA "${UPSCALE_FRAG_DATA}")
 string(REGEX REPLACE ",$" "" VDP1_SPRITE_VERT_DATA "${VDP1_SPRITE_VERT_DATA}")
 string(REGEX REPLACE ",$" "" VDP1_SPRITE_FRAG_DATA "${VDP1_SPRITE_FRAG_DATA}")
+string(REGEX REPLACE ",$" "" FXAA_FRAG_DATA "${FXAA_FRAG_DATA}")
+string(REGEX REPLACE ",$" "" FSR_RCAS_FRAG_DATA "${FSR_RCAS_FRAG_DATA}")
 
 # Generate header file
 file(WRITE "${OUTPUT_FILE}" "// Auto-generated - DO NOT EDIT\n")
@@ -142,6 +156,16 @@ file(APPEND "${OUTPUT_FILE}" "// VDP1 Sprite Fragment Shader (SPIR-V bytecode)\n
 file(APPEND "${OUTPUT_FILE}" "constexpr size_t vdp1_sprite_frag_size = ${VDP1_SPRITE_FRAG_SIZE};\n")
 file(APPEND "${OUTPUT_FILE}" "constexpr uint8_t vdp1_sprite_frag_data[] = {\n    ${VDP1_SPRITE_FRAG_DATA}\n};\n\n")
 
+file(APPEND "${OUTPUT_FILE}" "// ===== FXAA Shader =====\n\n")
+file(APPEND "${OUTPUT_FILE}" "// FXAA Fragment Shader (SPIR-V bytecode)\n")
+file(APPEND "${OUTPUT_FILE}" "constexpr size_t fxaa_frag_size = ${FXAA_FRAG_SIZE};\n")
+file(APPEND "${OUTPUT_FILE}" "constexpr uint8_t fxaa_frag_data[] = {\n    ${FXAA_FRAG_DATA}\n};\n\n")
+
+file(APPEND "${OUTPUT_FILE}" "// ===== FSR 1.0 RCAS Shader =====\n\n")
+file(APPEND "${OUTPUT_FILE}" "// FSR RCAS Fragment Shader (SPIR-V bytecode)\n")
+file(APPEND "${OUTPUT_FILE}" "constexpr size_t fsr_rcas_frag_size = ${FSR_RCAS_FRAG_SIZE};\n")
+file(APPEND "${OUTPUT_FILE}" "constexpr uint8_t fsr_rcas_frag_data[] = {\n    ${FSR_RCAS_FRAG_DATA}\n};\n\n")
+
 file(APPEND "${OUTPUT_FILE}" "} // namespace brimir::vdp::shaders\n")
 
 message(STATUS "Embedded shaders:")
@@ -157,3 +181,5 @@ message(STATUS "  upscale.vert.spv (${UPSCALE_VERT_SIZE} bytes)")
 message(STATUS "  upscale.frag.spv (${UPSCALE_FRAG_SIZE} bytes)")
 message(STATUS "  vdp1_sprite.vert.spv (${VDP1_SPRITE_VERT_SIZE} bytes)")
 message(STATUS "  vdp1_sprite.frag.spv (${VDP1_SPRITE_FRAG_SIZE} bytes)")
+message(STATUS "  fxaa.frag.spv (${FXAA_FRAG_SIZE} bytes)")
+message(STATUS "  fsr_rcas.frag.spv (${FSR_RCAS_FRAG_SIZE} bytes)")
