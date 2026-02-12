@@ -29,6 +29,9 @@
 // SIMD intrinsics
 #if defined(_M_X64) || defined(__x86_64__)
 #include <emmintrin.h>  // SSE2
+#if defined(__AVX2__)
+#include <immintrin.h>  // AVX2 (superset of SSE)
+#endif
 #endif
 
 // Undefine any Windows macros that might interfere
@@ -767,65 +770,26 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         m_framebuffer.resize(pixelCount);
     }
 
-    // Convert from VDP's XBGR8888 (0x00BBGGRR) to libretro XRGB8888 (0x00RRGGBB)
-    // This is a lossless R<->B channel swap, replacing the old lossy RGB565 conversion
-    {
-        ScopedTimer convTimer(m_profiler, "PixelConversion");
-        
-        uint32_t* dst = m_framebuffer.data();
-        
-        // Process line by line to handle overscan cropping
-        for (uint32_t y = 0; y < visibleHeight; ++y) {
-            const uint32_t srcY = y + yOffset;
-            const uint32_t* srcLine = fb + (srcY * width) + xOffset;
-            uint32_t* dstLine = dst + (y * visibleWidth);
-            
-            size_t i = 0;
-            
-#if defined(_M_X64) || defined(__x86_64__)
-    #if defined(__SSE2__) || defined(_M_X64)
-            // SSE2: Process 4 pixels at a time
-            // XBGR8888 (0x00BBGGRR) -> XRGB8888 (0x00RRGGBB): swap R and B channels
-            const __m128i maskRB = _mm_set1_epi32(0x00FF00FF);  // R and B channel mask
-            const __m128i maskG  = _mm_set1_epi32(0x0000FF00);  // G channel mask
-            
-            for (; i + 4 <= visibleWidth; i += 4) {
-                __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srcLine[i]));
-                
-                // Extract R (bits 0-7) and B (bits 16-23)
-                __m128i rb = _mm_and_si128(pixels, maskRB);
-                // Swap R and B: shift R left by 16, B right by 16
-                __m128i rb_swapped = _mm_or_si128(_mm_slli_epi32(rb, 16), _mm_srli_epi32(rb, 16));
-                // Keep only the valid swapped bits (mask out overflow from shift)
-                rb_swapped = _mm_and_si128(rb_swapped, maskRB);
-                // Keep G channel as-is
-                __m128i g = _mm_and_si128(pixels, maskG);
-                // Combine: swapped R/B + original G
-                __m128i result = _mm_or_si128(rb_swapped, g);
-                
-                _mm_storeu_si128(reinterpret_cast<__m128i*>(&dstLine[i]), result);
-            }
-    #endif
-#endif
-            
-            // Scalar fallback for remaining pixels
-            for (; i < visibleWidth; ++i) {
-                uint32_t pixel = srcLine[i];
-                // Swap R (bits 0-7) and B (bits 16-23), keep G (bits 8-15)
-                uint32_t r = pixel & 0x000000FF;
-                uint32_t g = pixel & 0x0000FF00;
-                uint32_t b = pixel & 0x00FF0000;
-                dstLine[i] = (r << 16) | g | (b >> 16);
-            }
-        }
-    }
-    
     // GPU upscaling: upload software-rendered frame to GPU and upscale
     m_upscaledFrameReady = false;
     if (m_useGPUUpscaling && m_gpuRenderer && m_internalScale > 1) {
         ScopedTimer gpuTimer(m_profiler, "GPUUpscale");
         
-        // Upload the XRGB8888 framebuffer to GPU
+        // GPU path: crop only, no R/B swap needed.
+        // The Vulkan input texture uses R8G8B8A8_UNORM which matches Ymir's native
+        // XBGR8888 byte layout [R,G,B,X]. The GPU handles format conversion to
+        // B8G8R8A8_UNORM output during rendering, saving the CPU R/B swap.
+        {
+            uint32_t* dst = m_framebuffer.data();
+            for (uint32_t y = 0; y < visibleHeight; ++y) {
+                const uint32_t srcY = y + yOffset;
+                const uint32_t* srcLine = fb + (srcY * width) + xOffset;
+                uint32_t* dstLine = dst + (y * visibleWidth);
+                std::memcpy(dstLine, srcLine, visibleWidth * sizeof(uint32_t));
+            }
+        }
+        
+        // Upload the raw XBGR8888 framebuffer to GPU
         m_gpuRenderer->UploadSoftwareFramebuffer(
             m_framebuffer.data(), visibleWidth, visibleHeight, visibleWidth * 4);
         
@@ -837,6 +801,65 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
                 m_upscaledHeight = m_gpuRenderer->GetUpscaledHeight();
                 m_upscaledPitch = m_gpuRenderer->GetUpscaledPitch();
                 m_upscaledFrameReady = true;
+            }
+        }
+    } else {
+        // Software path: convert from VDP's XBGR8888 (0x00BBGGRR) to libretro XRGB8888 (0x00RRGGBB)
+        ScopedTimer convTimer(m_profiler, "PixelConversion");
+        
+        uint32_t* dst = m_framebuffer.data();
+        
+        for (uint32_t y = 0; y < visibleHeight; ++y) {
+            const uint32_t srcY = y + yOffset;
+            const uint32_t* srcLine = fb + (srcY * width) + xOffset;
+            uint32_t* dstLine = dst + (y * visibleWidth);
+            
+            size_t i = 0;
+            
+#if defined(_M_X64) || defined(__x86_64__)
+    #if defined(__AVX2__)
+            // AVX2: Process 8 pixels at a time (256-bit registers)
+            {
+                const __m256i maskRB256 = _mm256_set1_epi32(0x00FF00FF);
+                const __m256i maskG256  = _mm256_set1_epi32(0x0000FF00);
+                
+                for (; i + 8 <= visibleWidth; i += 8) {
+                    __m256i pixels = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&srcLine[i]));
+                    __m256i rb = _mm256_and_si256(pixels, maskRB256);
+                    __m256i rb_swapped = _mm256_or_si256(_mm256_slli_epi32(rb, 16), _mm256_srli_epi32(rb, 16));
+                    rb_swapped = _mm256_and_si256(rb_swapped, maskRB256);
+                    __m256i g = _mm256_and_si256(pixels, maskG256);
+                    __m256i result = _mm256_or_si256(rb_swapped, g);
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(&dstLine[i]), result);
+                }
+            }
+    #endif
+    #if defined(__SSE2__) || defined(_M_X64)
+            // SSE2: Process 4 pixels at a time (handles remaining after AVX2, or all if no AVX2)
+            {
+                const __m128i maskRB = _mm_set1_epi32(0x00FF00FF);
+                const __m128i maskG  = _mm_set1_epi32(0x0000FF00);
+                
+                for (; i + 4 <= visibleWidth; i += 4) {
+                    __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srcLine[i]));
+                    __m128i rb = _mm_and_si128(pixels, maskRB);
+                    __m128i rb_swapped = _mm_or_si128(_mm_slli_epi32(rb, 16), _mm_srli_epi32(rb, 16));
+                    rb_swapped = _mm_and_si128(rb_swapped, maskRB);
+                    __m128i g = _mm_and_si128(pixels, maskG);
+                    __m128i result = _mm_or_si128(rb_swapped, g);
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(&dstLine[i]), result);
+                }
+            }
+    #endif
+#endif
+            
+            // Scalar fallback for remaining pixels
+            for (; i < visibleWidth; ++i) {
+                uint32_t pixel = srcLine[i];
+                uint32_t r = pixel & 0x000000FF;
+                uint32_t g = pixel & 0x0000FF00;
+                uint32_t b = pixel & 0x00FF0000;
+                dstLine[i] = (r << 16) | g | (b >> 16);
             }
         }
     }
@@ -1055,6 +1078,13 @@ void CoreWrapper::SetCDReadSpeed(uint8_t speed) {
     if (speed > 200) speed = 200;
 
     m_saturn->configuration.cdblock.readSpeedFactor = speed;
+}
+
+void CoreWrapper::SetSH2SyncStep(uint32_t step) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+    m_saturn->SetSH2SyncStep(static_cast<uint64_t>(step));
 }
 
 void CoreWrapper::SetAutodetectRegion(bool enable) {

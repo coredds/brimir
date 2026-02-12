@@ -616,6 +616,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_core->SetCDReadSpeed(cd_speed);
     brimir_log(RETRO_LOG_INFO, "CD read speed: %ux", cd_speed);
 
+    const char* sh2_sync_str = get_option_value("brimir_sh2_sync_step", "32");
+    uint32_t sh2_sync_step = static_cast<uint32_t>(atoi(sh2_sync_str));
+    g_core->SetSH2SyncStep(sh2_sync_step);
+    brimir_log(RETRO_LOG_INFO, "SH-2 sync step: %u cycles", sh2_sync_step);
+
     const char* autodetect_region_str = get_option_value("brimir_autodetect_region", "enabled");
     bool autodetect_region = strcmp(autodetect_region_str, "enabled") == 0;
     g_core->SetAutodetectRegion(autodetect_region);

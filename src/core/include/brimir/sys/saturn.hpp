@@ -189,6 +189,26 @@ struct Saturn {
         configuration.system.emulateSH2Cache = enable;
     }
 
+    /// @brief Sets the maximum SH-2 sync step size (in cycles).
+    ///
+    /// Controls how often the master and slave SH-2 CPUs synchronize.
+    /// Lower values are more accurate, higher values improve performance.
+    /// Default is 32, which is conservative. Values of 64 or 128 are faster but may
+    /// cause compatibility issues with some games.
+    ///
+    /// @param[in] step the maximum cycles between master/slave SH-2 synchronization
+    void SetSH2SyncStep(uint64 step) {
+        if (step < 1) step = 1;
+        if (step > 256) step = 256;
+        m_sh2SyncMaxStep = step;
+    }
+
+    /// @brief Returns the current SH-2 sync step size.
+    /// @return the maximum cycles between synchronization
+    [[nodiscard]] uint64 GetSH2SyncStep() const noexcept {
+        return m_sh2SyncMaxStep;
+    }
+
     /// @brief Determines if SH-2 cache emulation is enabled.
     /// @return the SH-2 cache emulation state
     [[nodiscard]] bool IsSH2CacheEmulationEnabled() const noexcept {
@@ -435,6 +455,7 @@ private:
     media::Disc m_disc;         ///< Currently loaded game disc
     media::fs::Filesystem m_fs; ///< Filesystem contained in the disc
 
+    uint64 m_sh2SyncMaxStep = 32; ///< Maximum SH-2 sync step size (cycles between master/slave sync)
     uint64 m_msh2SpilloverCycles; ///< Master SH-2 execution cycles spilled over between executions
     uint64 m_ssh2SpilloverCycles; ///< Slave SH-2 execution cycles spilled over between executions
     uint64 m_sh1SpilloverCycles;  ///< SH-1 execution cycles spilled over between executions

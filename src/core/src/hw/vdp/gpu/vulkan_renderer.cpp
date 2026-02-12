@@ -112,6 +112,17 @@ public:
                 return false;
             }
             
+            // Step 9b: Create render fence for GPU synchronization
+            {
+                VkFenceCreateInfo fenceInfo{};
+                fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+                // Not signaled initially - first frame has nothing to wait for
+                if (vkCreateFence(m_device, &fenceInfo, nullptr, &m_renderFence) != VK_SUCCESS) {
+                    Shutdown();
+                    return false;
+                }
+            }
+            
             // Step 10: Create sprite texture resources
             if (!CreateSpriteTextureResources()) {
                 Shutdown();
@@ -296,6 +307,13 @@ public:
             // Cleanup upscale resources
             DestroyUpscaleResources();
             
+            // Destroy render fence
+            if (m_renderFence) {
+                vkDestroyFence(m_device, m_renderFence, nullptr);
+                m_renderFence = VK_NULL_HANDLE;
+            }
+            m_gpuFramePending = false;
+            
             if (m_commandPool) {
                 vkDestroyCommandPool(m_device, m_commandPool, nullptr);
                 m_commandPool = VK_NULL_HANDLE;
@@ -479,6 +497,31 @@ public:
     
     // ===== GPU Upscaling (Hybrid Mode) =====
     
+    // Helper: read back the upscaled frame from the persistently mapped readback staging buffer.
+    // Must only be called after the GPU has finished writing (fence waited).
+    bool ReadbackUpscaledFrame() {
+        if (!m_readbackStagingMapped) return false;
+        
+        const uint32_t w = m_currentUpscaleWidth;
+        const uint32_t h = m_currentUpscaleHeight;
+        if (w == 0 || h == 0) return false;
+        
+        // If using HOST_CACHED (non-coherent), invalidate so CPU sees GPU writes
+        if (m_upscaledStagingIsCached) {
+            VkMappedMemoryRange range{};
+            range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+            range.memory = m_upscaledStagingMemory;
+            range.offset = 0;
+            range.size = VK_WHOLE_SIZE;
+            vkInvalidateMappedMemoryRanges(m_device, 1, &range);
+        }
+        
+        m_upscaledFramebuffer.resize(w * h);
+        std::memcpy(m_upscaledFramebuffer.data(), m_readbackStagingMapped,
+                    static_cast<size_t>(w) * h * sizeof(uint32_t));
+        return true;
+    }
+    
     void UploadSoftwareFramebuffer(const uint32_t* data, uint32_t width, 
                                    uint32_t height, uint32_t pitch) override {
         if (!m_initialized || !data || width == 0 || height == 0) return;
@@ -488,27 +531,21 @@ public:
         m_softwareHeight = height;
         m_softwarePitch = pitch;
         
-        // Copy data to staging buffer - direct memcpy since B8G8R8A8 matches XRGB8888 layout
-        void* mappedData = nullptr;
-        if (vkMapMemory(m_device, m_softwareInputStagingMemory, 0, 
-                        width * height * 4, 0, &mappedData) != VK_SUCCESS) {
-            return;
-        }
+        // Copy data to persistently mapped staging buffer (HOST_COHERENT, no flush needed)
+        if (!m_uploadStagingMapped) return;
         
         const uint32_t dstPitch = width * 4;
         if (pitch == dstPitch) {
             // Pitches match - single fast memcpy
-            std::memcpy(mappedData, data, static_cast<size_t>(width) * height * 4);
+            std::memcpy(m_uploadStagingMapped, data, static_cast<size_t>(width) * height * 4);
         } else {
             // Different pitches - copy row by row
-            uint8_t* dst = static_cast<uint8_t*>(mappedData);
+            uint8_t* dst = static_cast<uint8_t*>(m_uploadStagingMapped);
             const uint8_t* src = reinterpret_cast<const uint8_t*>(data);
             for (uint32_t y = 0; y < height; ++y) {
                 std::memcpy(dst + y * dstPitch, src + y * pitch, dstPitch);
             }
         }
-        
-        vkUnmapMemory(m_device, m_softwareInputStagingMemory);
         
         // Transfer from staging buffer to GPU texture
         VkCommandBufferBeginInfo beginInfo{};
@@ -601,8 +638,9 @@ public:
             submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &m_commandBuffer;
-            vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-            vkQueueWaitIdle(m_graphicsQueue);
+            vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_renderFence);
+            vkWaitForFences(m_device, 1, &m_renderFence, VK_TRUE, UINT64_MAX);
+            vkResetFences(m_device, 1, &m_renderFence);
             
             if (!CreateUpscaleOutputImage(finalWidth, finalHeight)) {
                 m_softwareFramebufferDirty = false;
@@ -760,46 +798,18 @@ public:
         
         vkEndCommandBuffer(m_commandBuffer);
         
-        // Submit and wait
+        // Submit with fence and wait (targeted wait instead of draining entire queue)
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &m_commandBuffer;
         
-        vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(m_graphicsQueue);
+        vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_renderFence);
+        vkWaitForFences(m_device, 1, &m_renderFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(m_device, 1, &m_renderFence);
         
-        // Readback to CPU buffer - direct memcpy since B8G8R8A8 matches XRGB8888
-        bool readbackOk = false;
-        if (m_upscaledStagingBuffer) {
-            const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(finalWidth) * finalHeight * 4;
-            
-            void* mappedData = nullptr;
-            if (vkMapMemory(m_device, m_upscaledStagingMemory, 0,
-                            bufferSize, 0, &mappedData) == VK_SUCCESS) {
-                
-                // If using HOST_CACHED (non-coherent), invalidate AFTER mapping
-                // so the CPU cache sees the GPU-written data
-                if (m_upscaledStagingIsCached) {
-                    VkMappedMemoryRange range{};
-                    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-                    range.memory = m_upscaledStagingMemory;
-                    range.offset = 0;
-                    range.size = VK_WHOLE_SIZE;
-                    vkInvalidateMappedMemoryRanges(m_device, 1, &range);
-                }
-                
-                m_upscaledFramebuffer.resize(finalWidth * finalHeight);
-                
-                // B8G8R8A8 in memory is [B,G,R,A] = XRGB8888 on little-endian
-                // No per-pixel conversion needed - just memcpy
-                std::memcpy(m_upscaledFramebuffer.data(), mappedData,
-                            static_cast<size_t>(finalWidth) * finalHeight * sizeof(uint32_t));
-                
-                vkUnmapMemory(m_device, m_upscaledStagingMemory);
-                readbackOk = true;
-            }
-        }
+        // Readback from persistently mapped staging buffer
+        bool readbackOk = ReadbackUpscaledFrame();
         
         m_softwareFramebufferDirty = false;
         
@@ -807,7 +817,6 @@ public:
             m_upscaledReady = true;
             return true;
         } else {
-            // Readback failed - don't mark as ready, fall back to software framebuffer
             m_upscaledReady = false;
             return false;
         }
@@ -1009,6 +1018,14 @@ private:
     VkBuffer m_upscaledStagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_upscaledStagingMemory = VK_NULL_HANDLE;
     bool m_upscaledStagingIsCached = false;
+    
+    // Persistent mapped staging pointers (mapped once at creation, valid until destroy)
+    void* m_uploadStagingMapped = nullptr;     // Persistently mapped upload staging buffer
+    void* m_readbackStagingMapped = nullptr;   // Persistently mapped readback staging buffer
+    
+    // Fence-based GPU synchronization (pipelining)
+    VkFence m_renderFence = VK_NULL_HANDLE;
+    bool m_gpuFramePending = false;  // True when GPU work submitted but not yet read back
     
     VkRenderPass m_upscaleRenderPass = VK_NULL_HANDLE;
     VkFramebuffer m_upscaleFramebuffer = VK_NULL_HANDLE;
@@ -1823,12 +1840,12 @@ private:
     // Create resources for GPU upscaling of software framebuffer
     bool CreateUpscaleResources() {
         // Create software input texture (max Saturn resolution: 704x512)
-        // Use B8G8R8A8 to match XRGB8888 memory layout (bytes: B,G,R,X on little-endian)
-        // This eliminates per-pixel format conversion on upload/readback
+        // Use R8G8B8A8 to match Ymir's native XBGR8888 memory layout (bytes: R,G,B,X on LE)
+        // This allows uploading the raw VDP framebuffer without CPU R/B swap
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
+        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
         imageInfo.extent = {704, 512, 1};  // Max Saturn resolution
         imageInfo.mipLevels = 1;
         imageInfo.arrayLayers = 1;
@@ -1865,7 +1882,7 @@ private:
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewInfo.image = m_softwareInputTexture;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
+        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         
         if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_softwareInputView) != VK_SUCCESS) {
@@ -1898,6 +1915,13 @@ private:
         }
         
         vkBindBufferMemory(m_device, m_softwareInputStaging, m_softwareInputStagingMemory, 0);
+        
+        // Persistently map upload staging buffer (HOST_COHERENT, no flush needed)
+        if (vkMapMemory(m_device, m_softwareInputStagingMemory, 0, 
+                        704 * 512 * 4, 0, &m_uploadStagingMapped) != VK_SUCCESS) {
+            m_lastError = "Failed to persistently map upload staging buffer";
+            return false;
+        }
         
         // Create upscale sampler (bilinear filtering)
         VkSamplerCreateInfo samplerInfo{};
@@ -2619,6 +2643,11 @@ private:
             m_upscaledOutputMemory = VK_NULL_HANDLE;
         }
         if (m_upscaledStagingBuffer) {
+            // Unmap persistent readback mapping before destroying
+            if (m_readbackStagingMapped) {
+                vkUnmapMemory(m_device, m_upscaledStagingMemory);
+                m_readbackStagingMapped = nullptr;
+            }
             vkDestroyBuffer(m_device, m_upscaledStagingBuffer, nullptr);
             m_upscaledStagingBuffer = VK_NULL_HANDLE;
         }
@@ -2723,6 +2752,13 @@ private:
         
         vkBindBufferMemory(m_device, m_upscaledStagingBuffer, m_upscaledStagingMemory, 0);
         
+        // Persistently map readback staging buffer
+        if (vkMapMemory(m_device, m_upscaledStagingMemory, 0, 
+                        bufferSize, 0, &m_readbackStagingMapped) != VK_SUCCESS) {
+            m_readbackStagingMapped = nullptr;
+            return false;
+        }
+        
         // Create framebuffer
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -2794,6 +2830,11 @@ private:
             m_softwareInputMemory = VK_NULL_HANDLE;
         }
         if (m_softwareInputStaging) {
+            // Unmap persistent upload mapping before destroying
+            if (m_uploadStagingMapped) {
+                vkUnmapMemory(m_device, m_softwareInputStagingMemory);
+                m_uploadStagingMapped = nullptr;
+            }
             vkDestroyBuffer(m_device, m_softwareInputStaging, nullptr);
             m_softwareInputStaging = VK_NULL_HANDLE;
         }
@@ -2814,6 +2855,11 @@ private:
             m_upscaledOutputMemory = VK_NULL_HANDLE;
         }
         if (m_upscaledStagingBuffer) {
+            // Unmap persistent readback mapping before destroying
+            if (m_readbackStagingMapped) {
+                vkUnmapMemory(m_device, m_upscaledStagingMemory);
+                m_readbackStagingMapped = nullptr;
+            }
             vkDestroyBuffer(m_device, m_upscaledStagingBuffer, nullptr);
             m_upscaledStagingBuffer = VK_NULL_HANDLE;
         }

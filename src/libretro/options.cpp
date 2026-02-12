@@ -357,6 +357,25 @@ static struct retro_core_option_v2_definition option_defs[] = {
         },
         "2"
     },
+    {
+        "brimir_sh2_sync_step",
+        "CPU Sync Accuracy",
+        nullptr,
+        "Controls how often the master and slave SH-2 CPUs synchronize. "
+        "High: 32 cycles (most accurate, default). "
+        "Normal: 64 cycles (good balance of speed and accuracy). "
+        "Fast: 128 cycles (fastest, may cause issues in some games). "
+        "Lower values improve timing accuracy, higher values improve performance.",
+        nullptr,
+        "system",
+        {
+            { "32", "High (32 cycles)" },
+            { "64", "Normal (64 cycles)" },
+            { "128", "Fast (128 cycles)" },
+            { nullptr, nullptr }
+        },
+        "32"
+    },
     { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr }
 };
 

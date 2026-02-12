@@ -538,7 +538,8 @@ void Saturn::RunFrameImpl() {
 
 template <bool debug, bool enableSH2Cache, bool cdblockLLE>
 bool Saturn::Run() {
-    static constexpr uint64 kSH2SyncMaxStep = 32;
+    // SH-2 sync step size: configurable via SetSH2SyncStep() (default 32)
+    const uint64 syncStep = m_sh2SyncMaxStep;
 
     const uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
 
@@ -554,7 +555,7 @@ bool Saturn::Run() {
             uint64 slaveCycles = m_ssh2SpilloverCycles;
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
+                const uint64 targetCycles = std::min(execCycles + syncStep, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 slaveCycles = slaveSH2.Advance<debug, enableSH2Cache>(execCycles, slaveCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
@@ -577,7 +578,7 @@ bool Saturn::Run() {
         } else {
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
+                const uint64 targetCycles = std::min(execCycles + syncStep, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
                 if constexpr (debug) {

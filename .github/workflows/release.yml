@@ -19,7 +19,7 @@ jobs:
           cache: true
 
       - name: Configure CMake
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBRIMIR_GPU_VULKAN=ON
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBRIMIR_GPU_VULKAN=ON -DBRIMIR_LTO=ON
 
       - name: Build
         run: cmake --build build --config Release --target brimir_libretro
@@ -53,7 +53,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_C_COMPILER=gcc-14 \
-            -DBRIMIR_GPU_VULKAN=ON
+            -DBRIMIR_GPU_VULKAN=ON \
+            -DBRIMIR_LTO=ON
 
       - name: Build
         run: cmake --build build --config Release --target brimir_libretro --parallel $(nproc)

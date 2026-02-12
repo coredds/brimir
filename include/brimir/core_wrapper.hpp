@@ -246,6 +246,10 @@ public:
     /// @param mode "disabled", "fxaa", or "rcas"
     void SetSharpeningMode(const char* mode);
     
+    /// @brief Set SH-2 CPU sync step size
+    /// @param step Cycles between master/slave sync (32 = accurate, 64 = balanced, 128 = fast)
+    void SetSH2SyncStep(uint32_t step);
+    
     /// @brief Set horizontal blend filter for interlaced modes
     /// @param enable True to enable horizontal blending in high-res interlaced modes
     void SetHorizontalBlend(bool enable);
