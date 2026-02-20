@@ -34,8 +34,10 @@
 #include <brimir/core/types.hpp>
 
 #include <brimir/util/inline.hpp>
+#include <brimir/util/virtual_memory.hpp>
 
 #include <array>
+#include <bitset>
 #include <iosfwd>
 #include <map>
 #include <set>
@@ -48,10 +50,6 @@ class SH2 {
 public:
     SH2(core::Scheduler &scheduler, sys::SH2Bus &bus, bool master, const sys::SystemFeatures &systemFeatures);
 
-#ifdef BRIMIR_HAS_JIT
-    ~SH2();  // Defined in .cpp due to unique_ptr<JitCompilerImpl> incomplete type
-#endif
-
     void Reset(bool hard, bool watchdogInitiated = false);
 
     void MapCallbacks(CBAcknowledgeExternalInterrupt callback) {
@@ -60,6 +58,15 @@ public:
 
     void UseDebugBreakManager(debug::DebugBreakManager *mgr) {
         m_debugBreakMgr = mgr;
+        if (mgr != nullptr) {
+            m_breakpoints.Allocate(kBreakpointMapSize);
+            m_watchpoints.Allocate(kWatchpointMapSize);
+            ReapplyBreakpoints();
+            ReapplyWatchpoints();
+        } else {
+            m_breakpoints.Free();
+            m_watchpoints.Free();
+        }
     }
 
     void MapMemory(sys::SH2Bus &bus);
@@ -95,14 +102,6 @@ public:
     // Should be done before enabling cache emulation to ensure previous cache contents are cleared.
     void PurgeCache();
 
-#ifdef BRIMIR_HAS_JIT
-    /// @brief Enable or disable JIT recompiler
-    void EnableJIT(bool enabled);
-    
-    /// @brief Check if JIT is enabled
-    bool IsJITEnabled() const;
-#endif
-
     // -------------------------------------------------------------------------
     // Save states
 
@@ -119,111 +118,206 @@ public:
         m_tracer = tracer;
     }
 
+    // --- Breakpoints
+
+private:
+    // Returns a reference to the portion of the breakpoint bitmap containing the given address.
+    FORCE_INLINE uint64 &BreakpointBitmapChunkRef(uint32 address) {
+        address >>= 7u; // 1 bit for halfword alignment, 6 bits for 64-bit addressing
+        return static_cast<uint64 *>(m_breakpoints.GetMemory())[address];
+    }
+
+    // Returns the portion of the breakpoint bitmap containing the given address.
+    FORCE_INLINE uint64 GetBreakpointBitmapChunk(uint32 address) const {
+        address >>= 7u; // 1 bit for halfword alignment, 6 bits for 64-bit addressing
+        return static_cast<uint64 *>(m_breakpoints.GetMemory())[address];
+    }
+
+    // Builds a value containing the breakpoint bitmap bit for the given address.
+    FORCE_INLINE static uint64 MakeBreakpointBit(uint32 address) {
+        return 1ull << ((address >> 1u) & 63u);
+    }
+
+public:
     // Adds the specified address to the set of breakpoints.
     // The address is force-aligned to word boundaries.
     // Returns `true` if the breakpoint was added, `false` if it already exists.
     bool AddBreakpoint(uint32 address) {
-        return m_breakpoints.insert(address & ~1u).second;
+        if (m_breakpoints.IsAllocated()) {
+            BreakpointBitmapChunkRef(address) |= MakeBreakpointBit(address);
+        }
+        return m_breakpointSet.insert(address & ~1u).second;
     }
 
     // Removes the specified address from the set of breakpoints.
     // The address is force-aligned to word boundaries.
     // Returns `true` if the breakpoint was removed, `false` if it did not exist.
     bool RemoveBreakpoint(uint32 address) {
-        return m_breakpoints.erase(address & ~1u);
+        if (m_breakpoints.IsAllocated()) {
+            BreakpointBitmapChunkRef(address) &= ~MakeBreakpointBit(address);
+        }
+        return m_breakpointSet.erase(address & ~1u);
     }
 
     // Toggles the breakpoint at the specified address.
     // The address is force-aligned to word boundaries.
     // Returns `true` if the breakpoint was added, `false` if it was removed.
     bool ToggleBreakpoint(uint32 address) {
+        if (m_breakpoints.IsAllocated()) {
+            BreakpointBitmapChunkRef(address) ^= MakeBreakpointBit(address);
+        }
         address &= ~1u;
-        const bool result = m_breakpoints.insert(address).second;
+        const bool result = m_breakpointSet.insert(address).second;
         if (!result) {
-            m_breakpoints.erase(address);
+            m_breakpointSet.erase(address);
         }
         return result;
     }
 
     // Clears all breakpoints.
     void ClearBreakpoints() {
-        m_breakpoints.clear();
+        if (m_breakpoints.IsAllocated()) {
+            for (uint32 address : m_breakpointSet) {
+                BreakpointBitmapChunkRef(address) &= ~MakeBreakpointBit(address);
+            }
+        }
+        m_breakpointSet.clear();
     }
 
     // Retrieves all breakpoints set in this SH-2.
     const std::set<uint32> &GetBreakpoints() const {
-        return m_breakpoints;
+        return m_breakpointSet;
     }
 
     // Replaces all breakpoints with those of the provided set.
     // All addresses of the specified set are force-aligned to word boundaries.
     void ReplaceBreakpoints(const std::set<uint32> &breakpoints) {
         // Manage breakpoints manually to sanitize addresses
-        m_breakpoints.clear();
+        ClearBreakpoints();
         for (auto address : breakpoints) {
-            m_breakpoints.insert(address & ~1u);
+            AddBreakpoint(address);
         }
     }
 
-    // Determines if the specified address has a breakpoint set.
+    // Determines if a breakpoint is set at specified address.
     // The address is force-aligned to word boundaries.
-    bool IsBreakpointSet(uint32 address) const {
-        return m_breakpoints.contains(address & ~1u);
+    FORCE_INLINE bool IsBreakpointSet(uint32 address) const {
+        return m_breakpointSet.contains(address & ~1);
     }
 
+private:
+    // Determines if a breakpoint is set at specified address using the fast bitmap.
+    // The address is force-aligned to word boundaries.
+    // Must only be invoked if the bitmap is allocated.
+    FORCE_INLINE bool IsBreakpointSetInBitmap(uint32 address) const {
+        return GetBreakpointBitmapChunk(address) & MakeBreakpointBit(address);
+    }
+
+    // Reapplies the breakpoints from the set into the bitmap.
+    // Should be used after reallocating the bitmap.
+    FORCE_INLINE void ReapplyBreakpoints() {
+        if (!m_breakpoints.IsAllocated()) {
+            return;
+        }
+        for (auto address : m_breakpointSet) {
+            AddBreakpoint(address);
+        }
+    }
+
+    // --- Watchpoints
+
+private:
+    // Returns a reference to the watchpoint flags for the given address.
+    FORCE_INLINE debug::WatchpointFlags &WatchpointFlagsRef(uint32 address) {
+        return static_cast<debug::WatchpointFlags *>(m_watchpoints.GetMemory())[address];
+    }
+
+    // Returns the the watchpoint flags for the given address.
+    FORCE_INLINE debug::WatchpointFlags GetWatchpointFlags(uint32 address) const {
+        return static_cast<debug::WatchpointFlags *>(m_watchpoints.GetMemory())[address];
+    }
+
+public:
     // Adds watchpoints to the specified address.
     // Watchpoints set at misaligned addresses will not trigger.
     // e.g. longword-sized watchpoint with address & 3 != 0
     void AddWatchpoint(uint32 address, debug::WatchpointFlags flags) {
+        if (m_watchpoints.IsAllocated()) {
+            WatchpointFlagsRef(address) |= flags;
+        }
         if (flags != debug::WatchpointFlags::None) {
-            m_watchpoints[address] |= flags;
+            m_watchpointSet[address] |= flags;
         }
     }
 
     // Removes watchpoints from the specified address.
     void RemoveWatchpoint(uint32 address, debug::WatchpointFlags flags) {
-        if (!m_watchpoints.contains(address)) {
+        if (m_watchpoints.IsAllocated()) {
+            WatchpointFlagsRef(address) &= ~flags;
+        }
+        if (!m_watchpointSet.contains(address)) {
             return;
         }
-        auto &wtpt = m_watchpoints.at(address);
+        auto &wtpt = m_watchpointSet.at(address);
         wtpt &= ~flags;
         if (wtpt == debug::WatchpointFlags::None) {
-            m_watchpoints.erase(address);
+            m_watchpointSet.erase(address);
         }
     }
 
     // Clears all watchpoints at the specified address.
     void ClearWatchpointsAt(uint32 address) {
-        m_watchpoints.erase(address);
+        if (m_watchpoints.IsAllocated()) {
+            WatchpointFlagsRef(address) = debug::WatchpointFlags::None;
+        }
+        m_watchpointSet.erase(address);
     }
 
     // Clears all watchpoints.
     void ClearWatchpoints() {
-        m_watchpoints.clear();
+        if (m_watchpoints.IsAllocated()) {
+            for (auto [address, _] : m_watchpointSet) {
+                WatchpointFlagsRef(address) = debug::WatchpointFlags::None;
+            }
+        }
+        m_watchpointSet.clear();
     }
 
     // Retrieves configured watchpoints for the specified address.
-    debug::WatchpointFlags GetWatchpoint(uint32 address) const {
-        if (m_watchpoints.contains(address)) {
-            return m_watchpoints.at(address);
-        }
-        return debug::WatchpointFlags::None;
+    FORCE_INLINE debug::WatchpointFlags GetWatchpoint(uint32 address) const {
+        auto it = m_watchpointSet.find(address);
+        return it != m_watchpointSet.cend() ? it->second : debug::WatchpointFlags::None;
     }
 
+private:
+    // Reapplies the watchpoints from the set into the memory map.
+    // Should be used after reallocating the memory map.
+    FORCE_INLINE void ReapplyWatchpoints() {
+        if (!m_watchpoints.IsAllocated()) {
+            return;
+        }
+        for (auto &[address, flags] : m_watchpointSet) {
+            AddWatchpoint(address, flags);
+        }
+    }
+
+public:
     // Retrieves all watchpoints set in this SH-2.
     const std::map<uint32, debug::WatchpointFlags> &GetWatchpoints() const {
-        return m_watchpoints;
+        return m_watchpointSet;
     }
 
     // Replaces all watchpoints with those of the provided set.
     // All addresses of the specified set are force-aligned to word boundaries.
     void ReplaceWatchpoints(const std::map<uint32, debug::WatchpointFlags> &watchpoints) {
         // Manage watchpoints manually to sanitize addresses
-        m_watchpoints.clear();
+        ClearWatchpoints();
         for (auto &[address, flags] : watchpoints) {
             AddWatchpoint(address, flags);
         }
     }
+
+    // --- Misc
 
     // Suspends (disabled) the CPU in debug mode.
     void SetCPUSuspended(bool suspend) {
@@ -540,38 +634,6 @@ public:
         return m_probe;
     }
 
-    // -------------------------------------------------------------------------
-    // JIT Testing Interface
-    // These methods are ONLY for JIT validation testing and should not be
-    // used in production code. They provide direct access to CPU state.
-
-#ifdef BRIMIR_ENABLE_JIT_TESTING
-    // Register access
-    uint32 JIT_GetR(int idx) const { return R[idx]; }
-    void JIT_SetR(int idx, uint32 value) { R[idx] = value; }
-    
-    uint32 JIT_GetPC() const { return PC; }
-    void JIT_SetPC(uint32 value) { PC = value; }
-    
-    uint32 JIT_GetPR() const { return PR; }
-    void JIT_SetPR(uint32 value) { PR = value; }
-    
-    RegSR JIT_GetSR() const { return SR; }
-    void JIT_SetSR(const RegSR& value) { SR = value; }
-    
-    uint32 JIT_GetGBR() const { return GBR; }
-    void JIT_SetGBR(uint32 value) { GBR = value; }
-    
-    uint32 JIT_GetVBR() const { return VBR; }
-    void JIT_SetVBR(uint32 value) { VBR = value; }
-    
-    RegMAC JIT_GetMAC() const { return MAC; }
-    void JIT_SetMAC(const RegMAC& value) { MAC = value; }
-    
-    // Execution - execute exactly ONE instruction (no scheduler integration)
-    uint64 JIT_ExecuteSingleInstruction();
-#endif // BRIMIR_ENABLE_JIT_TESTING
-
 private:
     // -------------------------------------------------------------------------
     // CPU state
@@ -837,8 +899,18 @@ private:
 
     std::array<bool, 2> m_dmacTraced; // whether each DMA channel has had a transfer traced
 
-    std::set<uint32> m_breakpoints;
-    std::map<uint32, debug::WatchpointFlags> m_watchpoints;
+    static constexpr size_t kBitsPerByte = 8ull; // asserted in ymir.cpp
+    static constexpr size_t kAddressSpaceSize = 1ull << 32ull;
+    static constexpr size_t kInstructionSize = sizeof(uint16); // breakpoints must be instruction-aligned
+    static constexpr size_t kBreakpointMapSize = kAddressSpaceSize / kInstructionSize / kBitsPerByte;
+    static constexpr size_t kWatchpointMapSize = kAddressSpaceSize; // only 6 bits per byte are used
+
+    util::VirtualMemory m_breakpoints;
+    util::VirtualMemory m_watchpoints;
+
+    // These help track what breakpoints and watchpoints are set for fast clears.
+    std::set<uint32> m_breakpointSet;
+    std::map<uint32, debug::WatchpointFlags> m_watchpointSet;
 
     bool m_debugSuspend = false; // Disables CPU while in debug mode
 
@@ -847,13 +919,6 @@ private:
     bool CheckWatchpoint(const DecodedMemAccesses::Access &access);
 
     const std::string_view m_logPrefix; // For devlogs
-
-#ifdef BRIMIR_HAS_JIT
-    // JIT compiler state
-    class JitCompilerImpl;
-    std::unique_ptr<JitCompilerImpl> m_jitCompiler;
-    bool m_jitEnabled = false;
-#endif
 
     // -------------------------------------------------------------------------
     // Helper functions

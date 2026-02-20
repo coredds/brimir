@@ -114,34 +114,28 @@ add_library(brimir-core STATIC
     include/brimir/hw/smpc/peripheral/peripheral_impl_control_pad.hpp
     include/brimir/hw/smpc/peripheral/peripheral_impl_mission_stick.hpp
     include/brimir/hw/smpc/peripheral/peripheral_impl_null.hpp
+    include/brimir/hw/smpc/peripheral/peripheral_impl_shuttle_mouse.hpp
+    include/brimir/hw/smpc/peripheral/peripheral_impl_virtua_gun.hpp
     include/brimir/hw/smpc/peripheral/peripheral_port.hpp
     include/brimir/hw/smpc/peripheral/peripheral_report.hpp
     include/brimir/hw/smpc/peripheral/peripheral_state_common.hpp
 
-    include/brimir/hw/vdp/slope.hpp
     include/brimir/hw/vdp/vdp.hpp
     include/brimir/hw/vdp/vdp_callbacks.hpp
+    include/brimir/hw/vdp/vdp_configs.hpp
     include/brimir/hw/vdp/vdp_defs.hpp
     include/brimir/hw/vdp/vdp_internal_callbacks.hpp
-    include/brimir/hw/vdp/vdp_profiler.hpp
-    include/brimir/hw/vdp/vdp_simd.hpp
     include/brimir/hw/vdp/vdp_state.hpp
     include/brimir/hw/vdp/vdp1_defs.hpp
     include/brimir/hw/vdp/vdp1_regs.hpp
     include/brimir/hw/vdp/vdp2_defs.hpp
     include/brimir/hw/vdp/vdp2_regs.hpp
-
-    # New VDP1 (Mednafen-inspired)
-    include/brimir/hw/vdp1/vdp1.hpp
-    include/brimir/hw/vdp1/vdp1_commands.hpp
-    include/brimir/hw/vdp1/vdp1_helpers.hpp
-    include/brimir/hw/vdp1/vdp1_render.hpp
-
-    # New VDP2 (Mednafen-inspired)
-    include/brimir/hw/vdp2/vdp2.hpp
-    include/brimir/hw/vdp2/vdp2_layers.hpp
-    include/brimir/hw/vdp2/vdp2_helpers.hpp
-    include/brimir/hw/vdp2/vdp2_render.hpp
+    include/brimir/hw/vdp/renderer/vdp_renderer.hpp
+    include/brimir/hw/vdp/renderer/vdp_renderer_base.hpp
+    include/brimir/hw/vdp/renderer/vdp_renderer_defs.hpp
+    include/brimir/hw/vdp/renderer/vdp_renderer_null.hpp
+    include/brimir/hw/vdp/renderer/vdp_renderer_sw.hpp
+    include/brimir/hw/vdp/renderer/sw/vdp1_steppers.hpp
 
     include/brimir/media/cdrom_crc.hpp
     include/brimir/media/disc.hpp
@@ -264,41 +258,19 @@ add_library(brimir-core STATIC
     src/hw/smpc/peripheral/peripheral_impl_arcade_racer.cpp
     src/hw/smpc/peripheral/peripheral_impl_control_pad.cpp
     src/hw/smpc/peripheral/peripheral_impl_mission_stick.cpp
+    src/hw/smpc/peripheral/peripheral_impl_shuttle_mouse.cpp
+    src/hw/smpc/peripheral/peripheral_impl_virtua_gun.cpp
 
     src/hw/sh1/sh1.cpp
     src/hw/sh1/sh1_decode.cpp
-    #src/hw/sh1/sh1_disasm.cpp
 
     src/hw/sh2/sh2.cpp
     src/hw/sh2/sh2_decode.cpp
     src/hw/sh2/sh2_disasm.cpp
-    
-    # Brimir: SH2 JIT compiler (x64/ARM64) - TODO: Reintegrate with proper headers
-    # src/hw/sh2/jit/jit_compiler.cpp
-    # src/hw/sh2/jit/code_buffer.cpp
-    # src/hw/sh2/jit/register_allocator.cpp
 
     src/hw/vdp/vdp.cpp
-    src/hw/vdp/vdp_profiler.cpp
-    src/hw/vdp/vdp_renderer.cpp
-    src/hw/vdp/software_renderer.cpp
-    src/hw/vdp/gpu/vulkan_renderer.cpp
-
-    # New VDP1 (Mednafen-inspired)
-    src/hw/vdp1/vdp1.cpp
-    src/hw/vdp1/vdp1_registers.cpp
-    src/hw/vdp1/vdp1_helpers.cpp
-    src/hw/vdp1/vdp1_render.cpp
-    src/hw/vdp1/vdp1_commands.cpp
-    src/hw/vdp1/vdp1_texture.cpp
-
-    # New VDP2 (Mednafen-inspired)
-    src/hw/vdp2/vdp2.cpp
-    src/hw/vdp2/vdp2_registers.cpp
-    src/hw/vdp2/vdp2_layers.cpp
-    src/hw/vdp2/vdp2_helpers.cpp
-    src/hw/vdp2/vdp2_render.cpp
-    src/hw/vdp2/vdp2_window.cpp
+    src/hw/vdp/renderer/vdp_renderer_base.cpp
+    src/hw/vdp/renderer/vdp_renderer_sw.cpp
 
     src/media/cdrom_crc.cpp
     src/media/filesystem.cpp

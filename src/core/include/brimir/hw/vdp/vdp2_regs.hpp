@@ -21,10 +21,11 @@ struct VDP2Regs {
         EXTEN.u16 = 0x0;
         HCNT = 0x0;
         VCNT = 0x0;
+        HCNTShift = 0;
+        HCNTMask = 0x3FE;
         VCNTShift = 0;
         VCNTSkip = 0;
         VCNTLatch = 0x3FF;
-        VCNTLatched = false;
         vramControl.Reset();
         VRSIZE.u16 = 0x0;
         cyclePatterns.Reset();
@@ -71,11 +72,12 @@ struct VDP2Regs {
         accessPatternsDirty = true;
     }
 
+    template <bool peek>
     uint16 Read(uint32 address) const {
         switch (address) {
         case 0x000: return ReadTVMD();
         case 0x002: return ReadEXTEN();
-        case 0x004: return ReadTVSTAT();
+        case 0x004: return ReadTVSTAT<peek>();
         case 0x006: return ReadVRSIZE();
         case 0x008: return ReadHCNT();
         case 0x00A: return ReadVCNT();
@@ -374,8 +376,8 @@ struct VDP2Regs {
 
     // 180000   TVMD    TV Screen Mode
     RegTVMD TVMD;
-    bool displayEnabledLatch = false;  // Latched TVMD.DISP
-    bool borderColorModeLatch = false; // Latched TVMD.BDCLMD
+    bool displayEnabledLatch;  // Latched TVMD.DISP
+    bool borderColorModeLatch; // Latched TVMD.BDCLMD
 
     FORCE_INLINE void LatchTVMD() {
         displayEnabledLatch = TVMD.DISP;
@@ -405,15 +407,18 @@ struct VDP2Regs {
     }
 
     // 180004   TVSTAT  Screen Status (read-only)
-    mutable RegTVSTAT TVSTAT;
+    RegTVSTAT TVSTAT;
 
+    template <bool peek>
     FORCE_INLINE uint16 ReadTVSTAT() const {
         uint16 value = TVSTAT.u16;
         if (TVMD.IsInterlaced()) {
             value ^= 0x2; // for some reason ODD is read inverted
         }
-        VCNTLatched = TVSTAT.EXLTFG;
-        TVSTAT.EXLTFG = 0;
+        if constexpr (!peek) {
+            VCNTLatched = TVSTAT.EXLTFG;
+            TVSTAT.EXLTFG = 0;
+        }
         return value;
     }
 
@@ -444,14 +449,16 @@ struct VDP2Regs {
     //     Hi-Res: bits 9-0
     //     Excl. Normal: bits 8-0 (no shift); HCT9 is invalid
     //     Excl. Hi-Res: bits 9-1 shifted right by 1; HCT9 is invalid
-    uint16 HCNT;
+    uint16 HCNT;      // Horizontal counter latched by external signal
+    uint16 HCNTShift; // Right-shift applied to HCNT<<1, derived from screen mode
+    uint16 HCNTMask;  // Mask applied to final HCNT, derived from screen mode
 
     FORCE_INLINE uint16 ReadHCNT() const {
         return HCNT;
     }
 
     FORCE_INLINE void WriteHCNT(uint16 value) {
-        HCNT = value & 0x3FF;
+        HCNT = (value >> HCNTShift) & HCNTMask;
     }
 
     // 18000A   VCNT    V Counter
@@ -467,9 +474,9 @@ struct VDP2Regs {
     //       bits 8-0 shifted left by 1
     //       bit 0 contains interlaced field (0=odd, 1=even)
     //     All other modes: bits 8-0 shifted left by 1; VCT0 is invalid
-    uint16 VCNT;
-    uint16 VCNTShift;
-    uint16 VCNTSkip;
+    uint16 VCNT;              // Current vertical counter
+    uint16 VCNTShift;         // Left-shift applied to VCNT, derived from screen mode
+    uint16 VCNTSkip;          // Value added to VCNT, derived from current display phase
     uint16 VCNTLatch;         // Vertical counter latched by external signal
     mutable bool VCNTLatched; // Whether the vertical counter is currently latched
 
@@ -959,17 +966,15 @@ struct VDP2Regs {
         accessPatternsDirty |= ReadCHCTLA() != value;
 
         bgParams[1].cellSizeShift = bit::extract<0>(value);
-        bgParams[1].bitmap = bit::extract<0, 1>(value) == 0b10;  // Bits 1:0 = 10b for bitmap mode (BMEN=1, CHSZ=0)
+        bgParams[1].bitmap = bit::test<1>(value);
         bgParams[1].bmsz = bit::extract<2, 3>(value);
-        bgParams[1].charDoubleHeight = bit::test<3>(value);  // Bit 3: 8×16 char patterns in interlaced mode
         bgParams[1].colorFormat = static_cast<ColorFormat>(bit::extract<4, 6>(value));
         bgParams[1].UpdateCHCTL();
         bgParams[1].rbgPageBaseAddressesDirty = true;
 
         bgParams[2].cellSizeShift = bit::extract<8>(value);
-        bgParams[2].bitmap = bit::extract<8, 9>(value) == 0b10;  // Bits 9:8 = 10b for bitmap mode (BMEN=1, CHSZ=0)
+        bgParams[2].bitmap = bit::test<9>(value);
         bgParams[2].bmsz = bit::extract<10, 11>(value);
-        bgParams[2].charDoubleHeight = bit::test<11>(value);  // Bit 11: 8×16 char patterns in interlaced mode
         bgParams[2].colorFormat = static_cast<ColorFormat>(bit::extract<12, 13>(value));
         bgParams[2].UpdateCHCTL();
     }
@@ -1020,18 +1025,15 @@ struct VDP2Regs {
 
         bgParams[3].cellSizeShift = bit::extract<0>(value);
         bgParams[3].colorFormat = static_cast<ColorFormat>(bit::extract<1>(value));
-        bgParams[3].charDoubleHeight = bit::test<3>(value);  // Bit 3: 8×16 char patterns in interlaced mode (NBG2, reserved bit)
         bgParams[3].UpdateCHCTL();
 
         bgParams[4].cellSizeShift = bit::extract<4>(value);
         bgParams[4].colorFormat = static_cast<ColorFormat>(bit::extract<5>(value));
-        bgParams[4].charDoubleHeight = bit::test<7>(value);  // Bit 7: 8×16 char patterns in interlaced mode (NBG3, reserved bit)
         bgParams[4].UpdateCHCTL();
 
         bgParams[0].cellSizeShift = bit::extract<8>(value);
-        bgParams[0].bitmap = bit::extract<8, 9>(value) == 0b10;  // Bits 9:8 = 10b for bitmap mode (BMEN=1, CHSZ=0)
+        bgParams[0].bitmap = bit::test<9>(value);
         bgParams[0].bmsz = bit::extract<10>(value);
-        bgParams[0].charDoubleHeight = bit::test<11>(value);  // Bit 11: 8×16 char patterns in interlaced mode (RBG0, reserved bit)
         bgParams[0].colorFormat = static_cast<ColorFormat>(bit::extract<12, 14>(value));
         bgParams[0].UpdateCHCTL();
         bgParams[0].rbgPageBaseAddressesDirty = true;

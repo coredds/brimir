@@ -2,7 +2,6 @@
 
 #include "peripheral/peripheral_port.hpp"
 #include "rtc.hpp"
-#include "smpc_internal_callbacks.hpp"
 
 #include <brimir/core/scheduler.hpp>
 #include <brimir/sys/bus.hpp>
@@ -200,8 +199,8 @@ private:
 
     uint8 PDR1;
     uint8 PDR2;
-    uint8 DDR1;
-    uint8 DDR2;
+    uint8 DDR1; // 0=input, 1=output
+    uint8 DDR2; // 0=input, 1=output
 
     uint8 m_busValue;
 

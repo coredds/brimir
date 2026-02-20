@@ -197,8 +197,7 @@ uint32 SCSP::ReceiveCDDA(std::span<uint8, 2352> data) {
     if (len < 0) {
         len += m_cddaBuffer.size();
     }
-    // Increased threshold from 4 to 8 sectors for more stable buffering
-    if (len >= 2352 * 8) {
+    if (len >= 2352 * 4) {
         m_cddaReady = true;
     }
     return len * 3 / m_cddaBuffer.size();

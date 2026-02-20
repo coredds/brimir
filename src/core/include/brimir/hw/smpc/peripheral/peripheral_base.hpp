@@ -72,7 +72,7 @@ public:
     /// @brief Performs low-level access to the peripheral.
     /// @param[in] ddr the value of the DDR register (direction bits)
     /// @param[in] value the value to write
-    /// @param[in] exle whether the external latch is enabled
+    /// @param[in] exle the state of the port's EXLE bit
     /// @return the response data
     virtual uint8 WritePDR(uint8 ddr, uint8 value, bool exle) = 0;
 

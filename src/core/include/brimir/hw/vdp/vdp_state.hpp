@@ -6,6 +6,13 @@
 
 #include <brimir/state/state_vdp.hpp>
 
+#include <brimir/hw/hw_defs.hpp>
+
+#include <brimir/util/data_ops.hpp>
+#include <brimir/util/inline.hpp>
+
+#include <brimir/core/types.hpp>
+
 #include <array>
 
 namespace brimir::vdp {
@@ -68,11 +75,16 @@ struct VDPState {
         state.regs1.COPR = regs1.ReadCOPR();
         state.regs1.MODR = regs1.ReadMODR();
 
-        state.VDP1FBCRChanged = regs1.fbParamsChanged;
+        state.regs1.FBCRChanged = regs1.fbParamsChanged;
+        state.regs1.eraseWriteValueLatch = regs1.eraseWriteValueLatch;
+        state.regs1.eraseX1Latch = regs1.eraseX1Latch;
+        state.regs1.eraseX3Latch = regs1.eraseX3Latch;
+        state.regs1.eraseY1Latch = regs1.eraseY1Latch;
+        state.regs1.eraseY3Latch = regs1.eraseY3Latch;
 
         state.regs2.TVMD = regs2.ReadTVMD();
         state.regs2.EXTEN = regs2.ReadEXTEN();
-        state.regs2.TVSTAT = regs2.ReadTVSTAT();
+        state.regs2.TVSTAT = regs2.ReadTVSTAT<true>();
         state.regs2.VRSIZE = regs2.ReadVRSIZE();
         state.regs2.HCNT = regs2.ReadHCNT();
         state.regs2.VCNT = regs2.ReadVCNT();
@@ -213,6 +225,11 @@ struct VDPState {
         state.regs2.COBG = regs2.ReadCOBG();
         state.regs2.COBB = regs2.ReadCOBB();
 
+        state.regs2.displayEnabledLatch = regs2.displayEnabledLatch;
+        state.regs2.borderColorModeLatch = regs2.borderColorModeLatch;
+        state.regs2.VCNTLatch = regs2.VCNTLatch;
+        state.regs2.VCNTLatched = regs2.VCNTLatched;
+
         switch (HPhase) {
         default:
         case HorizontalPhase::Active: state.HPhase = state::VDPState::HorizontalPhase::Active; break;
@@ -272,7 +289,12 @@ struct VDPState {
         regs1.WriteCOPR(state.regs1.COPR);
         regs1.WriteMODR(state.regs1.MODR);
 
-        regs1.fbParamsChanged = state.VDP1FBCRChanged;
+        regs1.fbParamsChanged = state.regs1.FBCRChanged;
+        regs1.eraseWriteValueLatch = state.regs1.eraseWriteValueLatch;
+        regs1.eraseX1Latch = state.regs1.eraseX1Latch;
+        regs1.eraseX3Latch = state.regs1.eraseX3Latch;
+        regs1.eraseY1Latch = state.regs1.eraseY1Latch;
+        regs1.eraseY3Latch = state.regs1.eraseY3Latch;
 
         regs2.WriteTVMD(state.regs2.TVMD);
         regs2.WriteEXTEN(state.regs2.EXTEN);
@@ -417,6 +439,11 @@ struct VDPState {
         regs2.WriteCOBG(state.regs2.COBG);
         regs2.WriteCOBB(state.regs2.COBB);
 
+        regs2.displayEnabledLatch = state.regs2.displayEnabledLatch;
+        regs2.borderColorModeLatch = state.regs2.borderColorModeLatch;
+        regs2.VCNTLatch = state.regs2.VCNTLatch;
+        regs2.VCNTLatched = state.regs2.VCNTLatched;
+
         regs2.accessPatternsDirty = true;
 
         switch (state.HPhase) {
@@ -445,7 +472,148 @@ struct VDPState {
     alignas(16) std::array<uint8, kVDP2VRAMSize> VRAM2; // 4x 128 KiB banks: A0, A1, B0, B1
     alignas(16) std::array<uint8, kVDP2CRAMSize> CRAM;
     alignas(16) std::array<SpriteFB, 2> spriteFB;
-    uint8 displayFB; // index of current sprite display buffer, CPU-accessible; opposite buffer is drawn into
+    uint8 displayFB; // index of current sprite display buffer, CPU-accessible; opposite buffer is drawn into by VDP1
+
+    // -------------------------------------------------------------------------
+
+    template <mem_primitive T>
+    FORCE_INLINE uint32 MapVDP1VRAMAddress(uint32 address) const {
+        address &= 0x7FFFF & ~(sizeof(T) - 1);
+        return address;
+    }
+
+    template <mem_primitive T>
+    FORCE_INLINE uint32 MapVDP1FBAddress(uint32 address) const {
+        address &= 0x3FFFF & ~(sizeof(T) - 1);
+        return address;
+    }
+
+    FORCE_INLINE uint32 MapVDP1RegAddress(uint32 address) const {
+        address &= 0x7FFFF & ~(sizeof(uint16) - 1);
+        return address;
+    }
+
+    // -------------------------------------------------------------------------
+
+    template <mem_primitive T>
+    FORCE_INLINE uint32 MapVDP2VRAMAddress(uint32 address) const {
+        // TODO: handle VRSIZE.VRAMSZ
+        address &= 0x7FFFF & ~(sizeof(T) - 1);
+        return address;
+    }
+
+    template <mem_primitive T>
+    FORCE_INLINE uint32 MapVDP2CRAMAddress(uint32 address) const {
+        address &= 0xFFF & ~(sizeof(T) - 1);
+        return kVDP2CRAMAddressMapping[regs2.vramControl.colorRAMMode >> 1][address];
+    }
+
+    FORCE_INLINE uint32 MapVDP2RegAddress(uint32 address) const {
+        address &= 0x1FF & ~(sizeof(uint16) - 1);
+        return address;
+    }
+
+    template <mem_primitive T>
+    static void DefaultMemFn(uint32 address, T value) {}
+
+    // -------------------------------------------------------------------------
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE T VDP1ReadVRAM(uint32 address, TMemFn &&memFn = DefaultMemFn) const {
+        address = MapVDP1VRAMAddress<T>(address);
+        const T value = util::ReadBE<T>(&VRAM1[address]);
+        memFn(address, value);
+        return value;
+    }
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE void VDP1WriteVRAM(uint32 address, T value, TMemFn &&memFn = DefaultMemFn) {
+        address = MapVDP1VRAMAddress<T>(address);
+        util::WriteBE<T>(&VRAM1[address], value);
+        memFn(address, value);
+    }
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE T VDP1ReadFB(uint32 address, TMemFn &&memFn = DefaultMemFn) const {
+        address = MapVDP1FBAddress<T>(address);
+        const T value = util::ReadBE<T>(&spriteFB[displayFB ^ 1][address]);
+        memFn(address, value);
+        return value;
+    }
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE void VDP1WriteFB(uint32 address, T value, TMemFn &&memFn = DefaultMemFn) {
+        address = MapVDP1FBAddress<T>(address);
+        util::WriteBE<T>(&spriteFB[displayFB ^ 1][address], value);
+        memFn(address, value);
+    }
+
+    template <bool peek, typename TMemFn = decltype(DefaultMemFn<uint16>)>
+    FORCE_INLINE uint16 VDP1ReadReg(uint32 address, TMemFn &&memFn = DefaultMemFn) const {
+        address = MapVDP1RegAddress(address);
+        const uint16 value = regs1.Read<peek>(address);
+        memFn(address, value);
+        return value;
+    }
+
+    template <bool poke, typename TMemFn = decltype(DefaultMemFn<uint16>)>
+    FORCE_INLINE void VDP1WriteReg(uint32 address, uint16 value, TMemFn &&memFn = DefaultMemFn) {
+        address = MapVDP1RegAddress(address);
+        regs1.Write<poke>(address, value);
+        memFn(address, value);
+    }
+
+    // -------------------------------------------------------------------------
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE T VDP2ReadVRAM(uint32 address, TMemFn &&memFn = DefaultMemFn) const {
+        address = MapVDP2VRAMAddress<T>(address);
+        const T value = util::ReadBE<T>(&VRAM2[address]);
+        memFn(address, value);
+        return value;
+    }
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE void VDP2WriteVRAM(uint32 address, T value, TMemFn &&memFn = DefaultMemFn) {
+        address = MapVDP2VRAMAddress<T>(address);
+        util::WriteBE<T>(&VRAM2[address], value);
+        memFn(address, value);
+    }
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE T VDP2ReadCRAM(uint32 address, TMemFn &&memFn = DefaultMemFn) const {
+        address = MapVDP2CRAMAddress<T>(address);
+        const T value = util::ReadBE<T>(&CRAM[address]);
+        memFn(address, value);
+        return value;
+    }
+
+    template <mem_primitive T, typename TMemFn = decltype(DefaultMemFn<T>)>
+    FORCE_INLINE void VDP2WriteCRAM(uint32 address, T value, TMemFn &&memFn = DefaultMemFn) {
+        address = MapVDP2CRAMAddress<T>(address);
+        util::WriteBE<T>(&CRAM[address], value);
+        memFn(address, value);
+        if (regs2.vramControl.colorRAMMode == 0) {
+            address ^= 0x800;
+            util::WriteBE<T>(&CRAM[address], value);
+            memFn(address, value);
+        }
+    }
+
+    template <bool peek, typename TMemFn = decltype(DefaultMemFn<uint16>)>
+    FORCE_INLINE uint16 VDP2ReadReg(uint32 address, TMemFn &&memFn = DefaultMemFn) const {
+        address = MapVDP2RegAddress(address);
+        const uint16 value = regs2.Read<peek>(address);
+        memFn(address, value);
+        return value;
+    }
+
+    template <bool poke, typename TMemFn = decltype(DefaultMemFn<uint16>)>
+    FORCE_INLINE void VDP2WriteReg(uint32 address, uint16 value, TMemFn &&memFn = DefaultMemFn) {
+        address = MapVDP2RegAddress(address);
+        regs2.Write(address, value);
+        memFn(address, value);
+    }
 
     // -------------------------------------------------------------------------
     // Registers
@@ -505,8 +673,6 @@ struct VDPState {
 
     HorizontalPhase HPhase;
     VerticalPhase VPhase;
-
-    // TODO: store latched H/V counters
 };
 
 } // namespace brimir::vdp

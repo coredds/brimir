@@ -12,9 +12,6 @@
 #include <string>
 #include <string_view>
 
-// x64 intrinsics for optimized carry flag and bit manipulation
-// MSVC intrinsics removed - portable code is equally well optimized by modern compilers
-
 namespace brimir::sh2 {
 
 // -----------------------------------------------------------------------------
@@ -346,10 +343,10 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
         // Address bits 28 and 27 are disconnected and games generally don't use these mirrors.
         // Might not always be horribly wrong, but is highly likely to be a bad jump.
         // Unaligned addresses (bit 0 set) are a sign of potential memory corruption.
-        BRIMIR_DEV_ASSERT((PC & 0x18000001) == 0);
+        YMIR_DEV_ASSERT((PC & 0x18000001) == 0);
         // PC should be in the cached and uncached spaces or the cache data array areas.
         // Anywhere else is highly suspicious or outright forbidden by the CPU.
-        BRIMIR_DEV_ASSERT((PC >> 29u) == 0b000 || (PC >> 29u) == 0b001 || (PC >> 29u) == 0b100 || (PC >> 29u) == 0b101 ||
+        YMIR_DEV_ASSERT((PC >> 29u) == 0b000 || (PC >> 29u) == 0b001 || (PC >> 29u) == 0b100 || (PC >> 29u) == 0b101 ||
                         (PC >> 29u) == 0b110);
 
         // Check for breakpoints and watchpoints in debug tracing mode
@@ -413,16 +410,6 @@ void SH2::SetNMI() {
 void SH2::PurgeCache() {
     m_cache.Purge();
 }
-
-#ifdef BRIMIR_ENABLE_JIT_TESTING
-uint64 SH2::JIT_ExecuteSingleInstruction() {
-    // Execute exactly one instruction without scheduler integration
-    // This is for JIT validation testing only
-    m_cyclesExecuted = 0;
-    m_cyclesExecuted = InterpretNext<false, false>();
-    return m_cyclesExecuted;
-}
-#endif
 
 // -----------------------------------------------------------------------------
 // Save states
@@ -877,7 +864,7 @@ template <mem_primitive T, bool peek>
 }
 
 template <bool peek>
-FORCE_INLINE uint8 SH2::OnChipRegReadByte(uint32 address) {
+FORCE_INLINE_EX uint8 SH2::OnChipRegReadByte(uint32 address) {
     if (address >= 0x100) {
         if constexpr (peek) {
             const uint16 value = OnChipRegReadWord<true>(address & ~1);
@@ -998,7 +985,7 @@ FORCE_INLINE uint8 SH2::OnChipRegReadByte(uint32 address) {
 }
 
 template <bool peek>
-FORCE_INLINE uint16 SH2::OnChipRegReadWord(uint32 address) {
+FORCE_INLINE_EX uint16 SH2::OnChipRegReadWord(uint32 address) {
     if (address < 0x100) {
         switch (address) {
         case 0x82: [[fallthrough]];
@@ -1032,7 +1019,7 @@ FORCE_INLINE uint16 SH2::OnChipRegReadWord(uint32 address) {
 }
 
 template <bool peek>
-FORCE_INLINE uint32 SH2::OnChipRegReadLong(uint32 address) {
+FORCE_INLINE_EX uint32 SH2::OnChipRegReadLong(uint32 address) {
     if (address < 0x100) {
         if constexpr (peek) {
             uint32 value = OnChipRegReadWord<true>(address & ~3) << 16u;
@@ -1119,7 +1106,7 @@ template <mem_primitive T, bool poke, bool debug, bool enableCache>
 }
 
 template <bool poke, bool debug, bool enableCache>
-FORCE_INLINE void SH2::OnChipRegWriteByte(uint32 address, uint8 value) {
+FORCE_INLINE_EX void SH2::OnChipRegWriteByte(uint32 address, uint8 value) {
     if (address >= 0x100) {
         if constexpr (poke) {
             uint16 currValue = OnChipRegReadWord<true>(address & ~1);
@@ -1290,7 +1277,7 @@ FORCE_INLINE void SH2::OnChipRegWriteByte(uint32 address, uint8 value) {
 }
 
 template <bool poke, bool debug, bool enableCache>
-FORCE_INLINE void SH2::OnChipRegWriteWord(uint32 address, uint16 value) {
+FORCE_INLINE_EX void SH2::OnChipRegWriteWord(uint32 address, uint16 value) {
     switch (address) {
     case 0x60:
     case 0x61:
@@ -1392,7 +1379,7 @@ FORCE_INLINE void SH2::OnChipRegWriteWord(uint32 address, uint16 value) {
 }
 
 template <bool poke, bool debug, bool enableCache>
-FORCE_INLINE void SH2::OnChipRegWriteLong(uint32 address, uint32 value) {
+FORCE_INLINE_EX void SH2::OnChipRegWriteLong(uint32 address, uint32 value) {
     if (address < 0x100) {
         if constexpr (poke) {
             OnChipRegWriteWord<true, debug, enableCache>(address + 0, value >> 16u);
@@ -1865,7 +1852,7 @@ void SH2::RecalcInterrupts() {
 // Debugger
 
 FORCE_INLINE bool SH2::CheckBreakpoint() {
-    if (m_breakpoints.contains(PC)) {
+    if (IsBreakpointSetInBitmap(PC)) {
         m_debugBreakMgr->SignalDebugBreak(debug::DebugBreakInfo::SH2Breakpoint(IsMaster(), PC));
         return true;
     }
@@ -1873,7 +1860,7 @@ FORCE_INLINE bool SH2::CheckBreakpoint() {
 }
 
 FORCE_INLINE bool SH2::CheckWatchpoints(const DecodedMemAccesses &mem) {
-    if (m_watchpoints.empty() || !mem.anyAccess) {
+    if (!mem.anyAccess) {
         return false;
     }
     const bool wtpt1 = CheckWatchpoint(mem.first);
@@ -1895,12 +1882,7 @@ FORCE_INLINE bool SH2::CheckWatchpoint(const DecodedMemAccesses::Access &access)
     case AccType::AtDispPC: address = (PC & ~(access.size - 1)) + access.disp; break;
     }
 
-    auto it = m_watchpoints.find(address);
-    if (it == m_watchpoints.end()) {
-        return false;
-    }
-
-    const auto wtptFlags = it->second;
+    const auto wtptFlags = GetWatchpointFlags(address);
     if (wtptFlags == debug::WatchpointFlags::None) {
         return false;
     }

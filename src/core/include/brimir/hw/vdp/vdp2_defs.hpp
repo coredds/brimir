@@ -123,7 +123,6 @@ struct alignas(128) BGParams {
         specialFunctionSelect = 0;
 
         cellSizeShift = 0;
-        charDoubleHeight = false;
 
         pageShiftH = 0;
         pageShiftV = 0;
@@ -211,10 +210,6 @@ struct alignas(128) BGParams {
     // Cell size shift corresponding to the dimensions of a character pattern (0=1x1, 1=2x2).
     // Derived from CHCTLA/CHCTLB.xxCHSZ
     uint32 cellSizeShift;
-    
-    // Character pattern double height (8×16 vs 8×8) in interlaced mode.
-    // Derived from CHCTLA/CHCTLB bit 3/11 (undocumented feature)
-    bool charDoubleHeight;
 
     // Page shifts are either 0 or 1, used when determining which plane a particular (x,y) coordinate belongs to.
     // A shift of 0 corresponds to 1 page per plane dimension.
@@ -1026,7 +1021,7 @@ union RegTVSTAT {
         uint16 VBLANK : 1;
         uint16 _rsvd4_7 : 4;
         uint16 EXSYFG : 1;
-        uint16 EXLTFG : 1;
+        mutable uint16 EXLTFG : 1; // cleared on reads
         uint16 _rsvd10_15 : 6;
     };
 };
