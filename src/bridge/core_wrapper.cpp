@@ -15,8 +15,7 @@
 #include <brimir/hw/cart/cart_impl_dram.hpp>
 #include <brimir/hw/cart/cart_impl_rom.hpp>
 #include <brimir/core/hash.hpp>
-#include <brimir/hw/vdp/vdp_renderer.hpp>
-#include <brimir/hw/vdp/gpu/vulkan_renderer.hpp>
+#include <brimir/hw/vdp/renderer/vdp_renderer.hpp>
 
 #include <cstring>
 #include <filesystem>
@@ -73,24 +72,23 @@ bool CoreWrapper::Initialize() {
         // We'll set the path later when the game loads (need game name for per-game saves)
         // For now, just mark as uninitialized
         
-        // Configure Brimir with optimized settings for libretro
-        // Threaded VDP provides better frame pacing and async rendering
-        m_saturn->configuration.video.threadedVDP = true;
-        // Note: threadedDeinterlacer will be set by SetDeinterlaceMode() below
-        m_saturn->configuration.video.includeVDP1InRenderThread = false;
+        // Configure Ymir with optimized settings for libretro
+        // Threaded VDP1/VDP2 provides better frame pacing and async rendering
+        m_saturn->configuration.video.threadedVDP1 = true;
+        m_saturn->configuration.video.threadedVDP2 = true;
+        m_saturn->configuration.video.threadedDeinterlacer = true;
         
-        // Enable deinterlacing with Bob mode for optimal libretro performance
-        // Bob mode: 60 FPS, no scanlines, no shader required - ideal for RetroArch
-        // Many games use interlaced hi-res menus (Panzer Dragoon Zwei, Grandia, etc)
-        // Note: SetDeinterlaceMode() controls both m_deinterlaceRender and m_threadedDeinterlacer
-        m_saturn->VDP.SetDeinterlaceMode(brimir::vdp::DeinterlaceMode::Bob);
+        // Configure enhancements for optimal libretro performance
+        m_saturn->VDP.ModifyEnhancements([](brimir::vdp::config::Enhancements& enh) {
+            enh.deinterlace = true;        // Bob mode deinterlacing
+            enh.transparentMeshes = true;  // Accurate VDP1 mesh rendering
+        });
         
-        // Enable transparent mesh for accurate VDP1 rendering
-        m_saturn->VDP.SetTransparentMeshes(true);
-        
-        // Set up VDP render callback to capture framebuffer
-        auto videoCallback = util::MakeClassMemberOptionalCallback<&CoreWrapper::OnFrameComplete>(this);
-        m_saturn->VDP.SetRenderCallback(videoCallback);
+        // Set up VDP software render callback to capture framebuffer
+        m_saturn->VDP.SetSoftwareRenderCallback(
+            {this, [](uint32* fb, uint32 width, uint32 height, void* ctx) {
+                static_cast<CoreWrapper*>(ctx)->OnFrameComplete(fb, width, height);
+            }});
         
         // Set up SCSP audio callback to capture audio samples
         auto audioCallback = util::MakeClassMemberOptionalCallback<&CoreWrapper::OnAudioSample>(this);
@@ -753,66 +751,28 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         return;
     }
 
-    // Get overscan cropping parameters
-    const uint32_t visibleWidth = m_saturn->VDP.GetVisibleWidth();
-    const uint32_t visibleHeight = m_saturn->VDP.GetVisibleHeight();
-    const uint32_t xOffset = m_saturn->VDP.GetHOverscanOffset();
-    const uint32_t yOffset = m_saturn->VDP.GetVOverscanOffset();
-    
-    // Update output dimensions (visible area after cropping)
-    m_fbWidth = visibleWidth;
-    m_fbHeight = visibleHeight;
-    m_fbPitch = visibleWidth * 4; // XRGB8888 = 4 bytes per pixel
+    // Ymir's software renderer provides the full framebuffer at native resolution
+    // No overscan cropping is applied by the VDP - we output the full frame
+    m_fbWidth = width;
+    m_fbHeight = height;
+    m_fbPitch = width * 4; // XRGB8888 = 4 bytes per pixel
 
     // Resize framebuffer if needed
-    size_t pixelCount = static_cast<size_t>(visibleWidth) * visibleHeight;
+    size_t pixelCount = static_cast<size_t>(width) * height;
     if (m_framebuffer.size() < pixelCount) {
         m_framebuffer.resize(pixelCount);
     }
 
-    // GPU upscaling: upload software-rendered frame to GPU and upscale
-    m_upscaledFrameReady = false;
-    if (m_useGPUUpscaling && m_gpuRenderer && m_internalScale > 1) {
-        ScopedTimer gpuTimer(m_profiler, "GPUUpscale");
-        
-        // GPU path: crop only, no R/B swap needed.
-        // The Vulkan input texture uses R8G8B8A8_UNORM which matches Ymir's native
-        // XBGR8888 byte layout [R,G,B,X]. The GPU handles format conversion to
-        // B8G8R8A8_UNORM output during rendering, saving the CPU R/B swap.
-        {
-            uint32_t* dst = m_framebuffer.data();
-            for (uint32_t y = 0; y < visibleHeight; ++y) {
-                const uint32_t srcY = y + yOffset;
-                const uint32_t* srcLine = fb + (srcY * width) + xOffset;
-                uint32_t* dstLine = dst + (y * visibleWidth);
-                std::memcpy(dstLine, srcLine, visibleWidth * sizeof(uint32_t));
-            }
-        }
-        
-        // Upload the raw XBGR8888 framebuffer to GPU
-        m_gpuRenderer->UploadSoftwareFramebuffer(
-            m_framebuffer.data(), visibleWidth, visibleHeight, visibleWidth * 4);
-        
-        // Render upscaled version
-        if (m_gpuRenderer->RenderUpscaled()) {
-            const void* upscaledData = m_gpuRenderer->GetUpscaledFramebuffer();
-            if (upscaledData) {
-                m_upscaledWidth = m_gpuRenderer->GetUpscaledWidth();
-                m_upscaledHeight = m_gpuRenderer->GetUpscaledHeight();
-                m_upscaledPitch = m_gpuRenderer->GetUpscaledPitch();
-                m_upscaledFrameReady = true;
-            }
-        }
-    } else {
-        // Software path: convert from VDP's XBGR8888 (0x00BBGGRR) to libretro XRGB8888 (0x00RRGGBB)
+    // Convert from Ymir's XBGR8888 (0x00BBGGRR) to libretro XRGB8888 (0x00RRGGBB)
+    // This is the exact same composition as Ymir outputs - no modifications
+    {
         ScopedTimer convTimer(m_profiler, "PixelConversion");
         
         uint32_t* dst = m_framebuffer.data();
         
-        for (uint32_t y = 0; y < visibleHeight; ++y) {
-            const uint32_t srcY = y + yOffset;
-            const uint32_t* srcLine = fb + (srcY * width) + xOffset;
-            uint32_t* dstLine = dst + (y * visibleWidth);
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint32_t* srcLine = fb + (y * width);
+            uint32_t* dstLine = dst + (y * width);
             
             size_t i = 0;
             
@@ -823,7 +783,7 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
                 const __m256i maskRB256 = _mm256_set1_epi32(0x00FF00FF);
                 const __m256i maskG256  = _mm256_set1_epi32(0x0000FF00);
                 
-                for (; i + 8 <= visibleWidth; i += 8) {
+                for (; i + 8 <= width; i += 8) {
                     __m256i pixels = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&srcLine[i]));
                     __m256i rb = _mm256_and_si256(pixels, maskRB256);
                     __m256i rb_swapped = _mm256_or_si256(_mm256_slli_epi32(rb, 16), _mm256_srli_epi32(rb, 16));
@@ -840,7 +800,7 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
                 const __m128i maskRB = _mm_set1_epi32(0x00FF00FF);
                 const __m128i maskG  = _mm_set1_epi32(0x0000FF00);
                 
-                for (; i + 4 <= visibleWidth; i += 4) {
+                for (; i + 4 <= width; i += 4) {
                     __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&srcLine[i]));
                     __m128i rb = _mm_and_si128(pixels, maskRB);
                     __m128i rb_swapped = _mm_or_si128(_mm_slli_epi32(rb, 16), _mm_srli_epi32(rb, 16));
@@ -854,7 +814,7 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
 #endif
             
             // Scalar fallback for remaining pixels
-            for (; i < visibleWidth; ++i) {
+            for (; i < width; ++i) {
                 uint32_t pixel = srcLine[i];
                 uint32_t r = pixel & 0x000000FF;
                 uint32_t g = pixel & 0x0000FF00;
@@ -1104,52 +1064,13 @@ void CoreWrapper::SetRenderer(const char* renderer) {
         return;
     }
 
-    brimir::vdp::RendererType type = brimir::vdp::RendererType::Software;
-    if (strcmp(renderer, "vulkan") == 0) {
-        type = brimir::vdp::RendererType::Vulkan;
-    } else if (strcmp(renderer, "software") == 0) {
-        type = brimir::vdp::RendererType::Software;
-    } else {
-        type = brimir::vdp::RendererType::Software;
-    }
-
-    // Check availability
-    if (type != brimir::vdp::RendererType::Software) {
-        bool available = brimir::vdp::IsRendererAvailable(type);
-        if (!available) {
-            type = brimir::vdp::RendererType::Software;
-        }
-    }
-
-    if (type == brimir::vdp::RendererType::Software) {
-        m_gpuRenderer.reset(); // Destroy GPU renderer if switching to software
-        m_saturn->VDP.SetGPURenderer(nullptr, false);
-    } else {
-        // Try to create GPU renderer
-        m_gpuRenderer = brimir::vdp::CreateRenderer(type);
-        
-        if (!m_gpuRenderer) {
-            // CreateRenderer returned null
-            m_saturn->VDP.SetGPURenderer(nullptr, false);
-            return;
-        }
-        
-        // Pass hardware context if available
-        if (m_hwRenderCallback) {
-            // The renderer will handle the type internally
-            m_gpuRenderer->SetHWContext(m_hwRenderCallback);
-        }
-        
-        // Try to initialize
-        bool initSuccess = m_gpuRenderer->Initialize();
-        
-        if (initSuccess) {
-            m_saturn->VDP.SetGPURenderer(m_gpuRenderer.get(), true);
-        } else {
-            // Initialize failed - store error for libretro to log
-            m_lastRendererError = m_gpuRenderer->GetLastError();
-            m_gpuRenderer.reset();
-            m_saturn->VDP.SetGPURenderer(nullptr, false);
+    // Ymir only supports software rendering (Null and Software types)
+    // GPU rendering (Vulkan) was a Brimir-specific enhancement
+    if (strcmp(renderer, "software") == 0 || strcmp(renderer, "vulkan") == 0) {
+        // Always use software renderer - GPU not yet re-integrated with Ymir hw layer
+        m_gpuRenderer.reset();
+        if (strcmp(renderer, "vulkan") == 0) {
+            m_lastRendererError = "GPU rendering not available with Ymir hw layer";
         }
     }
 }
@@ -1159,7 +1080,9 @@ void CoreWrapper::SetDeinterlacing(bool enable) {
         return;
     }
 
-    m_saturn->VDP.SetDeinterlaceRender(enable);
+    m_saturn->VDP.ModifyEnhancements([enable](brimir::vdp::config::Enhancements& enh) {
+        enh.deinterlace = enable;
+    });
 }
 
 void CoreWrapper::SetHorizontalBlend(bool enable) {
@@ -1167,7 +1090,8 @@ void CoreWrapper::SetHorizontalBlend(bool enable) {
         return;
     }
 
-    m_saturn->VDP.SetHorizontalBlend(enable);
+    // Horizontal blend is not a Ymir feature - this was a Brimir enhancement
+    // Ignore this setting for now (can be re-added later as a post-process)
 }
 
 void CoreWrapper::SetHorizontalOverscan(bool enable) {
@@ -1175,7 +1099,9 @@ void CoreWrapper::SetHorizontalOverscan(bool enable) {
         return;
     }
 
-    m_saturn->VDP.SetHorizontalOverscan(enable);
+    // Overscan cropping is not a Ymir VDP feature - Ymir outputs full resolution
+    // Frontends handle overscan cropping themselves if needed
+    // Ignore this setting (libretro will display full frame)
 }
 
 void CoreWrapper::SetInternalResolution(uint32_t scale) {
@@ -1319,7 +1245,9 @@ void CoreWrapper::SetVerticalOverscan(bool enable) {
         return;
     }
 
-    m_saturn->VDP.SetVerticalOverscan(enable);
+    // Overscan cropping is not a Ymir VDP feature - Ymir outputs full resolution
+    // Frontends handle overscan cropping themselves if needed
+    // Ignore this setting (libretro will display full frame)
 }
 
 void CoreWrapper::GetVisibleResolution(uint32_t& width, uint32_t& height) const {
@@ -1329,8 +1257,10 @@ void CoreWrapper::GetVisibleResolution(uint32_t& width, uint32_t& height) const 
         return;
     }
 
-    width = m_saturn->VDP.GetVisibleWidth();
-    height = m_saturn->VDP.GetVisibleHeight();
+    // Ymir outputs full resolution - use Probe to get current dimensions
+    auto dims = m_saturn->VDP.GetProbe().GetResolution();
+    width = dims.width;
+    height = dims.height;
 }
 
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {
@@ -1338,19 +1268,13 @@ void CoreWrapper::SetDeinterlacingMode(const char* mode) {
         return;
     }
 
-    using DeinterlaceMode = brimir::vdp::DeinterlaceMode;
-    
-    if (strcmp(mode, "blend") == 0) {
-        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Blend);
-    } else if (strcmp(mode, "weave") == 0) {
-        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Weave);
-    } else if (strcmp(mode, "bob") == 0) {
-        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Bob);
-    } else if (strcmp(mode, "current") == 0) {
-        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::Current);
-    } else if (strcmp(mode, "none") == 0) {
-        m_saturn->VDP.SetDeinterlaceMode(DeinterlaceMode::None);
-    }
+    // Ymir only supports enable/disable deinterlacing via Enhancements
+    // The specific modes (blend/weave/bob/current) were Brimir enhancements
+    // For now, just toggle deinterlacing on/off
+    bool enable = (strcmp(mode, "none") != 0);
+    m_saturn->VDP.ModifyEnhancements([enable](brimir::vdp::config::Enhancements& enh) {
+        enh.deinterlace = enable;
+    });
 }
 
 // TODO: Fix MSVC compilation errors
