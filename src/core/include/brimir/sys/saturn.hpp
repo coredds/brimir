@@ -95,8 +95,9 @@ struct Saturn {
     /// `error` will contain the filesystem error if the image failed to load.
     ///
     /// @param[in] path the path of the internal backup memory image to load
+    /// @param[in] copyOnWrite whether to map the file in copy-on-write mode, preserving its contents on the disk
     /// @param[out] error receives the filesystem error in case the image fails to load
-    void LoadInternalBackupMemoryImage(std::filesystem::path path, std::error_code &error);
+    void LoadInternalBackupMemoryImage(std::filesystem::path path, bool copyOnWrite, std::error_code &error);
 
     /// @brief Retrieves the IPL ROM hash code.
     /// @return the hash code of the currently loaded IPL ROM image
@@ -187,26 +188,6 @@ struct Saturn {
     /// @param[in] enable whether to enable or disable SH-2 cache emulation
     void EnableSH2CacheEmulation(bool enable) {
         configuration.system.emulateSH2Cache = enable;
-    }
-
-    /// @brief Sets the maximum SH-2 sync step size (in cycles).
-    ///
-    /// Controls how often the master and slave SH-2 CPUs synchronize.
-    /// Lower values are more accurate, higher values improve performance.
-    /// Default is 32, which is conservative. Values of 64 or 128 are faster but may
-    /// cause compatibility issues with some games.
-    ///
-    /// @param[in] step the maximum cycles between master/slave SH-2 synchronization
-    void SetSH2SyncStep(uint64 step) {
-        if (step < 1) step = 1;
-        if (step > 256) step = 256;
-        m_sh2SyncMaxStep = step;
-    }
-
-    /// @brief Returns the current SH-2 sync step size.
-    /// @return the maximum cycles between synchronization
-    [[nodiscard]] uint64 GetSH2SyncStep() const noexcept {
-        return m_sh2SyncMaxStep;
     }
 
     /// @brief Determines if SH-2 cache emulation is enabled.
@@ -347,8 +328,8 @@ private:
     /// Depends on debug tracing and SH-2 cache emulation settings.
     StepSH2Fn m_stepSSH2Fn;
 
-    /// @brief Updates pointers to the execution functions based on the current debug tracing and SH-2 cache emulation
-    /// settings.
+    /// @brief Updates pointers to the execution functions based on the current debug tracing, SH-2 cache emulation and
+    /// low-level CD Block emulation settings.
     void UpdateFunctionPointers();
 
     /// @brief Helper template to convert runtime parameters into compile-time constants for building function pointers.
@@ -455,7 +436,6 @@ private:
     media::Disc m_disc;         ///< Currently loaded game disc
     media::fs::Filesystem m_fs; ///< Filesystem contained in the disc
 
-    uint64 m_sh2SyncMaxStep = 32; ///< Maximum SH-2 sync step size (cycles between master/slave sync)
     uint64 m_msh2SpilloverCycles; ///< Master SH-2 execution cycles spilled over between executions
     uint64 m_ssh2SpilloverCycles; ///< Slave SH-2 execution cycles spilled over between executions
     uint64 m_sh1SpilloverCycles;  ///< SH-1 execution cycles spilled over between executions

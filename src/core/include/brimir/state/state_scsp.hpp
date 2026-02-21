@@ -18,7 +18,7 @@ struct SCSPState {
 
     alignas(16) std::array<uint8, m68k::kM68KWRAMSize> WRAM;
 
-    alignas(16) std::array<uint8, 2352 * 30> cddaBuffer;
+    alignas(16) std::array<uint8, 2352 * 15> cddaBuffer;
     uint32 cddaReadPos;
     uint32 cddaWritePos;
     bool cddaReady;

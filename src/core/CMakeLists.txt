@@ -293,6 +293,7 @@ add_library(brimir-core STATIC
     src/util/event.cpp
     src/util/process.cpp
     src/util/thread_name.cpp
+    src/util/virtual_memory.cpp
 )
 add_library(brimir::brimir-core ALIAS brimir-core)
 set_target_properties(brimir-core PROPERTIES

@@ -1338,7 +1338,7 @@ bool CDBlock::SetupSubcodeTransfer(uint8 type) {
 
     // TODO: check why this is happening
     if (m_status.track == 0xFF) {
-        YMIR_DEV_CHECK();
+        BRIMIR_DEV_CHECK();
         return false;
     }
 
@@ -1697,7 +1697,7 @@ FORCE_INLINE void CDBlock::ProcessCommand() {
 
     default:
         devlog::warn<grp::cmd>("Unimplemented command {:02X}", cmd);
-        YMIR_DEV_CHECK();
+        BRIMIR_DEV_CHECK();
         break;
     }
 
@@ -2687,7 +2687,7 @@ void CDBlock::CmdExecuteFADSearch() {
     // TODO: search for a sector with the largest FAD <= searched FAD within specified partition
     // - how does sectorPos factor in here?
     devlog::info<grp::base>("Execute frame address search command is unimplemented");
-    YMIR_DEV_CHECK();
+    BRIMIR_DEV_CHECK();
 
     // Output structure: standard CD status data
     ReportCDStatus();
@@ -2706,7 +2706,7 @@ void CDBlock::CmdGetFADSearchResults() {
 
     // TODO: return search FAD results
     devlog::info<grp::base>("Get frame address search results command is unimplemented");
-    YMIR_DEV_CHECK();
+    BRIMIR_DEV_CHECK();
 
     // Output structure:
     // status code        <blank>
@@ -2928,7 +2928,7 @@ void CDBlock::CmdCopySectorData() {
     // TODO: setup async sector copy transfer
     // TODO: report Reject status if not enough buffer space available
     devlog::info<grp::base>("Copy sector data command is unimplemented");
-    YMIR_DEV_CHECK();
+    BRIMIR_DEV_CHECK();
 
     // Output structure: standard CD status data
     ReportCDStatus();
@@ -2951,7 +2951,7 @@ void CDBlock::CmdMoveSectorData() {
 
     // TODO: setup async sector move transfer
     devlog::info<grp::base>("Move sector data command is unimplemented");
-    YMIR_DEV_CHECK();
+    BRIMIR_DEV_CHECK();
 
     // Output structure: standard CD status data
     ReportCDStatus();
@@ -3174,7 +3174,7 @@ void CDBlock::CmdMpegInit() {
 
     // TODO: initialize MPEG stuff
     devlog::info<grp::base>("MPEG init command is unimplemented");
-    YMIR_DEV_CHECK();
+    BRIMIR_DEV_CHECK();
 
     // Output structure:
     // status code (FF=unauthenticated)  <blank>

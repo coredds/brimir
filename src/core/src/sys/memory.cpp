@@ -1,6 +1,6 @@
 #include <brimir/sys/memory.hpp>
 
-#include <brimir/sys/null_program.hpp>
+#include "null_program.hpp"
 
 namespace brimir::sys {
 
@@ -39,8 +39,8 @@ XXH128Hash SystemMemory::GetIPLHash() const {
     return m_iplHash;
 }
 
-void SystemMemory::LoadInternalBackupMemoryImage(std::filesystem::path path, std::error_code &error) {
-    m_internalBackupRAM.CreateFrom(path, kInternalBackupRAMSize, error);
+void SystemMemory::LoadInternalBackupMemoryImage(std::filesystem::path path, bool copyOnWrite, std::error_code &error) {
+    m_internalBackupRAM.CreateFrom(path, copyOnWrite, error, kInternalBackupRAMSize);
 }
 
 void SystemMemory::DumpWRAMLow(std::ostream &out) const {

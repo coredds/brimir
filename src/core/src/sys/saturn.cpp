@@ -2,7 +2,6 @@
 
 #include <brimir/db/game_db.hpp>
 
-#include <brimir/util/bitmask_enum.hpp>
 #include <brimir/util/dev_log.hpp>
 
 #include <bit>
@@ -130,9 +129,6 @@ Saturn::Saturn()
     m_system.AddClockSpeedChangeCallback(CDDrive.CbClockSpeedChange);
     m_system.AddClockSpeedChangeCallback(CDBlock.CbClockSpeedChange);
 
-    masterSH2.UseDebugBreakManager(&m_debugBreakMgr);
-    slaveSH2.UseDebugBreakManager(&m_debugBreakMgr);
-
     mem.MapMemory(mainBus);
     masterSH2.MapMemory(mainBus);
     slaveSH2.MapMemory(mainBus);
@@ -245,8 +241,8 @@ void Saturn::LoadCDBlockROM(std::span<uint8, sh1::kROMSize> rom) {
     SH1.LoadROM(rom);
 }
 
-void Saturn::LoadInternalBackupMemoryImage(std::filesystem::path path, std::error_code &error) {
-    mem.LoadInternalBackupMemoryImage(path, error);
+void Saturn::LoadInternalBackupMemoryImage(std::filesystem::path path, bool copyOnWrite, std::error_code &error) {
+    mem.LoadInternalBackupMemoryImage(path, copyOnWrite, error);
 }
 
 XXH128Hash Saturn::GetIPLHash() const noexcept {
@@ -391,6 +387,13 @@ void Saturn::EnableDebugTracing(bool enable) {
     m_systemFeatures.enableDebugTracing = enable;
     UpdateFunctionPointers();
     SCSP.SetDebugTracing(enable);
+    if (enable) {
+        masterSH2.UseDebugBreakManager(&m_debugBreakMgr);
+        slaveSH2.UseDebugBreakManager(&m_debugBreakMgr);
+    } else {
+        masterSH2.UseDebugBreakManager(nullptr);
+        slaveSH2.UseDebugBreakManager(nullptr);
+    }
 }
 
 void Saturn::SaveState(state::State &state) const {
@@ -538,8 +541,7 @@ void Saturn::RunFrameImpl() {
 
 template <bool debug, bool enableSH2Cache, bool cdblockLLE>
 bool Saturn::Run() {
-    // SH-2 sync step size: configurable via SetSH2SyncStep() (default 32)
-    const uint64 syncStep = m_sh2SyncMaxStep;
+    static constexpr uint64 kSH2SyncMaxStep = 32;
 
     const uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
 
@@ -555,7 +557,7 @@ bool Saturn::Run() {
             uint64 slaveCycles = m_ssh2SpilloverCycles;
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + syncStep, cycles);
+                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 slaveCycles = slaveSH2.Advance<debug, enableSH2Cache>(execCycles, slaveCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
@@ -578,7 +580,7 @@ bool Saturn::Run() {
         } else {
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + syncStep, cycles);
+                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
                 if constexpr (debug) {
@@ -589,7 +591,7 @@ bool Saturn::Run() {
             } while (execCycles < cycles);
         }
     }
-    VDP.Advance<debug>(execCycles);
+    VDP.Advance(execCycles);
 
     // SCSP+M68K and CD block are ticked by the scheduler
 
@@ -623,7 +625,7 @@ uint64 Saturn::StepMasterSH2Impl() {
     while (SCU.IsDMAActive()) {
         const uint64 cycles = 64;
         SCU.Advance<debug>(cycles);
-        VDP.Advance<debug>(cycles);
+        VDP.Advance(cycles);
         // SCSP+M68K and CD block are ticked by the scheduler
         if constexpr (cdblockLLE) {
             AdvanceSH1(cycles);
@@ -642,7 +644,7 @@ uint64 Saturn::StepMasterSH2Impl() {
             m_ssh2SpilloverCycles = slaveCycles - masterCycles;
         }
         SCU.Advance<debug>(masterCycles);
-        VDP.Advance<debug>(masterCycles);
+        VDP.Advance(masterCycles);
         // SCSP+M68K and CD block are ticked by the scheduler
         if constexpr (cdblockLLE) {
             AdvanceSH1(masterCycles);
@@ -665,7 +667,7 @@ uint64 Saturn::StepSlaveSH2Impl() {
     while (SCU.IsDMAActive()) {
         const uint64 cycles = 64;
         SCU.Advance<debug>(cycles);
-        VDP.Advance<debug>(cycles);
+        VDP.Advance(cycles);
         // SCSP+M68K and CD block are ticked by the scheduler
         if constexpr (cdblockLLE) {
             AdvanceSH1(cycles);
@@ -682,7 +684,7 @@ uint64 Saturn::StepSlaveSH2Impl() {
         const uint64 masterCycles = masterSH2.Advance<debug, enableSH2Cache>(slaveCycles, m_msh2SpilloverCycles);
         m_msh2SpilloverCycles = masterCycles - slaveCycles;
         SCU.Advance<debug>(slaveCycles);
-        VDP.Advance<debug>(slaveCycles);
+        VDP.Advance(slaveCycles);
         // SCSP+M68K and CD block are ticked by the scheduler
         if constexpr (cdblockLLE) {
             AdvanceSH1(slaveCycles);

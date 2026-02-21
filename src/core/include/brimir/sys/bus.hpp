@@ -36,9 +36,9 @@ using FnBusWait = bool (*)(uint32 address, uint32 size, bool write, void *ctx);
 /// @tparam T the type to check
 template <typename T>
 concept bus_handler_fn =
-    brimir::fninfo::IsAssignable<FnRead8, T> || brimir::fninfo::IsAssignable<FnRead16, T> || brimir::fninfo::IsAssignable<FnRead32, T> ||
-    brimir::fninfo::IsAssignable<FnWrite8, T> || brimir::fninfo::IsAssignable<FnWrite16, T> || brimir::fninfo::IsAssignable<FnWrite32, T> ||
-    brimir::fninfo::IsAssignable<FnBusWait, T>;
+    fninfo::IsAssignable<FnRead8, T> || fninfo::IsAssignable<FnRead16, T> || fninfo::IsAssignable<FnRead32, T> ||
+    fninfo::IsAssignable<FnWrite8, T> || fninfo::IsAssignable<FnWrite16, T> || fninfo::IsAssignable<FnWrite32, T> ||
+    fninfo::IsAssignable<FnBusWait, T>;
 
 /// @brief Represents a memory bus interconnecting various components in the system.
 ///
@@ -370,34 +370,34 @@ private:
 
     template <bool peekpoke, bus_handler_fn THandler>
     static void AssignHandler(MemoryPage &page, THandler &&handler) {
-        if constexpr (brimir::fninfo::IsAssignable<FnBusWait, THandler>) {
+        if constexpr (fninfo::IsAssignable<FnBusWait, THandler>) {
             page.busWait = handler;
         } else if constexpr (peekpoke) {
-            if constexpr (brimir::fninfo::IsAssignable<FnRead8, THandler>) {
+            if constexpr (fninfo::IsAssignable<FnRead8, THandler>) {
                 page.peek8 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnRead16, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnRead16, THandler>) {
                 page.peek16 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnRead32, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnRead32, THandler>) {
                 page.peek32 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnWrite8, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnWrite8, THandler>) {
                 page.poke8 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnWrite16, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnWrite16, THandler>) {
                 page.poke16 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnWrite32, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnWrite32, THandler>) {
                 page.poke32 = handler;
             }
         } else {
-            if constexpr (brimir::fninfo::IsAssignable<FnRead8, THandler>) {
+            if constexpr (fninfo::IsAssignable<FnRead8, THandler>) {
                 page.read8 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnRead16, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnRead16, THandler>) {
                 page.read16 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnRead32, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnRead32, THandler>) {
                 page.read32 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnWrite8, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnWrite8, THandler>) {
                 page.write8 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnWrite16, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnWrite16, THandler>) {
                 page.write16 = handler;
-            } else if constexpr (brimir::fninfo::IsAssignable<FnWrite32, THandler>) {
+            } else if constexpr (fninfo::IsAssignable<FnWrite32, THandler>) {
                 page.write32 = handler;
             }
         }
