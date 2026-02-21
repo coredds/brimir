@@ -608,32 +608,18 @@ bool CoreWrapper::LoadIPLFromFile(const char* path) {
 
 
 const void* CoreWrapper::GetFramebuffer() const {
-    // Return GPU upscaled framebuffer if available, or software framebuffer
-    if (m_upscaledFrameReady && m_gpuRenderer && m_upscaledWidth > 0) {
-        const void* upscaled = m_gpuRenderer->GetUpscaledFramebuffer();
-        if (upscaled) return upscaled;
-    }
     return m_framebuffer.data();
 }
 
 unsigned int CoreWrapper::GetFramebufferWidth() const {
-    if (m_upscaledFrameReady && m_upscaledWidth > 0) {
-        return m_upscaledWidth;
-    }
     return m_fbWidth;
 }
 
 unsigned int CoreWrapper::GetFramebufferHeight() const {
-    if (m_upscaledFrameReady && m_upscaledHeight > 0) {
-        return m_upscaledHeight;
-    }
     return m_fbHeight;
 }
 
 unsigned int CoreWrapper::GetFramebufferPitch() const {
-    if (m_upscaledFrameReady && m_upscaledPitch > 0) {
-        return m_upscaledPitch;
-    }
     return m_fbPitch;
 }
 
@@ -1064,7 +1050,8 @@ void CoreWrapper::SetAutodetectRegion(bool enable) {
 }
 
 void CoreWrapper::SetHWContext(void* hw_render) {
-    m_hwRenderCallback = hw_render;
+    // Hardware rendering context not used with Ymir hw layer
+    (void)hw_render;
 }
 
 void CoreWrapper::SetRenderer(const char* renderer) {
@@ -1073,13 +1060,8 @@ void CoreWrapper::SetRenderer(const char* renderer) {
     }
 
     // Ymir only supports software rendering (Null and Software types)
-    // GPU rendering (Vulkan) was a Brimir-specific enhancement
-    if (strcmp(renderer, "software") == 0 || strcmp(renderer, "vulkan") == 0) {
-        // Always use software renderer - GPU not yet re-integrated with Ymir hw layer
-        m_gpuRenderer.reset();
-        if (strcmp(renderer, "vulkan") == 0) {
-            m_lastRendererError = "GPU rendering not available with Ymir hw layer";
-        }
+    if (strcmp(renderer, "software") == 0) {
+        // Software renderer is always active with Ymir hw layer
     }
 }
 
@@ -1117,115 +1099,49 @@ void CoreWrapper::SetInternalResolution(uint32_t scale) {
         return;
     }
 
-    // Clamp to valid range
-    if (scale < 1) scale = 1;
-    if (scale > 8) scale = 8;
-    
-    // Store scale locally for CPU upscaling
-    m_internalScale = scale;
-
-    // Check if GPU renderer is active (just check our local pointer)
-    bool gpuActive = (m_gpuRenderer != nullptr);
-    
-    if (gpuActive) {
-        m_gpuRenderer->SetInternalScale(scale);
-    }
-    
-    // Auto-enable upscaling when scale > 1
-    if (scale > 1) {
-        m_useGPUUpscaling = true;
-    } else {
-        m_useGPUUpscaling = false;
-    }
-    // Note: Logging happens in libretro layer
+    // Internal resolution scaling not supported with Ymir hw layer
+    // Software renderer always outputs at native resolution
+    (void)scale;
 }
 
 void CoreWrapper::SetGPUUpscaling(bool enable) {
-    if (!m_initialized) {
-        return;
-    }
-    
-    // Only enable if we have a GPU renderer
-    if (enable && m_gpuRenderer) {
-        m_useGPUUpscaling = true;
-    } else {
-        m_useGPUUpscaling = false;
-        m_upscaledFrameReady = false;
-    }
-    // If GPU not active, silently ignore (libretro will log warning)
+    // GPU upscaling not supported with Ymir hw layer
+    (void)enable;
 }
 
 void CoreWrapper::SetUpscaleFilter(const char* mode) {
-    if (!mode) return;
-    
-    uint32_t filterMode = 2; // default: sharp bilinear
-    if (std::strcmp(mode, "nearest") == 0) {
-        filterMode = 0;
-    } else if (std::strcmp(mode, "bilinear") == 0) {
-        filterMode = 1;
-    } else if (std::strcmp(mode, "sharp_bilinear") == 0) {
-        filterMode = 2;
-    } else if (std::strcmp(mode, "fsr") == 0) {
-        filterMode = 3; // FSR 1.0 EASU
-    }
-    
-    m_upscaleFilter = filterMode;
-    if (m_gpuRenderer) {
-        m_gpuRenderer->SetUpscaleFilter(filterMode);
-    }
+    // Upscale filtering not supported with Ymir hw layer
+    (void)mode;
 }
 
 void CoreWrapper::SetDebanding(bool enable) {
-    m_debanding = enable;
-    if (m_gpuRenderer) {
-        m_gpuRenderer->SetDebanding(enable);
-    }
+    // Debanding not supported with Ymir hw layer
+    (void)enable;
 }
 
 void CoreWrapper::SetBrightness(float brightness) {
-    m_brightness = brightness;
-    if (m_gpuRenderer) {
-        m_gpuRenderer->SetBrightness(brightness);
-    }
+    // Brightness adjustment not supported with Ymir hw layer
+    (void)brightness;
 }
 
 void CoreWrapper::SetGamma(float gamma) {
-    m_gamma = gamma;
-    if (m_gpuRenderer) {
-        m_gpuRenderer->SetGamma(gamma);
-    }
+    // Gamma correction not supported with Ymir hw layer
+    (void)gamma;
 }
 
 void CoreWrapper::SetFXAA(bool enable) {
-    m_fxaa = enable;
-    if (m_gpuRenderer) {
-        m_gpuRenderer->SetFXAA(enable);
-    }
+    // FXAA not supported with Ymir hw layer
+    (void)enable;
 }
 
 void CoreWrapper::SetSharpeningMode(const char* mode) {
-    if (!mode) return;
-    
-    uint32_t sharpeningMode = 0; // default: off
-    if (std::strcmp(mode, "fxaa") == 0) {
-        sharpeningMode = 1;
-    } else if (std::strcmp(mode, "rcas") == 0) {
-        sharpeningMode = 2;
-    }
-    
-    if (m_gpuRenderer) {
-        m_gpuRenderer->SetSharpeningMode(sharpeningMode);
-    }
+    // Sharpening not supported with Ymir hw layer
+    (void)mode;
 }
 
 void CoreWrapper::SetWireframeMode(bool enable) {
-    if (!m_initialized || !m_saturn) {
-        return;
-    }
-
-    if (m_gpuRenderer) {
-        m_gpuRenderer->SetWireframeMode(enable);
-    }
+    // Wireframe mode not supported with Ymir hw layer
+    (void)enable;
 }
 
 const char* CoreWrapper::GetActiveRenderer() const {
@@ -1233,19 +1149,15 @@ const char* CoreWrapper::GetActiveRenderer() const {
         return "Unknown";
     }
     
-    return (m_gpuRenderer != nullptr) ? "Vulkan" : "Software";
+    return "Software";
 }
 
 bool CoreWrapper::IsGPURendererActive() const {
-    if (!m_initialized || !m_saturn) {
-        return false;
-    }
-    
-    return (m_gpuRenderer != nullptr);
+    return false;
 }
 
 const char* CoreWrapper::GetLastRendererError() const {
-    return m_lastRendererError.c_str();
+    return "";
 }
 
 void CoreWrapper::SetVerticalOverscan(bool enable) {

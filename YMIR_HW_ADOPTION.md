@@ -127,11 +127,18 @@ Updated `src/bridge/core_wrapper.cpp` to use Ymir's API:
 - Removed overscan cropping (Ymir outputs full frame)
 - Removed GPU renderer calls (not part of Ymir hw layer)
 
-**API Mismatch Fixes (Commit TBD)**:
+**API Mismatch Fixes (Commit 310f5f5)**:
 1. **LoadInternalBackupMemoryImage**: Added missing `copyOnWrite` parameter (now 3 params: path, copyOnWrite, error)
 2. **threadedVDP**: Split into `threadedVDP1` and `threadedVDP2` (Ymir has separate threading for VDP1/VDP2)
 3. **GetCartridgeSlot()**: Replaced with `SCU.GetCartridge()` (cartridge accessed through SCU in Ymir)
 4. **SetSH2SyncStep()**: Commented out - not available in Ymir (uses fixed SH-2 synchronization strategy)
+
+**GPU Code Removal (Commit TBD)**:
+All GPU upscaling and Vulkan rendering code has been removed:
+- Removed GPU renderer member variables (`m_gpuRenderer`, `m_upscaledFrameReady`, etc.)
+- Stubbed out GPU-related methods (SetGPUUpscaling, SetUpscaleFilter, SetDebanding, etc.)
+- Cleaned up libretro.cpp GPU initialization and logging
+- Software rendering is now the only supported mode with Ymir hw layer
 
 ### Verification
 

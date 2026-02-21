@@ -27,12 +27,6 @@ static std::unique_ptr<brimir::CoreWrapper> g_core;
 // SRAM sync state (reset on game load/unload)
 static bool g_sram_synced = false;
 
-// GPU HW render state
-static bool g_hw_render_enabled = false;
-static retro_hw_render_callback g_hw_render_callback = {};
-static bool g_use_gpu_upscaling = false;
-static uint32_t g_internal_scale = 1;
-
 // Helper function for logging
 static void brimir_log(retro_log_level level, const char* fmt, ...) {
     if (!log_cb) return;
@@ -46,32 +40,6 @@ static void brimir_log(retro_log_level level, const char* fmt, ...) {
     log_cb(level, "[Brimir] %s\n", buffer);
 }
 
-// HW render context callbacks (for future full GPU pipeline)
-static void hw_context_reset() {
-    brimir_log(RETRO_LOG_INFO, "HW context reset");
-    // In future: Initialize GPU resources using RetroArch's context
-    g_hw_render_enabled = true;
-}
-
-static void hw_context_destroy() {
-    brimir_log(RETRO_LOG_INFO, "HW context destroyed");
-    // In future: Cleanup GPU resources
-    g_hw_render_enabled = false;
-}
-
-// Try to setup HW rendering (returns true if successful)
-static bool setup_hw_render() {
-    // For now, we use software rendering with optional GPU upscaling
-    // Full HW render integration would require:
-    // 1. Using RetroArch's Vulkan device instead of our own
-    // 2. Rendering to RetroArch's framebuffer
-    // 3. Using RETRO_HW_FRAME_BUFFER_VALID
-    
-    // The current hybrid approach (software + GPU upscaling) works better
-    // because it preserves Saturn's complex priority/compositing logic
-    
-    return false;  // Don't enable HW render for now
-}
 
 // Helper function to get option value
 static const char* get_option_value(const char* key, const char* default_value = nullptr) {
@@ -221,11 +189,9 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
     info->geometry.base_width = 320;
     info->geometry.base_height = 224;
     
-    // Max dimensions must accommodate internal upscaling (up to 8x)
-    // Saturn max native is 704x512, with 8x upscaling = 5632x4096
-    // Clamp to reasonable max for GPU upscaling
-    info->geometry.max_width = 2816;   // 704 * 4 (practical limit)
-    info->geometry.max_height = 2048;  // 512 * 4
+    // Saturn max native resolution
+    info->geometry.max_width = 704;
+    info->geometry.max_height = 512;
     info->geometry.aspect_ratio = 4.0f / 3.0f;
     
     // NTSC timing
@@ -261,12 +227,6 @@ RETRO_API void retro_run(void) {
         brimir_log(RETRO_LOG_INFO, "");
         brimir_log(RETRO_LOG_INFO, "=== RENDERER STATUS (First Frame) ===");
         brimir_log(RETRO_LOG_INFO, "Active: %s", g_core->GetActiveRenderer());
-        brimir_log(RETRO_LOG_INFO, "GPU Mode: %s", g_core->IsGPURendererActive() ? "ENABLED" : "DISABLED");
-        if (!g_core->IsGPURendererActive()) {
-            brimir_log(RETRO_LOG_WARN, "⚠ GPU renderer is NOT active - using software");
-        } else {
-            brimir_log(RETRO_LOG_INFO, "✓ GPU rendering is ACTIVE");
-        }
         brimir_log(RETRO_LOG_INFO, "=====================================");
         brimir_log(RETRO_LOG_INFO, "");
         
@@ -351,7 +311,7 @@ RETRO_API void retro_run(void) {
         unsigned int height = g_core->GetFramebufferHeight();
         unsigned int pitch = g_core->GetFramebufferPitch();
         
-        // Update geometry if dimensions changed (needed for GPU upscaling)
+        // Update geometry if dimensions changed
         static unsigned int s_lastWidth = 0, s_lastHeight = 0;
         if (width != s_lastWidth || height != s_lastHeight) {
             if (s_lastWidth != 0 && s_lastHeight != 0) {
@@ -433,7 +393,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     
     // Set pixel format - XRGB8888 for full quality (lossless from VDP output)
     // This is a lossless channel swap from VDP's native XBGR8888, replacing the old
-    // lossy RGB565 conversion. Also required for GPU upscaling path.
+    // lossy RGB565 conversion.
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
     if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) {
         brimir_log(RETRO_LOG_ERROR, "XRGB8888 pixel format is not supported by this frontend");
@@ -626,110 +586,20 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_core->SetAutodetectRegion(autodetect_region);
     brimir_log(RETRO_LOG_INFO, "Autodetect region: %s", autodetect_region ? "enabled" : "disabled");
     
-    const char* renderer_str = get_option_value("brimir_renderer", "software");
-    brimir_log(RETRO_LOG_INFO, "Renderer option value: '%s'", renderer_str ? renderer_str : "NULL");
+    // Ymir hw layer only supports software rendering
+    brimir_log(RETRO_LOG_INFO, "Using software renderer (Ymir hw layer)");
+    g_core->SetRenderer("software");
     
-    bool gpuActive = false;
-
-    // Set up renderer
-    // NOTE: We do NOT request HW rendering from RetroArch because our Vulkan renderer
-    // does headless rendering with CPU readback. RetroArch's HW mode would ignore our
-    // CPU framebuffer data. The Vulkan renderer creates its own internal Vulkan instance.
-    if (strcmp(renderer_str, "vulkan") == 0) {
-        brimir_log(RETRO_LOG_INFO, "Initializing Vulkan GPU renderer (headless mode)");
-        
-        // Set renderer to Vulkan - it will create its own Vulkan instance
-        g_core->SetRenderer("vulkan");
-        
-        gpuActive = g_core->IsGPURendererActive();
-        
-        if (gpuActive) {
-            brimir_log(RETRO_LOG_INFO, "Vulkan GPU renderer initialized successfully");
-        } else {
-            brimir_log(RETRO_LOG_WARN, "Vulkan GPU renderer failed to initialize, using software");
-            g_core->SetRenderer("software");
-        }
-    } else {
-        // Software renderer
-        g_core->SetRenderer("software");
-    }
-    
-    // Apply internal resolution (GPU only)
-    const char* internal_res_str = get_option_value("brimir_internal_resolution", "1");
-    uint32_t internal_res = static_cast<uint32_t>(atoi(internal_res_str));
-    g_core->SetInternalResolution(internal_res);
-    g_internal_scale = internal_res;
-    
-    // Enable GPU upscaling if scale > 1 and GPU renderer is available
-    if (internal_res > 1 && g_core->IsGPURendererActive()) {
-        g_core->SetGPUUpscaling(true);
-        g_use_gpu_upscaling = true;
-        brimir_log(RETRO_LOG_INFO, "GPU upscaling enabled at %ux", internal_res);
-    } else {
-        g_core->SetGPUUpscaling(false);
-        g_use_gpu_upscaling = false;
-    }
-    
-    // Apply GPU post-processing options
-    const char* upscale_filter = get_option_value("brimir_upscale_filter", "sharp_bilinear");
-    g_core->SetUpscaleFilter(upscale_filter);
-    
-    // Sharpening mode (replaces old FXAA toggle)
-    const char* sharpening = get_option_value("brimir_sharpening", "disabled");
-    g_core->SetSharpeningMode(sharpening);
-    
-    // Legacy FXAA option support (backwards compat)
-    if (std::strcmp(sharpening, "disabled") == 0) {
-        // Check legacy brimir_fxaa option for backwards compatibility
-        bool fxaa_enabled = std::strcmp(get_option_value("brimir_fxaa", "disabled"), "enabled") == 0;
-        if (fxaa_enabled) {
-            g_core->SetFXAA(true);
-        }
-    }
-    
-    // Color debanding
-    bool debanding_enabled = std::strcmp(get_option_value("brimir_debanding", "disabled"), "enabled") == 0;
-    g_core->SetDebanding(debanding_enabled);
-    
-    float brightness = static_cast<float>(atof(get_option_value("brimir_brightness", "1.0")));
-    g_core->SetBrightness(brightness);
-    
-    float gamma = static_cast<float>(atof(get_option_value("brimir_gamma", "1.0")));
-    g_core->SetGamma(gamma);
-    
-    // Log active renderer status with clear verification info
     brimir_log(RETRO_LOG_INFO, "");
     brimir_log(RETRO_LOG_INFO, "╔═══════════════════════════════════════╗");
     brimir_log(RETRO_LOG_INFO, "║       RENDERER STATUS (Load Time)     ║");
     brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
-    brimir_log(RETRO_LOG_INFO, "║ Option Selected: %-20s ║", renderer_str);
     brimir_log(RETRO_LOG_INFO, "║ Active Renderer: %-20s ║", g_core->GetActiveRenderer());
-    brimir_log(RETRO_LOG_INFO, "║ GPU Mode: %-27s ║", g_core->IsGPURendererActive() ? "ENABLED" : "DISABLED");
-    if (g_core->IsGPURendererActive()) {
-        brimir_log(RETRO_LOG_INFO, "║ Internal Resolution: %-16ux ║", internal_res);
-        brimir_log(RETRO_LOG_INFO, "║ GPU Upscaling: %-22s ║", g_use_gpu_upscaling ? "ACTIVE" : "OFF (1x)");
-        brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
-        brimir_log(RETRO_LOG_INFO, "║ GPU FEATURES:                         ║");
-        brimir_log(RETRO_LOG_INFO, "║  ✓ GPU Upscaling (bilinear filter)   ║");
-        brimir_log(RETRO_LOG_INFO, "║  ✓ VRAM/CRAM GPU textures            ║");
-        brimir_log(RETRO_LOG_INFO, "║  ✓ Layer render targets              ║");
-        brimir_log(RETRO_LOG_INFO, "║  ○ VDP1 Sprite GPU rendering (stub)  ║");
-        brimir_log(RETRO_LOG_INFO, "║  ○ VDP2 NBG GPU rendering (stub)     ║");
-        brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
-        brimir_log(RETRO_LOG_INFO, "║ VERIFICATION TIP:                     ║");
-        brimir_log(RETRO_LOG_INFO, "║ Change 'Internal Resolution' option   ║");
-        brimir_log(RETRO_LOG_INFO, "║ If graphics get sharper = GPU works! ║");
-    } else {
-        brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
-        brimir_log(RETRO_LOG_INFO, "║ Using Software Renderer (CPU)         ║");
-        brimir_log(RETRO_LOG_INFO, "║  ✓ Full VDP1/VDP2 Support             ║");
-        brimir_log(RETRO_LOG_INFO, "║  ✓ Stable and Accurate                ║");
-        brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
-        brimir_log(RETRO_LOG_INFO, "║ TO ENABLE GPU:                        ║");
-        brimir_log(RETRO_LOG_INFO, "║ Quick Menu → Options → Renderer       ║");
-        brimir_log(RETRO_LOG_INFO, "║ Select: 'Vulkan (Experimental)'       ║");
-        brimir_log(RETRO_LOG_INFO, "║ Then: Close Content + Reload Game     ║");
-    }
+    brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
+    brimir_log(RETRO_LOG_INFO, "║ Using Software Renderer (CPU)         ║");
+    brimir_log(RETRO_LOG_INFO, "║  ✓ Full VDP1/VDP2 Support             ║");
+    brimir_log(RETRO_LOG_INFO, "║  ✓ Stable and Accurate                ║");
+    brimir_log(RETRO_LOG_INFO, "║  ✓ Ymir Hardware Layer                ║");
     brimir_log(RETRO_LOG_INFO, "╚═══════════════════════════════════════╝");
     brimir_log(RETRO_LOG_INFO, "");
     
