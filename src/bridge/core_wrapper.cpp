@@ -140,7 +140,8 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
     
     // Re-enable threaded VDP if it was previously disabled during UnloadGame
     try {
-        m_saturn->configuration.video.threadedVDP = true;
+        m_saturn->configuration.video.threadedVDP1 = true;
+        m_saturn->configuration.video.threadedVDP2 = true;
         // Note: threadedDeinterlacer is controlled by DeinterlaceMode, don't override it here
     } catch (const std::exception& e) {
         m_lastError = std::string("Exception setting threadedVDP: ") + e.what();
@@ -173,8 +174,9 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         std::filesystem::create_directories(m_sramTempPath.parent_path());
         
         // Load backup RAM from persistent file (creates if doesn't exist)
+        // Use copyOnWrite=true to allow modifications without affecting the file on disk
         std::error_code error;
-        m_saturn->LoadInternalBackupMemoryImage(m_sramTempPath, error);
+        m_saturn->LoadInternalBackupMemoryImage(m_sramTempPath, true, error);
         if (error) {
             m_lastError = "Failed to load backup RAM from " + m_sramTempPath.string() + ": " + error.message();
             // Don't fail game load - just continue with fresh backup RAM
@@ -326,7 +328,8 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         
         // Re-enable threaded VDP for performance (may have been disabled during previous unload)
         // Do this AFTER CloseTray() to avoid timing issues with Japanese BIOS
-        m_saturn->configuration.video.threadedVDP = true;
+        m_saturn->configuration.video.threadedVDP1 = true;
+        m_saturn->configuration.video.threadedVDP2 = true;
         m_saturn->configuration.video.threadedDeinterlacer = true;
         
         // Region auto-detection (if enabled in configuration)
@@ -363,9 +366,11 @@ void CoreWrapper::UnloadGame() {
     
     // CRITICAL: Stop threaded VDP FIRST to prevent race conditions
     // This gracefully shuts down the render thread before we do any cleanup
-    bool wasThreadedVDP = m_saturn->configuration.video.threadedVDP.Get();
-    if (wasThreadedVDP) {
-        m_saturn->configuration.video.threadedVDP = false;
+    bool wasThreadedVDP1 = m_saturn->configuration.video.threadedVDP1.Get();
+    bool wasThreadedVDP2 = m_saturn->configuration.video.threadedVDP2.Get();
+    if (wasThreadedVDP1 || wasThreadedVDP2) {
+        m_saturn->configuration.video.threadedVDP1 = false;
+        m_saturn->configuration.video.threadedVDP2 = false;
         // Give the thread time to shut down cleanly
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -1041,10 +1046,13 @@ void CoreWrapper::SetCDReadSpeed(uint8_t speed) {
 }
 
 void CoreWrapper::SetSH2SyncStep(uint32_t step) {
+    // NOTE: SetSH2SyncStep is not available in Ymir's hardware layer
+    // Ymir uses a fixed synchronization strategy between master and slave SH-2
+    // This setting is ignored when using Ymir hw layer
     if (!m_initialized || !m_saturn) {
         return;
     }
-    m_saturn->SetSH2SyncStep(static_cast<uint64_t>(step));
+    // m_saturn->SetSH2SyncStep(static_cast<uint64_t>(step)); // Not available in Ymir
 }
 
 void CoreWrapper::SetAutodetectRegion(bool enable) {
@@ -1306,24 +1314,24 @@ bool CoreWrapper::LoadCartridgeRAM() {
         file.read(reinterpret_cast<char*>(data.data()), fileSize);
         
         // Get cartridge and load RAM based on type
-        auto& cartSlot = m_saturn->GetCartridgeSlot();
+        auto& cart = m_saturn->SCU.GetCartridge();
         using CartType = brimir::cart::CartType;
-        const auto cartType = cartSlot.GetCartridgeType();
+        const auto cartType = cart.GetType();
         
         constexpr size_t size8 = 1024 * 1024;
         constexpr size_t size32 = 4 * 1024 * 1024;
         constexpr size_t size48 = 6 * 1024 * 1024;
         
         if (cartType == CartType::DRAM8Mbit && fileSize == size8) {
-            auto* cart8 = static_cast<brimir::cart::DRAM8MbitCartridge*>(&cartSlot.GetCartridge());
+            auto* cart8 = static_cast<brimir::cart::DRAM8MbitCartridge*>(&cart);
             cart8->LoadRAM(std::span<const uint8_t, size8>(data.data(), size8));
             return true;
         } else if (cartType == CartType::DRAM32Mbit && fileSize == size32) {
-            auto* cart32 = static_cast<brimir::cart::DRAM32MbitCartridge*>(&cartSlot.GetCartridge());
+            auto* cart32 = static_cast<brimir::cart::DRAM32MbitCartridge*>(&cart);
             cart32->LoadRAM(std::span<const uint8_t, size32>(data.data(), size32));
             return true;
         } else if (cartType == CartType::DRAM48Mbit && fileSize == size48) {
-            auto* cart48 = static_cast<brimir::cart::DRAM48MbitCartridge*>(&cartSlot.GetCartridge());
+            auto* cart48 = static_cast<brimir::cart::DRAM48MbitCartridge*>(&cart);
             cart48->LoadRAM(std::span<const uint8_t, size48>(data.data(), size48));
             return true;
         }
@@ -1341,26 +1349,26 @@ void CoreWrapper::SaveCartridgeRAM() {
     
     try {
         // Get cartridge and save RAM based on type
-        auto& cartSlot = m_saturn->GetCartridgeSlot();
+        auto& cart = m_saturn->SCU.GetCartridge();
         using CartType = brimir::cart::CartType;
-        const auto cartType = cartSlot.GetCartridgeType();
+        const auto cartType = cart.GetType();
         
         std::vector<uint8_t> data;
         
         if (cartType == CartType::DRAM8Mbit) {
             constexpr size_t size8 = 1024 * 1024;
             data.resize(size8);
-            auto* cart8 = static_cast<brimir::cart::DRAM8MbitCartridge*>(&cartSlot.GetCartridge());
+            auto* cart8 = static_cast<brimir::cart::DRAM8MbitCartridge*>(&cart);
             cart8->DumpRAM(std::span<uint8_t, size8>(data.data(), size8));
         } else if (cartType == CartType::DRAM32Mbit) {
             constexpr size_t size32 = 4 * 1024 * 1024;
             data.resize(size32);
-            auto* cart32 = static_cast<brimir::cart::DRAM32MbitCartridge*>(&cartSlot.GetCartridge());
+            auto* cart32 = static_cast<brimir::cart::DRAM32MbitCartridge*>(&cart);
             cart32->DumpRAM(std::span<uint8_t, size32>(data.data(), size32));
         } else if (cartType == CartType::DRAM48Mbit) {
             constexpr size_t size48 = 6 * 1024 * 1024;
             data.resize(size48);
-            auto* cart48 = static_cast<brimir::cart::DRAM48MbitCartridge*>(&cartSlot.GetCartridge());
+            auto* cart48 = static_cast<brimir::cart::DRAM48MbitCartridge*>(&cart);
             cart48->DumpRAM(std::span<uint8_t, size48>(data.data(), size48));
         } else {
             return;

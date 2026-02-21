@@ -116,14 +116,22 @@ The software rendering composition now works **exactly** as in Ymir:
 5. **Composition Pipeline**: VDP1 sprites + VDP2 backgrounds composited by Ymir's renderer
 6. **Threading**: Supports threaded VDP1, VDP2, and deinterlacer (Ymir feature)
 
-### Integration Changes (Commit 084869e)
+### Integration Changes
 
 Updated `src/bridge/core_wrapper.cpp` to use Ymir's API:
+
+**Initial Integration (Commit 084869e)**:
 - `SetSoftwareRenderCallback()` instead of `SetRenderCallback()`
 - `ModifyEnhancements()` for deinterlace/transparentMeshes configuration
 - `GetProbe().GetResolution()` for framebuffer dimensions
 - Removed overscan cropping (Ymir outputs full frame)
 - Removed GPU renderer calls (not part of Ymir hw layer)
+
+**API Mismatch Fixes (Commit TBD)**:
+1. **LoadInternalBackupMemoryImage**: Added missing `copyOnWrite` parameter (now 3 params: path, copyOnWrite, error)
+2. **threadedVDP**: Split into `threadedVDP1` and `threadedVDP2` (Ymir has separate threading for VDP1/VDP2)
+3. **GetCartridgeSlot()**: Replaced with `SCU.GetCartridge()` (cartridge accessed through SCU in Ymir)
+4. **SetSH2SyncStep()**: Commented out - not available in Ymir (uses fixed SH-2 synchronization strategy)
 
 ### Verification
 
