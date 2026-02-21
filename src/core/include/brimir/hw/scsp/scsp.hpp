@@ -30,6 +30,7 @@
 #include <brimir/util/dev_log.hpp>
 #include <brimir/util/inline.hpp>
 
+#include <algorithm>
 #include <array>
 #include <iosfwd>
 #include <queue>
@@ -195,7 +196,7 @@ private:
 
     alignas(16) std::array<uint8, m68k::kM68KWRAMSize> m_WRAM;
 
-    alignas(16) std::array<uint8, 2352 * 30> m_cddaBuffer;  // Increased from 15 to 30 sectors for better buffering during CD access
+    alignas(16) std::array<uint8, 2352 * 15> m_cddaBuffer;
     uint32 m_cddaReadPos;
     uint32 m_cddaWritePos;
     // set to true when there's enough audio data to be read by the SCSP

@@ -197,22 +197,12 @@ public:
     /// @param enable True to enable autodetect
     void SetAutodetectRegion(bool enable);
     
-    /// @brief Set hardware render context (for Vulkan)
-    /// @param hw_render Pointer to retro_hw_render_callback
-    void SetHWContext(void* hw_render);
-    
-    /// @brief Set renderer type
-    /// @param renderer Renderer string: "software", "vulkan"
+    /// @brief Set renderer type (Ymir hw layer only supports software)
+    /// @param renderer Renderer string: "software"
     void SetRenderer(const char* renderer);
-    void SetInternalResolution(uint32_t scale); // 1x, 2x, 4x, 8x (GPU only)
-    void SetWireframeMode(bool enable);         // GPU only - visual verification
-    const char* GetActiveRenderer() const;      // Returns "Software" or "Vulkan"
-    bool IsGPURendererActive() const;
-    const char* GetLastRendererError() const;   // Get last GPU initialization error
-    
-    /// @brief Enable or disable GPU upscaling of software framebuffer
-    /// @param enable True to enable GPU upscaling
-    void SetGPUUpscaling(bool enable);
+    const char* GetActiveRenderer() const;      // Returns "Software"
+    bool IsGPURendererActive() const;           // Always returns false
+    const char* GetLastRendererError() const;   // Always returns empty string
     
     /// @brief Set deinterlacing mode
     /// @param enable True to enable deinterlacing
@@ -222,29 +212,17 @@ public:
     /// @param mode Mode string: "current", "weave", "blend", "bob", "none"
     void SetDeinterlacingMode(const char* mode);
     
-    /// @brief Set upscale filter mode (GPU Only)
-    /// @param mode Filter string: "nearest", "bilinear", "sharp_bilinear"
-    void SetUpscaleFilter(const char* mode);
-    
-    /// @brief Enable/disable color debanding (GPU Only)
-    /// @param enable True to enable debanding
-    void SetDebanding(bool enable);
-    
-    /// @brief Set brightness multiplier (GPU Only)
-    /// @param brightness Brightness value (0.8 - 1.2)
-    void SetBrightness(float brightness);
-    
-    /// @brief Set gamma correction (GPU Only)
-    /// @param gamma Gamma value (0.8 - 2.2)
-    void SetGamma(float gamma);
-    
-    /// @brief Enable/disable FXAA anti-aliasing (GPU Only)
-    /// @param enable True to enable FXAA
-    void SetFXAA(bool enable);
-    
-    /// Set sharpening/post-processing mode
-    /// @param mode "disabled", "fxaa", or "rcas"
-    void SetSharpeningMode(const char* mode);
+    // GPU-only features (stubbed out with Ymir hw layer)
+    void SetHWContext(void* hw_render);         // Not used
+    void SetInternalResolution(uint32_t scale); // Not supported
+    void SetWireframeMode(bool enable);         // Not supported
+    void SetGPUUpscaling(bool enable);          // Not supported
+    void SetUpscaleFilter(const char* mode);    // Not supported
+    void SetDebanding(bool enable);             // Not supported
+    void SetBrightness(float brightness);       // Not supported
+    void SetGamma(float gamma);                 // Not supported
+    void SetFXAA(bool enable);                  // Not supported
+    void SetSharpeningMode(const char* mode);   // Not supported
     
     /// @brief Set SH-2 CPU sync step size
     /// @param step Cycles between master/slave sync (32 = accurate, 64 = balanced, 128 = fast)
@@ -288,10 +266,6 @@ private:
     bool m_initialized = false;
     bool m_gameLoaded = false;
     bool m_iplLoaded = false;
-    
-    // GPU renderer (optional, nullptr if using software rendering)
-    std::unique_ptr<brimir::vdp::IVDPRenderer> m_gpuRenderer;
-    std::string m_lastRendererError;
 
     // Video framebuffer info (will be updated from Ymir's VDP)
     unsigned int m_fbWidth = 320;
@@ -299,21 +273,6 @@ private:
     unsigned int m_fbPitch = 320 * 4; // XRGB8888 = 4 bytes per pixel
     unsigned int m_pixelFormat = 1;   // XRGB8888
     std::vector<uint32_t> m_framebuffer;  // XRGB8888 (0x00RRGGBB)
-    
-    // GPU upscaling state
-    bool m_useGPUUpscaling = false;       // True if GPU upscaling is active
-    bool m_upscaledFrameReady = false;    // True if upscaled frame is available
-    uint32_t m_internalScale = 1;         // Internal resolution scale factor
-    unsigned int m_upscaledWidth = 0;
-    unsigned int m_upscaledHeight = 0;
-    unsigned int m_upscaledPitch = 0;
-
-    // GPU post-processing settings
-    uint32_t m_upscaleFilter = 2;       // 0=nearest, 1=bilinear, 2=sharp bilinear
-    bool m_debanding = false;
-    float m_brightness = 1.0f;
-    float m_gamma = 1.0f;
-    bool m_fxaa = false;
     
     // Audio ring buffer for efficient batching (power of 2 for fast modulo)
     static constexpr size_t kAudioRingBufferSize = 4096;
@@ -341,9 +300,6 @@ private:
     
     // Last error message from operations (for debugging)
     std::string m_lastError;
-    
-    // Hardware render context (if negotiated)
-    void* m_hwRenderCallback = nullptr;
     
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;

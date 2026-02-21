@@ -15,8 +15,15 @@ struct VDPState {
     alignas(16) std::array<std::array<uint8, vdp::kVDP1FramebufferRAMSize>, 2> spriteFB;
     uint8 displayFB;
 
-    uint64 VDP1TimingPenalty;
-    bool VDP1FBCRChanged;
+    struct VDP1State {
+        bool drawing;
+
+        bool doDisplayErase;
+        bool doVBlankErase;
+
+        uint64 spilloverCycles;
+        uint64 timingPenalty;
+    } vdp1State;
 
     struct VDP1RegsState {
         uint16 TVMR;
@@ -29,6 +36,11 @@ struct VDPState {
         uint16 LOPR;
         uint16 COPR;
         uint16 MODR;
+
+        bool FBCRChanged;
+        uint16 eraseWriteValueLatch;
+        uint16 eraseX1Latch, eraseY1Latch;
+        uint16 eraseX3Latch, eraseY3Latch;
     } regs1;
 
     struct VDP2RegsState {
@@ -174,6 +186,12 @@ struct VDPState {
         uint16 COBR;
         uint16 COBG;
         uint16 COBB;
+
+        bool displayEnabledLatch;
+        bool borderColorModeLatch;
+
+        uint16 VCNTLatch;
+        bool VCNTLatched;
     } regs2;
 
     enum class HorizontalPhase {
@@ -207,18 +225,6 @@ struct VDPState {
 
             sint32 localCoordX;
             sint32 localCoordY;
-
-            bool rendering;
-
-            bool doDisplayErase;
-            bool doVBlankErase;
-
-            uint16 eraseWriteValue;
-            uint16 eraseX1, eraseY1;
-            uint16 eraseX3, eraseY3;
-
-            uint64 cycleCount;
-            uint64 cyclesSpent;
 
             std::array<std::array<std::array<uint8, vdp::kVDP1FramebufferRAMSize>, 2>, 2> meshFB;
         };
@@ -273,11 +279,7 @@ struct VDPState {
         uint32 vertCellScrollInc;
 
         uint8 displayFB;
-        bool vdp1Done;
     } renderer;
-
-    bool displayEnabled;
-    bool borderColorMode;
 };
 
 } // namespace brimir::state

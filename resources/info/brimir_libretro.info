@@ -1,6 +1,6 @@
 # Software Information
 display_name = "Sega - Saturn (Brimir)"
-display_version = "0.2.3"
+display_version = "0.3.0"
 authors = "coredds"
 categories = "Emulator"
 license = "GPLv3"

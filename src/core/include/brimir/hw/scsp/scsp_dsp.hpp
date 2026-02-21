@@ -37,7 +37,7 @@ FORCE_INLINE static uint32 IntToFloat(const uint32 value) {
     const uint32 shiftedValue = value << 8;
     const uint32 signXor = static_cast<sint32>(shiftedValue) >> 31;
 
-    const uint32 exp = (std::min)(0x1F, std::countl_zero(((shiftedValue ^ signXor) << 1) | (1 << 19)));
+    const uint32 exp = std::min(0x1F, std::countl_zero(((shiftedValue ^ signXor) << 1) | (1 << 19)));
     const uint32 shift = exp - (exp == 12);
 
     uint32 ret = static_cast<sint32>(shiftedValue) >> (19 - shift);

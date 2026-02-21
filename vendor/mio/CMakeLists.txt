@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.10)
 
 #
 # Here we check whether mio is being configured in isolation or as a component
@@ -22,7 +22,6 @@ project(mio VERSION 1.1.0 LANGUAGES C CXX)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 include(CMakeDependentOption)
 include(CMakePackageConfigHelpers)
-include(CTest)
 include(GNUInstallDirs)
 
 # Generate 'compile_commands.json' for clang_complete
@@ -146,6 +145,7 @@ target_link_libraries(mio-headers INTERFACE mio)
 add_subdirectory(include/mio)
 
 if(mio.tests)
+  include(CTest)
   add_subdirectory(test)
 endif()
 
