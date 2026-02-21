@@ -4,13 +4,14 @@ A Sega Saturn emulation core for libretro, targeting high performance and accura
 
 ## Overview
 
-Brimir is a libretro core for Sega Saturn emulation, built on a foundation inspired by the Ymir emulator architecture. It provides both a software renderer and an experimental Vulkan GPU renderer with upscaling and post-processing capabilities.
+Brimir is a libretro core for Sega Saturn emulation, built directly on the Ymir emulator hardware layer. It provides accurate, cycle-accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development -- interpreter-based emulation is functional with GPU-accelerated upscaling via Vulkan. JIT compiler is in the planning phase.
+**Current Status**: Active development -- using Ymir's proven hardware emulation layer with interpreter-based SH-2 execution. Full compatibility with Ymir's software renderer.
 
 ## Features
 
 ### Emulation
+- **Ymir Hardware Layer**: Cycle-accurate Saturn hardware emulation
 - Accurate SH-2 dual-CPU emulation (interpreter)
 - Full VDP1 sprite engine and VDP2 scroll plane graphics
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation
@@ -20,32 +21,36 @@ Brimir is a libretro core for Sega Saturn emulation, built on a foundation inspi
 - Save state and backup RAM persistence
 - Auto-detection of console region from disc
 - Configurable CD read speed (2x-16x)
+- RAM expansion cartridge support (1MB, 4MB, 6MB)
+- ROM cartridge support (King of Fighters '95, Ultraman)
 
 ### Rendering
-- **Software Renderer**: Accurate, fully featured, optimized with SSE4.2/AVX2 intrinsics
-- **Vulkan Renderer** (Experimental): Headless GPU rendering for upscaling and post-processing
-  - Internal resolution scaling: 1x (native), 2x, 4x, 8x
-  - Upscale filters: Nearest, Bilinear, Sharp Bilinear, FSR 1.0 EASU (edge-adaptive)
-  - Post-processing: FXAA, RCAS sharpening (FSR 1.0)
-  - Color debanding for Saturn's RGB555 palette
-  - Brightness and gamma correction
-- Deinterlacing modes: Bob, Weave, Blend, Current field
-- Horizontal blend filter for high-res interlaced modes
-- Configurable overscan cropping (horizontal and vertical)
-- Frameskip support
+- **Software Renderer**: Ymir's proven software renderer with pixel-perfect accuracy
+  - Optimized with SIMD intrinsics (AVX2/SSE2) for pixel conversion
+  - Threaded VDP1 and VDP2 rendering for optimal performance
+  - Full resolution output (no overscan cropping by VDP)
+- **Deinterlacing**: Multiple modes for interlaced video
+  - Bob (smooth 60 FPS, no scanlines)
+  - Weave (CRT-style scanlines)
+  - Blend (field blending)
+  - Current (legacy dual-field)
+- **Post-Processing**:
+  - Horizontal blend filter for high-res interlaced modes
+  - Configurable overscan cropping (horizontal and vertical)
+  - Frameskip support
 
 ### Integration
 - Libretro API v2 with full core options support
 - Compatible with RetroArch and other libretro frontends
 - XRGB8888 pixel format output
 - Performance profiling (logged every 300 frames)
+- Full controller remapping support
 
 ## Build Requirements
 
 - Windows 10/11 (x64) or Linux (x64)
 - C++20 compiler: MSVC 2022+, GCC 11+, or Clang 14+
 - CMake 3.28+
-- Vulkan SDK (optional, for shader compilation)
 
 ## Building
 
@@ -70,17 +75,6 @@ cmake --build build -j$(nproc)
 
 # Output: build/brimir_libretro.so
 ```
-
-### Shader Compilation
-
-The Vulkan shaders are embedded as SPIR-V bytecode. To recompile after modifying GLSL sources:
-
-```powershell
-cd src\core\src\hw\vdp\gpu\shaders
-.\compile_shaders.ps1
-```
-
-This requires the Vulkan SDK with `glslc`. The build system will pick up the updated `embedded_shaders.hpp` automatically.
 
 ## Installation
 
@@ -108,14 +102,13 @@ This requires the Vulkan SDK with `glslc`. The build system will pick up the upd
 |----------|--------|--------|
 | System | BIOS Selection | Auto-detect, JP, US, EU variants |
 | System | Console Region | Auto-detect, US, EU, JP |
-| Video | Renderer | Software, Vulkan (Experimental) |
-| Video | Internal Resolution | 1x, 2x, 4x, 8x (GPU only) |
-| Video | Upscale Filter | Nearest, Bilinear, Sharp Bilinear, FSR 1.0 (GPU only) |
-| Video | Sharpening | Off, FXAA, RCAS (GPU only) |
-| Video | Debanding | Off, On (GPU only) |
-| Video | Brightness / Gamma | Adjustable (GPU only) |
-| Video | Deinterlacing | On/Off, modes: Bob, Weave, Blend, Current, None |
-| Video | Overscan | Horizontal and vertical cropping |
+| System | Auto-Detect Region | On/Off |
+| Video | Video Standard | Auto, NTSC (60Hz), PAL (50Hz) |
+| Video | Deinterlacing | On/Off |
+| Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
+| Video | Horizontal Blend | On/Off (for interlaced modes) |
+| Video | Horizontal Overscan | On/Off (crop 8px each side) |
+| Video | Vertical Overscan | On/Off (crop 8px top/bottom) |
 | Video | Frameskip | 0-3 frames |
 | Audio | Interpolation | Linear, Nearest |
 | Media | CD Read Speed | 2x-16x |
@@ -125,11 +118,10 @@ This requires the Vulkan SDK with `glslc`. The build system will pick up the upd
 ```
 brimir/
   src/
-    core/          Core emulation (SH-2, VDP1/2, SCSP, SCU, CD block, etc.)
-      src/hw/vdp/gpu/     Vulkan renderer and GLSL shaders
+    core/          Ymir hardware layer (SH-2, VDP1/2, SCSP, SCU, CD block, etc.)
     bridge/        CoreWrapper -- interface between emulator and frontends
     libretro/      Libretro API implementation and core options
-    jit/           SH-2 JIT compiler (Phase 0 -- planning/infrastructure)
+    jit/           SH-2 JIT compiler (future)
   include/         Public headers
   vendor/          Vendored dependencies
   tests/           Unit and integration tests
@@ -140,16 +132,16 @@ brimir/
 
 - x64 only (ARM64 support planned)
 - macOS not yet tested
-- Interpreter-based SH-2 execution (JIT compiler in planning)
-- VDP1 sprite rendering and VDP2 NBG layer rendering are software-only (GPU stubs exist)
+- Interpreter-based SH-2 execution (JIT compiler planned)
+- Software rendering only (GPU acceleration planned for future)
 - Some games may have compatibility issues
 
 ## Roadmap
 
-- **Phase 1** (current): Stabilize interpreter, improve game compatibility, refine GPU upscaling pipeline
+- **Phase 1** (current): Stabilize Ymir hardware layer integration, improve game compatibility
 - **Phase 2**: Implement SH-2 JIT compiler for x86-64
 - **Phase 3**: Expand platform support (macOS, ARM64)
-- **Phase 4**: GPU-native VDP1/VDP2 rendering, ARM64 JIT backend
+- **Phase 4**: Optional GPU acceleration layer on top of Ymir's software renderer
 
 ## Dependencies
 
@@ -168,7 +160,7 @@ Licensed under the GPLv2. See LICENSE file for details.
 
 ## Acknowledgments
 
-This project's architecture is inspired by the Ymir emulator by StrikerX3. Special thanks to the Ymir developers for their foundational work on Saturn emulation.
+This project uses the Ymir emulator hardware layer by StrikerX3. Special thanks to the Ymir developers for their exceptional work on cycle-accurate Saturn emulation.
 
 ## Contributing
 

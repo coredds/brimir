@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] - Ymir Hardware Layer Branch
+
+### Changed
+- **Ymir Hardware Layer Integration** - Complete adoption of Ymir's hardware emulation layer
+  - Replaced custom hardware implementation with Ymir's proven, cycle-accurate emulation
+  - Software renderer now uses Ymir's optimized VDP implementation
+  - Simplified codebase by removing custom VDP1/VDP2 split architecture
+  - Easier upstream synchronization with Ymir project
+  
+- **API Compatibility Fixes**
+  - Fixed `LoadInternalBackupMemoryImage` to include `copyOnWrite` parameter
+  - Updated threading configuration to use separate `threadedVDP1` and `threadedVDP2`
+  - Changed cartridge access from `GetCartridgeSlot()` to `SCU.GetCartridge()`
+  - Removed `SetSH2SyncStep()` (Ymir uses fixed synchronization)
+
+### Removed
+- **GPU Rendering** - Removed experimental Vulkan renderer (will be re-architected in future)
+  - Removed internal resolution scaling options
+  - Removed upscale filter options (Nearest, Bilinear, Sharp Bilinear, FSR)
+  - Removed post-processing options (FXAA, RCAS sharpening)
+  - Removed color adjustment options (debanding, brightness, gamma)
+  - All GPU code preserved in `backup_brimir_hw/` for future re-integration
+
+- **Core Options** - Removed obsolete options
+  - Renderer selection (software is now the only mode)
+  - All GPU-only video enhancement options
+  - SH-2 sync step option (not applicable with Ymir)
+
+### Technical
+- Software rendering provides pixel-perfect output matching Ymir
+- Full VDP1 and VDP2 support with threaded rendering
+- Deinterlacing modes preserved (Bob, Weave, Blend, Current)
+- SIMD optimizations maintained for pixel format conversion
+- Save states and backup RAM fully compatible
+
+---
+
 ## [0.1.3] - 2025-11-29
 
 ### Added
