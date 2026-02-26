@@ -1031,16 +1031,6 @@ void CoreWrapper::SetCDReadSpeed(uint8_t speed) {
     m_saturn->configuration.cdblock.readSpeedFactor = speed;
 }
 
-void CoreWrapper::SetSH2SyncStep(uint32_t step) {
-    // NOTE: SetSH2SyncStep is not available in Ymir's hardware layer
-    // Ymir uses a fixed synchronization strategy between master and slave SH-2
-    // This setting is ignored when using Ymir hw layer
-    if (!m_initialized || !m_saturn) {
-        return;
-    }
-    // m_saturn->SetSH2SyncStep(static_cast<uint64_t>(step)); // Not available in Ymir
-}
-
 void CoreWrapper::SetAutodetectRegion(bool enable) {
     if (!m_initialized || !m_saturn) {
         return;
