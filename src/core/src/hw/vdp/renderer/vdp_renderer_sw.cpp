@@ -14,8 +14,13 @@
 
 #if defined(_M_X64) || defined(__x86_64__)
     #include <immintrin.h>
-#elif defined(_M_ARM64) || defined(__aarch64__)
-    #include <arm_neon.h>
+    #define BRIMIR_SIMD_ENABLED 1
+// ARM NEON support temporarily disabled due to type conversion issues
+// #elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
+//     #include <arm_neon.h>
+//     #define BRIMIR_SIMD_ENABLED 1
+#else
+    #define BRIMIR_SIMD_ENABLED 0
 #endif
 
 namespace brimir::vdp {
@@ -3219,7 +3224,7 @@ FORCE_INLINE bool AllZeroU8(std::span<const uint8> values) {
         }
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // 64 at a time
     for (; values.size() >= 64; values = values.subspan(64)) {
         const uint8x16x4_t vec64 = vld1q_u8_x4(reinterpret_cast<const uint8 *>(values.data()));
@@ -3310,7 +3315,7 @@ FORCE_INLINE bool AllBool(std::span<const bool> values) {
         }
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // 64 at a time
     for (; values.size() >= 64; values = values.subspan(64)) {
         const uint8x16x4_t vec64 = vld1q_u8_x4(reinterpret_cast<const uint8 *>(values.data()));
@@ -3398,7 +3403,7 @@ FORCE_INLINE bool AnyBool(std::span<const bool> values) {
         }
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // 64 at a time
     for (; values.size() >= 64; values = values.subspan(64)) {
         const uint8x16x4_t vec64 = vld1q_u8_x4(reinterpret_cast<const uint8 *>(values.data()));
@@ -3503,7 +3508,7 @@ FORCE_INLINE void Color888ShadowMasked(const std::span<Color888> pixels, const s
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&pixels[i]), dstColor_x4);
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // Four pixels at a time
     for (; (i + 4) < pixels.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3581,7 +3586,7 @@ FORCE_INLINE void Color888SatAddMasked(const std::span<Color888> dest, const std
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&dest[i]), dstColor_x4);
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3661,7 +3666,7 @@ FORCE_INLINE void Color888SelectMasked(const std::span<Color888> dest, const std
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&dest[i]), dstColor_x4);
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3737,7 +3742,7 @@ FORCE_INLINE void Color888AverageMasked(const std::span<Color888> dest, const st
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&dest[i]), dstColor_x4);
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3868,7 +3873,7 @@ FORCE_INLINE void Color888CompositeRatioPerPixelMasked(const std::span<Color888>
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&dest[i]), dstColor_x4);
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -4012,7 +4017,7 @@ FORCE_INLINE void Color888CompositeRatioMasked(const std::span<Color888> dest, c
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&dest[i]), dstColor_x4);
     }
     #endif
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif 0 && (defined(_M_ARM64) || defined(__aarch64__))
     // Four pixels at a time
     const uint8x16_t ratio_x4 = vdupq_n_u8(ratio);
     for (; (i + 4) < dest.size(); i += 4) {
