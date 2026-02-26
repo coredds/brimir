@@ -1,9 +1,17 @@
 #include <brimir/util/cpu_features.hpp>
 
-#ifdef _MSC_VER
-    #include <intrin.h>
-#elif defined(__GNUC__)
-    #include <cpuid.h>
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    #define BRIMIR_X86_FAMILY 1
+#else
+    #define BRIMIR_X86_FAMILY 0
+#endif
+
+#if BRIMIR_X86_FAMILY
+    #ifdef _MSC_VER
+        #include <intrin.h>
+    #elif defined(__GNUC__)
+        #include <cpuid.h>
+    #endif
 #endif
 
 namespace brimir::util {
@@ -18,7 +26,20 @@ CPUFeatures::CPUFeatures() {
 }
 
 void CPUFeatures::detect() {
-    #ifdef _MSC_VER
+    #if !BRIMIR_X86_FAMILY
+        // Non-x86 architectures: set all features to false
+        sse2 = false;
+        sse3 = false;
+        ssse3 = false;
+        sse4_1 = false;
+        sse4_2 = false;
+        avx = false;
+        avx2 = false;
+        bmi1 = false;
+        bmi2 = false;
+        popcnt = false;
+        lzcnt = false;
+    #elif defined(_MSC_VER)
         int cpuInfo[4] = {0};
         
         // Get vendor string and max function
@@ -97,7 +118,7 @@ void CPUFeatures::detect() {
         }
         
     #else
-        // Conservative defaults for unknown compiler
+        // Conservative defaults for unknown compiler on x86
         sse2 = true;  // All x64 has SSE2
         sse3 = false;
         ssse3 = false;
@@ -109,6 +130,7 @@ void CPUFeatures::detect() {
         bmi2 = false;
         popcnt = false;
         lzcnt = false;
+    #endif
     #endif
 }
 
