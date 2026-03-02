@@ -27,6 +27,9 @@ static std::unique_ptr<brimir::CoreWrapper> g_core;
 // SRAM sync state (reset on game load/unload)
 static bool g_sram_synced = false;
 
+// Whether the frontend supports RETRO_DEVICE_ID_JOYPAD_MASK (single-call input read)
+static bool g_input_bitmask_supported = false;
+
 // Helper function for logging
 static void brimir_log(retro_log_level level, const char* fmt, ...) {
     if (!log_cb) return;
@@ -126,6 +129,9 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &logging)) {
         log_cb = logging.log;
     }
+
+    // Check for bitmask input support (avoids 14 separate calls per player per frame)
+    g_input_bitmask_supported = cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, nullptr);
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb) {
@@ -177,7 +183,7 @@ RETRO_API unsigned retro_api_version(void) {
 RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "Brimir";
-    info->library_version = "0.2.2";
+    info->library_version = "0.3.1";
     info->need_fullpath = true;
     info->valid_extensions = "chd|cue|bin|iso|ccd|img|mds|mdf|m3u";
 }
@@ -221,15 +227,6 @@ RETRO_API void retro_run(void) {
     // Solution: Read from Ymir's .bup AGAIN to restore the clock settings
     if (!g_sram_synced) {
         g_core->RefreshSRAMFromEmulator();
-        brimir_log(RETRO_LOG_INFO, "Restored .bup data - clock should persist now");
-        
-        // Log renderer status on first frame
-        brimir_log(RETRO_LOG_INFO, "");
-        brimir_log(RETRO_LOG_INFO, "=== RENDERER STATUS (First Frame) ===");
-        brimir_log(RETRO_LOG_INFO, "Active: %s", g_core->GetActiveRenderer());
-        brimir_log(RETRO_LOG_INFO, "=====================================");
-        brimir_log(RETRO_LOG_INFO, "");
-        
         g_sram_synced = true;
     }
     
@@ -261,43 +258,47 @@ RETRO_API void retro_run(void) {
     
     // Read and update controller input for both players
     if (input_state_cb) {
-        // Player 1
-        // Build button mask using libretro standard button IDs as bit positions
         uint16_t buttons_p1 = 0;
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_B);       // bit 0
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_Y);       // bit 1
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_SELECT);  // bit 2
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))  buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_START);   // bit 3
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_UP);      // bit 4
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))   buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_DOWN);    // bit 5
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))   buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_LEFT);    // bit 6
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))  buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT);   // bit 7
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_A);       // bit 8
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_X);       // bit 9
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_L);       // bit 10
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_R);       // bit 11
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_L2);      // bit 12
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_R2);      // bit 13
-        
-        g_core->SetControllerState(0, buttons_p1);
-        
-        // Player 2
         uint16_t buttons_p2 = 0;
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_B);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_Y);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_SELECT);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))  buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_START);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_UP);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))   buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_DOWN);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))   buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_LEFT);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))  buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_A);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_X);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_L);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_R);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_L2);
-        if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_R2);
-        
+
+        if (g_input_bitmask_supported) {
+            // Single call returns all buttons as a bitmask - bits match RETRO_DEVICE_ID_JOYPAD_* values
+            buttons_p1 = static_cast<uint16_t>(input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK));
+            buttons_p2 = static_cast<uint16_t>(input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK));
+        } else {
+            // Fallback: query each button individually
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_B);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_Y);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_SELECT);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))  buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_START);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_UP);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))   buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_DOWN);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))   buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_LEFT);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))  buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_A);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_X);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_L);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_R);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_L2);
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_R2);
+
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_B);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_Y);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_SELECT);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))  buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_START);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_UP);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))   buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_DOWN);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))   buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_LEFT);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))  buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_A);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_X);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_L);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_R);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_L2);
+            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_R2);
+        }
+
+        g_core->SetControllerState(0, buttons_p1);
         g_core->SetControllerState(1, buttons_p2);
     }
     
@@ -506,122 +507,35 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
     }
     
-    // Load the game (with save directory for per-game saves and system directory for RTC)
-    brimir_log(RETRO_LOG_INFO, "Calling LoadGame...");
-    brimir_log(RETRO_LOG_INFO, "  Path: %s", game->path);
-    brimir_log(RETRO_LOG_INFO, "  Save dir: %s", save_dir ? save_dir : "(null)");
-    brimir_log(RETRO_LOG_INFO, "  System dir: %s", system_dir ? system_dir : "(null)");
-    brimir_log(RETRO_LOG_INFO, "  g_core pointer: %p", (void*)g_core.get());
-    brimir_log(RETRO_LOG_INFO, "About to call g_core->LoadGame()...");
-    
-    bool load_result = false;
-    try {
-        brimir_log(RETRO_LOG_INFO, "TEST: About to invoke LoadGame");
-        brimir_log(RETRO_LOG_INFO, "TEST: path=%s", game->path);
-        brimir_log(RETRO_LOG_INFO, "TEST: save_dir=%s", save_dir ? save_dir : "NULL");
-        brimir_log(RETRO_LOG_INFO, "TEST: system_dir=%s", system_dir ? system_dir : "NULL");
-        load_result = g_core->LoadGame(game->path, save_dir, system_dir);
-        brimir_log(RETRO_LOG_INFO, "TEST: LoadGame call completed");
-        brimir_log(RETRO_LOG_INFO, "LoadGame returned: %s", load_result ? "true" : "false");
-        
-        // Log last error even on success for debugging
-        const std::string& debug_error = g_core->GetLastError();
-        if (!debug_error.empty()) {
-            brimir_log(RETRO_LOG_INFO, "DEBUG LastError: %s", debug_error.c_str());
-        }
-    } catch (const std::exception& e) {
-        brimir_log(RETRO_LOG_ERROR, "C++ Exception in LoadGame: %s", e.what());
-        const std::string& error = g_core->GetLastError();
-        if (!error.empty()) {
-            brimir_log(RETRO_LOG_ERROR, "LastError: %s", error.c_str());
-        }
-        return false;
-    } catch (...) {
-        brimir_log(RETRO_LOG_ERROR, "Unknown exception in LoadGame");
-        const std::string& error = g_core->GetLastError();
-        if (!error.empty()) {
-            brimir_log(RETRO_LOG_ERROR, "LastError: %s", error.c_str());
-        }
-        return false;
-    }
-    
-    if (!load_result) {
-        const std::string& error = g_core->GetLastError();
-        if (!error.empty()) {
-            brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s", error.c_str());
-        } else {
-            brimir_log(RETRO_LOG_ERROR, "Failed to load game (no error message)");
-        }
-        return false;
-    }
-    
-    brimir_log(RETRO_LOG_INFO, "Game loaded successfully!");
+    brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
 
-    // Initialize SRAM - Ymir has loaded backup RAM from persistent file
-    size_t sram_size = g_core->GetSRAMSize();
-    if (sram_size > 0) {
-        brimir_log(RETRO_LOG_INFO, "Backup RAM initialized: %zu bytes", sram_size);
-        // Note: RetroArch will call retro_get_memory_data to get the buffer,
-        // then load the .srm file into it. We'll sync it back to Ymir's file
-        // on the first frame.
+    if (!g_core->LoadGame(game->path, save_dir, system_dir)) {
+        const std::string& error = g_core->GetLastError();
+        brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
+            error.empty() ? "(no error message)" : error.c_str());
+        return false;
     }
+
+    brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
 
     // Apply core options
     const char* audio_interp = get_option_value("brimir_audio_interpolation", "linear");
     g_core->SetAudioInterpolation(audio_interp);
-    brimir_log(RETRO_LOG_INFO, "Audio interpolation: %s", audio_interp);
 
     const char* cd_speed_str = get_option_value("brimir_cd_speed", "2");
-    uint8_t cd_speed = static_cast<uint8_t>(atoi(cd_speed_str));
-    g_core->SetCDReadSpeed(cd_speed);
-    brimir_log(RETRO_LOG_INFO, "CD read speed: %ux", cd_speed);
+    g_core->SetCDReadSpeed(static_cast<uint8_t>(atoi(cd_speed_str)));
 
     const char* autodetect_region_str = get_option_value("brimir_autodetect_region", "enabled");
-    bool autodetect_region = strcmp(autodetect_region_str, "enabled") == 0;
-    g_core->SetAutodetectRegion(autodetect_region);
-    brimir_log(RETRO_LOG_INFO, "Autodetect region: %s", autodetect_region ? "enabled" : "disabled");
-    
-    // Ymir hw layer only supports software rendering
-    brimir_log(RETRO_LOG_INFO, "Using software renderer (Ymir hw layer)");
+    g_core->SetAutodetectRegion(strcmp(autodetect_region_str, "enabled") == 0);
+
     g_core->SetRenderer("software");
-    
-    brimir_log(RETRO_LOG_INFO, "");
-    brimir_log(RETRO_LOG_INFO, "╔═══════════════════════════════════════╗");
-    brimir_log(RETRO_LOG_INFO, "║       RENDERER STATUS (Load Time)     ║");
-    brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
-    brimir_log(RETRO_LOG_INFO, "║ Active Renderer: %-20s ║", g_core->GetActiveRenderer());
-    brimir_log(RETRO_LOG_INFO, "╠═══════════════════════════════════════╣");
-    brimir_log(RETRO_LOG_INFO, "║ Using Software Renderer (CPU)         ║");
-    brimir_log(RETRO_LOG_INFO, "║  ✓ Full VDP1/VDP2 Support             ║");
-    brimir_log(RETRO_LOG_INFO, "║  ✓ Stable and Accurate                ║");
-    brimir_log(RETRO_LOG_INFO, "║  ✓ Ymir Hardware Layer                ║");
-    brimir_log(RETRO_LOG_INFO, "╚═══════════════════════════════════════╝");
-    brimir_log(RETRO_LOG_INFO, "");
-    
+
     const char* deinterlacing_str = get_option_value("brimir_deinterlacing", "enabled");
-    bool deinterlacing = strcmp(deinterlacing_str, "enabled") == 0;
-    g_core->SetDeinterlacing(deinterlacing);
-    brimir_log(RETRO_LOG_INFO, "Deinterlacing: %s", deinterlacing ? "enabled" : "disabled");
-    
+    g_core->SetDeinterlacing(strcmp(deinterlacing_str, "enabled") == 0);
+
     const char* deinterlace_mode = get_option_value("brimir_deinterlace_mode", "bob");
     g_core->SetDeinterlacingMode(deinterlace_mode);
-    brimir_log(RETRO_LOG_INFO, "Deinterlacing mode: %s", deinterlace_mode);
-    
-    const char* horizontal_blend_str = get_option_value("brimir_horizontal_blend", "enabled");
-    bool horizontal_blend = strcmp(horizontal_blend_str, "enabled") == 0;
-    g_core->SetHorizontalBlend(horizontal_blend);
-    brimir_log(RETRO_LOG_INFO, "Horizontal blend: %s", horizontal_blend ? "enabled" : "disabled");
-    
-    const char* h_overscan_str = get_option_value("brimir_h_overscan", "enabled");
-    bool h_overscan = strcmp(h_overscan_str, "enabled") == 0;
-    g_core->SetHorizontalOverscan(h_overscan);
-    brimir_log(RETRO_LOG_INFO, "Horizontal overscan: %s", h_overscan ? "enabled" : "disabled");
-    
-    const char* v_overscan_str = get_option_value("brimir_v_overscan", "enabled");
-    bool v_overscan = strcmp(v_overscan_str, "enabled") == 0;
-    g_core->SetVerticalOverscan(v_overscan);
-    brimir_log(RETRO_LOG_INFO, "Vertical overscan: %s", v_overscan ? "enabled" : "disabled");
-    
+
     return true;
 }
 

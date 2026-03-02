@@ -51,37 +51,6 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "auto"
     },
     {
-        "brimir_region",
-        "Console Region",
-        nullptr,
-        "Force a specific region. Auto will detect from the disc.",
-        nullptr,
-        "system",
-        {
-            { "auto", "Auto-detect" },
-            { "us", "North America" },
-            { "eu", "Europe" },
-            { "jp", "Japan" },
-            { nullptr, nullptr }
-        },
-        "auto"
-    },
-    {
-        "brimir_video_standard",
-        "Video Standard",
-        nullptr,
-        "Force NTSC (60Hz) or PAL (50Hz). Auto will use region default.",
-        nullptr,
-        "video",
-        {
-            { "auto", "Auto" },
-            { "ntsc", "NTSC (60Hz)" },
-            { "pal", "PAL (50Hz)" },
-            { nullptr, nullptr }
-        },
-        "auto"
-    },
-    {
         "brimir_deinterlacing",
         "Deinterlacing",
         nullptr,
@@ -118,68 +87,6 @@ static struct retro_core_option_v2_definition option_defs[] = {
             { nullptr, nullptr }
         },
         "bob"
-    },
-    {
-        "brimir_horizontal_blend",
-        "Horizontal Blend (Interlaced)",
-        nullptr,
-        "Apply horizontal blur filter in high-res interlaced modes (640+ width) to reduce combing artifacts. "
-        "Blends adjacent horizontal pixels for smoother perceived image. "
-        "Recommended with Bob deinterlacing mode. Minimal performance impact (<1ms).",
-        nullptr,
-        "video",
-        {
-            { "disabled", "OFF" },
-            { "enabled", "ON" },
-            { nullptr, nullptr }
-        },
-        "disabled"
-    },
-    {
-        "brimir_h_overscan",
-        "Horizontal Overscan",
-        nullptr,
-        "Show horizontal overscan area. Many Saturn games render content in this region. "
-        "Disable to crop 8 pixels from each side for cleaner edges.",
-        nullptr,
-        "video",
-        {
-            { "disabled", "OFF (Crop 8px)" },
-            { "enabled", "ON (Full Width)" },
-            { nullptr, nullptr }
-        },
-        "enabled"
-    },
-    {
-        "brimir_v_overscan",
-        "Vertical Overscan",
-        nullptr,
-        "Show vertical overscan area. Reveals full vertical rendering. "
-        "Disable to crop 8 pixels from top/bottom for cleaner edges.",
-        nullptr,
-        "video",
-        {
-            { "disabled", "OFF (Crop 8px)" },
-            { "enabled", "ON (Full Height)" },
-            { nullptr, nullptr }
-        },
-        "enabled"
-    },
-    {
-        "brimir_frameskip",
-        "Frameskip",
-        nullptr,
-        "Skip frames to improve performance. 0 = disabled.",
-        nullptr,
-        "video",
-        {
-            { "0", "Disabled" },
-            { "1", "Skip 1 frame" },
-            { "2", "Skip 2 frames" },
-            { "3", "Skip 3 frames" },
-            { nullptr, nullptr }
-        },
-        "0"
     },
     {
         "brimir_autodetect_region",

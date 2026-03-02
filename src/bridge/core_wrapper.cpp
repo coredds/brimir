@@ -13,9 +13,7 @@
 #include <brimir/db/game_db.hpp>
 #include <brimir/db/rom_cart_db.hpp>
 #include <brimir/hw/cart/cart_impl_dram.hpp>
-#include <brimir/hw/cart/cart_impl_rom.hpp>
 #include <brimir/core/hash.hpp>
-#include <brimir/hw/vdp/renderer/vdp_renderer.hpp>
 
 #include <cstring>
 #include <filesystem>
@@ -46,8 +44,7 @@
 
 namespace brimir {
 
-CoreWrapper::CoreWrapper()
-    : m_videoStandard(brimir::core::config::sys::VideoStandard::NTSC) {
+CoreWrapper::CoreWrapper() {
     // Reserve framebuffer space (max Saturn resolution)
     m_framebuffer.resize(704 * 512);
     
@@ -459,46 +456,6 @@ void CoreWrapper::RefreshSRAMFromEmulator() {
     m_framesSinceLastSRAMSync = 0;
 }
 
-bool CoreWrapper::SetSRAMData(const void* data, size_t size) {
-    if (!m_initialized || !m_saturn || !data || size == 0) {
-        return false;
-    }
-
-    // Get expected SRAM size
-    size_t expectedSize = m_saturn->mem.GetInternalBackupRAM().Size();
-    if (size != expectedSize) {
-        m_lastError = "SRAM size mismatch";
-        return false;
-    }
-
-    if (m_sramTempPath.empty()) {
-        m_lastError = "SRAM temp file path not set";
-        return false;
-    }
-
-    try {
-        // Write the RetroArch .srm data directly to Ymir's memory-mapped file
-        std::ofstream file(m_sramTempPath, std::ios::binary | std::ios::in | std::ios::out);
-        if (!file) {
-            m_lastError = "Failed to open SRAM file for writing";
-            return false;
-        }
-
-        file.seekp(0);
-        file.write(static_cast<const char*>(data), size);
-        file.flush();
-        file.close();
-
-        m_sramInitialized = true;
-        m_sramFirstLoad = false;  // First load complete, can now read from Ymir
-        return true;
-
-    } catch (const std::exception& e) {
-        m_lastError = std::string("Exception writing SRAM: ") + e.what();
-        return false;
-    }
-}
-
 
 void CoreWrapper::RunFrame() {
     if (!m_initialized || !m_saturn) {
@@ -623,9 +580,6 @@ unsigned int CoreWrapper::GetFramebufferPitch() const {
     return m_fbPitch;
 }
 
-unsigned int CoreWrapper::GetPixelFormat() const {
-    return m_pixelFormat;  // 1 = XRGB8888
-}
 
 size_t CoreWrapper::GetAudioSamples(int16_t* buffer, size_t max_samples) {
     if (!m_initialized || !m_saturn || !buffer) {
@@ -646,17 +600,22 @@ size_t CoreWrapper::GetAudioSamples(int16_t* buffer, size_t max_samples) {
     if (samples_to_copy == 0) {
         return 0;
     }
-    
-    // Copy from ring buffer (handle wrap-around)
-    size_t samples_copied = 0;
-    while (samples_copied < samples_to_copy) {
-        buffer[samples_copied * 2] = m_audioRingBuffer[m_audioRingReadPos];
-        buffer[samples_copied * 2 + 1] = m_audioRingBuffer[m_audioRingReadPos + 1];
-        
-        m_audioRingReadPos = (m_audioRingReadPos + 2) & (kAudioRingBufferSize - 1);
-        samples_copied++;
+
+    // Each stereo sample occupies 2 int16_t slots in the ring buffer
+    const size_t slots_to_copy = samples_to_copy * 2;
+    const size_t slots_until_wrap = kAudioRingBufferSize - m_audioRingReadPos;
+
+    if (slots_to_copy <= slots_until_wrap) {
+        // Contiguous: single memcpy
+        std::memcpy(buffer, &m_audioRingBuffer[m_audioRingReadPos], slots_to_copy * sizeof(int16_t));
+    } else {
+        // Wraps: two memcpys
+        std::memcpy(buffer, &m_audioRingBuffer[m_audioRingReadPos], slots_until_wrap * sizeof(int16_t));
+        std::memcpy(buffer + slots_until_wrap, &m_audioRingBuffer[0], (slots_to_copy - slots_until_wrap) * sizeof(int16_t));
     }
-    
+
+    m_audioRingReadPos = (m_audioRingReadPos + slots_to_copy) & (kAudioRingBufferSize - 1);
+
     return samples_to_copy;
 }
 
@@ -723,17 +682,6 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
     }
 }
 
-void CoreWrapper::SetVideoStandard(brimir::core::config::sys::VideoStandard standard) {
-    m_videoStandard = standard;
-    if (m_initialized && m_saturn) {
-        // TODO: Apply to Ymir Saturn instance
-        // m_saturn->GetConfig().sys.videoStandard = standard;
-    }
-}
-
-brimir::core::config::sys::VideoStandard CoreWrapper::GetVideoStandard() const {
-    return m_videoStandard;
-}
 
 void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height) {
     ScopedTimer timer(m_profiler, "OnFrameComplete_Total");
@@ -816,21 +764,6 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
     }
 }
 
-uint16_t CoreWrapper::ConvertXRGB8888toRGB565(uint32_t color) {
-    // Ymir outputs in XBGR8888 format: 0xXXBBGGRR
-    // Note: Byte order is BGR, not RGB!
-    uint8_t b = (color >> 16) & 0xFF;  // Blue in high byte
-    uint8_t g = (color >> 8) & 0xFF;   // Green in middle byte
-    uint8_t r = color & 0xFF;          // Red in low byte
-
-    // Convert 8-bit channels to RGB565
-    // RGB565: RRRRRGGG GGGBBBBB
-    uint16_t r5 = (r >> 3) & 0x1F;
-    uint16_t g6 = (g >> 2) & 0x3F;
-    uint16_t b5 = (b >> 3) & 0x1F;
-
-    return (r5 << 11) | (g6 << 5) | b5;
-}
 
 void CoreWrapper::OnAudioSample(int16_t left, int16_t right) {
     // Efficient ring buffer implementation - no bounds checks or allocations!
@@ -858,60 +791,6 @@ void CoreWrapper::SetControllerState(unsigned int port, uint16_t buttons) {
     }
 }
 
-bool CoreWrapper::GetGameInfo(char* title, size_t titleSize, char* region, size_t regionSize) const {
-    if (!m_initialized || !m_saturn || !m_gameLoaded) {
-        return false;
-    }
-
-    if (!title || titleSize == 0 || !region || regionSize == 0) {
-        return false;
-    }
-
-    try {
-        const auto& disc = m_saturn->GetDisc();
-        
-        // Copy game title
-        const auto& gameTitle = disc.header.gameTitle;
-        size_t titleLen = std::min(gameTitle.length(), titleSize - 1);
-        std::memcpy(title, gameTitle.c_str(), titleLen);
-        title[titleLen] = '\0';
-        
-        // Convert area code to string
-        std::string regionStr;
-        auto areaCode = disc.header.compatAreaCode;
-        
-        // Area codes can be combined (e.g., JUE for all regions)
-        if ((areaCode & brimir::media::AreaCode::Japan) != brimir::media::AreaCode::None) {
-            regionStr += "J";
-        }
-        if ((areaCode & brimir::media::AreaCode::NorthAmerica) != brimir::media::AreaCode::None) {
-            regionStr += "U";
-        }
-        if ((areaCode & brimir::media::AreaCode::EuropePAL) != brimir::media::AreaCode::None) {
-            regionStr += "E";
-        }
-        if ((areaCode & brimir::media::AreaCode::AsiaPAL) != brimir::media::AreaCode::None) {
-            regionStr += "A";
-        }
-        if ((areaCode & brimir::media::AreaCode::AsiaNTSC) != brimir::media::AreaCode::None) {
-            regionStr += "T";
-        }
-        
-        if (regionStr.empty()) {
-            regionStr = "Unknown";
-        }
-        
-        size_t regionLen = std::min(regionStr.length(), regionSize - 1);
-        std::memcpy(region, regionStr.c_str(), regionLen);
-        region[regionLen] = '\0';
-        
-        return true;
-        
-    } catch (const std::exception& e) {
-        (void)e; // Suppress unused variable warning
-        return false;
-    }
-}
 
 void CoreWrapper::OnPeripheralReport1(brimir::peripheral::PeripheralReport& report) {
     if (report.type == brimir::peripheral::PeripheralType::ControlPad) {
@@ -1039,11 +918,6 @@ void CoreWrapper::SetAutodetectRegion(bool enable) {
     m_saturn->configuration.system.autodetectRegion = enable;
 }
 
-void CoreWrapper::SetHWContext(void* hw_render) {
-    // Hardware rendering context not used with Ymir hw layer
-    (void)hw_render;
-}
-
 void CoreWrapper::SetRenderer(const char* renderer) {
     if (!m_initialized || !m_saturn || !renderer) {
         return;
@@ -1065,74 +939,6 @@ void CoreWrapper::SetDeinterlacing(bool enable) {
     });
 }
 
-void CoreWrapper::SetHorizontalBlend(bool enable) {
-    if (!m_initialized || !m_saturn) {
-        return;
-    }
-
-    // Horizontal blend is not a Ymir feature - this was a Brimir enhancement
-    // Ignore this setting for now (can be re-added later as a post-process)
-}
-
-void CoreWrapper::SetHorizontalOverscan(bool enable) {
-    if (!m_initialized || !m_saturn) {
-        return;
-    }
-
-    // Overscan cropping is not a Ymir VDP feature - Ymir outputs full resolution
-    // Frontends handle overscan cropping themselves if needed
-    // Ignore this setting (libretro will display full frame)
-}
-
-void CoreWrapper::SetInternalResolution(uint32_t scale) {
-    if (!m_initialized || !m_saturn) {
-        return;
-    }
-
-    // Internal resolution scaling not supported with Ymir hw layer
-    // Software renderer always outputs at native resolution
-    (void)scale;
-}
-
-void CoreWrapper::SetGPUUpscaling(bool enable) {
-    // GPU upscaling not supported with Ymir hw layer
-    (void)enable;
-}
-
-void CoreWrapper::SetUpscaleFilter(const char* mode) {
-    // Upscale filtering not supported with Ymir hw layer
-    (void)mode;
-}
-
-void CoreWrapper::SetDebanding(bool enable) {
-    // Debanding not supported with Ymir hw layer
-    (void)enable;
-}
-
-void CoreWrapper::SetBrightness(float brightness) {
-    // Brightness adjustment not supported with Ymir hw layer
-    (void)brightness;
-}
-
-void CoreWrapper::SetGamma(float gamma) {
-    // Gamma correction not supported with Ymir hw layer
-    (void)gamma;
-}
-
-void CoreWrapper::SetFXAA(bool enable) {
-    // FXAA not supported with Ymir hw layer
-    (void)enable;
-}
-
-void CoreWrapper::SetSharpeningMode(const char* mode) {
-    // Sharpening not supported with Ymir hw layer
-    (void)mode;
-}
-
-void CoreWrapper::SetWireframeMode(bool enable) {
-    // Wireframe mode not supported with Ymir hw layer
-    (void)enable;
-}
 
 const char* CoreWrapper::GetActiveRenderer() const {
     if (!m_initialized || !m_saturn) {
@@ -1142,36 +948,6 @@ const char* CoreWrapper::GetActiveRenderer() const {
     return "Software";
 }
 
-bool CoreWrapper::IsGPURendererActive() const {
-    return false;
-}
-
-const char* CoreWrapper::GetLastRendererError() const {
-    return "";
-}
-
-void CoreWrapper::SetVerticalOverscan(bool enable) {
-    if (!m_initialized || !m_saturn) {
-        return;
-    }
-
-    // Overscan cropping is not a Ymir VDP feature - Ymir outputs full resolution
-    // Frontends handle overscan cropping themselves if needed
-    // Ignore this setting (libretro will display full frame)
-}
-
-void CoreWrapper::GetVisibleResolution(uint32_t& width, uint32_t& height) const {
-    if (!m_initialized || !m_saturn) {
-        width = 320;
-        height = 224;
-        return;
-    }
-
-    // Ymir outputs full resolution - use Probe to get current dimensions
-    auto dims = m_saturn->VDP.GetProbe().GetResolution();
-    width = dims.width;
-    height = dims.height;
-}
 
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {
     if (!m_initialized || !m_saturn || !mode) {
@@ -1187,110 +963,6 @@ void CoreWrapper::SetDeinterlacingMode(const char* mode) {
     });
 }
 
-// TODO: Fix MSVC compilation errors
-/*
-bool CoreWrapper::LoadCartridgeRAM() {
-    if (!m_hasCartridge || m_cartridgePath.empty()) {
-        return false;
-    }
-    
-    // Check if save file exists
-    if (!std::filesystem::exists(m_cartridgePath)) {
-        return false;  // No save file yet, that's OK
-    }
-    
-    try {
-        // Read the cartridge RAM file
-        std::ifstream file(m_cartridgePath, std::ios::binary);
-        if (!file) {
-            return false;
-        }
-        
-        // Get file size
-        file.seekg(0, std::ios::end);
-        size_t fileSize = file.tellg();
-        file.seekg(0, std::ios::beg);
-        
-        // Read data
-        std::vector<uint8_t> data(fileSize);
-        file.read(reinterpret_cast<char*>(data.data()), fileSize);
-        
-        // Get cartridge and load RAM based on type
-        auto& cart = m_saturn->SCU.GetCartridge();
-        using CartType = brimir::cart::CartType;
-        const auto cartType = cart.GetType();
-        
-        constexpr size_t size8 = 1024 * 1024;
-        constexpr size_t size32 = 4 * 1024 * 1024;
-        constexpr size_t size48 = 6 * 1024 * 1024;
-        
-        if (cartType == CartType::DRAM8Mbit && fileSize == size8) {
-            auto* cart8 = static_cast<brimir::cart::DRAM8MbitCartridge*>(&cart);
-            cart8->LoadRAM(std::span<const uint8_t, size8>(data.data(), size8));
-            return true;
-        } else if (cartType == CartType::DRAM32Mbit && fileSize == size32) {
-            auto* cart32 = static_cast<brimir::cart::DRAM32MbitCartridge*>(&cart);
-            cart32->LoadRAM(std::span<const uint8_t, size32>(data.data(), size32));
-            return true;
-        } else if (cartType == CartType::DRAM48Mbit && fileSize == size48) {
-            auto* cart48 = static_cast<brimir::cart::DRAM48MbitCartridge*>(&cart);
-            cart48->LoadRAM(std::span<const uint8_t, size48>(data.data(), size48));
-            return true;
-        }
-        
-        return false;
-    } catch (...) {
-        return false;
-    }
-}
-
-void CoreWrapper::SaveCartridgeRAM() {
-    if (!m_hasCartridge || m_cartridgePath.empty()) {
-        return;
-    }
-    
-    try {
-        // Get cartridge and save RAM based on type
-        auto& cart = m_saturn->SCU.GetCartridge();
-        using CartType = brimir::cart::CartType;
-        const auto cartType = cart.GetType();
-        
-        std::vector<uint8_t> data;
-        
-        if (cartType == CartType::DRAM8Mbit) {
-            constexpr size_t size8 = 1024 * 1024;
-            data.resize(size8);
-            auto* cart8 = static_cast<brimir::cart::DRAM8MbitCartridge*>(&cart);
-            cart8->DumpRAM(std::span<uint8_t, size8>(data.data(), size8));
-        } else if (cartType == CartType::DRAM32Mbit) {
-            constexpr size_t size32 = 4 * 1024 * 1024;
-            data.resize(size32);
-            auto* cart32 = static_cast<brimir::cart::DRAM32MbitCartridge*>(&cart);
-            cart32->DumpRAM(std::span<uint8_t, size32>(data.data(), size32));
-        } else if (cartType == CartType::DRAM48Mbit) {
-            constexpr size_t size48 = 6 * 1024 * 1024;
-            data.resize(size48);
-            auto* cart48 = static_cast<brimir::cart::DRAM48MbitCartridge*>(&cart);
-            cart48->DumpRAM(std::span<uint8_t, size48>(data.data(), size48));
-        } else {
-            return;
-        }
-        
-        // Ensure parent directory exists
-        std::filesystem::create_directories(m_cartridgePath.parent_path());
-        
-        // Write to file
-        std::ofstream file(m_cartridgePath, std::ios::binary);
-        if (file) {
-            file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        }
-    } catch (...) {
-        // Ignore errors - save will be retried next time
-    }
-}
-
-
-*/
 
 } // namespace brimir
 

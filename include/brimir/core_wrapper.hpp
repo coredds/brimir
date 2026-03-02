@@ -25,18 +25,10 @@
 namespace brimir {
 struct Saturn;
 
-namespace core::config::sys {
-enum class VideoStandard;
-}
-
 namespace peripheral {
 class ControlPad;
 struct PeripheralReport;
 enum class Button : uint16_t;
-}
-
-namespace vdp {
-class IVDPRenderer;
 }
 }
 
@@ -81,12 +73,6 @@ public:
     /// @return Size in bytes
     size_t GetSRAMSize() const;
 
-    /// @brief Write SRAM data back to emulator
-    /// @param data Pointer to SRAM data
-    /// @param size Size of data in bytes
-    /// @return true if successful
-    bool SetSRAMData(const void* data, size_t size);
-    
     /// @brief Force refresh SRAM from Ymir's backup RAM
     /// This reads from Ymir's .bup file into our buffer
     void RefreshSRAMFromEmulator();
@@ -133,10 +119,6 @@ public:
     /// @return Pitch in bytes
     unsigned int GetFramebufferPitch() const;
 
-    /// @brief Get the pixel format for the framebuffer
-    /// @return libretro pixel format (0=0RGB1555, 1=XRGB8888, 2=RGB565)
-    unsigned int GetPixelFormat() const;
-
     /// @brief Get audio samples for this frame
     /// @param buffer Buffer to write samples to
     /// @param max_samples Maximum number of stereo samples to write
@@ -159,14 +141,6 @@ public:
     /// @return true if successful
     bool LoadState(const void* data, size_t size);
 
-    /// @brief Set the video standard (NTSC/PAL)
-    /// @param standard Video standard to use
-    void SetVideoStandard(brimir::core::config::sys::VideoStandard standard);
-
-    /// @brief Get the current video standard
-    /// @return Current video standard
-    brimir::core::config::sys::VideoStandard GetVideoStandard() const;
-
     /// @brief Check if the emulator is initialized
     /// @return true if initialized
     bool IsInitialized() const { return m_initialized; }
@@ -174,12 +148,6 @@ public:
     /// @brief Check if a game is currently loaded
     /// @return true if a game is loaded
     bool IsGameLoaded() const { return m_gameLoaded; }
-
-    /// @brief Get information about the loaded game
-    /// @param title Output buffer for game title (max 256 chars)
-    /// @param region Output buffer for region code (max 16 chars)
-    /// @return true if game info is available
-    bool GetGameInfo(char* title, size_t titleSize, char* region, size_t regionSize) const;
 
     /// @brief Get the Ymir Saturn instance (for advanced access)
     /// @return Pointer to Saturn instance, or nullptr if not initialized
@@ -200,46 +168,14 @@ public:
     /// @brief Set renderer type (Ymir hw layer only supports software)
     /// @param renderer Renderer string: "software"
     void SetRenderer(const char* renderer);
-    const char* GetActiveRenderer() const;      // Returns "Software"
-    bool IsGPURendererActive() const;           // Always returns false
-    const char* GetLastRendererError() const;   // Always returns empty string
-    
-    /// @brief Set deinterlacing mode
-    /// @param enable True to enable deinterlacing
+    const char* GetActiveRenderer() const;
+
+    /// @brief Set deinterlacing enable
     void SetDeinterlacing(bool enable);
-    
-    /// @brief Set deinterlacing mode (new optimized modes)
-    /// @param mode Mode string: "current", "weave", "blend", "bob", "none"
+
+    /// @brief Set deinterlacing mode
+    /// @param mode Mode string: "bob", "weave", "blend", "current", "none"
     void SetDeinterlacingMode(const char* mode);
-    
-    // GPU-only features (stubbed out with Ymir hw layer)
-    void SetHWContext(void* hw_render);         // Not used
-    void SetInternalResolution(uint32_t scale); // Not supported
-    void SetWireframeMode(bool enable);         // Not supported
-    void SetGPUUpscaling(bool enable);          // Not supported
-    void SetUpscaleFilter(const char* mode);    // Not supported
-    void SetDebanding(bool enable);             // Not supported
-    void SetBrightness(float brightness);       // Not supported
-    void SetGamma(float gamma);                 // Not supported
-    void SetFXAA(bool enable);                  // Not supported
-    void SetSharpeningMode(const char* mode);   // Not supported
-    
-    /// @brief Set horizontal blend filter for interlaced modes
-    /// @param enable True to enable horizontal blending in high-res interlaced modes
-    void SetHorizontalBlend(bool enable);
-    
-    /// @brief Set horizontal overscan display
-    /// @param enable True to show full horizontal area, false to crop edges
-    void SetHorizontalOverscan(bool enable);
-    
-    /// @brief Set vertical overscan display
-    /// @param enable True to show full vertical area, false to crop edges
-    void SetVerticalOverscan(bool enable);
-    
-    /// @brief Get visible framebuffer dimensions after overscan cropping
-    /// @param width Output: visible width
-    /// @param height Output: visible height
-    void GetVisibleResolution(uint32_t& width, uint32_t& height) const;
     
     /// @brief Get profiling report
     /// @return Performance profiling data as string
@@ -254,9 +190,6 @@ private:
 
     /// @brief Callback for when SCSP outputs an audio sample
     void OnAudioSample(int16_t left, int16_t right);
-
-    /// @brief Convert XRGB8888 to RGB565
-    static uint16_t ConvertXRGB8888toRGB565(uint32_t color);
 
     std::unique_ptr<brimir::Saturn> m_saturn;
     bool m_initialized = false;
@@ -276,9 +209,6 @@ private:
     std::atomic<size_t> m_audioRingWritePos{0};
     size_t m_audioRingReadPos = 0;
     
-    // Video standard
-    brimir::core::config::sys::VideoStandard m_videoStandard;
-
     // Input devices (raw pointers owned by Saturn's SMPC)
     brimir::peripheral::ControlPad* m_controller1 = nullptr;
     brimir::peripheral::ControlPad* m_controller2 = nullptr;
@@ -312,12 +242,6 @@ private:
     // Cartridge support
     std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file
     bool m_hasCartridge = false;  // True if a cartridge is inserted
-    
-    /// @brief Load cartridge RAM from file
-    bool LoadCartridgeRAM();
-    
-    /// @brief Save cartridge RAM to file
-    void SaveCartridgeRAM();
 };
 
 } // namespace brimir
