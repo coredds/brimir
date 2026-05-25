@@ -7,14 +7,9 @@ target_link_libraries(benchmark_sh2 PRIVATE brimir::brimir-core)
 
 target_compile_features(benchmark_sh2 PRIVATE cxx_std_20)
 
-# Enable optimizations even in Debug
-if(MSVC)
-    target_compile_options(benchmark_sh2 PRIVATE /O2 /Oi)
-else()
-    target_compile_options(benchmark_sh2 PRIVATE -O2)
-endif()
+# Enable optimizations even in Debug; disable RTC which conflicts with /O2
+target_compile_options(benchmark_sh2 PRIVATE "$<$<CONFIG:Debug>:/O2;/Oi;/RTC1->")
 
 set_target_properties(benchmark_sh2 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}"
 )
-

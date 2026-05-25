@@ -1,6 +1,6 @@
 #pragma once
 
-#include <brimir/core/types.hpp>
+#include <ymir/core/types.hpp>
 #include <string>
 
 namespace brimir {

@@ -93,12 +93,4 @@ private:
     std::string m_name;
 };
 
-} // namespace brimir
-
-
-
-
-
-
-
-
+} // namespace ymir

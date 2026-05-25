@@ -6,12 +6,12 @@ A Sega Saturn emulation core for libretro, targeting high performance and accura
 
 Brimir is a libretro core for Sega Saturn emulation, built directly on the Ymir emulator hardware layer. It provides accurate, cycle-accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development -- using Ymir's proven hardware emulation layer with interpreter-based SH-2 execution. Full compatibility with Ymir's software renderer.
+**Current Status**: Active development. Hardware layer synced directly from upstream Ymir (v0.3.2-dev) with no namespace patching, enabling trivial future updates.
 
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn hardware emulation
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir
 - Accurate SH-2 dual-CPU emulation (interpreter)
 - Full VDP1 sprite engine and VDP2 scroll plane graphics
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation
@@ -118,10 +118,13 @@ cmake --build build -j$(nproc)
 ```
 brimir/
   src/
-    core/          Ymir hardware layer (SH-2, VDP1/2, SCSP, SCU, CD block, etc.)
-    bridge/        CoreWrapper -- interface between emulator and frontends
-    libretro/      Libretro API implementation and core options
-    jit/           SH-2 JIT compiler (future)
+    core/
+      include/ymir/   Ymir hardware layer (verbatim upstream sync)
+      include/brimir/ Brimir-specific additions
+      src/ymir/       Ymir source files (verbatim)
+    bridge/           CoreWrapper -- interface between emulator and frontends
+    libretro/         Libretro API implementation and core options
+    jit/              SH-2 JIT compiler (future)
   include/         Public headers
   vendor/          Vendored dependencies
   tests/           Unit and integration tests
@@ -138,7 +141,7 @@ brimir/
 
 ## Roadmap
 
-- **Phase 1** (current): Stabilize Ymir hardware layer integration, improve game compatibility
+- **Phase 1** (done): Ymir hardware layer synced verbatim from upstream
 - **Phase 2**: Implement SH-2 JIT compiler for x86-64
 - **Phase 3**: Expand platform support (macOS, ARM64)
 - **Phase 4**: Optional GPU acceleration layer on top of Ymir's software renderer
@@ -160,7 +163,7 @@ Licensed under the GPLv2. See LICENSE file for details.
 
 ## Acknowledgments
 
-This project uses the Ymir emulator hardware layer by StrikerX3. Special thanks to the Ymir developers for their exceptional work on cycle-accurate Saturn emulation.
+This project's hardware layer is synced verbatim from the Ymir emulator by StrikerX3. Future Ymir updates can be applied by copying `libs/ymir-core/{include,src}/ymir/` into `src/core/{include,src}/ymir/` — no namespace patching required.
 
 ## Contributing
 

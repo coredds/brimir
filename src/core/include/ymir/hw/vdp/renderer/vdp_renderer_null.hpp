@@ -1,0 +1,99 @@
+#pragma once
+
+/**
+@file
+@brief Null VDP1 and VDP2 renderer implementation.
+
+Does nothing, but invokes all standard renderer callbacks at appropriate times.
+*/
+
+#include <ymir/hw/vdp/renderer/vdp_renderer_base.hpp>
+
+namespace ymir::vdp {
+
+class NullVDPRenderer : public IVDPRenderer {
+public:
+    NullVDPRenderer()
+        : IVDPRenderer(VDPRendererType::Null) {}
+
+    // -------------------------------------------------------------------------
+    // Basics
+
+    bool IsValid() const override {
+        return true;
+    }
+
+    bool IsHardwareRenderer() const override {
+        return false;
+    }
+
+    void Reset(bool hard) override {}
+
+    // -------------------------------------------------------------------------
+    // Save states
+
+    void PreSaveStateSync() override {}
+    void PostLoadStateSync() override {}
+
+    void SaveState(savestate::VDPSaveState::VDPRendererSaveState &state) override {}
+    bool ValidateState(const savestate::VDPSaveState::VDPRendererSaveState &state) const override {
+        return true;
+    }
+    void LoadState(const savestate::VDPSaveState::VDPRendererSaveState &state) override {}
+
+    // -------------------------------------------------------------------------
+    // VDP1 memory and register writes
+
+    void VDP1WriteVRAM(uint32 address, uint8 value) override {}
+    void VDP1WriteVRAM(uint32 address, uint16 value) override {}
+    void VDP1SyncFB() override {}
+    void VDP1DebugSyncFB() override {}
+    void VDP1WriteFB(uint32 address, uint8 value) override {}
+    void VDP1WriteFB(uint32 address, uint16 value) override {}
+    void VDP1WriteReg(uint32 address, uint16 value) override {}
+
+    // -------------------------------------------------------------------------
+    // VDP2 memory and register writes
+
+    void VDP2WriteVRAM(uint32 address, uint8 value) override {}
+    void VDP2WriteVRAM(uint32 address, uint16 value) override {}
+    void VDP2WriteCRAM(uint32 address, uint8 value) override {}
+    void VDP2WriteCRAM(uint32 address, uint16 value) override {}
+    void VDP2WriteReg(uint32 address, uint16 value) override {}
+
+    // -------------------------------------------------------------------------
+    // Debugger
+
+    void UpdateEnabledLayers() override {}
+
+    // -------------------------------------------------------------------------
+    // Utilities
+
+    void DumpExtraVDP1Framebuffers(std::ostream &out) const override {}
+
+    // -------------------------------------------------------------------------
+    // Rendering process
+
+    void VDP1EraseFramebuffer(uint64 cycles) override {}
+    void VDP1SwapFramebuffer() override {
+        Callbacks.VDP1FramebufferSwap();
+    }
+    void VDP1BeginFrame() override {}
+    void VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Control control) override {}
+    void VDP1EndFrame() override {
+        Callbacks.VDP1DrawFinished();
+    }
+
+    void VDP2SetResolution(uint32 h, uint32 v, bool exclusive) override {
+        Callbacks.VDP2ResolutionChanged(h, v);
+    }
+    void VDP2SetField(bool odd) override {}
+    void VDP2LatchTVMD() override {}
+    void VDP2BeginFrame() override {}
+    void VDP2RenderLine(uint32 y) override {}
+    void VDP2EndFrame() override {
+        Callbacks.VDP2DrawFinished();
+    }
+};
+
+} // namespace ymir::vdp

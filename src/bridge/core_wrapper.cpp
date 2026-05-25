@@ -4,16 +4,16 @@
 
 #include "brimir/core_wrapper.hpp"
 
-#include <brimir/brimir.hpp>
-#include <brimir/media/loader/loader.hpp>
-#include <brimir/core/configuration.hpp>
-#include <brimir/hw/smpc/peripheral/peripheral_state_common.hpp>
-#include <brimir/hw/smpc/peripheral/peripheral_report.hpp>
-#include <brimir/state/state.hpp>
-#include <brimir/db/game_db.hpp>
-#include <brimir/db/rom_cart_db.hpp>
-#include <brimir/hw/cart/cart_impl_dram.hpp>
-#include <brimir/core/hash.hpp>
+#include <ymir/ymir.hpp>
+#include <ymir/media/loader/loader.hpp>
+#include <ymir/core/configuration.hpp>
+#include <ymir/hw/smpc/peripheral/peripheral_state_common.hpp>
+#include <ymir/hw/smpc/peripheral/peripheral_report.hpp>
+#include <ymir/savestate/savestate.hpp>
+#include <ymir/db/game_db.hpp>
+#include <ymir/db/rom_cart_db.hpp>
+#include <ymir/hw/cart/cart_impl_dram.hpp>
+#include <ymir/core/hash.hpp>
 
 #include <cstring>
 #include <filesystem>
@@ -63,7 +63,7 @@ bool CoreWrapper::Initialize() {
 
     try {
         // Create the Saturn emulator instance
-        m_saturn = std::make_unique<brimir::Saturn>();
+        m_saturn = std::make_unique<ymir::Saturn>();
         
         // NOTE: Ymir requires a file-backed memory-mapped backup RAM
         // We'll set the path later when the game loads (need game name for per-game saves)
@@ -76,7 +76,7 @@ bool CoreWrapper::Initialize() {
         m_saturn->configuration.video.threadedDeinterlacer = true;
         
         // Configure enhancements for optimal libretro performance
-        m_saturn->VDP.ModifyEnhancements([](brimir::vdp::config::Enhancements& enh) {
+        m_saturn->VDP.ModifyEnhancements([](ymir::vdp::config::Enhancements& enh) {
             enh.deinterlace = true;        // Bob mode deinterlacing
             enh.transparentMeshes = true;  // Accurate VDP1 mesh rendering
         });
@@ -208,15 +208,15 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         }
         
         // Create a Disc object and load the disc image into it
-        brimir::media::Disc disc;
+        ymir::media::Disc disc;
         
         // Clear previous error
         m_lastError.clear();
         
         // Callback for loader messages - capture errors for debugging
-        auto loaderCallback = [this](brimir::media::MessageType type, std::string message) {
+        auto loaderCallback = [this](ymir::media::MessageType type, std::string message) {
             // Store error messages
-            if (type == brimir::media::MessageType::Error) {
+            if (type == ymir::media::MessageType::Error) {
                 if (!m_lastError.empty()) {
                     m_lastError += "; ";
                 }
@@ -228,7 +228,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // Use Ymir's loader to load the disc
         bool success = false;
         try {
-            success = brimir::media::LoadDisc(gamePath, disc, false, loaderCallback);
+            success = ymir::media::LoadDisc(gamePath, disc, false, loaderCallback);
         } catch (const std::exception& e) {
             m_lastError = std::string("Exception during disc load: ") + e.what();
             return false;
@@ -260,12 +260,12 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         const auto& discForCartridge = m_saturn->GetDisc();
         if (!discForCartridge.sessions.empty()) {
             // Get game info from Ymir's database
-            const brimir::db::GameInfo* gameInfo = brimir::db::GetGameInfo(
+            const ymir::db::GameInfo* gameInfo = ymir::db::GetGameInfo(
                 discForCartridge.header.productNumber,
                 m_saturn->GetDiscHash()
             );
             
-            if (gameInfo && gameInfo->GetCartridge() != brimir::db::Cartridge::None) {
+            if (gameInfo && gameInfo->GetCartridge() != ymir::db::Cartridge::None) {
                 // Set up cartridge RAM save path
                 std::filesystem::path gameFileName = gamePath.stem();
                 if (save_directory && save_directory[0] != '\0') {
@@ -277,18 +277,18 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                 // Insert the appropriate cartridge
                 try {
                     switch (gameInfo->GetCartridge()) {
-                    case brimir::db::Cartridge::DRAM8Mbit:
-                        m_saturn->InsertCartridge<brimir::cart::DRAM8MbitCartridge>();
+                    case ymir::db::Cartridge::DRAM8Mbit:
+                        m_saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
                         m_hasCartridge = true;
                         // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
                         break;
-                    case brimir::db::Cartridge::DRAM32Mbit:
-                        m_saturn->InsertCartridge<brimir::cart::DRAM32MbitCartridge>();
+                    case ymir::db::Cartridge::DRAM32Mbit:
+                        m_saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>();
                         m_hasCartridge = true;
                         // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
                         break;
-                    case brimir::db::Cartridge::DRAM48Mbit:
-                        m_saturn->InsertCartridge<brimir::cart::DRAM48MbitCartridge>();
+                    case ymir::db::Cartridge::DRAM48Mbit:
+                        m_saturn->InsertCartridge<ymir::cart::DRAM48MbitCartridge>();
                         m_hasCartridge = true;
                         // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
                         break;
@@ -626,7 +626,7 @@ size_t CoreWrapper::GetStateSize() const {
 
     // Return the size of Ymir's State structure
     // This includes all emulator state (CPU, VDP, SCSP, memory, etc.)
-    return sizeof(brimir::state::State);
+    return sizeof(ymir::savestate::SaveState);
 }
 
 bool CoreWrapper::SaveState(void* data, size_t size) {
@@ -642,7 +642,7 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
 
     try {
         // Create a State object on the heap (too large for stack)
-        auto state = std::make_unique<brimir::state::State>();
+        auto state = std::make_unique<ymir::savestate::SaveState>();
         m_saturn->SaveState(*state);
         
         // Serialize state to buffer (simple memcpy for now)
@@ -668,7 +668,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
 
     try {
         // Deserialize state from buffer (allocate on heap - too large for stack)
-        auto state = std::make_unique<brimir::state::State>();
+        auto state = std::make_unique<ymir::savestate::SaveState>();
         std::memcpy(state.get(), data, requiredSize);
         
         // Load state into emulator
@@ -792,21 +792,21 @@ void CoreWrapper::SetControllerState(unsigned int port, uint16_t buttons) {
 }
 
 
-void CoreWrapper::OnPeripheralReport1(brimir::peripheral::PeripheralReport& report) {
-    if (report.type == brimir::peripheral::PeripheralType::ControlPad) {
+void CoreWrapper::OnPeripheralReport1(ymir::peripheral::PeripheralReport& report) {
+    if (report.type == ymir::peripheral::PeripheralType::ControlPad) {
         // Convert libretro button mask to Saturn button states
         report.report.controlPad.buttons = ConvertLibretroButtons(m_port1Buttons);
     }
 }
 
-void CoreWrapper::OnPeripheralReport2(brimir::peripheral::PeripheralReport& report) {
-    if (report.type == brimir::peripheral::PeripheralType::ControlPad) {
+void CoreWrapper::OnPeripheralReport2(ymir::peripheral::PeripheralReport& report) {
+    if (report.type == ymir::peripheral::PeripheralType::ControlPad) {
         // Convert libretro button mask to Saturn button states
         report.report.controlPad.buttons = ConvertLibretroButtons(m_port2Buttons);
     }
 }
 
-brimir::peripheral::Button CoreWrapper::ConvertLibretroButtons(uint16_t retroButtons) {
+ymir::peripheral::Button CoreWrapper::ConvertLibretroButtons(uint16_t retroButtons) {
     // libretro button indices (standard mapping)
     constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_B = 0;
     constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_Y = 1;
@@ -826,59 +826,59 @@ brimir::peripheral::Button CoreWrapper::ConvertLibretroButtons(uint16_t retroBut
     constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_R3 = 15;
     
     // Start with all buttons released (1 = released in Saturn)
-    brimir::peripheral::Button saturnButtons = brimir::peripheral::Button::Default;
+    ymir::peripheral::Button saturnButtons = ymir::peripheral::Button::Default;
     
     // Map libretro buttons to Saturn buttons (0 = pressed in Saturn)
     // Note: libretro uses bit mask (1 = pressed), Saturn uses inverted (0 = pressed)
     
     // D-pad
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_UP)) {
-        saturnButtons &= ~brimir::peripheral::Button::Up;
+        saturnButtons &= ~ymir::peripheral::Button::Up;
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_DOWN)) {
-        saturnButtons &= ~brimir::peripheral::Button::Down;
+        saturnButtons &= ~ymir::peripheral::Button::Down;
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_LEFT)) {
-        saturnButtons &= ~brimir::peripheral::Button::Left;
+        saturnButtons &= ~ymir::peripheral::Button::Left;
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT)) {
-        saturnButtons &= ~brimir::peripheral::Button::Right;
+        saturnButtons &= ~ymir::peripheral::Button::Right;
     }
     
     // Face buttons (map to Saturn's 6-button layout)
     // Saturn: A B C X Y Z
     // Libretro: B A Y X (SNES layout)
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_B)) {
-        saturnButtons &= ~brimir::peripheral::Button::A;  // B -> A
+        saturnButtons &= ~ymir::peripheral::Button::A;  // B -> A
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_A)) {
-        saturnButtons &= ~brimir::peripheral::Button::B;  // A -> B
+        saturnButtons &= ~ymir::peripheral::Button::B;  // A -> B
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_Y)) {
-        saturnButtons &= ~brimir::peripheral::Button::C;  // Y -> C
+        saturnButtons &= ~ymir::peripheral::Button::C;  // Y -> C
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_X)) {
-        saturnButtons &= ~brimir::peripheral::Button::X;  // X -> X
+        saturnButtons &= ~ymir::peripheral::Button::X;  // X -> X
     }
     // L2/R2 for Y/Z
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_L2)) {
-        saturnButtons &= ~brimir::peripheral::Button::Y;  // L2 -> Y
+        saturnButtons &= ~ymir::peripheral::Button::Y;  // L2 -> Y
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_R2)) {
-        saturnButtons &= ~brimir::peripheral::Button::Z;  // R2 -> Z
+        saturnButtons &= ~ymir::peripheral::Button::Z;  // R2 -> Z
     }
     
     // Shoulder buttons
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_L)) {
-        saturnButtons &= ~brimir::peripheral::Button::L;
+        saturnButtons &= ~ymir::peripheral::Button::L;
     }
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_R)) {
-        saturnButtons &= ~brimir::peripheral::Button::R;
+        saturnButtons &= ~ymir::peripheral::Button::R;
     }
     
     // Start button
     if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_START)) {
-        saturnButtons &= ~brimir::peripheral::Button::Start;
+        saturnButtons &= ~ymir::peripheral::Button::Start;
     }
     
     return saturnButtons;
@@ -889,7 +889,7 @@ void CoreWrapper::SetAudioInterpolation(const char* mode) {
         return;
     }
 
-    using InterpolationMode = brimir::core::config::audio::SampleInterpolationMode;
+    using InterpolationMode = ymir::core::config::audio::SampleInterpolationMode;
     
     if (strcmp(mode, "linear") == 0) {
         m_saturn->configuration.audio.interpolation = InterpolationMode::Linear;
@@ -934,7 +934,7 @@ void CoreWrapper::SetDeinterlacing(bool enable) {
         return;
     }
 
-    m_saturn->VDP.ModifyEnhancements([enable](brimir::vdp::config::Enhancements& enh) {
+    m_saturn->VDP.ModifyEnhancements([enable](ymir::vdp::config::Enhancements& enh) {
         enh.deinterlace = enable;
     });
 }
@@ -958,11 +958,10 @@ void CoreWrapper::SetDeinterlacingMode(const char* mode) {
     // The specific modes (blend/weave/bob/current) were Brimir enhancements
     // For now, just toggle deinterlacing on/off
     bool enable = (strcmp(mode, "none") != 0);
-    m_saturn->VDP.ModifyEnhancements([enable](brimir::vdp::config::Enhancements& enh) {
+    m_saturn->VDP.ModifyEnhancements([enable](ymir::vdp::config::Enhancements& enh) {
         enh.deinterlace = enable;
     });
 }
 
 
 } // namespace brimir
-

@@ -183,7 +183,7 @@ RETRO_API unsigned retro_api_version(void) {
 RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "Brimir";
-    info->library_version = "0.3.1";
+    info->library_version = "0.4.0";
     info->need_fullpath = true;
     info->valid_extensions = "chd|cue|bin|iso|ccd|img|mds|mdf|m3u";
 }
@@ -593,4 +593,3 @@ RETRO_API size_t retro_get_memory_size(unsigned id) {
             return 0;
     }
 }
-

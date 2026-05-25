@@ -8,9 +8,9 @@
  * - Bit extraction (instruction decode)
  */
 
-#include <brimir/util/bit_ops.hpp>
+#include <ymir/util/bit_ops.hpp>
 #include <brimir/util/benchmark.hpp>
-#include <brimir/core/types.hpp>
+#include <ymir/core/types.hpp>
 
 #include <iostream>
 #include <iomanip>
@@ -18,7 +18,6 @@
 #include <vector>
 #include <chrono>
 
-using namespace brimir;
 using namespace brimir::util;
 using ::bit::byte_swap;
 using ::bit::extract;

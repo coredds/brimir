@@ -8,4 +8,3 @@
 
 // Get core options v2 structure
 const struct retro_core_options_v2* brimir_get_core_options_v2(void);
-

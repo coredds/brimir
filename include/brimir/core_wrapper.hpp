@@ -13,16 +13,16 @@
 #include <string>
 #include <vector>
 
-#include "brimir/profiler.hpp"
+#include "profiler.hpp"
 
 // Include Saturn headers for test access
 // Note: Only include in test builds to keep libretro API clean
 #ifdef BRIMIR_BUILD_TESTS
-#include <brimir/sys/saturn.hpp>
+#include <ymir/sys/saturn.hpp>
 #endif
 
 // Forward declarations to avoid including Ymir headers in libretro builds
-namespace brimir {
+namespace ymir {
 struct Saturn;
 
 namespace peripheral {
@@ -151,7 +151,7 @@ public:
 
     /// @brief Get the Ymir Saturn instance (for advanced access)
     /// @return Pointer to Saturn instance, or nullptr if not initialized
-    brimir::Saturn* GetSaturn() { return m_saturn.get(); }
+    ymir::Saturn* GetSaturn() { return m_saturn.get(); }
 
     /// @brief Set audio interpolation mode
     /// @param mode Interpolation mode: "linear" or "nearest"
@@ -191,7 +191,7 @@ private:
     /// @brief Callback for when SCSP outputs an audio sample
     void OnAudioSample(int16_t left, int16_t right);
 
-    std::unique_ptr<brimir::Saturn> m_saturn;
+    std::unique_ptr<ymir::Saturn> m_saturn;
     bool m_initialized = false;
     bool m_gameLoaded = false;
     bool m_iplLoaded = false;
@@ -210,19 +210,19 @@ private:
     size_t m_audioRingReadPos = 0;
     
     // Input devices (raw pointers owned by Saturn's SMPC)
-    brimir::peripheral::ControlPad* m_controller1 = nullptr;
-    brimir::peripheral::ControlPad* m_controller2 = nullptr;
+    ymir::peripheral::ControlPad* m_controller1 = nullptr;
+    ymir::peripheral::ControlPad* m_controller2 = nullptr;
     
     // Button states for each port (stored for peripheral callback)
     uint16_t m_port1Buttons = 0;
     uint16_t m_port2Buttons = 0;
     
     // Peripheral report callbacks
-    void OnPeripheralReport1(brimir::peripheral::PeripheralReport& report);
-    void OnPeripheralReport2(brimir::peripheral::PeripheralReport& report);
+    void OnPeripheralReport1(ymir::peripheral::PeripheralReport& report);
+    void OnPeripheralReport2(ymir::peripheral::PeripheralReport& report);
     
     // Convert libretro button mask to Saturn Button enum
-    static brimir::peripheral::Button ConvertLibretroButtons(uint16_t retroButtons);
+    static ymir::peripheral::Button ConvertLibretroButtons(uint16_t retroButtons);
     
     // Last error message from operations (for debugging)
     std::string m_lastError;
@@ -245,5 +245,3 @@ private:
 };
 
 } // namespace brimir
-
-

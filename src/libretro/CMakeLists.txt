@@ -10,4 +10,3 @@ target_include_directories(brimir_libretro_api PUBLIC
 )
 
 target_compile_features(brimir_libretro_api PUBLIC cxx_std_20)
-
