@@ -271,7 +271,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                 if (save_directory && save_directory[0] != '\0') {
                     m_cartridgePath = std::filesystem::path(save_directory) / (gameFileName.string() + ".cart");
                 } else {
-                    m_cartridgePath = std::filesystem::path(save_directory) / (gameFileName.string() + ".cart");
+                    m_cartridgePath = std::filesystem::temp_directory_path() / (gameFileName.string() + ".cart");
                 }
                 
                 // Insert the appropriate cartridge
@@ -418,6 +418,19 @@ void* CoreWrapper::GetSRAMData() {
         m_sramData.resize(GetSRAMSize());
         // DON'T read from Ymir yet - let RetroArch load .srm first!
         return m_sramData.data();
+    }
+
+    // On the first call after RetroArch has loaded .srm data,
+    // write it back into Ymir's backup RAM so the emulator uses it
+    if (m_gameLoaded && m_sramFirstLoad) {
+        auto& bup = m_saturn->mem.GetInternalBackupRAM();
+        uint32 size = bup.Size();
+        for (uint32 i = 0; i < size && i < m_sramData.size(); i++) {
+            bup.WriteByte(i, m_sramData[i]);
+        }
+        m_sramFirstLoad = false;
+        m_sramCacheDirty = false;
+        m_framesSinceLastSRAMSync = 0;
     }
 
     // If game is loaded, refresh SRAM from Ymir periodically or when marked dirty
