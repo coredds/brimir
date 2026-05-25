@@ -3161,15 +3161,16 @@ FORCE_INLINE static void Color888ShadowMasked(const std::span<Color888> pixels,
     // Four pixels at a time
     for (; (i + 4) < pixels.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
-        uint32x4_t mask_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
-        mask_x4 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x4))));
-        mask_x4 = vnegq_s32(mask_x4);
+        uint8x16_t mask_x16 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
+        mask_x16 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x16))));
+        int32x4_t mask_x4 = vnegq_s32(vreinterpretq_s32_u8(mask_x16));
 
         const uint32x4_t pixel_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&pixels[i]));
-        const uint32x4_t shadowed_x4 = vshrq_n_u8(pixel_x4, 1);
+        const uint32x4_t shadowed_x4 = vreinterpretq_u32_u8(
+            vshrq_n_u8(vreinterpretq_u8_u32(pixel_x4), 1));
 
         // Blend with mask
-        const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, shadowed_x4, pixel_x4);
+        const uint32x4_t dstColor_x4 = vbslq_u32(vreinterpretq_u32_s32(mask_x4), shadowed_x4, pixel_x4);
 
         // Write
         vst1q_u32(reinterpret_cast<uint32 *>(&pixels[i]), dstColor_x4);
@@ -3240,18 +3241,23 @@ FORCE_INLINE static void Color888SatAddMasked(const std::span<Color888> dest,
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
-        uint32x4_t mask_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
-        mask_x4 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x4))));
-        mask_x4 = vnegq_s32(mask_x4);
+        uint8x16_t mask_x16 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
+        mask_x16 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x16))));
+        int32x4_t mask_x4 = vnegq_s32(vreinterpretq_s32_u8(mask_x16));
 
-        const uint32x4_t topColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i]));
-        const uint32x4_t btmColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&btmColors[i]));
+        const uint8x16_t topColor_x16 = vreinterpretq_u8_u32(
+            vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i])));
+        const uint8x16_t btmColor_x16 = vreinterpretq_u8_u32(
+            vld1q_u32(reinterpret_cast<const uint32 *>(&btmColors[i])));
 
         // Saturated add
-        const uint32x4_t add_x4 = vqaddq_u8(topColor_x4, btmColor_x4);
+        const uint8x16_t add_x16 = vqaddq_u8(topColor_x16, btmColor_x16);
 
         // Blend with mask
-        const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, add_x4, topColor_x4);
+        const uint32x4_t dstColor_x4 = vbslq_u32(
+            vreinterpretq_u32_s32(mask_x4),
+            vreinterpretq_u32_u8(add_x16),
+            vreinterpretq_u32_u8(topColor_x16));
 
         // Write
         vst1q_u32(reinterpret_cast<uint32 *>(&dest[i]), dstColor_x4);
@@ -3321,15 +3327,15 @@ FORCE_INLINE static void Color888SelectMasked(const std::span<Color888> dest,
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
-        uint32x4_t mask_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
-        mask_x4 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x4))));
-        mask_x4 = vnegq_s32(mask_x4);
+        uint8x16_t mask_x16 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
+        mask_x16 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x16))));
+        int32x4_t mask_x4 = vnegq_s32(vreinterpretq_s32_u8(mask_x16));
 
         const uint32x4_t topColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i]));
         const uint32x4_t btmColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&btmColors[i]));
 
         // Blend with mask
-        const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, btmColor_x4, topColor_x4);
+        const uint32x4_t dstColor_x4 = vbslq_u32(vreinterpretq_u32_s32(mask_x4), btmColor_x4, topColor_x4);
 
         // Write
         vst1q_u32(reinterpret_cast<uint32 *>(&dest[i]), dstColor_x4);
@@ -3398,18 +3404,23 @@ FORCE_INLINE static void Color888AverageMasked(const std::span<Color888> dest,
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
-        uint32x4_t mask_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
-        mask_x4 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x4))));
-        mask_x4 = vnegq_s32(mask_x4);
+        uint8x16_t mask_x16 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
+        mask_x16 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x16))));
+        int32x4_t mask_x4 = vnegq_s32(vreinterpretq_s32_u8(mask_x16));
 
-        const uint32x4_t topColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i]));
-        const uint32x4_t btmColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&btmColors[i]));
+        const uint8x16_t topColor_x16 = vreinterpretq_u8_u32(
+            vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i])));
+        const uint8x16_t btmColor_x16 = vreinterpretq_u8_u32(
+            vld1q_u32(reinterpret_cast<const uint32 *>(&btmColors[i])));
 
         // Halving average
-        const uint32x4_t average_x4 = vhaddq_u8(topColor_x4, btmColor_x4);
+        const uint8x16_t average_x16 = vhaddq_u8(topColor_x16, btmColor_x16);
 
         // Blend with mask
-        const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, average_x4, topColor_x4);
+        const uint32x4_t dstColor_x4 = vbslq_u32(
+            vreinterpretq_u32_s32(mask_x4),
+            vreinterpretq_u32_u8(average_x16),
+            vreinterpretq_u32_u8(topColor_x16));
 
         // Write
         vst1q_u32(reinterpret_cast<uint32 *>(&dest[i]), dstColor_x4);
@@ -3530,40 +3541,52 @@ FORCE_INLINE static void Color888CompositeRatioPerPixelMasked(const std::span<Co
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
-        uint32x4_t mask_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
-        mask_x4 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x4))));
-        mask_x4 = vnegq_s32(mask_x4);
+        uint8x16_t mask_x16 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
+        mask_x16 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x16))));
+        int32x4_t mask_x4 = vnegq_s32(vreinterpretq_s32_u8(mask_x16));
 
         // Load four ratios and splat each byte into 32-bit lanes
-        uint32x4_t ratio_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(ratios.data() + i), vdupq_n_u32(0), 0);
+        uint8x16_t ratio_x16 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(ratios.data() + i), vdupq_n_u32(0), 0);
         // 8 -> 16
-        ratio_x4 = vzip1q_u8(ratio_x4, ratio_x4);
+        ratio_x16 = vzip1q_u8(ratio_x16, ratio_x16);
         // 16 -> 32
-        ratio_x4 = vzip1q_u16(ratio_x4, ratio_x4);
+        ratio_x16 = vreinterpretq_u8_u16(vzip1q_u16(
+            vreinterpretq_u16_u8(ratio_x16), vreinterpretq_u16_u8(ratio_x16)));
 
-        const uint32x4_t topColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i]));
-        const uint32x4_t btmColor_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&btmColors[i]));
+        const uint8x16_t topColor_x16 = vreinterpretq_u8_u32(
+            vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i])));
+        const uint8x16_t btmColor_x16 = vreinterpretq_u8_u32(
+            vld1q_u32(reinterpret_cast<const uint32 *>(&btmColors[i])));
 
-        const uint16x8_t topColor16lo = vmovl_u8(vget_low_u8(topColor_x4));
-        const uint16x8_t btmColor16lo = vmovl_u8(vget_low_u8(btmColor_x4));
+        const uint16x8_t topColor16lo = vmovl_u8(vget_low_u8(topColor_x16));
+        const uint16x8_t btmColor16lo = vmovl_u8(vget_low_u8(btmColor_x16));
 
-        const uint16x8_t topColor16hi = vmovl_high_u8(topColor_x4);
-        const uint16x8_t btmColor16hi = vmovl_high_u8(btmColor_x4);
+        const uint16x8_t topColor16hi = vmovl_high_u8(topColor_x16);
+        const uint16x8_t btmColor16hi = vmovl_high_u8(btmColor_x16);
 
         // Composite
-        int16x8_t composite16lo = vsubq_s16(topColor16lo, btmColor16lo);
-        int16x8_t composite16hi = vsubq_s16(topColor16hi, btmColor16hi);
+        int16x8_t composite16lo = vsubq_s16(vreinterpretq_s16_u16(topColor16lo),
+                                             vreinterpretq_s16_u16(btmColor16lo));
+        int16x8_t composite16hi = vsubq_s16(vreinterpretq_s16_u16(topColor16hi),
+                                             vreinterpretq_s16_u16(btmColor16hi));
 
-        composite16lo = vmulq_u16(composite16lo, vmovl_u8(vget_low_s8(ratio_x4)));
-        composite16hi = vmulq_u16(composite16hi, vmovl_high_u8(ratio_x4));
+        composite16lo = vmulq_s16(composite16lo,
+            vmovl_s8(vget_low_s8(vreinterpretq_s8_u8(ratio_x16))));
+        composite16hi = vmulq_s16(composite16hi,
+            vmovl_high_s8(vreinterpretq_s8_u8(ratio_x16)));
 
-        composite16lo = vsraq_n_s16(vmovl_s8(vget_low_s8(btmColor_x4)), composite16lo, 5);
-        composite16hi = vsraq_n_s16(vmovl_high_s8(btmColor_x4), composite16hi, 5);
+        composite16lo = vsraq_n_s16(vmovl_s8(vget_low_s8(vreinterpretq_s8_u8(btmColor_x16))),
+                                     composite16lo, 5);
+        composite16hi = vsraq_n_s16(vmovl_high_s8(vreinterpretq_s8_u8(btmColor_x16)),
+                                     composite16hi, 5);
 
-        int8x16_t composite_x4 = vmovn_high_s16(vmovn_s16(composite16lo), composite16hi);
+        const int8x16_t composite_x16 = vmovn_high_s16(vmovn_s16(composite16lo), composite16hi);
 
         // Blend with mask
-        const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, composite_x4, topColor_x4);
+        const uint32x4_t dstColor_x4 = vbslq_u32(
+            vreinterpretq_u32_s32(mask_x4),
+            vreinterpretq_u32_s8(composite_x16),
+            vreinterpretq_u32_u8(topColor_x16));
 
         // Write
         vst1q_u32(reinterpret_cast<uint32 *>(&dest[i]), dstColor_x4);
