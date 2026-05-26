@@ -3961,13 +3961,11 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
         for (uint32 x = 0; Color888 &outputColor : framebufferOutput) {
             if (layer0ColorOffsetEnabled[x]) {
                 const auto &colorOffset = regs2.colorOffset[regs2.colorOffsetSelect[scanline_layers[x][0]]];
-                outputColor = Color888{
-                    .r = kColorOffsetLUT[colorOffset.r][outputColor.r],
-                    .g = kColorOffsetLUT[colorOffset.g][outputColor.g],
-                    .b = kColorOffsetLUT[colorOffset.b][outputColor.b],
-                    .pad = 0,
-                    .msb = 0,
-                };
+                outputColor.r = kColorOffsetLUT[colorOffset.r][outputColor.r];
+                outputColor.g = kColorOffsetLUT[colorOffset.g][outputColor.g];
+                outputColor.b = kColorOffsetLUT[colorOffset.b][outputColor.b];
+                outputColor.pad = 0;
+                outputColor.msb = 0;
             }
             ++x;
         }
@@ -4019,13 +4017,11 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
             for (uint32 x = 0; Color888 &mesheColor : meshOut) {
                 const auto &colorOffset = regs2.colorOffset[regs2.colorOffsetSelect[LYR_Sprite]];
                 if (colorOffset.nonZero) {
-                    mesheColor = Color888{
-                        .r = kColorOffsetLUT[colorOffset.r][mesheColor.r],
-                        .g = kColorOffsetLUT[colorOffset.g][mesheColor.g],
-                        .b = kColorOffsetLUT[colorOffset.b][mesheColor.b],
-                        .pad = 0,
-                        .msb = 0,
-                    };
+                    mesheColor.r = kColorOffsetLUT[colorOffset.r][mesheColor.r];
+                    mesheColor.g = kColorOffsetLUT[colorOffset.g][mesheColor.g];
+                    mesheColor.b = kColorOffsetLUT[colorOffset.b][mesheColor.b];
+                    mesheColor.pad = 0;
+                    mesheColor.msb = 0;
                 }
                 ++x;
             }
