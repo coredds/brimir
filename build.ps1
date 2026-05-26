@@ -4,7 +4,7 @@
 param(
     [string]$BuildType = "Release",
     [string]$Arch = "x64",
-    [string]$Generator = "Ninja",
+    [string]$Generator = "Visual Studio 17 2022",
     [switch]$Clean,
     [switch]$Reconfigure,
     [switch]$Target,
@@ -43,7 +43,7 @@ if (-not (Test-Path $vswherePath)) {
     Write-Host "Trying to build without VS environment setup..." -ForegroundColor Yellow
     $vsPath = $null
 } else {
-    $vsPath = & $vswherePath -latest -property installationPath
+    $vsPath = & $vswherePath -latest -products * -property installationPath
     if (-not $vsPath) {
         Write-Host "WARNING: Visual Studio not found" -ForegroundColor Yellow
     }
@@ -95,7 +95,8 @@ if ($Reconfigure -or -not (Test-Path "build/CMakeCache.txt")) {
     $cmakeArgs = @(
         "-B", "build",
         "-G", $Generator,
-        "-DCMAKE_BUILD_TYPE=$BuildType"
+        "-DCMAKE_BUILD_TYPE=$BuildType",
+        "-DBRIMIR_LTO=ON"
     )
     
     # Add architecture for Visual Studio generators
