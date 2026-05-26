@@ -426,7 +426,7 @@ void* CoreWrapper::GetSRAMData() {
         auto& bup = m_saturn->mem.GetInternalBackupRAM();
         uint32 size = bup.Size();
         for (uint32 i = 0; i < size && i < m_sramData.size(); i++) {
-            bup.WriteByte(i, m_sramData[i]);
+            bup.WriteByte(i * 2, m_sramData[i]);
         }
         m_sramFirstLoad = false;
         m_sramCacheDirty = false;
