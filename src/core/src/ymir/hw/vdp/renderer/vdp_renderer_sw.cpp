@@ -3961,7 +3961,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
         for (uint32 x = 0; Color888 &outputColor : framebufferOutput) {
             if (layer0ColorOffsetEnabled[x]) {
                 const auto &colorOffset = regs2.colorOffset[regs2.colorOffsetSelect[scanline_layers[x][0]]];
-                outputColor = {
+                outputColor = Color888{
                     .r = kColorOffsetLUT[colorOffset.r][outputColor.r],
                     .g = kColorOffsetLUT[colorOffset.g][outputColor.g],
                     .b = kColorOffsetLUT[colorOffset.b][outputColor.b],
@@ -4019,7 +4019,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
             for (uint32 x = 0; Color888 &mesheColor : meshOut) {
                 const auto &colorOffset = regs2.colorOffset[regs2.colorOffsetSelect[LYR_Sprite]];
                 if (colorOffset.nonZero) {
-                    mesheColor = {
+                    mesheColor = Color888{
                         .r = kColorOffsetLUT[colorOffset.r][mesheColor.r],
                         .g = kColorOffsetLUT[colorOffset.g][mesheColor.g],
                         .b = kColorOffsetLUT[colorOffset.b][mesheColor.b],
