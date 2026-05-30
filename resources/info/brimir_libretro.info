@@ -5,7 +5,7 @@ authors = "coredds"
 categories = "Emulator"
 license = "GPLv3"
 permissions = ""
-supported_extensions = "cue|chd|iso|ccd|mds"
+supported_extensions = "cue|chd|iso|ccd|mds|m3u"
 
 # Hardware Information
 manufacturer = "Sega"
@@ -26,7 +26,7 @@ core_options_version = "1.0"
 load_subsystem = "false"
 hw_render = "false"
 needs_fullpath = "false"
-disk_control = "false"
+disk_control = "true"
 
 # Firmware / BIOS
 firmware_count = "2"

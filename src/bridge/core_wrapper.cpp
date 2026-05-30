@@ -157,9 +157,65 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             return false;
         }
         
+        // Store game path and directories for later disc swaps
+        m_gamePath = gamePath;
+        m_saveDirectory = save_directory ? save_directory : "";
+        m_systemDirectory = system_directory ? system_directory : "";
+
+        // Handle M3U playlists for multi-disc games
+        std::filesystem::path discToLoad = gamePath;
+        std::string ext = gamePath.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        
+        if (ext == ".m3u" || ext == ".m3u8") {
+            // Parse M3U file
+            m_discList.clear();
+            std::ifstream m3uFile(gamePath);
+            if (!m3uFile) {
+                m_lastError = "Failed to open M3U file: " + gamePath.string();
+                m_initialDiscSet = false;
+                return false;
+            }
+            std::string line;
+            std::filesystem::path m3uDir = gamePath.parent_path();
+            while (std::getline(m3uFile, line)) {
+                // Trim whitespace
+                size_t start = 0;
+                while (start < line.size() && (line[start] == ' ' || line[start] == '\t' || line[start] == '\r')) start++;
+                size_t end = line.size();
+                while (end > start && (line[end-1] == ' ' || line[end-1] == '\t' || line[end-1] == '\r')) end--;
+                if (start >= end || line[start] == '#') continue;
+                std::string entry = line.substr(start, end - start);
+                std::filesystem::path entryPath(entry);
+                if (entryPath.is_relative()) {
+                    entryPath = m3uDir / entryPath;
+                }
+                m_discList.push_back(std::filesystem::absolute(entryPath));
+            }
+            if (m_discList.empty()) {
+                m_lastError = "M3U file contains no valid disc entries";
+                m_initialDiscSet = false;
+                return false;
+            }
+            // Determine which disc to load
+            size_t loadIndex = 0;
+            if (m_initialDiscSet && m_initialDiscIndex < m_discList.size()) {
+                loadIndex = m_initialDiscIndex;
+            }
+            m_currentDiscIndex = loadIndex;
+            discToLoad = m_discList[loadIndex];
+        } else {
+            // Single disc: create a one-entry disc list for consistency
+            m_discList.clear();
+            m_discList.push_back(std::filesystem::absolute(gamePath));
+            m_currentDiscIndex = 0;
+        }
+        m_initialDiscSet = false;
+
         // Set up persistent backup RAM path (Ymir uses memory-mapped files)
         // Use save_directory + game name to create a persistent backup RAM file
-        std::filesystem::path gameFileName = gamePath.stem(); // Get filename without extension
+        // For M3U games, use the M3U filename (all discs share the same backup RAM)
+        std::filesystem::path gameFileName = gamePath.stem();
         if (save_directory && save_directory[0] != '\0') {
             m_sramTempPath = std::filesystem::path(save_directory) / (gameFileName.string() + ".bup");
         } else {
@@ -228,7 +284,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // Use Ymir's loader to load the disc
         bool success = false;
         try {
-            success = ymir::media::LoadDisc(gamePath, disc, false, loaderCallback);
+            success = ymir::media::LoadDisc(discToLoad, disc, false, loaderCallback);
         } catch (const std::exception& e) {
             m_lastError = std::string("Exception during disc load: ") + e.what();
             return false;
@@ -265,13 +321,12 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                 m_saturn->GetDiscHash()
             );
             
-            if (gameInfo && gameInfo->GetCartridge() != ymir::db::Cartridge::None) {
+                if (gameInfo && gameInfo->GetCartridge() != ymir::db::Cartridge::None) {
                 // Set up cartridge RAM save path
-                std::filesystem::path gameFileName = gamePath.stem();
                 if (save_directory && save_directory[0] != '\0') {
-                    m_cartridgePath = std::filesystem::path(save_directory) / (gameFileName.string() + ".cart");
+                    m_cartridgePath = std::filesystem::path(save_directory) / (gamePath.stem().string() + ".cart");
                 } else {
-                    m_cartridgePath = std::filesystem::temp_directory_path() / (gameFileName.string() + ".cart");
+                    m_cartridgePath = std::filesystem::temp_directory_path() / (gamePath.stem().string() + ".cart");
                 }
                 
                 // Insert the appropriate cartridge
@@ -974,6 +1029,131 @@ void CoreWrapper::SetDeinterlacingMode(const char* mode) {
     m_saturn->VDP.ModifyEnhancements([enable](ymir::vdp::config::Enhancements& enh) {
         enh.deinterlace = enable;
     });
+}
+
+// --- Disk control (multi-disc support) ---
+
+size_t CoreWrapper::GetNumDiscs() const {
+    return m_discList.size();
+}
+
+size_t CoreWrapper::GetCurrentDiscIndex() const {
+    return m_currentDiscIndex;
+}
+
+bool CoreWrapper::GetDiscPath(unsigned index, char* s, size_t len) const {
+    if (index >= m_discList.size() || !s || len == 0) {
+        return false;
+    }
+    std::string path = m_discList[index].string();
+    if (path.size() >= len) {
+        return false;
+    }
+    std::memcpy(s, path.c_str(), path.size() + 1);
+    return true;
+}
+
+bool CoreWrapper::GetDiscLabel(unsigned index, char* s, size_t len) const {
+    if (index >= m_discList.size() || !s || len == 0) {
+        return false;
+    }
+    std::string label = m_discList[index].stem().string();
+    if (label.size() >= len) {
+        return false;
+    }
+    std::memcpy(s, label.c_str(), label.size() + 1);
+    return true;
+}
+
+bool CoreWrapper::SetEjectState(bool ejected) {
+    if (!m_initialized || !m_saturn || !m_gameLoaded) {
+        return false;
+    }
+    if (ejected) {
+        m_saturn->OpenTray();
+    } else {
+        m_saturn->CloseTray();
+    }
+    return true;
+}
+
+bool CoreWrapper::GetEjectState() const {
+    if (!m_initialized || !m_saturn) {
+        return false;
+    }
+    return m_saturn->IsTrayOpen();
+}
+
+bool CoreWrapper::SetDiscIndex(unsigned index) {
+    if (!m_initialized || !m_saturn) {
+        return false;
+    }
+    // Eject is equivalent to "remove disc" from drive
+    if (index >= m_discList.size()) {
+        m_saturn->EjectDisc();
+        m_currentDiscIndex = m_discList.size();
+        return true;
+    }
+    const auto& discPath = m_discList[index];
+    if (!std::filesystem::exists(discPath)) {
+        return false;
+    }
+    // Validate that we can parse the disc before ejecting the current one
+    ymir::media::Disc disc;
+    auto loaderCallback = [this](ymir::media::MessageType type, std::string message) {
+        if (type == ymir::media::MessageType::Error) {
+            if (!m_lastError.empty()) m_lastError += "; ";
+            m_lastError += message;
+        }
+    };
+    if (!ymir::media::LoadDisc(discPath, disc, false, loaderCallback)) {
+        if (m_lastError.empty()) {
+            m_lastError = "Failed to load disc: " + discPath.string();
+        }
+        return false;
+    }
+    // Now eject the current disc and insert the new one
+    m_saturn->EjectDisc();
+    m_saturn->LoadDisc(std::move(disc));
+    m_currentDiscIndex = index;
+    m_sramCacheDirty = true;
+    return true;
+}
+
+bool CoreWrapper::AddDiscIndex() {
+    m_discList.emplace_back();
+    return true;
+}
+
+bool CoreWrapper::ReplaceDiscIndex(unsigned index, const char* path) {
+    if (index >= m_discList.size()) {
+        return false;
+    }
+    if (!path || path[0] == '\0') {
+        // Removal: shift everything down
+        m_discList.erase(m_discList.begin() + index);
+        if (m_currentDiscIndex > index) {
+            m_currentDiscIndex--;
+        } else if (m_currentDiscIndex == index) {
+            // Currently loaded disc was removed from playlist
+            m_currentDiscIndex = m_discList.size();
+        }
+        return true;
+    }
+    m_discList[index] = std::filesystem::path(path);
+    return true;
+}
+
+bool CoreWrapper::SetInitialDisc(unsigned index, const char* path) {
+    if (!path) {
+        m_initialDiscSet = false;
+        return false;
+    }
+    // Store initial disc info; validation happens in LoadGame when M3U is parsed
+    m_initialDiscSet = true;
+    m_initialDiscIndex = index;
+    m_initialDiscPath = std::filesystem::path(path);
+    return true;
 }
 
 

@@ -43,6 +43,18 @@ static void brimir_log(retro_log_level level, const char* fmt, ...) {
     log_cb(level, "[Brimir] %s\n", buffer);
 }
 
+// Disk control callback forward declarations
+static bool disk_set_eject_state(bool ejected);
+static bool disk_get_eject_state(void);
+static unsigned disk_get_image_index(void);
+static bool disk_set_image_index(unsigned index);
+static unsigned disk_get_num_images(void);
+static bool disk_replace_image_index(unsigned index, const struct retro_game_info* info);
+static bool disk_add_image_index(void);
+static bool disk_set_initial_image(unsigned index, const char* path);
+static bool disk_get_image_path(unsigned index, char* s, size_t len);
+static bool disk_get_image_label(unsigned index, char* s, size_t len);
+
 
 // Helper function to get option value
 static const char* get_option_value(const char* key, const char* default_value = nullptr) {
@@ -164,6 +176,26 @@ RETRO_API void retro_init(void) {
     if (!g_core->Initialize()) {
         brimir_log(RETRO_LOG_ERROR, "Failed to initialize core");
         g_core.reset();
+        return;
+    }
+
+    // Register disk control interface for multi-disc games
+    unsigned dc_version = 0;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION, &dc_version) && dc_version >= 1) {
+        static struct retro_disk_control_ext_callback disk_cb = {
+            disk_set_eject_state,
+            disk_get_eject_state,
+            disk_get_image_index,
+            disk_set_image_index,
+            disk_get_num_images,
+            disk_replace_image_index,
+            disk_add_image_index,
+            disk_set_initial_image,
+            disk_get_image_path,
+            disk_get_image_label,
+        };
+        environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE, &disk_cb);
+        brimir_log(RETRO_LOG_INFO, "Disk control ext interface registered");
     }
 }
 
@@ -556,6 +588,62 @@ RETRO_API void retro_unload_game(void) {
     
     // Reset SRAM sync flag for next game load
     g_sram_synced = false;
+}
+
+// Disk control callbacks
+
+static bool disk_set_eject_state(bool ejected) {
+    if (!g_core) return false;
+    return g_core->SetEjectState(ejected);
+}
+
+static bool disk_get_eject_state(void) {
+    if (!g_core) return false;
+    return g_core->GetEjectState();
+}
+
+static unsigned disk_get_image_index(void) {
+    if (!g_core) return 0;
+    return static_cast<unsigned>(g_core->GetCurrentDiscIndex());
+}
+
+static bool disk_set_image_index(unsigned index) {
+    if (!g_core) return false;
+    return g_core->SetDiscIndex(index);
+}
+
+static unsigned disk_get_num_images(void) {
+    if (!g_core) return 0;
+    return static_cast<unsigned>(g_core->GetNumDiscs());
+}
+
+static bool disk_replace_image_index(unsigned index, const struct retro_game_info* info) {
+    if (!g_core) return false;
+    if (info) {
+        return g_core->ReplaceDiscIndex(index, info->path);
+    } else {
+        return g_core->ReplaceDiscIndex(index, nullptr);
+    }
+}
+
+static bool disk_add_image_index(void) {
+    if (!g_core) return false;
+    return g_core->AddDiscIndex();
+}
+
+static bool disk_set_initial_image(unsigned index, const char* path) {
+    if (!g_core) return false;
+    return g_core->SetInitialDisc(index, path);
+}
+
+static bool disk_get_image_path(unsigned index, char* s, size_t len) {
+    if (!g_core) return false;
+    return g_core->GetDiscPath(index, s, len);
+}
+
+static bool disk_get_image_label(unsigned index, char* s, size_t len) {
+    if (!g_core) return false;
+    return g_core->GetDiscLabel(index, s, len);
 }
 
 RETRO_API unsigned retro_get_region(void) {

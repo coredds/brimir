@@ -176,6 +176,38 @@ public:
     /// @brief Set deinterlacing mode
     /// @param mode Mode string: "bob", "weave", "blend", "current", "none"
     void SetDeinterlacingMode(const char* mode);
+
+    // --- Disk control (multi-disc games via M3U) ---
+
+    /// @brief Get the number of discs in the loaded M3U playlist
+    size_t GetNumDiscs() const;
+
+    /// @brief Get the current disc index (0-based)
+    size_t GetCurrentDiscIndex() const;
+
+    /// @brief Get the filesystem path of a disc by index
+    bool GetDiscPath(unsigned index, char* s, size_t len) const;
+
+    /// @brief Get a display label for a disc by index
+    bool GetDiscLabel(unsigned index, char* s, size_t len) const;
+
+    /// @brief Open or close the virtual disk tray
+    bool SetEjectState(bool ejected);
+
+    /// @brief Check if the virtual disk tray is open
+    bool GetEjectState() const;
+
+    /// @brief Eject current disc and insert the disc at the given index
+    bool SetDiscIndex(unsigned index);
+
+    /// @brief Add room for a new disc index (for retro_add_image_index)
+    bool AddDiscIndex();
+
+    /// @brief Replace the disc at the given index with a new image path
+    bool ReplaceDiscIndex(unsigned index, const char* path);
+
+    /// @brief Set the initial disc index from retro_set_initial_image
+    bool SetInitialDisc(unsigned index, const char* path);
     
     /// @brief Get profiling report
     /// @return Performance profiling data as string
@@ -242,6 +274,16 @@ private:
     // Cartridge support
     std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file
     bool m_hasCartridge = false;  // True if a cartridge is inserted
+
+    // Multi-disc support (M3U playlists)
+    std::vector<std::filesystem::path> m_discList;
+    size_t m_currentDiscIndex = 0;
+    std::filesystem::path m_gamePath;
+    std::string m_saveDirectory;
+    std::string m_systemDirectory;
+    bool m_initialDiscSet = false;
+    unsigned m_initialDiscIndex = 0;
+    std::filesystem::path m_initialDiscPath;
 };
 
 } // namespace brimir
