@@ -73,6 +73,14 @@ public:
     /// @return Size in bytes
     size_t GetSRAMSize() const;
 
+    /// @brief Get pointer to system RAM (Work RAM Low) for RetroAchievements / cheat search
+    /// @return Pointer to WRAM Low data (1MiB), or nullptr if not available
+    void* GetSystemRAMData();
+
+    /// @brief Get size of system RAM
+    /// @return Size in bytes (1MiB)
+    size_t GetSystemRAMSize() const;
+
     /// @brief Force refresh SRAM from Ymir's backup RAM
     /// This reads from Ymir's .bup file into our buffer
     void RefreshSRAMFromEmulator();

@@ -660,8 +660,7 @@ RETRO_API void* retro_get_memory_data(unsigned id) {
         case RETRO_MEMORY_SAVE_RAM:
             return g_core->GetSRAMData();
         case RETRO_MEMORY_SYSTEM_RAM:
-            // Could expose main RAM here if needed
-            return nullptr;
+            return g_core->GetSystemRAMData();
         default:
             return nullptr;
     }
@@ -676,7 +675,7 @@ RETRO_API size_t retro_get_memory_size(unsigned id) {
         case RETRO_MEMORY_SAVE_RAM:
             return g_core->GetSRAMSize();
         case RETRO_MEMORY_SYSTEM_RAM:
-            return 0; // Not exposed yet
+            return g_core->GetSystemRAMSize();
         default:
             return 0;
     }

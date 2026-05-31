@@ -524,6 +524,20 @@ void CoreWrapper::RefreshSRAMFromEmulator() {
     m_framesSinceLastSRAMSync = 0;
 }
 
+void* CoreWrapper::GetSystemRAMData() {
+    if (!m_initialized || !m_saturn) {
+        return nullptr;
+    }
+    return m_saturn->mem.WRAMLow.data();
+}
+
+size_t CoreWrapper::GetSystemRAMSize() const {
+    if (!m_initialized || !m_saturn) {
+        return 0;
+    }
+    return m_saturn->mem.WRAMLow.size();
+}
+
 
 void CoreWrapper::RunFrame() {
     if (!m_initialized || !m_saturn) {
