@@ -199,13 +199,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Planned for 0.2.0
-- Additional controller types (analog pad, mission stick, mouse, wheel)
-- Multi-disc game support
-- Backup RAM cartridge support
-- Extended compatibility testing
-- Linux and macOS testing
-- Achievement support (RetroAchievements)
+The roadmap has been revised based on a gap analysis against mature RetroArch cores. The guiding constraint is that Ymir's hardware layer stays verbatim upstream — all features are implemented in Brimir's bridge/libretro layers or proposed to Ymir upstream. See [ROADMAP.md](ROADMAP.md) for the full plan.
+
+### Upcoming — v0.4.1 (Bridge Layer)
+- System RAM exposure via `RETRO_MEMORY_SYSTEM_RAM` (unblocks RetroAchievements)
+- Memory descriptors (SRAM, cartridge RAM, WRAM visible in RA)
+- Save state compression (LZ4, enabling rewind + runahead viability)
+- Contentless / BIOS menu mode (`supports_no_game = "true"`)
+- M3U-less disc swapping
+- CD read speed options beyond 16x
+
+### Upcoming — v0.5.0 (Bridge Layer)
+- Full cheat system (Action Replay / GameShark / RAM search)
+- All controller types (3D Control Pad, Arcade Racer, Mission Stick, Virtua Gun, Shuttle Mouse)
+- RetroAchievements integration
+- Screen rotation for TATE shmups (90°/270°)
+- VDP layer toggling and debug overlay exposure
+- Overscan crop options
+- Audio volume control
+- Cartridge RAM persistence
+- Frameskip support (Hybrid — needs Ymir config)
+- Region patching (PAL→NTSC force)
+
+### Upcoming — v0.5.1 (Bridge Layer)
+- Internal cheat database (shipped with core)
+
+### Upcoming — v0.6.0 (Hybrid)
+- CPU overclocking (SH-2 clock multiplier)
+
+### Upcoming — v0.7.0+ (Upstream / Major Engineering)
+- SH-2 JIT compiler (see `src/jit/STATUS.md`)
+- Hardware renderer with internal resolution scaling (Vulkan/OGL/D3D)
+- Widescreen hacks
+- HD texture replacement
+- ST-V arcade support
 
 ---
 
@@ -276,7 +303,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Milestones
 
-#### [0.1.1] - 2025-11-25 (Current)
+#### [0.3.0] - 2026-02-20 (Current)
+- Ymir hardware layer synced verbatim upstream (v0.3.2-dev)
+- Software renderer with SIMD-optimized pixel conversion
+- Full VDP1/VDP2 with threaded rendering
+- 6 BIOS variants + auto-detection
+
+#### [0.1.1] - 2025-11-25
 - Expansion cartridge support (RAM + ROM)
 - Game database integration
 - System-wide RTC configuration
@@ -285,17 +318,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First feature-complete release
 - Full libretro API implementation
 - Production-ready core
-
-#### [0.2.0] - TBD (Planned)
-- Extended controller support
-- Multi-disc games
-- Broader platform testing
-
-#### [1.0.0] - TBD (Goal)
-- Official libretro repository inclusion
-- 85%+ game compatibility
-- Full platform support
-- Stable API
 
 ---
 

@@ -137,6 +137,7 @@ docs/
 !CONTRIBUTING.md
 !CHANGELOG.md
 !LICENSE.md
+!ROADMAP.md
 
 # Packaging
 *.deb

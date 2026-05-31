@@ -131,20 +131,15 @@ brimir/
   tools/           Development utilities
 ```
 
-## Current Limitations
-
-- x64 only (ARM64 support planned)
-- macOS not yet tested
-- Interpreter-based SH-2 execution (JIT compiler planned)
-- Software rendering only (GPU acceleration planned for future)
-- Some games may have compatibility issues
-
 ## Roadmap
 
-- **Phase 1** (done): Ymir hardware layer synced verbatim from upstream
-- **Phase 2**: Implement SH-2 JIT compiler for x86-64
-- **Phase 3**: Expand platform support (macOS, ARM64)
-- **Phase 4**: Optional GPU acceleration layer on top of Ymir's software renderer
+Brimir's development is driven by a gap analysis against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes). Features are prioritized by user impact and implementation feasibility, with every feature tagged by where it must be implemented to preserve Ymir's verbatim upstream status.
+
+See **[ROADMAP.md](ROADMAP.md)** for the full prioritized plan including:
+
+- **Bridge-layer features** (no Ymir changes): cheats, all controller types, RetroAchievements, screen rotation, save state compression, rewind/runahead, VDP layer toggling, contentless/BIOS mode
+- **Hybrid features** (minor upstream Ymir config additions): CPU overclocking, frameskip, region patching, cartridge RAM persistence
+- **Upstream features** (propose to Ymir): hardware renderer + upscaling, JIT compiler, widescreen hacks, HD texture replacement, ST-V arcade support
 
 ## Dependencies
 

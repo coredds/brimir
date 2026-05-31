@@ -93,7 +93,7 @@ Before contributing, ensure you have:
 
 - Look for issues labeled `good first issue` for beginner-friendly tasks
 - Check `help wanted` label for areas needing assistance
-- Review the [ROADMAP.md](docs/ROADMAP.md) for planned features
+- Review the [ROADMAP.md](ROADMAP.md) for planned features
 - Ask in Discussions if you're unsure where to start
 
 ### Creating a New Issue
