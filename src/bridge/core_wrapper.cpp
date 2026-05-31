@@ -538,6 +538,23 @@ size_t CoreWrapper::GetSystemRAMSize() const {
     return m_saturn->mem.WRAMLow.size();
 }
 
+void* CoreWrapper::GetSRAMRawPointer() {
+    if (!m_initialized || !m_saturn) {
+        return nullptr;
+    }
+    if (m_sramData.empty()) {
+        m_sramData.resize(GetSRAMSize());
+    }
+    return m_sramData.data();
+}
+
+void* CoreWrapper::GetSystemRAMRawPointer() {
+    if (!m_initialized || !m_saturn) {
+        return nullptr;
+    }
+    return m_saturn->mem.WRAMLow.data();
+}
+
 
 void CoreWrapper::RunFrame() {
     if (!m_initialized || !m_saturn) {

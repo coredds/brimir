@@ -81,6 +81,15 @@ public:
     /// @return Size in bytes (1MiB)
     size_t GetSystemRAMSize() const;
 
+    /// @brief Get raw pointer to backup RAM buffer without triggering .srm sync side effects.
+    /// Used by memory descriptors; callers needing full SRAM lifecycle MUST use GetSRAMData().
+    /// @return Pointer to SRAM buffer, or nullptr if not available
+    void* GetSRAMRawPointer();
+
+    /// @brief Get raw pointer to system RAM without any side effects.
+    /// @return Pointer to WRAM Low data, or nullptr if not available
+    void* GetSystemRAMRawPointer();
+
     /// @brief Force refresh SRAM from Ymir's backup RAM
     /// This reads from Ymir's .bup file into our buffer
     void RefreshSRAMFromEmulator();

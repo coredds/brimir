@@ -27,6 +27,15 @@ static std::unique_ptr<brimir::CoreWrapper> g_core;
 // SRAM sync state (reset on game load/unload)
 static bool g_sram_synced = false;
 
+// Memory descriptors for RetroArch's memory viewer / cheat search
+// ptr fields are updated on each game load; struct layout must match
+// declaration order in libretro.h (flags, ptr, offset, start, select, disconnect, len, addrspace)
+static struct retro_memory_descriptor g_memdesc[] = {
+    { RETRO_MEMDESC_SYSTEM_RAM, nullptr, 0, 0x00200000, 0, 0, 1024 * 1024, "SYSARAM" },
+    { RETRO_MEMDESC_SAVE_RAM,   nullptr, 0, 0x00100000, 0, 0, 32 * 1024,   "SYSARAM" },
+};
+static const unsigned g_memdesc_count = sizeof(g_memdesc) / sizeof(g_memdesc[0]);
+
 // Whether the frontend supports RETRO_DEVICE_ID_JOYPAD_MASK (single-call input read)
 static bool g_input_bitmask_supported = false;
 
@@ -567,6 +576,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
     const char* deinterlace_mode = get_option_value("brimir_deinterlace_mode", "bob");
     g_core->SetDeinterlacingMode(deinterlace_mode);
+
+    // Register memory descriptors for RetroArch's memory viewer / cheat search
+    // Use raw pointer getters to avoid triggering .srm sync side effects
+    g_memdesc[0].ptr = g_core->GetSystemRAMRawPointer();
+    g_memdesc[1].ptr = g_core->GetSRAMRawPointer();
+
+    static struct retro_memory_map mmap = {
+        .descriptors     = g_memdesc,
+        .num_descriptors = g_memdesc_count,
+    };
+    environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmap);
 
     return true;
 }

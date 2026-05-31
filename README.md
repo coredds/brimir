@@ -1,12 +1,12 @@
 # Brimir
 
-A Sega Saturn emulation core for libretro, targeting high performance and accuracy.
+A Sega Saturn emulation core for libretro, built on the [Ymir](https://github.com/StrikerX3/ymir) emulator by StrikerX3.
 
 ## Overview
 
-Brimir is a libretro core for Sega Saturn emulation, built directly on the Ymir emulator hardware layer. It provides accurate, cycle-accurate emulation with optimized software rendering and full VDP1/VDP2 support.
+Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accurate hardware layer. It provides accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development. Hardware layer synced directly from upstream Ymir (v0.3.2-dev) with no namespace patching, enabling trivial future updates.
+**Current Status**: Active development. Hardware layer synced verbatim from upstream Ymir (v0.3.2-dev).
 
 ## Features
 
@@ -131,16 +131,6 @@ brimir/
   tools/           Development utilities
 ```
 
-## Roadmap
-
-Brimir's development is driven by a gap analysis against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes). Features are prioritized by user impact and implementation feasibility, with every feature tagged by where it must be implemented to preserve Ymir's verbatim upstream status.
-
-See **[ROADMAP.md](ROADMAP.md)** for the full prioritized plan including:
-
-- **Bridge-layer features** (no Ymir changes): cheats, all controller types, RetroAchievements, screen rotation, save state compression, rewind/runahead, VDP layer toggling, contentless/BIOS mode
-- **Hybrid features** (minor upstream Ymir config additions): CPU overclocking, frameskip, region patching, cartridge RAM persistence
-- **Upstream features** (propose to Ymir): hardware renderer + upscaling, JIT compiler, widescreen hacks, HD texture replacement, ST-V arcade support
-
 ## Dependencies
 
 All dependencies are vendored in the `vendor/` directory:
@@ -156,9 +146,9 @@ All dependencies are vendored in the `vendor/` directory:
 
 Licensed under the GPLv2. See LICENSE file for details.
 
-## Acknowledgments
+## Credits
 
-This project's hardware layer is synced verbatim from the Ymir emulator by StrikerX3. Future Ymir updates can be applied by copying `libs/ymir-core/{include,src}/ymir/` into `src/core/{include,src}/ymir/` — no namespace patching required.
+Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The entire hardware layer under `src/core/` is synced verbatim from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. Brimir wraps this hardware layer in a libretro core, adding performance optimizations and frontend integration without modifying the emulation engine. Both projects are licensed under GPL.
 
 ## Contributing
 
