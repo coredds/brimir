@@ -30,6 +30,7 @@ target_link_libraries(brimir-core PUBLIC
     concurrentqueue
     xxhash
     chdr-static
+    lz4_static
 )
 if (WIN32)
     target_link_libraries(brimir-core PUBLIC

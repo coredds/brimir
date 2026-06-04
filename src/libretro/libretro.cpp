@@ -33,6 +33,7 @@ static bool g_sram_synced = false;
 static struct retro_memory_descriptor g_memdesc[] = {
     { RETRO_MEMDESC_SYSTEM_RAM, nullptr, 0, 0x00200000, 0, 0, 1024 * 1024, "SYSARAM" },
     { RETRO_MEMDESC_SAVE_RAM,   nullptr, 0, 0x00100000, 0, 0, 32 * 1024,   "SYSARAM" },
+    { RETRO_MEMDESC_SYSTEM_RAM, nullptr, 0, 0x06000000, 0, 0, 1024 * 1024, "SYSARAM" },
 };
 static const unsigned g_memdesc_count = sizeof(g_memdesc) / sizeof(g_memdesc[0]);
 
@@ -89,7 +90,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     }
     
     // Set core options
-    bool no_content = false;
+    bool no_content = true;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_content);
     
     // Set input descriptors for controller remapping
@@ -581,6 +582,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // Use raw pointer getters to avoid triggering .srm sync side effects
     g_memdesc[0].ptr = g_core->GetSystemRAMRawPointer();
     g_memdesc[1].ptr = g_core->GetSRAMRawPointer();
+    g_memdesc[2].ptr = g_core->GetSystemRAMHighRawPointer();
 
     static struct retro_memory_map mmap = {
         .descriptors     = g_memdesc,

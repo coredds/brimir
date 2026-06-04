@@ -18,6 +18,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+
+#include <lz4.h>
 #include <algorithm>
 #include <cctype>
 #include <thread>
@@ -555,6 +557,20 @@ void* CoreWrapper::GetSystemRAMRawPointer() {
     return m_saturn->mem.WRAMLow.data();
 }
 
+void* CoreWrapper::GetSystemRAMHighRawPointer() {
+    if (!m_initialized || !m_saturn) {
+        return nullptr;
+    }
+    return m_saturn->mem.WRAMHigh.data();
+}
+
+size_t CoreWrapper::GetSystemRAMHighSize() const {
+    if (!m_initialized || !m_saturn) {
+        return 0;
+    }
+    return m_saturn->mem.WRAMHigh.size();
+}
+
 
 void CoreWrapper::RunFrame() {
     if (!m_initialized || !m_saturn) {
@@ -723,9 +739,8 @@ size_t CoreWrapper::GetStateSize() const {
         return 0;
     }
 
-    // Return the size of Ymir's State structure
-    // This includes all emulator state (CPU, VDP, SCSP, memory, etc.)
-    return sizeof(ymir::savestate::SaveState);
+    // Header (8 bytes) + max compressed size
+    return static_cast<size_t>(LZ4_compressBound(static_cast<int>(sizeof(ymir::savestate::SaveState)))) + 8;
 }
 
 bool CoreWrapper::SaveState(void* data, size_t size) {
@@ -733,7 +748,7 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         return false;
     }
     
-    // Verify buffer is large enough
+    // Verify buffer is large enough for header + max compressed data
     size_t requiredSize = GetStateSize();
     if (size < requiredSize) {
         return false;
@@ -744,12 +759,30 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         auto state = std::make_unique<ymir::savestate::SaveState>();
         m_saturn->SaveState(*state);
         
-        // Serialize state to buffer (simple memcpy for now)
-        std::memcpy(data, state.get(), requiredSize);
+        // Write 8-byte header: magic + uncompressed size
+        const uint32_t magic = 0x4D495242; // "BRIM" in LE
+        const uint32_t uncompSize = static_cast<uint32_t>(sizeof(ymir::savestate::SaveState));
+        auto* out = static_cast<uint8_t*>(data);
+        std::memcpy(out, &magic, 4);
+        std::memcpy(out + 4, &uncompSize, 4);
         
+        // Compress with LZ4
+        int srcSize = static_cast<int>(sizeof(ymir::savestate::SaveState));
+        int dstCapacity = static_cast<int>(size - 8);
+        int compressedSize = LZ4_compress_default(
+            reinterpret_cast<const char*>(state.get()),
+            reinterpret_cast<char*>(out + 8),
+            srcSize,
+            dstCapacity
+        );
+        
+        if (compressedSize <= 0) {
+            return false;
+        }
+
         return true;
     } catch (const std::exception& e) {
-        (void)e; // Suppress unused variable warning
+        (void)e;
         return false;
     }
 }
@@ -759,24 +792,55 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
         return false;
     }
     
-    // Verify buffer size matches expected state size
-    size_t requiredSize = GetStateSize();
-    if (size < requiredSize) {
+    // Must be at least 8 bytes (header)
+    if (size < 8) {
         return false;
     }
 
     try {
-        // Deserialize state from buffer (allocate on heap - too large for stack)
+        // Read 8-byte header: magic + uncompressed size
+        const uint32_t expectedMagic = 0x4D495242; // "BRIM"
+        const auto* in = static_cast<const uint8_t*>(data);
+        uint32_t magic = 0;
+        uint32_t uncompSize = 0;
+        std::memcpy(&magic, in, 4);
+        std::memcpy(&uncompSize, in + 4, 4);
+        
+        // Validate header
+        if (magic != expectedMagic) {
+            // Legacy uncompressed state — try direct memcpy
+            size_t requiredSize = sizeof(ymir::savestate::SaveState);
+            if (size < requiredSize) {
+                return false;
+            }
+            auto state = std::make_unique<ymir::savestate::SaveState>();
+            std::memcpy(state.get(), data, requiredSize);
+            return m_saturn->LoadState(*state, true);
+        }
+        
+        // Validate uncompressed size
+        if (uncompSize != sizeof(ymir::savestate::SaveState)) {
+            return false;
+        }
+        
+        // Decompress with LZ4
         auto state = std::make_unique<ymir::savestate::SaveState>();
-        std::memcpy(state.get(), data, requiredSize);
+        int compressedSize = static_cast<int>(size - 8);
+        int result = LZ4_decompress_safe(
+            reinterpret_cast<const char*>(in + 8),
+            reinterpret_cast<char*>(state.get()),
+            compressedSize,
+            static_cast<int>(uncompSize)
+        );
+        
+        if (result != static_cast<int>(uncompSize)) {
+            return false;
+        }
         
         // Load state into emulator
-        // skipROMChecks = true to allow loading states with different BIOS
-        bool success = m_saturn->LoadState(*state, true);
-        
-        return success;
+        return m_saturn->LoadState(*state, true);
     } catch (const std::exception& e) {
-        (void)e; // Suppress unused variable warning
+        (void)e;
         return false;
     }
 }

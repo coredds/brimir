@@ -90,6 +90,14 @@ public:
     /// @return Pointer to WRAM Low data, or nullptr if not available
     void* GetSystemRAMRawPointer();
 
+    /// @brief Get raw pointer to WRAM High without any side effects.
+    /// @return Pointer to WRAM High data (1MiB), or nullptr if not available
+    void* GetSystemRAMHighRawPointer();
+
+    /// @brief Get size of WRAM High
+    /// @return Size in bytes (1MiB)
+    size_t GetSystemRAMHighSize() const;
+
     /// @brief Force refresh SRAM from Ymir's backup RAM
     /// This reads from Ymir's .bup file into our buffer
     void RefreshSRAMFromEmulator();

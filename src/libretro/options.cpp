@@ -133,6 +133,9 @@ static struct retro_core_option_v2_definition option_defs[] = {
             { "8", "8x" },
             { "12", "12x" },
             { "16", "16x" },
+            { "24", "24x" },
+            { "32", "32x" },
+            { "200", "Max (200x)" },
             { nullptr, nullptr }
         },
         "2"
