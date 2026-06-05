@@ -63,6 +63,10 @@ Desktop.ini
 .cursor/
 query_saturn.py
 
+# CodeWhale AI
+.codewhale/
+codewhale/
+
 # vcpkg
 vcpkg_installed/
 vcpkg/downloads/
