@@ -1,10 +1,8 @@
 #include "brimir_sh2_wrapper.hpp"
 
 // Ymir includes
-#include <brimir/hw/sh2/sh2.hpp>
-#include <brimir/core/scheduler.hpp>
-#include <brimir/sys/bus.hpp>
-#include <brimir/sys/system_features.hpp>
+#include <ymir/hw/sh2/sh2.hpp>
+#include <ymir/sys/bus.hpp>
 
 #include <sstream>
 #include <cstring>
@@ -127,25 +125,25 @@ std::string SH2StateSnapshot::Diff(const SH2StateSnapshot& other) const {
 // ============================================================================
 
 struct YmirSH2Wrapper::Impl {
-    brimir::core::Scheduler scheduler;
-    brimir::sys::SH2Bus bus;
-    brimir::sys::SystemFeatures features;
-    std::unique_ptr<brimir::sh2::SH2> sh2;
+    uint64_t cycleCounter;
+    bool useCache;
+    ymir::sys::SH2Bus bus;
+    std::unique_ptr<ymir::sh2::SH2> sh2;
     std::vector<uint8_t>* ram; // Pointer to wrapper's RAM
     
     Impl(std::vector<uint8_t>* ramPtr)
-        : scheduler()
+        : cycleCounter(0)
+        , useCache(false)
         , bus()
-        , features()
         , sh2(nullptr)
         , ram(ramPtr)
     {
-        // Create minimal system features for testing
-        features.enableDebugTracing = false;
-        features.emulateSH2Cache = false;
-        
         // Create SH-2 instance (slave, for testing)
-        sh2 = std::make_unique<brimir::sh2::SH2>(scheduler, bus, false, features);
+        sh2 = std::make_unique<ymir::sh2::SH2>(bus, false);
+        
+        // Bind cycle counter and cache option
+        sh2->BindGlobalCycleCounter(cycleCounter);
+        sh2->BindEmulateCacheOption(useCache);
     }
 };
 

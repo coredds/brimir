@@ -6,8 +6,7 @@
 #include "../include/jit_validator.hpp"
 #include "../include/jit_x64_backend.hpp"
 #include "../include/sh2_spec.hpp"
-#include <brimir/hw/sh2/sh2.hpp>
-#include <brimir/core/scheduler.hpp>
+#include <ymir/hw/sh2/sh2.hpp>
 #include <iostream>
 
 namespace brimir::jit {
@@ -18,14 +17,14 @@ namespace brimir::jit {
 class SimpleSH2Executor {
 public:
     SimpleSH2Executor() 
-        : scheduler_()
+        : cycleCounter_(0)
+        , useCache_(false)
         , bus_()
-        , features_()
-        , sh2_(scheduler_, bus_, true, features_)
+        , sh2_(bus_, true)
     {
-        // Set up minimal system features
-        features_.enableDebugTracing = false;
-        features_.emulateSH2Cache = false;
+        // Bind cycle counter and cache option
+        sh2_.BindGlobalCycleCounter(cycleCounter_);
+        sh2_.BindEmulateCacheOption(useCache_);
         
         // Allocate test RAM
         ram_.resize(1024 * 1024); // 1MB test RAM
@@ -160,10 +159,10 @@ private:
         return state;
     }
     
-    core::Scheduler scheduler_;
-    sys::SH2Bus bus_;
-    sys::SystemFeatures features_;
-    brimir::sh2::SH2 sh2_;
+    uint64 cycleCounter_;
+    bool useCache_;
+    ymir::sys::SH2Bus bus_;
+    ymir::sh2::SH2 sh2_;
     std::vector<uint8> ram_;
 };
 

@@ -49,8 +49,8 @@ namespace grp {
 } // namespace grp
 
 Saturn::Saturn()
-    : masterSH2(m_scheduler, mainBus, true, m_systemFeatures)
-    , slaveSH2(m_scheduler, mainBus, false, m_systemFeatures)
+    : masterSH2(mainBus, true)
+    , slaveSH2(mainBus, false)
     , SCU(m_scheduler, mainBus)
     , VDP(m_scheduler, configuration)
     , SMPC(m_scheduler, smpcOps, configuration.rtc)
@@ -143,14 +143,21 @@ Saturn::Saturn()
     }
     YGR.MapMemory(SH1Bus);
 
+    masterSH2.BindGlobalCycleCounter(m_scheduler.CurrentCountRef());
+    slaveSH2.BindGlobalCycleCounter(m_scheduler.CurrentCountRef());
+
+    masterSH2.BindEmulateCacheOption(m_emulateSH2Caches);
+    slaveSH2.BindEmulateCacheOption(m_emulateSH2Caches);
+
     ConfigureAccessCycles(false);
 
-    m_systemFeatures.enableDebugTracing = false;
-    m_systemFeatures.emulateSH2Cache = false;
+    m_enableDebugTracing = false;
+    m_emulateSH2Caches = false;
     UpdateFunctionPointers();
 
     configuration.system.preferredRegionOrder.Observe(
         [&](const std::vector<core::config::sys::Region> &regions) { UpdatePreferredRegionOrder(regions); });
+    configuration.system.debugTracing.Observe([&](bool enabled) { UpdateDebugTracing(enabled); });
     configuration.system.emulateSH2Cache.Observe([&](bool enabled) { UpdateSH2CacheEmulation(enabled); });
     configuration.system.videoStandard.Observe(
         [&](core::config::sys::VideoStandard videoStandard) { UpdateVideoStandard(videoStandard); });
@@ -359,22 +366,6 @@ void Saturn::AutodetectRegion(media::AreaCode areaCodes) {
     }
 }
 
-void Saturn::EnableDebugTracing(bool enable) {
-    if (m_systemFeatures.enableDebugTracing && !enable) {
-        DetachAllTracers();
-    }
-    m_systemFeatures.enableDebugTracing = enable;
-    UpdateFunctionPointers();
-    SCSP.SetDebugTracing(enable);
-    if (enable) {
-        masterSH2.UseDebugBreakManager(&m_debugBreakMgr);
-        slaveSH2.UseDebugBreakManager(&m_debugBreakMgr);
-    } else {
-        masterSH2.UseDebugBreakManager(nullptr);
-        slaveSH2.UseDebugBreakManager(nullptr);
-    }
-}
-
 void Saturn::SaveState(savestate::SaveState &state) const {
     m_scheduler.SaveState(state.scheduler);
     m_system.SaveState(state.system);
@@ -476,6 +467,9 @@ bool Saturn::LoadState(const savestate::SaveState &state, bool skipROMChecks) {
         CDBlock.LoadState(state.cdblock);
     }
 
+    masterSH2.PostLoadState(state.msh2);
+    slaveSH2.PostLoadState(state.ssh2);
+
     return true;
 }
 
@@ -505,13 +499,14 @@ void Saturn::DumpCDBlockDRAM(std::ostream &out) {
 
 template <bool debug, bool enableSH2Cache, bool cdblockLLE>
 void Saturn::RunFrameImpl() {
-    // Use the last line phase as reference to give some leeway if we overshoot the target cycles
-    while (VDP.InLastLinePhase()) {
+    // Run until we reach the vertical blanking area.
+    // At that point, the frame is fully rendered and dispatched to the frontend.
+    while (VDP.GetVerticalPhase() == vdp::VerticalPhase::BlankingAndSync) {
         if (!Run<debug, enableSH2Cache, cdblockLLE>()) {
             return;
         }
     }
-    while (!VDP.InLastLinePhase()) {
+    while (VDP.GetVerticalPhase() != vdp::VerticalPhase::BlankingAndSync) {
         if (!Run<debug, enableSH2Cache, cdblockLLE>()) {
             return;
         }
@@ -552,6 +547,7 @@ bool Saturn::Run() {
                     m_ssh2SpilloverCycles = slaveCycles - execCycles;
                 } else {
                     m_msh2SpilloverCycles = execCycles - slaveCycles;
+                    m_ssh2SpilloverCycles = 0;
                 }
             } else {
                 m_ssh2SpilloverCycles = slaveCycles - execCycles;
@@ -678,7 +674,7 @@ uint64 Saturn::StepSlaveSH2Impl() {
 }
 
 void Saturn::UpdateFunctionPointers() {
-    UpdateFunctionPointersTemplate(m_systemFeatures.enableDebugTracing, m_systemFeatures.emulateSH2Cache, m_cdblockLLE);
+    UpdateFunctionPointersTemplate(m_enableDebugTracing, m_emulateSH2Caches, m_cdblockLLE);
 }
 
 template <bool... t_features>
@@ -709,49 +705,59 @@ void Saturn::ConfigureAccessCycles(bool fastTimings) {
     if (fastTimings) {
         // HACK: this fixes X-Men/Marvel Super Heroes vs. Street Fighter
         // ... but why?
-        mainBus.SetAccessCycles(0x000'0000, 0x7FF'FFFF, 1, 1); // Forced fast timings for all regions
+        mainBus.SetAccessCycles(0x000'0000, 0x7FF'FFFF, 1, 1, 1, 1, 1, 1);
     } else {
         // These timings avoid issues with some games:
         // - Virtua Fighter 2 -- sound effects go missing if the SH-2 runs too fast
         // - Resident Evil -- can't go past title screen if timings are too slow
         // CD block area timings help with BIOS CD player track switching
-        mainBus.SetAccessCycles(0x000'0000, 0x7FF'FFFF, 4, 2); // Default timings for all unmapped regions
 
-        mainBus.SetAccessCycles(0x000'0000, 0x00F'FFFF, 2, 2);   // IPL/BIOS ROM
-        mainBus.SetAccessCycles(0x018'0000, 0x01F'FFFF, 2, 2);   // Internal Backup RAM
-        mainBus.SetAccessCycles(0x020'0000, 0x02F'FFFF, 2, 2);   // Low Work RAM
-        mainBus.SetAccessCycles(0x010'0000, 0x017'FFFF, 4, 2);   // SMPC registers
-        mainBus.SetAccessCycles(0x100'0000, 0x1FF'FFFF, 4, 2);   // MINIT/SINIT area
-        mainBus.SetAccessCycles(0x200'0000, 0x4FF'FFFF, 2, 2);   // SCU A-Bus CS0/CS1 area (TODO: variable timings)
-        mainBus.SetAccessCycles(0x500'0000, 0x57F'FFFF, 8, 2);   // SCU A-Bus dummy area
-        mainBus.SetAccessCycles(0x580'0000, 0x58F'FFFF, 40, 40); // SCU A-Bus CS2 area (CD block, Netlink)
-        mainBus.SetAccessCycles(0x5A0'0000, 0x5BF'FFFF, 40, 2);  // SCSP RAM, registers
-        mainBus.SetAccessCycles(0x5C0'0000, 0x5C7'FFFF, 22, 2);  // VDP1 VRAM (TODO: VDP1 drawing contention)
-        mainBus.SetAccessCycles(0x5C8'0000, 0x5CF'FFFF, 22, 2);  // VDP1 FB (TODO: variable timings)
-        mainBus.SetAccessCycles(0x5D0'0000, 0x5D7'FFFF, 14, 2);  // VDP1 registers
-        mainBus.SetAccessCycles(0x5E0'0000, 0x5FB'FFFF, 20, 2);  // VDP2 VRAM, CRAM, registers
-        mainBus.SetAccessCycles(0x5FE'0000, 0x5FE'FFFF, 4, 2);   // SCU registers (TODO: delay on some registers)
-        mainBus.SetAccessCycles(0x600'0000, 0x7FF'FFFF, 2, 2);   // High Work RAM
+        // TODO:
+        // - SCU A-Bus CS0/CS1 area variable timings
+        // - SCU register delays
+        // - VDP1 FB variable timings
+        // - VDP1 VRAM drawing contention
 
-        // The timings below pass misctest, but are too slow in practice
+        mainBus.SetAccessCycles(0x000'0000, 0x7FF'FFFF, 4, 2, 4, 2, 4, 2); // Default timings for all unmapped regions
 
-        // mainBus.SetAccessCycles(0x000'0000, 0x7FF'FFFF, 4, 4); // Default timings for all regions
+        mainBus.SetAccessCycles(0x000'0000, 0x00F'FFFF, 2, 2, 2, 2, 4, 4);       // IPL/BIOS ROM
+        mainBus.SetAccessCycles(0x018'0000, 0x01F'FFFF, 2, 2, 2, 2, 4, 4);       // Internal Backup RAM
+        mainBus.SetAccessCycles(0x020'0000, 0x02F'FFFF, 2, 2, 2, 2, 4, 4);       // Low Work RAM
+        mainBus.SetAccessCycles(0x010'0000, 0x017'FFFF, 4, 2, 4, 2, 8, 4);       // SMPC registers
+        mainBus.SetAccessCycles(0x100'0000, 0x1FF'FFFF, 4, 2, 4, 2, 8, 4);       // MINIT/SINIT area
+        mainBus.SetAccessCycles(0x200'0000, 0x4FF'FFFF, 2, 2, 2, 2, 4, 4);       // SCU A-Bus CS0/CS1
+        mainBus.SetAccessCycles(0x500'0000, 0x57F'FFFF, 8, 2, 8, 2, 8, 2);       // SCU A-Bus dummy area
+        mainBus.SetAccessCycles(0x580'0000, 0x58F'FFFF, 40, 40, 40, 40, 40, 40); // SCU A-Bus CS2 (CD block, Netlink)
+        mainBus.SetAccessCycles(0x5A0'0000, 0x5BF'FFFF, 40, 2, 40, 2, 40, 2);    // SCSP RAM, registers
+        mainBus.SetAccessCycles(0x5C0'0000, 0x5C7'FFFF, 22, 2, 22, 2, 22, 2);    // VDP1 VRAM
+        mainBus.SetAccessCycles(0x5C8'0000, 0x5CF'FFFF, 22, 2, 22, 2, 22, 2);    // VDP1 FB
+        mainBus.SetAccessCycles(0x5D0'0000, 0x5D7'FFFF, 14, 2, 14, 2, 14, 2);    // VDP1 registers
+        mainBus.SetAccessCycles(0x5E0'0000, 0x5FB'FFFF, 20, 2, 20, 2, 20, 2);    // VDP2 VRAM, CRAM, registers
+        mainBus.SetAccessCycles(0x5FE'0000, 0x5FE'FFFF, 4, 2, 4, 2, 4, 2);       // SCU registers
+        mainBus.SetAccessCycles(0x600'0000, 0x7FF'FFFF, 2, 2, 2, 2, 2, 2);       // High Work RAM
+
+        // The timings below pass misctest, but are too slow in practice due to inaccurate SH2 cache, write buffer and
+        // BSC emulation
+
+        // TODO: IPL/BIOS ROM 32-bit R/W should be 18/18
+
+        // mainBus.SetAccessCycles(0x000'0000, 0x7FF'FFFF, 4, 4, 4, 4, 8, 8); // Default timings for all regions
         //
-        // mainBus.SetAccessCycles(0x000'0000, 0x00F'FFFF, 9, 9);   // IPL/BIOS ROM
-        // mainBus.SetAccessCycles(0x018'0000, 0x01F'FFFF, 9, 9);   // Internal Backup RAM
-        // mainBus.SetAccessCycles(0x020'0000, 0x02F'FFFF, 8, 8);   // Low Work RAM
-        // mainBus.SetAccessCycles(0x010'0000, 0x017'FFFF, 9, 9);   // SMPC registers
-        // mainBus.SetAccessCycles(0x100'0000, 0x1FF'FFFF, 9, 9);   // MINIT/SINIT area
-        // mainBus.SetAccessCycles(0x200'0000, 0x4FF'FFFF, 4, 4);   // SCU A-Bus CS0/CS1 area (TODO: variable timings)
-        // mainBus.SetAccessCycles(0x500'0000, 0x57F'FFFF, 16, 16); // SCU A-Bus dummy area
-        // mainBus.SetAccessCycles(0x580'0000, 0x58F'FFFF, 8, 8);   // SCU A-Bus CS2 area (CD block, Netlink)
-        // mainBus.SetAccessCycles(0x5A0'0000, 0x5BF'FFFF, 47, 47); // SCSP RAM, registers
-        // mainBus.SetAccessCycles(0x5C0'0000, 0x5C7'FFFF, 45, 45); // VDP1 VRAM (TODO: VDP1 drawing contention)
-        // mainBus.SetAccessCycles(0x5C8'0000, 0x5CF'FFFF, 45, 45); // VDP1 FB (TODO: variable timings)
-        // mainBus.SetAccessCycles(0x5D0'0000, 0x5D7'FFFF, 29, 29); // VDP1 registers
-        // mainBus.SetAccessCycles(0x5E0'0000, 0x5FB'FFFF, 40, 40); // VDP2 VRAM, CRAM, registers
-        // mainBus.SetAccessCycles(0x5FE'0000, 0x5FE'FFFF, 8, 8);   // SCU registers (TODO: delay on some registers)
-        // mainBus.SetAccessCycles(0x600'0000, 0x7FF'FFFF, 8, 8);   // High Work RAM
+        // mainBus.SetAccessCycles(0x000'0000, 0x00F'FFFF, 9, 9, 9, 9, 17, 17);     // IPL/BIOS ROM
+        // mainBus.SetAccessCycles(0x018'0000, 0x01F'FFFF, 9, 9, 9, 9, 18, 18);     // Internal Backup RAM
+        // mainBus.SetAccessCycles(0x020'0000, 0x02F'FFFF, 8, 8, 8, 8, 16, 16);     // Low Work RAM
+        // mainBus.SetAccessCycles(0x010'0000, 0x017'FFFF, 9, 9, 9, 9, 18, 18);     // SMPC registers
+        // mainBus.SetAccessCycles(0x100'0000, 0x1FF'FFFF, 9, 9, 9, 9, 18, 18);     // MINIT/SINIT area
+        // mainBus.SetAccessCycles(0x200'0000, 0x4FF'FFFF, 4, 4, 4, 4, 8, 8);       // SCU A-Bus CS0/CS1
+        // mainBus.SetAccessCycles(0x500'0000, 0x57F'FFFF, 16, 16, 16, 16, 16, 16); // SCU A-Bus dummy area
+        // mainBus.SetAccessCycles(0x580'0000, 0x58F'FFFF, 8, 8, 8, 8, 8, 8);       // SCU A-Bus CS2 (CD block, Netlink)
+        // mainBus.SetAccessCycles(0x5A0'0000, 0x5BF'FFFF, 47, 47, 47, 47, 47, 47); // SCSP RAM, registers
+        // mainBus.SetAccessCycles(0x5C0'0000, 0x5C7'FFFF, 45, 45, 45, 45, 45, 45); // VDP1 VRAM
+        // mainBus.SetAccessCycles(0x5C8'0000, 0x5CF'FFFF, 45, 45, 45, 45, 45, 45); // VDP1 FB
+        // mainBus.SetAccessCycles(0x5D0'0000, 0x5D7'FFFF, 29, 29, 29, 29, 29, 29); // VDP1 registers
+        // mainBus.SetAccessCycles(0x5E0'0000, 0x5FB'FFFF, 40, 40, 40, 40, 40, 40); // VDP2 VRAM, CRAM, registers
+        // mainBus.SetAccessCycles(0x5FE'0000, 0x5FE'FFFF, 8, 8, 8, 8, 8, 8);       // SCU registers
+        // mainBus.SetAccessCycles(0x600'0000, 0x7FF'FFFF, 8, 8, 8, 8, 8, 8);       // High Work RAM
     }
 }
 
@@ -780,13 +786,29 @@ void Saturn::UpdatePreferredRegionOrder(std::span<const core::config::sys::Regio
     }
 }
 
+void Saturn::UpdateDebugTracing(bool enabled) {
+    if (m_enableDebugTracing && !enabled) {
+        DetachAllTracers();
+    }
+    m_enableDebugTracing = enabled;
+    UpdateFunctionPointers();
+    SCSP.SetDebugTracing(enabled);
+    if (enabled) {
+        masterSH2.UseDebugBreakManager(&m_debugBreakMgr);
+        slaveSH2.UseDebugBreakManager(&m_debugBreakMgr);
+    } else {
+        masterSH2.UseDebugBreakManager(nullptr);
+        slaveSH2.UseDebugBreakManager(nullptr);
+    }
+}
+
 void Saturn::UpdateSH2CacheEmulation(bool enabled) {
     enabled |= m_forceSH2CacheEmulation;
-    if (!m_systemFeatures.emulateSH2Cache && enabled) {
+    if (!m_emulateSH2Caches && enabled) {
         masterSH2.PurgeCache();
         slaveSH2.PurgeCache();
     }
-    m_systemFeatures.emulateSH2Cache = enabled;
+    m_emulateSH2Caches = enabled;
     UpdateFunctionPointers();
 }
 

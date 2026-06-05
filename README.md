@@ -6,19 +6,19 @@ A Sega Saturn emulation core for libretro, built on the [Ymir](https://github.co
 
 Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accurate hardware layer. It provides accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development. Hardware layer synced verbatim from upstream Ymir (v0.3.2-dev).
+**Current Status**: Active development. Hardware layer synced verbatim from upstream Ymir (2026-06-04).
 
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir
-- Accurate SH-2 dual-CPU emulation (interpreter)
-- Full VDP1 sprite engine and VDP2 scroll plane graphics
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir (2026-06-04)
+- Accurate SH-2 dual-CPU emulation with WB/EX stall timing and 32-bit instruction fetch
+- Full VDP1 sprite engine and VDP2 scroll plane graphics with COPR register fix
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation
 - M68000 sound CPU emulation
 - SCU DSP and DMA emulation
 - CHD and ISO disc format support via libchdr
-- Save state and backup RAM persistence
+- Save state and backup RAM persistence with Japanese character translation
 - Auto-detection of console region from disc
 - Configurable CD read speed (2x-16x)
 - RAM expansion cartridge support (1MB, 4MB, 6MB)
@@ -60,8 +60,15 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 # Using the build script (recommended)
 .\build.ps1 -Generator "Visual Studio 17 2022"
 
+# With AVX2 optimizations
+.\build.ps1 -Generator "Visual Studio 17 2022" -AVX2
+
 # Or manually with CMake
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+
+# With AVX2: add -DBrimir_AVX2=ON
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBrimir_AVX2=ON
 cmake --build build --config Release
 
 # Output: build\bin\Release\brimir_libretro.dll
@@ -71,6 +78,10 @@ cmake --build build --config Release
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+
+# With AVX2: add -DBrimir_AVX2=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBrimir_AVX2=ON
 cmake --build build -j$(nproc)
 
 # Output: build/brimir_libretro.so

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Ymir Hardware Layer Sync (2026-06-04)** — Synced hardware layer to latest Ymir upstream
+  - **SH2 CPU** — Full rewrite with WB/EX stall emulation, 32-bit instruction fetch, corrected cycle counts for ~10 instructions, renamed `enableCache` → `emulateCache`, decoupled from `Scheduler`/`SystemFeatures`
+  - **VDP1** — COPR register fix: separated `currCommandAddress` from `nextCommandAddress` for correct COPR reads mid-command
+  - **Saturn system** — Updated SH2 construction to use `BindGlobalCycleCounter()`/`BindEmulateCacheOption()` callbacks; replaced `SystemFeatures` struct with direct bool members
+  - **Save state** — Added `fetchedOpcodes`, `forceFetchOpcodes`, `wbReg`, `nextCommandAddress` fields (**not backward-compatible with old saves**)
+  - **Infrastructure** — Synced `scheduler.hpp`, `configuration.hpp`, `bus.hpp`, `bit_ops.hpp`, `debug_break.hpp`, `watchpoint_defs.hpp`
+
+### Added
+- **Backup RAM utilities** — `backup_ram_utils.hpp/cpp` and `bup_char_table.inc` for Japanese character translation in backup memory
+- **CMake options** — Added `Brimir_AVX2`, `Brimir_EXTRA_INLINING`, `Brimir_DISABLE_FORCE_INLINE`, `Brimir_ENABLE_IPO` options
+- **Extended AVX2 flags** — Added `-mpopcnt`, `-mlzcnt`, `-mbmi2` for GCC/Clang builds
+
+### Fixed
+- **JIT wrapper** — Updated to new SH2 constructor signature (2-param) and `ymir::` namespace
+- **`vdp.hpp`** — Synced to provide `GetVerticalPhase()`/`GetHorizontalPhase()` used by updated Saturn frame loop
+
+### Technical
+- 29 hardware-layer files synced verbatim from Ymir upstream
+- ARM NEON intrinsics in `vdp_renderer_sw.cpp` preserved with `vreinterpretq` casts
+- `system_features.hpp` is now an orphan file (no remaining consumers)
+
 ## [0.3.0] - 2026-02-20
 
 ### Changed
