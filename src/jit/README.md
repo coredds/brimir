@@ -2,7 +2,7 @@
 
 **Status**: 🚧 Under Development (Phase 0)  
 **Branch**: `feature/sh2-jit`  
-**Target**: v0.3.0 (Q3 2026)
+**Target**: v0.7.0+ (see ROADMAP)
 
 ---
 
@@ -62,7 +62,7 @@ if (g_jit_enabled && !debug_mode) {
     }
 } else {
     // Fallback to Ymir interpreter (always accurate)
-    m_cyclesExecuted += InterpretNext<debug, enableCache>();
+    m_cyclesExecuted += InterpretNext<debug, emulateCache>();
 }
 ```
 
@@ -94,5 +94,5 @@ if (g_jit_enabled && !debug_mode) {
 ---
 
 **Next Milestone**: Complete Phase 1 test infrastructure  
-**Target Completion**: Q3 2026
+**Target Completion**: TBD
 
