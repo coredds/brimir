@@ -10,14 +10,14 @@ add_executable(brimir_tests
     main.cpp
     # Basic smoke tests
     unit/test_basic.cpp
-    # VDP priority and compositing tests
-    unit/test_vdp_priority.cpp
     # VDP color calculation tests
     unit/test_vdp_color_calc.cpp
-    # GPU validation tests
-    unit/test_gpu_validation.cpp
-    # Core wrapper tests (disabled until fixed)
-    # unit/test_core_wrapper.cpp
+    # Core wrapper tests (audio volume, rotation, overscan crop)
+    unit/test_core_wrapper.cpp
+    # VDP priority tests (disabled — uses removed SetHorizontalOverscan API)
+    # unit/test_vdp_priority.cpp
+    # GPU validation tests (disabled — depends on removed vdp_renderer.hpp)
+    # unit/test_gpu_validation.cpp
     # unit/test_hardware_access.cpp
     # Other tests (disabled until we need them)
     # unit/test_memory_components.cpp
