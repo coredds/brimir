@@ -119,6 +119,61 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "linear"
     },
     {
+        "brimir_audio_volume",
+        "Audio Volume",
+        nullptr,
+        "Audio output volume as a percentage. 100% is unchanged, lower values reduce volume, higher values amplify.",
+        nullptr,
+        "audio",
+        {
+            { "0", "0%" },
+            { "25", "25%" },
+            { "50", "50%" },
+            { "75", "75%" },
+            { "100", "100%" },
+            { "125", "125%" },
+            { "150", "150%" },
+            { "175", "175%" },
+            { "200", "200%" },
+            { nullptr, nullptr }
+        },
+        "100"
+    },
+    {
+        "brimir_rotation",
+        "Screen Rotation (TATE)",
+        nullptr,
+        "Rotate the screen for vertical (TATE) arcade games. "
+        "90° and 270° are for vertical shooters like Battle Garegga, Dodonpachi, Radiant Silvergun.",
+        nullptr,
+        "video",
+        {
+            { "0", "None" },
+            { "90", "90\u00B0" },
+            { "180", "180\u00B0" },
+            { "270", "270\u00B0" },
+            { nullptr, nullptr }
+        },
+        "0"
+    },
+    {
+        "brimir_overscan",
+        "Overscan Crop",
+        nullptr,
+        "Crop overscan edges from the video output. "
+        "Small cuts ~16px, Medium ~32px, Large ~48px from each edge.",
+        nullptr,
+        "video",
+        {
+            { "0", "None" },
+            { "1", "Small (~16px)" },
+            { "2", "Medium (~32px)" },
+            { "3", "Large (~48px)" },
+            { nullptr, nullptr }
+        },
+        "0"
+    },
+    {
         "brimir_cd_speed",
         "CD Read Speed",
         nullptr,

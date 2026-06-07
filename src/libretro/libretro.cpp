@@ -578,6 +578,18 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     const char* deinterlace_mode = get_option_value("brimir_deinterlace_mode", "bob");
     g_core->SetDeinterlacingMode(deinterlace_mode);
 
+    const char* audio_volume_str = get_option_value("brimir_audio_volume", "100");
+    g_core->SetAudioVolume(atoi(audio_volume_str));
+
+    const char* rotation_str = get_option_value("brimir_rotation", "0");
+    g_core->SetRotation(atoi(rotation_str));
+
+    const char* overscan_str = get_option_value("brimir_overscan", "0");
+    int overscan = atoi(overscan_str);
+    int cropH = overscan * 16; // 0=0px, 1=16px, 2=32px, 3=48px
+    int cropV = overscan * 16;
+    g_core->SetOverscanCrop(cropH, cropV);
+
     // Register memory descriptors for RetroArch's memory viewer / cheat search
     // Use raw pointer getters to avoid triggering .srm sync side effects
     g_memdesc[0].ptr = g_core->GetSystemRAMRawPointer();

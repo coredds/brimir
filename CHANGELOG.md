@@ -225,27 +225,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The roadmap has been revised based on a gap analysis against mature RetroArch cores. The guiding constraint is that Ymir's hardware layer stays verbatim upstream — all features are implemented in Brimir's bridge/libretro layers or proposed to Ymir upstream. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
-### Upcoming — v0.4.1 (Bridge Layer)
+### Completed (v0.5.0-dev)
+
+#### Audio Volume
+- New core option `brimir_audio_volume` (0%–200%, default 100%)
+- Fixed-point 16.16 scaling applied per-sample in `OnAudioSample()` with zero overhead at 100%
+- Validated: no overflow at 200% volume with full-scale samples
+
+#### Screen Rotation (TATE)
+- New core option `brimir_rotation` (None, 90°, 180°, 270°)
+- Post-process rotation applied after pixel conversion in `OnFrameComplete()`
+- Supports chaining with overscan crop (crop first, then rotate)
+- Buffer swap between `m_framebuffer` and `m_displayFramebuffer` avoids third allocation
+
+#### Overscan Crop
+- New core option `brimir_overscan` (None, Small ~16px, Medium ~32px, Large ~48px)
+- Crops from all four edges before rotation in `OnFrameComplete()`
+- Guard prevents crop when remaining area would be < 32px
+
+### Completed — v0.4.1 (2026-06-04)
 - System RAM exposure via `RETRO_MEMORY_SYSTEM_RAM` (unblocks RetroAchievements)
-- Memory descriptors (SRAM, cartridge RAM, WRAM visible in RA)
+- Memory descriptors (SRAM, WRAM Low, WRAM High visible in RetroArch)
 - Save state compression (LZ4, enabling rewind + runahead viability)
 - Contentless / BIOS menu mode (`supports_no_game = "true"`)
-- M3U-less disc swapping
-- CD read speed options beyond 16x
+- M3U-less disc swapping (full disk control ext interface, 10 callbacks)
+- CD read speed options expanded to 24x, 32x, Max (200x)
 
-### Upcoming — v0.5.0 (Bridge Layer)
+### Upcoming — v0.5.0
 - Full cheat system (Action Replay / GameShark / RAM search)
 - All controller types (3D Control Pad, Arcade Racer, Mission Stick, Virtua Gun, Shuttle Mouse)
 - RetroAchievements integration
-- Screen rotation for TATE shmups (90°/270°)
 - VDP layer toggling and debug overlay exposure
-- Overscan crop options
-- Audio volume control
 - Cartridge RAM persistence
 - Frameskip support (Hybrid — needs Ymir config)
 - Region patching (PAL→NTSC force)
 
-### Upcoming — v0.5.1 (Bridge Layer)
+### Upcoming — v0.5.1
 - Internal cheat database (shipped with core)
 
 ### Upcoming — v0.6.0 (Hybrid)

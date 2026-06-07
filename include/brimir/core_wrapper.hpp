@@ -202,6 +202,19 @@ public:
     /// @param mode Mode string: "bob", "weave", "blend", "current", "none"
     void SetDeinterlacingMode(const char* mode);
 
+    /// @brief Set audio volume percentage
+    /// @param percent Volume percentage (0-200)
+    void SetAudioVolume(int percent);
+
+    /// @brief Set screen rotation for TATE mode
+    /// @param degrees Rotation angle: 0, 90, 180, 270
+    void SetRotation(int degrees);
+
+    /// @brief Set overscan crop in pixels from each edge
+    /// @param horizontal Total horizontal pixels to crop (from both edges)
+    /// @param vertical Total vertical pixels to crop (from both edges)
+    void SetOverscanCrop(int horizontal, int vertical);
+
     // --- Disk control (multi-disc games via M3U) ---
 
     /// @brief Get the number of discs in the loaded M3U playlist
@@ -258,8 +271,21 @@ private:
     unsigned int m_fbHeight = 224;
     unsigned int m_fbPitch = 320 * 4; // XRGB8888 = 4 bytes per pixel
     unsigned int m_pixelFormat = 1;   // XRGB8888
-    std::vector<uint32_t> m_framebuffer;  // XRGB8888 (0x00RRGGBB)
+    std::vector<uint32_t> m_framebuffer;  // XRGB8888 converted from Ymir's XBGR
+    std::vector<uint32_t> m_displayFramebuffer; // Final output after crop/rotation
+    const void* m_displayPointer = nullptr; // Points to final display buffer
+
+    // Screen rotation (TATE mode)
+    int m_rotation = 0; // 0, 90, 180, 270
+
+    // Overscan crop in pixels (total from both edges)
+    int m_overscanCropH = 0;
+    int m_overscanCropV = 0;
     
+    // Audio volume (0-200%, scaled as fixed-point 0.0-2.0 in 16.16)
+    int m_audioVolume = 100;
+    int32_t m_audioVolumeFixed = 65536; // 1.0 in 16.16 fixed-point
+
     // Audio ring buffer for efficient batching (power of 2 for fast modulo)
     static constexpr size_t kAudioRingBufferSize = 4096;
     std::array<int16_t, kAudioRingBufferSize> m_audioRingBuffer;

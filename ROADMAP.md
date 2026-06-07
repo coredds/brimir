@@ -2,6 +2,7 @@
 
 **Date**: 2026-06-04
 **Status**: Active — Ymir hardware layer synced to latest upstream (2026-06-04)
+**Last Updated**: 2026-06-07 — v0.4.1 features complete, v0.5.0 in progress
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes).
 
@@ -82,8 +83,8 @@ Once save states are fast and compressed (#5), these are RetroArch frontend feat
 - Rewind: Already works if state size is reasonable
 - Runahead: May need a "secondary instance" optimization (skip audio/video rendering)
 
-### 7. Screen Rotation (TATE)
-**Layer**: Bridge | **Effort**: ~100 LOC | **Target**: v0.5.0
+### 7. Screen Rotation (TATE)  ✅
+**Layer**: Bridge | **Effort**: ~100 LOC | **Target**: v0.5.0 | **Status**: Done (2026-06-07)
 
 Post-process the framebuffer in `OnFrameComplete()` before `video_cb`:
 - 90° / 270° rotation for TATE shmups
@@ -128,8 +129,8 @@ Add `configuration.system.cpuClockMultiplier` to Ymir (propose upstream). Core o
 
 Add `configuration.video.frameskip` to Ymir (partially exists in underlying VDP). Core option: 0–3 or Auto. Skips VDP rendering for N frames while continuing CPU emulation.
 
-### 14. Overscan Crop
-**Layer**: Bridge (no Ymir changes needed after all) | **Effort**: ~40 LOC | **Target**: v0.5.0
+### 14. Overscan Crop  ✅
+**Layer**: Bridge (no Ymir changes needed after all) | **Effort**: ~40 LOC | **Target**: v0.5.0 | **Status**: Done (2026-06-07)
 
 Post-process crop in `OnFrameComplete()` — trim N pixels from each edge before `video_cb`. Core options for horizontal and vertical overscan.
 
@@ -138,8 +139,8 @@ Post-process crop in `OnFrameComplete()` — trim N pixels from each edge before
 
 Ymir accepts values 2–200. Brimir's options only expose 2x–16x. Add 24x, 32x, Max/Instant options.
 
-### 16. Audio Volume
-**Layer**: Bridge | **Effort**: ~30 LOC | **Target**: v0.5.0
+### 16. Audio Volume  ✅
+**Layer**: Bridge | **Effort**: ~30 LOC | **Target**: v0.5.0 | **Status**: Done (2026-06-07)
 
 Scale samples in `OnAudioSample()` before buffering. No Ymir changes needed. Core option: 0–200% volume.
 
@@ -218,8 +219,8 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Would
 
 | Version | Features |
 |---|---|
-| **v0.4.1** | System RAM exposure, memory descriptors, save state compression, contentless mode, M3U-less disc swap, CD speed 24x+, rewind/runahead viability |
-| **v0.5.0** | Cheat system, all controller types, screen rotation, layer toggling, overscan crop, audio volume, cartridge RAM persistence, frameskip, region patching, RetroAchievements |
+| **v0.4.1** ✅ | System RAM exposure, memory descriptors, save state compression, contentless mode, M3U-less disc swap, CD speed 24x+, rewind/runahead viability |
+| **v0.5.0** 🚧 | Cheat system, all controller types, ~~screen rotation~~, layer toggling, ~~overscan crop~~, ~~audio volume~~, cartridge RAM persistence, frameskip, region patching, RetroAchievements |
 | **v0.5.1** | Internal cheat database, extended compatibility testing |
 | **v0.6.0** | CPU overclocking (hybrid — needs Ymir config), VDP2 debug overlay exposure |
 | **v0.7.0+** | JIT compiler (Phase 2), hardware renderer review |

@@ -680,7 +680,7 @@ bool CoreWrapper::LoadIPLFromFile(const char* path) {
 
 
 const void* CoreWrapper::GetFramebuffer() const {
-    return m_framebuffer.data();
+    return m_displayPointer ? m_displayPointer : m_framebuffer.data();
 }
 
 unsigned int CoreWrapper::GetFramebufferWidth() const {
@@ -925,10 +925,106 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
             }
         }
     }
+
+    // Apply overscan crop and/or TATE rotation to produce final display buffer
+    uint32_t srcWidth = width;
+    uint32_t srcHeight = height;
+    const uint32_t* srcBuf = m_framebuffer.data();
+
+    // Step 1: Overscan crop
+    if (m_overscanCropH > 0 || m_overscanCropV > 0) {
+        uint32_t cropW = width;
+        uint32_t cropH = height;
+
+        if (static_cast<int>(width) > m_overscanCropH + 32 && static_cast<int>(height) > m_overscanCropV + 32) {
+            cropW = width - static_cast<uint32_t>(m_overscanCropH);
+            cropH = height - static_cast<uint32_t>(m_overscanCropV);
+        }
+
+        if (cropW != width || cropH != height) {
+            int cropLeft = m_overscanCropH / 2;
+            int cropTop = m_overscanCropV / 2;
+
+            size_t cropPixels = static_cast<size_t>(cropW) * cropH;
+            if (m_displayFramebuffer.size() < cropPixels) {
+                m_displayFramebuffer.resize(cropPixels);
+            }
+
+            for (uint32_t y = 0; y < cropH; ++y) {
+                const uint32_t* srcRow = m_framebuffer.data() + (static_cast<size_t>(y + cropTop) * width + cropLeft);
+                uint32_t* dstRow = m_displayFramebuffer.data() + (static_cast<size_t>(y) * cropW);
+                std::memcpy(dstRow, srcRow, cropW * sizeof(uint32_t));
+            }
+
+            srcBuf = m_displayFramebuffer.data();
+            srcWidth = cropW;
+            srcHeight = cropH;
+        }
+    }
+
+    // Step 2: TATE rotation
+    if (m_rotation != 0) {
+        uint32_t rotW = (m_rotation == 90 || m_rotation == 270) ? srcHeight : srcWidth;
+        uint32_t rotH = (m_rotation == 90 || m_rotation == 270) ? srcWidth : srcHeight;
+
+        size_t rotPixels = static_cast<size_t>(rotW) * rotH;
+        std::vector<uint32_t>* rotBuf = (srcBuf == m_displayFramebuffer.data())
+            ? &m_framebuffer  // Reuse other buffer to avoid extra allocation
+            : &m_displayFramebuffer;
+
+        if (rotBuf->size() < rotPixels) {
+            rotBuf->resize(rotPixels);
+        }
+
+        switch (m_rotation) {
+            case 90:
+                for (uint32_t y = 0; y < rotH; ++y) {
+                    for (uint32_t x = 0; x < rotW; ++x) {
+                        (*rotBuf)[static_cast<size_t>(y) * rotW + x] =
+                            srcBuf[static_cast<size_t>(rotW - 1 - x) * srcWidth + y];
+                    }
+                }
+                break;
+            case 180:
+                for (uint32_t y = 0; y < rotH; ++y) {
+                    for (uint32_t x = 0; x < rotW; ++x) {
+                        (*rotBuf)[static_cast<size_t>(y) * rotW + x] =
+                            srcBuf[static_cast<size_t>(rotH - 1 - y) * rotW + (rotW - 1 - x)];
+                    }
+                }
+                break;
+            case 270:
+                for (uint32_t y = 0; y < rotH; ++y) {
+                    for (uint32_t x = 0; x < rotW; ++x) {
+                        (*rotBuf)[static_cast<size_t>(y) * rotW + x] =
+                            srcBuf[static_cast<size_t>(x) * srcWidth + (srcWidth - 1 - y)];
+                    }
+                }
+                break;
+        }
+
+        m_displayPointer = rotBuf->data();
+        m_fbWidth = rotW;
+        m_fbHeight = rotH;
+        m_fbPitch = rotW * 4;
+    } else if (srcBuf != m_framebuffer.data()) {
+        m_displayPointer = m_displayFramebuffer.data();
+        m_fbWidth = srcWidth;
+        m_fbHeight = srcHeight;
+        m_fbPitch = srcWidth * 4;
+    } else {
+        m_displayPointer = nullptr;
+    }
 }
 
 
 void CoreWrapper::OnAudioSample(int16_t left, int16_t right) {
+    // Scale samples by volume (16.16 fixed-point)
+    if (m_audioVolumeFixed != 65536) {
+        left = static_cast<int16_t>((static_cast<int64_t>(left) * m_audioVolumeFixed) >> 16);
+        right = static_cast<int16_t>((static_cast<int64_t>(right) * m_audioVolumeFixed) >> 16);
+    }
+
     // Efficient ring buffer implementation - no bounds checks or allocations!
     // Write position is atomic for thread safety (though SCSP is single-threaded)
     size_t writePos = m_audioRingWritePos.load(std::memory_order_relaxed);
@@ -1124,6 +1220,27 @@ void CoreWrapper::SetDeinterlacingMode(const char* mode) {
     m_saturn->VDP.ModifyEnhancements([enable](ymir::vdp::config::Enhancements& enh) {
         enh.deinterlace = enable;
     });
+}
+
+void CoreWrapper::SetAudioVolume(int percent) {
+    if (percent < 0) percent = 0;
+    if (percent > 200) percent = 200;
+    m_audioVolume = percent;
+    m_audioVolumeFixed = (percent * 65536) / 100;
+}
+
+void CoreWrapper::SetRotation(int degrees) {
+    if (degrees != 0 && degrees != 90 && degrees != 180 && degrees != 270) {
+        degrees = 0;
+    }
+    m_rotation = degrees;
+}
+
+void CoreWrapper::SetOverscanCrop(int horizontal, int vertical) {
+    if (horizontal < 0) horizontal = 0;
+    if (vertical < 0) vertical = 0;
+    m_overscanCropH = horizontal;
+    m_overscanCropV = vertical;
 }
 
 // --- Disk control (multi-disc support) ---
