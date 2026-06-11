@@ -337,17 +337,14 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                     case ymir::db::Cartridge::DRAM8Mbit:
                         m_saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
                         m_hasCartridge = true;
-                        LoadCartridgeRAM();
                         break;
                     case ymir::db::Cartridge::DRAM32Mbit:
                         m_saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>();
                         m_hasCartridge = true;
-                        LoadCartridgeRAM();
                         break;
                     case ymir::db::Cartridge::DRAM48Mbit:
                         m_saturn->InsertCartridge<ymir::cart::DRAM48MbitCartridge>();
                         m_hasCartridge = true;
-                        LoadCartridgeRAM();
                         break;
                     default:
                         // Other cartridge types (ROM, BackupRAM) not yet supported
@@ -357,6 +354,9 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                     // Do a HARD reset after inserting cartridge to force BIOS reboot
                     // This is necessary because the BIOS has already initialized
                     m_saturn->Reset(true);
+
+                    // Load saved cartridge RAM AFTER reset (Reset zeros the RAM)
+                    LoadCartridgeRAM();
                     
                 } catch (const std::exception& e) {
                     m_lastError = std::string("Exception inserting cartridge: ") + e.what();
