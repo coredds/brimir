@@ -1,8 +1,8 @@
 # Brimir Roadmap
 
-**Date**: 2026-06-04
-**Status**: Active — Ymir hardware layer synced to latest upstream (2026-06-04)
-**Last Updated**: 2026-06-07 — v0.4.1 features complete, v0.5.0 in progress
+**Date**: 2026-06-10
+**Status**: Active — Ymir hardware layer synced verbatim to upstream HEAD (2026-06-10)
+**Last Updated**: 2026-06-10 — v0.4.2 released, SH2 decode sync complete, v0.5.0 in progress
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes).
 
@@ -21,8 +21,8 @@ Feature categories below are tagged:
 
 These are the biggest wins with the lowest implementation cost. All leverage Ymir's existing public API.
 
-### 1. Cheat System
-**Layer**: Bridge | **Effort**: ~500 LOC | **Target**: v0.5.0
+### 1. Cheat System  🚧
+**Layer**: Bridge | **Effort**: ~500 LOC | **Target**: v0.5.0 | **Status**: Stubs only — `retro_cheat_set`/`retro_cheat_reset` wired, `.info` flag set, no AR/GS parser yet
 
 Ymir exposes `saturn.mainBus.Poke<T>(addr, val)` for side-effect-free memory writes, plus public memory arrays (`WRAMLow`, `WRAMHigh`). Action Replay / GameShark / RAM watch / cheat search engine all possible.
 
@@ -48,15 +48,13 @@ Ymir already supports all Saturn peripherals — Brimir just hardcodes `ConnectC
 - Input descriptors for 3D Pad analog axes, wheel, stick, gun coordinates
 - Note: Virtua Gun gated by `Ymir_FF_VIRTUA_GUN` — verify build flag
 
-### 3. System RAM Exposure + Memory Descriptors
-**Layer**: Bridge | **Effort**: ~30 LOC | **Target**: v0.4.1
+### 3. System RAM Exposure + Memory Descriptors  ✅
+**Layer**: Bridge | **Effort**: ~30 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
 
 Ymir's `saturn.mem.WRAMLow` and `saturn.mem.WRAMHigh` are public `std::array<uint8_t, 1MiB>` fields. Currently `retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM)` returns nullptr.
 
 - Return WRAM pointers in `retro_get_memory_data`
 - Flip `.info`: `memory_descriptors = "true"`
-- Expose: System RAM, Backup RAM, Cartridge RAM
-- Unblocks RetroAchievements memory mapping
 
 ### 4. RetroAchievements
 **Layer**: Bridge | **Effort**: ~200 LOC | **Target**: v0.5.0
@@ -66,8 +64,8 @@ Once system RAM is exposed (#3), RA integration is mostly configuration:
 - Expose memory regions for RA to peek
 - Rich presence: expose game state (disc ID, region) via RA memory
 
-### 5. Save State Compression
-**Layer**: Bridge | **Effort**: ~50 LOC | **Target**: v0.4.1
+### 5. Save State Compression  ✅
+**Layer**: Bridge | **Effort**: ~50 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
 
 Brimir controls serialization — currently raw `memcpy` of `sizeof(SaveState)`. Wrap with LZ4 (already vendored) before passing to libretro.
 
@@ -103,13 +101,13 @@ Ymir exposes `saturn.VDP.SetLayerEnabled(Layer, bool)` and `saturn.VDP.vdp2Debug
 
 Ship a JSON cheat database with the core. Auto-apply per-game Action Replay codes on load. Community-contributable.
 
-### 10. Contentless Mode (BIOS Menu)
-**Layer**: Bridge | **Effort**: ~10 LOC + testing | **Target**: v0.4.1
+### 10. Contentless Mode (BIOS Menu)  ✅
+**Layer**: Bridge | **Effort**: ~10 LOC + testing | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
 
 Flip `.info`: `supports_no_game = "true"`. Ymir's `Saturn()` boots to BIOS menu when a real IPL is loaded without a disc. Gives access to the Saturn CD player, memory manager, and settings.
 
-### 11. M3U-Less Disc Swapping
-**Layer**: Bridge | **Effort**: ~50 LOC | **Target**: v0.4.1
+### 11. M3U-Less Disc Swapping  ✅
+**Layer**: Bridge | **Effort**: ~50 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
 
 Ymir exposes `EjectDisc()`, `LoadDisc(media::Disc&&)`, tray control. Extend disk control interface to allow direct disc path loading without M3U playlist pre-creation.
 
@@ -134,8 +132,8 @@ Add `configuration.video.frameskip` to Ymir (partially exists in underlying VDP)
 
 Post-process crop in `OnFrameComplete()` — trim N pixels from each edge before `video_cb`. Core options for horizontal and vertical overscan.
 
-### 15. CD Read Speed Beyond 16x
-**Layer**: Bridge | **Effort**: ~10 LOC | **Target**: v0.4.1
+### 15. CD Read Speed Beyond 16x  ✅
+**Layer**: Bridge | **Effort**: ~10 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
 
 Ymir accepts values 2–200. Brimir's options only expose 2x–16x. Add 24x, 32x, Max/Instant options.
 
@@ -149,8 +147,8 @@ Scale samples in `OnAudioSample()` before buffering. No Ymir changes needed. Cor
 
 Propose `configuration.system.forceVideoStandard` upstream. Core option: "Force NTSC" for PAL games to fix 50Hz slowdown/borders.
 
-### 18. Cartridge RAM Persistence
-**Layer**: Bridge | **Effort**: ~100 LOC | **Target**: v0.5.0
+### 18. Cartridge RAM Persistence  🚧
+**Layer**: Bridge | **Effort**: ~100 LOC | **Target**: v0.5.0 | **Status**: Partial — path wiring done, Load/Save TODO
 
 Ymir's `BackupMemoryCartridge` exists and is fully wired. Brimir's `core_wrapper.cpp` has `m_cartridgePath` and TODO comments. Wire up cartridge save/load in `LoadGame()`/`UnloadGame()`.
 
@@ -219,7 +217,8 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Would
 
 | Version | Features |
 |---|---|
-| **v0.4.1** ✅ | System RAM exposure, memory descriptors, save state compression, contentless mode, M3U-less disc swap, CD speed 24x+, rewind/runahead viability |
+| **v0.4.1** ✅ | System RAM exposure, memory descriptors, save state compression, contentless mode, M3U-less disc swap, CD speed 24x+ |
+| **v0.4.2** ✅ | SH2 decode optimization + DIV1 microoptimization (4 files synced verbatim from Ymir HEAD), rewind/runahead viability |
 | **v0.5.0** 🚧 | Cheat system, all controller types, ~~screen rotation~~, layer toggling, ~~overscan crop~~, ~~audio volume~~, cartridge RAM persistence, frameskip, region patching, RetroAchievements |
 | **v0.5.1** | Internal cheat database, extended compatibility testing |
 | **v0.6.0** | CPU overclocking (hybrid — needs Ymir config), VDP2 debug overlay exposure |
@@ -237,12 +236,12 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Would
 | Cheats | Stub | Yes | Yes | Yes | Yes | v0.5.0 |
 | RetroAchievements | Planned | Yes | Yes | No | Yes | v0.5.0 |
 | 3D analog controller | No | Yes | DualShock | DualShock | DS2 | v0.5.0 |
-| Rewind | No | Yes | Yes | Yes | Yes | v0.4.1 |
-| Runahead | No | Yes | Yes | Yes | Yes | v0.4.1+ |
+| Rewind | Wired | Yes | Yes | Yes | Yes | v0.4.1 |
+| Runahead | Wired | Yes | Yes | Yes | Yes | v0.4.1+ |
 | Light gun | No | Yes | GunCon | No | Yes | v0.5.0 |
 | Widescreen hacks | No | Yes | Yes | Yes | Yes | Post-JIT |
 | HD textures | No | Yes | Mods | Yes | Yes | Post-HW |
-| TATE rotation | No | Yes | Via RA | No | No | v0.5.0 |
+| TATE rotation | Yes | Yes | Via RA | No | No | v0.5.0 |
 | Netplay | No | Rollback | Yes | No | No | Post-JIT |
 | ST-V arcade | No | No | N/A | N/A | N/A | Post-1.0 |
 
