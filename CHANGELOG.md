@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ARM NEON intrinsics in `vdp_renderer_sw.cpp` preserved with `vreinterpretq` casts
 - `system_features.hpp` is now an orphan file (no remaining consumers)
 
+## [0.4.2] - 2026-06-10
+
+### Changed
+- **SH2 decode optimization** — Removed `DecodedArgs` pre-decode table (~256KB saved); instruction handlers now decode opcode arguments directly via `DECODE_NM`/`DECODE_D_S` macros, matching Ymir upstream
+- **DIV1 microoptimization** — Applied upstream performance tweaks to DIV1 instruction
+
+### Fixed
+- **Incomplete sync** — `sh2_decode.{hpp,cpp}` now match Ymir upstream; previous 0.4.1 sync retained stale `DecodedArgs` pre-decoding that was never consumed by the updated handlers
+
+### Technical
+- 4 hardware-layer files synced: `sh2.{hpp,cpp}`, `sh2_decode.{hpp,cpp}`
+- ARM NEON intrinsics preserved; SH1 decode unchanged
+
 ## [0.3.0] - 2026-02-20
 
 ### Changed
