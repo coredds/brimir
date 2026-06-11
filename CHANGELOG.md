@@ -37,12 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SH2 decode optimization** — Removed `DecodedArgs` pre-decode table (~256KB saved); instruction handlers now decode opcode arguments directly via `DECODE_NM`/`DECODE_D_S` macros, matching Ymir upstream
 - **DIV1 microoptimization** — Applied upstream performance tweaks to DIV1 instruction
 
+### Added
+- **Cartridge RAM persistence** — Save/load `.cart` files for all DRAM cartridge types (8 Mbit, 32 Mbit, 48 Mbit) using Ymir's `DumpRAM`/`LoadRAM` API
+
 ### Fixed
 - **Incomplete sync** — `sh2_decode.{hpp,cpp}` now match Ymir upstream; previous 0.4.1 sync retained stale `DecodedArgs` pre-decoding that was never consumed by the updated handlers
+- **Cartridge RAM load order** — Load saved cartridge RAM after hard reset to prevent immediate zeroing
 
 ### Technical
 - 4 hardware-layer files synced: `sh2.{hpp,cpp}`, `sh2_decode.{hpp,cpp}`
 - ARM NEON intrinsics preserved; SH1 decode unchanged
+- CI: Windows build switched from VS generator to Ninja
+- CI: Node.js 24 opt-in for deprecated GitHub Actions
 
 ## [0.3.0] - 2026-02-20
 
