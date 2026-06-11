@@ -337,17 +337,17 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                     case ymir::db::Cartridge::DRAM8Mbit:
                         m_saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
                         m_hasCartridge = true;
-                        // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
+                        LoadCartridgeRAM();
                         break;
                     case ymir::db::Cartridge::DRAM32Mbit:
                         m_saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>();
                         m_hasCartridge = true;
-                        // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
+                        LoadCartridgeRAM();
                         break;
                     case ymir::db::Cartridge::DRAM48Mbit:
                         m_saturn->InsertCartridge<ymir::cart::DRAM48MbitCartridge>();
                         m_hasCartridge = true;
-                        // TODO: LoadCartridgeRAM();  // Load saved RAM if exists
+                        LoadCartridgeRAM();
                         break;
                     default:
                         // Other cartridge types (ROM, BackupRAM) not yet supported
@@ -413,6 +413,116 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
     }
 }
 
+void CoreWrapper::SaveCartridgeRAM() {
+    if (!m_saturn || !m_hasCartridge || m_cartridgePath.empty()) {
+        return;
+    }
+
+    auto& cart = m_saturn->GetCartridge();
+    const auto type = cart.GetType();
+
+    std::vector<uint8> ram;
+
+    switch (type) {
+    case ymir::cart::CartType::DRAM8Mbit: {
+        auto* dram = cart.As<ymir::cart::CartType::DRAM8Mbit>();
+        if (!dram) return;
+        ram.resize(1_MiB);
+        dram->DumpRAM(std::span<uint8, 1_MiB>(ram.data(), ram.size()));
+        break;
+    }
+    case ymir::cart::CartType::DRAM32Mbit: {
+        auto* dram = cart.As<ymir::cart::CartType::DRAM32Mbit>();
+        if (!dram) return;
+        ram.resize(4_MiB);
+        dram->DumpRAM(std::span<uint8, 4_MiB>(ram.data(), ram.size()));
+        break;
+    }
+    case ymir::cart::CartType::DRAM48Mbit: {
+        auto* dram = cart.As<ymir::cart::CartType::DRAM48Mbit>();
+        if (!dram) return;
+        ram.resize(6_MiB);
+        dram->DumpRAM(std::span<uint8, 6_MiB>(ram.data(), ram.size()));
+        break;
+    }
+    default:
+        return;
+    }
+
+    try {
+        std::ofstream file(m_cartridgePath, std::ios::binary | std::ios::trunc);
+        if (file.is_open()) {
+            file.write(reinterpret_cast<const char*>(ram.data()), ram.size());
+        }
+    } catch (...) {
+        m_lastError = "Failed to save cartridge RAM";
+    }
+}
+
+void CoreWrapper::LoadCartridgeRAM() {
+    if (!m_saturn || !m_hasCartridge || m_cartridgePath.empty()) {
+        return;
+    }
+
+    if (!std::filesystem::exists(m_cartridgePath)) {
+        return;
+    }
+
+    auto& cart = m_saturn->GetCartridge();
+    const auto type = cart.GetType();
+
+    std::vector<uint8> ram;
+    size_t expectedSize = 0;
+
+    switch (type) {
+    case ymir::cart::CartType::DRAM8Mbit:
+        expectedSize = 1_MiB;
+        break;
+    case ymir::cart::CartType::DRAM32Mbit:
+        expectedSize = 4_MiB;
+        break;
+    case ymir::cart::CartType::DRAM48Mbit:
+        expectedSize = 6_MiB;
+        break;
+    default:
+        return;
+    }
+
+    try {
+        std::ifstream file(m_cartridgePath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) return;
+
+        const auto fileSize = static_cast<size_t>(file.tellg());
+        if (fileSize != expectedSize) return;
+
+        file.seekg(0, std::ios::beg);
+        ram.resize(expectedSize);
+        file.read(reinterpret_cast<char*>(ram.data()), expectedSize);
+    } catch (...) {
+        return;
+    }
+
+    switch (type) {
+    case ymir::cart::CartType::DRAM8Mbit: {
+        auto* dram = cart.As<ymir::cart::CartType::DRAM8Mbit>();
+        if (dram) dram->LoadRAM(std::span<const uint8, 1_MiB>(ram.data(), 1_MiB));
+        break;
+    }
+    case ymir::cart::CartType::DRAM32Mbit: {
+        auto* dram = cart.As<ymir::cart::CartType::DRAM32Mbit>();
+        if (dram) dram->LoadRAM(std::span<const uint8, 4_MiB>(ram.data(), 4_MiB));
+        break;
+    }
+    case ymir::cart::CartType::DRAM48Mbit: {
+        auto* dram = cart.As<ymir::cart::CartType::DRAM48Mbit>();
+        if (dram) dram->LoadRAM(std::span<const uint8, 6_MiB>(ram.data(), 6_MiB));
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 void CoreWrapper::UnloadGame() {
     if (!m_initialized || !m_saturn) {
         return;
@@ -429,10 +539,10 @@ void CoreWrapper::UnloadGame() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     
-    // TODO: Save cartridge RAM if present
-    // if (m_hasCartridge) {
-    //     SaveCartridgeRAM();
-    // }
+    // Save cartridge RAM if present
+    if (m_hasCartridge) {
+        SaveCartridgeRAM();
+    }
     
     // Save SMPC persistent data (RTC clock!) before unloading
     // This preserves the date/time the user set (system-wide, not per-game)

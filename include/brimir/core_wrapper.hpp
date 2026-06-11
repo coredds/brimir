@@ -326,6 +326,9 @@ private:
     std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file
     bool m_hasCartridge = false;  // True if a cartridge is inserted
 
+    void SaveCartridgeRAM();
+    void LoadCartridgeRAM();
+
     // Multi-disc support (M3U playlists)
     std::vector<std::filesystem::path> m_discList;
     size_t m_currentDiscIndex = 0;
