@@ -1,8 +1,8 @@
 # Brimir Roadmap
 
-**Date**: 2026-06-10
-**Status**: Active — Ymir hardware layer synced verbatim to upstream HEAD (2026-06-10)
-**Last Updated**: 2026-06-10 — v0.4.2 released, SH2 decode sync complete, v0.5.0 in progress
+**Date**: 2026-06-17
+**Status**: Active — Ymir hardware layer synced verbatim to upstream HEAD (2026-06-17)
+**Last Updated**: 2026-06-17 — v0.4.3 released, VDP1/CD Block/SCSP threading sync complete, v0.5.0 in progress
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes).
 

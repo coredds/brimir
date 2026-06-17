@@ -329,6 +329,24 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1WriteVRAMImpl(uint32 address, T value
     }
 }
 
+void SoftwareVDPRenderer::VDP1SyncFB() {
+    if (m_threadedVDP1Rendering) {
+        auto &ctx = m_vdp1RenderingContext;
+        ctx.FlushPendingEvents();
+        for (;;) {
+            const uint32 curr = ctx.cmdFence.load();
+            if (ctx.cmdCount == curr) {
+                break;
+            }
+            ctx.cmdFence.wait(curr);
+        }
+    }
+}
+
+FLATTEN void SoftwareVDPRenderer::VDP1DebugSyncFB() {
+    VDP1SyncFB();
+}
+
 void SoftwareVDPRenderer::VDP1WriteFB(uint32 address, uint8 value) {
     VDP1WriteFBImpl(address, value);
 }
@@ -341,6 +359,9 @@ template <mem_primitive_16 T>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1WriteFBImpl(uint32 address, T value) {
     if (m_enhancements.deinterlace) {
         util::WriteBE<T>(&m_altSpriteFB[m_state.displayFB ^ 1][address & 0x3FFFF], value);
+    }
+    if (m_threadedVDP1Rendering) {
+        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::FBRAMWrite<T>(address, value));
     }
 }
 
@@ -464,6 +485,9 @@ void SoftwareVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Con
 }
 
 void SoftwareVDPRenderer::VDP1EndFrame() {
+    if (m_threadedVDP1Rendering) {
+        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::EndDraw());
+    }
     Callbacks.VDP1DrawFinished();
 }
 
@@ -582,19 +606,39 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             switch (event.type) {
             case EvtType::Reset: rctx.Reset(); break;
 
-            case EvtType::EraseFramebuffer:
+            case EvtType::EraseFramebuffer: {
                 if (event.erase.cycles == 0) {
                     VDP1DoEraseFramebuffer<false>();
                 } else {
                     VDP1DoEraseFramebuffer<true>(event.erase.cycles);
                 }
+                const auto fbIndex = VDP1GetDisplayFBIndex();
+                rctx.vdp1.spriteFB[fbIndex] = m_state.spriteFB[fbIndex];
                 break;
-            case EvtType::SwapBuffers: rctx.swapBuffersSignal.Set(); break;
+            }
+            case EvtType::SwapBuffers: {
+                const auto fbIndex = VDP1GetDisplayFBIndex() ^ 1;
+                m_state.spriteFB[fbIndex] = rctx.vdp1.spriteFB[fbIndex];
+                rctx.swapBuffersSignal.Set();
+                break;
+            }
+            case EvtType::EndDraw: {
+                const auto fbIndex = VDP1GetDisplayFBIndex() ^ 1;
+                m_state.spriteFB[fbIndex] = rctx.vdp1.spriteFB[fbIndex];
+                break;
+            }
             case EvtType::Command: (this->*m_fnVDP1HandleCommand)(event.command.address, event.command.control); break;
 
             case EvtType::VRAMWriteByte: rctx.vdp1.mem.VRAM[event.write.address] = event.write.value; break;
             case EvtType::VRAMWriteWord:
                 util::WriteBE<uint16>(&rctx.vdp1.mem.VRAM[event.write.address], event.write.value);
+                break;
+            case EvtType::FBRAMWriteByte:
+                rctx.vdp1.spriteFB[VDP1GetDisplayFBIndex() ^ 1][event.write.address] = event.write.value;
+                break;
+            case EvtType::FBRAMWriteWord:
+                util::WriteBE<uint16>(&rctx.vdp1.spriteFB[VDP1GetDisplayFBIndex() ^ 1][event.write.address],
+                                      event.write.value);
                 break;
             case EvtType::RegWrite: rctx.vdp1.regs.Write<false>(event.write.address, event.write.value); break;
 
@@ -607,6 +651,9 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
 
             case EvtType::Shutdown: running = false; break;
             }
+
+            ++rctx.cmdFence;
+            rctx.cmdFence.notify_all();
         }
     }
 }
@@ -841,6 +888,16 @@ FORCE_INLINE uint8 SoftwareVDPRenderer::VDP1GetDisplayFBIndex() const {
     return m_state.displayFB;
 }
 
+FORCE_INLINE std::array<SpriteFB, 2> &SoftwareVDPRenderer::VDP1GetRendererDrawFB(bool altFB) {
+    if (altFB) {
+        return m_altSpriteFB;
+    } else if (m_threadedVDP1Rendering) {
+        return m_vdp1RenderingContext.vdp1.spriteFB;
+    } else {
+        return m_state.spriteFB;
+    }
+}
+
 template <bool countCycles>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
     const VDP1Regs &regs1 = VDP1GetRegs();
@@ -1030,7 +1087,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
 
     uint32 fbOffset = y * regs1.fbSizeH + x;
     const auto fbIndex = VDP1GetDisplayFBIndex() ^ 1;
-    auto &drawFB = (altFB ? m_altSpriteFB : m_state.spriteFB)[fbIndex];
+    auto &drawFB = VDP1GetRendererDrawFB(altFB)[fbIndex];
     if (regs1.pixel8Bits) {
         fbOffset &= 0x3FFFF;
         // TODO: what happens if pixelParams.mode.colorCalcBits/gouraudEnable != 0?
@@ -1278,6 +1335,10 @@ bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, CoordS32 coord2,
         uStepper.StepPixel();
 
         if (hasEndCode || (transparent && !mode.transparentPixelDisable)) {
+            if (mode.gouraudEnable) {
+                pixelParams.gouraud.Step();
+            }
+
             // Check if the transparent pixel is in-bounds, but only if the clipping mode is set to reject outside
             if (!mode.clippingMode) {
                 if (!VDP1IsPixelClipped<deinterlace>(line.Coord(), mode.userClippingEnable, mode.clippingMode)) {
@@ -1319,7 +1380,7 @@ bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, CoordS32 coord2,
         }
     }
 
-    if (endCodeCount == 2 && !plotted) {
+    if (endCodeCount == 2 && !plotted && !mode.clippingMode) {
         // Check that the line is indeed entirely out of bounds.
         // End codes cut the line short, so if it happens to cut the line before it managed to plot a pixel in-bounds,
         // the optimization could interrupt rendering the rest of the quad.
@@ -1328,7 +1389,7 @@ bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, CoordS32 coord2,
                 plotted = true;
                 break;
             }
-            if (aa && !VDP1IsPixelClipped<deinterlace>(line.Coord(), mode.userClippingEnable, mode.clippingMode)) {
+            if (aa && !VDP1IsPixelClipped<deinterlace>(line.AACoord(), mode.userClippingEnable, mode.clippingMode)) {
                 plotted = true;
                 break;
             }
@@ -1868,17 +1929,17 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawLine(uint32 cmdAddress) {
 
 void SoftwareVDPRenderer::VDP1Cmd_SetSystemClipping(uint32 cmdAddress) {
     auto &ctx = m_state.state1;
-    ctx.sysClipH = bit::extract<0, 9>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x14));
-    ctx.sysClipV = bit::extract<0, 8>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x16));
+    ctx.sysClipH = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x14);
+    ctx.sysClipV = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x16);
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Set system clipping: {}x{}", cmdAddress, ctx.sysClipH, ctx.sysClipV);
 }
 
 void SoftwareVDPRenderer::VDP1Cmd_SetUserClipping(uint32 cmdAddress) {
     auto &ctx = m_state.state1;
-    ctx.userClipX0 = bit::extract<0, 9>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0C));
-    ctx.userClipY0 = bit::extract<0, 8>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0E));
-    ctx.userClipX1 = bit::extract<0, 9>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x14));
-    ctx.userClipY1 = bit::extract<0, 8>(VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x16));
+    ctx.userClipX0 = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0C);
+    ctx.userClipY0 = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x0E);
+    ctx.userClipX1 = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x14);
+    ctx.userClipY1 = VDP1ReadRendererVRAM<uint16>(cmdAddress + 0x16);
     devlog::trace<grp::swvdp1_cmd>("[{:05X}] Set user clipping: {}x{} - {}x{}", cmdAddress, ctx.userClipX0,
                                    ctx.userClipY0, ctx.userClipX1, ctx.userClipY1);
 }

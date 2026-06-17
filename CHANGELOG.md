@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ARM NEON intrinsics in `vdp_renderer_sw.cpp` preserved with `vreinterpretq` casts
 - `system_features.hpp` is now an orphan file (no remaining consumers)
 
+## [0.4.3] - 2026-06-17
+
+### Changed
+- **Ymir Hardware Layer Sync (2026-06-17)** — Synced hardware layer to latest Ymir upstream
+  - **VDP1** — 7 accuracy fixes: full 16-bit clipping coordinates (fixes Revolution X), FBRAM read/write synchronization with event-based flush (fixes BlackFire, Burning Rangers, Scorcher), infinite loop detection no longer halts frame drawing (fixes Stellar Assault), Gouraud shading incremented in transparent pixels (fixes Cotton 2), line drawing optimization corrections
+  - **CD Block HLE** — Fix "Play Disc" resume-from-pause parameters (fixes Panzer Dragoon II Zwei softlocks)
+  - **Backup RAM** — Fix invalid block index infinite loop (`continue` → `break`)
+  - **System** — SH-2 overclocking support with GCD clock ratio correction; configurable via `sh2OverclockFactor`
+  - **SCSP/M68K** — Threaded SCSP fully implemented (was a TODO stub); SCSP and M68K now run on dedicated thread; write queue with fencing for register/RAM synchronization; thread-safe CDDA and MIDI input
+
+### Technical
+- 13 hardware-layer files synced from Ymir upstream
+- ARM NEON intrinsics in `vdp_renderer_sw.cpp` preserved
+- Build verified: all targets compile cleanly
+
 ## [0.4.2] - 2026-06-10
 
 ### Changed
