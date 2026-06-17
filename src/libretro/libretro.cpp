@@ -567,6 +567,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     const char* cd_speed_str = get_option_value("brimir_cd_speed", "2");
     g_core->SetCDReadSpeed(static_cast<uint8_t>(atoi(cd_speed_str)));
 
+    const char* sh2_oc_str = get_option_value("brimir_sh2_overclock", "100");
+    g_core->SetSH2OverclockFactor(static_cast<uint32_t>(atoi(sh2_oc_str)));
+
     const char* autodetect_region_str = get_option_value("brimir_autodetect_region", "enabled");
     g_core->SetAutodetectRegion(strcmp(autodetect_region_str, "enabled") == 0);
 

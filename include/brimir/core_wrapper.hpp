@@ -186,6 +186,10 @@ public:
     /// @param speed Speed multiplier (2-200)
     void SetCDReadSpeed(uint8_t speed);
 
+    /// @brief Set SH-2 CPU overclock factor
+    /// @param factor Overclock percentage (100-300), 100 = stock
+    void SetSH2OverclockFactor(uint32_t factor);
+
     /// @brief Set autodetect region from disc
     /// @param enable True to enable autodetect
     void SetAutodetectRegion(bool enable);

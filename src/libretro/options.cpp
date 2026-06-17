@@ -195,6 +195,27 @@ static struct retro_core_option_v2_definition option_defs[] = {
         },
         "2"
     },
+    {
+        "brimir_sh2_overclock",
+        "SH-2 CPU Overclock",
+        nullptr,
+        "Overclock the dual SH-2 CPUs to reduce internal slowdown in demanding games. "
+        "100% matches real hardware. Higher values may cause issues in some titles. "
+        "Effective in: Panzer Dragoon Saga, Burning Rangers, Sonic R, Tomb Raider.",
+        nullptr,
+        "system",
+        {
+            { "100", "100% (Stock)" },
+            { "125", "125%" },
+            { "150", "150%" },
+            { "175", "175%" },
+            { "200", "200%" },
+            { "250", "250%" },
+            { "300", "300%" },
+            { nullptr, nullptr }
+        },
+        "100"
+    },
     { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr }
 };
 

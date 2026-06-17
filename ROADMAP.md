@@ -117,10 +117,10 @@ Ymir exposes `EjectDisc()`, `LoadDisc(media::Disc&&)`, tray control. Extend disk
 
 These need small additions to Ymir's `Configuration` struct but the heavy lifting is in Brimir. Propose these upstream to Ymir first; if accepted, implement in Brimir.
 
-### 12. CPU Overclocking
-**Layer**: Hybrid | **Effort**: ~100 LOC Brimir + Ymir config field | **Target**: v0.6.0
+### 12. CPU Overclocking  ✅
+**Layer**: Hybrid | **Effort**: ~50 LOC Bridge (Ymir side done) | **Target**: v0.4.3 | **Status**: Done (2026-06-17)
 
-Add `configuration.system.cpuClockMultiplier` to Ymir (propose upstream). Core option: 100% / 125% / 150% / 200% SH-2 clock. Fixes Saturn's notorious slowdown in Panzer Dragoon Saga, Burning Rangers, Sonic R.
+Core option `brimir_sh2_overclock` (100%–300%) wired to Ymir's `sh2OverclockFactor` with GCD clock ratio correction. Fixes Saturn slowdown in Panzer Dragoon Saga, Burning Rangers, Sonic R.
 
 ### 13. Frameskip
 **Layer**: Hybrid | **Effort**: ~50 LOC Brimir + Ymir config field | **Target**: v0.5.0

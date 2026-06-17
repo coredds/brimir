@@ -1279,6 +1279,17 @@ void CoreWrapper::SetCDReadSpeed(uint8_t speed) {
     m_saturn->configuration.cdblock.readSpeedFactor = speed;
 }
 
+void CoreWrapper::SetSH2OverclockFactor(uint32_t factor) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+
+    if (factor < 100) factor = 100;
+    if (factor > 300) factor = 300;
+
+    m_saturn->SetSH2OverclockFactor(factor);
+}
+
 void CoreWrapper::SetAutodetectRegion(bool enable) {
     if (!m_initialized || !m_saturn) {
         return;
