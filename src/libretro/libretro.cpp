@@ -192,6 +192,11 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "R" },
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
         
+        // ST-V arcade inputs (mapped to extra controller buttons)
+        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Coin (Insert Coin)" },
+        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "Service" },
+        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Test" },
+        
         // Terminator
         { 0 },
     };
@@ -417,6 +422,17 @@ RETRO_API void retro_run(void) {
 
         g_core->SetControllerState(0, buttons_p1);
         g_core->SetControllerState(1, buttons_p2);
+
+        // ST-V arcade inputs (coin, service, test)
+        // Coin is mapped to SELECT button; service/test to L3/R3
+        if (input_state_cb) {
+            // Coin: trigger on each press (edge-detect not needed — STVIOBoard handles it)
+            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) {
+                g_core->InsertCoin();
+            }
+            g_core->SetServiceSwitch(input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3));
+            g_core->SetTestSwitch(input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3));
+        }
     }
     
     // Run one frame of emulation
@@ -535,8 +551,26 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         brimir_log(RETRO_LOG_INFO, "Save directory: %s", save_dir);
     }
     
-    // Load BIOS if not already loaded
-    if (!g_core->IsIPLLoaded()) {
+    // Detect ST-V games by file extension
+    bool isSTV = false;
+    if (game->path) {
+        const char* ext = strrchr(game->path, '.');
+        if (ext) {
+            bool match = false;
+#ifdef _MSC_VER
+            match = (_stricmp(ext, ".bin") == 0 || _stricmp(ext, ".rom") == 0 || _stricmp(ext, ".zip") == 0);
+#else
+            match = (strcasecmp(ext, ".bin") == 0 || strcasecmp(ext, ".rom") == 0 || strcasecmp(ext, ".zip") == 0);
+#endif
+            if (match) {
+                isSTV = true;
+                brimir_log(RETRO_LOG_INFO, "Detected ST-V arcade ROM: %s", game->path);
+            }
+        }
+    }
+
+    // Load BIOS if not already loaded (Saturn only; ST-V loads its own BIOS)
+    if (!isSTV && !g_core->IsIPLLoaded()) {
         brimir_log(RETRO_LOG_INFO, "Loading BIOS...");
         
         // Get BIOS preference from core options
@@ -628,11 +662,20 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     
     brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
 
-    if (!g_core->LoadGame(game->path, save_dir, system_dir)) {
-        const std::string& error = g_core->GetLastError();
-        brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
-            error.empty() ? "(no error message)" : error.c_str());
-        return false;
+    if (isSTV) {
+        if (!g_core->LoadSTVGame(game->path, system_dir)) {
+            const std::string& error = g_core->GetLastError();
+            brimir_log(RETRO_LOG_ERROR, "Failed to load ST-V game: %s",
+                error.empty() ? "(no error message)" : error.c_str());
+            return false;
+        }
+    } else {
+        if (!g_core->LoadGame(game->path, save_dir, system_dir)) {
+            const std::string& error = g_core->GetLastError();
+            brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
+                error.empty() ? "(no error message)" : error.c_str());
+            return false;
+        }
     }
 
     brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
@@ -645,12 +688,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     update_system_av_info_for_region();
 
     g_core->SetRenderer("software");
+    brimir_log(RETRO_LOG_INFO, "Option: done");
 
     // Register memory descriptors for RetroArch's memory viewer / cheat search
-    // Use raw pointer getters to avoid triggering .srm sync side effects
     g_memdesc[0].ptr = g_core->GetSystemRAMRawPointer();
     g_memdesc[1].ptr = g_core->GetSRAMRawPointer();
     g_memdesc[2].ptr = g_core->GetSystemRAMHighRawPointer();
+    brimir_log(RETRO_LOG_INFO, "Memory: done");
 
     static struct retro_memory_map mmap = {
         .descriptors     = g_memdesc,
@@ -658,6 +702,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     };
     environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmap);
 
+    brimir_log(RETRO_LOG_INFO, "retro_load_game returning true");
     return true;
 }
 
