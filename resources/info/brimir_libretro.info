@@ -1,16 +1,16 @@
 # Software Information
-display_name = "Sega - Saturn (Brimir)"
+display_name = "Sega - Saturn / ST-V (Brimir)"
 display_version = "0.4.3"
 authors = "coredds"
 categories = "Emulator"
 license = "GPLv3"
 permissions = ""
-supported_extensions = "cue|chd|iso|ccd|mds|m3u"
+supported_extensions = "cue|chd|iso|ccd|mds|m3u|bin|rom"
 
 # Hardware Information
 manufacturer = "Sega"
-systemname = "Saturn"
-systemid = "saturn"
+systemname = "Sega Saturn / ST-V"
+systemid = "saturn_stv"
 
 # Libretro Features
 supports_no_game = "true"
@@ -25,17 +25,26 @@ core_options = "true"
 core_options_version = "1.0"
 load_subsystem = "false"
 hw_render = "false"
-needs_fullpath = "false"
+needs_fullpath = "true"
 disk_control = "true"
 
 # Firmware / BIOS
-firmware_count = "2"
+firmware_count = "5"
 firmware0_desc = "Saturn BIOS - US (sega_101.bin)"
 firmware0_path = "sega_101.bin"
 firmware0_opt = "false"
 firmware1_desc = "Saturn BIOS - EU (sega_100.bin)"
 firmware1_path = "sega_100.bin"
 firmware1_opt = "true"
+firmware2_desc = "ST-V BIOS - JP (epr-20091.ic8)"
+firmware2_path = "epr-20091.ic8"
+firmware2_opt = "true"
+firmware3_desc = "ST-V BIOS - US (epr-17952a.ic8)"
+firmware3_path = "epr-17952a.ic8"
+firmware3_opt = "true"
+firmware4_desc = "ST-V BIOS - EU (epr-17954a.ic8)"
+firmware4_path = "epr-17954a.ic8"
+firmware4_opt = "true"
 
 # Notes
 notes = "(!) sega_101.bin (md5): f273555d7d91e8a5a6bfd9bcf066331c|(!) sega_100.bin (md5): 2aba43c2f1526c5e898dfe1cafbfc53a|Built on Ymir's cycle-accurate hardware layer (verbatim upstream).|Requires Saturn BIOS ROM (place in system directory).|Japanese BIOS files (Sega Saturn BIOS v1.00/v1.01 (JAP).bin) are also supported.|Note: sega1003.bin (JP v1.003) is NOT supported due to compatibility issues.|Visit https://github.com/coredds/brimir for more information."

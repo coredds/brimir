@@ -15,6 +15,11 @@
 
 #include "profiler.hpp"
 
+// Forward declaration for ST-V I/O board
+namespace brimir::stv {
+class STVIOBoard;
+}
+
 // Include Saturn headers for test access
 // Note: Only include in test builds to keep libretro API clean
 #ifdef BRIMIR_BUILD_TESTS
@@ -51,12 +56,18 @@ public:
     /// @brief Shutdown the emulator
     void Shutdown();
 
-    /// @brief Load a game from the given path
+    /// @brief Load a game from the given path (Saturn disc or ST-V ROM)
     /// @param path Path to the game file
     /// @param save_directory Directory where save files (.srm, backup RAM) are stored
-    /// @param system_directory Directory where system-wide files (RTC, etc.) are stored
+    /// @param system_directory Directory where system-wide files (RTC, ST-V BIOS, etc.) are stored
     /// @return true if successful
     bool LoadGame(const char* path, const char* save_directory = nullptr, const char* system_directory = nullptr);
+
+    /// @brief Load an ST-V arcade game ROM
+    /// @param path Path to the ST-V ROM file
+    /// @param system_directory Directory where ST-V BIOS is stored
+    /// @return true if successful
+    bool LoadSTVGame(const char* path, const char* system_directory = nullptr);
 
     /// @brief Get the last error message from game loading
     /// @return Last error message, or empty string if none
@@ -127,6 +138,15 @@ public:
     /// @param port Port number (0 or 1)
     /// @param buttons Button states (libretro button mask)
     void SetControllerState(unsigned int port, uint16_t buttons);
+
+    /// @brief Insert coin (for ST-V arcade games)
+    void InsertCoin();
+
+    /// @brief Set service switch (for ST-V arcade games)
+    void SetServiceSwitch(bool pressed);
+
+    /// @brief Set test switch (for ST-V arcade games)
+    void SetTestSwitch(bool pressed);
 
     /// @brief Get the current video frame buffer
     /// @return Pointer to framebuffer data, or nullptr if not available
@@ -329,6 +349,10 @@ private:
     // Cartridge support
     std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file
     bool m_hasCartridge = false;  // True if a cartridge is inserted
+
+    // ST-V arcade support
+    std::unique_ptr<stv::STVIOBoard> m_stvIO;  // ST-V I/O board (IOGA + EEPROM)
+    bool m_stvMode = false;                     // True when running an ST-V game
 
     void SaveCartridgeRAM();
     void LoadCartridgeRAM();

@@ -192,10 +192,27 @@ Saturn VDP1 draws affine-textured quads without perspective correction. Needs in
 
 Requires perfect determinism across dual SH-2s, SCSP timers, CD block timing. Needs Ymir deterministic mode + RetroArch netplay integration.
 
-### 25. ST-V Arcade Support
-**Layer**: Upstream (new system class) | **Target**: Post-1.0
+### 25. ST-V Arcade Support ✅ (Phase 1 complete, 8 games in DB)
+**Layer**: Bridge | **Branch**: `feature/stv-support` | **Target**: 1.0
+**Status**: Boots Radiant Silvergun (RSG-protected) to black screen. Needs debugging.
 
-ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Would require new `stv::Titan` class or major `Saturn` modifications. Big differentiator — no RetroArch core does ST-V well.
+Implementation lives entirely in `src/bridge/stv/`, reusing Ymir's `CartType::ROM` and `Saturn` API verbatim. No upstream changes.
+
+**Done:**
+- `STVGameROMCartridge`: variable-size ROM cart (up to 48 MiB), RSG encryption, power-of-2 mirroring
+- `STVIOBoard`: IOGA at `0x00400000-0x0040007F`, bus fallback to IPL for non-IOGA addresses, coin/service/test, 4-frame coin pulse
+- EEPROM init from ROM header (cab type from `ROM[0xF46]`, game ID from `0xF40`, settings from `0xF48`, Mednafen-compatible settings encoding)
+- Multi-file MAME ROM set loader with `STVROMLayoutEntry` database (8 games), endian swap for `STV_MAP_16LE`
+- ZIP reader (store + deflate via manual zlib linkage)
+- Directory scan fallback (`LookupSTVGameInDir`)
+- ST-V BIOS loading (512 KiB, 3 region variants + generic fallback)
+- `CoreWrapper::LoadSTVGame()` orchestrates BIOS + ROM + EEPROM + cartridge
+- `retro_load_game` detects `.bin`/`.rom`/`.zip` and routes to ST-V
+- Libretro `.info`: `bin|rom` extensions, 5 firmware entries, `needs_fullpath=true`
+- ST-V input descriptors (Coin=SELECT, Service=L3, Test=R3)
+- Crash fixed: `BackupMemory` must be initialized (`CreateInMemory` before reset)
+
+**Remaining — see `src/bridge/stv/ISSUES.md`**
 
 ---
 

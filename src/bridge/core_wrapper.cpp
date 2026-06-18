@@ -15,6 +15,11 @@
 #include <ymir/hw/cart/cart_impl_dram.hpp>
 #include <ymir/core/hash.hpp>
 
+#include "stv/stv_cartridge.hpp"
+#include "stv/stv_io.hpp"
+#include "stv/stv_loader.hpp"
+#include "stv/stv_game_db.hpp"
+
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -67,6 +72,12 @@ bool CoreWrapper::Initialize() {
         // Create the Saturn emulator instance
         m_saturn = std::make_unique<ymir::Saturn>();
         
+        // Set up ST-V I/O board
+        // Always present but inactive unless an ST-V game is loaded
+        m_stvIO = std::make_unique<stv::STVIOBoard>();
+        m_stvIO->MapMemory(m_saturn->mainBus);
+        m_stvIO->SetIPLPointer(m_saturn->mem.IPL.data());
+
         // NOTE: Ymir requires a file-backed memory-mapped backup RAM
         // We'll set the path later when the game loads (need game name for per-game saves)
         // For now, just mark as uninitialized
@@ -413,6 +424,103 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
     }
 }
 
+bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
+    if (!m_initialized || !m_saturn || !m_stvIO) return false;
+    if (!path || path[0] == '\0') return false;
+
+    std::filesystem::path romPath(path);
+    if (!std::filesystem::exists(romPath)) {
+        m_lastError = "ST-V ROM file not found: " + romPath.string();
+        return false;
+    }
+
+    // Load ST-V BIOS (512 KiB, same size as Saturn BIOS)
+    if (system_directory && system_directory[0] != '\0') {
+        static const char* kSTVBiosNames[] = {
+            "epr-20091.ic8",   // JP / Asia-NTSC
+            "epr-17952a.ic8",  // NA / CSA-NTSC / CSA-PAL
+            "epr-17954a.ic8",  // EU / Asia-PAL / Korea
+            "stv_bios.bin",    // Generic fallback
+        };
+        std::filesystem::path biosPath;
+        std::ifstream biosFile;
+        for (const char* name : kSTVBiosNames) {
+            biosPath = std::filesystem::path(system_directory) / name;
+            biosFile.open(biosPath, std::ios::binary);
+            if (biosFile) break;
+        }
+        if (!biosFile) {
+            m_lastError = "ST-V BIOS not found in system directory";
+            return false;
+        }
+        biosFile.seekg(0, std::ios::end);
+        auto biosSize = biosFile.tellg();
+        biosFile.seekg(0);
+        if (biosSize != 524288) { // 512 KiB
+            m_lastError = "ST-V BIOS wrong size: expected 524288 bytes, got " + std::to_string(biosSize);
+            return false;
+        }
+        std::vector<uint8> biosData(524288);
+        biosFile.read(reinterpret_cast<char *>(biosData.data()), 524288);
+        if (biosFile.fail()) {
+            m_lastError = "Failed to read ST-V BIOS: " + biosPath.string();
+            return false;
+        }
+        // Load directly into IPL ROM (same size as Saturn)
+        std::copy(biosData.begin(), biosData.end(), m_saturn->mem.IPL.begin());
+        m_saturn->mem.LoadIPL(m_saturn->mem.IPL);
+        m_iplLoaded = true;
+    } else {
+        m_lastError = "System directory required for ST-V BIOS loading";
+        return false;
+    }
+
+    // Load ST-V game ROM
+    std::vector<uint8> romData;
+    const stv::STVGameInfo *gameInfo = nullptr;
+    auto loadResult = stv::LoadSTVGameROM(romPath, romData, gameInfo);
+    if (!loadResult.succeeded) {
+        m_lastError = loadResult.errorMessage;
+        return false;
+    }
+
+    // Set SMPC area code for this game (ST-V games are region-locked)
+    if (gameInfo && gameInfo->area != 0) {
+        m_saturn->SMPC.SetAreaCode(static_cast<uint8>(gameInfo->area));
+    }
+
+    // Insert ST-V cartridge
+    auto *cart = m_saturn->InsertCartridge<ymir::cart::STVGameROMCartridge>();
+    cart->LoadROM(romData);
+
+    // Initialize EEPROM from ROM header
+    uint8 header[2] = {};
+    uint8 settings[8] = {};
+    uint8 cabType = 0;
+    for (int i = 0; i < 2; i++) header[i] = cart->PeekROMByte(0xF40 + i);
+    cabType = cart->PeekROMByte(0xF46);
+    for (int i = 0; i < 8; i++) settings[i] = cart->PeekROMByte(0xF48 + i);
+    m_stvIO->InitEEPROM(header, settings, cabType);
+
+    // Activate ST-V mode
+    m_stvMode = true;
+    m_stvIO->SetSTVMode(true);
+
+    // Create in-memory backup RAM (ST-V uses internal backup RAM for EEPROM saves)
+    {
+        ymir::bup::BackupMemory bupMem;
+        bupMem.CreateInMemory(ymir::bup::BackupMemorySize::_256Kbit);
+        m_saturn->mem.SetInternalBackupRAM(std::move(bupMem));
+    }
+
+    // Hard reset to boot from ST-V BIOS
+    m_saturn->Reset(true);
+
+    m_gameLoaded = true;
+    m_lastError.clear();
+    return true;
+}
+
 void CoreWrapper::SaveCartridgeRAM() {
     if (!m_saturn || !m_hasCartridge || m_cartridgePath.empty()) {
         return;
@@ -573,6 +681,12 @@ void CoreWrapper::UnloadGame() {
     m_sramInitialized = false;
     m_framesSinceLastSRAMSync = 0;
     m_sramFirstLoad = true;  // Reset for next game load
+
+    // Reset ST-V mode
+    if (m_stvMode) {
+        m_stvIO->SetSTVMode(false);
+        m_stvMode = false;
+    }
 }
 
 void* CoreWrapper::GetSRAMData() {
@@ -690,6 +804,11 @@ void CoreWrapper::RunFrame() {
     try {
         ScopedTimer timer(m_profiler, "RunFrame_Total");
         
+        // Update ST-V I/O inputs before running the frame
+        if (m_stvMode) {
+            m_stvIO->UpdateInputs();
+        }
+        
         // Run one frame of emulation
         // VDP callback will update framebuffer via OnFrameComplete()
         // SCSP callback will update audio buffer via OnAudioSample()
@@ -718,6 +837,9 @@ void CoreWrapper::Reset() {
     }
 
     m_saturn->Reset(false); // Soft reset
+    if (m_stvMode && m_stvIO) {
+        m_stvIO->Reset(false);
+    }
 }
 
 bool CoreWrapper::LoadIPL(std::span<const uint8_t> data) {
@@ -1151,13 +1273,25 @@ void CoreWrapper::SetControllerState(unsigned int port, uint16_t buttons) {
         return;
     }
 
-    // Store button state for the specified port
-    // The peripheral callback will read these when the emulator needs input
     if (port == 0) {
         m_port1Buttons = buttons;
+        if (m_stvMode) m_stvIO->SetButton(0, buttons);
     } else if (port == 1) {
         m_port2Buttons = buttons;
+        if (m_stvMode) m_stvIO->SetButton(1, buttons);
     }
+}
+
+void CoreWrapper::InsertCoin() {
+    if (m_stvMode && m_stvIO) m_stvIO->SetCoin1(true);
+}
+
+void CoreWrapper::SetServiceSwitch(bool pressed) {
+    if (m_stvIO) m_stvIO->SetService(pressed);
+}
+
+void CoreWrapper::SetTestSwitch(bool pressed) {
+    if (m_stvIO) m_stvIO->SetTest(pressed);
 }
 
 
