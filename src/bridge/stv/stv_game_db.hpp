@@ -46,6 +46,7 @@ struct STVGameInfo {
     unsigned area;          // SMPC area code (JP, NA, EU, etc.)
     unsigned control;       // STVControlScheme
     unsigned ec_chip;       // STVEChip
+    uint32_t crypt_key;     // 315-5881 key (0 = none/unknown)
     unsigned romtwiddle;    // STVROMTwiddle
     bool     rotate;        // Screen rotation (tate mode)
     STVROMLayoutEntry rom_layout[16]; // Up to 16 ROM file entries

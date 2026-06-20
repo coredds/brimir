@@ -65,6 +65,15 @@ public:
         }
     }
 
+    template <bool peek>
+    uint32 ReadLong(uint32 address) const {
+        if constexpr (peek) {
+            return m_cart->PeekLong(address);
+        } else {
+            return m_cart->ReadLong(address);
+        }
+    }
+
     template <bool poke>
     void WriteByte(uint32 address, uint8 value) {
         if constexpr (poke) {
@@ -80,6 +89,15 @@ public:
             m_cart->PokeWord(address, value);
         } else {
             m_cart->WriteWord(address, value);
+        }
+    }
+
+    template <bool poke>
+    void WriteLong(uint32 address, uint32 value) {
+        if constexpr (poke) {
+            m_cart->PokeLong(address, value);
+        } else {
+            m_cart->WriteLong(address, value);
         }
     }
 

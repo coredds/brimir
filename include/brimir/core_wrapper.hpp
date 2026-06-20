@@ -35,6 +35,10 @@ class ControlPad;
 struct PeripheralReport;
 enum class Button : uint16_t;
 }
+
+namespace cart {
+class STVGameROMCartridge;
+}
 }
 
 namespace brimir {
@@ -353,6 +357,7 @@ private:
     // ST-V arcade support
     std::unique_ptr<stv::STVIOBoard> m_stvIO;  // ST-V I/O board (IOGA + EEPROM)
     bool m_stvMode = false;                     // True when running an ST-V game
+    ymir::cart::STVGameROMCartridge *m_stvCartridge = nullptr;  // ST-V cart (inserted at init, persistent)
 
     void SaveCartridgeRAM();
     void LoadCartridgeRAM();

@@ -75,8 +75,21 @@ bool CoreWrapper::Initialize() {
         // Set up ST-V I/O board
         // Always present but inactive unless an ST-V game is loaded
         m_stvIO = std::make_unique<stv::STVIOBoard>();
-        m_stvIO->MapMemory(m_saturn->mainBus);
         m_stvIO->SetIPLPointer(m_saturn->mem.IPL.data());
+
+        // Insert empty ST-V cartridge early so IOGA dispatch is available
+        // for the BIOS boot phase (IOGA lives on the same A-Bus page as CS1).
+        {
+            auto *cart = m_saturn->InsertCartridge<ymir::cart::STVGameROMCartridge>();
+            m_stvCartridge = cart;
+            cart->SetIOGADispatch(
+                [this](uint32 addr) -> uint8 {
+                    return m_stvIO->ReadIOGAByte(addr);
+                },
+                [this](uint32 addr, uint8 val) {
+                    m_stvIO->WriteIOGAByte(addr, val);
+                });
+        }
 
         // NOTE: Ymir requires a file-backed memory-mapped backup RAM
         // We'll set the path later when the game loads (need game name for per-game saves)
@@ -466,6 +479,12 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
             m_lastError = "Failed to read ST-V BIOS: " + biosPath.string();
             return false;
         }
+
+        // ST-V BIOS dumps are word-swapped relative to Ymir's IPL byte layout.
+        for (size_t i = 0; i + 1 < biosData.size(); i += 2) {
+            std::swap(biosData[i], biosData[i + 1]);
+        }
+
         // Load directly into IPL ROM (same size as Saturn)
         std::copy(biosData.begin(), biosData.end(), m_saturn->mem.IPL.begin());
         m_saturn->mem.LoadIPL(m_saturn->mem.IPL);
@@ -489,9 +508,32 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
         m_saturn->SMPC.SetAreaCode(static_cast<uint8>(gameInfo->area));
     }
 
-    // Insert ST-V cartridge
+    // Insert ST-V cartridge (replaces init-time cartridge if present)
     auto *cart = m_saturn->InsertCartridge<ymir::cart::STVGameROMCartridge>();
+    m_stvCartridge = cart;
+    cart->SetIOGADispatch(
+        [this](uint32 addr) -> uint8 {
+            return m_stvIO->ReadIOGAByte(addr);
+        },
+        [this](uint32 addr, uint8 val) {
+            m_stvIO->WriteIOGAByte(addr, val);
+        });
     cart->LoadROM(romData);
+
+    ymir::cart::STVGameROMCartridge::ProtectionMode protectionMode =
+        ymir::cart::STVGameROMCartridge::ProtectionMode::None;
+    uint32 protectionKey = 0;
+
+    if (gameInfo) {
+        if (gameInfo->ec_chip == stv::STV_EC_CHIP_RSG) {
+            protectionMode = ymir::cart::STVGameROMCartridge::ProtectionMode::RSG;
+        } else if (gameInfo->ec_chip == stv::STV_EC_CHIP_315_5881) {
+            protectionMode = ymir::cart::STVGameROMCartridge::ProtectionMode::Chip3155881;
+        }
+        protectionKey = gameInfo->crypt_key;
+    }
+
+    cart->ConfigureProtection(protectionMode, protectionKey);
 
     // Initialize EEPROM from ROM header
     uint8 header[2] = {};
@@ -500,6 +542,7 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
     for (int i = 0; i < 2; i++) header[i] = cart->PeekROMByte(0xF40 + i);
     cabType = cart->PeekROMByte(0xF46);
     for (int i = 0; i < 8; i++) settings[i] = cart->PeekROMByte(0xF48 + i);
+
     m_stvIO->InitEEPROM(header, settings, cabType);
 
     // Activate ST-V mode
@@ -515,6 +558,9 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
 
     // Hard reset to boot from ST-V BIOS
     m_saturn->Reset(true);
+
+    // Keep tray state closed for ST-V (no optical media path)
+    m_saturn->CloseTray();
 
     m_gameLoaded = true;
     m_lastError.clear();
@@ -816,7 +862,7 @@ void CoreWrapper::RunFrame() {
             ScopedTimer ymirTimer(m_profiler, "Ymir_RunFrame");
             m_saturn->RunFrame();
         }
-        
+
         // Track frames for SRAM sync optimization
         m_framesSinceLastSRAMSync++;
     } catch (const std::exception& e) {
