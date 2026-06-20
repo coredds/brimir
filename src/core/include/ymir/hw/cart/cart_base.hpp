@@ -87,15 +87,31 @@ public:
 
     virtual uint8 ReadByte(uint32 address) const = 0;
     virtual uint16 ReadWord(uint32 address) const = 0;
+    virtual uint32 ReadLong(uint32 address) const {
+        return (static_cast<uint32>(ReadWord(address + 0)) << 16u) |
+               (static_cast<uint32>(ReadWord(address + 2)) << 0u);
+    }
 
     virtual void WriteByte(uint32 address, uint8 value) = 0;
     virtual void WriteWord(uint32 address, uint16 value) = 0;
+    virtual void WriteLong(uint32 address, uint32 value) {
+        WriteWord(address + 0, static_cast<uint16>(value >> 16u));
+        WriteWord(address + 2, static_cast<uint16>(value >> 0u));
+    }
 
     virtual uint8 PeekByte(uint32 address) const = 0;
     virtual uint16 PeekWord(uint32 address) const = 0;
+    virtual uint32 PeekLong(uint32 address) const {
+        return (static_cast<uint32>(PeekWord(address + 0)) << 16u) |
+               (static_cast<uint32>(PeekWord(address + 2)) << 0u);
+    }
 
     virtual void PokeByte(uint32 address, uint8 value) = 0;
     virtual void PokeWord(uint32 address, uint16 value) = 0;
+    virtual void PokeLong(uint32 address, uint32 value) {
+        PokeWord(address + 0, static_cast<uint16>(value >> 16u));
+        PokeWord(address + 2, static_cast<uint16>(value >> 0u));
+    }
 
 protected:
     void ChangeID(uint8 id) {

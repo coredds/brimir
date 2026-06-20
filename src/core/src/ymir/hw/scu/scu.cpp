@@ -89,8 +89,9 @@ void SCU::MapMemory(sys::SH2Bus &bus) {
     static constexpr auto cast = [](void *ctx) -> SCU & { return *static_cast<SCU *>(ctx); };
 
     // A-Bus CS0 and CS1 - Cartridge
+    // ST-V accesses extend through 0x057FFFFF (mirrored CS1 space).
     bus.MapNormal(
-        0x200'0000, 0x4FF'FFFF, this,
+        0x200'0000, 0x57F'FFFF, this,
         [](uint32 address, void *ctx) -> uint8 { return cast(ctx).ReadCartridge<uint8, false>(address); },
         [](uint32 address, void *ctx) -> uint16 { return cast(ctx).ReadCartridge<uint16, false>(address); },
         [](uint32 address, void *ctx) -> uint32 { return cast(ctx).ReadCartridge<uint32, false>(address); },
@@ -99,7 +100,7 @@ void SCU::MapMemory(sys::SH2Bus &bus) {
         [](uint32 address, uint32 value, void *ctx) { cast(ctx).WriteCartridge<uint32, false>(address, value); });
 
     bus.MapSideEffectFree(
-        0x200'0000, 0x4FF'FFFF, this,
+        0x200'0000, 0x57F'FFFF, this,
         [](uint32 address, void *ctx) -> uint8 { return cast(ctx).ReadCartridge<uint8, true>(address); },
         [](uint32 address, void *ctx) -> uint16 { return cast(ctx).ReadCartridge<uint16, true>(address); },
         [](uint32 address, void *ctx) -> uint32 { return cast(ctx).ReadCartridge<uint32, true>(address); },
@@ -521,19 +522,20 @@ void SCU::OnTimer1Event(core::EventContext &eventContext, void *userContext) {
 template <mem_primitive T, bool peek>
 T SCU::ReadCartridge(uint32 address) {
     if constexpr (std::is_same_v<T, uint32>) {
-        // 32-bit reads are split into two 16-bit reads
-        uint32 value = ReadCartridge<uint16, peek>(address + 0) << 16u;
-        value |= ReadCartridge<uint16, peek>(address + 2) << 0u;
-        return value;
+        return m_cartSlot.ReadLong<peek>(address);
     } else if constexpr (std::is_same_v<T, uint16>) {
-        if (address >= 0x4FF'FFFE) [[unlikely]] {
+        const bool cartIdAddr = (address >= 0x040'0000 && address < 0x580'0000 &&
+                                 (address & 0x00FF'FFFF) >= 0x00FF'FFFE);
+        if (cartIdAddr) [[unlikely]] {
             // Return cartridge ID
             return 0xFF00 | m_cartSlot.GetID();
         } else {
             return m_cartSlot.ReadWord<peek>(address);
         }
     } else if constexpr (std::is_same_v<T, uint8>) {
-        if (address >= 0x4FF'FFFE) [[unlikely]] {
+        const bool cartIdAddr = (address >= 0x040'0000 && address < 0x580'0000 &&
+                                 (address & 0x00FF'FFFF) >= 0x00FF'FFFE);
+        if (cartIdAddr) [[unlikely]] {
             // Return cartridge ID
             if ((address & 1) == 0) {
                 return 0xFF;
@@ -550,9 +552,7 @@ T SCU::ReadCartridge(uint32 address) {
 template <mem_primitive T, bool poke>
 void SCU::WriteCartridge(uint32 address, T value) {
     if constexpr (std::is_same_v<T, uint32>) {
-        // 32-bit writes are split into two 16-bit writes
-        WriteCartridge<uint16, poke>(address + 0, value >> 16u);
-        WriteCartridge<uint16, poke>(address + 2, value >> 0u);
+        m_cartSlot.WriteLong<poke>(address, value);
     } else if constexpr (std::is_same_v<T, uint16>) {
         m_cartSlot.WriteWord<poke>(address, value);
     } else if constexpr (std::is_same_v<T, uint8>) {

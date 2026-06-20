@@ -3,6 +3,7 @@
 add_library(brimir_bridge OBJECT
     core_wrapper.cpp
     stv/stv_cartridge.cpp
+    stv/stv_315_5881.cpp
     stv/stv_io.cpp
     stv/stv_loader.cpp
     stv/stv_game_db.cpp

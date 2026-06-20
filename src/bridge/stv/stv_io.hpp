@@ -35,6 +35,13 @@ public:
 
     void InitEEPROM(const uint8 *romHeader, const uint8 *gameSettings, uint8 cabType);
 
+    uint8 ReadIOGAByte(uint32 address) {
+        return ReadIOGA<uint8, false>(address);
+    }
+    void WriteIOGAByte(uint32 address, uint8 value) {
+        WriteIOGA<uint8, false>(address, value);
+    }
+
 private:
     template <typename T, bool peek>
     T ReadIOGA(uint32 address);

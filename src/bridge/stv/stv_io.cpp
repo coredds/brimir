@@ -6,9 +6,27 @@
 
 #include <ymir/util/data_ops.hpp>
 
+#include <algorithm>
 #include <cstring>
 
 namespace brimir::stv {
+
+static uint16 ComputeSTVEEPROMCRC(const std::array<uint8, 128>& eeprom) {
+    uint16 crc = 0x5A81;
+    for (uint32 i = 0x0C; i <= 0x3F; i++) {
+        crc ^= static_cast<uint16>(eeprom[i]) << 8;
+        for (int bit = 0; bit < 8; bit++) {
+            if (crc & 0x8000u) {
+                crc = static_cast<uint16>((crc << 1) ^ 0x1021u);
+            } else {
+                crc = static_cast<uint16>(crc << 1);
+            }
+        }
+    }
+
+    const uint16 xorWord = static_cast<uint16>((static_cast<uint16>(eeprom[0x42]) << 8) | eeprom[0x43]);
+    return static_cast<uint16>(crc ^ xorWord);
+}
 
 void STVIOBoard::Reset(bool hard) {
     if (hard) {
@@ -25,7 +43,7 @@ void STVIOBoard::MapMemory(ymir::sys::SH2Bus &bus) {
     };
 
     bus.MapNormal(
-        0x0040000, 0x004007F, this,
+        0x0400000, 0x040007F, this,
         [](uint32 address, void *ctx) -> uint8 {
             return cast(ctx).ReadIOGA<uint8, false>(address & ~1u);
         },
@@ -46,7 +64,7 @@ void STVIOBoard::MapMemory(ymir::sys::SH2Bus &bus) {
         });
 
     bus.MapSideEffectFree(
-        0x0040000, 0x004007F, this,
+        0x0400000, 0x040007F, this,
         [](uint32 address, void *ctx) -> uint8 {
             return cast(ctx).ReadIOGA<uint8, true>(address & ~1u);
         },
@@ -87,9 +105,9 @@ T STVIOBoard::ReadIOGA(uint32 address) {
         }
     }
 
-    // Only handle IOGA register range 0x0040000-0x004007F
+    // Only handle IOGA register range 0x0400000-0x040007F
     // Outside this range, fall back to IPL ROM for BIOS code execution
-    if (address < 0x0040000 || address > 0x004007F) {
+    if (address < 0x0400000 || address > 0x040007F) {
         if constexpr (std::is_same_v<T, uint16>) {
             if (m_iplROM) {
                 uint32 off = address & 0x7FFFF;
@@ -131,7 +149,7 @@ void STVIOBoard::WriteIOGA(uint32 address, T value) {
     if (!m_stvModeActive) return;
 
     // Only handle IOGA register range
-    if (address < 0x0040000 || address > 0x004007F) return;
+    if (address < 0x0400000 || address > 0x040007F) return;
 
     const uint8 iogaAddr = static_cast<uint8>((address >> 1) & 0x3F);
     const uint8 byteVal = static_cast<uint8>(value);
@@ -231,8 +249,12 @@ void STVIOBoard::InitEEPROM(const uint8 *romHeader, const uint8 *gameSettings, u
         std::memcpy(&m_eeprom[0x1E], gameSettings, 8);
     }
 
-    m_eeprom[0x08] = 0x00;
-    m_eeprom[0x09] = 0x00;
+    const uint16 crc = ComputeSTVEEPROMCRC(m_eeprom);
+    m_eeprom[0x08] = static_cast<uint8>(crc >> 8);
+    m_eeprom[0x09] = static_cast<uint8>(crc);
+
+    // Mirror block, matches cabinet EEPROM layout used by ST-V BIOS/game code.
+    std::copy(m_eeprom.begin() + 0x08, m_eeprom.begin() + 0x40, m_eeprom.begin() + 0x44);
 }
 
 } // namespace brimir::stv
