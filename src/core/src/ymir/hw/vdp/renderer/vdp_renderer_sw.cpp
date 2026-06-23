@@ -3505,16 +3505,18 @@ FORCE_INLINE static void Color888GradationMasked(const std::span<Color888> dest,
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
         uint32x4_t mask_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(mask.data() + i), vdupq_n_u32(0), 0);
-        mask_x4 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(mask_x4))));
-        mask_x4 = vnegq_s32(mask_x4);
+        mask_x4 = vmovl_u16(vget_low_u16(vmovl_u8(vget_low_u8(vreinterpretq_u8_u32(mask_x4)))));
+        mask_x4 = vreinterpretq_u32_s32(vnegq_s32(vreinterpretq_s32_u32(mask_x4)));
 
         const uint32x4_t color0_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&src[i]));
         const uint32x4_t color1_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&src[i + 1]));
         const uint32x4_t color2_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&src[i + 2]));
 
         // Halving average
-        const uint32x4_t blend01_x4 = vhaddq_u8(color0_x4, color1_x4);
-        const uint32x4_t blend2_x4 = vhaddq_u8(blend01_x4, color2_x4);
+        const uint32x4_t blend01_x4 = vreinterpretq_u32_u8(
+            vhaddq_u8(vreinterpretq_u8_u32(color0_x4), vreinterpretq_u8_u32(color1_x4)));
+        const uint32x4_t blend2_x4 = vreinterpretq_u32_u8(
+            vhaddq_u8(vreinterpretq_u8_u32(blend01_x4), vreinterpretq_u8_u32(color2_x4)));
 
         // Blend with mask
         const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, color2_x4, blend2_x4);
