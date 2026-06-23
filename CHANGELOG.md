@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ARM NEON intrinsics in `vdp_renderer_sw.cpp` preserved with `vreinterpretq` casts
 - `system_features.hpp` is now an orphan file (no remaining consumers)
 
+## [0.4.4] - 2026-06-23
+
+### Changed
+- **Ymir Hardware Layer Sync (2026-06-23)** — Synced hardware layer to latest Ymir upstream
+  - **VDP2** — Color gradation effect implemented (fixes Saturn Bomberman Stage 4-4 background); horizontal scroll increment now updated every scanline (fixes Shellshock terrain)
+  - **VDP1** — Infinite loop detection optimized with `inInfiniteLoop` flag; jumps to address 0 no longer treated as infinite loops (fixes Akumajou Dracula X); save state FBRAM synchronization fix (fixes rewind flicker / blank sprites); color bank masking moved from per-pixel to per-quad; VDP1Regs reference and double density flag cached per command instead of per pixel
+  - **SCSP/M68K** — Threading synchronization redesigned: sample-counter-based sync replaced with unified event queue (Write/Sample/Quit) using `wait_dequeue_bulk` batch processing; fixes rare deadlock, ~10-15% performance improvement
+  - **SH2** — Decode macros cleaned up with `#undef` after use (unity build safety)
+
+### Technical
+- 9 hardware-layer commits synced from Ymir upstream
+- All targets compile cleanly
+
 ## [0.4.3] - 2026-06-17
 
 ### Changed
