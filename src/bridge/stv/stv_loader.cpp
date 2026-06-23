@@ -28,6 +28,14 @@ static bool ReadFile(const std::filesystem::path &path, std::vector<uint8> &out)
 static void MapROMData(std::vector<uint8> &romData, const STVROMLayoutEntry &layout,
                        const std::vector<uint8> &fileData) {
     if (layout.map == STV_MAP_BYTE) {
+        // Byte ROM fills contiguous addresses starting from layout.offset.
+        // Each byte occupies exactly one ROM position (matches Kronos stv.c copyFile GAME_BYTE_BLOB).
+        for (uint32_t j = 0; j < layout.size && layout.offset + j < romData.size(); j++) {
+            romData[layout.offset + j] = fileData[j];
+        }
+    } else if (layout.map == STV_MAP_HEADER) {
+        // Header byte ROM with interleaved mapping (matches Kronos stv.c copyFile HEADER_BLOB).
+        // Writes to every other byte: rom[offset + 2*j] = fileData[j].
         for (uint32_t j = 0; j < layout.size && layout.offset + (j << 1) < romData.size(); j++) {
             romData[layout.offset + (j << 1)] = fileData[j];
         }
@@ -83,7 +91,7 @@ STVLoadResult LoadSTVGameROM(const std::filesystem::path &romPath,
             return result;
         }
 
-        romData.assign(ymir::cart::kSTVGameROMMaxSize, 0xFFu);
+        romData.assign(ymir::cart::kSTVGameROMMaxSize, 0x00u);
 
         for (const auto &layout : game->rom_layout) {
             if (!layout.fname || layout.size == 0) break;
@@ -139,7 +147,7 @@ STVLoadResult LoadSTVGameROM(const std::filesystem::path &romPath,
     std::filesystem::path romDir = romPath.parent_path();
     if (romDir.empty()) romDir = ".";
 
-    romData.assign(ymir::cart::kSTVGameROMMaxSize, 0xFFu);
+    romData.assign(ymir::cart::kSTVGameROMMaxSize, 0x00u);
 
     for (const auto &layout : game->rom_layout) {
         if (!layout.fname || layout.size == 0) break;

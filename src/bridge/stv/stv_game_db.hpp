@@ -29,9 +29,10 @@ enum STVEChip {
 };
 
 enum STVROMMap {
-    STV_MAP_BYTE = 0,
-    STV_MAP_16LE,
-    STV_MAP_16BE
+    STV_MAP_BYTE = 0,    // Contiguous byte mapping (matches Kronos GAME_BYTE_BLOB)
+    STV_MAP_16LE,        // 16-bit little-endian, byte-swapped to BE in buffer
+    STV_MAP_16BE,        // 16-bit big-endian, copied verbatim
+    STV_MAP_HEADER       // Interleaved byte mapping (matches Kronos HEADER_BLOB: offset + 2*j)
 };
 
 struct STVROMLayoutEntry {

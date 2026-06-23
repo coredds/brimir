@@ -5,7 +5,7 @@ authors = "coredds"
 categories = "Emulator"
 license = "GPLv3"
 permissions = ""
-supported_extensions = "cue|chd|iso|ccd|mds|m3u|bin|rom"
+supported_extensions = "cue|chd|iso|ccd|mds|m3u|bin|rom|zip"
 
 # Hardware Information
 manufacturer = "Sega"

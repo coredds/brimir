@@ -20,11 +20,13 @@ static const STVGameInfo kGameDB[] = {
     },
     {
         "Baku Baku Animal", 0x1, STV_CONTROL_3B, STV_EC_CHIP_NONE, 0, STV_ROMTWIDDLE_NONE, false,
-        { STVROMLayoutEntry{0x0000001, 0x0100000, STV_MAP_BYTE, "fpr17969.13"},
-          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE, "mpr17970.2"},
-          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE, "mpr17971.3"},
-          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE, "mpr17972.4"},
-          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE, "mpr17973.5"} }
+        { STVROMLayoutEntry{0x0000001, 0x0100000, STV_MAP_HEADER, "fpr17969.13"},
+          STVROMLayoutEntry{0x0200000, 0x0100000, STV_MAP_BYTE,   "fpr17969.13"},
+          STVROMLayoutEntry{0x0300000, 0x0100000, STV_MAP_BYTE,   "fpr17969.13"},
+          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE,   "mpr17970.2"},
+          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE,   "mpr17971.3"},
+          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE,   "mpr17972.4"},
+          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE,   "mpr17973.5"} }
     },
     {
         "Cotton 2", 0x1, STV_CONTROL_3B, STV_EC_CHIP_NONE, 0, STV_ROMTWIDDLE_NONE, false,
@@ -39,22 +41,25 @@ static const STVGameInfo kGameDB[] = {
     },
     {
         "Die Hard Arcade", 0x4, STV_CONTROL_3B, STV_EC_CHIP_NONE, 0, STV_ROMTWIDDLE_NONE, false,
-        { STVROMLayoutEntry{0x0000001, 0x0100000, STV_MAP_BYTE, "fpr19119.13"},
-          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE, "mpr19115.2"},
-          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE, "mpr19116.3"},
-          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE, "mpr19117.4"},
-          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE, "mpr19118.5"} }
+        { STVROMLayoutEntry{0x0000001, 0x0100000, STV_MAP_HEADER, "fpr19119.13"},
+          STVROMLayoutEntry{0x0200000, 0x0100000, STV_MAP_BYTE,   "fpr19119.13"},
+          STVROMLayoutEntry{0x0300000, 0x0100000, STV_MAP_BYTE,   "fpr19119.13"},
+          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE,   "mpr19115.2"},
+          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE,   "mpr19116.3"},
+          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE,   "mpr19117.4"},
+          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE,   "mpr19118.5"} }
     },
     {
         "Golden Axe: The Duel", 0x1, STV_CONTROL_6B, STV_EC_CHIP_NONE, 0, STV_ROMTWIDDLE_NONE, false,
-        { STVROMLayoutEntry{0x0000001, 0x0080000, STV_MAP_BYTE, "epr17766.13"},
-          STVROMLayoutEntry{0x0100001, 0x0080000, STV_MAP_BYTE, "epr17766.13"},
-          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE, "mpr17768.2"},
-          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE, "mpr17769.3"},
-          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE, "mpr17770.4"},
-          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE, "mpr17771.5"},
-          STVROMLayoutEntry{0x1400000, 0x0400000, STV_MAP_16LE, "mpr17772.6"},
-          STVROMLayoutEntry{0x1800000, 0x0400000, STV_MAP_16LE, "mpr17767.1"} }
+        { STVROMLayoutEntry{0x0000001, 0x0080000, STV_MAP_HEADER, "epr17766.13"},
+          STVROMLayoutEntry{0x0200000, 0x0080000, STV_MAP_BYTE,   "epr17766.13"},
+          STVROMLayoutEntry{0x0300000, 0x0080000, STV_MAP_BYTE,   "epr17766.13"},
+          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE,   "mpr17768.2"},
+          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE,   "mpr17769.3"},
+          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE,   "mpr17770.4"},
+          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE,   "mpr17771.5"},
+          STVROMLayoutEntry{0x1400000, 0x0400000, STV_MAP_16LE,   "mpr17772.6"},
+          STVROMLayoutEntry{0x1800000, 0x0400000, STV_MAP_16LE,   "mpr17767.1"} }
     },
     {
         "Guardian Force", 0x1, STV_CONTROL_3B, STV_EC_CHIP_NONE, 0, STV_ROMTWIDDLE_NONE, false,
@@ -67,20 +72,23 @@ static const STVGameInfo kGameDB[] = {
     },
     {
         "Puyo Puyo Sun", 0x1, STV_CONTROL_3B, STV_EC_CHIP_NONE, 0, STV_ROMTWIDDLE_NONE, false,
-        { STVROMLayoutEntry{0x0000001, 0x0080000, STV_MAP_BYTE, "epr19531.13"},
-          STVROMLayoutEntry{0x0100001, 0x0080000, STV_MAP_BYTE, "epr19531.13"},
-          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE, "mpr19533.2"},
-          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE, "mpr19534.3"},
-          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE, "mpr19535.4"},
-          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE, "mpr19536.5"},
-          STVROMLayoutEntry{0x1400000, 0x0400000, STV_MAP_16LE, "mpr19537.6"},
-          STVROMLayoutEntry{0x1800000, 0x0400000, STV_MAP_16LE, "mpr19538.1"} }
+        { STVROMLayoutEntry{0x0000001, 0x0080000, STV_MAP_HEADER, "epr19531.13"},
+          STVROMLayoutEntry{0x0200000, 0x0080000, STV_MAP_BYTE,   "epr19531.13"},
+          STVROMLayoutEntry{0x0300000, 0x0080000, STV_MAP_BYTE,   "epr19531.13"},
+          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE,   "mpr19533.2"},
+          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE,   "mpr19534.3"},
+          STVROMLayoutEntry{0x0C00000, 0x0400000, STV_MAP_16LE,   "mpr19535.4"},
+          STVROMLayoutEntry{0x1000000, 0x0400000, STV_MAP_16LE,   "mpr19536.5"},
+          STVROMLayoutEntry{0x1400000, 0x0400000, STV_MAP_16LE,   "mpr19537.6"},
+          STVROMLayoutEntry{0x1800000, 0x0400000, STV_MAP_16LE,   "mpr19538.1"} }
     },
     {
         "Columns '97", 0x1, STV_CONTROL_3B, STV_EC_CHIP_NONE, 0, STV_ROMTWIDDLE_NONE, false,
-        { STVROMLayoutEntry{0x0000001, 0x0100000, STV_MAP_BYTE, "fpr19553.13"},
-          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE, "mpr19554.2"},
-          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE, "mpr19555.3"} }
+        { STVROMLayoutEntry{0x0000001, 0x0100000, STV_MAP_HEADER, "fpr19553.13"},
+          STVROMLayoutEntry{0x0200000, 0x0100000, STV_MAP_BYTE,   "fpr19553.13"},
+          STVROMLayoutEntry{0x0300000, 0x0100000, STV_MAP_BYTE,   "fpr19553.13"},
+          STVROMLayoutEntry{0x0400000, 0x0400000, STV_MAP_16LE,   "mpr19554.2"},
+          STVROMLayoutEntry{0x0800000, 0x0400000, STV_MAP_16LE,   "mpr19555.3"} }
     },
 };
 

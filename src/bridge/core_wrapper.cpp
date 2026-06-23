@@ -664,6 +664,14 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
     m_stvMode = true;
     m_stvIO->SetSTVMode(true);
 
+    // Map IOGA on the bus at page 0x40 (0x0400000-0x040007F).
+    // This is needed because the ST-V BIOS accesses IOGA at these addresses,
+    // which fall in the gap between WRAMLow mirror (pages 0x30-0x3F) and
+    // cartridge CS0 (page 0x200+). The cartridge CS1 dispatch only covers
+    // pages 0x200-0x57F so it can't handle these IOGA accesses.
+    // Note: page 0x40 does NOT conflict with cartridge CS1 (page 0x400+).
+    m_stvIO->MapMemory(m_saturn->mainBus);
+
     // Create in-memory backup RAM (ST-V uses internal backup RAM for EEPROM saves)
     {
         ymir::bup::BackupMemory bupMem;

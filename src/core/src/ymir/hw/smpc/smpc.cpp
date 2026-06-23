@@ -670,14 +670,20 @@ void SMPC::SYSRES() {
 void SMPC::CKCHG352() {
     devlog::debug<grp::base>("Processing CKCHG352");
 
+    // ST-V: stop slave SH-2 before clock change, send NMI after (matches Kronos smpc.c:219-239)
+    m_smpcOps.DisableSlaveSH2();
     ClockChange(sys::ClockSpeed::_352);
+    m_smpcOps.RaiseNMI();
 
     SF = false; // done processing
 }
 void SMPC::CKCHG320() {
     devlog::debug<grp::base>("Processing CKCHG320");
 
+    // ST-V: stop slave SH-2 before clock change, send NMI after (matches Kronos smpc.c:243-265)
+    m_smpcOps.DisableSlaveSH2();
     ClockChange(sys::ClockSpeed::_320);
+    m_smpcOps.RaiseNMI();
 
     SF = false; // done processing
 }

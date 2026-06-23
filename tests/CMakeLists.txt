@@ -11,6 +11,8 @@ add_executable(brimir_tests
     # Options metadata (compiled directly from libretro layer)
     ../src/libretro/options.cpp
     unit/test_options.cpp
+    # ST-V boot test
+    unit/test_stv_boot.cpp
     # Basic smoke tests
     unit/test_basic.cpp
     unit/test_bitmask_enum.cpp
