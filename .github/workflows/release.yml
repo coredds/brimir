@@ -191,13 +191,15 @@ jobs:
             brimir-${{ github.ref_name }}-macos-arm64.tar.gz
           body: |
             Brimir is a Sega Saturn emulation core for libretro, built on Ymir's cycle-accurate hardware layer.
-            
-            ### v0.4.2
-            
-            **SH2 decode optimization** — Removed `DecodedArgs` pre-decode table (~256KB saved); instruction handlers now decode opcode arguments directly via `DECODE_NM`/`DECODE_D_S` macros, matching Ymir upstream.
-            
-            **Cartridge RAM persistence** — Save/load `.cart` files for all DRAM cartridge types (8 Mbit, 32 Mbit, 48 Mbit) using Ymir's `DumpRAM`/`LoadRAM` API. Supports games like KoF '95, Vampire Savior, and other RAM-expansion titles.
-            
-            **DIV1 microoptimization** — Applied upstream performance tweaks to DIV1 instruction.
-            
-            **Infrastructure** — 4 hardware-layer files synced verbatim from Ymir HEAD. SH1 decode unchanged. NEON intrinsics preserved.
+
+            ### v0.4.4
+
+            **Ymir Hardware Layer Sync (2026-06-23)** — 9 commits synced from upstream
+
+            **VDP2** — Color gradation effect (fixes Saturn Bomberman Stage 4-4 background); horizontal scroll per-scanline fix (fixes Shellshock terrain)
+
+            **VDP1** — Infinite loop detection optimized with `inInfiniteLoop` flag; jumps to 0 no longer treated as infinite loops (fixes Akumajou Dracula X); save state FBRAM sync fix (fixes rewind flicker); color bank per-quad; VDP1Regs/double density cached per command
+
+            **SCSP/M68K** — Threading redesigned with unified event queue (fixes rare deadlock, ~10-15% perf gain)
+
+            **SH2** — Macro cleanup for unity builds
