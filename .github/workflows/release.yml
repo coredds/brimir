@@ -18,16 +18,16 @@ jobs:
           submodules: recursive
 
       - name: Configure CMake
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_LTO=ON
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBRIMIR_LTO=ON
 
       - name: Build
-        run: cmake --build build --config Release --target brimir_libretro
+        run: cmake --build build --config Release --target brimir_libretro --parallel
 
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p artifact
-          cp build/bin/brimir_libretro.dll artifact/
+          cp build/bin/Release/brimir_libretro.dll artifact/
           cp resources/info/brimir_libretro.info artifact/
 
       - name: Upload artifact
