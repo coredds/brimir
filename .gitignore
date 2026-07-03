@@ -191,3 +191,12 @@ profile/
 deploy-retroarch.ps1
 check_gpu_dependencies.ps1
 
+# Local agent/tool artifacts (kept local, not for contributors)
+.playwright-mcp/
+retroarch_output.txt
+retroarch_output2.txt
+retroarch_stdout.log
+retroarch_stderr.log
+brimir_stv_debug.log
+brimir_stv_rsg.log
+

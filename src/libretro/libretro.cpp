@@ -423,7 +423,7 @@ RETRO_API void retro_run(void) {
         g_core->SetControllerState(0, buttons_p1);
         g_core->SetControllerState(1, buttons_p2);
 
-        // ST-V arcade inputs (coin, service, test)
+        // ST-V arcade inputs (coin, service, test, start)
         // Coin is mapped to SELECT button; service/test to L3/R3
         if (input_state_cb) {
             // Coin: trigger on each press (edge-detect not needed — STVIOBoard handles it)
@@ -432,6 +432,14 @@ RETRO_API void retro_run(void) {
             }
             g_core->SetServiceSwitch(input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3));
             g_core->SetTestSwitch(input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3));
+
+            // Start: ST-V arcade boards have a dedicated Start signal per player
+            // that is distinct from the regular joypad button bits decoded by
+            // STVIOBoard::UpdateInputs(). Without this, the BIOS/game accepts
+            // coins but can never see a Start press, so it idles forever on the
+            // "insert coin / push start" attract screen.
+            g_core->SetSTVStart(0, input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START));
+            g_core->SetSTVStart(1, input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START));
         }
     }
     

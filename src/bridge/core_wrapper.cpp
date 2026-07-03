@@ -1588,7 +1588,11 @@ void CoreWrapper::SetServiceSwitch(bool pressed) {
 }
 
 void CoreWrapper::SetTestSwitch(bool pressed) {
-    if (m_stvIO) m_stvIO->SetTest(pressed);
+    m_stvIO->SetTest(pressed);
+}
+
+void CoreWrapper::SetSTVStart(uint8_t player, bool pressed) {
+    if (m_stvMode && m_stvIO) m_stvIO->SetStart(player, pressed);
 }
 
 

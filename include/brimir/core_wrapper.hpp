@@ -171,6 +171,11 @@ public:
     /// @brief Set test switch (for ST-V arcade games)
     void SetTestSwitch(bool pressed);
 
+    /// @brief Set the arcade Start button state for a player (for ST-V arcade games)
+    /// @param player Player index (0 or 1)
+    /// @param pressed Whether the Start button is held down
+    void SetSTVStart(uint8_t player, bool pressed);
+
     /// @brief Get the current video frame buffer
     /// @return Pointer to framebuffer data, or nullptr if not available
     const void* GetFramebuffer() const;
