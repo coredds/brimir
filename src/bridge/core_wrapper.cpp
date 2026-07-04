@@ -682,6 +682,11 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
     // Hard reset to boot from ST-V BIOS
     m_saturn->Reset(true);
 
+    // Force ST-V mode on the SMPC so INTBACK reports normal startup (OREG[0]
+    // bit 7 = 1), matching Kronos. Must be set after the hard reset since the
+    // SMPC mode flag is bridge-controlled and survives Reset().
+    m_saturn->SMPC.SetSTVMode(true);
+
     // Keep tray state closed for ST-V (no optical media path)
     m_saturn->CloseTray();
 
@@ -869,6 +874,7 @@ void CoreWrapper::UnloadGame() {
     // Reset ST-V mode
     if (m_stvMode) {
         m_stvIO->SetSTVMode(false);
+        m_saturn->SMPC.SetSTVMode(false);
         m_stvMode = false;
     }
 }

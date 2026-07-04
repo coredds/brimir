@@ -159,6 +159,7 @@ void STVIOBoard::WriteIOGA(uint32 address, T value) {
     } else if (iogaAddr < 0x8) {
         m_dataOut[iogaAddr] = byteVal;
     }
+
 }
 
 void STVIOBoard::SetCoin1(bool pressed) {

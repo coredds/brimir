@@ -646,7 +646,12 @@ void SMPC::SSHOFF() {
 void SMPC::SNDON() {
     devlog::debug<grp::base>("Processing SNDON");
 
-    m_smpcOps.EnableAndResetM68K();
+    // ST-V: the 68K sound CPU is controlled by PDR2, not by SNDON (matches Kronos
+    // smpc.c:196 "C68k wire is controlled by pdr2 on STV"). Starting it here would
+    // run the 68K with no loaded program, potentially corrupting sound RAM.
+    if (!m_stvMode) {
+        m_smpcOps.EnableAndResetM68K();
+    }
 
     SF = false; // done processing
 }
@@ -654,7 +659,9 @@ void SMPC::SNDON() {
 void SMPC::SNDOFF() {
     devlog::debug<grp::base>("Processing SNDOFF");
 
-    m_smpcOps.DisableM68K();
+    if (!m_stvMode) {
+        m_smpcOps.DisableM68K();
+    }
 
     SF = false; // done processing
 }
@@ -670,20 +677,17 @@ void SMPC::SYSRES() {
 void SMPC::CKCHG352() {
     devlog::debug<grp::base>("Processing CKCHG352");
 
-    // ST-V: stop slave SH-2 before clock change, send NMI after (matches Kronos smpc.c:219-239)
-    m_smpcOps.DisableSlaveSH2();
+    // Matches Kronos smpc.c:219-239: reset VDP/SCU/SCSP, stop slave, change
+    // clock, then raise NMI (NMI must come after the clock change).
     ClockChange(sys::ClockSpeed::_352);
-    m_smpcOps.RaiseNMI();
 
     SF = false; // done processing
 }
 void SMPC::CKCHG320() {
     devlog::debug<grp::base>("Processing CKCHG320");
 
-    // ST-V: stop slave SH-2 before clock change, send NMI after (matches Kronos smpc.c:243-265)
-    m_smpcOps.DisableSlaveSH2();
+    // Matches Kronos smpc.c:243-265: same sequence as CKCHG352 but for 26.8 MHz.
     ClockChange(sys::ClockSpeed::_320);
-    m_smpcOps.RaiseNMI();
 
     SF = false; // done processing
 }
@@ -802,7 +806,11 @@ void SMPC::WriteINTBACKStatusReport() {
     SR.P1MDn = m_port1mode;
     SR.P2MDn = m_port2mode;
 
-    OREG[0] = (m_STE << 7) | (m_resetDisable << 6);
+    // OREG[0] bit 7: 1 = normal startup, 0 = goto system configuration screen.
+    // On Saturn this is the STE flag (set by SETSMEM); ST-V arcade BIOS expects
+    // normal startup immediately, so force it on in ST-V mode (matches Kronos
+    // smpc.c:291 which hardcodes 0x80).
+    OREG[0] = ((m_STE || m_stvMode) << 7) | (m_resetDisable << 6);
 
     if (m_rtc.IsVirtualMode()) {
         m_rtc.UpdateSysClock(m_scheduler.CurrentCount());
@@ -909,8 +917,15 @@ void SMPC::ClockChange(sys::ClockSpeed clockSpeed) {
     m_smpcOps.ClockChangeSoftReset();
     // TODO: clear VDP VRAMs?
     m_smpcOps.DisableSlaveSH2();
-    m_smpcOps.RaiseNMI();
-    m_smpcOps.SetClockSpeed(clockSpeed);
+    if (m_stvMode) {
+        // ST-V/Kronos order: change clock, then raise NMI.
+        m_smpcOps.SetClockSpeed(clockSpeed);
+        m_smpcOps.RaiseNMI();
+    } else {
+        // Preserve existing Saturn behavior.
+        m_smpcOps.RaiseNMI();
+        m_smpcOps.SetClockSpeed(clockSpeed);
+    }
 }
 
 // -----------------------------------------------------------------------------

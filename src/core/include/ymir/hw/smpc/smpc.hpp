@@ -60,6 +60,11 @@ public:
     [[nodiscard]] uint8 GetAreaCode() const;
     void SetAreaCode(uint8 areaCode);
 
+    // ST-V arcade mode: forces INTBACK OREG[0] bit 7 to 1 so the ST-V BIOS
+    // takes the normal startup path instead of the system configuration screen.
+    // Matches Kronos smpc.c SmpcINTBACKStatus which hardcodes 0x80.
+    void SetSTVMode(bool stv) { m_stvMode = stv; }
+
     peripheral::PeripheralPort &GetPeripheralPort1() {
         return m_port1;
     }
@@ -95,6 +100,8 @@ private:
     std::array<uint8, 4> SMEM;
 
     bool m_STE; // false = forces system configuration on boot up
+
+    bool m_stvMode = false; // ST-V arcade mode flag (bridge-controlled, not reset by Reset())
 
     bool m_resetDisable; // RESD flag, masks the Reset state
     bool m_resetState;   // State of the console's Reset button
