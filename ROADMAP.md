@@ -192,10 +192,10 @@ Saturn VDP1 draws affine-textured quads without perspective correction. Needs in
 
 Requires perfect determinism across dual SH-2s, SCSP timers, CD block timing. Needs Ymir deterministic mode + RetroArch netplay integration.
 
-### 25. ST-V Arcade Support
-**Layer**: Upstream (new system class) | **Target**: Post-1.0
+### 25. ST-V Arcade Support  🚧
+**Layer**: Upstream (new system class) | **Target**: Post-1.0 | **Status**: In progress on `feature/stv-support` branch (not yet merged, not ready for release)
 
-ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Would require new `stv::Titan` class or major `Saturn` modifications. Big differentiator — no RetroArch core does ST-V well.
+ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requires cartridge decryption (315-5881), IOGA dispatch, and dedicated SMPC arcade-mode handling on top of the existing `Saturn` class. Big differentiator — no RetroArch core does ST-V well.
 
 ---
 

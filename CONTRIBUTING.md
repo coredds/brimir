@@ -409,13 +409,11 @@ When testing with actual games:
    - Include usage examples
 
 3. **User Documentation:**
-   - README.md: Project overview
-   - docs/guides/QUICKSTART.md: Setup and build instructions
-   - User guides in docs/guides/
+   - README.md: Project overview, build instructions, core options, and installation steps
 
 4. **Developer Documentation:**
-   - docs/development/ARCHITECTURE.md: System design
-   - docs/ROADMAP.md: Development roadmap
+   - ROADMAP.md: Development roadmap and feature gap analysis
+   - CHANGELOG.md: Version history and release notes
    - This file (CONTRIBUTING.md)
 
 ## Community
