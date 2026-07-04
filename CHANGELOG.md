@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.5] - 2026-07-04
+
+### Fixed
+- **Ymir Hardware Layer Fixes (through 2026-06-26)** — Backported targeted upstream bug fixes on top of the 2026-06-23 sync
+  - **SMPC** — Update peripheral PDR1/PDR2 registers when reading and when updating EXLE; fixes many cases of games not recognizing Virtua Gun inputs or missing shots
+  - **Input** — 3D Control Pad digital-mode report now matches the Standard Pad (fixes Bug Too!, Black/Matrix); analog-mode report LSBs set to all ones (fixes double inputs in Deep Fear)
+  - **VDP1** — Textured sprites with CMDSIZE.H=0 now fetch texels correctly (fixes glitched graphics in Policenauts' shooting range scorecard); FBRAM no longer synced on debug reads (fixes a deadlock when viewing the framebuffer in a memory viewer)
+  - **VDP2** — Color calculations now correctly restricted in Hi-Res/exclusive-monitor modes with color RAM modes other than 0, preventing blending on top of palette layers (fixes Dark Savior Sound Test text); VCNT/external-latch coordinate handling overhauled — latches current VCNT on EXTEN reads, fixes the Hi-Res HCNTShift case, and corrects ExternalLatch offsets (fixes several Virtua Gun shot-offset and reload-detection errors, plus Digital Dance Mix Vol. 1 camera angles)
+  - **CD Block (HLE)** — Squashed fix chain for Play/Pause/Seek/TOC/Init command handling: extended seek ticks to avoid a race between quick successive Play commands (Digital Dance Mix Vol. 1); reworked resume-from-pause and reset-position logic (fixes music looping/restart issues in Mass Destruction); Get TOC no longer clobbers playback status (fixes music stopping in Mass Destruction); read speed setting is now ignored in favor of the configured speed factor for data tracks (fixes slow FMVs); Mode 2 Form 2 sector buffers are extended when under-sized (fixes FMV/animation corruption); playback now properly resumes after a buffer-full pause (fixes freezes in Mahjong Yon Shimai, Shellshock, Sonic Jam, IRREEL); Seek Disc FAD/track/index edge cases corrected (disc-bounds/leadout clamping, track 0 = first track, out-of-range index handling)
+
+### Technical
+- 7 commits, cherry-picked from specific Ymir upstream fixes (not a full verbatim sync) rather than a wholesale hardware-layer sync
+- Verified with matching test suites on MSVC (Windows), GCC 13 (Linux x64), and a real aarch64 cross-compile (confirmed NEON codegen unaffected) — all 218,082 test assertions pass on every toolchain
+- **Save state compatibility note**: removes the now-unused `VCNTLatched` field from `ymir::savestate::SaveState`; existing save states will be rejected (size mismatch) after this update, same as prior hardware-layer syncs that touched save state layout
+
 ## [0.4.1] - 2026-06-04
 
 ### Changed
