@@ -41,7 +41,9 @@ static uint32 CalcPutOffset(uint32 size) {
 // Implementation
 
 // NOTE: cannot be less than 2 due to how the Seek state processing is implemented
-static constexpr uint32 kSeekTicks = 2;
+// - Digital Dance Mix Vol. 1 - Namie Amuro -- requires at least 5 seek ticks due to issuing two Play commands in a
+//   short interval. The first Play command should not have enough time to read the disc.
+static constexpr uint32 kSeekTicks = 5;
 
 CDBlock::CDBlock(core::Scheduler &scheduler, const media::Disc &disc, const media::fs::Filesystem &fs,
                  core::Configuration::CDBlock &config)
@@ -692,15 +694,15 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
     const bool keepEndParam = endParam == 0xFFFFFF;
     const bool keepRepeatParam = repeatParam == 0xFF;
 
-    // Handle resume from pause
-    if (keepStartParam && keepEndParam && keepRepeatParam && GetStatusCode() == kStatusCodePause) {
+    const bool isStartFAD = bit::test<23>(keepStartParam ? m_playStartParam : startParam);
+    const bool isEndFAD = bit::test<23>(keepEndParam ? m_playEndParam : endParam);
+
+    const bool paused = GetStatusCode() == kStatusCodePause;
+
+    // Handle resume from pause for data tracks
+    if (keepStartParam && keepEndParam && keepRepeatParam && isStartFAD && isEndFAD && paused) {
         m_status.statusCode = kStatusCodePlay;
-        if (m_status.controlADR == 0x41) {
-            m_targetDriveCycles = kDriveCyclesPlaying1x / m_readSpeed;
-        } else {
-            // Force 1x speed if playing audio track
-            m_targetDriveCycles = kDriveCyclesPlaying1x;
-        }
+        m_targetDriveCycles = kDriveCyclesPlaying1x / m_readSpeed;
         devlog::debug<grp::play_init>("Resuming from pause");
         return true;
     }
@@ -713,9 +715,7 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
         repeatParam = m_playRepeatParam;
     }
 
-    const bool isStartFAD = bit::test<23>(startParam);
-    const bool isEndFAD = bit::test<23>(endParam);
-    const bool resetPos = bit::test<15>(repeatParam);
+    const bool resetPos = !keepRepeatParam && !bit::test<7>(repeatParam);
 
     // Sanity check: both must be FADs or tracks, not a mix
     if (!keepEndParam && isStartFAD != isEndFAD) {
@@ -737,7 +737,6 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
 
     if (isStartFAD) {
         // Frame address range
-        const bool paused = GetStatusCode() == kStatusCodePause;
         m_playStartPos = startParam & 0x7FFFFF;
         if (!keepEndParam) {
             m_playEndPos = m_playStartPos + (endParam & 0x7FFFFF) - 1;
@@ -746,7 +745,10 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
         devlog::debug<grp::play_init>("FAD range {:06X} to {:06X}", m_playStartPos, m_playEndPos);
 
         uint32 frameAddress = m_status.frameAddress;
-        if (paused || resetPos || frameAddress < m_playStartPos || frameAddress > m_playEndPos) {
+        if (frameAddress < m_playStartPos || frameAddress > m_playEndPos + 1) {
+            devlog::debug<grp::play_init>(
+                "Adjusting playback position from {:06X} to {:06X} to fit range {:06X}..{:06X}", frameAddress,
+                m_playStartPos, m_playStartPos, m_playEndPos);
             frameAddress = m_playStartPos;
         }
 
@@ -777,6 +779,7 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
                 devlog::debug<grp::play_init>("Reset playback position to {:06X}", m_status.frameAddress);
             } else {
                 m_status.frameAddress = frameAddress;
+                devlog::debug<grp::play_init>("Continuing playback from {:06X}", m_status.frameAddress);
             }
         } else {
             m_targetDriveCycles = kDriveCyclesNotPlaying;
@@ -963,6 +966,11 @@ bool CDBlock::SetupScan(uint8 direction) {
 void CDBlock::ProcessDriveState() {
     CheckPlayEnd();
 
+    // Resume playback if paused due to running out of buffers
+    if (m_bufferFullPause && m_partitionManager.GetFreeBufferCount() > 0) {
+        m_bufferFullPause = false;
+    }
+
     switch (GetStatusCode()) {
     case kStatusCodeSeek:
         // HACK: Extremely hacky way to make the status transition from Seek to Play
@@ -979,21 +987,16 @@ void CDBlock::ProcessDriveState() {
             if (m_status.frameAddress < m_playStartPos || m_status.frameAddress > m_playEndPos) {
                 m_status.frameAddress = m_playStartPos;
             }
+            m_bufferFullPause = false;
             ProcessDriveStatePlay();
         } else if (m_seekTicks == 0) {
+            m_bufferFullPause = false;
             m_status.statusCode = kStatusCodePlay;
             ProcessDriveStatePlay();
         }
         break;
     case kStatusCodePlay: [[fallthrough]];
     case kStatusCodeScan: ProcessDriveStatePlay(); break;
-    case kStatusCodePause:
-        // Resume playback if paused due to running out of buffers
-        if (m_bufferFullPause && m_partitionManager.GetFreeBufferCount() > 0) {
-            m_bufferFullPause = false;
-            m_status.statusCode = kStatusCodePlay;
-        }
-        break;
     }
 
     // FIXME: cdbtest fails if the PEND interrupt happens at the same time as the CSCT interrupt from Play
@@ -1030,6 +1033,11 @@ void CDBlock::ProcessDriveStatePlay() {
             m_status.statusCode = kStatusCodeNoDisc; // TODO: is this correct?
             SetInterrupt(kHIRQ_DCHG);
         } else {
+            if (m_bufferFullPause) {
+                devlog::trace<grp::play>("Can't play disc, no buffers available");
+                return;
+            }
+
             // TODO: consider caching the track pointer
             const media::Session &session = m_disc.sessions.back();
             const media::Track *track = session.FindTrack(frameAddress);
@@ -1079,11 +1087,12 @@ void CDBlock::ProcessDriveStatePlay() {
 
                     // TODO: what is the correct status code here?
                     // TODO: there really should be a separate state machine for handling this...
-                    m_status.statusCode = kStatusCodePause;
                     SetInterrupt(kHIRQ_BFUL);
                     m_bufferFullPause = true;
                 } else {
-                    buffer.size = m_getSectorLength;
+                    const bool mode2 = buffer.data[0xF] == 0x02;
+                    const bool mode2form2 = mode2 && bit::test<5>(buffer.data[0x12]);
+                    buffer.size = mode2form2 ? std::max(2324u, m_getSectorLength) : m_getSectorLength;
                     buffer.frameAddress = frameAddress;
                     track->ReadSectorSubheader(frameAddress, buffer.subheader);
 
@@ -1227,7 +1236,7 @@ uint8 CDBlock::GetStatusCode() const {
 }
 
 void CDBlock::SetupTOCTransfer() {
-    devlog::debug<grp::xfer>("Starting TOC transfer");
+    devlog::trace<grp::xfer>("Starting TOC transfer");
 
     m_xferType = TransferType::TOC;
     m_xferPos = 0;
@@ -1457,9 +1466,6 @@ bool CDBlock::SetupSubcodeTransfer(uint8 type) {
 void CDBlock::ReadSector() {
     const Buffer *buffer = m_partitionManager.GetTail(m_xferPartition, m_xferSectorPos);
     if (buffer != nullptr) {
-        devlog::trace<grp::xfer>("Starting transfer from sector at frame address {:08X} - sector {}",
-                                 buffer->frameAddress, m_xferSectorPos);
-
         // Skip to user data when not reading 2352 bytes.
         // Also force get sector length 2048 -> 2324 when executing:
         // - Get Sector Data from Mode 2 Form 2 sectors
@@ -1482,6 +1488,9 @@ void CDBlock::ReadSector() {
         if (extendLength) {
             m_xferLength += m_xferGetLength - m_getSectorLength;
         }
+
+        devlog::trace<grp::xfer>("Starting transfer: partition {}, buffer {}, frame address {:06X} -> {} bytes",
+                                 m_xferPartition, m_xferSectorPos, buffer->frameAddress, getLength);
     } else {
         devlog::warn<grp::xfer>("Out of bounds transfer - sector {}", m_xferSectorPos);
         m_xferGetLength = m_getSectorLength;
@@ -1508,7 +1517,7 @@ uint16 CDBlock::DoReadTransfer() {
     case TransferType::GetThenDeleteSector:
         if (m_xferBufferPos >= m_xferGetLength / sizeof(uint16)) {
             ++m_xferSectorPos;
-            devlog::trace<grp::xfer>("Going to sector {}", m_xferSectorPos);
+            devlog::trace<grp::xfer>("Going to sector index {}", m_xferSectorPos);
             m_xferBufferPos = 0;
             if (m_xferPos + 1 < m_xferLength) {
                 ReadSector();
@@ -1806,8 +1815,10 @@ void CDBlock::CmdGetTOC() {
     m_RR[3] = 0x0000;
 
     // TODO: make busy for a brief moment
-    m_status.statusCode = kStatusCodePause;
-    m_targetDriveCycles = kDriveCyclesNotPlaying;
+    // NOTE: should *not* change current playback status! Mass Destruction spams this command right after Play Disc,
+    // expecting the disc to still play normally.
+    // m_status.statusCode = kStatusCodePause;
+    // m_targetDriveCycles = kDriveCyclesNotPlaying;
 
     SetInterrupt(kHIRQ_CMOK | kHIRQ_DRDY);
 }
@@ -1866,7 +1877,7 @@ void CDBlock::CmdInitializeCDSystem() {
     // const bool decodeSubcodeRW = bit::test<1>(m_CR[0]);
     // const bool ignoreMode2Subheader = bit::test<2>(m_CR[0]);
     // const bool retryForm2Read = bit::test<3>(m_CR[0]);
-    const uint8 readSpeed = bit::extract<4, 5>(m_CR[0]); // 0=max (2x), 1=1x, 2=2x, 3=invalid
+    // const uint8 readSpeed = bit::extract<4, 5>(m_CR[0]); // 0=max (2x), 1=2x, 2=invalid, 3=invalid
     // const bool keepSettings = bit::test<7>(m_CR[0]);
     // const uint16 standbyTime = m_CR[1];
     // const uint8 ecc = bit::extract<8, 15>(m_CR[3]);
@@ -1922,7 +1933,8 @@ void CDBlock::CmdInitializeCDSystem() {
         m_xferSubcodeGroup = 0;
     }
 
-    m_readSpeed = readSpeed == 1 ? 1 : m_readSpeedFactor;
+    // m_readSpeed = readSpeed == 1 ? 1 : m_readSpeedFactor;
+    m_readSpeed = m_readSpeedFactor;
     devlog::info<grp::base>("Read speed set to {}x", m_readSpeed);
 
     // Output structure: standard CD status data
@@ -2026,7 +2038,7 @@ void CDBlock::CmdSeekDisc() {
         m_status.index = 0xFF;
         m_targetDriveCycles = kDriveCyclesNotPlaying;
     } else if (isStartFAD) {
-        const uint32 frameAddress = startPos & 0x7FFFFF;
+        uint32 frameAddress = startPos & 0x7FFFFF;
         devlog::debug<grp::base>("Seeking to frame address {:06X}", frameAddress);
         if (m_disc.sessions.empty()) {
             devlog::debug<grp::base>("No disc in drive - stopped");
@@ -2040,6 +2052,11 @@ void CDBlock::CmdSeekDisc() {
             m_targetDriveCycles = kDriveCyclesNotPlaying;
         } else {
             const auto &session = m_disc.sessions.back();
+
+            // Handle frame address exceptions:
+            //   Before start of disc (150) -> clamp to 150
+            //   After end of disc -> clamp to last disc FAD + 1 (leadout area)
+            frameAddress = std::max<uint32>(frameAddress, session.startFrameAddress);
             const uint8 trackIndex = session.FindTrackIndex(frameAddress);
             if (trackIndex < 99) {
                 const auto &track = session.tracks[trackIndex];
@@ -2050,21 +2067,20 @@ void CDBlock::CmdSeekDisc() {
                 m_status.track = trackIndex;
                 m_status.index = 1;
                 m_targetDriveCycles = kDriveCyclesNotPlaying;
-            } else {
-                devlog::debug<grp::base>("Frame address out of range - stopped");
-                m_status.statusCode = kStatusCodeStandby;
-                m_status.frameAddress = 0xFFFFFF;
-                m_status.flags = 0xF;
-                m_status.repeatCount = 0xF;
-                m_status.controlADR = 0xFF;
-                m_status.track = 0xFF;
-                m_status.index = 0xFF;
+            } else { // frameAddress > session.endFrameAddress
+                devlog::debug<grp::base>("Seeking to leadout area");
+                m_status.statusCode = kStatusCodePause;
+                m_status.frameAddress = session.endFrameAddress + 1;
+                m_status.flags = 0x0;
+                m_status.controlADR = 0x01;
+                m_status.track = 0xAA;
+                m_status.index = 1;
                 m_targetDriveCycles = kDriveCyclesNotPlaying;
             }
         }
     } else {
-        const uint32 trackNum = bit::extract<8, 14>(startPos);
-        const uint32 indexNum = bit::extract<0, 6>(startPos);
+        uint32 trackNum = bit::extract<8, 14>(startPos);
+        uint32 indexNum = bit::extract<0, 6>(startPos);
         devlog::debug<grp::base>("Seeking to track:index {}:{}", trackNum, indexNum);
         if (m_disc.sessions.empty()) {
             devlog::debug<grp::base>("No disc in drive - stopped");
@@ -2078,26 +2094,41 @@ void CDBlock::CmdSeekDisc() {
             m_targetDriveCycles = kDriveCyclesNotPlaying;
         } else {
             const auto &session = m_disc.sessions.back();
-            if (trackNum - 1 >= session.firstTrackIndex && trackNum - 1 <= session.lastTrackIndex) {
-                const auto &track = session.tracks[trackNum - 1];
-                m_status.statusCode = kStatusCodePause;
-                m_status.frameAddress = track.index01FrameAddress;
-                m_status.flags = track.controlADR == 0x41 ? 0x8 : 0x0;
-                m_status.controlADR = track.controlADR;
-                m_status.track = trackNum;
-                m_status.index = 1;
-                m_targetDriveCycles = kDriveCyclesNotPlaying;
-            } else {
-                devlog::debug<grp::base>("Track:index out of range - stopped");
-                m_status.statusCode = kStatusCodeStandby;
-                m_status.frameAddress = 0xFFFFFF;
-                m_status.flags = 0xF;
-                m_status.repeatCount = 0xF;
-                m_status.controlADR = 0xFF;
-                m_status.track = 0xFF;
-                m_status.index = 0xFF;
-                m_targetDriveCycles = kDriveCyclesNotPlaying;
+
+            // Handle track number exceptions:
+            //   0 -> first track
+            //   Outside of valid track range -> clamp to range, set index = 1
+            if (trackNum == 0) {
+                trackNum = session.firstTrackIndex + 1;
+            } else if (trackNum < session.firstTrackIndex + 1) {
+                trackNum = session.firstTrackIndex + 1;
+                indexNum = 1;
+            } else if (trackNum > session.lastTrackIndex + 1) {
+                trackNum = session.lastTrackIndex + 1;
+                indexNum = 1;
             }
+
+            const auto &track = session.tracks[trackNum - 1];
+
+            // Handle index number exceptions:
+            //   0 -> 1
+            //   Nonexistent index -> start of next track, set index = 1
+            if (indexNum == 0) {
+                indexNum = 1;
+            } else if (indexNum > track.indices.size() - 1) {
+                indexNum = 1;
+                if (trackNum < session.lastTrackIndex + 1) {
+                    ++trackNum;
+                }
+            }
+
+            m_status.statusCode = kStatusCodePause;
+            m_status.frameAddress = track.index01FrameAddress;
+            m_status.flags = track.controlADR == 0x41 ? 0x8 : 0x0;
+            m_status.controlADR = track.controlADR;
+            m_status.track = trackNum;
+            m_status.index = 1;
+            m_targetDriveCycles = kDriveCyclesNotPlaying;
         }
     }
 
