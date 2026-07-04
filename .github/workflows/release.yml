@@ -197,14 +197,20 @@ jobs:
           body: |
             Brimir is a Sega Saturn emulation core for libretro, built on Ymir's cycle-accurate hardware layer.
 
-            ### v0.4.4
+            ### v0.4.5
 
-            **Ymir Hardware Layer Sync (2026-06-23)** — 9 commits synced from upstream
+            **Ymir Hardware Layer Fixes (through 2026-06-26)** — 7 targeted upstream bug fixes backported on top of the 2026-06-23 sync
 
-            **VDP2** — Color gradation effect (fixes Saturn Bomberman Stage 4-4 background); horizontal scroll per-scanline fix (fixes Shellshock terrain)
+            **SMPC** — Update peripheral PDR1/PDR2 registers when reading and when updating EXLE; fixes many cases of games not recognizing Virtua Gun inputs or missing shots
 
-            **VDP1** — Infinite loop detection optimized with `inInfiniteLoop` flag; jumps to 0 no longer treated as infinite loops (fixes Akumajou Dracula X); save state FBRAM sync fix (fixes rewind flicker); color bank per-quad; VDP1Regs/double density cached per command
+            **Input** — 3D Control Pad digital-mode report now matches the Standard Pad (fixes Bug Too!, Black/Matrix); analog-mode report LSBs set to all ones (fixes double inputs in Deep Fear)
 
-            **SCSP/M68K** — Threading redesigned with unified event queue (fixes rare deadlock, ~10-15% perf gain)
+            **VDP1** — Textured sprites with CMDSIZE.H=0 now fetch texels correctly (fixes glitched graphics in Policenauts); FBRAM no longer synced on debug reads (fixes a memory-viewer deadlock)
 
-            **SH2** — Macro cleanup for unity builds
+            **VDP2** — Color calculations correctly restricted in Hi-Res/exclusive-monitor modes with color RAM modes other than 0 (fixes Dark Savior Sound Test text); VCNT/external-latch coordinate handling overhauled (fixes several Virtua Gun shot-offset/reload errors and Digital Dance Mix Vol. 1 camera angles)
+
+            **CD Block (HLE)** — Squashed fix chain for Play/Pause/Seek/TOC/Init command handling — fixes music looping/restart and freeze issues in Mass Destruction, Mahjong Yon Shimai, Shellshock, Sonic Jam, and IRREEL, plus Seek Disc edge cases
+
+            **Save state compatibility note** — this release removes an unused field from the save state layout; existing save states will need to be recreated after upgrading
+
+            See [CHANGELOG.md](https://github.com/coredds/brimir/blob/master/CHANGELOG.md) for full details.
