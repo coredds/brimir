@@ -197,20 +197,22 @@ jobs:
           body: |
             Brimir is a Sega Saturn emulation core for libretro, built on Ymir's cycle-accurate hardware layer.
 
-            ### v0.4.5
+            ### v0.4.6
 
-            **Ymir Hardware Layer Fixes (through 2026-06-26)** — 7 targeted upstream bug fixes backported on top of the 2026-06-23 sync
+            **Ymir Hardware Layer Refresh (through 2026-07-17)** — targeted upstream bug fixes and optimizations backported on top of the 2026-06-23 sync
 
-            **SMPC** — Update peripheral PDR1/PDR2 registers when reading and when updating EXLE; fixes many cases of games not recognizing Virtua Gun inputs or missing shots
+            **Added**
+            - **SMPC per-region persistent storage** — RTC/backup data is now saved per Saturn region, using region-qualified filenames (`brimir_saturn_rtc_<region>.smpc`). The legacy single-region file is automatically migrated.
+            - **Region-free IPL database** — IPL ROM info is now keyed by BIOS image content rather than a fixed Japanese-only lookup, enabling first-class US/EU/Asia BIOS support.
+            - **Europe PAL / Asia NTSC default regions** — automatic default region selection for European and Asian BIOS variants.
 
-            **Input** — 3D Control Pad digital-mode report now matches the Standard Pad (fixes Bug Too!, Black/Matrix); analog-mode report LSBs set to all ones (fixes double inputs in Deep Fear)
+            **Changed**
+            - **SH2** — interrupt flag register micro-optimizations backported from upstream Ymir.
+            - **VDP2** — sprite layer attribute reference cached per command, reducing redundant lookups.
+            - **Game DB** — compatibility/hack entries updated for 3D Baseball, Resident Evil, Dino Island, and others.
+            - **CD/Media** — non-ASCII CHD filename crash fix, ISO path-table size guard, and CUE track-length/null-byte guards.
+            - **Input** — Virtua Gun jitter support for Death Crimson.
 
-            **VDP1** — Textured sprites with CMDSIZE.H=0 now fetch texels correctly (fixes glitched graphics in Policenauts); FBRAM no longer synced on debug reads (fixes a memory-viewer deadlock)
-
-            **VDP2** — Color calculations correctly restricted in Hi-Res/exclusive-monitor modes with color RAM modes other than 0 (fixes Dark Savior Sound Test text); VCNT/external-latch coordinate handling overhauled (fixes several Virtua Gun shot-offset/reload errors and Digital Dance Mix Vol. 1 camera angles)
-
-            **CD Block (HLE)** — Squashed fix chain for Play/Pause/Seek/TOC/Init command handling — fixes music looping/restart and freeze issues in Mass Destruction, Mahjong Yon Shimai, Shellshock, Sonic Jam, and IRREEL, plus Seek Disc edge cases
-
-            **Save state compatibility note** — this release removes an unused field from the save state layout; existing save states will need to be recreated after upgrading
+            **Save state compatibility note** — SMPC persistent data is now stored inside the save state payload; existing save states are incompatible and need to be recreated after upgrading.
 
             See [CHANGELOG.md](https://github.com/coredds/brimir/blob/master/CHANGELOG.md) for full details.

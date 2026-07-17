@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.6] - 2026-07-17
+
+### Added
+- **SMPC per-region persistent storage** — RTC/backup data now persists per loaded Saturn region; filenames are region-qualified (`brimir_saturn_rtc_<jp|us_eu|asia|other>.smpc`) and the legacy `brimir_saturn_rtc.smpc` is migrated automatically
+- **Region-free IPL database** — IPL ROM metadata is looked up by ROM content, enabling US, European, and Asian BIOS files without hard-coding the Japanese IPL
+- **Europe PAL / Asia NTSC default regions** — system region defaults to PAL for European BIOS and NTSC for Asian BIOS variants
+
+### Changed
+- **SH2 interrupt flag register** — micro-optimized interrupt flag reads/writes backported from Ymir upstream
+- **VDP2 sprite layer cache** — cached sprite layer attribute reference per command
+- **Game DB** — refreshed compatibility and hack entries for 3D Baseball, Resident Evil, Dino Island, and other titles
+- **Media** — backported non-ASCII CHD filename crash fix, ISO path-table size guard, CUE track-length and null-byte guards
+- **Input** — Virtua Gun jitter support for Death Crimson
+
+### Fixed
+- Correct core version reported to libretro — now 0.4.6
+
+### Technical
+- 3 additional Ymir core commits backported since v0.4.5 (VDP2, SH2, SMPC), plus the bridge-side SMPC callback implementation
+- Save state layout changed to include `PersistentSMPCData`; existing save states from v0.4.5 and earlier will be rejected and must be recreated
+
 ## [0.4.5] - 2026-07-04
 
 ### Fixed
