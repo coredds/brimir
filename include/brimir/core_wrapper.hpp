@@ -25,6 +25,10 @@
 namespace ymir {
 struct Saturn;
 
+namespace smpc {
+struct PersistentSMPCData;
+}
+
 namespace peripheral {
 class ControlPad;
 struct PeripheralReport;
@@ -318,7 +322,7 @@ private:
     mutable std::vector<uint8_t> m_sramData;
     bool m_sramInitialized = false;
     std::filesystem::path m_sramTempPath;  // Temporary file for Ymir's memory-mapped backup RAM
-    std::filesystem::path m_smpcPath;      // System-wide RTC persistent data file
+    std::filesystem::path m_smpcBaseDir;   // Directory for system-wide RTC persistent data files
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh
     mutable uint32_t m_framesSinceLastSRAMSync = 0;  // Frames since last SRAM sync
     bool m_sramFirstLoad = true;  // True until first frame runs (for .srm loading)
@@ -332,6 +336,15 @@ private:
 
     void SaveCartridgeRAM();
     void LoadCartridgeRAM();
+
+    /// @brief Returns the region-qualified SMPC persistent data file path.
+    std::filesystem::path GetPersistentSMPCDataPath() const;
+
+    /// @brief Returns the region suffix to use for the SMPC persistent data file.
+    std::string GetSMPCRegionSuffix() const;
+
+    /// @brief Callback invoked by the core when persistent SMPC data should be saved.
+    static void OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, void *ctx);
 
     // Multi-disc support (M3U playlists)
     std::vector<std::filesystem::path> m_discList;

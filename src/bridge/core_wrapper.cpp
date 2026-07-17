@@ -12,8 +12,13 @@
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/db/game_db.hpp>
 #include <ymir/db/rom_cart_db.hpp>
+#include <ymir/db/ipl_db.hpp>
 #include <ymir/hw/cart/cart_impl_dram.hpp>
 #include <ymir/core/hash.hpp>
+#include <ymir/hw/smpc/smpc_defs.hpp>
+#include <ymir/util/bit_ops.hpp>
+
+#include <bit>
 
 #include <cstring>
 #include <filesystem>
@@ -43,6 +48,66 @@
 #ifdef DRAM48Mbit
 #undef DRAM48Mbit
 #endif
+
+namespace {
+
+constexpr uint8_t kPersistentSMPCDataVersion = 0x01;
+
+bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
+                                    const std::filesystem::path &path) {
+    std::ifstream in{path, std::ios::binary};
+    if (!in) {
+        return false;
+    }
+
+    const int version = in.get();
+    if (version < 0 || static_cast<uint8_t>(version) != kPersistentSMPCDataVersion) {
+        return false;
+    }
+    in.seekg(3, std::ios::cur); // skip 3 reserved bytes
+
+    std::array<uint8_t, 4> smem{};
+    bool ste{};
+    uint64_t rtcOffset = 0;
+    uint64_t rtcTimestamp = 0;
+
+    in.read(reinterpret_cast<char *>(smem.data()), smem.size());
+    in.read(reinterpret_cast<char *>(&ste), sizeof(ste));
+    in.read(reinterpret_cast<char *>(&rtcOffset), sizeof(rtcOffset));
+    in.read(reinterpret_cast<char *>(&rtcTimestamp), sizeof(rtcTimestamp));
+    if (!in) {
+        return false;
+    }
+
+    data.SMEM = smem;
+    data.STE = ste;
+    data.rtc.offset = static_cast<sint64>(bit::little_endian_swap(rtcOffset));
+    data.rtc.timestamp = static_cast<sint64>(bit::little_endian_swap(rtcTimestamp));
+    return true;
+}
+
+void SavePersistentSMPCDataToFile(const ymir::smpc::PersistentSMPCData &data,
+                                  const std::filesystem::path &path) {
+    std::ofstream out{path, std::ios::binary};
+    if (!out) {
+        return;
+    }
+
+    out.put(static_cast<char>(kPersistentSMPCDataVersion));
+    out.put(0x00); // reserved for future expansion
+    out.put(0x00); // reserved for future expansion
+    out.put(0x00); // reserved for future expansion
+
+    const uint64_t rtcOffset = bit::little_endian_swap(static_cast<uint64_t>(data.rtc.offset));
+    const uint64_t rtcTimestamp = bit::little_endian_swap(static_cast<uint64_t>(data.rtc.timestamp));
+
+    out.write(reinterpret_cast<const char *>(data.SMEM.data()), data.SMEM.size());
+    out.write(reinterpret_cast<const char *>(&data.STE), sizeof(data.STE));
+    out.write(reinterpret_cast<const char *>(&rtcOffset), sizeof(rtcOffset));
+    out.write(reinterpret_cast<const char *>(&rtcTimestamp), sizeof(rtcTimestamp));
+}
+
+} // namespace
 
 namespace brimir {
 
@@ -238,16 +303,33 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         }
         
         // Load SMPC persistent data (RTC clock settings!)
-        // This is system-wide (not per-game) as the RTC is a console setting, not a game setting
+        // This is system-wide (not per-game) as the RTC is a console setting, not a game setting.
+        // The filename is qualified by the loaded IPL ROM region to keep per-console settings separate.
         if (system_directory && system_directory[0] != '\0') {
-            m_smpcPath = std::filesystem::path(system_directory) / "brimir_saturn_rtc.smpc";
-        } else {
+            m_smpcBaseDir = std::filesystem::path(system_directory);
+        } else if (save_directory && save_directory[0] != '\0') {
             // Fallback to save directory if no system_directory provided
-            m_smpcPath = m_sramTempPath.parent_path() / "brimir_saturn_rtc.smpc";
+            m_smpcBaseDir = std::filesystem::path(save_directory);
         }
-        m_saturn->SMPC.LoadPersistentDataFrom(m_smpcPath, error);
-        if (error) {
-            // Not an error - just means first time running
+        std::filesystem::create_directories(m_smpcBaseDir);
+
+        // Register SMPC data persistence callback so core settings are saved whenever they change.
+        m_saturn->SMPC.SetPersistDataCallback({this, &CoreWrapper::OnPersistSMPCData});
+
+        // Load existing SMPC data for the current BIOS region.
+        ymir::smpc::PersistentSMPCData smpcData{};
+        const auto smpcPath = GetPersistentSMPCDataPath();
+        if (!smpcPath.empty()) {
+            if (!LoadPersistentSMPCDataFromFile(smpcData, smpcPath)) {
+                // Migrate from the old non-region-qualified filename, if present.
+                const auto legacyPath = m_smpcBaseDir / "brimir_saturn_rtc.smpc";
+                if (LoadPersistentSMPCDataFromFile(smpcData, legacyPath)) {
+                    std::error_code migrateError;
+                    std::filesystem::create_directories(smpcPath.parent_path(), migrateError);
+                    SavePersistentSMPCDataToFile(smpcData, smpcPath);
+                }
+            }
+            m_saturn->SMPC.LoadPersistentData(smpcData);
         }
         
         // Immediately read the .bup file into our buffer so RetroArch can see it
@@ -546,11 +628,11 @@ void CoreWrapper::UnloadGame() {
     
     // Save SMPC persistent data (RTC clock!) before unloading
     // This preserves the date/time the user set (system-wide, not per-game)
-    if (!m_smpcPath.empty()) {
-        std::error_code error;
-        m_saturn->SMPC.SavePersistentDataTo(m_smpcPath, error);
-        if (error) {
-            m_lastError = "Failed to save SMPC data: " + error.message();
+    if (m_saturn) {
+        try {
+            m_saturn->SMPC.PersistData();
+        } catch (...) {
+            // Non-critical, continue
         }
     }
     
@@ -573,6 +655,45 @@ void CoreWrapper::UnloadGame() {
     m_sramInitialized = false;
     m_framesSinceLastSRAMSync = 0;
     m_sramFirstLoad = true;  // Reset for next game load
+}
+
+std::string CoreWrapper::GetSMPCRegionSuffix() const {
+    if (!m_saturn) {
+        return "none";
+    }
+
+    const auto *info = ymir::db::GetIPLROMInfo(m_saturn->GetIPLHash());
+    if (!info) {
+        return "none";
+    }
+
+    switch (info->region) {
+    case ymir::db::SystemRegion::US_EU: return "us_eu";
+    case ymir::db::SystemRegion::JP: return "jp";
+    case ymir::db::SystemRegion::KR: return "asia";
+    default: return "other";
+    }
+}
+
+std::filesystem::path CoreWrapper::GetPersistentSMPCDataPath() const {
+    if (m_smpcBaseDir.empty()) {
+        return {};
+    }
+    return m_smpcBaseDir / ("brimir_saturn_rtc_" + GetSMPCRegionSuffix() + ".smpc");
+}
+
+void CoreWrapper::OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, void *ctx) {
+    auto *self = static_cast<CoreWrapper *>(ctx);
+    if (!self) {
+        return;
+    }
+    const auto path = self->GetPersistentSMPCDataPath();
+    if (path.empty()) {
+        return;
+    }
+    std::error_code dirError;
+    std::filesystem::create_directories(path.parent_path(), dirError);
+    SavePersistentSMPCDataToFile(data, path);
 }
 
 void* CoreWrapper::GetSRAMData() {
