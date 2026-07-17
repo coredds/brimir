@@ -382,8 +382,8 @@ void SH2::Reset(bool hard, bool watchdogInitiated) {
     DIVU.Reset();
     FRT.Reset();
     INTC.Reset();
-    m_intrFlags.values.pending = false;
-    m_intrFlags.values.allow = true;
+    m_intrFlags.pending = false;
+    m_intrFlags.allow = true;
 
     m_delaySlotTarget = 0;
     m_delaySlot = false;
@@ -446,7 +446,7 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
     // Skip interpreting instructions if CPU is in sleep or standby mode.
     // Wake up on interrupts.
     if (m_sleep) [[unlikely]] {
-        if (m_intrFlags.values.pending) {
+        if (m_intrFlags.pending) {
             m_sleep = false;
             PC += 2;
         } else {
@@ -547,7 +547,7 @@ void SH2::SaveState(savestate::SH2SaveState &state) const {
     state.VBR = VBR;
     state.delaySlotTarget = m_delaySlotTarget;
     state.delaySlot = m_delaySlot;
-    state.intrAllow = m_intrFlags.values.allow;
+    state.intrAllow = m_intrFlags.allow;
     state.fetchedOpcodes = m_fetchedOpcodes;
     state.forceFetchOpcodes = false;
     state.wbReg = m_wbReg;
@@ -588,7 +588,7 @@ void SH2::LoadState(const savestate::SH2SaveState &state) {
     VBR = state.VBR;
     m_delaySlotTarget = state.delaySlotTarget;
     m_delaySlot = state.delaySlot;
-    m_intrFlags.values.allow = state.intrAllow;
+    m_intrFlags.allow = state.intrAllow;
     m_fetchedOpcodes = state.fetchedOpcodes;
     m_wbReg = state.wbReg;
 
@@ -612,7 +612,7 @@ void SH2::LoadState(const savestate::SH2SaveState &state) {
     SBYCR.u8 = state.SBYCR;
     m_sleep = state.sleep;
 
-    m_intrFlags.values.pending = !m_delaySlot && INTC.pending.level > SR.ILevel;
+    m_intrFlags.pending = !m_delaySlot && INTC.pending.level > SR.ILevel;
 }
 
 void SH2::PostLoadState(const savestate::SH2SaveState &state) {
@@ -2015,15 +2015,17 @@ void SH2::RecalcInterrupts() {
     // Check interrupts and use the vector number of the exception with highest priority
     // See documentation for InterruptSource for related registers and default/tie-breaker priority order
 
-    INTC.pending.level = 0;
-    INTC.pending.source = InterruptSource::None;
-    m_intrFlags.values.pending = false;
-
     // HACK: should be edge-detected
-    if (INTC.NMI) {
-        RaiseInterrupt(InterruptSource::NMI);
+    if (INTC.NMI) [[unlikely]] {
+        INTC.pending.level = 0x10;
+        INTC.pending.source = InterruptSource::NMI;
+        m_intrFlags.pending = !m_delaySlot;
         return;
     }
+
+    INTC.pending.level = 0;
+    INTC.pending.source = InterruptSource::None;
+    m_intrFlags.pending = false;
 
     // TODO: user break
     /*if (...) {
@@ -2032,65 +2034,38 @@ void SH2::RecalcInterrupts() {
     }*/
 
     // IRLs
-    if (INTC.GetLevel(InterruptSource::IRL) > 0) {
-        RaiseInterrupt(InterruptSource::IRL);
-    }
+    RaiseInterrupt(InterruptSource::IRL);
 
     // Division overflow
-    if (INTC.GetLevel(InterruptSource::DIVU_OVFI) > 0 && DIVU.DVCR.OVF && DIVU.DVCR.OVFIE) {
-        RaiseInterrupt(InterruptSource::DIVU_OVFI);
-    }
+    RaiseInterruptIf(InterruptSource::DIVU_OVFI, [this] { return DIVU.DVCR.OVF && DIVU.DVCR.OVFIE; });
 
     // DMA channel transfer end
-    if (INTC.GetLevel(InterruptSource::DMAC0_XferEnd) > 0) {
-        if (m_dmaChannels[0].xferEnded && m_dmaChannels[0].irqEnable) {
-            RaiseInterrupt(InterruptSource::DMAC0_XferEnd);
-        }
-        if (m_dmaChannels[1].xferEnded && m_dmaChannels[1].irqEnable) {
-            RaiseInterrupt(InterruptSource::DMAC1_XferEnd);
-        }
-    }
+    const uint8 levelDMAC = INTC.GetLevel(InterruptSource::DMAC0_XferEnd);
+    RaiseInterruptIf(InterruptSource::DMAC0_XferEnd, levelDMAC,
+                     [this] { return m_dmaChannels[0].xferEnded && m_dmaChannels[0].irqEnable; });
+    RaiseInterruptIf(InterruptSource::DMAC1_XferEnd, levelDMAC,
+                     [this] { return m_dmaChannels[1].xferEnded && m_dmaChannels[1].irqEnable; });
 
-    if (INTC.GetLevel(InterruptSource::WDT_ITI) > 0) {
-        // Watchdog timer
-        if (WDT.WTCSR.OVF && !WDT.WTCSR.WT_nIT) {
-            RaiseInterrupt(InterruptSource::WDT_ITI);
-        }
+    // Watchdog timer
+    const uint8 levelWDT_BSC = INTC.GetLevel(InterruptSource::WDT_ITI);
+    RaiseInterruptIf(InterruptSource::WDT_ITI, levelWDT_BSC, [this] { return WDT.WTCSR.OVF && !WDT.WTCSR.WT_nIT; });
 
-        // TODO: BSC REF CMI
-        /*if (...) {
-            RaiseInterrupt(InterruptSource::BSC_REF_CMI);
-        }*/
-    }
+    // TODO: BSC REF CMI
+    // RaiseInterruptIf(InterruptSource::BSC_REF_CMI, levelWDT_BSC, [this] { return ...; });
 
     // TODO: SCI ERI, RXI, TXI, TEI
-    // if (INTC.GetLevel(InterruptSource::SCI_ERI) > 0) {
-    //     /*if (...) {
-    //         RaiseInterrupt(InterruptSource::SCI_ERI);
-    //     }*/
-    //     /*if (...) {
-    //         RaiseInterrupt(InterruptSource::SCI_RXI);
-    //     }*/
-    //     /*if (...) {
-    //         RaiseInterrupt(InterruptSource::SCI_TXI);
-    //     }*/
-    //     /*if (...) {
-    //         RaiseInterrupt(InterruptSource::SCI_TEI);
-    //     }*/
-    // }
+    // const uint8 levelSCI = INTC.GetLevel(InterruptSource::SCI_ERI);
+    // RaiseInterruptIf(InterruptSource::SCI_ERI, levelSCI, [this] { return ...; });
+    // RaiseInterruptIf(InterruptSource::SCI_RXI, levelSCI, [this] { return ...; });
+    // RaiseInterruptIf(InterruptSource::SCI_TXI, levelSCI, [this] { return ...; });
+    // RaiseInterruptIf(InterruptSource::SCI_TEI, levelSCI, [this] { return ...; });
 
     // Free-running timer interrupts
-    if (INTC.GetLevel(InterruptSource::FRT_ICI) > 0) {
-        if (FRT.FTCSR.ICF && FRT.TIER.ICIE) {
-            RaiseInterrupt(InterruptSource::FRT_ICI);
-        }
-        if ((FRT.FTCSR.OCFA && FRT.TIER.OCIAE) || (FRT.FTCSR.OCFB && FRT.TIER.OCIBE)) {
-            RaiseInterrupt(InterruptSource::FRT_OCI);
-        }
-        if (FRT.FTCSR.OVF && FRT.TIER.OVIE) {
-            RaiseInterrupt(InterruptSource::FRT_OVI);
-        }
-    }
+    const uint8 levelFRT = INTC.GetLevel(InterruptSource::FRT_ICI);
+    RaiseInterruptIf(InterruptSource::FRT_ICI, levelFRT, [this] { return FRT.FTCSR.ICF && FRT.TIER.ICIE; });
+    RaiseInterruptIf(InterruptSource::FRT_OCI, levelFRT,
+                     [this] { return (FRT.FTCSR.OCFA && FRT.TIER.OCIAE) || (FRT.FTCSR.OCFB && FRT.TIER.OCIBE); });
+    RaiseInterruptIf(InterruptSource::FRT_OVI, levelFRT, [this] { return FRT.FTCSR.OVF && FRT.TIER.OVIE; });
 }
 
 // -------------------------------------------------------------------------
@@ -2177,7 +2152,7 @@ FORCE_INLINE bool SH2::CheckWatchpoint(const DecodedMemAccesses::Access &access)
 FORCE_INLINE void SH2::SetupDelaySlot(uint32 targetAddress) {
     m_delaySlot = true;
     m_delaySlotTarget = targetAddress;
-    m_intrFlags.values.pending = false;
+    m_intrFlags.pending = false;
 }
 
 template <bool debug, bool emulateCache, bool delaySlot>
@@ -2189,7 +2164,7 @@ FORCE_INLINE void SH2::AdvancePC() {
             RefillPipeline<emulateCache>();
         }
         m_delaySlot = false;
-        m_intrFlags.values.pending = INTC.pending.level > SR.ILevel;
+        m_intrFlags.pending = INTC.pending.level > SR.ILevel;
     } else {
         PC += 2;
     }
@@ -2221,7 +2196,7 @@ FORCE_INLINE uint64 SH2::EnterException(uint8 vectorNumber) {
 
 template <bool debug, bool emulateCache>
 FORCE_INLINE uint64 SH2::InterpretNext() {
-    if (m_intrFlags.all == kIntrFlagsPendingAllowed.all) [[unlikely]] {
+    if (std::bit_cast<uint16>(m_intrFlags) == kIntrFlagsPendingAllowed) [[unlikely]] {
         // Service interrupt
         const uint8 vecNum = INTC.GetVector(INTC.pending.source);
         TraceInterrupt<debug>(m_tracer, vecNum, INTC.pending.level, INTC.pending.source, PC);
@@ -2230,7 +2205,7 @@ FORCE_INLINE uint64 SH2::InterpretNext() {
         const uint64 cycles = EnterException<debug, emulateCache>(vecNum);
         devlog::trace<grp::intr>(m_logPrefix, "[PC = {:08X}] Entering interrupt handler", PC);
         SR.ILevel = std::min<uint8>(INTC.pending.level, 0xF);
-        m_intrFlags.values.pending = false;
+        m_intrFlags.pending = false;
 
         // Acknowledge interrupt
         switch (INTC.pending.source) {
@@ -2247,7 +2222,7 @@ FORCE_INLINE uint64 SH2::InterpretNext() {
         }
         return cycles + 1;
     }
-    m_intrFlags.values.allow = true;
+    m_intrFlags.allow = true;
 
     // TODO: emulate or approximate fetch - decode - execute - memory access - writeback pipeline
 
@@ -3296,7 +3271,7 @@ template <bool debug, bool emulateCache, bool delaySlot>
 FORCE_INLINE uint64 SH2::LDCGBR(uint16 opcode) {
     DECODE_M
     GBR = R[rm];
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rm) + 1;
     m_wbReg = kWBRegNone;
@@ -3308,8 +3283,10 @@ template <bool debug, bool emulateCache, bool delaySlot>
 FORCE_INLINE uint64 SH2::LDCSR(uint16 opcode) {
     DECODE_M
     SR.u32 = R[rm] & 0x000003F3;
-    m_intrFlags.values.pending = !delaySlot && INTC.pending.level > SR.ILevel;
-    m_intrFlags.values.allow = false;
+    m_intrFlags = std::bit_cast<IntrFlags>(std::bit_cast<uint16>(IntrFlags{
+        .pending = !delaySlot && INTC.pending.level > SR.ILevel,
+        .allow = false,
+    }));
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rm) + 1;
     m_wbReg = kWBRegNone;
@@ -3321,7 +3298,7 @@ template <bool debug, bool emulateCache, bool delaySlot>
 FORCE_INLINE uint64 SH2::LDCVBR(uint16 opcode) {
     DECODE_M
     VBR = R[rm];
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rm) + 1;
     m_wbReg = kWBRegNone;
@@ -3333,7 +3310,7 @@ template <bool debug, bool emulateCache, bool delaySlot>
 FORCE_INLINE uint64 SH2::LDSMACH(uint16 opcode) {
     DECODE_M
     MAC.H = R[rm];
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rm) + 1;
     m_wbReg = kWBRegNone;
@@ -3345,7 +3322,7 @@ template <bool debug, bool emulateCache, bool delaySlot>
 FORCE_INLINE uint64 SH2::LDSMACL(uint16 opcode) {
     DECODE_M
     MAC.L = R[rm];
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rm) + 1;
     m_wbReg = kWBRegNone;
@@ -3357,7 +3334,7 @@ template <bool debug, bool emulateCache, bool delaySlot>
 FORCE_INLINE uint64 SH2::LDSPR(uint16 opcode) {
     DECODE_M
     PR = R[rm];
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rm, kWBRegPR) + 1;
     m_wbReg = kWBRegNone;
@@ -3370,7 +3347,7 @@ FORCE_INLINE uint64 SH2::STCGBR(uint16 opcode) {
     DECODE_N
     R[rn] = GBR;
     TraceChangeStack<debug>(m_tracer, rn, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rn) + 1;
     m_wbReg = kWBRegNone;
@@ -3383,7 +3360,7 @@ FORCE_INLINE uint64 SH2::STCSR(uint16 opcode) {
     DECODE_N
     R[rn] = SR.u32;
     TraceChangeStack<debug>(m_tracer, rn, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rn) + 1;
     m_wbReg = kWBRegNone;
@@ -3396,7 +3373,7 @@ FORCE_INLINE uint64 SH2::STCVBR(uint16 opcode) {
     DECODE_N
     R[rn] = VBR;
     TraceChangeStack<debug>(m_tracer, rn, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rn) + 1;
     m_wbReg = kWBRegNone;
@@ -3409,7 +3386,7 @@ FORCE_INLINE uint64 SH2::STSMACH(uint16 opcode) {
     DECODE_N
     R[rn] = MAC.H;
     TraceChangeStack<debug>(m_tracer, rn, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = rn;
     return 1;
@@ -3421,7 +3398,7 @@ FORCE_INLINE uint64 SH2::STSMACL(uint16 opcode) {
     DECODE_N
     R[rn] = MAC.L;
     TraceChangeStack<debug>(m_tracer, rn, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = rn;
     return 1;
@@ -3433,7 +3410,7 @@ FORCE_INLINE uint64 SH2::STSPR(uint16 opcode) {
     DECODE_N
     R[rn] = PR;
     TraceChangeStack<debug>(m_tracer, rn, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     const uint64 cycles = WritebackCycles(rn, kWBRegPR) + 1;
     m_wbReg = kWBRegNone;
@@ -3449,7 +3426,7 @@ FORCE_INLINE uint64 SH2::LDCMGBR(uint16 opcode) {
     GBR = MemReadLong<emulateCache>(address);
     R[rm] += 4;
     TracePopFromStack<debug>(m_tracer, rm, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3462,10 +3439,12 @@ FORCE_INLINE uint64 SH2::LDCMSR(uint16 opcode) {
     const uint32 address = R[rm];
     const uint64 cycles = AccessCycles<uint32, false, emulateCache>(address) + WritebackCycles(rm) + 2;
     SR.u32 = MemReadLong<emulateCache>(address) & 0x000003F3;
-    m_intrFlags.values.pending = !delaySlot && INTC.pending.level > SR.ILevel;
+    m_intrFlags = std::bit_cast<IntrFlags>(std::bit_cast<uint16>(IntrFlags{
+        .pending = !delaySlot && INTC.pending.level > SR.ILevel,
+        .allow = false,
+    }));
     R[rm] += 4;
     TracePopFromStack<debug>(m_tracer, rm, R[15]);
-    m_intrFlags.values.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3480,7 +3459,7 @@ FORCE_INLINE uint64 SH2::LDCMVBR(uint16 opcode) {
     VBR = MemReadLong<emulateCache>(address);
     R[rm] += 4;
     TracePopFromStack<debug>(m_tracer, rm, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3495,7 +3474,7 @@ FORCE_INLINE uint64 SH2::LDSMMACH(uint16 opcode) {
     MAC.H = MemReadLong<emulateCache>(address);
     R[rm] += 4;
     TracePopFromStack<debug>(m_tracer, rm, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3510,7 +3489,7 @@ FORCE_INLINE uint64 SH2::LDSMMACL(uint16 opcode) {
     MAC.L = MemReadLong<emulateCache>(address);
     R[rm] += 4;
     TracePopFromStack<debug>(m_tracer, rm, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3525,7 +3504,7 @@ FORCE_INLINE uint64 SH2::LDSMPR(uint16 opcode) {
     PR = MemReadLong<emulateCache>(address);
     R[rm] += 4;
     TracePopFromStack<debug>(m_tracer, rm, R[15]);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegPR;
     return cycles;
@@ -3540,7 +3519,7 @@ FORCE_INLINE uint64 SH2::STCMGBR(uint16 opcode) {
     const uint32 address = R[rn];
     const uint64 cycles = AccessCycles<uint32, true, emulateCache>(address) + WritebackCycles(rn) + 2;
     MemWriteLong<debug, emulateCache>(address, GBR);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3555,7 +3534,7 @@ FORCE_INLINE uint64 SH2::STCMSR(uint16 opcode) {
     const uint32 address = R[rn];
     const uint64 cycles = AccessCycles<uint32, true, emulateCache>(address) + WritebackCycles(rn) + 2;
     MemWriteLong<debug, emulateCache>(address, SR.u32);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3570,7 +3549,7 @@ FORCE_INLINE uint64 SH2::STCMVBR(uint16 opcode) {
     const uint32 address = R[rn];
     const uint64 cycles = AccessCycles<uint32, true, emulateCache>(address) + WritebackCycles(rn) + 2;
     MemWriteLong<debug, emulateCache>(address, VBR);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3585,7 +3564,7 @@ FORCE_INLINE uint64 SH2::STSMMACH(uint16 opcode) {
     const uint32 address = R[rn];
     const uint64 cycles = AccessCycles<uint32, true, emulateCache>(address) + WritebackCycles(rn);
     MemWriteLong<debug, emulateCache>(address, MAC.H);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3600,7 +3579,7 @@ FORCE_INLINE uint64 SH2::STSMMACL(uint16 opcode) {
     const uint32 address = R[rn];
     const uint64 cycles = AccessCycles<uint32, true, emulateCache>(address) + WritebackCycles(rn);
     MemWriteLong<debug, emulateCache>(address, MAC.L);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
@@ -3615,7 +3594,7 @@ FORCE_INLINE uint64 SH2::STSMPR(uint16 opcode) {
     const uint32 address = R[rn];
     const uint64 cycles = AccessCycles<uint32, true, emulateCache>(address) + WritebackCycles(rn, kWBRegPR);
     MemWriteLong<debug, emulateCache>(address, PR);
-    m_intrFlags.values.allow = false;
+    m_intrFlags.allow = false;
     AdvancePC<debug, emulateCache, delaySlot>();
     m_wbReg = kWBRegNone;
     return cycles;
