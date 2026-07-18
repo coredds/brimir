@@ -5,6 +5,7 @@
 #include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 using namespace brimir;
@@ -438,4 +439,38 @@ TEST_CASE("CoreWrapper maps SMPC area codes to NTSC/PAL", "[core][region][unit]"
 
     saturn->SMPC.SetAreaCode(12); // Europe PAL
     REQUIRE(core.GetConsoleRegion() == CoreWrapper::ConsoleRegion::PAL);
+}
+
+TEST_CASE("Save state version reject", "[core][savestate][unit]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> buf(stateSize);
+    REQUIRE(core.SaveState(buf.data(), stateSize));
+
+    // Corrupt the version word (offset 4) and ensure load fails
+    uint32_t badVersion = 0xDEADBEEF;
+    std::memcpy(buf.data() + 4, &badVersion, sizeof(badVersion));
+    REQUIRE_FALSE(core.LoadState(buf.data(), stateSize));
+}
+
+TEST_CASE("Save state writes 12-byte header", "[core][savestate][unit]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> buf(stateSize);
+    REQUIRE(core.SaveState(buf.data(), stateSize));
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint32_t uncompSize = 0;
+    std::memcpy(&magic, buf.data(), sizeof(magic));
+    std::memcpy(&version, buf.data() + 4, sizeof(version));
+    std::memcpy(&uncompSize, buf.data() + 8, sizeof(uncompSize));
+
+    REQUIRE(magic == 0x32524942); // "BRI2" in LE
+    REQUIRE(version == 1);
+    REQUIRE(uncompSize == sizeof(ymir::savestate::SaveState));
 }

@@ -55,6 +55,10 @@ constexpr size_t kSaturnInternalBackupRAMSize = 32 * 1024;
 
 constexpr uint8_t kPersistentSMPCDataVersion = 0x01;
 
+constexpr uint32_t kNewStateMagic    = 0x32524942; // "BRI2" in LE
+constexpr uint32_t kLegacyStateMagic = 0x4D495242; // "BRIM" in LE
+constexpr uint32_t kSaveStateVersion = 1;
+
 bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
                                     const std::filesystem::path &path) {
     std::ifstream in{path, std::ios::binary};
@@ -991,8 +995,8 @@ size_t CoreWrapper::GetStateSize() const {
         return 0;
     }
 
-    // Header (8 bytes) + max compressed size
-    return static_cast<size_t>(LZ4_compressBound(static_cast<int>(sizeof(ymir::savestate::SaveState)))) + 8;
+    // Header (12 bytes) + max compressed size
+    return static_cast<size_t>(LZ4_compressBound(static_cast<int>(sizeof(ymir::savestate::SaveState)))) + 12;
 }
 
 bool CoreWrapper::SaveState(void* data, size_t size) {
@@ -1011,19 +1015,21 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         auto state = std::make_unique<ymir::savestate::SaveState>();
         m_saturn->SaveState(*state);
         
-        // Write 8-byte header: magic + uncompressed size
-        const uint32_t magic = 0x4D495242; // "BRIM" in LE
+        // Write 12-byte header: magic + version + uncompressed size
+        const uint32_t magic = kNewStateMagic;
+        const uint32_t version = kSaveStateVersion;
         const uint32_t uncompSize = static_cast<uint32_t>(sizeof(ymir::savestate::SaveState));
         auto* out = static_cast<uint8_t*>(data);
         std::memcpy(out, &magic, 4);
-        std::memcpy(out + 4, &uncompSize, 4);
-        
+        std::memcpy(out + 4, &version, 4);
+        std::memcpy(out + 8, &uncompSize, 4);
+
         // Compress with LZ4
         int srcSize = static_cast<int>(sizeof(ymir::savestate::SaveState));
-        int dstCapacity = static_cast<int>(size - 8);
+        int dstCapacity = static_cast<int>(size - 12);
         int compressedSize = LZ4_compress_default(
             reinterpret_cast<const char*>(state.get()),
-            reinterpret_cast<char*>(out + 8),
+            reinterpret_cast<char*>(out + 12),
             srcSize,
             dstCapacity
         );
@@ -1043,53 +1049,74 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
     if (!m_initialized || !m_saturn || !data) {
         return false;
     }
-    
-    // Must be at least 8 bytes (header)
-    if (size < 8) {
-        return false;
-    }
 
     try {
-        // Read 8-byte header: magic + uncompressed size
-        const uint32_t expectedMagic = 0x4D495242; // "BRIM"
         const auto* in = static_cast<const uint8_t*>(data);
+
+        if (size < 8) {
+            return false;
+        }
+
         uint32_t magic = 0;
-        uint32_t uncompSize = 0;
         std::memcpy(&magic, in, 4);
-        std::memcpy(&uncompSize, in + 4, 4);
-        
-        // Validate header
-        if (magic != expectedMagic) {
-            // Legacy uncompressed state — try direct memcpy
-            size_t requiredSize = sizeof(ymir::savestate::SaveState);
-            if (size < requiredSize) {
+
+        // New format: [magic:4][version:4][uncompSize:4] followed by LZ4 data
+        if (magic == kNewStateMagic && size >= 12) {
+            uint32_t version = 0;
+            uint32_t uncompSize = 0;
+            std::memcpy(&version, in + 4, 4);
+            std::memcpy(&uncompSize, in + 8, 4);
+
+            if (version != kSaveStateVersion) {
                 return false;
             }
+            if (uncompSize != sizeof(ymir::savestate::SaveState)) {
+                return false;
+            }
+
             auto state = std::make_unique<ymir::savestate::SaveState>();
-            std::memcpy(state.get(), data, requiredSize);
+            int compressedSize = static_cast<int>(size - 12);
+            int result = LZ4_decompress_safe(
+                reinterpret_cast<const char*>(in + 12),
+                reinterpret_cast<char*>(state.get()),
+                compressedSize,
+                static_cast<int>(uncompSize)
+            );
+            if (result != static_cast<int>(uncompSize)) {
+                return false;
+            }
             return m_saturn->LoadState(*state, true);
         }
-        
-        // Validate uncompressed size
-        if (uncompSize != sizeof(ymir::savestate::SaveState)) {
+
+        // Old Brimir compressed format: [magic:4][uncompSize:4] followed by LZ4 data
+        if (magic == kLegacyStateMagic) {
+            uint32_t uncompSize = 0;
+            std::memcpy(&uncompSize, in + 4, 4);
+            if (uncompSize != sizeof(ymir::savestate::SaveState)) {
+                return false;
+            }
+
+            auto state = std::make_unique<ymir::savestate::SaveState>();
+            int compressedSize = static_cast<int>(size - 8);
+            int result = LZ4_decompress_safe(
+                reinterpret_cast<const char*>(in + 8),
+                reinterpret_cast<char*>(state.get()),
+                compressedSize,
+                static_cast<int>(uncompSize)
+            );
+            if (result != static_cast<int>(uncompSize)) {
+                return false;
+            }
+            return m_saturn->LoadState(*state, true);
+        }
+
+        // Raw uncompressed state (fallback)
+        size_t requiredSize = sizeof(ymir::savestate::SaveState);
+        if (size < requiredSize) {
             return false;
         }
-        
-        // Decompress with LZ4
         auto state = std::make_unique<ymir::savestate::SaveState>();
-        int compressedSize = static_cast<int>(size - 8);
-        int result = LZ4_decompress_safe(
-            reinterpret_cast<const char*>(in + 8),
-            reinterpret_cast<char*>(state.get()),
-            compressedSize,
-            static_cast<int>(uncompSize)
-        );
-        
-        if (result != static_cast<int>(uncompSize)) {
-            return false;
-        }
-        
-        // Load state into emulator
+        std::memcpy(state.get(), data, requiredSize);
         return m_saturn->LoadState(*state, true);
     } catch (const std::exception& e) {
         (void)e;
