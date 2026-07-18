@@ -38,11 +38,20 @@ enum class Button : uint16_t;
 
 namespace brimir {
 
+enum class ConsoleRegion {
+    NTSC,
+    PAL,
+    Unknown,
+};
+
 /// @brief Wraps the Ymir Saturn emulator for use with libretro
 class CoreWrapper {
 public:
     CoreWrapper();
     ~CoreWrapper();
+
+    // Re-export the namespace-level region enum so tests/code can use CoreWrapper::ConsoleRegion
+    using ConsoleRegion = brimir::ConsoleRegion;
 
     // Prevent copying
     CoreWrapper(const CoreWrapper&) = delete;
@@ -132,6 +141,8 @@ public:
     /// @return true if BIOS is loaded
     bool IsIPLLoaded() const { return m_iplLoaded; }
 
+    /// @brief Get the currently configured console region for libretro reporting
+    ConsoleRegion GetConsoleRegion() const;
 
     /// @brief Set controller input state for a port
     /// @param port Port number (0 or 1)

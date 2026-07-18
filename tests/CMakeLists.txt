@@ -58,6 +58,8 @@ target_include_directories(brimir_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
 )
 
+target_compile_definitions(brimir_tests PRIVATE BRIMIR_BUILD_TESTS)
+
 # Enable CTest support
 include(CTest)
 

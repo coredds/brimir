@@ -752,6 +752,27 @@ size_t CoreWrapper::GetSRAMSize() const {
     return m_saturn->mem.GetInternalBackupRAM().Size();
 }
 
+ConsoleRegion CoreWrapper::GetConsoleRegion() const {
+    if (!m_initialized || !m_saturn) {
+        return ConsoleRegion::Unknown;
+    }
+
+    switch (m_saturn->SMPC.GetAreaCode()) {
+        case 1:  // Japan
+        case 2:  // Asia NTSC
+        case 4:  // North America
+        case 5:  // Central/South America NTSC
+        case 6:  // Korea
+            return ConsoleRegion::NTSC;
+        case 12: // Europe PAL
+        case 10: // Asia PAL
+        case 13: // Central/South America PAL
+            return ConsoleRegion::PAL;
+        default:
+            return ConsoleRegion::NTSC;
+    }
+}
+
 bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
     if (!data || size == 0) {
         return false;

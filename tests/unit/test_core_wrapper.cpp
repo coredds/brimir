@@ -416,3 +416,26 @@ TEST_CASE("CoreWrapper setters handle repeated calls without crashing", "[core][
     core.SetOverscanCrop(16, 16);
     core.SetOverscanCrop(0, 0);
 }
+
+TEST_CASE("CoreWrapper maps SMPC area codes to NTSC/PAL", "[core][region][unit]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    // Before any game/region is set we are unknown or NTSC fallback
+    auto initial = core.GetConsoleRegion();
+    REQUIRE((initial == CoreWrapper::ConsoleRegion::NTSC ||
+             initial == CoreWrapper::ConsoleRegion::Unknown));
+
+    // Tests use BRIMIR_BUILD_TESTS, so we can access the Saturn instance
+    ymir::Saturn* saturn = core.GetSaturn();
+    REQUIRE(saturn != nullptr);
+
+    saturn->SMPC.SetAreaCode(1);  // Japan
+    REQUIRE(core.GetConsoleRegion() == CoreWrapper::ConsoleRegion::NTSC);
+
+    saturn->SMPC.SetAreaCode(4);  // North America
+    REQUIRE(core.GetConsoleRegion() == CoreWrapper::ConsoleRegion::NTSC);
+
+    saturn->SMPC.SetAreaCode(12); // Europe PAL
+    REQUIRE(core.GetConsoleRegion() == CoreWrapper::ConsoleRegion::PAL);
+}

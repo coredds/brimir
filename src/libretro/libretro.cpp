@@ -284,6 +284,21 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
     info->timing.sample_rate = 44100.0;
 }
 
+static void update_system_av_info_for_region(void) {
+    if (!environ_cb || !g_core) return;
+
+    struct retro_system_av_info avi;
+    retro_get_system_av_info(&avi);
+
+    if (g_core->GetConsoleRegion() == brimir::ConsoleRegion::PAL) {
+        avi.timing.fps = 50.0;
+    } else {
+        avi.timing.fps = 59.94;
+    }
+
+    environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avi);
+}
+
 RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) {
     brimir_log(RETRO_LOG_INFO, "Controller port %u set to device %u", port, device);
 }
@@ -592,6 +607,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // Apply core options now and cache them for live updates each frame
     apply_core_options(true);
 
+    update_system_av_info_for_region();
+
     g_core->SetRenderer("software");
 
     // Register memory descriptors for RetroArch's memory viewer / cheat search
@@ -683,7 +700,11 @@ static bool disk_get_image_label(unsigned index, char* s, size_t len) {
 }
 
 RETRO_API unsigned retro_get_region(void) {
-    // TODO: Return actual region from loaded game
+    if (g_core && g_core->IsGameLoaded()) {
+        return g_core->GetConsoleRegion() == brimir::ConsoleRegion::PAL
+               ? RETRO_REGION_PAL
+               : RETRO_REGION_NTSC;
+    }
     return RETRO_REGION_NTSC;
 }
 
