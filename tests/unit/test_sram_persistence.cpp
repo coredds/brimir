@@ -48,14 +48,12 @@ TEST_CASE("LoadGame preserves frontend-provided SRAM buffer", "[sram][unit]") {
     CoreWrapper core;
     REQUIRE(core.Initialize());
 
-    // Seed the SRAM buffer before LoadGame, simulating a frontend that calls
-    // retro_get_memory_data / retro_get_memory_size before retro_load_game.
+    // Seed the SRAM buffer before LoadGame, simulating a frontend that supplies
+    // an .srm via SetSRAMData before retro_load_game.
     size_t size = core.GetSRAMSize();
     REQUIRE(size > 0);
-    uint8_t* sram = static_cast<uint8_t*>(core.GetSRAMData());
-    REQUIRE(sram != nullptr);
     std::vector<uint8_t> expected(size, 0xB5);
-    std::memcpy(sram, expected.data(), size);
+    REQUIRE(core.SetSRAMData(expected.data(), size));
 
     // Set up a temporary save/system directory and a dummy disc file. The
     // game load is expected to fail because the file is not a valid disc image,

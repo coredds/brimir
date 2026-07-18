@@ -18,8 +18,6 @@
 #include <ymir/hw/smpc/smpc_defs.hpp>
 #include <ymir/util/bit_ops.hpp>
 
-#include <bit>
-
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -73,12 +71,12 @@ bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
     in.seekg(3, std::ios::cur); // skip 3 reserved bytes
 
     std::array<uint8_t, 4> smem{};
-    bool ste{};
+    uint8_t steRaw = 0;
     uint64_t rtcOffset = 0;
     uint64_t rtcTimestamp = 0;
 
     in.read(reinterpret_cast<char *>(smem.data()), smem.size());
-    in.read(reinterpret_cast<char *>(&ste), sizeof(ste));
+    in.read(reinterpret_cast<char *>(&steRaw), sizeof(steRaw));
     in.read(reinterpret_cast<char *>(&rtcOffset), sizeof(rtcOffset));
     in.read(reinterpret_cast<char *>(&rtcTimestamp), sizeof(rtcTimestamp));
     if (!in) {
@@ -86,7 +84,7 @@ bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
     }
 
     data.SMEM = smem;
-    data.STE = ste;
+    data.STE = (steRaw != 0);
     data.rtc.offset = static_cast<sint64>(bit::little_endian_swap(rtcOffset));
     data.rtc.timestamp = static_cast<sint64>(bit::little_endian_swap(rtcTimestamp));
     return true;
@@ -108,7 +106,8 @@ void SavePersistentSMPCDataToFile(const ymir::smpc::PersistentSMPCData &data,
     const uint64_t rtcTimestamp = bit::little_endian_swap(static_cast<uint64_t>(data.rtc.timestamp));
 
     out.write(reinterpret_cast<const char *>(data.SMEM.data()), data.SMEM.size());
-    out.write(reinterpret_cast<const char *>(&data.STE), sizeof(data.STE));
+    const uint8_t steRaw = data.STE ? uint8_t{1} : uint8_t{0};
+    out.write(reinterpret_cast<const char *>(&steRaw), sizeof(steRaw));
     out.write(reinterpret_cast<const char *>(&rtcOffset), sizeof(rtcOffset));
     out.write(reinterpret_cast<const char *>(&rtcTimestamp), sizeof(rtcTimestamp));
 }
@@ -335,9 +334,16 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             m_saturn->SMPC.LoadPersistentData(smpcData);
         }
         
+        // Discard any stale SRAM from a previous game unless the frontend
+        // explicitly provided new data (e.g. via SetSRAMData / pre-loaded .srm).
+        if (!m_sramDataProvided) {
+            m_sramData.clear();
+        }
+        m_sramDataProvided = false;
+
         // Bring Ymir's backup RAM into the canonical SRAM buffer. If the frontend
-        // already provided data (e.g. an .srm loaded before retro_load_game), keep
-        // that buffer authoritative and copy it into Ymir instead.
+        // already provided data for this game, keep that buffer authoritative and
+        // copy it into Ymir instead.
         if (m_sramData.empty()) {
             m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
         } else {
@@ -784,6 +790,7 @@ bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
     }
 
     m_sramData.assign(data, data + size);
+    m_sramDataProvided = true;
 
     if (m_gameLoaded && m_saturn) {
         WriteSRAMToYmir();
