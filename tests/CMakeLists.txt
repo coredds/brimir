@@ -8,6 +8,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(brimir_tests
     catch_amalgamated.cpp
     main.cpp
+    # Options metadata (compiled directly from libretro layer)
+    ../src/libretro/options.cpp
+    unit/test_options.cpp
     # Basic smoke tests
     unit/test_basic.cpp
     # VDP color calculation tests
@@ -58,6 +61,7 @@ target_link_libraries(brimir_tests PRIVATE
 
 target_include_directories(brimir_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/libretro
 )
 
 target_compile_definitions(brimir_tests PRIVATE BRIMIR_BUILD_TESTS)

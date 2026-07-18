@@ -216,6 +216,20 @@ static struct retro_core_option_v2_definition option_defs[] = {
         },
         "100"
     },
+    {
+        "brimir_profiling",
+        "Performance Profiling",
+        nullptr,
+        "Log a performance breakdown every 300 frames. Enabled can be noisy.",
+        nullptr,
+        "system",
+        {
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
+            { nullptr, nullptr }
+        },
+        "disabled"
+    },
     { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr }
 };
 

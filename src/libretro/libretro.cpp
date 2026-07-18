@@ -87,6 +87,7 @@ struct OptionCache {
     std::string audio_volume = "100";
     std::string rotation = "0";
     std::string overscan = "0";
+    std::string profiling = "disabled";
 } g_options;
 
 static void apply_core_options(bool force) {
@@ -112,6 +113,7 @@ static void apply_core_options(bool force) {
         int overscan = atoi(v);
         g_core->SetOverscanCrop(overscan * 16, overscan * 16);
     });
+    apply("brimir_profiling",               g_options.profiling,        [](const char* /*v*/){});
 }
 
 // Libretro API implementation
@@ -319,13 +321,12 @@ RETRO_API void retro_run(void) {
     // RetroArch may change options from the Quick Menu; apply any deltas
     apply_core_options(false);
 
-    // Performance profiling: dump report every 300 frames (~5 seconds)
+    // Performance profiling: dump report every 300 frames if enabled
     static size_t frame_count = 0;
     frame_count++;
-    if (frame_count == 300) {
+    if (g_options.profiling == "enabled" && frame_count == 300) {
         brimir_log(RETRO_LOG_INFO, "=== Performance Profile (300 frames) ===");
         std::string report = g_core->GetProfilingReport();
-        // Split report by newlines and log each line
         size_t pos = 0;
         while (pos < report.size()) {
             size_t end = report.find('\n', pos);
@@ -338,8 +339,10 @@ RETRO_API void retro_run(void) {
         }
         g_core->ResetProfiling();
         frame_count = 0;
+    } else if (frame_count > 300) {
+        frame_count = 0;
     }
-    
+
     // Poll input
     if (input_poll_cb) {
         input_poll_cb();
@@ -408,8 +411,8 @@ RETRO_API void retro_run(void) {
                 struct retro_game_geometry geo = {};
                 geo.base_width = width;
                 geo.base_height = height;
-                geo.max_width = 2816;
-                geo.max_height = 2048;
+                geo.max_width = 704;
+                geo.max_height = 512;
                 geo.aspect_ratio = 4.0f / 3.0f;
                 environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
             }
