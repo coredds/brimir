@@ -375,7 +375,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // Use Ymir's loader to load the disc
         bool success = false;
         try {
-            success = ymir::media::LoadDisc(discToLoad, disc, false, loaderCallback);
+            success = ymir::media::LoadDisc(discToLoad, disc, m_discPreload, loaderCallback);
         } catch (const std::exception& e) {
             m_lastError = std::string("Exception during disc load: ") + e.what();
             return false;
@@ -1618,7 +1618,7 @@ bool CoreWrapper::SetDiscIndex(unsigned index) {
             m_lastError += message;
         }
     };
-    if (!ymir::media::LoadDisc(discPath, disc, false, loaderCallback)) {
+    if (!ymir::media::LoadDisc(discPath, disc, m_discPreload, loaderCallback)) {
         if (m_lastError.empty()) {
             m_lastError = "Failed to load disc: " + discPath.string();
         }

@@ -205,6 +205,10 @@ public:
     /// @param speed Speed multiplier (2-200)
     void SetCDReadSpeed(uint8_t speed);
 
+    /// @brief Set whether disc images are preloaded entirely into RAM
+    /// @param enable True to load the whole image into memory (avoids streaming hitches)
+    void SetDiscPreloadEnabled(bool enable) { m_discPreload = enable; }
+
     /// @brief Set SH-2 CPU overclock factor
     /// @param factor Overclock percentage (100-300), 100 = stock
     void SetSH2OverclockFactor(uint32_t factor);
@@ -361,6 +365,9 @@ private:
 
     /// @brief Callback invoked by the core when persistent SMPC data should be saved.
     static void OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, void *ctx);
+
+    // Disc loading options
+    bool m_discPreload = true; // Preload disc images to RAM by default to avoid streaming hitches
 
     // Multi-disc support (M3U playlists)
     std::vector<std::filesystem::path> m_discList;

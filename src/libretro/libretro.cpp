@@ -88,6 +88,7 @@ struct OptionCache {
     std::string rotation = "0";
     std::string overscan = "0";
     std::string profiling = "disabled";
+    std::string cd_preload = "enabled";
 } g_options;
 
 static void apply_core_options(bool force) {
@@ -114,6 +115,7 @@ static void apply_core_options(bool force) {
         g_core->SetOverscanCrop(overscan * 16, overscan * 16);
     });
     apply("brimir_profiling",               g_options.profiling,        [](const char* /*v*/){});
+    apply("brimir_cd_preload",              g_options.cd_preload,       [](const char* v){ g_core->SetDiscPreloadEnabled(strcmp(v, "enabled") == 0); });
 }
 
 // Libretro API implementation
@@ -264,7 +266,7 @@ RETRO_API unsigned retro_api_version(void) {
 RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "Brimir";
-    info->library_version = "0.4.6";
+    info->library_version = "0.4.7";
     info->need_fullpath = true;
     info->valid_extensions = "chd|cue|bin|iso|ccd|img|mds|mdf|m3u";
 }
@@ -604,6 +606,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     
     brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
 
+    // Apply core options before loading the disc so choices like disc preloading
+    // take effect on the current game load.
+    apply_core_options(true);
+
     if (!g_core->LoadGame(game->path, save_dir, system_dir)) {
         const std::string& error = g_core->GetLastError();
         brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
@@ -612,9 +618,6 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     }
 
     brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
-
-    // Apply core options now and cache them for live updates each frame
-    apply_core_options(true);
 
     update_system_av_info_for_region();
 

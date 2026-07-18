@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.7] - 2026-07-17
+
+### Fixed
+- **RetroArch AMD Vulkan crash on NTSC content** — eliminated an unnecessary `SET_SYSTEM_AV_INFO` environment call that could reinitialize the video driver and trigger an AMD Vulkan driver access violation
+- **SRAM persistence regression** — the frontend-supplied `.srm` buffer is no longer cleared at game load; it is reset only when a game is unloaded, restoring legacy SRAM behavior
+
+### Added
+- **Disc preloading core option** — new `brimir_cd_preload` option (default ON) loads the entire disc image into RAM at game start, removing the brief hitches that occur when streaming CD-DA audio or seeking from compressed CHD files. Disable it on low-memory systems if needed.
+
 ## [0.4.6] - 2026-07-17
 
 ### Added

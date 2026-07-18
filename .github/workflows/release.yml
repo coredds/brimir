@@ -197,29 +197,13 @@ jobs:
           body: |
             Brimir is a Sega Saturn emulation core for libretro, built on Ymir's cycle-accurate hardware layer.
 
-            ### v0.4.6
-
-            **Ymir Hardware Layer Refresh (through 2026-07-17)** — targeted upstream bug fixes and optimizations backported on top of the 2026-06-23 sync
-
-            **Added**
-            - **SMPC per-region persistent storage** — RTC/backup data is now saved per Saturn region, using region-qualified filenames (`brimir_saturn_rtc_<region>.smpc`). The legacy single-region file is automatically migrated.
-            - **Region-free IPL database** — IPL ROM info is now keyed by BIOS image content rather than a fixed Japanese-only lookup, enabling first-class US/EU/Asia BIOS support.
-            - **Europe PAL / Asia NTSC default regions** — automatic default region selection for European and Asian BIOS variants.
-            - **Libretro integration hardening** — SRAM managed as the canonical `.srm` buffer, core options apply live from the Quick Menu, real NTSC/PAL region drives AV timing, and save states are versioned with legacy compatibility.
-
-            **Changed**
-            - **SH2** — interrupt flag register micro-optimizations backported from upstream Ymir.
-            - **VDP2** — sprite layer attribute reference cached per command, reducing redundant lookups.
-            - **Game DB** — compatibility/hack entries updated for 3D Baseball, Resident Evil, Dino Island, and others.
-            - **CD/Media** — non-ASCII CHD filename crash fix, ISO path-table size guard, and CUE track-length/null-byte guards.
-            - **Input** — Virtua Gun jitter support for Death Crimson.
-            - Saturn-native maximum geometry reported to libretro (704×512).
-            - Performance profiling is now gated behind the `brimir_profiling` core option.
+            ### v0.4.7
 
             **Fixed**
-            - Cross-game SRAM contamination when a stale in-memory buffer was copied into a newly loaded title's backup RAM.
-            - Non-portable `bool` serialization in per-region SMPC RTC save files.
+            - **RetroArch AMD Vulkan crash on NTSC content** — eliminated an unnecessary `SET_SYSTEM_AV_INFO` environment call that could reinitialize the video driver and trigger an AMD Vulkan driver access violation.
+            - **SRAM persistence regression** — the frontend-supplied `.srm` buffer is no longer cleared at game load; it is reset only when a game is unloaded, restoring legacy SRAM behavior.
 
-            **Save state compatibility note** — States are now versioned with a `BRI2` header and can still load legacy `BRIM` states. SMPC persistent data is stored inside the state payload.
+            **Added**
+            - **Disc preloading core option** — new `brimir_cd_preload` option (default ON) loads the entire disc image into RAM at game start, removing the brief hitches that occur when streaming CD-DA audio or seeking from compressed CHD files. Disable it on low-memory systems if needed.
 
             See [CHANGELOG.md](https://github.com/coredds/brimir/blob/master/CHANGELOG.md) for full details.

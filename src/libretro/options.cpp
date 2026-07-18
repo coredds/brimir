@@ -196,6 +196,22 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "2"
     },
     {
+        "brimir_cd_preload",
+        "Preload Disc to RAM",
+        nullptr,
+        "Load the entire disc image into memory when the game starts. "
+        "This avoids the brief hitches that can occur when streaming CD-DA audio or seeking from compressed CHD files. "
+        "Disable only on systems with very limited RAM; the next disc load will use the new setting.",
+        nullptr,
+        "media",
+        {
+            { "enabled", "ON" },
+            { "disabled", "OFF" },
+            { nullptr, nullptr }
+        },
+        "enabled"
+    },
+    {
         "brimir_sh2_overclock",
         "SH-2 CPU Overclock",
         nullptr,
