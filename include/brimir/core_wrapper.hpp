@@ -334,7 +334,6 @@ private:
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;
     bool m_sramInitialized = false;
-    bool m_sramDataProvided = false;       // True when frontend explicitly supplied SRAM for the next load
     std::filesystem::path m_sramTempPath;  // Temporary file for Ymir's memory-mapped backup RAM
     std::filesystem::path m_smpcBaseDir;   // Directory for system-wide RTC persistent data files
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh

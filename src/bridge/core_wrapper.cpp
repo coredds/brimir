@@ -334,16 +334,9 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             m_saturn->SMPC.LoadPersistentData(smpcData);
         }
         
-        // Discard any stale SRAM from a previous game unless the frontend
-        // explicitly provided new data (e.g. via SetSRAMData / pre-loaded .srm).
-        if (!m_sramDataProvided) {
-            m_sramData.clear();
-        }
-        m_sramDataProvided = false;
-
         // Bring Ymir's backup RAM into the canonical SRAM buffer. If the frontend
-        // already provided data for this game, keep that buffer authoritative and
-        // copy it into Ymir instead.
+        // already provided data (e.g. an .srm loaded before retro_load_game), keep
+        // that buffer authoritative and copy it into Ymir instead.
         if (m_sramData.empty()) {
             m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
         } else {
@@ -655,7 +648,11 @@ void CoreWrapper::UnloadGame() {
     if (m_sramInitialized) {
         m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
     }
-    
+
+    // Clear the in-memory SRAM buffer so it cannot leak into the next game.
+    // The frontend is expected to save the buffer before calling unload.
+    m_sramData.clear();
+
     // Eject disc
     m_saturn->EjectDisc();
     m_gameLoaded = false;
@@ -790,7 +787,6 @@ bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
     }
 
     m_sramData.assign(data, data + size);
-    m_sramDataProvided = true;
 
     if (m_gameLoaded && m_saturn) {
         WriteSRAMToYmir();

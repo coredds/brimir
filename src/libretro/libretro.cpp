@@ -290,15 +290,16 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
 static void update_system_av_info_for_region(void) {
     if (!environ_cb || !g_core) return;
 
-    struct retro_system_av_info avi;
-    retro_get_system_av_info(&avi);
-
-    if (g_core->GetConsoleRegion() == brimir::ConsoleRegion::PAL) {
-        avi.timing.fps = 50.0;
-    } else {
-        avi.timing.fps = 59.94;
+    // retro_get_system_av_info() already reports 59.94 fps as the fallback.
+    // Only push a new system av info if the loaded region is actually PAL,
+    // to avoid an unnecessary video driver re-init on NTSC content.
+    if (g_core->GetConsoleRegion() != brimir::ConsoleRegion::PAL) {
+        return;
     }
 
+    struct retro_system_av_info avi;
+    retro_get_system_av_info(&avi);
+    avi.timing.fps = 50.0;
     environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avi);
 }
 
