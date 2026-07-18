@@ -741,8 +741,36 @@ size_t CoreWrapper::GetSRAMSize() const {
         return 0;
     }
 
-    // Saturn internal backup RAM is 32 KiB
+    // Saturn internal backup RAM is 32 KiB. Until LoadGame() attaches a backing
+    // file, Ymir's object may not be safely queried, so return the fixed size.
+    if (!m_sramInitialized) {
+        return 32 * 1024;
+    }
+
     return m_saturn->mem.GetInternalBackupRAM().Size();
+}
+
+bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
+    if (!data || size == 0) {
+        return false;
+    }
+    if (size != GetSRAMSize()) {
+        return false;
+    }
+
+    m_sramData.assign(data, data + size);
+
+    if (m_gameLoaded && m_saturn) {
+        auto& bup = m_saturn->mem.GetInternalBackupRAM();
+        uint32_t bupSize = bup.Size();
+        for (uint32_t i = 0; i < bupSize && i < m_sramData.size(); ++i) {
+            bup.WriteByte(i * 2, m_sramData[i]);
+        }
+        m_sramCacheDirty = false;
+        m_framesSinceLastSRAMSync = 0;
+        m_sramFirstLoad = false;
+    }
+    return true;
 }
 
 void CoreWrapper::RefreshSRAMFromEmulator() {

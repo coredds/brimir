@@ -69,13 +69,19 @@ public:
     /// @brief Unload the current game
     void UnloadGame();
 
-    /// @brief Get pointer to backup RAM (SRAM) data
+    /// @brief Get pointer to the canonical backup RAM (SRAM) buffer used by RetroArch.
     /// @return Pointer to SRAM data, or nullptr if not available
     void* GetSRAMData();
 
     /// @brief Get size of backup RAM (SRAM)
     /// @return Size in bytes
     size_t GetSRAMSize() const;
+
+    /// @brief Replace the SRAM buffer with external data (e.g. RetroArch's .srm)
+    /// @param data New SRAM data, must be exactly GetSRAMSize() bytes
+    /// @param size Number of bytes in data
+    /// @return true if the data was accepted (size matches and data non-null)
+    bool SetSRAMData(const uint8_t* data, size_t size);
 
     /// @brief Get pointer to system RAM (Work RAM Low) for RetroAchievements / cheat search
     /// @return Pointer to WRAM Low data (1MiB), or nullptr if not available

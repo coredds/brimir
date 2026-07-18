@@ -24,9 +24,6 @@ static retro_environment_t environ_cb = nullptr;
 // Core instance
 static std::unique_ptr<brimir::CoreWrapper> g_core;
 
-// SRAM sync state (reset on game load/unload)
-static bool g_sram_synced = false;
-
 // Memory descriptors for RetroArch's memory viewer / cheat search
 // ptr fields are updated on each game load; struct layout must match
 // declaration order in libretro.h (flags, ptr, offset, start, select, disconnect, len, addrspace)
@@ -264,14 +261,6 @@ RETRO_API void retro_run(void) {
         return;
     }
     
-    // On the very first frame: Restore .bup data to our buffer
-    // Problem: RetroArch loaded .srm into our buffer, overwriting the .bup data!
-    // Solution: Read from Ymir's .bup AGAIN to restore the clock settings
-    if (!g_sram_synced) {
-        g_core->RefreshSRAMFromEmulator();
-        g_sram_synced = true;
-    }
-    
     // Performance profiling: dump report every 300 frames (~5 seconds)
     static size_t frame_count = 0;
     frame_count++;
@@ -428,9 +417,6 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         brimir_log(RETRO_LOG_ERROR, "Core not initialized");
         return false;
     }
-    
-    // Reset SRAM sync flag for new game
-    g_sram_synced = false;
     
     brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path ? game->path : "unknown");
     
@@ -623,8 +609,6 @@ RETRO_API void retro_unload_game(void) {
         g_core->UnloadGame();
     }
     
-    // Reset SRAM sync flag for next game load
-    g_sram_synced = false;
 }
 
 // Disk control callbacks

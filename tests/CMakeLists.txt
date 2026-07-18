@@ -39,7 +39,7 @@ add_executable(brimir_tests
     # unit/test_game_loading.cpp
     # unit/test_save_states.cpp
     # unit/test_cartridge_support.cpp
-    # unit/test_sram_persistence.cpp
+    unit/test_sram_persistence.cpp
     # # Hardware-accurate tests (documentation-based)
     # unit/test_sh2_cache.cpp
     # unit/test_vdp_registers.cpp
