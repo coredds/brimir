@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "audio_ring_buffer.hpp"
 #include "profiler.hpp"
 
 // Include Saturn headers for test access
@@ -311,11 +312,9 @@ private:
     int m_audioVolume = 100;
     int32_t m_audioVolumeFixed = 65536; // 1.0 in 16.16 fixed-point
 
-    // Audio ring buffer for efficient batching (power of 2 for fast modulo)
-    static constexpr size_t kAudioRingBufferSize = 4096;
-    std::array<int16_t, kAudioRingBufferSize> m_audioRingBuffer;
-    std::atomic<size_t> m_audioRingWritePos{0};
-    size_t m_audioRingReadPos = 0;
+    // Audio ring buffer (power of two stereo capacity for fast modulo)
+    static constexpr size_t kAudioRingBufferStereoCapacity = 2048;
+    AudioRingBuffer<kAudioRingBufferStereoCapacity> m_audioRingBuffer;
     
     // Input devices (raw pointers owned by Saturn's SMPC)
     ymir::peripheral::ControlPad* m_controller1 = nullptr;

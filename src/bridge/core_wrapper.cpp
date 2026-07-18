@@ -116,9 +116,6 @@ namespace brimir {
 CoreWrapper::CoreWrapper() {
     // Reserve framebuffer space (max Saturn resolution)
     m_framebuffer.resize(704 * 512);
-    
-    // Audio ring buffer is statically sized (no need to resize)
-    m_audioRingBuffer.fill(0);
 }
 
 CoreWrapper::~CoreWrapper() {
@@ -982,38 +979,11 @@ size_t CoreWrapper::GetAudioSamples(int16_t* buffer, size_t max_samples) {
     if (!m_initialized || !m_saturn || !buffer) {
         return 0;
     }
-
-    // Get current write position
-    size_t writePos = m_audioRingWritePos.load(std::memory_order_acquire);
-    
-    // Calculate available samples in ring buffer
-    // Both positions are in int16_t units, so divide by 2 for stereo pairs
-    size_t available = (writePos >= m_audioRingReadPos) 
-        ? (writePos - m_audioRingReadPos) / 2
-        : ((kAudioRingBufferSize - m_audioRingReadPos) + writePos) / 2;
-    
-    size_t samples_to_copy = std::min(available, max_samples);
-    
-    if (samples_to_copy == 0) {
-        return 0;
+    // Clamp to a sensible per-frame upper bound to avoid huge copies
+    if (max_samples > kAudioRingBufferStereoCapacity) {
+        max_samples = kAudioRingBufferStereoCapacity;
     }
-
-    // Each stereo sample occupies 2 int16_t slots in the ring buffer
-    const size_t slots_to_copy = samples_to_copy * 2;
-    const size_t slots_until_wrap = kAudioRingBufferSize - m_audioRingReadPos;
-
-    if (slots_to_copy <= slots_until_wrap) {
-        // Contiguous: single memcpy
-        std::memcpy(buffer, &m_audioRingBuffer[m_audioRingReadPos], slots_to_copy * sizeof(int16_t));
-    } else {
-        // Wraps: two memcpys
-        std::memcpy(buffer, &m_audioRingBuffer[m_audioRingReadPos], slots_until_wrap * sizeof(int16_t));
-        std::memcpy(buffer + slots_until_wrap, &m_audioRingBuffer[0], (slots_to_copy - slots_until_wrap) * sizeof(int16_t));
-    }
-
-    m_audioRingReadPos = (m_audioRingReadPos + slots_to_copy) & (kAudioRingBufferSize - 1);
-
-    return samples_to_copy;
+    return m_audioRingBuffer.Pop(buffer, max_samples);
 }
 
 size_t CoreWrapper::GetStateSize() const {
@@ -1301,21 +1271,14 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
 
 
 void CoreWrapper::OnAudioSample(int16_t left, int16_t right) {
-    // Scale samples by volume (16.16 fixed-point)
     if (m_audioVolumeFixed != 65536) {
-        left = static_cast<int16_t>((static_cast<int64_t>(left) * m_audioVolumeFixed) >> 16);
+        left  = static_cast<int16_t>((static_cast<int64_t>(left)  * m_audioVolumeFixed) >> 16);
         right = static_cast<int16_t>((static_cast<int64_t>(right) * m_audioVolumeFixed) >> 16);
     }
 
-    // Efficient ring buffer implementation - no bounds checks or allocations!
-    // Write position is atomic for thread safety (though SCSP is single-threaded)
-    size_t writePos = m_audioRingWritePos.load(std::memory_order_relaxed);
-    
-    m_audioRingBuffer[writePos] = left;
-    m_audioRingBuffer[writePos + 1] = right;
-    
-    // Fast modulo using bitwise AND (kAudioRingBufferSize is power of 2)
-    m_audioRingWritePos.store((writePos + 2) & (kAudioRingBufferSize - 1), std::memory_order_release);
+    if (!m_audioRingBuffer.Push(left, right)) {
+        // Optional: count overflows; keep branch cold
+    }
 }
 
 void CoreWrapper::SetControllerState(unsigned int port, uint16_t buttons) {
