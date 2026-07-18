@@ -6,21 +6,25 @@ A Sega Saturn emulation core for libretro, built on the [Ymir](https://github.co
 
 Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accurate hardware layer. It provides accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development. Hardware layer synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes backported through 2026-06-26.
+**Current Status**: Active development. Hardware layer synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes backported through 2026-07-17.
 
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir (2026-06-23)
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes through 2026-07-17
 - Accurate SH-2 dual-CPU emulation with WB/EX stall timing, 32-bit instruction fetch, and inlined opcode decode
 - Full VDP1 sprite engine and VDP2 scroll plane graphics with COPR register fix
-- SCSP (Saturn Custom Sound Processor) audio with configurable interpolation
+- SCSP (Saturn Custom Sound Processor) audio with configurable interpolation and volume control
 - M68000 sound CPU emulation
 - SCU DSP and DMA emulation
 - CHD and ISO disc format support via libchdr
 - Save state and backup RAM persistence with Japanese character translation
-- Auto-detection of console region from disc
-- Configurable CD read speed (2x-16x)
+- Versioned save states with backward compatibility
+- SRAM managed as a single source of truth for libretro `.srm` files
+- Per-region persistent SMPC/RTC data with automatic migration from the legacy filename
+- Auto-detection of console region from disc; real NTSC/PAL timing reported to the frontend
+- Configurable CD read speed (2x-32x/Max)
+- SH-2 CPU overclocking (100%-300%)
 - RAM expansion cartridge support (1MB, 4MB, 6MB)
 - ROM cartridge support (King of Fighters '95, Ultraman)
 
@@ -40,10 +44,13 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
   - Frameskip support
 
 ### Integration
-- Libretro API v2 with full core options support
+- Libretro API v2 with live-updatable core options
 - Compatible with RetroArch and other libretro frontends
 - XRGB8888 pixel format output
-- Performance profiling (logged every 300 frames)
+- Memory descriptors for RetroArch cheat search / memory viewer
+- Real NTSC/PAL region reporting with dynamic AV timing updates
+- Save state versioning for forward compatibility
+- Performance profiling option (gated via core option)
 - Full controller remapping support
 
 ## Build Requirements
@@ -111,18 +118,17 @@ cmake --build build -j$(nproc)
 
 | Category | Option | Values |
 |----------|--------|--------|
-| System | BIOS Selection | Auto-detect, JP, US, EU variants |
-| System | Console Region | Auto-detect, US, EU, JP |
-| System | Auto-Detect Region | On/Off |
-| Video | Video Standard | Auto, NTSC (60Hz), PAL (50Hz) |
+| System | BIOS Selection | Auto, JP v1.01, JP v1.00, US v1.01, US v1.00, EU v1.00, EU alt |
+| System | Auto-Detect Region from Disc | On/Off |
+| System | SH-2 CPU Overclock | 100% (Stock), 125%, 150%, 175%, 200%, 250%, 300% |
+| System | Performance Profiling | On/Off |
 | Video | Deinterlacing | On/Off |
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
-| Video | Horizontal Blend | On/Off (for interlaced modes) |
-| Video | Horizontal Overscan | On/Off (crop 8px each side) |
-| Video | Vertical Overscan | On/Off (crop 8px top/bottom) |
-| Video | Frameskip | 0-3 frames |
-| Audio | Interpolation | Linear, Nearest |
-| Media | CD Read Speed | 2x-16x |
+| Video | Screen Rotation (TATE) | None, 90°, 180°, 270° |
+| Video | Overscan Crop | None, Small (~16px), Medium (~32px), Large (~48px) |
+| Audio | Audio Interpolation | Linear, Nearest |
+| Audio | Audio Volume | 0%, 25%, 50%, 75%, 100%, 125%, 150%, 175%, 200% |
+| Media | CD Read Speed | 2x, 4x, 6x, 8x, 12x, 16x, 24x, 32x, Max (200x) |
 
 ## Project Structure
 
