@@ -38,8 +38,6 @@ TEST_CASE("SRAM SetSRAMData rejects bad inputs", "[sram][unit]") {
     std::vector<uint8_t> smallData(size / 2, 0x42);
     REQUIRE_FALSE(core.SetSRAMData(smallData.data(), smallData.size()));
 
-    if (size > 0) {
-        std::vector<uint8_t> testData(size, 0x5A);
-        REQUIRE(core.SetSRAMData(testData.data(), size));
-    }
+    std::vector<uint8_t> testData(size, 0x5A);
+    REQUIRE(core.SetSRAMData(testData.data(), size));
 }

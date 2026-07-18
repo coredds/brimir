@@ -51,6 +51,8 @@
 
 namespace {
 
+constexpr size_t kSaturnInternalBackupRAMSize = 32 * 1024;
+
 constexpr uint8_t kPersistentSMPCDataVersion = 0x01;
 
 bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
@@ -741,10 +743,10 @@ size_t CoreWrapper::GetSRAMSize() const {
         return 0;
     }
 
-    // Saturn internal backup RAM is 32 KiB. Until LoadGame() attaches a backing
-    // file, Ymir's object may not be safely queried, so return the fixed size.
-    if (!m_sramInitialized) {
-        return 32 * 1024;
+    // Saturn internal backup RAM is 32 KiB. Until LoadGame() has finished,
+    // Ymir's backup RAM may not be safely queried, so return the fixed size.
+    if (!m_gameLoaded) {
+        return kSaturnInternalBackupRAMSize;
     }
 
     return m_saturn->mem.GetInternalBackupRAM().Size();
