@@ -396,3 +396,23 @@ TEST_CASE("CoreWrapper audio access after init", "[core][integration]") {
     std::vector<int16_t> buf(2048 * 2);
     [[maybe_unused]] size_t samples = core.GetAudioSamples(buf.data(), 2048);
 }
+
+TEST_CASE("CoreWrapper setters handle repeated calls without crashing", "[core][unit]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    core.SetAudioInterpolation("linear");
+    core.SetAudioInterpolation("nearest");
+    core.SetCDReadSpeed(2);
+    core.SetCDReadSpeed(200);
+    core.SetSH2OverclockFactor(100);
+    core.SetSH2OverclockFactor(300);
+    core.SetAutodetectRegion(true);
+    core.SetAutodetectRegion(false);
+    core.SetAudioVolume(50);
+    core.SetAudioVolume(150);
+    core.SetRotation(90);
+    core.SetRotation(0);
+    core.SetOverscanCrop(16, 16);
+    core.SetOverscanCrop(0, 0);
+}

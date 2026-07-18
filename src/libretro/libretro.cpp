@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <memory>
+#include <string>
 
 // Libretro callbacks
 static retro_log_printf_t log_cb = nullptr;
@@ -72,6 +73,46 @@ static const char* get_option_value(const char* key, const char* default_value =
         return var.value;
     }
     return default_value;
+}
+
+// Cached core option values so Quick Menu changes can be applied live each frame
+struct OptionCache {
+    std::string audio_interp = "linear";
+    std::string cd_speed = "2";
+    std::string sh2_overclock = "100";
+    std::string autodetect_region = "enabled";
+    std::string deinterlacing = "enabled";
+    std::string deinterlace_mode = "bob";
+    std::string audio_volume = "100";
+    std::string rotation = "0";
+    std::string overscan = "0";
+    std::string profiling = "disabled";
+} g_options;
+
+static void apply_core_options(bool force) {
+    if (!g_core) return;
+
+    auto apply = [force](const char* key, std::string& cached, auto setter) {
+        const char* value = get_option_value(key, cached.c_str());
+        if (force || cached != value) {
+            cached = value;
+            setter(value);
+        }
+    };
+
+    apply("brimir_audio_interpolation",     g_options.audio_interp,     [](const char* v){ g_core->SetAudioInterpolation(v); });
+    apply("brimir_cd_speed",                g_options.cd_speed,         [](const char* v){ g_core->SetCDReadSpeed(static_cast<uint8_t>(atoi(v))); });
+    apply("brimir_sh2_overclock",           g_options.sh2_overclock,    [](const char* v){ g_core->SetSH2OverclockFactor(static_cast<uint32_t>(atoi(v))); });
+    apply("brimir_autodetect_region",       g_options.autodetect_region,[](const char* v){ g_core->SetAutodetectRegion(strcmp(v, "enabled") == 0); });
+    apply("brimir_deinterlacing",           g_options.deinterlacing,    [](const char* v){ g_core->SetDeinterlacing(strcmp(v, "enabled") == 0); });
+    apply("brimir_deinterlace_mode",        g_options.deinterlace_mode, [](const char* v){ g_core->SetDeinterlacingMode(v); });
+    apply("brimir_audio_volume",            g_options.audio_volume,     [](const char* v){ g_core->SetAudioVolume(atoi(v)); });
+    apply("brimir_rotation",                g_options.rotation,         [](const char* v){ g_core->SetRotation(atoi(v)); });
+    apply("brimir_overscan",                g_options.overscan,         [](const char* v){
+        int overscan = atoi(v);
+        g_core->SetOverscanCrop(overscan * 16, overscan * 16);
+    });
+    apply("brimir_profiling",               g_options.profiling,        [](const char* v){ /* consumed directly in retro_run */ (void)v; });
 }
 
 // Libretro API implementation
@@ -260,7 +301,10 @@ RETRO_API void retro_run(void) {
     if (!g_core) {
         return;
     }
-    
+
+    // RetroArch may change options from the Quick Menu; apply any deltas
+    apply_core_options(false);
+
     // Performance profiling: dump report every 300 frames (~5 seconds)
     static size_t frame_count = 0;
     frame_count++;
@@ -546,38 +590,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
     brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
 
-    // Apply core options
-    const char* audio_interp = get_option_value("brimir_audio_interpolation", "linear");
-    g_core->SetAudioInterpolation(audio_interp);
-
-    const char* cd_speed_str = get_option_value("brimir_cd_speed", "2");
-    g_core->SetCDReadSpeed(static_cast<uint8_t>(atoi(cd_speed_str)));
-
-    const char* sh2_oc_str = get_option_value("brimir_sh2_overclock", "100");
-    g_core->SetSH2OverclockFactor(static_cast<uint32_t>(atoi(sh2_oc_str)));
-
-    const char* autodetect_region_str = get_option_value("brimir_autodetect_region", "enabled");
-    g_core->SetAutodetectRegion(strcmp(autodetect_region_str, "enabled") == 0);
+    // Apply core options now and cache them for live updates each frame
+    apply_core_options(true);
 
     g_core->SetRenderer("software");
-
-    const char* deinterlacing_str = get_option_value("brimir_deinterlacing", "enabled");
-    g_core->SetDeinterlacing(strcmp(deinterlacing_str, "enabled") == 0);
-
-    const char* deinterlace_mode = get_option_value("brimir_deinterlace_mode", "bob");
-    g_core->SetDeinterlacingMode(deinterlace_mode);
-
-    const char* audio_volume_str = get_option_value("brimir_audio_volume", "100");
-    g_core->SetAudioVolume(atoi(audio_volume_str));
-
-    const char* rotation_str = get_option_value("brimir_rotation", "0");
-    g_core->SetRotation(atoi(rotation_str));
-
-    const char* overscan_str = get_option_value("brimir_overscan", "0");
-    int overscan = atoi(overscan_str);
-    int cropH = overscan * 16; // 0=0px, 1=16px, 2=32px, 3=48px
-    int cropV = overscan * 16;
-    g_core->SetOverscanCrop(cropH, cropV);
 
     // Register memory descriptors for RetroArch's memory viewer / cheat search
     // Use raw pointer getters to avoid triggering .srm sync side effects
