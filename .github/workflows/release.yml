@@ -205,6 +205,7 @@ jobs:
             - **SMPC per-region persistent storage** — RTC/backup data is now saved per Saturn region, using region-qualified filenames (`brimir_saturn_rtc_<region>.smpc`). The legacy single-region file is automatically migrated.
             - **Region-free IPL database** — IPL ROM info is now keyed by BIOS image content rather than a fixed Japanese-only lookup, enabling first-class US/EU/Asia BIOS support.
             - **Europe PAL / Asia NTSC default regions** — automatic default region selection for European and Asian BIOS variants.
+            - **Libretro integration hardening** — SRAM managed as the canonical `.srm` buffer, core options apply live from the Quick Menu, real NTSC/PAL region drives AV timing, and save states are versioned with legacy compatibility.
 
             **Changed**
             - **SH2** — interrupt flag register micro-optimizations backported from upstream Ymir.
@@ -212,7 +213,13 @@ jobs:
             - **Game DB** — compatibility/hack entries updated for 3D Baseball, Resident Evil, Dino Island, and others.
             - **CD/Media** — non-ASCII CHD filename crash fix, ISO path-table size guard, and CUE track-length/null-byte guards.
             - **Input** — Virtua Gun jitter support for Death Crimson.
+            - Saturn-native maximum geometry reported to libretro (704×512).
+            - Performance profiling is now gated behind the `brimir_profiling` core option.
 
-            **Save state compatibility note** — SMPC persistent data is now stored inside the save state payload; existing save states are incompatible and need to be recreated after upgrading.
+            **Fixed**
+            - Cross-game SRAM contamination when a stale in-memory buffer was copied into a newly loaded title's backup RAM.
+            - Non-portable `bool` serialization in per-region SMPC RTC save files.
+
+            **Save state compatibility note** — States are now versioned with a `BRI2` header and can still load legacy `BRIM` states. SMPC persistent data is stored inside the state payload.
 
             See [CHANGELOG.md](https://github.com/coredds/brimir/blob/master/CHANGELOG.md) for full details.
