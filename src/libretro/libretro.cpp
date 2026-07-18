@@ -280,8 +280,9 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
     info->geometry.max_width = 704;
     info->geometry.max_height = 512;
     info->geometry.aspect_ratio = 4.0f / 3.0f;
-    
-    // NTSC timing
+
+    // Fallback timing. The actual regional framerate (NTSC/PAL) is set once the
+    // disc region is known via update_system_av_info_for_region() in retro_load_game.
     info->timing.fps = 59.94;
     info->timing.sample_rate = 44100.0;
 }
@@ -318,29 +319,33 @@ RETRO_API void retro_run(void) {
         return;
     }
 
-    // RetroArch may change options from the Quick Menu; apply any deltas
-    apply_core_options(false);
+    // Only re-query core options when the frontend reports a change. This avoids
+    // string comparisons and setter calls on every frame when nothing changed.
+    bool updated = false;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
+        apply_core_options(false);
+    }
 
     // Performance profiling: dump report every 300 frames if enabled
-    static size_t frame_count = 0;
-    frame_count++;
-    if (g_options.profiling == "enabled" && frame_count == 300) {
-        brimir_log(RETRO_LOG_INFO, "=== Performance Profile (300 frames) ===");
-        std::string report = g_core->GetProfilingReport();
-        size_t pos = 0;
-        while (pos < report.size()) {
-            size_t end = report.find('\n', pos);
-            if (end == std::string::npos) end = report.size();
-            std::string line = report.substr(pos, end - pos);
-            if (!line.empty()) {
-                brimir_log(RETRO_LOG_INFO, "%s", line.c_str());
+    if (g_options.profiling == "enabled") {
+        static size_t frame_count = 0;
+        frame_count++;
+        if (frame_count == 300) {
+            brimir_log(RETRO_LOG_INFO, "=== Performance Profile (300 frames) ===");
+            std::string report = g_core->GetProfilingReport();
+            size_t pos = 0;
+            while (pos < report.size()) {
+                size_t end = report.find('\n', pos);
+                if (end == std::string::npos) end = report.size();
+                std::string line = report.substr(pos, end - pos);
+                if (!line.empty()) {
+                    brimir_log(RETRO_LOG_INFO, "%s", line.c_str());
+                }
+                pos = end + 1;
             }
-            pos = end + 1;
+            g_core->ResetProfiling();
+            frame_count = 0;
         }
-        g_core->ResetProfiling();
-        frame_count = 0;
-    } else if (frame_count > 300) {
-        frame_count = 0;
     }
 
     // Poll input
@@ -404,18 +409,18 @@ RETRO_API void retro_run(void) {
         unsigned int height = g_core->GetFramebufferHeight();
         unsigned int pitch = g_core->GetFramebufferPitch();
         
-        // Update geometry if dimensions changed
+        // Update geometry whenever dimensions change, including the first frame.
+        // retro_get_system_av_info() reports a fixed fallback base size, so we
+        // correct it here as soon as the running content produces its first frame.
         static unsigned int s_lastWidth = 0, s_lastHeight = 0;
         if (width != s_lastWidth || height != s_lastHeight) {
-            if (s_lastWidth != 0 && s_lastHeight != 0) {
-                struct retro_game_geometry geo = {};
-                geo.base_width = width;
-                geo.base_height = height;
-                geo.max_width = 704;
-                geo.max_height = 512;
-                geo.aspect_ratio = 4.0f / 3.0f;
-                environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
-            }
+            struct retro_game_geometry geo = {};
+            geo.base_width = width;
+            geo.base_height = height;
+            geo.max_width = 704;
+            geo.max_height = 512;
+            geo.aspect_ratio = 4.0f / 3.0f;
+            environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
             s_lastWidth = width;
             s_lastHeight = height;
         }

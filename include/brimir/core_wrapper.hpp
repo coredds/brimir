@@ -51,9 +51,6 @@ public:
     CoreWrapper();
     ~CoreWrapper();
 
-    // Re-export the namespace-level region enum so tests/code can use CoreWrapper::ConsoleRegion
-    using ConsoleRegion = brimir::ConsoleRegion;
-
     // Prevent copying
     CoreWrapper(const CoreWrapper&) = delete;
     CoreWrapper& operator=(const CoreWrapper&) = delete;
@@ -352,6 +349,9 @@ private:
 
     void SaveCartridgeRAM();
     void LoadCartridgeRAM();
+
+    /// @brief Copy the cached m_sramData buffer into Ymir's internal backup RAM.
+    void WriteSRAMToYmir() const;
 
     /// @brief Returns the region-qualified SMPC persistent data file path.
     std::filesystem::path GetPersistentSMPCDataPath() const;

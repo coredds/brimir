@@ -424,21 +424,21 @@ TEST_CASE("CoreWrapper maps SMPC area codes to NTSC/PAL", "[core][region][unit]"
 
     // Before any game/region is set we are unknown or NTSC fallback
     auto initial = core.GetConsoleRegion();
-    REQUIRE((initial == CoreWrapper::ConsoleRegion::NTSC ||
-             initial == CoreWrapper::ConsoleRegion::Unknown));
+    REQUIRE((initial == ConsoleRegion::NTSC ||
+             initial == ConsoleRegion::Unknown));
 
     // Tests use BRIMIR_BUILD_TESTS, so we can access the Saturn instance
     ymir::Saturn* saturn = core.GetSaturn();
     REQUIRE(saturn != nullptr);
 
     saturn->SMPC.SetAreaCode(1);  // Japan
-    REQUIRE(core.GetConsoleRegion() == CoreWrapper::ConsoleRegion::NTSC);
+    REQUIRE(core.GetConsoleRegion() == ConsoleRegion::NTSC);
 
     saturn->SMPC.SetAreaCode(4);  // North America
-    REQUIRE(core.GetConsoleRegion() == CoreWrapper::ConsoleRegion::NTSC);
+    REQUIRE(core.GetConsoleRegion() == ConsoleRegion::NTSC);
 
     saturn->SMPC.SetAreaCode(12); // Europe PAL
-    REQUIRE(core.GetConsoleRegion() == CoreWrapper::ConsoleRegion::PAL);
+    REQUIRE(core.GetConsoleRegion() == ConsoleRegion::PAL);
 }
 
 TEST_CASE("Save state version reject", "[core][savestate][unit]") {

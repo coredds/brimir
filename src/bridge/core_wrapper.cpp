@@ -335,9 +335,14 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             m_saturn->SMPC.LoadPersistentData(smpcData);
         }
         
-        // Immediately read the .bup file into our buffer so RetroArch can see it
-        // This ensures the clock settings are visible to RetroArch
-        m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
+        // Bring Ymir's backup RAM into the canonical SRAM buffer. If the frontend
+        // already provided data (e.g. an .srm loaded before retro_load_game), keep
+        // that buffer authoritative and copy it into Ymir instead.
+        if (m_sramData.empty()) {
+            m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
+        } else {
+            WriteSRAMToYmir();
+        }
         m_sramInitialized = true;
         
         // Validate file extension (common Saturn formats)
@@ -714,11 +719,7 @@ void* CoreWrapper::GetSRAMData() {
     // On the first call after RetroArch has loaded .srm data,
     // write it back into Ymir's backup RAM so the emulator uses it
     if (m_gameLoaded && m_sramFirstLoad) {
-        auto& bup = m_saturn->mem.GetInternalBackupRAM();
-        uint32 size = bup.Size();
-        for (uint32 i = 0; i < size && i < m_sramData.size(); i++) {
-            bup.WriteByte(i * 2, m_sramData[i]);
-        }
+        WriteSRAMToYmir();
         m_sramFirstLoad = false;
         m_sramCacheDirty = false;
         m_framesSinceLastSRAMSync = 0;
@@ -785,16 +786,24 @@ bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
     m_sramData.assign(data, data + size);
 
     if (m_gameLoaded && m_saturn) {
-        auto& bup = m_saturn->mem.GetInternalBackupRAM();
-        uint32_t bupSize = bup.Size();
-        for (uint32_t i = 0; i < bupSize && i < m_sramData.size(); ++i) {
-            bup.WriteByte(i * 2, m_sramData[i]);
-        }
+        WriteSRAMToYmir();
         m_sramCacheDirty = false;
         m_framesSinceLastSRAMSync = 0;
         m_sramFirstLoad = false;
     }
     return true;
+}
+
+void CoreWrapper::WriteSRAMToYmir() const {
+    if (!m_initialized || !m_saturn || m_sramData.empty()) {
+        return;
+    }
+
+    auto& bup = m_saturn->mem.GetInternalBackupRAM();
+    const uint32_t size = bup.Size();
+    for (uint32_t i = 0; i < size && i < m_sramData.size(); ++i) {
+        bup.WriteByte(i * 2, m_sramData[i]);
+    }
 }
 
 void CoreWrapper::RefreshSRAMFromEmulator() {
@@ -995,7 +1004,12 @@ size_t CoreWrapper::GetStateSize() const {
         return 0;
     }
 
-    // Header (12 bytes) + max compressed size
+    // Header (12 bytes) + max compressed size.
+    // NOTE: The save-state header currently does not store the compressed
+    // payload size; LoadState() assumes all bytes after the header are LZ4
+    // data. Adding a compressedSize field would break the existing save-state
+    // header contract, so this is left as a known follow-up for a future
+    // compatibility bump. Existing save-state tests rely on the current layout.
     return static_cast<size_t>(LZ4_compressBound(static_cast<int>(sizeof(ymir::savestate::SaveState)))) + 12;
 }
 
