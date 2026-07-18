@@ -75,7 +75,8 @@ static const char* get_option_value(const char* key, const char* default_value =
     return default_value;
 }
 
-// Cached core option values so Quick Menu changes can be applied live each frame
+// Cached core option values so Quick Menu changes can be applied live each frame.
+// Defaults here must stay in sync with src/libretro/options.cpp for each key.
 struct OptionCache {
     std::string audio_interp = "linear";
     std::string cd_speed = "2";
@@ -86,7 +87,6 @@ struct OptionCache {
     std::string audio_volume = "100";
     std::string rotation = "0";
     std::string overscan = "0";
-    std::string profiling = "disabled";
 } g_options;
 
 static void apply_core_options(bool force) {
@@ -95,7 +95,7 @@ static void apply_core_options(bool force) {
     auto apply = [force](const char* key, std::string& cached, auto setter) {
         const char* value = get_option_value(key, cached.c_str());
         if (force || cached != value) {
-            cached = value;
+            cached = std::string(value);
             setter(value);
         }
     };
@@ -112,7 +112,6 @@ static void apply_core_options(bool force) {
         int overscan = atoi(v);
         g_core->SetOverscanCrop(overscan * 16, overscan * 16);
     });
-    apply("brimir_profiling",               g_options.profiling,        [](const char* v){ /* consumed directly in retro_run */ (void)v; });
 }
 
 // Libretro API implementation
