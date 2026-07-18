@@ -606,10 +606,6 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     
     brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
 
-    // Apply core options before loading the disc so choices like disc preloading
-    // take effect on the current game load.
-    apply_core_options(true);
-
     if (!g_core->LoadGame(game->path, save_dir, system_dir)) {
         const std::string& error = g_core->GetLastError();
         brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
@@ -618,6 +614,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     }
 
     brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
+
+    // Apply core options after the disc is loaded. Region autodetection happens
+    // during disc loading, so options that disable it must not be applied until
+    // afterwards (otherwise the system would stay at the default Japan area code).
+    apply_core_options(true);
 
     update_system_av_info_for_region();
 
