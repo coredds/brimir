@@ -89,6 +89,36 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "bob"
     },
     {
+        "brimir_threaded_vdp1",
+        "Threaded VDP1 Rendering",
+        nullptr,
+        "Run VDP1 rendering on a separate worker thread. "
+        "Disabling can improve stability with save states at the cost of performance.",
+        nullptr,
+        "video",
+        {
+            { "enabled", "ON" },
+            { "disabled", "OFF" },
+            { nullptr, nullptr }
+        },
+        "enabled"
+    },
+    {
+        "brimir_threaded_vdp2",
+        "Threaded VDP2 Rendering",
+        nullptr,
+        "Run VDP2 rendering on a separate worker thread. "
+        "Disabling can improve stability with save states at the cost of performance.",
+        nullptr,
+        "video",
+        {
+            { "enabled", "ON" },
+            { "disabled", "OFF" },
+            { nullptr, nullptr }
+        },
+        "enabled"
+    },
+    {
         "brimir_autodetect_region",
         "Auto-Detect Region from Disc",
         nullptr,

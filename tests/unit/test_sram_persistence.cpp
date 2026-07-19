@@ -82,3 +82,50 @@ TEST_CASE("LoadGame preserves frontend-provided SRAM buffer", "[sram][unit]") {
     core.Shutdown();
     std::filesystem::remove_all(tempDir);
 }
+
+TEST_CASE("GetSRAMData does not clobber frontend SRAM before first RunFrame", "[sram][unit][regression]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    size_t size = core.GetSRAMSize();
+    REQUIRE(size > 0);
+
+    // Simulate a frontend-supplied .srm (the public injection path in unit tests).
+    std::vector<uint8_t> expected(size, 0xC7);
+    REQUIRE(core.SetSRAMData(expected.data(), size));
+
+    std::filesystem::path tempDir =
+        std::filesystem::temp_directory_path() / "brimir_sram_sync_test";
+    std::filesystem::remove_all(tempDir);
+    std::filesystem::create_directories(tempDir / "saves");
+    std::filesystem::create_directories(tempDir / "system");
+
+    std::filesystem::path gamePath = tempDir / "saves" / "dummy.iso";
+    {
+        std::ofstream dummy(gamePath, std::ios::binary);
+        dummy.write("not a real disc image", 21);
+    }
+
+    // LoadGame preserves frontend SRAM (disc parsing is expected to fail).
+    REQUIRE_FALSE(core.LoadGame(gamePath.string().c_str(),
+                                (tempDir / "saves").string().c_str(),
+                                (tempDir / "system").string().c_str()));
+
+    // Calling GetSRAMData to obtain the pointer must NOT push the buffer to
+    // Ymir yet, because the real frontend would still be copying the .srm into
+    // it. The previous implementation wrote here, which overwrote the .srm
+    // with the empty/formatted .bup contents before the game could see it.
+    const uint8_t* ptr = static_cast<const uint8_t*>(core.GetSRAMData());
+    REQUIRE(ptr != nullptr);
+    REQUIRE(std::memcmp(ptr, expected.data(), size) == 0);
+
+    // UnloadGame must keep the SRAM buffer available for the frontend to save.
+    // It used to clear it, preventing post-unload .srm serialization.
+    core.UnloadGame();
+    ptr = static_cast<const uint8_t*>(core.GetSRAMData());
+    REQUIRE(ptr != nullptr);
+    REQUIRE(core.GetSRAMSize() == size);
+
+    core.Shutdown();
+    std::filesystem::remove_all(tempDir);
+}

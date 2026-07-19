@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <memory>
+#include <mutex>
 #include <string>
 
 // Libretro callbacks
@@ -24,6 +25,12 @@ static retro_environment_t environ_cb = nullptr;
 
 // Core instance
 static std::unique_ptr<brimir::CoreWrapper> g_core;
+
+// Guards any libretro API call that inspects or mutates core state.
+// This protects against frontends that dispatch save/load/reset while the
+// core thread is still running a frame (RetroArch normally serializes these,
+// but the lock makes the core safe either way).
+static std::recursive_mutex g_coreMutex;
 
 // Memory descriptors for RetroArch's memory viewer / cheat search
 // ptr fields are updated on each game load; struct layout must match
@@ -89,6 +96,8 @@ struct OptionCache {
     std::string overscan = "0";
     std::string profiling = "disabled";
     std::string cd_preload = "enabled";
+    std::string threaded_vdp1 = "enabled";
+    std::string threaded_vdp2 = "enabled";
 } g_options;
 
 static void apply_core_options(bool force) {
@@ -116,6 +125,8 @@ static void apply_core_options(bool force) {
     });
     apply("brimir_profiling",               g_options.profiling,        [](const char* /*v*/){});
     apply("brimir_cd_preload",              g_options.cd_preload,       [](const char* v){ g_core->SetDiscPreloadEnabled(strcmp(v, "enabled") == 0); });
+    apply("brimir_threaded_vdp1",           g_options.threaded_vdp1,    [](const char* v){ g_core->SetThreadedVDP1(strcmp(v, "enabled") == 0); });
+    apply("brimir_threaded_vdp2",           g_options.threaded_vdp2,    [](const char* v){ g_core->SetThreadedVDP2(strcmp(v, "enabled") == 0); });
 }
 
 // Libretro API implementation
@@ -252,8 +263,9 @@ RETRO_API void retro_init(void) {
 
 RETRO_API void retro_deinit(void) {
     brimir_log(RETRO_LOG_INFO, "Brimir shutting down");
-    
+
     if (g_core) {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
         g_core->Shutdown();
         g_core.reset();
     }
@@ -266,7 +278,7 @@ RETRO_API unsigned retro_api_version(void) {
 RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     memset(info, 0, sizeof(*info));
     info->library_name = "Brimir";
-    info->library_version = "0.4.7";
+    info->library_version = BRIMIR_VERSION;
     info->need_fullpath = true;
     info->valid_extensions = "chd|cue|bin|iso|ccd|img|mds|mdf|m3u";
 }
@@ -311,8 +323,9 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) 
 
 RETRO_API void retro_reset(void) {
     brimir_log(RETRO_LOG_INFO, "Reset requested");
-    
+
     if (g_core) {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
         g_core->Reset();
     }
 }
@@ -321,6 +334,8 @@ RETRO_API void retro_run(void) {
     if (!g_core) {
         return;
     }
+
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
 
     // Only re-query core options when the frontend reports a change. This avoids
     // string comparisons and setter calls on every frame when nothing changed.
@@ -445,7 +460,8 @@ RETRO_API size_t retro_serialize_size(void) {
     if (!g_core) {
         return 0;
     }
-    
+
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->GetStateSize();
 }
 
@@ -453,7 +469,8 @@ RETRO_API bool retro_serialize(void* data, size_t size) {
     if (!g_core) {
         return false;
     }
-    
+
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->SaveState(data, size);
 }
 
@@ -461,7 +478,8 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
     if (!g_core) {
         return false;
     }
-    
+
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->LoadState(data, size);
 }
 
@@ -481,14 +499,16 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         brimir_log(RETRO_LOG_ERROR, "No game provided");
         return false;
     }
-    
+
     if (!g_core) {
         brimir_log(RETRO_LOG_ERROR, "Core not initialized");
         return false;
     }
-    
+
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+
     brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path ? game->path : "unknown");
-    
+
     // Set pixel format - XRGB8888 for full quality (lossless from VDP output)
     // This is a lossless channel swap from VDP's native XBGR8888, replacing the old
     // lossy RGB565 conversion.
@@ -649,42 +669,49 @@ RETRO_API bool retro_load_game_special(unsigned game_type, const struct retro_ga
 
 RETRO_API void retro_unload_game(void) {
     brimir_log(RETRO_LOG_INFO, "Unloading game");
-    
+
     if (g_core) {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
         g_core->UnloadGame();
     }
-    
+
 }
 
 // Disk control callbacks
 
 static bool disk_set_eject_state(bool ejected) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->SetEjectState(ejected);
 }
 
 static bool disk_get_eject_state(void) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->GetEjectState();
 }
 
 static unsigned disk_get_image_index(void) {
     if (!g_core) return 0;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return static_cast<unsigned>(g_core->GetCurrentDiscIndex());
 }
 
 static bool disk_set_image_index(unsigned index) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->SetDiscIndex(index);
 }
 
 static unsigned disk_get_num_images(void) {
     if (!g_core) return 0;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return static_cast<unsigned>(g_core->GetNumDiscs());
 }
 
 static bool disk_replace_image_index(unsigned index, const struct retro_game_info* info) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (info) {
         return g_core->ReplaceDiscIndex(index, info->path);
     } else {
@@ -694,21 +721,25 @@ static bool disk_replace_image_index(unsigned index, const struct retro_game_inf
 
 static bool disk_add_image_index(void) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->AddDiscIndex();
 }
 
 static bool disk_set_initial_image(unsigned index, const char* path) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->SetInitialDisc(index, path);
 }
 
 static bool disk_get_image_path(unsigned index, char* s, size_t len) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->GetDiscPath(index, s, len);
 }
 
 static bool disk_get_image_label(unsigned index, char* s, size_t len) {
     if (!g_core) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->GetDiscLabel(index, s, len);
 }
 

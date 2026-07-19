@@ -222,6 +222,12 @@ public:
     void SetRenderer(const char* renderer);
     const char* GetActiveRenderer() const;
 
+    /// @brief Set threaded VDP1 rendering
+    void SetThreadedVDP1(bool enable);
+
+    /// @brief Set threaded VDP2 rendering
+    void SetThreadedVDP2(bool enable);
+
     /// @brief Set deinterlacing enable
     void SetDeinterlacing(bool enable);
 
@@ -338,7 +344,9 @@ private:
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;
     bool m_sramInitialized = false;
-    std::filesystem::path m_sramTempPath;  // Temporary file for Ymir's memory-mapped backup RAM
+    bool m_sramDataFromFrontend = false;   // True when SetSRAMData or our own .srm load supplied data
+    std::filesystem::path m_sramTempPath;  // Scratch file for Ymir's memory-mapped backup RAM
+    std::filesystem::path m_srmPath;       // Canonical .srm path (also managed by the frontend)
     std::filesystem::path m_smpcBaseDir;   // Directory for system-wide RTC persistent data files
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh
     mutable uint32_t m_framesSinceLastSRAMSync = 0;  // Frames since last SRAM sync

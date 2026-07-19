@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.9] - 2026-07-19
+
+### Fixed
+- **SRAM save persistence** — the `.srm` buffer is now copied into Ymir's backup RAM on the first emulation frame instead of during the first `GetSRAMData()` call. Previously the copy happened before the frontend had loaded the `.srm`, causing the game to see an empty/formatted backup RAM and eventually overwriting the real save file.
+- **SRAM buffer discarded on unload** — `UnloadGame()` no longer clears the in-memory SRAM buffer so the frontend can read the final state for `.srm` serialization after closing content.
+- **Save-state trailing bytes** — the `BRI2` save-state header now stores the compressed payload size. Frontends that allocate larger buffers than required can no longer cause `LoadState` to misdecode trailing bytes as LZ4 data.
+
+### Added
+- **Threaded VDP core options** — new `brimir_threaded_vdp1` and `brimir_threaded_vdp2` options (default ON) allow toggling threaded rendering for stability testing or debugging save-state race conditions.
+
+### Changed
+- **libretro API serialization** — all core API calls that inspect or mutate running state (`retro_run`, serialize/unserialize, reset, load/unload, and disk-control callbacks) now share a recursive mutex, making the core safe against frontends that dispatch these concurrently.
+- **Save-state format** — `BRI2` header version bumped to 2 (16 bytes: magic, version, uncompressed size, compressed size). Version 1 states still load, but raw/unknown-magic buffers are now rejected to avoid layout mismatch heap corruption.
+
+### Technical
+- Correct core version (`0.4.9`) is now propagated from CMake to both `retro_get_system_info()` and `brimir_libretro.info` via a compile definition.
+
+---
+
 ## [0.4.7] - 2026-07-17
 
 ### Fixed

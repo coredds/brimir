@@ -81,8 +81,7 @@ TEST_CASE("CoreWrapper save/load state round-trip", "[core][unit]") {
     std::vector<uint8_t> buf(stateSize);
 
     REQUIRE(core.SaveState(buf.data(), stateSize));
-    // Note: LoadState round-trip disabled — causes SIGSEGV (known issue with bare Initialize)
-    // REQUIRE(core.LoadState(buf.data(), stateSize));
+    REQUIRE(core.LoadState(buf.data(), stateSize));
 }
 
 TEST_CASE("CoreWrapper save state too-small buffer", "[core][unit]") {
@@ -455,7 +454,7 @@ TEST_CASE("Save state version reject", "[core][savestate][unit]") {
     REQUIRE_FALSE(core.LoadState(buf.data(), stateSize));
 }
 
-TEST_CASE("Save state writes 12-byte header", "[core][savestate][unit]") {
+TEST_CASE("Save state writes 16-byte header", "[core][savestate][unit]") {
     CoreWrapper core;
     REQUIRE(core.Initialize());
 
@@ -466,11 +465,15 @@ TEST_CASE("Save state writes 12-byte header", "[core][savestate][unit]") {
     uint32_t magic = 0;
     uint32_t version = 0;
     uint32_t uncompSize = 0;
+    uint32_t compressedSize = 0;
     std::memcpy(&magic, buf.data(), sizeof(magic));
     std::memcpy(&version, buf.data() + 4, sizeof(version));
     std::memcpy(&uncompSize, buf.data() + 8, sizeof(uncompSize));
+    std::memcpy(&compressedSize, buf.data() + 12, sizeof(compressedSize));
 
     REQUIRE(magic == 0x32524942); // "BRI2" in LE
-    REQUIRE(version == 1);
+    REQUIRE(version == 2);
     REQUIRE(uncompSize == sizeof(ymir::savestate::SaveState));
+    REQUIRE(compressedSize > 0);
+    REQUIRE(compressedSize < stateSize - 16);
 }

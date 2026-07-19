@@ -25,8 +25,6 @@
 #include <lz4.h>
 #include <algorithm>
 #include <cctype>
-#include <thread>
-#include <chrono>
 
 // SIMD intrinsics
 #if defined(_M_X64) || defined(__x86_64__)
@@ -55,7 +53,7 @@ constexpr uint8_t kPersistentSMPCDataVersion = 0x01;
 
 constexpr uint32_t kNewStateMagic    = 0x32524942; // "BRI2" in LE
 constexpr uint32_t kLegacyStateMagic = 0x4D495242; // "BRIM" in LE
-constexpr uint32_t kSaveStateVersion = 1;
+constexpr uint32_t kSaveStateVersion = 2;
 
 bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
                                     const std::filesystem::path &path) {
@@ -281,16 +279,13 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         }
         m_initialDiscSet = false;
 
-        // Set up persistent backup RAM path (Ymir uses memory-mapped files)
-        // Use save_directory + game name to create a persistent backup RAM file
-        // For M3U games, use the M3U filename (all discs share the same backup RAM)
+        // Set up a scratch backup RAM path for Ymir's memory-mapped internal RAM.
+        // This is NOT the persistent save; it is only used as a formatted scratch
+        // image while the game is running. The user's actual saves live in the
+        // .srm file in the save directory, which the core loads/saves explicitly.
         std::filesystem::path gameFileName = gamePath.stem();
-        if (save_directory && save_directory[0] != '\0') {
-            m_sramTempPath = std::filesystem::path(save_directory) / (gameFileName.string() + ".bup");
-        } else {
-            // Fallback to temp directory if no save_directory provided
-            m_sramTempPath = std::filesystem::temp_directory_path() / (gameFileName.string() + ".bup");
-        }
+        m_sramTempPath = std::filesystem::temp_directory_path() / "Brimir" /
+                         (gameFileName.string() + ".bup");
         
         // Ensure parent directory exists
         std::filesystem::create_directories(m_sramTempPath.parent_path());
@@ -333,14 +328,45 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             }
             m_saturn->SMPC.LoadPersistentData(smpcData);
         }
-        
+
+        // Set up the canonical .srm path the frontend normally manages. If the
+        // frontend did not preload the .srm into m_sramData (e.g. because the
+        // core is being driven outside libretro or the memory pointer was not
+        // ready in time), load it ourselves so saves are visible to the game.
+        if (save_directory && save_directory[0] != '\0') {
+            m_srmPath = std::filesystem::path(save_directory) / (gameFileName.string() + ".srm");
+        } else {
+            m_srmPath = std::filesystem::temp_directory_path() / (gameFileName.string() + ".srm");
+        }
+
+        std::error_code srmError;
+        if (std::filesystem::exists(m_srmPath, srmError) && !srmError) {
+            const auto srmSize = std::filesystem::file_size(m_srmPath, srmError);
+            if (!srmError && srmSize == kSaturnInternalBackupRAMSize) {
+                std::ifstream srmFile(m_srmPath, std::ios::binary);
+                if (srmFile) {
+                    std::vector<uint8_t> fileData(srmSize);
+                    srmFile.read(reinterpret_cast<char*>(fileData.data()), srmSize);
+                    if (srmFile) {
+                        m_sramData = std::move(fileData);
+                        m_sramDataFromFrontend = true;
+                    }
+                }
+            }
+        }
+
+        // Discard any stale SRAM from a previous game unless the frontend
+        // explicitly provided new data (e.g. via SetSRAMData / pre-loaded .srm).
+        if (!m_sramDataFromFrontend) {
+            m_sramData.clear();
+        }
+        m_sramDataFromFrontend = false;
+
         // Bring Ymir's backup RAM into the canonical SRAM buffer. If the frontend
         // already provided data (e.g. an .srm loaded before retro_load_game), keep
-        // that buffer authoritative and copy it into Ymir instead.
+        // that buffer authoritative and copy it into Ymir before the first frame.
         if (m_sramData.empty()) {
             m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
-        } else {
-            WriteSRAMToYmir();
         }
         m_sramInitialized = true;
         
@@ -617,16 +643,10 @@ void CoreWrapper::UnloadGame() {
         return;
     }
     
-    // CRITICAL: Stop threaded VDP FIRST to prevent race conditions
-    // This gracefully shuts down the render thread before we do any cleanup
-    bool wasThreadedVDP1 = m_saturn->configuration.video.threadedVDP1.Get();
-    bool wasThreadedVDP2 = m_saturn->configuration.video.threadedVDP2.Get();
-    if (wasThreadedVDP1 || wasThreadedVDP2) {
-        m_saturn->configuration.video.threadedVDP1 = false;
-        m_saturn->configuration.video.threadedVDP2 = false;
-        // Give the thread time to shut down cleanly
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
+    // Stop threaded VDP cleanly before cleanup. The observable assignment
+    // synchronously joins the worker threads, so no extra delay is needed.
+    m_saturn->configuration.video.threadedVDP1 = false;
+    m_saturn->configuration.video.threadedVDP2 = false;
     
     // Save cartridge RAM if present
     if (m_hasCartridge) {
@@ -646,12 +666,29 @@ void CoreWrapper::UnloadGame() {
     // Read final SRAM state from Ymir BEFORE unloading
     // This ensures RetroArch can save the latest state (including clock settings)
     if (m_sramInitialized) {
+        // Safety net: if no frame ever ran, the frontend-loaded .srm was never
+        // pushed into Ymir. Copy it down now so the read-back captures it.
+        if (m_sramFirstLoad) {
+            WriteSRAMToYmir();
+        }
         m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
     }
 
-    // Clear the in-memory SRAM buffer so it cannot leak into the next game.
-    // The frontend is expected to save the buffer before calling unload.
-    m_sramData.clear();
+    // Persist the canonical SRAM buffer to the .srm file. The frontend also
+    // saves via RETRO_MEMORY_SAVE_RAM, but writing it ourselves guarantees
+    // persistence even when the frontend's memory pointer path is skipped.
+    if (!m_srmPath.empty() && !m_sramData.empty()) {
+        try {
+            std::error_code dirEc;
+            std::filesystem::create_directories(m_srmPath.parent_path(), dirEc);
+            std::ofstream srmFile(m_srmPath, std::ios::binary | std::ios::trunc);
+            if (srmFile) {
+                srmFile.write(reinterpret_cast<const char*>(m_sramData.data()), m_sramData.size());
+            }
+        } catch (...) {
+            // Non-critical: the frontend may still have saved the buffer.
+        }
+    }
 
     // Eject disc
     m_saturn->EjectDisc();
@@ -712,34 +749,29 @@ void* CoreWrapper::GetSRAMData() {
         return nullptr;
     }
 
-    // Initialize buffer on first call (for RetroArch to load .srm into)
+    // Initialize buffer on first call (for RetroArch to load .srm into).
+    // This does not count as frontend-provided data; LoadGame will reload
+    // from the .bup fallback if no .srm was supplied.
     if (m_sramData.empty()) {
         m_sramData.resize(GetSRAMSize());
         // DON'T read from Ymir yet - let RetroArch load .srm first!
         return m_sramData.data();
     }
 
-    // On the first call after RetroArch has loaded .srm data,
-    // write it back into Ymir's backup RAM so the emulator uses it
-    if (m_gameLoaded && m_sramFirstLoad) {
-        WriteSRAMToYmir();
-        m_sramFirstLoad = false;
-        m_sramCacheDirty = false;
-        m_framesSinceLastSRAMSync = 0;
-    }
-
-    // If game is loaded, refresh SRAM from Ymir periodically or when marked dirty
-    // This ensures RetroArch always gets the latest state for periodic saves
+    // Refresh SRAM from Ymir periodically so RetroArch can save the latest
+    // state. Do NOT refresh before the first RunFrame: m_sramData is still
+    // the frontend's .srm buffer at that point, and RefreshSRAMFromEmulator()
+    // would overwrite it with the empty/formatted .bup contents.
     if (m_gameLoaded && m_sramInitialized && !m_sramFirstLoad) {
         constexpr uint32_t kSRAMSyncInterval = 300;
-        
+
         if (m_sramCacheDirty || m_framesSinceLastSRAMSync >= kSRAMSyncInterval) {
             m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
             m_sramCacheDirty = false;
             m_framesSinceLastSRAMSync = 0;
         }
     }
-    
+
     return m_sramData.data();
 }
 
@@ -787,6 +819,7 @@ bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
     }
 
     m_sramData.assign(data, data + size);
+    m_sramDataFromFrontend = true;
 
     if (m_gameLoaded && m_saturn) {
         WriteSRAMToYmir();
@@ -872,9 +905,20 @@ void CoreWrapper::RunFrame() {
         return;
     }
 
+    // On the first frame after a game is loaded, copy the canonical SRAM buffer
+    // down into Ymir. By this point the frontend has had a chance to load the
+    // .srm into the pointer returned by GetSRAMData(); copying earlier (in
+    // GetSRAMData itself) used the unmodified .bup contents and erased any .srm.
+    if (m_gameLoaded && m_sramInitialized && m_sramFirstLoad) {
+        WriteSRAMToYmir();
+        m_sramFirstLoad = false;
+        m_sramCacheDirty = false;
+        m_framesSinceLastSRAMSync = 0;
+    }
+
     try {
         ScopedTimer timer(m_profiler, "RunFrame_Total");
-        
+
         // Run one frame of emulation
         // VDP callback will update framebuffer via OnFrameComplete()
         // SCSP callback will update audio buffer via OnAudioSample()
@@ -882,7 +926,7 @@ void CoreWrapper::RunFrame() {
             ScopedTimer ymirTimer(m_profiler, "Ymir_RunFrame");
             m_saturn->RunFrame();
         }
-        
+
         // Track frames for SRAM sync optimization
         m_framesSinceLastSRAMSync++;
     } catch (const std::exception& e) {
@@ -1007,13 +1051,9 @@ size_t CoreWrapper::GetStateSize() const {
         return 0;
     }
 
-    // Header (12 bytes) + max compressed size.
-    // NOTE: The save-state header currently does not store the compressed
-    // payload size; LoadState() assumes all bytes after the header are LZ4
-    // data. Adding a compressedSize field would break the existing save-state
-    // header contract, so this is left as a known follow-up for a future
-    // compatibility bump. Existing save-state tests rely on the current layout.
-    return static_cast<size_t>(LZ4_compressBound(static_cast<int>(sizeof(ymir::savestate::SaveState)))) + 12;
+    // Header (16 bytes: magic, version, uncompressed size, compressed size)
+    // + max compressed size.
+    return static_cast<size_t>(LZ4_compressBound(static_cast<int>(sizeof(ymir::savestate::SaveState)))) + 16;
 }
 
 bool CoreWrapper::SaveState(void* data, size_t size) {
@@ -1028,11 +1068,13 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
     }
 
     try {
-        // Create a State object on the heap (too large for stack)
+        // Ymir's software renderer handles its own worker-thread synchronization
+        // in VDP::SaveState() via PreSaveStateSync(). The libretro frontend
+        // ensures serialize/unserialize do not run concurrently with retro_run().
         auto state = std::make_unique<ymir::savestate::SaveState>();
         m_saturn->SaveState(*state);
-        
-        // Write 12-byte header: magic + version + uncompressed size
+
+        // Write 16-byte header: magic + version + uncompressed size + placeholder compressed size
         const uint32_t magic = kNewStateMagic;
         const uint32_t version = kSaveStateVersion;
         const uint32_t uncompSize = static_cast<uint32_t>(sizeof(ymir::savestate::SaveState));
@@ -1043,17 +1085,21 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
 
         // Compress with LZ4
         int srcSize = static_cast<int>(sizeof(ymir::savestate::SaveState));
-        int dstCapacity = static_cast<int>(size - 12);
+        int dstCapacity = static_cast<int>(size - 16);
         int compressedSize = LZ4_compress_default(
             reinterpret_cast<const char*>(state.get()),
-            reinterpret_cast<char*>(out + 12),
+            reinterpret_cast<char*>(out + 16),
             srcSize,
             dstCapacity
         );
-        
+
         if (compressedSize <= 0) {
             return false;
         }
+
+        // Fill in the actual compressed payload size so LoadState can ignore
+        // any trailing bytes that the frontend may have written.
+        std::memcpy(out + 12, &compressedSize, 4);
 
         return true;
     } catch (const std::exception& e) {
@@ -1068,6 +1114,8 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
     }
 
     try {
+        // Ymir's VDP::LoadState() uses PostLoadStateSync() to refresh the
+        // worker-thread copies after the main state is restored.
         const auto* in = static_cast<const uint8_t*>(data);
 
         if (size < 8) {
@@ -1077,7 +1125,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
         uint32_t magic = 0;
         std::memcpy(&magic, in, 4);
 
-        // New format: [magic:4][version:4][uncompSize:4] followed by LZ4 data
+        // New format: [magic:4][version:4][uncompSize:4][compressedSize:4] followed by LZ4 data
         if (magic == kNewStateMagic && size >= 12) {
             uint32_t version = 0;
             uint32_t uncompSize = 0;
@@ -1091,10 +1139,24 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 return false;
             }
 
+            int headerSize;
+            int compressedSize;
+            if (size >= 16) {
+                uint32_t storedCompressedSize = 0;
+                std::memcpy(&storedCompressedSize, in + 12, 4);
+                compressedSize = static_cast<int>(storedCompressedSize);
+                headerSize = 16;
+            } else {
+                // v1 header fallback (12 bytes) - the entire trailing buffer is LZ4 data.
+                // This can fail when the buffer contains trailing garbage, but preserves
+                // compatibility with old save states that happened to work.
+                compressedSize = static_cast<int>(size - 12);
+                headerSize = 12;
+            }
+
             auto state = std::make_unique<ymir::savestate::SaveState>();
-            int compressedSize = static_cast<int>(size - 12);
             int result = LZ4_decompress_safe(
-                reinterpret_cast<const char*>(in + 12),
+                reinterpret_cast<const char*>(in + headerSize),
                 reinterpret_cast<char*>(state.get()),
                 compressedSize,
                 static_cast<int>(uncompSize)
@@ -1127,14 +1189,12 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             return m_saturn->LoadState(*state, true);
         }
 
-        // Raw uncompressed state (fallback)
-        size_t requiredSize = sizeof(ymir::savestate::SaveState);
-        if (size < requiredSize) {
-            return false;
-        }
-        auto state = std::make_unique<ymir::savestate::SaveState>();
-        std::memcpy(state.get(), data, requiredSize);
-        return m_saturn->LoadState(*state, true);
+        // Unknown magic: this buffer is not a Brimir state. It may be an
+        // incompatible save from another build/version, or corrupt data.
+        // Refuse to load rather than treating it as a raw state, which has
+        // caused heap corruption when the layout differs from the current
+        // ymir::savestate::SaveState struct.
+        return false;
     } catch (const std::exception& e) {
         (void)e;
         return false;
@@ -1507,6 +1567,19 @@ const char* CoreWrapper::GetActiveRenderer() const {
     return "Software";
 }
 
+void CoreWrapper::SetThreadedVDP1(bool enable) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+    m_saturn->configuration.video.threadedVDP1 = enable;
+}
+
+void CoreWrapper::SetThreadedVDP2(bool enable) {
+    if (!m_initialized || !m_saturn) {
+        return;
+    }
+    m_saturn->configuration.video.threadedVDP2 = enable;
+}
 
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {
     if (!m_initialized || !m_saturn || !mode) {
