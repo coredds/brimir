@@ -197,13 +197,18 @@ jobs:
           body: |
             Brimir is a Sega Saturn emulation core for libretro, built on Ymir's cycle-accurate hardware layer.
 
-            ### v0.4.7
+            ### v0.4.9
 
             **Fixed**
-            - **RetroArch AMD Vulkan crash on NTSC content** — eliminated an unnecessary `SET_SYSTEM_AV_INFO` environment call that could reinitialize the video driver and trigger an AMD Vulkan driver access violation.
-            - **SRAM persistence regression** — the frontend-supplied `.srm` buffer is no longer cleared at game load; it is reset only when a game is unloaded, restoring legacy SRAM behavior.
+            - **SRAM save persistence** — the `.srm` buffer is now copied into Ymir's backup RAM on the first emulation frame instead of during the first `GetSRAMData()` call. Previously the copy happened before the frontend had loaded the `.srm`, causing the game to see an empty/formatted backup RAM and eventually overwriting the real save file.
+            - **SRAM buffer discarded on unload** — `UnloadGame()` no longer clears the in-memory SRAM buffer so the frontend can read the final state for `.srm` serialization after closing content.
+            - **Save-state trailing bytes** — the `BRI2` save-state header now stores the compressed payload size. Frontends that allocate larger buffers than required can no longer cause `LoadState` to misdecode trailing bytes as LZ4 data.
 
             **Added**
-            - **Disc preloading core option** — new `brimir_cd_preload` option (default ON) loads the entire disc image into RAM at game start, removing the brief hitches that occur when streaming CD-DA audio or seeking from compressed CHD files. Disable it on low-memory systems if needed.
+            - **Threaded VDP core options** — new `brimir_threaded_vdp1` and `brimir_threaded_vdp2` options (default ON) allow toggling threaded rendering for stability testing or debugging save-state race conditions.
+
+            **Changed**
+            - **libretro API serialization** — all core API calls that inspect or mutate running state (`retro_run`, serialize/unserialize, reset, load/unload, and disk-control callbacks) now share a recursive mutex, making the core safe against frontends that dispatch these concurrently.
+            - **Save-state format** — `BRI2` header version bumped to 2 (16 bytes: magic, version, uncompressed size, compressed size). Version 1 states still load, but raw/unknown-magic buffers are now rejected to avoid layout mismatch heap corruption.
 
             See [CHANGELOG.md](https://github.com/coredds/brimir/blob/master/CHANGELOG.md) for full details.
