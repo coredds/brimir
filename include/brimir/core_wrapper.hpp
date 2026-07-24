@@ -261,7 +261,7 @@ public:
     void SetDeinterlacing(bool enable);
 
     /// @brief Set deinterlacing mode
-    /// @param mode Mode string: "bob", "weave", "blend", "current", "none"
+    /// @param mode Mode string: "auto", "bob", "weave", "blend", "current", "none"
     void SetDeinterlacingMode(const char* mode);
 
     /// @brief Set audio volume percentage
@@ -343,6 +343,11 @@ private:
     // Screen rotation (TATE mode)
     int m_rotation = 0; // 0, 90, 180, 270
 
+    // Deinterlacing state for auto mode
+    bool m_deinterlacingEnabled = true;
+    std::string m_deinterlaceMode = "auto";
+    bool m_autoDeinterlaceActive = false;
+
     // Overscan crop in pixels (total from both edges)
     int m_overscanCropH = 0;
     int m_overscanCropV = 0;
@@ -398,6 +403,9 @@ private:
 
     void SaveCartridgeRAM();
     void LoadCartridgeRAM();
+
+    /// @brief Adjust deinterlace enable based on current TV interlace mode
+    void UpdateAutoDeinterlacing();
 
     /// @brief Copy the cached m_sramData buffer into Ymir's internal backup RAM.
     void WriteSRAMToYmir() const;

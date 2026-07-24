@@ -142,19 +142,13 @@ bool CoreWrapper::Initialize() {
         m_stvIO = std::make_unique<stv::STVIOBoard>();
         m_stvIO->SetIPLPointer(m_saturn->mem.IPL.data());
 
-        // Insert empty ST-V cartridge early so IOGA dispatch is available
-        // for the BIOS boot phase (IOGA lives on the same A-Bus page as CS1).
-        {
-            auto *cart = m_saturn->InsertCartridge<ymir::cart::STVGameROMCartridge>();
-            m_stvCartridge = cart;
-            cart->SetIOGADispatch(
-                [this](uint32 addr) -> uint8 {
-                    return m_stvIO->ReadIOGAByte(addr);
-                },
-                [this](uint32 addr, uint8 val) {
-                    m_stvIO->WriteIOGAByte(addr, val);
-                });
-        }
+        // ST-V cartridge is inserted on demand in LoadSTVGame(), not at init.
+        // Keeping it out of Initialize() avoids breaking Saturn save states:
+        // Ymir's SCU::SaveState assumes CartType::ROM cartridges are the
+        // built-in ROMCartridge type and calls DumpROM on a down-cast pointer.
+        // STVGameROMCartridge is a separate class that reports CartType::ROM
+        // but is not ROMCartridge, so an empty init-time cartridge causes a
+        // null-pointer dereference during save.
 
         // NOTE: Ymir requires a file-backed memory-mapped backup RAM
         // We'll set the path later when the game loads (need game name for per-game saves)
@@ -672,10 +666,17 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
     // Note: page 0x40 does NOT conflict with cartridge CS1 (page 0x400+).
     m_stvIO->MapMemory(m_saturn->mainBus);
 
-    // Create in-memory backup RAM (ST-V uses internal backup RAM for EEPROM saves)
+    // Create in-memory backup RAM (ST-V uses internal backup RAM for EEPROM saves).
+    // ST-V BIOS/games manage this as raw memory rather than a Saturn filesystem,
+    // so clear it to a cold-boot state (matches MAME) instead of leaving a
+    // Saturn-style formatted header on it.
     {
         ymir::bup::BackupMemory bupMem;
         bupMem.CreateInMemory(ymir::bup::BackupMemorySize::_256Kbit);
+        const uint32_t bupSize = bupMem.Size();
+        for (uint32_t i = 0; i < bupSize * 2; i += 2) {
+            bupMem.WriteByte(i, 0);
+        }
         m_saturn->mem.SetInternalBackupRAM(std::move(bupMem));
     }
 
@@ -686,6 +687,11 @@ bool CoreWrapper::LoadSTVGame(const char* path, const char* system_directory) {
     // bit 7 = 1), matching Kronos. Must be set after the hard reset since the
     // SMPC mode flag is bridge-controlled and survives Reset().
     m_saturn->SMPC.SetSTVMode(true);
+    m_saturn->SMPC.SetSTVPDRHandlers(
+        [this]() { return m_stvIO->ReadPDR1(); },
+        [this](uint8_t data) { m_stvIO->WritePDR1(data); },
+        [this]() { return m_stvIO->ReadPDR2(); },
+        [this](uint8_t data) { m_stvIO->WritePDR2(data); });
 
     // Keep tray state closed for ST-V (no optical media path)
     m_saturn->CloseTray();
@@ -875,6 +881,7 @@ void CoreWrapper::UnloadGame() {
     if (m_stvMode) {
         m_stvIO->SetSTVMode(false);
         m_saturn->SMPC.SetSTVMode(false);
+        m_saturn->SMPC.SetSTVPDRHandlers(nullptr, nullptr, nullptr, nullptr);
         m_stvMode = false;
     }
 }
@@ -1093,6 +1100,8 @@ void CoreWrapper::RunFrame() {
         m_sramCacheDirty = false;
         m_framesSinceLastSRAMSync = 0;
     }
+
+    UpdateAutoDeinterlacing();
 
     try {
         ScopedTimer timer(m_profiler, "RunFrame_Total");
@@ -1751,13 +1760,8 @@ void CoreWrapper::SetRenderer(const char* renderer) {
 }
 
 void CoreWrapper::SetDeinterlacing(bool enable) {
-    if (!m_initialized || !m_saturn) {
-        return;
-    }
-
-    m_saturn->VDP.ModifyEnhancements([enable](ymir::vdp::config::Enhancements& enh) {
-        enh.deinterlace = enable;
-    });
+    m_deinterlacingEnabled = enable;
+    UpdateAutoDeinterlacing();
 }
 
 
@@ -1784,17 +1788,30 @@ void CoreWrapper::SetThreadedVDP2(bool enable) {
 }
 
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {
-    if (!m_initialized || !m_saturn || !mode) {
-        return;
+    if (!mode) return;
+    m_deinterlaceMode = mode;
+    UpdateAutoDeinterlacing();
+}
+
+void CoreWrapper::UpdateAutoDeinterlacing() {
+    if (!m_initialized || !m_saturn) return;
+
+    bool desired = m_deinterlacingEnabled;
+
+    if (m_deinterlaceMode == "none") {
+        desired = false;
+    } else if (m_deinterlaceMode == "auto") {
+        const auto mode = m_saturn->VDP.GetProbe().GetInterlaceMode();
+        desired = desired && (mode == ymir::vdp::InterlaceMode::SingleDensity ||
+                              mode == ymir::vdp::InterlaceMode::DoubleDensity);
     }
 
-    // Ymir only supports enable/disable deinterlacing via Enhancements
-    // The specific modes (blend/weave/bob/current) were Brimir enhancements
-    // For now, just toggle deinterlacing on/off
-    bool enable = (strcmp(mode, "none") != 0);
-    m_saturn->VDP.ModifyEnhancements([enable](ymir::vdp::config::Enhancements& enh) {
-        enh.deinterlace = enable;
-    });
+    if (m_autoDeinterlaceActive != desired) {
+        m_autoDeinterlaceActive = desired;
+        m_saturn->VDP.ModifyEnhancements([desired](ymir::vdp::config::Enhancements& enh) {
+            enh.deinterlace = desired;
+        });
+    }
 }
 
 void CoreWrapper::SetAudioVolume(int percent) {

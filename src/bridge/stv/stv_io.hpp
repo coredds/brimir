@@ -8,6 +8,7 @@
 #include <ymir/sys/bus.hpp>
 
 #include <array>
+#include <cstdint>
 
 namespace brimir::stv {
 
@@ -42,6 +43,13 @@ public:
         WriteIOGA<uint8, false>(address, value);
     }
 
+    // SMPC PDR1/PDR2 hooks for ST-V cabinet EEPROM bit-banging.
+    // Matches MAME: PDR1 drives 93C46 CLK/DI/CS, PDR2 reads DO.
+    uint8 ReadPDR1() const;
+    void WritePDR1(uint8 data);
+    uint8 ReadPDR2() const;
+    void WritePDR2(uint8 data);
+
 private:
     template <typename T, bool peek>
     T ReadIOGA(uint32 address);
@@ -65,6 +73,49 @@ private:
     bool   m_test = false;
 
     std::array<uint8, 128> m_eeprom{};
+
+    // 93C46 16-bit serial EEPROM state machine driven by SMPC PDR1/PDR2.
+    struct SerialEEPROM {
+        enum class State {
+            Reset,
+            WaitStart,
+            Command,
+            Reading,
+            Writing,
+            Completion
+        };
+
+        State state = State::Reset;
+        bool cs = false;
+        bool clk = false;
+        bool di = false;
+        bool locked = true;
+        bool doOutputHigh = true; // high-impedance DO pulled up
+        uint32_t commandAccum = 0;
+        uint32_t shiftReg = 0;
+        unsigned bits = 0;
+        unsigned address = 0;
+        std::array<uint8, 128> data{};
+
+        static constexpr unsigned kAddressBits = 6;
+        static constexpr unsigned kDataBits = 16;
+        static constexpr unsigned kCells = 1u << kAddressBits;
+
+        void Load(const std::array<uint8, 128> &src);
+        void Reset();
+        void SetCS(bool value);
+        void SetCLK(bool value);
+        void SetDI(bool value);
+        bool GetDO() const { return doOutputHigh; }
+
+    private:
+        void Step();
+        void ExecuteCommand();
+        uint16_t ReadWord(unsigned addr) const;
+        void WriteWord(unsigned addr, uint16_t value);
+    };
+
+    SerialEEPROM m_serialEEPROM;
 };
 
 } // namespace brimir::stv

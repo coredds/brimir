@@ -14,6 +14,7 @@
 #include <ymir/sys/system_internal_callbacks.hpp>
 
 #include <array>
+#include <functional>
 #include <vector>
 
 namespace ymir::smpc {
@@ -65,6 +66,18 @@ public:
     // Matches Kronos smpc.c SmpcINTBACKStatus which hardcodes 0x80.
     void SetSTVMode(bool stv) { m_stvMode = stv; }
 
+    // ST-V arcade mode routes SMPC PDR1/PDR2 to a bit-banged 93C46
+    // cabinet EEPROM and system outputs instead of Saturn peripherals.
+    using STVPDRReadFn = std::function<uint8()>;
+    using STVPDRWriteFn = std::function<void(uint8)>;
+    void SetSTVPDRHandlers(STVPDRReadFn pdr1Read, STVPDRWriteFn pdr1Write,
+                           STVPDRReadFn pdr2Read, STVPDRWriteFn pdr2Write) {
+        m_stvPDR1Read = std::move(pdr1Read);
+        m_stvPDR1Write = std::move(pdr1Write);
+        m_stvPDR2Read = std::move(pdr2Read);
+        m_stvPDR2Write = std::move(pdr2Write);
+    }
+
     peripheral::PeripheralPort &GetPeripheralPort1() {
         return m_port1;
     }
@@ -102,6 +115,11 @@ private:
     bool m_STE; // false = forces system configuration on boot up
 
     bool m_stvMode = false; // ST-V arcade mode flag (bridge-controlled, not reset by Reset())
+
+    STVPDRReadFn m_stvPDR1Read;
+    STVPDRWriteFn m_stvPDR1Write;
+    STVPDRReadFn m_stvPDR2Read;
+    STVPDRWriteFn m_stvPDR2Write;
 
     bool m_resetDisable; // RESD flag, masks the Reset state
     bool m_resetState;   // State of the console's Reset button

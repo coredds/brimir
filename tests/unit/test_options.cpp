@@ -36,7 +36,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
     Expected expected[] = {
         { "brimir_bios",                 "auto"     },
         { "brimir_deinterlacing",        "enabled"  },
-        { "brimir_deinterlace_mode",     "bob"      },
+        { "brimir_deinterlace_mode",     "auto"     },
         { "brimir_autodetect_region",    "enabled"  },
         { "brimir_audio_interpolation",  "linear"   },
         { "brimir_audio_volume",         "100"      },

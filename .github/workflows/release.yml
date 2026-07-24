@@ -23,7 +23,7 @@ jobs:
           arch: amd64
 
       - name: Configure CMake
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_LTO=ON
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_LTO=ON -DBrimir_AVX2=ON
 
       - name: Build
         run: cmake --build build --config Release --target brimir_libretro --parallel
@@ -59,7 +59,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_C_COMPILER=gcc-14 \
-            -DBRIMIR_LTO=ON
+            -DBRIMIR_LTO=ON \
+            -DBrimir_AVX2=ON
 
       - name: Build
         run: cmake --build build --config Release --target brimir_libretro --parallel $(nproc)

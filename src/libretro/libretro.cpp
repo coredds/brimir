@@ -90,7 +90,7 @@ struct OptionCache {
     std::string sh2_overclock = "100";
     std::string autodetect_region = "enabled";
     std::string deinterlacing = "enabled";
-    std::string deinterlace_mode = "bob";
+    std::string deinterlace_mode = "auto";
     std::string audio_volume = "100";
     std::string rotation = "0";
     std::string overscan = "0";

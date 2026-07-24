@@ -443,6 +443,10 @@ template <bool peek>
 FORCE_INLINE uint8 SMPC::ReadPDR1() const {
     if constexpr (peek) {
         return PDR1;
+    } else if (m_stvMode && m_stvPDR1Read) {
+        const uint8 value = m_stvPDR1Read();
+        const_cast<SMPC *>(this)->PDR1 = value;
+        return (value & 0x7F) | (m_busValue & 0x80);
     } else {
         const_cast<SMPC *>(this)->WritePDR1<false>(PDR1);
         return (PDR1 & 0x7F) | (m_busValue & 0x80);
@@ -453,6 +457,10 @@ template <bool peek>
 FORCE_INLINE uint8 SMPC::ReadPDR2() const {
     if constexpr (peek) {
         return PDR2;
+    } else if (m_stvMode && m_stvPDR2Read) {
+        const uint8 value = m_stvPDR2Read();
+        const_cast<SMPC *>(this)->PDR2 = value;
+        return (value & 0x7F) | (m_busValue & 0x80);
     } else {
         const_cast<SMPC *>(this)->WritePDR2<false>(PDR2);
         return (PDR2 & 0x7F) | (m_busValue & 0x80);
@@ -534,6 +542,9 @@ template <bool poke>
 FORCE_INLINE void SMPC::WritePDR1(uint8 value) {
     if constexpr (poke) {
         PDR1 = value;
+    } else if (m_stvMode && m_stvPDR1Write) {
+        m_stvPDR1Write(value);
+        PDR1 = value;
     } else {
         m_port1.UpdateInputs();
         if (m_extLatchEnable1 && !bit::test<6>(PDR1 | DDR1)) {
@@ -550,6 +561,9 @@ FORCE_INLINE void SMPC::WritePDR1(uint8 value) {
 template <bool poke>
 FORCE_INLINE void SMPC::WritePDR2(uint8 value) {
     if constexpr (poke) {
+        PDR2 = value;
+    } else if (m_stvMode && m_stvPDR2Write) {
+        m_stvPDR2Write(value);
         PDR2 = value;
     } else {
         m_port2.UpdateInputs();

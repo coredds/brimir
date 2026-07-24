@@ -12,8 +12,9 @@ Last updated: 2026-06-21 (session 3)
 - EEPROM initializes from ROM header.
 - IOGA responds to BIOS reads (no more "Unhandled" bus messages).
 - CKCHG352 sends NMI to master + stops slave (matching Kronos).
-- **Blocker**: BIOS falls into CD block service menu loop at `0x060152BC`. Game never boots.
+- **Blocker**: BIOS falls into VRAM-clear idle loop at `0x060152BC` (downstream UI/diagnostic path). Game never boots.
 - Slave SH-2 stays at `0x20000200`; SSHON never issued.
+- Implemented SMPC PDR-driven 93C46 cabinet EEPROM and corrected PORT-C coin/start bit mapping; no boot change, confirming the stall is not due to missing EEPROM reads or raw input wiring.
 
 ---
 

@@ -71,6 +71,7 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "Deinterlacing Mode",
         nullptr,
         "Method for deinterlacing interlaced video modes. "
+        "Auto: Enable deinterlacing only when the Saturn outputs interlaced video (recommended). "
         "Bob: Duplicates current field to both lines (60 FPS, no scanlines, smooth). "
         "Weave: Shows alternating fields (60 FPS, CRT-style with scanlines). "
         "Blend: Blends both fields (60 FPS, may show ghosting). "
@@ -79,6 +80,7 @@ static struct retro_core_option_v2_definition option_defs[] = {
         nullptr,
         "video",
         {
+            { "auto", "Auto" },
             { "bob", "Bob" },
             { "weave", "Weave" },
             { "blend", "Blend" },
@@ -86,7 +88,7 @@ static struct retro_core_option_v2_definition option_defs[] = {
             { "none", "None" },
             { nullptr, nullptr }
         },
-        "bob"
+        "auto"
     },
     {
         "brimir_threaded_vdp1",
