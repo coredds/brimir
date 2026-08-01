@@ -3284,6 +3284,44 @@ FORCE_INLINE static void Color888ShadowMasked(const std::span<Color888> pixels,
     }
 }
 
+FORCE_INLINE static void Color888OpaqueAlpha(std::span<Color888> pixels) {
+    size_t i = 0;
+
+#if defined(_M_X64) || defined(__x86_64__)
+    #if defined(__AVX2__)
+    // Eight pixels at a time
+    const __m256i alphaMask = _mm256_set1_epi32(0xFF000000);
+    for (; (i + 8) < pixels.size(); i += 8) {
+        const __m256i pixel_x8 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(&pixels[i]));
+        const __m256i dstColor_x8 = _mm256_or_si256(pixel_x8, alphaMask);
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(&pixels[i]), dstColor_x8);
+    }
+    #endif
+
+    #if defined(__SSE2__)
+    // Four pixels at a time
+    const __m128i alphaMask4 = _mm_set1_epi32(0xFF000000);
+    for (; (i + 4) < pixels.size(); i += 4) {
+        const __m128i pixel_x4 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(&pixels[i]));
+        const __m128i dstColor_x4 = _mm_or_si128(pixel_x4, alphaMask4);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(&pixels[i]), dstColor_x4);
+    }
+    #endif
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    // Four pixels at a time
+    const uint32x4_t alphaMask4 = vdupq_n_u32(0xFF000000);
+    for (; (i + 4) < pixels.size(); i += 4) {
+        const uint32x4_t pixel_x4 = vld1q_u32(reinterpret_cast<const uint32 *>(&pixels[i]));
+        const uint32x4_t dstColor_x4 = vorrq_u32(pixel_x4, alphaMask4);
+        vst1q_u32(reinterpret_cast<uint32 *>(&pixels[i]), dstColor_x4);
+    }
+#endif
+
+    for (; i < pixels.size(); i++) {
+        pixels[i].u32 |= 0xFF000000;
+    }
+}
+
 FORCE_INLINE static void Color888SatAddMasked(const std::span<Color888> dest,
                                               const std::span<const bool, kMaxResH> mask,
                                               const std::span<const Color888, kMaxResH> topColors,
@@ -4405,9 +4443,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
     }
 
     // Opaque alpha
-    for (Color888 &outputColor : framebufferOutput) {
-        outputColor.u32 |= 0xFF000000;
-    }
+    Color888OpaqueAlpha(framebufferOutput);
 }
 
 template <SoftwareVDPRenderer::CharacterMode charMode, bool fourCellChar, ColorFormat colorFormat, uint32 colorMode,
