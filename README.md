@@ -59,6 +59,10 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 - Performance profiling option (gated via core option)
 - Full controller remapping support
 
+## Known Limitations
+
+- **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles. Details and pending investigation notes are in [`docs/superpowers/notes/2026-08-01-vf2-interlaced-audio-dropouts.md`](docs/superpowers/notes/2026-08-01-vf2-interlaced-audio-dropouts.md).
+
 ## Build Requirements
 
 - Windows 10/11 (x64) or Linux (x64)

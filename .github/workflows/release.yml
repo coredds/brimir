@@ -197,18 +197,22 @@ jobs:
           body: |
             Brimir is a Sega Saturn emulation core for libretro, built on Ymir's cycle-accurate hardware layer.
 
-            ### v0.4.9
+            ### ${{ github.ref_name }}
 
             **Fixed**
-            - **SRAM save persistence** — the `.srm` buffer is now copied into Ymir's backup RAM on the first emulation frame instead of during the first `GetSRAMData()` call. Previously the copy happened before the frontend had loaded the `.srm`, causing the game to see an empty/formatted backup RAM and eventually overwriting the real save file.
-            - **SRAM buffer discarded on unload** — `UnloadGame()` no longer clears the in-memory SRAM buffer so the frontend can read the final state for `.srm` serialization after closing content.
-            - **Save-state trailing bytes** — the `BRI2` save-state header now stores the compressed payload size. Frontends that allocate larger buffers than required can no longer cause `LoadState` to misdecode trailing bytes as LZ4 data.
-
-            **Added**
-            - **Threaded VDP core options** — new `brimir_threaded_vdp1` and `brimir_threaded_vdp2` options (default ON) allow toggling threaded rendering for stability testing or debugging save-state race conditions.
+            - **VDP2 EXTEN save-state side effect** — save-state reads no longer advance internal state, eliminating unintended VCNT mutations during saves.
+            - **SCU 8-bit DSP register writes** — byte writes to DSP program/data ports (`0x80`–`0x8F`) are now handled correctly instead of being ignored.
+            - **VDP1 MSB rendering** — pixel writes are force-aligned to 16-bit boundaries when MSB is enabled, and shadow offsets are corrected in 16-bit color mode.
+            - **VDP1 threading memory ordering** — threaded renderer atomics use less strict ordering, reducing synchronization overhead.
+            - **SMPC persist callback cleanup** — added `ClearPersistDataCallback()` for clean shutdown/reset of the SMPC persist callback.
+            - **CDBlock HLE unimplemented commands** — the HLE CD block now reports status and raises `CMOK` for unimplemented commands.
 
             **Changed**
-            - **libretro API serialization** — all core API calls that inspect or mutate running state (`retro_run`, serialize/unserialize, reset, load/unload, and disk-control callbacks) now share a recursive mutex, making the core safe against frontends that dispatch these concurrently.
-            - **Save-state format** — `BRI2` header version bumped to 2 (16 bytes: magic, version, uncompressed size, compressed size). Version 1 states still load, but raw/unknown-magic buffers are now rejected to avoid layout mismatch heap corruption.
+            - **Virtua Gun stable** — Virtua Gun is no longer gated behind a feature flag; it is unconditionally available.
+            - **MSVC build hints** — SH-2 and M68K interpreter helpers use `FORCE_INLINE_EX` to improve release compile times.
+            - **VDP2 interlace performance** — vectorized the final alpha-opaquing pass and skipped the unused alt-field VRAM fetcher reset when deinterlacing is disabled.
+
+            **Known Limitations**
+            - Interlaced / high-res titles (e.g., *Virtua Fighter 2*) may still show audio dropouts on CPU-bound setups when deinterlacing is enabled. Use Deinterlacing Mode = `None` for the best performance in these titles.
 
             See [CHANGELOG.md](https://github.com/coredds/brimir/blob/master/CHANGELOG.md) for full details.
