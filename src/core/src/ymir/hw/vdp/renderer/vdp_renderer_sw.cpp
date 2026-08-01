@@ -2475,8 +2475,10 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2PrepareLine(uint32 y) {
     VDP2DrawLineColorAndBackScreens(y, regs2);
     VDP2UpdateLineScreenScrollParams(y, regs2);
 
-    for (auto &field : m_vramFetchers) {
-        for (auto &fetcher : field) {
+    // The alt-field fetcher bank is only used while deinterlacing; skip the reset otherwise.
+    const uint32 maxField = m_enhancements.deinterlace ? 2u : 1u;
+    for (uint32 fieldIndex = 0; fieldIndex < maxField; ++fieldIndex) {
+        for (auto &fetcher : m_vramFetchers[fieldIndex]) {
             fetcher.lastCharIndex = 0xFFFFFFFF;   // force-fetch first character
             fetcher.lastCellX = 0xFF;             // align 2x2 char fetcher
             fetcher.charDataAddress = 0xFFFFFFFF; // force-fetch first character data chunk
