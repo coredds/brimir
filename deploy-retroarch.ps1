@@ -70,12 +70,19 @@ Write-Host "  [OK] Copied brimir_libretro.dll" -ForegroundColor Green
 # The core is fully self-contained!
 
 # Deploy core info
-if (Test-Path brimir_libretro.info) {
+$infoSources = @(
+    "resources\info\brimir_libretro.info",
+    "brimir_libretro.info"
+)
+$infoSource = $infoSources | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($infoSource) {
     if (-not (Test-Path $retroarchInfo)) {
         New-Item -ItemType Directory -Force -Path $retroarchInfo | Out-Null
     }
-    Copy-Item brimir_libretro.info $retroarchInfo -Force
+    Copy-Item $infoSource "$retroarchInfo\brimir_libretro.info" -Force
     Write-Host "  [OK] Copied brimir_libretro.info" -ForegroundColor Green
+} else {
+    Write-Host "  [WARNING] brimir_libretro.info not found in resources\info\ or repo root" -ForegroundColor Yellow
 }
 
 # Check for BIOS files
