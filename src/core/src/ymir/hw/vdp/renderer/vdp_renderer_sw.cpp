@@ -334,11 +334,11 @@ void SoftwareVDPRenderer::VDP1SyncFB() {
         auto &ctx = m_vdp1RenderingContext;
         ctx.FlushPendingEvents();
         for (;;) {
-            const uint32 curr = ctx.cmdFence.load();
+            const uint32 curr = ctx.cmdFence.load(std::memory_order_acquire);
             if (ctx.cmdCount == curr) {
                 break;
             }
-            ctx.cmdFence.wait(curr);
+            ctx.cmdFence.wait(curr, std::memory_order_acquire);
         }
     }
 }
@@ -651,7 +651,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             case EvtType::Shutdown: running = false; break;
             }
 
-            ++rctx.cmdFence;
+            rctx.cmdFence.fetch_add(1, std::memory_order_release);
             rctx.cmdFence.notify_all();
         }
     }
@@ -1083,14 +1083,22 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
     // TODO: pixelParams.mode.preClippingDisable
 
     uint32 fbOffset = y * regs1.fbSizeH + x;
+    if (!regs1.pixel8Bits) {
+        fbOffset *= sizeof(uint16);
+    }
+    fbOffset &= 0x3FFFF;
+
     const auto fbIndex = VDP1GetDisplayFBIndex() ^ 1;
     auto &drawFB = VDP1GetRendererDrawFB(altFB)[fbIndex];
+    if (pixelParams.mode.msbOn) {
+        // TODO: check correctness -- does it write only when (x&1)==0 or is it force-aligned like this?
+        drawFB[fbOffset & ~1u] |= 0x80;
+        return true;
+    }
+
     if (regs1.pixel8Bits) {
-        fbOffset &= 0x3FFFF;
         // TODO: what happens if pixelParams.mode.colorCalcBits/gouraudEnable != 0?
-        if (pixelParams.mode.msbOn) {
-            drawFB[fbOffset] |= 0x80;
-        } else if (transparentMeshes && pixelParams.mode.meshEnable) {
+        if (transparentMeshes && pixelParams.mode.meshEnable) {
             m_meshFB[altFB][fbIndex][fbOffset] = pixelParams.color;
         } else {
             drawFB[fbOffset] = pixelParams.color;
@@ -1099,64 +1107,59 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
             }
         }
     } else {
-        fbOffset = (fbOffset * sizeof(uint16)) & 0x3FFFE;
         uint8 *pixel = &drawFB[fbOffset];
 
-        if (pixelParams.mode.msbOn) {
-            *pixel |= 0x80;
-        } else {
-            Color555 srcColor{.u16 = pixelParams.color};
-            Color555 dstColor{.u16 = util::ReadBE<uint16>(pixel)};
+        Color555 srcColor{.u16 = pixelParams.color};
+        Color555 dstColor{.u16 = util::ReadBE<uint16>(pixel)};
 
-            // Apply color calculations
-            //
-            // In all cases where calculation is done, the raw color data to be drawn ("original graphic") or from
-            // the background are interpreted as 5:5:5 RGB.
+        // Apply color calculations
+        //
+        // In all cases where calculation is done, the raw color data to be drawn ("original graphic") or from
+        // the background are interpreted as 5:5:5 RGB.
 
-            if (pixelParams.mode.gouraudEnable) {
-                // Apply gouraud shading to source color
-                srcColor = pixelParams.gouraud.Blend(srcColor);
+        if (pixelParams.mode.gouraudEnable) {
+            // Apply gouraud shading to source color
+            srcColor = pixelParams.gouraud.Blend(srcColor);
+        }
+
+        switch (pixelParams.mode.colorCalcBits) {
+        case 0: // Replace
+            dstColor = srcColor;
+            break;
+        case 1: // Shadow
+            // Halve destination luminosity if it's not transparent
+            if (dstColor.msb) {
+                dstColor.r >>= 1u;
+                dstColor.g >>= 1u;
+                dstColor.b >>= 1u;
             }
-
-            switch (pixelParams.mode.colorCalcBits) {
-            case 0: // Replace
-                dstColor = srcColor;
-                break;
-            case 1: // Shadow
-                // Halve destination luminosity if it's not transparent
-                if (dstColor.msb) {
-                    dstColor.r >>= 1u;
-                    dstColor.g >>= 1u;
-                    dstColor.b >>= 1u;
-                }
-                break;
-            case 2: // Half-luminance
-                // Draw original graphic with halved luminance
-                dstColor.r = srcColor.r >> 1u;
-                dstColor.g = srcColor.g >> 1u;
-                dstColor.b = srcColor.b >> 1u;
-                dstColor.msb = srcColor.msb;
-                break;
-            case 3: // Half-transparency
-                // If background is not transparent, blend half of original graphic and half of background
-                // Otherwise, draw original graphic as is
-                if (dstColor.msb) {
-                    dstColor.r = (srcColor.r + dstColor.r) >> 1u;
-                    dstColor.g = (srcColor.g + dstColor.g) >> 1u;
-                    dstColor.b = (srcColor.b + dstColor.b) >> 1u;
-                } else {
-                    dstColor = srcColor;
-                }
-                break;
-            }
-
-            if (transparentMeshes && pixelParams.mode.meshEnable) {
-                util::WriteBE<uint16>(&m_meshFB[altFB][fbIndex][fbOffset], dstColor.u16);
+            break;
+        case 2: // Half-luminance
+            // Draw original graphic with halved luminance
+            dstColor.r = srcColor.r >> 1u;
+            dstColor.g = srcColor.g >> 1u;
+            dstColor.b = srcColor.b >> 1u;
+            dstColor.msb = srcColor.msb;
+            break;
+        case 3: // Half-transparency
+            // If background is not transparent, blend half of original graphic and half of background
+            // Otherwise, draw original graphic as is
+            if (dstColor.msb) {
+                dstColor.r = (srcColor.r + dstColor.r) >> 1u;
+                dstColor.g = (srcColor.g + dstColor.g) >> 1u;
+                dstColor.b = (srcColor.b + dstColor.b) >> 1u;
             } else {
-                util::WriteBE<uint16>(pixel, dstColor.u16);
-                if constexpr (transparentMeshes) {
-                    util::WriteBE<uint16>(&m_meshFB[altFB][fbIndex][fbOffset], 0);
-                }
+                dstColor = srcColor;
+            }
+            break;
+        }
+
+        if (transparentMeshes && pixelParams.mode.meshEnable) {
+            util::WriteBE<uint16>(&m_meshFB[altFB][fbIndex][fbOffset], dstColor.u16);
+        } else {
+            util::WriteBE<uint16>(pixel, dstColor.u16);
+            if constexpr (transparentMeshes) {
+                util::WriteBE<uint16>(&m_meshFB[altFB][fbIndex][fbOffset], 0);
             }
         }
     }
