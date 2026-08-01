@@ -8,10 +8,16 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Hardware layer synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes backported through 2026-08-01.
 
+## What's New in v0.5.0
+
+- **Ymir hardware-layer backports** — VDP2 EXTEN save-state fix, SCU 8-bit DSP writes, VDP1 MSB/force-align fixes, Virtua Gun graduation, SMPC callback cleanup, CDBlock HLE unimplemented-command status, and MSVC `FORCE_INLINE_EX` hints.
+- **Interlaced-mode performance** — vectorized the final VDP2 alpha-opaquing pass and skip resetting the unused alt-field fetcher bank when deinterlacing is disabled.
+- **Deployment fix** — `deploy-retroarch.ps1` now correctly finds `brimir_libretro.info` under `resources\info\`.
+
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes through 2026-07-17
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes through 2026-08-01
 - Accurate SH-2 dual-CPU emulation with WB/EX stall timing, 32-bit instruction fetch, and inlined opcode decode
 - Full VDP1 sprite engine and VDP2 scroll plane graphics with COPR register fix
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation and volume control
