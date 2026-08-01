@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] - 2026-08-01
+
+### Fixed
+- **VDP2 EXTEN save-state side effect** — `ReadEXTEN()` is now templated with a `peek` mode; save-state serialization latches the register value without advancing VCNT, preventing unintentional state mutation during saves.
+- **SCU 8-bit DSP register writes** — byte writes to the DSP program and data ports (`0x80`–`0x8F`) are now handled correctly instead of being ignored.
+- **VDP1 MSB rendering** — force-aligns pixel writes to 16-bit boundaries when MSB is enabled and corrects shadow offsets in 16-bit color mode.
+- **VDP1 threading memory ordering** — atomic operations in the threaded software renderer use less strict memory ordering, reducing synchronization overhead while preserving correctness.
+- **SMPC persist callback cleanup** — added `ClearPersistDataCallback()` to allow clean shutdown/reset of the SMPC persist callback.
+- **CDBlock HLE unimplemented commands** — the HLE CD block now reports current CD status and raises `CMOK` when an unimplemented command is encountered, matching Saturn firmware expectations.
+
+### Changed
+- **Virtua Gun stable** — the Virtua Gun peripheral type is no longer gated behind `Ymir_FF_VIRTUA_GUN`; it is unconditionally available in `kTypes`.
+- **MSVC build hints** — heavy SH-2 and M68K interpreter helpers now use `FORCE_INLINE_EX`, improving MSVC compile times for release builds.
+
+### Technical
+- 7 upstream Ymir hardware-layer commits backported since v0.4.9 (VDP2, SCU, VDP1, SMPC, CDBlock, SH2/M68K build).
+- Verified with the active Catch2 suite on Windows x64 (MSVC 2022): 218,186 assertions pass.
+- Linux x64 and aarch64 cross-compiles were not executed in this environment due to missing toolchains; the ARM NEON intrinsics in the VDP1 renderer were verified to remain intact after the merge.
+
+---
+
 ## [0.4.9] - 2026-07-19
 
 ### Fixed
