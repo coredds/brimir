@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Virtua Gun stable** — the Virtua Gun peripheral type is no longer gated behind `Ymir_FF_VIRTUA_GUN`; it is unconditionally available in `kTypes`.
 - **MSVC build hints** — heavy SH-2 and M68K interpreter helpers now use `FORCE_INLINE_EX`, improving MSVC compile times for release builds.
+- **VDP2 interlace performance** — small per-line optimizations in the software renderer: vectorized the final alpha opaquing pass and skip resetting the unused alt-field VRAM fetcher bank when deinterlacing is disabled.
 
 ### Technical
 - 7 upstream Ymir hardware-layer commits backported since v0.4.9 (VDP2, SCU, VDP1, SMPC, CDBlock, SH2/M68K build).
