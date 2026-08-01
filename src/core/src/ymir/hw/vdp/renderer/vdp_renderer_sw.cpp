@@ -3827,9 +3827,10 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
     const auto &scanline_layerPrios = composeLineBuffers.scanline_layerPrios;
 
     // Determine layer order
-    // Note: every entry is fully initialized by the per-pixel loop below,
-    // so an explicit pre-fill is unnecessary.
     std::array<std::array<uint8, 3>, kMaxResH> layerSortOrder;
+    static constexpr std::array<uint8, 3> kLayerSortOrderInit{uint8(LYR_Back ^ 7), uint8(LYR_Back ^ 7),
+                                                              uint8(LYR_Back ^ 7)};
+    std::fill_n(layerSortOrder.begin(), m_HRes, kLayerSortOrderInit);
 
     for (uint32 layer = 0; layer < m_layerOutputs[altField].size(); layer++) {
         if (!state2.layerEnabled[layer]) {
