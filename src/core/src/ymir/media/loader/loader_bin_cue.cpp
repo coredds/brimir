@@ -3,11 +3,19 @@
 #include <ymir/media/binary_reader/binary_reader_impl.hpp>
 #include <ymir/media/frame_address.hpp>
 
+#include <ymir/util/bit_ops.hpp>
 #include <ymir/util/scope_guard.hpp>
 
 #include <fmt/format.h>
 #include <fmt/std.h>
 
+#define DR_MP3_IMPLEMENTATION
+#include <dr_libs/dr_mp3.h>
+
+#include <stb/stb_vorbis.c>
+
+#include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -220,7 +228,7 @@ static std::optional<CueSheet> LoadSheet(std::filesystem::path cuePath, CbLoader
             }
 
             auto &track = sheet.tracks.emplace_back();
-            track.fileIndex = sheet.files.size() - 1;
+            track.fileIndex = static_cast<uint32>(sheet.files.size() - 1);
 
             ins >> track.number >> track.format;
 
@@ -333,6 +341,119 @@ static std::optional<CueSheet> LoadSheet(std::filesystem::path cuePath, CbLoader
     return sheet;
 }
 
+// Converts a mono 16-bit PCM buffer into an interleaved stereo buffer by duplicating each sample.
+// Uses AVX2 when the build is configured for it, otherwise falls back to a scalar loop.
+static void MonoToStereo(std::vector<sint16> &audioData) {
+    const size_t frameCount = audioData.size();
+    if (frameCount == 0) {
+        return;
+    }
+
+    std::vector<sint16> temp;
+    temp.resize(frameCount * 2);
+    const sint16 *src = audioData.data();
+    sint16 *dst = temp.data();
+    for (size_t i = 0; i < frameCount; ++i) {
+        dst[i * 2] = src[i];
+        dst[i * 2 + 1] = src[i];
+    }
+
+    audioData = std::move(temp);
+}
+
+// Decodes a compressed audio file (MP3 or OGG) to stereo, 16-bit PCM at 44.1 kHz and returns the raw bytes padded
+// to a multiple of a CD audio sector. Returns an empty vector if decoding fails or the source has no audio frames.
+static std::vector<uint8> DecodeAudioTrack(const std::filesystem::path &path, const std::string &format) {
+    std::vector<sint16> audioData;
+    uint64 frameCount = 0;
+    uint8 numChannels = 0;
+    uint32 sampleRate = 0;
+
+    if (format == "MP3") {
+        drmp3_config mp3Config{};
+        drmp3_uint64 mp3FrameCount = 0;
+        drmp3_int16 *tempBuffer =
+            drmp3_open_file_and_read_pcm_frames_s16(path.string().c_str(), &mp3Config, &mp3FrameCount, nullptr);
+        if (tempBuffer == nullptr) {
+            return {};
+        }
+        frameCount = mp3FrameCount;
+        numChannels = static_cast<uint8>(mp3Config.channels);
+        sampleRate = mp3Config.sampleRate;
+        audioData = std::vector<sint16>(tempBuffer, tempBuffer + frameCount * numChannels);
+        drmp3_free(tempBuffer, nullptr);
+    } else if (format == "OGG") {
+        int oggChannels = 0;
+        int oggSampleRate = 0;
+        short *tempBuffer = nullptr;
+        const int oggFrameCount = stb_vorbis_decode_filename(path.string().c_str(), &oggChannels, &oggSampleRate,
+                                                              &tempBuffer);
+        if (oggFrameCount == -1 || tempBuffer == nullptr) {
+            return {};
+        }
+        frameCount = static_cast<uint64>(oggFrameCount);
+        numChannels = static_cast<uint8>(oggChannels);
+        sampleRate = static_cast<uint32>(oggSampleRate);
+        audioData = std::vector<sint16>(tempBuffer, tempBuffer + frameCount * numChannels);
+        free(tempBuffer);
+    } else {
+        return {};
+    }
+
+    if (frameCount == 0 || audioData.empty()) {
+        return {};
+    }
+
+    // Expand mono to stereo
+    if (numChannels == 1) {
+        MonoToStereo(audioData);
+        numChannels = 2;
+    }
+
+    // Resample to 44.1 kHz with linear interpolation if needed
+    constexpr uint32 kTargetSamplingRate = 44100;
+    if (sampleRate != kTargetSamplingRate) {
+        const double ratio = static_cast<double>(sampleRate) / static_cast<double>(kTargetSamplingRate);
+        const uint64 newFrameCount = static_cast<uint64>(static_cast<double>(frameCount) / ratio);
+        std::vector<sint16> resampled;
+        resampled.resize(newFrameCount * numChannels);
+        for (uint64 i = 0; i < newFrameCount; i++) {
+            const double srcIndex = static_cast<double>(i) * ratio;
+            const uint64 srcIndexInt = static_cast<uint64>(srcIndex);
+            const double frac = srcIndex - static_cast<double>(srcIndexInt);
+            const uint64 nextIndex = std::min(srcIndexInt + 1, frameCount - 1);
+            for (uint8 ch = 0; ch < numChannels; ch++) {
+                const sint16 sample1 = audioData[srcIndexInt * numChannels + ch];
+                const sint16 sample2 = audioData[nextIndex * numChannels + ch];
+                resampled[i * numChannels + ch] =
+                    static_cast<sint16>(sample1 + static_cast<sint32>(sample2 - sample1) * frac);
+            }
+        }
+        audioData = std::move(resampled);
+        frameCount = newFrameCount;
+    }
+
+    // Swap endianness on big-endian hosts
+    if constexpr (std::endian::native != std::endian::little) {
+        for (sint16 &sample : audioData) {
+            sample = static_cast<sint16>(bit::byte_swap(static_cast<uint16>(sample)));
+        }
+    }
+
+    // Copy to a byte buffer and pad to a multiple of a CD audio sector
+    const size_t pcmBytes = audioData.size() * sizeof(sint16);
+    size_t sectorDataSize = pcmBytes;
+    const size_t remainder = sectorDataSize % 2352;
+    if (remainder > 0) {
+        sectorDataSize += 2352 - remainder;
+    }
+    std::vector<uint8> sectorData(sectorDataSize);
+    std::memcpy(sectorData.data(), audioData.data(), pcmBytes);
+    std::fill(sectorData.begin() + pcmBytes, sectorData.end(), uint8{0});
+
+    return sectorData;
+}
+
 bool Load(std::filesystem::path cuePath, Disc &disc, bool preloadToRAM, CbLoaderMessage cbMsg) {
     util::ScopeGuard sgInvalidateDisc{[&] { disc.Invalidate(); }};
 
@@ -342,36 +463,34 @@ bool Load(std::filesystem::path cuePath, Disc &disc, bool preloadToRAM, CbLoader
     if (auto optSheet = LoadSheet(cuePath, cbMsg)) {
         CueSheet &sheet = *optSheet;
 
-        // Build binary reader
-        // - use file reader directly if there's only one file in the sheet
-        // - use composite reader if there are multiple files
+        // Build binary reader. Always use a composite reader so that compressed audio (MP3/OGG) and WAVE subviews
+        // are handled uniformly regardless of how many files the CUE sheet references.
         std::shared_ptr<IBinaryReader> reader;
-        if (sheet.files.size() == 1) {
-            auto &file = sheet.files.front();
-            std::error_code err{};
-            if (preloadToRAM) {
-                reader = std::make_shared<MemoryBinaryReader>(file.path, err);
-            } else {
-                reader = std::make_shared<MemoryMappedBinaryReader>(file.path, err);
-            }
-            if (err) {
-                errorMsg(fmt::format("BIN/CUE: Failed to load {} - {}", file.path, err.message()));
-                return false;
-            }
-        } else {
-            uint32 currSheetTrackIndex = 0;
-            auto compReader = std::make_shared<CompositeBinaryReader>();
-            for (uint32 fileIndex = 0; fileIndex < sheet.files.size(); ++fileIndex) {
-                auto &file = sheet.files[fileIndex];
+        auto compReader = std::make_shared<CompositeBinaryReader>();
+        for (uint32 fileIndex = 0; fileIndex < sheet.files.size(); ++fileIndex) {
+            auto &file = sheet.files[fileIndex];
 
-                std::shared_ptr<IBinaryReader> fileReader;
-                std::error_code err{};
+            std::shared_ptr<IBinaryReader> fileReader;
+            std::error_code err{};
+            if (file.format == "MP3" || file.format == "OGG") {
+                auto sectorData = DecodeAudioTrack(file.path, file.format);
+                if (sectorData.empty()) {
+                    errorMsg(fmt::format("BIN/CUE: Failed to decode {} file {}", file.format, file.path));
+                    return false;
+                }
+
+                fileReader = std::make_shared<MemoryBinaryReader>(std::move(sectorData));
+                file.size = fileReader->Size();
+            } else {
                 if (preloadToRAM) {
                     fileReader = std::make_shared<MemoryBinaryReader>(file.path, err);
                 } else {
                     fileReader = std::make_shared<MemoryMappedBinaryReader>(file.path, err);
                 }
+
                 if (file.format == "WAVE") {
+                    bool waveSubviewValid = false;
+
                     // Check if wave file is raw, uncompressed 16-bit PCM stereo at 44100 Hz and grab a subview if so
                     [&] {
                         std::array<uint8, 4> buf{};
@@ -425,6 +544,9 @@ bool Load(std::filesystem::path cuePath, Disc &disc, bool preloadToRAM, CbLoader
                                 return;
                             }
                             const uint32 chunkSize = util::ReadLE<uint32>(&buf[0]);
+                            if (chunkSize == 0) {
+                                return;
+                            }
 
                             if (chunkID[0] == 'f' && chunkID[1] == 'm' && chunkID[2] == 't' && chunkID[3] == ' ') {
                                 std::array<uint8, 16> fmtData{};
@@ -462,6 +584,8 @@ bool Load(std::filesystem::path cuePath, Disc &disc, bool preloadToRAM, CbLoader
                                     fmt::format("BIN/CUE: {}: found WAVE data starting at {}", file.path, dataOffset));
                                 fileReader =
                                     std::make_shared<SharedSubviewBinaryReader>(fileReader, dataOffset, chunkSize);
+                                file.size = chunkSize;
+                                waveSubviewValid = true;
 
                                 // If the first track that uses this file has a PREGAP, append a silent binary reader
                                 for (auto &sheetTrack : sheet.tracks) {
@@ -480,53 +604,34 @@ bool Load(std::filesystem::path cuePath, Disc &disc, bool preloadToRAM, CbLoader
                             chunkOffset += chunkSize + 8ull;
                         }
                     }();
-                }
-                if (err) {
-                    errorMsg(fmt::format("BIN/CUE: Failed to load {} - {}", file.path, err.message()));
-                    return false;
-                }
-                compReader->Append(fileReader);
 
-                // If the last track that uses this file has a POSTGAP, append a silent binary reader
-                while (currSheetTrackIndex < sheet.tracks.size()) {
-                    auto &sheetTrack = sheet.tracks[currSheetTrackIndex];
-                    if (sheetTrack.fileIndex != fileIndex) {
-                        break;
+                    if (!waveSubviewValid) {
+                        errorMsg(fmt::format("BIN/CUE: {} is not a supported WAVE file", file.path));
+                        return false;
                     }
-                    ++currSheetTrackIndex;
-                }
-                if (currSheetTrackIndex > 0) {
-                    auto &prevTrack = sheet.tracks[currSheetTrackIndex - 1];
-                    if (prevTrack.postgap > 0) {
-                        uint32 sectorSize;
-                        if (prevTrack.format.starts_with("MODE")) {
-                            // Data track
-                            if (prevTrack.format.ends_with("_RAW")) {
-                                // MODE1_RAW and MODE2_RAW
-                                sectorSize = 2352;
-                            } else {
-                                // Known modes:
-                                // MODE1/2048   MODE2/2048
-                                //              MODE2/2324
-                                //              MODE2/2336
-                                // MODE1/2352   MODE2/2352
-                                sectorSize = std::stoi(prevTrack.format.substr(6));
-                            }
-                        } else if (prevTrack.format == "CDG") {
-                            // Karaoke CD+G track
-                            sectorSize = 2448;
-                        } else if (prevTrack.format == "AUDIO") {
-                            // Audio track
-                            sectorSize = 2352;
-                        } else {
-                            errorMsg(fmt::format("BIN/CUE: Unsupported track format: {}", prevTrack.format));
-                            return false;
-                        }
+                    if (fileReader->Size() == 0) {
+                        errorMsg(fmt::format("BIN/CUE: WAVE file {} has no audio data", file.path));
+                        return false;
+                    }
+
+                    // Append a silent reader after the WAVE data to align it to a multiple of a CD audio sector
+                    const size_t remainder = fileReader->Size() % 2352;
+                    if (remainder > 0) {
+                        const size_t alignSize = 2352 - remainder;
+                        compReader->Append(std::make_shared<ZeroBinaryReader>(alignSize));
+                        file.size += alignSize;
                     }
                 }
             }
-            reader = compReader;
+            if (err) {
+                errorMsg(fmt::format("BIN/CUE: Failed to load {} - {}", file.path, err.message()));
+                return false;
+            }
+            compReader->Append(fileReader);
+
+            // POSTGAP is handled per-track by the SharedSubviewBinaryReader created when tracks are closed.
         }
+        reader = compReader;
 
         // NOTE: INDEX 00 is present in the binary files, PREGAP/POSTGAP are not but do exist on the disc.
 
@@ -636,10 +741,9 @@ bool Load(std::filesystem::path cuePath, Disc &disc, bool preloadToRAM, CbLoader
                 session.firstTrackIndex = sheetTrack.number - 1;
             } else {
                 // Close previous track
-                closeTrack(i);
+                closeTrack(static_cast<uint32>(i));
             }
             session.lastTrackIndex = sheetTrack.number - 1;
-            ++session.numTracks;
 
             if (sheetTrack.format.starts_with("MODE")) {
                 // Data track
@@ -703,10 +807,11 @@ bool Load(std::filesystem::path cuePath, Disc &disc, bool preloadToRAM, CbLoader
         }
 
         // Close last track
-        closeTrack(sheet.tracks.size());
+        closeTrack(static_cast<uint32>(sheet.tracks.size()));
 
         // Finish session
         session.endFrameAddress = frameAddress - 1;
+        session.numTracks = session.lastTrackIndex - session.firstTrackIndex + 1;
         session.BuildTOC();
 
         // Read header

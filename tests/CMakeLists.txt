@@ -19,6 +19,8 @@ add_executable(brimir_tests
     unit/test_core_wrapper.cpp
     # Audio ring buffer tests
     unit/test_audio_ring_buffer.cpp
+    # Media loader tests (CUE/CCD compressed audio, sparse tracks, sector alignment)
+    unit/test_media_loader.cpp
     # VDP priority tests (disabled — uses removed SetHorizontalOverscan API)
     # unit/test_vdp_priority.cpp
     # GPU validation tests (disabled — depends on removed vdp_renderer.hpp)

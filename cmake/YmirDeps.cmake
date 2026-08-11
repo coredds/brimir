@@ -31,5 +31,15 @@ set(BUILD_FUZZER OFF)
 set(WITH_LZMA_ASM OFF CACHE BOOL "" FORCE)  # Disable lzma assembly to avoid MASM issues
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/vendor/libchdr EXCLUDE_FROM_ALL)
 
+# dr_libs - single-file audio decoding (dr_mp3)
+message(STATUS "==> dr_libs")
+add_library(dr_libs INTERFACE)
+target_include_directories(dr_libs INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/dr_libs/include)
+
+# stb - single-file audio decoding (stb_vorbis)
+message(STATUS "==> stb")
+add_library(stb INTERFACE)
+target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/stb)
+
 message(STATUS "Done adding core library dependencies")
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.1] - 2026-08-10
+
+### Added
+- **Multi-file CUE / compressed audio support** — the BIN/CUE loader now builds a composite reader for any number of `FILE` entries and can decode `MP3` and `OGG` audio tracks to 44.1 kHz stereo PCM, including mono-to-stereo expansion and resampling.
+- **New media-loader unit tests** — coverage for sparse WAVE track numbers, WAVE sector alignment, single and multi-file MP3/OGG loads, and invalid WAVE rejection.
+
+### Changed
+- **BIN/CUE loader hardening** — empty decoded audio and unsupported/invalid WAVE files are now rejected instead of being appended to the disc image; dead POSTGAP code removed; WAVE data alignment appended after the PCM chunk.
+
+### Technical
+- Added CMake interface targets for `dr_libs` and `stb` and linked them to `brimir-core`.
+- Verified with the active Catch2 suite on Windows x64 (MSVC 2022): 218,237 assertions pass.
+
+---
+
 ## [0.5.0] - 2026-08-01
 
 ### Fixed

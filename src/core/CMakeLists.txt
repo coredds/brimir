@@ -31,6 +31,8 @@ target_link_libraries(brimir-core PUBLIC
     xxhash
     chdr-static
     lz4_static
+    dr_libs
+    stb
 )
 if (WIN32)
     target_link_libraries(brimir-core PUBLIC
