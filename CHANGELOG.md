@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.2] - 2026-08-22
+
+### Fixed
+- **VDP2 color gradation** — color gradation is now disabled when the color RAM mode is not 0, fixing the fog effect in *Astal*.
+- **BIN/CUE loader validation** — malformed CUE sheets with no tracks, no indexes, or missing `INDEX 01` are now rejected early with a clear error message.
+- **VDP renderer switch devlog crash** — the raw renderer pointer is now captured before ownership transfer, fixing a use-after-move when devlog is enabled.
+
+### Technical
+- 3 upstream Ymir hardware-layer commits backported since v0.5.1 (VDP2, media loader, VDP setup).
+- Verified with the active Catch2 suite on Windows x64 (MSVC 2022) and Linux x64 (GCC 14): 218,237 assertions pass.
+
+---
+
 ## [0.5.1] - 2026-08-10
 
 ### Added
