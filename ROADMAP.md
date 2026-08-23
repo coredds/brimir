@@ -97,7 +97,7 @@ Ymir exposes `saturn.VDP.SetLayerEnabled(Layer, bool)` and `saturn.VDP.vdp2Debug
 - Debug overlay modes (layer coloring, priority stacks, color calc, shadow, windows, rotation params)
 
 ### 9. Internal Cheat Database
-**Layer**: Bridge | **Effort**: ~200 LOC | **Target**: v0.5.1
+**Layer**: Bridge | **Effort**: ~200 LOC | **Target**: v0.5.3
 
 Ship a JSON cheat database with the core. Auto-apply per-game Action Replay codes on load. Community-contributable.
 
@@ -219,8 +219,10 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requi
 |---|---|
 | **v0.4.1** ✅ | System RAM exposure, memory descriptors, save state compression, contentless mode, M3U-less disc swap, CD speed 24x+ |
 | **v0.4.2** ✅ | SH2 decode optimization + DIV1 microoptimization (4 files synced verbatim from Ymir HEAD), rewind/runahead viability |
-| **v0.5.0** 🚧 | Cheat system, all controller types, ~~screen rotation~~, layer toggling, ~~overscan crop~~, ~~audio volume~~, cartridge RAM persistence, frameskip, region patching, RetroAchievements |
-| **v0.5.1** | Internal cheat database, extended compatibility testing |
+| **v0.5.0** ✅ | Cheat system, all controller types, ~~screen rotation~~, layer toggling, ~~overscan crop~~, ~~audio volume~~, cartridge RAM persistence, frameskip, region patching, RetroAchievements |
+| **v0.5.1** ✅ | Multi-file CUE / compressed audio support, media loader tests |
+| **v0.5.2** ✅ | Ymir hardware-layer backports: VDP2 color gradation, BIN/CUE loader sanity checks, VDP renderer switch crash fix |
+| **v0.5.3** | Internal cheat database, extended compatibility testing |
 | **v0.6.0** | CPU overclocking (hybrid — needs Ymir config), VDP2 debug overlay exposure |
 | **v0.7.0+** | JIT compiler (Phase 2), hardware renderer review |
 | **v1.0.0** | JIT stable, 85%+ compatibility, RetroArch core inclusion |

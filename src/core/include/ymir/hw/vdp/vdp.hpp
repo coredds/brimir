@@ -270,6 +270,7 @@ private:
         requires std::derived_from<T, IVDPRenderer>
     T *UseRenderer(Args &&...args) {
         T *renderer = new T(std::forward<Args>(args)...);
+        T *pRenderer = renderer;
         if (renderer == nullptr) {
             return nullptr;
         }
@@ -293,9 +294,9 @@ private:
 
         m_renderer.reset(renderer);
 
-        devlog::info<grp::config>("Switched to {} VDP renderer", renderer->GetName());
+        devlog::info<grp::config>("Switched to {} VDP renderer", pRenderer->GetName());
 
-        return renderer;
+        return pRenderer;
     }
 
     CBHBlankStateChange m_cbHBlankStateChange;
