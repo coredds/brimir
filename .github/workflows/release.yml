@@ -200,17 +200,9 @@ jobs:
             ### ${{ github.ref_name }}
 
             **Fixed**
-            - **VDP2 EXTEN save-state side effect** — save-state reads no longer advance internal state, eliminating unintended VCNT mutations during saves.
-            - **SCU 8-bit DSP register writes** — byte writes to DSP program/data ports (`0x80`–`0x8F`) are now handled correctly instead of being ignored.
-            - **VDP1 MSB rendering** — pixel writes are force-aligned to 16-bit boundaries when MSB is enabled, and shadow offsets are corrected in 16-bit color mode.
-            - **VDP1 threading memory ordering** — threaded renderer atomics use less strict ordering, reducing synchronization overhead.
-            - **SMPC persist callback cleanup** — added `ClearPersistDataCallback()` for clean shutdown/reset of the SMPC persist callback.
-            - **CDBlock HLE unimplemented commands** — the HLE CD block now reports status and raises `CMOK` for unimplemented commands.
-
-            **Changed**
-            - **Virtua Gun stable** — Virtua Gun is no longer gated behind a feature flag; it is unconditionally available.
-            - **MSVC build hints** — SH-2 and M68K interpreter helpers use `FORCE_INLINE_EX` to improve release compile times.
-            - **VDP2 interlace performance** — vectorized the final alpha-opaquing pass and skipped the unused alt-field VRAM fetcher reset when deinterlacing is disabled.
+            - **VDP2 color gradation** — color gradation is now disabled when the color RAM mode is not 0, fixing the fog effect in *Astal*.
+            - **BIN/CUE loader validation** — malformed CUE sheets with no tracks, no indexes, or missing `INDEX 01` are now rejected early with a clear error message.
+            - **VDP renderer switch devlog crash** — the raw renderer pointer is now captured before ownership transfer, fixing a use-after-move when devlog is enabled.
 
             **Known Limitations**
             - Interlaced / high-res titles (e.g., *Virtua Fighter 2*) may still show audio dropouts on CPU-bound setups when deinterlacing is enabled. Use Deinterlacing Mode = `None` for the best performance in these titles.
