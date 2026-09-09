@@ -144,11 +144,6 @@ generate_export_header(brimir-core EXPORT_FILE_NAME include/ymir/export.h)
 target_compile_definitions(brimir-core PUBLIC "$<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:Brimir_core_STATIC_DEFINE>")
 target_include_directories(brimir-core PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>")
 
-if (IPO_SUPPORTED AND Brimir_ENABLE_IPO)
-    message(STATUS "Enabling IPO / LTO for brimir-core")
-    set_property(TARGET brimir-core PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
 ## Apply performance options
 if (Brimir_AVX2)
     target_compile_definitions(brimir-core PUBLIC ${PROJECT_NAME}_AVX2=1)

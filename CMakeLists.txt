@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 # Project information
 project(Brimir
-    VERSION 0.5.2
+    VERSION 0.5.3
     DESCRIPTION "Sega Saturn emulation libretro core"
     LANGUAGES CXX C
 )
@@ -91,10 +91,10 @@ include(cmake/YmirDeps.cmake)
 # Set Brimir core version variables
 set(Brimir_VERSION_MAJOR 0)
 set(Brimir_VERSION_MINOR 5)
-set(Brimir_VERSION_PATCH 2)
+set(Brimir_VERSION_PATCH 3)
 set(Brimir_VERSION_PRERELEASE "")
 set(Brimir_VERSION_BUILD "")
-set(Brimir_VERSION "0.5.2")
+set(Brimir_VERSION "0.5.3")
 set(Brimir_DEV_BUILD OFF)
 set(Brimir_ENABLE_DEVLOG ON)
 set(Brimir_ENABLE_DEV_ASSERTIONS OFF)
@@ -170,17 +170,6 @@ else()
     )
 endif()
 
-# Link-Time Optimization
-if(BRIMIR_LTO)
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
-    if(ipo_supported)
-        set_property(TARGET brimir_libretro PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-    else()
-        message(WARNING "LTO requested but not supported: ${ipo_error}")
-    endif()
-endif()
-
 # Tests
 if(BRIMIR_BUILD_TESTS)
     enable_testing()
@@ -189,6 +178,41 @@ if(BRIMIR_BUILD_TESTS)
 else()
     message(STATUS "Building without tests (use -DBRIMIR_BUILD_TESTS=ON to enable)")
 endif()
+
+# Configure IPO after all consumers exist; never enable it globally for vendors.
+set(brimir_ipo_targets)
+if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error LANGUAGES CXX)
+    if(ipo_supported)
+        # Final consumers must also link IPO objects (notably MSVC /GL objects).
+        list(APPEND brimir_ipo_targets brimir_libretro brimir_tests)
+        if(BRIMIR_LTO)
+            list(APPEND brimir_ipo_targets brimir_bridge brimir_libretro_api)
+        endif()
+        if(Brimir_ENABLE_IPO)
+            list(APPEND brimir_ipo_targets brimir-core benchmark_sh2 jit-tests)
+        endif()
+    else()
+        message(WARNING "IPO/LTO requested but not supported: ${ipo_error}")
+    endif()
+endif()
+
+foreach(target IN ITEMS brimir-core brimir_bridge brimir_libretro_api brimir_libretro brimir_tests benchmark_sh2 jit-tests)
+    if(TARGET ${target})
+        set(enable_ipo FALSE)
+        if(target IN_LIST brimir_ipo_targets)
+            set(enable_ipo TRUE)
+        endif()
+        set_target_properties(${target} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION FALSE
+            INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE ${enable_ipo}
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ${enable_ipo}
+            INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${enable_ipo}
+        )
+    endif()
+endforeach()
 
 # Installation
 install(TARGETS brimir_libretro
@@ -210,6 +234,7 @@ message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build tests: ${BRIMIR_BUILD_TESTS}")
 message(STATUS "  Static linking: ${BRIMIR_STATIC_LINK}")
 message(STATUS "  LTO: ${BRIMIR_LTO}")
+message(STATUS "  Core IPO: ${Brimir_ENABLE_IPO}")
 message(STATUS "  AVX2: ${Brimir_AVX2}")
 message(STATUS "  Extra inlining: ${Brimir_EXTRA_INLINING}")
 message(STATUS "  Disable force inline: ${Brimir_DISABLE_FORCE_INLINE}")

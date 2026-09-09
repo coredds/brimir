@@ -79,6 +79,7 @@ static const std::unordered_map<std::string_view, GameInfo> kGameInfosByCode = {
 
     // These need improved SH-2, bus, and other timings
     //{"GS-9172",    {.flags = ForceSH2Cache}}, // Chisato Moritaka - Watarase Bashi & Lala Sunshine (Japan) (Disc 1) -- crash at startup
+    {"GS-9184",    {.flags = ForceSH2Cache}}, // Dragon Force II (Japan) (Rev A) -- black screen (jump to 0) when entering 100 vs 100 battle
     {"T-4503G",    {.flags = ForceSH2Cache}}, // Dino Island (Japan) -- glitched palette due to SCU DMA parameters being overwritten before starting transfer of palette data
     //{"T-6002G",    {.flags = ForceSH2Cache}}, // Metal Fighter Miku (Japan) -- black screen after start menu
     //{"T-5013H",    {.flags = ForceSH2Cache}}, // Soviet Strike (Europe, France, Germany, USA) -- flickering VDP1 graphics

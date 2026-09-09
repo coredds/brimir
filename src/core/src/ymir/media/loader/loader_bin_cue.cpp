@@ -420,12 +420,6 @@ static std::vector<uint8> DecodeAudioTrack(const std::filesystem::path &path, co
         return {};
     }
 
-    // Expand mono to stereo
-    if (numChannels == 1) {
-        MonoToStereo(audioData);
-        numChannels = 2;
-    }
-
     // Resample to 44.1 kHz with linear interpolation if needed
     constexpr uint32 kTargetSamplingRate = 44100;
     if (sampleRate != kTargetSamplingRate) {
@@ -447,6 +441,12 @@ static std::vector<uint8> DecodeAudioTrack(const std::filesystem::path &path, co
         }
         audioData = std::move(resampled);
         frameCount = newFrameCount;
+    }
+
+    // Expand mono to stereo
+    if (numChannels == 1) {
+        MonoToStereo(audioData);
+        numChannels = 2;
     }
 
     // Swap endianness on big-endian hosts

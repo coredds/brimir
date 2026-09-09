@@ -13,10 +13,14 @@ add_executable(brimir_tests
     unit/test_options.cpp
     # Basic smoke tests
     unit/test_basic.cpp
+    unit/test_cdblock_hle.cpp
+    unit/test_game_db.cpp
     # VDP color calculation tests
     unit/test_vdp_color_calc.cpp
+    unit/test_vdp_composite.cpp
     # Core wrapper tests (audio volume, rotation, overscan crop)
     unit/test_core_wrapper.cpp
+    unit/test_profiler.cpp
     # Audio ring buffer tests
     unit/test_audio_ring_buffer.cpp
     # Media loader tests (CUE/CCD compressed audio, sparse tracks, sector alignment)

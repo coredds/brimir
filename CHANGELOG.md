@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.3] - 2026-09-09
+
+### Fixed
+- **Dragon Force II** - force SH-2 cache emulation for product code `GS-9184`, applying Ymir's workaround for black screens when entering 100-versus-100 battles.
+- **CD Block (HLE)** - report one-based track numbers after FAD seeks, reset playback position before selecting track metadata and speed, and calculate relative sub-Q time from INDEX 01 with pregap countdown.
+- **ARM64 VDP2 blending** - restore the missing NEON byte-duplication step so each pixel's blend ratio applies to all of its color channels.
+- **VDP2 color gradation** - correct SSE2 and NEON masked selection to match scalar rendering.
+- **Performance profiling** - disabling profiling now stops collection, not just report logging. Reset and live toggles discard stale scopes; nested scopes are measured independently.
+- **LTO configuration** - apply IPO to the actual core/object compilation targets and their final consumers, honoring both LTO options and leaving Debug/vendor targets unchanged.
+
+### Changed
+- **Mono MP3/OGG loading** - resample before stereo expansion, avoiding duplicate interpolation while preserving decoded PCM and sector padding.
+- **Windows x64 rendering** - enable the existing baseline SSE2 paths under MSVC without requiring AVX2 or raising CPU requirements.
+
+### Technical
+- Selectively adapted Ymir `ed3231d0`, `6ec6e27f`, and `6ef1ad70`; retained Brimir's disc model, libretro integration, and save-state layout.
+- Added game-database, HLE command, compressed-audio PCM, and scalar-reference renderer regression coverage.
+- Added profiler lifecycle/concurrency tests and expanded scalar-reference compositor coverage across 320/352/640/704-pixel widths, masks, saturation, shadows, line-color selection, averages, and gradation.
+- All 71 active tests pass with 647,107 assertions on Windows x64 (MSVC 2022), Linux x64 (GCC 14), and ARM64 (GCC 13, executed under QEMU), with LTO enabled and disabled. Libretro builds succeed on all three targets. Gradation and ARM64 ratio regressions were reproduced before their fixes.
+- Synthetic Windows renderer measurements showed approximately 5-8% lower median render time with SSE2 and identical frame hashes; LTO had no clear additional benefit in those scenes. Disabled profiling performed no allocations in the scope microbenchmark. These are not game-FPS claims; native macOS ARM64 and real-game performance validation remain outstanding.
+
+---
+
 ## [0.5.2] - 2026-08-22
 
 ### Fixed

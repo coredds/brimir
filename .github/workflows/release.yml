@@ -200,9 +200,19 @@ jobs:
             ### ${{ github.ref_name }}
 
             **Fixed**
-            - **VDP2 color gradation** — color gradation is now disabled when the color RAM mode is not 0, fixing the fog effect in *Astal*.
-            - **BIN/CUE loader validation** — malformed CUE sheets with no tracks, no indexes, or missing `INDEX 01` are now rejected early with a clear error message.
-            - **VDP renderer switch devlog crash** — the raw renderer pointer is now captured before ownership transfer, fixing a use-after-move when devlog is enabled.
+            - Dragon Force II SH-2 cache workaround for black screens in 100-versus-100 battles.
+            - HLE CD seek track numbering, playback-reset ordering, and INDEX 01-relative sub-Q timing.
+            - ARM64 blend-ratio expansion and SSE2/NEON color-gradation selection.
+            - Disabled profiling now stops collection; LTO now applies to source-producing targets and final links.
+
+            **Optimizations**
+            - Enable baseline SSE2 rendering on Windows x64 without requiring AVX2.
+            - Resample mono MP3/OGG audio before expanding to stereo.
+            - Synthetic Windows renderer tests measured approximately 5-8% lower median time with SSE2 and matching frame hashes. This is not a game-FPS claim; LTO showed no clear extra benefit in those scenes.
+
+            **Verification**
+            - 71 active tests, 647,107 assertions passing on MSVC x64, GCC 14 x64, and GCC 13 ARM64 under QEMU, with LTO enabled and disabled.
+            - Save-state layout and portable CPU requirements are unchanged. Native macOS ARM64 and real-game performance validation remain outstanding.
 
             **Known Limitations**
             - Interlaced / high-res titles (e.g., *Virtua Fighter 2*) may still show audio dropouts on CPU-bound setups when deinterlacing is enabled. Use Deinterlacing Mode = `None` for the best performance in these titles.

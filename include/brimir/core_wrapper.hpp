@@ -280,6 +280,9 @@ public:
     /// @brief Set the initial disc index from retro_set_initial_image
     bool SetInitialDisc(unsigned index, const char* path);
     
+    /// @brief Enable profiling collection (disabled by default). State changes clear samples.
+    void SetProfilingEnabled(bool enabled);
+
     /// @brief Get profiling report
     /// @return Performance profiling data as string
     std::string GetProfilingReport() const { return m_profiler.GetReport(); }
@@ -353,7 +356,7 @@ private:
     bool m_sramFirstLoad = true;  // True until first frame runs (for .srm loading)
     
     // Performance profiling
-    mutable Profiler m_profiler;
+    Profiler m_profiler;
     
     // Cartridge support
     std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file

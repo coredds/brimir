@@ -2958,7 +2958,7 @@ FORCE_INLINE static bool AllZeroU8(std::span<const uint8> values) {
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // 16 at a time
     for (; values.size() >= 16; values = values.subspan(16)) {
         __m128i vec16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(values.data()));
@@ -3049,7 +3049,7 @@ FORCE_INLINE static bool AllBool(std::span<const bool> values) {
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // 16 at a time
     for (; values.size() >= 16; values = values.subspan(16)) {
         __m128i vec16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(values.data()));
@@ -3137,7 +3137,7 @@ FORCE_INLINE static bool AnyBool(std::span<const bool> values) {
         }
     }
     #endif
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // 16 at a time
     for (; values.size() >= 16; values = values.subspan(16)) {
         __m128i vec16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(values.data()));
@@ -3234,7 +3234,7 @@ FORCE_INLINE static void Color888ShadowMasked(const std::span<Color888> pixels,
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // Four pixels at a time
     for (; (i + 4) < pixels.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3300,7 +3300,7 @@ FORCE_INLINE static void Color888OpaqueAlpha(std::span<Color888> pixels) {
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // Four pixels at a time
     const __m128i alphaMask4 = _mm_set1_epi32(0xFF000000);
     for (; (i + 4) < pixels.size(); i += 4) {
@@ -3353,7 +3353,7 @@ FORCE_INLINE static void Color888SatAddMasked(const std::span<Color888> dest,
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3441,7 +3441,7 @@ FORCE_INLINE static void Color888SelectMasked(const std::span<Color888> dest,
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3517,7 +3517,7 @@ FORCE_INLINE static void Color888GradationMasked(const std::span<Color888> dest,
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3531,15 +3531,15 @@ FORCE_INLINE static void Color888GradationMasked(const std::span<Color888> dest,
         const __m128i color2_x4 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(&src[i + 2]));
 
         const __m128i blend01_x4 =
-            _mm_add_epi32(_mm_srli_epi32(_mm_and_si128(_mm_xor_si128(color0_x4, color1_x4), _mm_set1_epi8(0xFE)), 1),
+            _mm_add_epi32(_mm_srli_epi32(_mm_and_si128(_mm_xor_si128(color0_x4, color1_x4), _mm_set1_epi8(-2)), 1),
                           _mm_and_si128(color0_x4, color1_x4));
         const __m128i blend2_x4 =
-            _mm_add_epi32(_mm_srli_epi32(_mm_and_si128(_mm_xor_si128(blend01_x4, color2_x4), _mm_set1_epi8(0xFE)), 1),
+            _mm_add_epi32(_mm_srli_epi32(_mm_and_si128(_mm_xor_si128(blend01_x4, color2_x4), _mm_set1_epi8(-2)), 1),
                           _mm_and_si128(blend01_x4, color2_x4));
 
         // Blend with mask
         const __m128i dstColor_x4 =
-            _mm_or_si128(_mm_and_si128(color2_x4, blend2_x4), _mm_andnot_si128(mask_x4, color2_x4));
+            _mm_or_si128(_mm_and_si128(mask_x4, blend2_x4), _mm_andnot_si128(mask_x4, color2_x4));
 
         // Write
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&dest[i]), dstColor_x4);
@@ -3564,7 +3564,7 @@ FORCE_INLINE static void Color888GradationMasked(const std::span<Color888> dest,
             vhaddq_u8(vreinterpretq_u8_u32(blend01_x4), vreinterpretq_u8_u32(color2_x4)));
 
         // Blend with mask
-        const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, color2_x4, blend2_x4);
+        const uint32x4_t dstColor_x4 = vbslq_u32(mask_x4, blend2_x4, color2_x4);
 
         // Write
         vst1q_u32(reinterpret_cast<uint32 *>(&dest[i]), dstColor_x4);
@@ -3613,7 +3613,7 @@ FORCE_INLINE static void Color888AverageMasked(const std::span<Color888> dest,
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3626,7 +3626,7 @@ FORCE_INLINE static void Color888AverageMasked(const std::span<Color888> dest,
         const __m128i btmColor_x4 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(&btmColors[i]));
 
         const __m128i average_x4 = _mm_add_epi32(
-            _mm_srli_epi32(_mm_and_si128(_mm_xor_si128(topColor_x4, btmColor_x4), _mm_set1_epi8(0xFE)), 1),
+            _mm_srli_epi32(_mm_and_si128(_mm_xor_si128(topColor_x4, btmColor_x4), _mm_set1_epi8(-2)), 1),
             _mm_and_si128(topColor_x4, btmColor_x4));
 
         // Blend with mask
@@ -3730,7 +3730,7 @@ FORCE_INLINE static void Color888CompositeRatioPerPixelMasked(const std::span<Co
     }
     #endif
 
-    #if defined(__SSE2__)
+    #if defined(__SSE2__) || defined(_M_X64)
     // Four pixels at a time
     for (; (i + 4) < dest.size(); i += 4) {
         // Load four mask values and expand each byte into 32-bit 000... or 111...
@@ -3785,9 +3785,10 @@ FORCE_INLINE static void Color888CompositeRatioPerPixelMasked(const std::span<Co
         // Load four ratios and splat each byte into 32-bit lanes
         uint32x4_t ratio_x4 = vld1q_lane_u32(reinterpret_cast<const uint32 *>(ratios.data() + i), vdupq_n_u32(0), 0);
         // 8 -> 16
+        ratio_x4 = vreinterpretq_u32_u8(vzip1q_u8(vreinterpretq_u8_u32(ratio_x4), vreinterpretq_u8_u32(ratio_x4)));
+        // 16 -> 32
         ratio_x4 = vreinterpretq_u32_u16(vzip1q_u16(
-            vreinterpretq_u16_u8(vreinterpretq_u8_u32(ratio_x4)),
-            vreinterpretq_u16_u8(vreinterpretq_u8_u32(ratio_x4))));
+            vreinterpretq_u16_u32(ratio_x4), vreinterpretq_u16_u32(ratio_x4)));
 
         const uint8x16_t topColor_x16 = vreinterpretq_u8_u32(
             vld1q_u32(reinterpret_cast<const uint32 *>(&topColors[i])));

@@ -900,6 +900,10 @@ size_t CoreWrapper::GetSystemRAMHighSize() const {
 }
 
 
+void CoreWrapper::SetProfilingEnabled(bool enabled) {
+    m_profiler.SetEnabled(enabled);
+}
+
 void CoreWrapper::RunFrame() {
     if (!m_initialized || !m_saturn) {
         return;

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <utility>
 
 namespace ymir::cdblock {
@@ -745,11 +746,16 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
         devlog::debug<grp::play_init>("FAD range {:06X} to {:06X}", m_playStartPos, m_playEndPos);
 
         uint32 frameAddress = m_status.frameAddress;
-        if (frameAddress < m_playStartPos || frameAddress > m_playEndPos + 1) {
+        if (resetPos) {
+            frameAddress = m_playStartPos;
+            devlog::debug<grp::play_init>("Reset playback position to {:06X}", frameAddress);
+        } else if (frameAddress < m_playStartPos || frameAddress > m_playEndPos + 1) {
             devlog::debug<grp::play_init>(
                 "Adjusting playback position from {:06X} to {:06X} to fit range {:06X}..{:06X}", frameAddress,
                 m_playStartPos, m_playStartPos, m_playEndPos);
             frameAddress = m_playStartPos;
+        } else {
+            devlog::debug<grp::play_init>("Continuing playback from {:06X}", frameAddress);
         }
 
         // Find track containing the requested start frame address
@@ -757,6 +763,7 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
         if (trackIndex != 0xFF) {
             const uint8 index = session.tracks[trackIndex].FindIndex(frameAddress);
             m_status.statusCode = kStatusCodeSeek;
+            m_status.frameAddress = frameAddress;
             m_status.flags = 0x8;     // CD-ROM decoding flag
             m_status.repeatCount = 0; // first repeat
             m_status.controlADR = session.tracks[trackIndex].controlADR;
@@ -773,14 +780,6 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
 
             devlog::debug<grp::play_init>("Track:Index {:02d}:{:02d} ctl/ADR={:02X}", m_status.track, m_status.index,
                                           m_status.controlADR);
-
-            if (resetPos) {
-                m_status.frameAddress = m_playStartPos;
-                devlog::debug<grp::play_init>("Reset playback position to {:06X}", m_status.frameAddress);
-            } else {
-                m_status.frameAddress = frameAddress;
-                devlog::debug<grp::play_init>("Continuing playback from {:06X}", m_status.frameAddress);
-            }
         } else {
             m_targetDriveCycles = kDriveCyclesNotPlaying;
             m_status.statusCode = kStatusCodePause;
@@ -1403,8 +1402,10 @@ bool CDBlock::SetupSubcodeTransfer(uint8 type) {
         m_xferCount = 0;
         m_xferExtraCount = 0;
 
-        const uint32 relativeFAD =
-            m_status.frameAddress - m_disc.sessions.back().tracks[m_status.track - 1].startFrameAddress;
+        // INDEX 00 counts down to INDEX 01; subsequent indices count up from it.
+        const uint32 relativeFAD = static_cast<uint32>(std::abs(
+            static_cast<sint64>(m_status.frameAddress) -
+            m_disc.sessions.back().tracks[m_status.track - 1].index01FrameAddress));
 
         auto [m, s, f] = FADToMSF(m_status.frameAddress);
         auto [relM, relS, relF] = FADToMSF(relativeFAD);
@@ -2066,7 +2067,7 @@ void CDBlock::CmdSeekDisc() {
                 m_status.frameAddress = frameAddress;
                 m_status.flags = track.controlADR == 0x41 ? 0x8 : 0x0;
                 m_status.controlADR = track.controlADR;
-                m_status.track = trackIndex;
+                m_status.track = trackIndex + 1;
                 m_status.index = 1;
                 m_targetDriveCycles = kDriveCyclesNotPlaying;
             } else { // frameAddress > session.endFrameAddress

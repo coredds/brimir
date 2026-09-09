@@ -6,13 +6,22 @@ A Sega Saturn emulation core for libretro, built on the [Ymir](https://github.co
 
 Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accurate hardware layer. It provides accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development. Hardware layer synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes backported through 2026-08-22.
+**Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-09-05 and Brimir-specific optimizations.
 
-## What's New in v0.5.2
+## What's New in v0.5.3
 
-- **Ymir hardware-layer backports** — VDP2 color-gradation fix (Astal fog effect), BIN/CUE loader sanity checks for malformed sheets, and a devlog crash fix when switching VDP renderers.
+- **Compatibility fixes** - Dragon Force II SH-2 cache workaround; corrected HLE CD seek track numbering, playback-reset ordering, and pregap-relative sub-Q timing.
+- **Rendering correctness** - fixed ARM64 per-pixel blend ratios and SSE2/NEON color-gradation selection.
+- **Host-side optimizations** - enabled baseline SSE2 on Windows x64, stopped profiling collection when disabled, corrected LTO compilation/link targeting, and resample mono MP3/OGG audio before stereo expansion.
+- **Regression coverage** - 71 active tests with 647,107 assertions pass on Windows x64, Linux x64, and ARM64 under QEMU, with LTO enabled and disabled. Save-state layout and CPU requirements are unchanged.
+
+Synthetic Windows sprite-rendering tests measured approximately 5-8% lower median render time with SSE2 and identical frame hashes. LTO showed no clear additional gain in those scenes. These are not game-FPS claims; native macOS ARM64 and real-game performance validation remain outstanding.
 
 ## Previous Highlights
+
+### v0.5.2
+
+- **Ymir hardware-layer backports** - VDP2 color-gradation fix (Astal fog effect), BIN/CUE loader sanity checks for malformed sheets, and a devlog crash fix when switching VDP renderers.
 
 ### v0.5.1
 
@@ -27,7 +36,7 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, synced verbatim from upstream Ymir (2026-06-23), plus targeted upstream bug fixes through 2026-08-22
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, based on the 2026-06-23 sync with selected upstream fixes through 2026-09-05
 - Accurate SH-2 dual-CPU emulation with WB/EX stall timing, 32-bit instruction fetch, and inlined opcode decode
 - Full VDP1 sprite engine and VDP2 scroll plane graphics with COPR register fix
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation and volume control
@@ -46,7 +55,7 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 ### Rendering
 - **Software Renderer**: Ymir's proven software renderer with pixel-perfect accuracy
-  - Optimized with SIMD intrinsics (AVX2/SSE2) for pixel conversion
+  - SIMD software rendering: baseline SSE2 on x64, NEON on ARM64, optional AVX2 on compatible x64 CPUs
   - Threaded VDP1 and VDP2 rendering for optimal performance
   - Full resolution output (no overscan cropping by VDP)
 - **Deinterlacing**: Multiple modes for interlaced video
@@ -75,8 +84,8 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 ## Build Requirements
 
-- Windows 10/11 (x64) or Linux (x64)
-- C++20 compiler: MSVC 2022+, GCC 11+, or Clang 14+
+- Release targets: Windows x64, Linux x64/ARM64, and macOS ARM64
+- C++20 compiler: release CI uses MSVC 2022+, GCC 14, or Apple Clang on macOS 14
 - CMake 3.28+
 
 ## Building
@@ -84,35 +93,23 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 ### Windows
 
 ```powershell
-# Using the build script (recommended)
-.\build.ps1 -Generator "Visual Studio 17 2022"
+# Use a fresh directory to avoid stale compiler flags in an existing CMake cache.
+cmake -S . -B build-release -G "Visual Studio 17 2022" -A x64 -DBRIMIR_LTO=ON -DBrimir_ENABLE_IPO=ON
+cmake --build build-release --config Release --target brimir_libretro
 
-# With AVX2 optimizations
-.\build.ps1 -Generator "Visual Studio 17 2022" -AVX2
-
-# Or manually with CMake
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-
-# With AVX2: add -DBrimir_AVX2=ON
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBrimir_AVX2=ON
-cmake --build build --config Release
-
-# Output: build\bin\Release\brimir_libretro.dll
+# Output: build-release\bin\Release\brimir_libretro.dll
 ```
 
 ### Linux
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14 -DBRIMIR_LTO=ON -DBrimir_ENABLE_IPO=ON
+cmake --build build-release --target brimir_libretro -j$(nproc)
 
-# With AVX2: add -DBrimir_AVX2=ON
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBrimir_AVX2=ON
-cmake --build build -j$(nproc)
-
-# Output: build/brimir_libretro.so
+# Output: build-release/lib/brimir_libretro.so
 ```
+
+LTO applies to optimized configurations, not Debug. To disable it completely, set both `BRIMIR_LTO=OFF` and `Brimir_ENABLE_IPO=OFF`. Optional `Brimir_AVX2=ON` raises the x64 CPU requirements and is not enabled in the portable release builds.
 
 ## Installation
 
@@ -122,6 +119,8 @@ cmake --build build -j$(nproc)
 # Automatically builds and copies to RetroArch
 .\deploy-retroarch.ps1
 ```
+
+The deployment helper uses its own `build` directory, not `build-release`. For the builds above, use the manual installation steps with the DLL or library from the documented output path.
 
 ### Manual Install
 

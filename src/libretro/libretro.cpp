@@ -123,7 +123,7 @@ static void apply_core_options(bool force) {
         int overscan = atoi(v);
         g_core->SetOverscanCrop(overscan * 16, overscan * 16);
     });
-    apply("brimir_profiling",               g_options.profiling,        [](const char* /*v*/){});
+    apply("brimir_profiling",               g_options.profiling,        [](const char* v){ g_core->SetProfilingEnabled(strcmp(v, "enabled") == 0); });
     apply("brimir_cd_preload",              g_options.cd_preload,       [](const char* v){ g_core->SetDiscPreloadEnabled(strcmp(v, "enabled") == 0); });
     apply("brimir_threaded_vdp1",           g_options.threaded_vdp1,    [](const char* v){ g_core->SetThreadedVDP1(strcmp(v, "enabled") == 0); });
     apply("brimir_threaded_vdp2",           g_options.threaded_vdp2,    [](const char* v){ g_core->SetThreadedVDP2(strcmp(v, "enabled") == 0); });
@@ -345,8 +345,8 @@ RETRO_API void retro_run(void) {
     }
 
     // Performance profiling: dump report every 300 frames if enabled
+    static size_t frame_count = 0;
     if (g_options.profiling == "enabled") {
-        static size_t frame_count = 0;
         frame_count++;
         if (frame_count == 300) {
             brimir_log(RETRO_LOG_INFO, "=== Performance Profile (300 frames) ===");
@@ -364,6 +364,8 @@ RETRO_API void retro_run(void) {
             g_core->ResetProfiling();
             frame_count = 0;
         }
+    } else {
+        frame_count = 0;
     }
 
     // Poll input
