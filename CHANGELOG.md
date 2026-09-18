@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- Constrain bitmask-enum detection so unrelated C++ types fail constraints cleanly rather than triggering template instantiation errors (Ymir `01a23905`).
+- Include `<cassert>` directly in the null-ROM helper header (selected hunk from Ymir `b8110b8b`).
+
+### Changed
+- Reject NUL-prefixed and empty CCD input before line parsing during disc-format probing (Ymir `99d3535d`). NUL-prefixed CCD rejection was already supported; this adds an earlier exit.
+
+### Technical
+- Added compile-time regression coverage for enum opt-in, non-enum constraint rejection, and unrelated friend operators.
+- Verified both header failures before their fixes. All 71 active tests and 647,107 assertions pass on Windows x64 (MSVC 2022) and Linux x64 (GCC 14), with LTO disabled; both libretro libraries build successfully.
+
+---
+
 ## [0.5.3] - 2026-09-09
 
 ### Fixed

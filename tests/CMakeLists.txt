@@ -13,6 +13,7 @@ add_executable(brimir_tests
     unit/test_options.cpp
     # Basic smoke tests
     unit/test_basic.cpp
+    unit/test_bitmask_enum.cpp
     unit/test_cdblock_hle.cpp
     unit/test_game_db.cpp
     # VDP color calculation tests
