@@ -16,6 +16,8 @@ add_executable(brimir_tests
     unit/test_bitmask_enum.cpp
     unit/test_cdblock_hle.cpp
     unit/test_game_db.cpp
+    # Ymir hardware-layer backport regressions (SMPC, VDP1, VDP2)
+    unit/test_hw_backports.cpp
     # VDP color calculation tests
     unit/test_vdp_color_calc.cpp
     unit/test_vdp_composite.cpp

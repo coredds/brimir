@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **SMPC** - ignore SSHON when the slave SH-2 is already running instead of resetting it (Ymir `184d2fbc`). Fixes Guardian Heroes getting stuck on level transitions, Gekitotsu Koushien crashing when going in-game, and Madden NFL 97 (Europe), Ten Pin Alley, UEFA Euro 96 - England, and No-appointment Gals Olympos not going in-game.
+- **VDP1** - don't clear COPR when a new VDP1 frame begins (Ymir `12ef24fb`). Fixes lockups in Alone in the Dark - One-Eyed Jack's Revenge.
+- **VDP1 threaded rendering** - CPU writes to the VDP1 framebuffer are now written back to the main VDP state from the render thread, so they are no longer lost when a pending end-of-draw/swap copy is processed after the write; the render thread also performs framebuffer erases on its own copy and publishes the result (adapted from Ymir `bcb0f526`). Fixes the glitched title screen in Waialae no Kiseki - Extra 36 Holes with `brimir_threaded_vdp1` enabled (the default).
+- **VDP2 save states** - VCNT is restored into the counter instead of the latch when loading a state (Ymir `49ee054d`). Affects rewind and run-ahead, which load states continuously.
+- **VDP2 mid-frame changes** - line color and back screen colors are fetched every line so table address changes take effect mid-frame; clearing TVMD.DISP mid-frame stops updating the line color/back screen for the rest of the frame; reading EXTEN with external latch disabled now also latches HCNT (Ymir `f9f47595`, `4ec1e59d`, `49df0c2e`).
+- **VDP2 RBG** - derive the horizontal double-resolution flag from the active renderer resolution instead of TVMD, fixing out-of-bounds line buffer accesses when the resolution changes mid-frame while drawing a rotation background (Ymir `3d504d53`).
+- **Game DB** - force SH-2 cache emulation for Hissatsu! (`T-23402G`, crash at startup) and No-appointment Gals Olympos (`T-4304G`, crash during the spinning animation) (Ymir `62e920af`, `627e016b`).
 - Constrain bitmask-enum detection so unrelated C++ types fail constraints cleanly rather than triggering template instantiation errors (Ymir `01a23905`).
 - Include `<cassert>` directly in the null-ROM helper header (selected hunk from Ymir `b8110b8b`).
 
@@ -19,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Technical
 - Added compile-time regression coverage for enum opt-in, non-enum constraint rejection, and unrelated friend operators.
 - Verified both header failures before their fixes. All 71 active tests and 647,107 assertions pass on Windows x64 (MSVC 2022) and Linux x64 (GCC 14), with LTO disabled; both libretro libraries build successfully.
+- Added `test_hw_backports.cpp` with regression coverage for SSHON, COPR, VCNT save-state restore, RBG mid-frame resolution changes, threaded VDP1 framebuffer write-back, mid-frame back screen/DISP changes, and the EXTEN HCNT latch; added game DB lookups for the two new entries. Each regression was observed failing before its fix (the per-line back screen test guards the intermediate upstream regression and passes on both sides). All 83 active tests and 647,796 assertions pass on Windows x64 (MSVC 2022) and Linux x64 (GCC 14); both libretro libraries build successfully.
+- Save-state layout is unchanged. Upstream's VDP1 framebuffer renames (`2220b167`, `01beeb01`, `9a64f38e`, `4769bb03`) were intentionally not taken, as `4769bb03` changes the save-state layout and `9a64f38e` changes the post-reset display framebuffer index.
 
 ---
 

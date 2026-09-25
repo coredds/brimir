@@ -70,6 +70,7 @@ static const std::unordered_map<std::string_view, GameInfo> kGameInfosByCode = {
     {"MK-81304",   {.flags = ForceSH2Cache | RelaxedVDP2BitmapCPAccessChecks}}, // Dark Savior (USA, Europe) -- crash during intro cutscene
     {"T-22101G",   {.flags = ForceSH2Cache | RelaxedVDP2BitmapCPAccessChecks}}, // Dark Savior (Japan) -- crash during intro cutscene
     {"T-13305G",   {.flags = ForceSH2Cache}}, // Dragon Ball Z - Idainaru Dragon Ball Densetsu (Japan) -- black screen after starting a new game
+    {"T-4304G",    {.flags = ForceSH2Cache}}, // No-appointment Gals Olympos (Japan) -- crash during spinning animation
 
     // -------------------------------------------------------------------------
     // Hacks
@@ -81,6 +82,7 @@ static const std::unordered_map<std::string_view, GameInfo> kGameInfosByCode = {
     //{"GS-9172",    {.flags = ForceSH2Cache}}, // Chisato Moritaka - Watarase Bashi & Lala Sunshine (Japan) (Disc 1) -- crash at startup
     {"GS-9184",    {.flags = ForceSH2Cache}}, // Dragon Force II (Japan) (Rev A) -- black screen (jump to 0) when entering 100 vs 100 battle
     {"T-4503G",    {.flags = ForceSH2Cache}}, // Dino Island (Japan) -- glitched palette due to SCU DMA parameters being overwritten before starting transfer of palette data
+    {"T-23402G",   {.flags = ForceSH2Cache}}, // Hissatsu! (Japan) -- crash at startup
     //{"T-6002G",    {.flags = ForceSH2Cache}}, // Metal Fighter Miku (Japan) -- black screen after start menu
     //{"T-5013H",    {.flags = ForceSH2Cache}}, // Soviet Strike (Europe, France, Germany, USA) -- flickering VDP1 graphics
     //{"T-10621G",   {.flags = ForceSH2Cache}}, // Soviet Strike (Japan) -- flickering VDP1 graphics

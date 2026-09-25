@@ -9,6 +9,20 @@ TEST_CASE("Dragon Force II requires SH-2 cache emulation", "[game-db][backport]"
     CHECK(info->GetCartridge() == ymir::db::Cartridge::None);
 }
 
+TEST_CASE("Hissatsu! requires SH-2 cache emulation", "[game-db][backport]") {
+    // Ymir 62e920af: crash at startup
+    const auto *info = ymir::db::GetGameInfo("T-23402G", {});
+    REQUIRE(info != nullptr);
+    CHECK(info->flags == ymir::db::GameInfo::Flags::ForceSH2Cache);
+}
+
+TEST_CASE("No-appointment Gals Olympos requires SH-2 cache emulation", "[game-db][backport]") {
+    // Ymir 627e016b: crash during spinning animation
+    const auto *info = ymir::db::GetGameInfo("T-4304G", {});
+    REQUIRE(info != nullptr);
+    CHECK(info->flags == ymir::db::GameInfo::Flags::ForceSH2Cache);
+}
+
 TEST_CASE("Game database preserves existing lookups", "[game-db][backport]") {
     using enum ymir::db::GameInfo::Flags;
     const auto *info = ymir::db::GetGameInfo("T-1515G", {});

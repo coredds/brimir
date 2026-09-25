@@ -1130,7 +1130,7 @@ struct VDPState {
         regs2.WriteTVSTAT(state.regs2.TVSTAT);
         regs2.WriteVRSIZE(state.regs2.VRSIZE);
         regs2.WriteHCNT(state.regs2.HCNT);
-        regs2.WriteVCNT(state.regs2.VCNT);
+        regs2.VCNT = state.regs2.VCNT;
         regs2.WriteRAMCTL(state.regs2.RAMCTL);
         regs2.WriteCYCA0L(state.regs2.CYCA0L);
         regs2.WriteCYCA0U(state.regs2.CYCA0U);

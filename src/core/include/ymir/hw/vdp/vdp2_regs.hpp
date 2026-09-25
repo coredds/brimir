@@ -396,6 +396,7 @@ struct VDP2Regs {
         TVMD.u16 = value & 0x81F7;
         TVMDDirty |= ((TVMD.u16 ^ oldTVMD.u16) & 0x1F7) != 0;
         accessPatternsDirty |= TVMD.HRESOn != oldTVMD.HRESOn;
+        displayEnabledLatch &= TVMD.DISP;
         UpdateRestrictedColorCalc();
     }
 
@@ -406,6 +407,8 @@ struct VDP2Regs {
     FORCE_INLINE uint16 ReadEXTEN() const {
         if constexpr (!peek) {
             if (!EXTEN.EXLTEN) {
+                static constexpr uint32 hRes[] = {320, 352, 640, 704};
+                HCNT = hRes[TVMD.HRESOn & 3] - 50; // TODO: derive coordinate from global cycle counter
                 VCNTLatch = (VCNT << VCNTShift) + VCNTSkip;
                 if (TVMD.LSMDn == InterlaceMode::DoubleDensity) {
                     VCNTLatch |= TVSTAT.ODD ^ 1;
@@ -461,9 +464,9 @@ struct VDP2Regs {
     //     Hi-Res: bits 9-0
     //     Excl. Normal: bits 8-0 (no shift); HCT9 is invalid
     //     Excl. Hi-Res: bits 9-1 shifted right by 1; HCT9 is invalid
-    uint16 HCNT;      // Horizontal counter latched by external signal
-    uint16 HCNTShift; // Right-shift applied to HCNT<<1, derived from screen mode
-    uint16 HCNTMask;  // Mask applied to final HCNT, derived from screen mode
+    mutable uint16 HCNT; // Horizontal counter latched by external signal
+    uint16 HCNTShift;    // Right-shift applied to HCNT<<1, derived from screen mode
+    uint16 HCNTMask;     // Mask applied to final HCNT, derived from screen mode
 
     FORCE_INLINE uint16 ReadHCNT() const {
         return HCNT;

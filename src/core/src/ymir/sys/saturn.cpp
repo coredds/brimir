@@ -853,8 +853,10 @@ void Saturn::SMPCOperations::RaiseNMI() {
 }
 
 void Saturn::SMPCOperations::EnableAndResetSlaveSH2() {
-    m_saturn.slaveSH2Enabled = true;
-    m_saturn.slaveSH2.Reset(true);
+    if (!m_saturn.slaveSH2Enabled) {
+        m_saturn.slaveSH2Enabled = true;
+        m_saturn.slaveSH2.Reset(true);
+    }
 }
 
 void Saturn::SMPCOperations::DisableSlaveSH2() {

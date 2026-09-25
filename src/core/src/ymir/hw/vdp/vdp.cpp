@@ -970,7 +970,6 @@ void VDP::VDP1BeginFrame() {
     // TODO: figure out VDP1 timings
 
     m_state.regs1.returnAddress = kVDP1NoReturn;
-    m_state.regs1.currCommandAddress = 0;
     m_state.regs1.nextCommandAddress = 0;
     m_state.regs1.currFrameEnded = false;
 

@@ -355,11 +355,12 @@ void SoftwareVDPRenderer::VDP1WriteFB(uint32 address, uint16 value) {
 
 template <mem_primitive_16 T>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1WriteFBImpl(uint32 address, T value) {
-    if (m_enhancements.deinterlace) {
-        util::WriteBE<T>(&m_altSpriteFB[m_state.displayFB ^ 1][address & 0x3FFFF], value);
-    }
     if (m_threadedVDP1Rendering) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::FBRAMWrite<T>(address, value));
+    } else {
+        if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
+            util::WriteBE<T>(&m_altSpriteFB[VDP1GetDrawFBIndex()][address & 0x3FFFF], value);
+        }
     }
 }
 
@@ -611,17 +612,17 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                     VDP1DoEraseFramebuffer<true>(event.erase.cycles);
                 }
                 const auto fbIndex = VDP1GetDisplayFBIndex();
-                rctx.vdp1.spriteFB[fbIndex] = m_state.spriteFB[fbIndex];
+                m_state.spriteFB[fbIndex] = rctx.vdp1.spriteFB[fbIndex];
                 break;
             }
             case EvtType::SwapBuffers: {
-                const auto fbIndex = VDP1GetDisplayFBIndex() ^ 1;
+                const auto fbIndex = VDP1GetDrawFBIndex();
                 m_state.spriteFB[fbIndex] = rctx.vdp1.spriteFB[fbIndex];
                 rctx.swapBuffersSignal.Set();
                 break;
             }
             case EvtType::EndDraw: {
-                const auto fbIndex = VDP1GetDisplayFBIndex() ^ 1;
+                const auto fbIndex = VDP1GetDrawFBIndex();
                 m_state.spriteFB[fbIndex] = rctx.vdp1.spriteFB[fbIndex];
                 break;
             }
@@ -631,13 +632,26 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             case EvtType::VRAMWriteWord:
                 util::WriteBE<uint16>(&rctx.vdp1.mem.VRAM[event.write.address], event.write.value);
                 break;
-            case EvtType::FBRAMWriteByte:
-                rctx.vdp1.spriteFB[VDP1GetDisplayFBIndex() ^ 1][event.write.address] = event.write.value;
+            case EvtType::FBRAMWriteByte: {
+                // Also write back to the main state, since an earlier SwapBuffers/EndDraw copy processed after the CPU
+                // write may have overwritten it there.
+                const auto fbIndex = VDP1GetDrawFBIndex();
+                rctx.vdp1.spriteFB[fbIndex][event.write.address] = event.write.value;
+                m_state.spriteFB[fbIndex][event.write.address] = event.write.value;
+                if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
+                    m_altSpriteFB[fbIndex][event.write.address] = event.write.value;
+                }
                 break;
-            case EvtType::FBRAMWriteWord:
-                util::WriteBE<uint16>(&rctx.vdp1.spriteFB[VDP1GetDisplayFBIndex() ^ 1][event.write.address],
-                                      event.write.value);
+            }
+            case EvtType::FBRAMWriteWord: {
+                const auto fbIndex = VDP1GetDrawFBIndex();
+                util::WriteBE<uint16>(&rctx.vdp1.spriteFB[fbIndex][event.write.address], event.write.value);
+                util::WriteBE<uint16>(&m_state.spriteFB[fbIndex][event.write.address], event.write.value);
+                if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
+                    util::WriteBE<uint16>(&m_altSpriteFB[fbIndex][event.write.address], event.write.value);
+                }
                 break;
+            }
             case EvtType::RegWrite: rctx.vdp1.regs.Write<false>(event.write.address, event.write.value); break;
 
             case EvtType::PreSaveStateSync: rctx.preSaveSyncSignal.Set(); break;
@@ -887,13 +901,17 @@ FORCE_INLINE uint8 SoftwareVDPRenderer::VDP1GetDisplayFBIndex() const {
     return m_state.displayFB;
 }
 
-FORCE_INLINE std::array<SpriteFB, 2> &SoftwareVDPRenderer::VDP1GetRendererDrawFB(bool altFB) {
+FORCE_INLINE uint8 SoftwareVDPRenderer::VDP1GetDrawFBIndex() const {
+    return m_state.displayFB ^ 1;
+}
+
+FORCE_INLINE SpriteFB &SoftwareVDPRenderer::VDP1GetRendererFB(bool altFB, uint8 fbIndex) {
     if (altFB) {
-        return m_altSpriteFB;
+        return m_altSpriteFB[fbIndex];
     } else if (m_threadedVDP1Rendering) {
-        return m_vdp1RenderingContext.vdp1.spriteFB;
+        return m_vdp1RenderingContext.vdp1.spriteFB[fbIndex];
     } else {
-        return m_state.spriteFB;
+        return m_state.spriteFB[fbIndex];
     }
 }
 
@@ -908,7 +926,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
                                regs1.eraseWriteValueLatch, regs1.fbSizeH, regs1.fbSizeV, (regs1.pixel8Bits ? 8 : 16));
 
     const uint8 fbIndex = VDP1GetDisplayFBIndex();
-    auto &fb = m_state.spriteFB[fbIndex];
+    auto &fb = VDP1GetRendererFB(false, fbIndex);
     auto &altFB = m_altSpriteFB[fbIndex];
     [[maybe_unused]] auto &meshFB = m_meshFB[0][fbIndex];
     [[maybe_unused]] auto &altMeshFB = m_meshFB[1][fbIndex];
@@ -1088,8 +1106,8 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
     }
     fbOffset &= 0x3FFFF;
 
-    const auto fbIndex = VDP1GetDisplayFBIndex() ^ 1;
-    auto &drawFB = VDP1GetRendererDrawFB(altFB)[fbIndex];
+    const auto fbIndex = VDP1GetDrawFBIndex();
+    auto &drawFB = VDP1GetRendererFB(altFB, fbIndex);
     if (pixelParams.mode.msbOn) {
         // TODO: check correctness -- does it write only when (x&1)==0 or is it force-aligned like this?
         drawFB[fbOffset & ~1u] |= 0x80;
@@ -2167,7 +2185,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2CalcRotationParameterTables(uint32 y,
         // Current coefficient address (16.10)
         uint32 KA = state.KA;
 
-        const bool doubleResH = regs2.TVMD.HRESOn & 0b010;
+        const bool doubleResH = m_HRes > kMaxNormalResH;
         const uint32 xShift = doubleResH ? 1 : 0;
         const uint32 maxX = m_HRes >> xShift;
 
@@ -2591,20 +2609,23 @@ void SoftwareVDPRenderer::VDP2DrawLine(uint32 y, bool altField) {
 
 FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawLineColorAndBackScreens(uint32 y, const VDP2Regs &regs2) {
     // Read line color screen color
+    // Both are fetched on every line so that table address changes made mid-frame take effect.
     const LineBackScreenParams &lineParams = regs2.lineScreenParams;
-    if (lineParams.perLine || y == 0) {
-        const uint32 address = lineParams.baseAddress + y * sizeof(uint16);
-        const uint32 cramAddress = VDP2ReadRendererVRAM<uint16>(address) * sizeof(uint16);
-        m_state.state2.lineBackLayerState.lineColor = VDP2ReadRendererColor5to8(cramAddress);
+    uint32 lineAddress = lineParams.baseAddress;
+    if (lineParams.perLine) {
+        lineAddress += y * sizeof(uint16);
     }
+    const uint32 cramAddress = VDP2ReadRendererVRAM<uint16>(lineAddress) * sizeof(uint16);
+    m_state.state2.lineBackLayerState.lineColor = VDP2ReadRendererColor5to8(cramAddress);
 
     // Read back screen color
     const LineBackScreenParams &backParams = regs2.backScreenParams;
-    if (backParams.perLine || y == 0) {
-        const uint32 address = backParams.baseAddress + y * sizeof(Color555);
-        const Color555 color555{.u16 = VDP2ReadRendererVRAM<uint16>(address)};
-        m_state.state2.lineBackLayerState.backColor = ConvertRGB555to888(color555);
+    uint32 backAddress = backParams.baseAddress;
+    if (backParams.perLine) {
+        backAddress += y * sizeof(Color555);
     }
+    const Color555 color555{.u16 = VDP2ReadRendererVRAM<uint16>(backAddress)};
+    m_state.state2.lineBackLayerState.backColor = ConvertRGB555to888(color555);
 }
 
 template <uint32 colorMode, bool rotate, bool altField, bool transparentMeshes>
@@ -3852,7 +3873,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
 
     y = VDP2GetY<deinterlace>(y, regs2) ^ static_cast<uint32>(altField);
 
-    if (!regs2.displayEnabledLatch || !regs2.TVMD.DISP) {
+    if (!regs2.TVMD.DISP) {
         uint32 color = 0xFF000000;
         if (regs2.borderColorModeLatch) {
             color |= state2.lineBackLayerState.backColor.u32;
@@ -4086,7 +4107,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
     };
 
     if (AnyBool(std::span{layer0ColorCalcEnabled}.first(m_HRes))) {
-        const bool doubleResH = regs2.TVMD.HRESOn & 0b010;
+        const bool doubleResH = m_HRes > kMaxNormalResH;
         const uint32 xShift = doubleResH ? 1 : 0;
 
         // Gather color calculation data
@@ -4643,7 +4664,7 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawRotationScrollBG(const VDP2Regs &reg
 
     const VDP2State &state2 = m_state.state2;
 
-    const bool doubleResH = regs2.TVMD.HRESOn & 0b010;
+    const bool doubleResH = m_HRes > kMaxNormalResH;
     const uint32 xShift = doubleResH ? 1 : 0;
     const uint32 maxX = m_HRes >> xShift;
 
@@ -4754,7 +4775,7 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawRotationBitmapBG(const VDP2Regs &reg
                                                              bool altField) {
     static constexpr bool selRotParam = bgIndex == 0;
 
-    const bool doubleResH = regs2.TVMD.HRESOn & 0b010;
+    const bool doubleResH = m_HRes > kMaxNormalResH;
     const uint32 xShift = doubleResH ? 1 : 0;
     const uint32 maxX = m_HRes >> xShift;
 
