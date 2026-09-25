@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.5.4] - 2026-09-24
 
 ### Fixed
 - **SMPC** - ignore SSHON when the slave SH-2 is already running instead of resetting it (Ymir `184d2fbc`). Fixes Guardian Heroes getting stuck on level transitions, Gekitotsu Koushien crashing when going in-game, and Madden NFL 97 (Europe), Ten Pin Alley, UEFA Euro 96 - England, and No-appointment Gals Olympos not going in-game.
@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Technical
 - Added compile-time regression coverage for enum opt-in, non-enum constraint rejection, and unrelated friend operators.
-- Verified both header failures before their fixes. All 71 active tests and 647,107 assertions pass on Windows x64 (MSVC 2022) and Linux x64 (GCC 14), with LTO disabled; both libretro libraries build successfully.
+- Verified both header failures before their fixes.
 - Added `test_hw_backports.cpp` with regression coverage for SSHON, COPR, VCNT save-state restore, RBG mid-frame resolution changes, threaded VDP1 framebuffer write-back, mid-frame back screen/DISP changes, and the EXTEN HCNT latch; added game DB lookups for the two new entries. Each regression was observed failing before its fix (the per-line back screen test guards the intermediate upstream regression and passes on both sides). All 83 active tests and 647,796 assertions pass on Windows x64 (MSVC 2022) and Linux x64 (GCC 14); both libretro libraries build successfully.
 - Save-state layout is unchanged. Upstream's VDP1 framebuffer renames (`2220b167`, `01beeb01`, `9a64f38e`, `4769bb03`) were intentionally not taken, as `4769bb03` changes the save-state layout and `9a64f38e` changes the post-reset display framebuffer index.
 

@@ -6,9 +6,19 @@ A Sega Saturn emulation core for libretro, built on the [Ymir](https://github.co
 
 Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accurate hardware layer. It provides accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-09-05 and Brimir-specific optimizations.
+**Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-09-24 and Brimir-specific optimizations.
 
-## What's New in v0.5.3
+## What's New in v0.5.4
+
+- **Compatibility fixes** - SMPC now ignores SSHON while the slave SH-2 is running, fixing Guardian Heroes level transitions and letting Gekitotsu Koushien, Madden NFL 97 (Europe), Ten Pin Alley, UEFA Euro 96 - England, and No-appointment Gals Olympos go in-game. VDP1 no longer clears COPR at frame start (fixes Alone in the Dark - One-Eyed Jack's Revenge lockups). SH-2 cache workarounds added for Hissatsu! and No-appointment Gals Olympos.
+- **Threaded VDP1 rendering** - CPU framebuffer writes are no longer lost when the render thread publishes its framebuffer, fixing the Waialae no Kiseki - Extra 36 Holes title screen with the default threaded VDP1 option.
+- **VDP2 correctness** - mid-frame back screen/line color and display-disable changes take effect, EXTEN reads latch HCNT, and rotation backgrounds no longer overrun line buffers when the resolution changes mid-frame.
+- **Save states** - VCNT is now restored correctly, which matters for rewind and run-ahead. Save-state layout is unchanged.
+- **Regression coverage** - 83 active tests with 647,796 assertions pass on Windows x64 and Linux x64.
+
+## Previous Highlights
+
+### v0.5.3
 
 - **Compatibility fixes** - Dragon Force II SH-2 cache workaround; corrected HLE CD seek track numbering, playback-reset ordering, and pregap-relative sub-Q timing.
 - **Rendering correctness** - fixed ARM64 per-pixel blend ratios and SSE2/NEON color-gradation selection.
@@ -16,8 +26,6 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 - **Regression coverage** - 71 active tests with 647,107 assertions pass on Windows x64, Linux x64, and ARM64 under QEMU, with LTO enabled and disabled. Save-state layout and CPU requirements are unchanged.
 
 Synthetic Windows sprite-rendering tests measured approximately 5-8% lower median render time with SSE2 and identical frame hashes. LTO showed no clear additional gain in those scenes. These are not game-FPS claims; native macOS ARM64 and real-game performance validation remain outstanding.
-
-## Previous Highlights
 
 ### v0.5.2
 
@@ -36,7 +44,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, based on the 2026-06-23 sync with selected upstream fixes through 2026-09-05
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, based on the 2026-06-23 sync with selected upstream fixes through 2026-09-24
 - Accurate SH-2 dual-CPU emulation with WB/EX stall timing, 32-bit instruction fetch, and inlined opcode decode
 - Full VDP1 sprite engine and VDP2 scroll plane graphics with COPR register fix
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation and volume control

@@ -200,19 +200,13 @@ jobs:
             ### ${{ github.ref_name }}
 
             **Fixed**
-            - Dragon Force II SH-2 cache workaround for black screens in 100-versus-100 battles.
-            - HLE CD seek track numbering, playback-reset ordering, and INDEX 01-relative sub-Q timing.
-            - ARM64 blend-ratio expansion and SSE2/NEON color-gradation selection.
-            - Disabled profiling now stops collection; LTO now applies to source-producing targets and final links.
-
-            **Optimizations**
-            - Enable baseline SSE2 rendering on Windows x64 without requiring AVX2.
-            - Resample mono MP3/OGG audio before expanding to stereo.
-            - Synthetic Windows renderer tests measured approximately 5-8% lower median time with SSE2 and matching frame hashes. This is not a game-FPS claim; LTO showed no clear extra benefit in those scenes.
-
-            **Verification**
-            - 71 active tests, 647,107 assertions passing on MSVC x64, GCC 14 x64, and GCC 13 ARM64 under QEMU, with LTO enabled and disabled.
-            - Save-state layout and portable CPU requirements are unchanged. Native macOS ARM64 and real-game performance validation remain outstanding.
+            - SMPC now ignores SSHON while the slave SH-2 is running. Fixes Guardian Heroes level transitions; Gekitotsu Koushien, Madden NFL 97 (Europe), Ten Pin Alley, UEFA Euro 96 - England, and No-appointment Gals Olympos now go in-game.
+            - VDP1 no longer clears COPR at frame start, fixing lockups in Alone in the Dark - One-Eyed Jack's Revenge.
+            - Threaded VDP1 rendering no longer loses CPU framebuffer writes, fixing the Waialae no Kiseki - Extra 36 Holes title screen.
+            - VDP2 mid-frame back screen/line color and display-disable changes now take effect; EXTEN reads latch HCNT.
+            - Rotation backgrounds no longer overrun line buffers when the resolution changes mid-frame.
+            - VCNT is restored correctly from save states (improves rewind and run-ahead).
+            - SH-2 cache workarounds for Hissatsu! (crash at startup) and No-appointment Gals Olympos (crash during animations).
 
             **Known Limitations**
             - Interlaced / high-res titles (e.g., *Virtua Fighter 2*) may still show audio dropouts on CPU-bound setups when deinterlacing is enabled. Use Deinterlacing Mode = `None` for the best performance in these titles.
