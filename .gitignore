@@ -1,6 +1,9 @@
 # Worktrees
 .worktrees/
 
+# CodeGraph index
+.codegraph/
+
 # Build directories
 /build/
 /build-*/
