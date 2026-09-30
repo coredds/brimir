@@ -296,7 +296,10 @@ RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     info->library_name = "Brimir";
     info->library_version = BRIMIR_VERSION;
     info->need_fullpath = true;
-    info->valid_extensions = "chd|cue|bin|iso|ccd|img|mds|mdf|m3u";
+    // Only formats Ymir's loader can open directly. Track data files (.bin, .img,
+    // .mdf) must be loaded through their .cue/.ccd/.mds sheet.
+    // Keep in sync with supported_extensions in resources/info/brimir_libretro.info.
+    info->valid_extensions = "chd|cue|ccd|mds|iso|m3u";
 }
 
 RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {

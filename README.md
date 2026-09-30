@@ -161,7 +161,7 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
    - `sega_100.bin` (EU v1.00)
    - `Sega Saturn BIOS v1.01 (JAP).bin`
    - `Sega Saturn BIOS v1.00 (JAP).bin`
-3. Load a Saturn game (.cue, .chd, .iso) through RetroArch.
+3. Load a Saturn game (.cue, .chd, .ccd, .mds, .iso or .m3u playlist) through RetroArch. Raw `.bin`/`.img`/`.mdf` track files must be opened through their `.cue`/`.ccd`/`.mds` sheet.
 
 ## Core Options
 
@@ -219,7 +219,7 @@ Upstream test suites, benchmarks and examples are not vendored.
 
 ## License
 
-Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license as Ymir.
+Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license as Ymir. See [LICENSE](LICENSE).
 
 ## Credits
 
