@@ -41,6 +41,7 @@ add_executable(brimir_tests
     unit/sh2_test_rig.cpp
     unit/test_sh2_jit_iface.cpp
     unit/test_jit_ir.cpp
+    unit/test_jit_backend.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE

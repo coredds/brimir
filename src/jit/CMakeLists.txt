@@ -1,6 +1,7 @@
 # Brimir SH-2 JIT (see design/sh2-jit.md)
 add_library(brimir-jit STATIC
     src/ir.cpp
+    src/interp_backend.cpp
 )
 
 target_include_directories(brimir-jit PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
