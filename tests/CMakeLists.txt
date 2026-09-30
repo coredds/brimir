@@ -40,10 +40,12 @@ add_executable(brimir_tests
     # SH-2 JIT (isolated SH-2 rig and differential tests)
     unit/sh2_test_rig.cpp
     unit/test_sh2_jit_iface.cpp
+    unit/test_jit_ir.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
     brimir_bridge
+    brimir-jit
     brimir-core
 )
 
