@@ -10,9 +10,6 @@
 .PARAMETER BuildType
     Build type: Release or Debug (default: Release)
 
-.PARAMETER WithBenchmarks
-    Build and run benchmarks after successful build
-
 .PARAMETER Clean
     Clean build directory before building
 
@@ -25,10 +22,6 @@
     Debug build
 
 .EXAMPLE
-    .\build-all.ps1 -WithBenchmarks
-    Build and run performance benchmarks
-
-.EXAMPLE
     .\build-all.ps1 -Clean
     Clean rebuild
 #>
@@ -37,7 +30,6 @@ param(
     [ValidateSet("Release", "Debug")]
     [string]$BuildType = "Release",
     
-    [switch]$WithBenchmarks,
     [switch]$Clean
 )
 
@@ -56,7 +48,6 @@ Write-Host "╚═════════════════════�
 
 Write-Host "Configuration:" -ForegroundColor Yellow
 Write-Host "  Build Type: $BuildType" -ForegroundColor White
-Write-Host "  Benchmarks: $(if ($WithBenchmarks) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
 Write-Host "  Clean:      $(if ($Clean) { 'Yes' } else { 'No' })`n" -ForegroundColor White
 
 # Step 1: Clean if requested
@@ -116,7 +107,7 @@ Write-Host "Checking build outputs..." -ForegroundColor Yellow
 
 $Outputs = @{
     "Libretro Core" = "$BuildDir\bin\$BuildType\brimir_libretro.dll"
-    "Benchmark Tool" = "$BuildDir\bin\$BuildType\$BuildType\benchmark_sh2.exe"
+    "Frame Benchmark" = "$BuildDir\bin\$BuildType\brimir_bench.exe"
 }
 
 $AllFound = $true
@@ -134,15 +125,6 @@ if (-not $AllFound) {
     Write-Host "`n⚠️  Some outputs missing. Build may have been incomplete." -ForegroundColor Yellow
 }
 
-# Step 5: Run benchmarks if requested
-if ($WithBenchmarks -and (Test-Path "$BuildDir\bin\$BuildType\$BuildType\benchmark_sh2.exe")) {
-    Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-    Write-Host "RUNNING BENCHMARKS" -ForegroundColor Yellow
-    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`n" -ForegroundColor Cyan
-    
-    & .\tools\run_benchmarks.ps1 -Save
-}
-
 # Summary
 Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
 Write-Host "BUILD COMPLETE" -ForegroundColor Green
@@ -150,7 +132,7 @@ Write-Host "━━━━━━━━━━━━━━━━━━━━━━�
 
 Write-Host "`nQuick Start:" -ForegroundColor Yellow
 Write-Host "  • Libretro DLL: $BuildDir\bin\$BuildType\brimir_libretro.dll" -ForegroundColor White
-Write-Host "  • Run benchmarks: .\tools\run_benchmarks.ps1" -ForegroundColor White
+Write-Host "  • Benchmark: $BuildDir\bin\$BuildType\brimir_bench.exe --bios <file> --game <file>" -ForegroundColor White
 Write-Host "  • Documentation: README.md" -ForegroundColor White
 Write-Host "`n"
 

@@ -1,15 +1,7 @@
-cmake_minimum_required(VERSION 3.21)
+# Headless frame benchmark: runs real content without a frontend and reports
+# host ms/frame and the SH-2 share of emulation time. See tools/README.md.
+add_executable(brimir_bench brimir_bench.cpp)
 
-# SH-2 Microbenchmark Tool
-add_executable(benchmark_sh2 benchmark_sh2.cpp)
+target_link_libraries(brimir_bench PRIVATE brimir_bridge brimir::brimir-core)
 
-target_link_libraries(benchmark_sh2 PRIVATE brimir::brimir-core)
-
-target_compile_features(benchmark_sh2 PRIVATE cxx_std_20)
-
-# Enable optimizations even in Debug; disable RTC which conflicts with /O2
-target_compile_options(benchmark_sh2 PRIVATE "$<$<CONFIG:Debug>:/O2;/Oi;/RTC1->")
-
-set_target_properties(benchmark_sh2 PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}"
-)
+target_compile_features(brimir_bench PRIVATE cxx_std_20)
