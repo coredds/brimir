@@ -89,7 +89,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
 - **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
-- **SH-2 JIT** — The code under `src/jit/` is an experimental test framework. It is not built by default and is not part of the shipped core.
+- **SH-2 JIT** — Not implemented yet; the SH-2 CPUs run on Ymir's interpreter. A JIT is planned (see [ROADMAP.md](ROADMAP.md)).
 
 ## Build Requirements
 
@@ -193,7 +193,6 @@ brimir/
       src/ymir/       Ymir source files (verbatim)
     bridge/           CoreWrapper -- interface between emulator and frontends
     libretro/         Libretro API implementation and core options
-    jit/              Experimental SH-2 JIT test framework (not built by default)
   include/         Public headers (libretro.h, CoreWrapper)
   resources/info/  Libretro core info file
   vendor/          Vendored dependencies

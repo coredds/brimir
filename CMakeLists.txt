@@ -127,20 +127,6 @@ add_subdirectory(src/libretro)
 # Tools (benchmarking, testing utilities)
 add_subdirectory(tools)
 
-# JIT (optional - enable with -DBUILD_JIT_TESTS=ON)
-option(BUILD_JIT_TESTS "Build JIT test framework and tests" OFF)
-option(BRIMIR_ENABLE_JIT_TESTING "Enable JIT testing interface (adds test-only methods to SH2)" OFF)
-
-if(BRIMIR_ENABLE_JIT_TESTING)
-    add_compile_definitions(BRIMIR_ENABLE_JIT_TESTING)
-    message(STATUS "JIT testing interface enabled")
-endif()
-
-if(BUILD_JIT_TESTS)
-    message(STATUS "Building JIT test framework")
-    add_subdirectory(src/jit)
-endif()
-
 # Main libretro core library
 add_library(brimir_libretro SHARED
     $<TARGET_OBJECTS:brimir_bridge>
@@ -191,14 +177,14 @@ if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
             list(APPEND brimir_ipo_targets brimir_bridge brimir_libretro_api)
         endif()
         if(Brimir_ENABLE_IPO)
-            list(APPEND brimir_ipo_targets brimir-core benchmark_sh2 jit-tests)
+            list(APPEND brimir_ipo_targets brimir-core benchmark_sh2)
         endif()
     else()
         message(WARNING "IPO/LTO requested but not supported: ${ipo_error}")
     endif()
 endif()
 
-foreach(target IN ITEMS brimir-core brimir_bridge brimir_libretro_api brimir_libretro brimir_tests benchmark_sh2 jit-tests)
+foreach(target IN ITEMS brimir-core brimir_bridge brimir_libretro_api brimir_libretro brimir_tests benchmark_sh2)
     if(TARGET ${target})
         set(enable_ipo FALSE)
         if(target IN_LIST brimir_ipo_targets)

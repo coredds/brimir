@@ -2,16 +2,13 @@
 
 <#
 .SYNOPSIS
-    Build all Brimir components (core, libretro, tools, JIT)
+    Build all Brimir components (core, libretro, tools)
 
 .DESCRIPTION
-    Complete build script with options for Release/Debug, JIT tests, and benchmarks
+    Complete build script with options for Release/Debug and benchmarks
 
 .PARAMETER BuildType
     Build type: Release or Debug (default: Release)
-
-.PARAMETER WithJIT
-    Include JIT test framework
 
 .PARAMETER WithBenchmarks
     Build and run benchmarks after successful build
@@ -28,10 +25,6 @@
     Debug build
 
 .EXAMPLE
-    .\build-all.ps1 -WithJIT
-    Build with JIT test framework
-
-.EXAMPLE
     .\build-all.ps1 -WithBenchmarks
     Build and run performance benchmarks
 
@@ -44,7 +37,6 @@ param(
     [ValidateSet("Release", "Debug")]
     [string]$BuildType = "Release",
     
-    [switch]$WithJIT,
     [switch]$WithBenchmarks,
     [switch]$Clean
 )
@@ -64,7 +56,6 @@ Write-Host "╚═════════════════════�
 
 Write-Host "Configuration:" -ForegroundColor Yellow
 Write-Host "  Build Type: $BuildType" -ForegroundColor White
-Write-Host "  JIT Tests:  $(if ($WithJIT) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
 Write-Host "  Benchmarks: $(if ($WithBenchmarks) { 'Enabled' } else { 'Disabled' })" -ForegroundColor White
 Write-Host "  Clean:      $(if ($Clean) { 'Yes' } else { 'No' })`n" -ForegroundColor White
 
@@ -84,10 +75,6 @@ $CMakeArgs = @(
     "-G", $CMakeGenerator,
     "-DCMAKE_BUILD_TYPE=$BuildType"
 )
-
-if ($WithJIT) {
-    $CMakeArgs += "-DBUILD_JIT_TESTS=ON"
-}
 
 & cmake @CMakeArgs 2>&1 | Out-Null
 
@@ -132,10 +119,6 @@ $Outputs = @{
     "Benchmark Tool" = "$BuildDir\bin\$BuildType\$BuildType\benchmark_sh2.exe"
 }
 
-if ($WithJIT) {
-    $Outputs["SH2 Wrapper"] = "$BuildDir\src\jit\$BuildType\brimir-sh2-wrapper.lib"
-}
-
 $AllFound = $true
 foreach ($output in $Outputs.GetEnumerator()) {
     if (Test-Path $output.Value) {
@@ -168,6 +151,6 @@ Write-Host "━━━━━━━━━━━━━━━━━━━━━━�
 Write-Host "`nQuick Start:" -ForegroundColor Yellow
 Write-Host "  • Libretro DLL: $BuildDir\bin\$BuildType\brimir_libretro.dll" -ForegroundColor White
 Write-Host "  • Run benchmarks: .\tools\run_benchmarks.ps1" -ForegroundColor White
-Write-Host "  • Documentation: docs\QUICK_START.md" -ForegroundColor White
+Write-Host "  • Documentation: README.md" -ForegroundColor White
 Write-Host "`n"
 

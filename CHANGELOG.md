@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Repository** - copyrighted BIOS images and ROM cartridge dumps are no longer tracked. Fixed `.gitignore` patterns that never matched because of trailing comments (`*.bin`, `*.bup`, `*.smpc`, `system/`, `tests/fixtures/*.bin`) and added ROM cart dumps (`*.ic[0-9]`).
 - **Vendored dependencies** - removed unused upstream test suites, benchmarks, examples and fuzzers (~2,500 files).
 - **Documentation** - README corrected (GPL-3.0 license, accurate feature list and core options, testing section, known limitations); removed references to documents that are not part of the repository.
+- **License / core info** - added the GPL-3.0 `LICENSE` file. `brimir_libretro.info` no longer advertises cheat support (stubbed), reports `needs_fullpath = true` and core options v2, and marks every BIOS optional since any one works.
+- **Content extensions** - `.bin`, `.img` and `.mdf` are no longer offered as loadable content; Ymir only opens them through their `.cue`/`.ccd`/`.mds` sheet. The core and `.info` extension lists now match.
+
+### Removed
+- **SH-2 JIT scaffolding** - removed `src/jit/` (~13.6k lines from 2025) together with the `BUILD_JIT_TESTS` / `BRIMIR_ENABLE_JIT_TESTING` CMake options and the `build-all.ps1 -WithJIT` switch. The code no longer compiled against the current Ymir API (removed `brimir/*` headers, three conflicting `SH2SpecDatabase` definitions, undeclared test-generator methods) and the SH2 test hooks it relied on no longer exist. The JIT will be redesigned from scratch; the old code remains in git history.
 
 ### Technical
 - Added `.github/workflows/ci.yml`: builds the core and runs the tests on Windows x64, Linux x64 and macOS ARM64 for pushes to `master` and pull requests. The suite is registered with CTest (`add_test`) so `ctest` now runs it.
