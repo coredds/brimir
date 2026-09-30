@@ -18,9 +18,12 @@
 #include <ymir/hw/smpc/smpc_defs.hpp>
 #include <ymir/util/bit_ops.hpp>
 
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <string>
 
 #include <lz4.h>
 #include <algorithm>
@@ -88,11 +91,16 @@ bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
     return true;
 }
 
-void SavePersistentSMPCDataToFile(const ymir::smpc::PersistentSMPCData &data,
+// Writes to a sibling temp file and renames it into place, so a failed or
+// interrupted write never truncates an existing RTC file. Returns false on error.
+bool SavePersistentSMPCDataToFile(const ymir::smpc::PersistentSMPCData &data,
                                   const std::filesystem::path &path) {
-    std::ofstream out{path, std::ios::binary};
+    auto tmpPath = path;
+    tmpPath += ".tmp";
+
+    std::ofstream out{tmpPath, std::ios::binary | std::ios::trunc};
     if (!out) {
-        return;
+        return false;
     }
 
     out.put(static_cast<char>(kPersistentSMPCDataVersion));
@@ -108,6 +116,19 @@ void SavePersistentSMPCDataToFile(const ymir::smpc::PersistentSMPCData &data,
     out.write(reinterpret_cast<const char *>(&steRaw), sizeof(steRaw));
     out.write(reinterpret_cast<const char *>(&rtcOffset), sizeof(rtcOffset));
     out.write(reinterpret_cast<const char *>(&rtcTimestamp), sizeof(rtcTimestamp));
+    out.close();
+
+    std::error_code ec;
+    if (!out) {
+        std::filesystem::remove(tmpPath, ec);
+        return false;
+    }
+    std::filesystem::rename(tmpPath, path, ec);
+    if (ec) {
+        std::filesystem::remove(tmpPath, ec);
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -191,14 +212,16 @@ void CoreWrapper::Shutdown() {
 }
 
 bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const char* system_directory) {
-    // DON'T touch m_lastError yet - test if that's causing the crash
-    
+    m_lastError.clear();
+
     if (!m_initialized || !m_saturn) {
+        m_lastError = "Core not initialized";
         return false;
     }
 
     // Check for nullptr or empty path
     if (!path || path[0] == '\0') {
+        m_lastError = "No game path provided";
         return false;
     }
     
@@ -220,7 +243,9 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         gamePath = std::filesystem::path(path);
         
         // Check if file/directory exists
-        if (!std::filesystem::exists(gamePath)) {
+        std::error_code existsError;
+        if (!std::filesystem::exists(gamePath, existsError)) {
+            m_lastError = "Game file not found: " + gamePath.string();
             return false;
         }
         
@@ -283,9 +308,19 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // This is NOT the persistent save; it is only used as a formatted scratch
         // image while the game is running. The user's actual saves live in the
         // .srm file in the save directory, which the core loads/saves explicitly.
+        // The name includes a hash of the absolute path so that different games
+        // sharing a file name (e.g. "Disc 1.cue" in separate folders) never share
+        // a scratch image.
         std::filesystem::path gameFileName = gamePath.stem();
-        m_sramTempPath = std::filesystem::temp_directory_path() / "Brimir" /
-                         (gameFileName.string() + ".bup");
+        {
+            std::error_code absError;
+            const auto absGamePath = std::filesystem::absolute(gamePath, absError);
+            const size_t pathHash = std::hash<std::string>{}((absError ? gamePath : absGamePath).generic_string());
+            char hashSuffix[24];
+            std::snprintf(hashSuffix, sizeof(hashSuffix), "-%016llx.bup", static_cast<unsigned long long>(pathHash));
+            m_sramTempPath = std::filesystem::temp_directory_path() / "Brimir" /
+                             (gameFileName.string() + hashSuffix);
+        }
         
         // Ensure parent directory exists
         std::filesystem::create_directories(m_sramTempPath.parent_path());
@@ -302,13 +337,19 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // Load SMPC persistent data (RTC clock settings!)
         // This is system-wide (not per-game) as the RTC is a console setting, not a game setting.
         // The filename is qualified by the loaded IPL ROM region to keep per-console settings separate.
+        // With neither directory available, RTC persistence is disabled
+        // (GetPersistentSMPCDataPath() returns an empty path).
+        m_smpcBaseDir.clear();
         if (system_directory && system_directory[0] != '\0') {
             m_smpcBaseDir = std::filesystem::path(system_directory);
         } else if (save_directory && save_directory[0] != '\0') {
             // Fallback to save directory if no system_directory provided
             m_smpcBaseDir = std::filesystem::path(save_directory);
         }
-        std::filesystem::create_directories(m_smpcBaseDir);
+        if (!m_smpcBaseDir.empty()) {
+            std::error_code dirError;
+            std::filesystem::create_directories(m_smpcBaseDir, dirError);
+        }
 
         // Register SMPC data persistence callback so core settings are saved whenever they change.
         m_saturn->SMPC.SetPersistDataCallback({this, &CoreWrapper::OnPersistSMPCData});
@@ -370,22 +411,14 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         }
         m_sramInitialized = true;
         
-        // Validate file extension (common Saturn formats)
-        std::string extension = gamePath.extension().string();
-        std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
-        
-        // Supported formats: .cue, .iso, .chd, .ccd, .mds
-        if (extension != ".cue" && extension != ".iso" && extension != ".chd" && 
-            extension != ".ccd" && extension != ".mds" && extension != ".bin") {
-            // Unknown format, but let Ymir try anyway
-        }
-        
-        // Create a Disc object and load the disc image into it
+        // Create a Disc object and load the disc image into it. The format is
+        // detected by Ymir's loader, not by file extension.
         ymir::media::Disc disc;
-        
-        // Clear previous error
+
+        // Drop any non-fatal message from backup RAM setup; only disc loader
+        // errors are relevant from here on.
         m_lastError.clear();
-        
+
         // Callback for loader messages - capture errors for debugging
         auto loaderCallback = [this](ymir::media::MessageType type, std::string message) {
             // Store error messages
