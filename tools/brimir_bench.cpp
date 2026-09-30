@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -45,11 +46,13 @@ void PrintUsage(std::FILE* out) {
         "  --bios        Saturn BIOS image (required)\n"
         "  --game        disc image to load (omit to benchmark the BIOS menu)\n"
         "  --system-dir  directory holding brimir_saturn_rtc_<jp|us_eu>.smpc (BIOS language/clock\n"
-        "                settings), e.g. a RetroArch system folder where the BIOS setup was done.\n"
-        "                Without a configured file the BIOS stops at its first-boot setup screen\n"
-        "                and never boots the disc. The core may write updated RTC settings back\n"
-        "                into this directory, as it does under RetroArch.\n"
-        "                Default: a fresh per-run temp directory (unconfigured).\n"
+        "                settings). The suffix follows the BIOS region, so a configured file is\n"
+        "                needed for each BIOS region used. Without one the BIOS stops at its\n"
+        "                first-boot setup screen and never boots the disc. The core may write\n"
+        "                RTC files back into this directory (including brimir_saturn_rtc_none.smpc),\n"
+        "                so prefer a scratch copy over the real RetroArch system folder.\n"
+        "                Only used with --game. Default: a fresh per-run temp directory\n"
+        "                (unconfigured).\n"
         "  --state       save state produced by --dump-state (raw core state data)\n"
         "  --frames      measured frames (default 1800)\n"
         "  --warmup      unmeasured frames before measuring (default 120)\n"
@@ -212,18 +215,31 @@ int main(int argc, char** argv) {
     if (!CreateRunDirectory(runDir)) {
         return 2;
     }
+    // Removes runDir on every exit path, including exceptions from Run.
+    struct RunDirGuard {
+        const std::filesystem::path& dir;
+        ~RunDirGuard() {
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+            if (ec) {
+                std::fprintf(stderr, "Warning: could not remove %s: %s\n", dir.string().c_str(),
+                             ec.message().c_str());
+            }
+        }
+    } runDirGuard{runDir};
     const std::filesystem::path systemDir = args.systemDir.empty() ? runDir : std::filesystem::path(args.systemDir);
 
-    // The core is destroyed inside Run, so any files it writes on shutdown
-    // land in runDir before it is removed.
-    const int result = Run(args, runDir, systemDir);
-
-    std::error_code ec;
-    std::filesystem::remove_all(runDir, ec);
-    if (ec) {
-        std::fprintf(stderr, "Warning: could not remove %s: %s\n", runDir.string().c_str(), ec.message().c_str());
+    // The core is destroyed inside Run (also during unwinding), so any files
+    // it writes on shutdown land in runDir before it is removed.
+    try {
+        return Run(args, runDir, systemDir);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Error: %s\n", e.what());
+        return 2;
+    } catch (...) {
+        std::fprintf(stderr, "Error: unknown exception\n");
+        return 2;
     }
-    return result;
 }
 
 namespace {

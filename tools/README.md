@@ -22,14 +22,23 @@ build\bin\brimir_bench.exe --bios system\sega_101.bin --game "D:\Saturn\Game.cue
 ```
 
 `--system-dir` must point to a directory that holds a configured
-`brimir_saturn_rtc_<jp|us_eu>.smpc` (BIOS language and clock settings, STE=1),
-for example the RetroArch system folder after running any game once with
-Brimir and completing the BIOS language/clock setup. The file name depends on
-the BIOS region. Without it the BIOS stops at its first-boot setup screen,
-waits for input, and never boots the disc (the slave SH-2 then reports
-0.000 ms). If `--system-dir` is omitted, the per-run temp directory is used,
-which is always unconfigured. The core may write updated RTC settings back into
-the system directory, as it does under RetroArch.
+`brimir_saturn_rtc_<jp|us_eu>.smpc` (BIOS language and clock settings, STE=1).
+The suffix follows the region of the BIOS image, not the disc, so you need a
+configured file for each BIOS region you use. Completing the BIOS
+language/clock setup once in RetroArch with Brimir only configures the file for
+the region of the BIOS used there. Either repeat the setup with each BIOS
+region, or copy the configured file to the other name (for example
+`brimir_saturn_rtc_us_eu.smpc` to `brimir_saturn_rtc_jp.smpc`; this is how the
+committed baseline was measured). Without a configured file the BIOS stops at
+its first-boot setup screen, waits for input, and never boots the disc (the
+slave SH-2 then reports 0.000 ms).
+
+The core writes RTC files back into the system directory, as it does under
+RetroArch, and may also create or rewrite `brimir_saturn_rtc_none.smpc`. Use a
+scratch copy of the system directory rather than the real RetroArch folder.
+`--system-dir` has no effect without `--game` (the no-disc path does not load
+SMPC settings). If it is omitted, the per-run temp directory is used, which is
+always unconfigured.
 
 Backup RAM (`.srm`) and cartridge RAM (`.cart`) are written to a fresh
 directory under `%TEMP%\brimir_bench\run-*` that is removed on exit, so saves
