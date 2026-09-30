@@ -5,7 +5,7 @@
     Build all Brimir components (core, libretro, tools)
 
 .DESCRIPTION
-    Complete build script with options for Release/Debug and benchmarks
+    Complete build script with options for Release/Debug
 
 .PARAMETER BuildType
     Build type: Release or Debug (default: Release)

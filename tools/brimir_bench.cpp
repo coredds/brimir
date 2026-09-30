@@ -14,7 +14,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
@@ -24,23 +26,39 @@ struct Args {
     std::string game;
     std::string state;
     std::string dumpState;
+    std::string systemDir;
     int dumpAt = -1;
     int frames = 1800;
     int warmup = 120;
 };
 
-void PrintUsage() {
-    std::puts(
-        "Usage: brimir_bench --bios <file> [--game <cue|chd|ccd|mds|iso|m3u>] [--state <file>]\n"
-        "                    [--frames N] [--warmup N]\n"
-        "       brimir_bench --bios <file> [--game <file>] [--state <file>] --dump-at N --dump-state <file>\n"
+enum class ParseResult { Ok, Help, Error };
+
+void PrintUsage(std::FILE* out) {
+    std::fputs(
+        "Usage: brimir_bench --bios <file> [--game <cue|chd|ccd|mds|iso|m3u>] [--system-dir <dir>]\n"
+        "                    [--state <file>] [--frames N] [--warmup N]\n"
+        "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
+        "                    --dump-at N --dump-state <file>\n"
+        "       brimir_bench --help\n"
         "\n"
         "  --bios        Saturn BIOS image (required)\n"
         "  --game        disc image to load (omit to benchmark the BIOS menu)\n"
+        "  --system-dir  directory holding brimir_saturn_rtc_<jp|us_eu>.smpc (BIOS language/clock\n"
+        "                settings), e.g. a RetroArch system folder where the BIOS setup was done.\n"
+        "                Without a configured file the BIOS stops at its first-boot setup screen\n"
+        "                and never boots the disc. The core may write updated RTC settings back\n"
+        "                into this directory, as it does under RetroArch.\n"
+        "                Default: a fresh per-run temp directory (unconfigured).\n"
         "  --state       save state produced by --dump-state (raw core state data)\n"
         "  --frames      measured frames (default 1800)\n"
         "  --warmup      unmeasured frames before measuring (default 120)\n"
-        "  --dump-at     run N frames, write a save state to --dump-state, and exit\n");
+        "  --dump-at     run N frames, write a save state to --dump-state, and exit\n"
+        "  --help, -h    show this help\n"
+        "\n"
+        "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
+        "removed on exit, so every run starts from the same state.\n",
+        out);
 }
 
 bool ParseInt(const char* text, int& out) {
@@ -53,18 +71,26 @@ bool ParseInt(const char* text, int& out) {
     return true;
 }
 
-bool ParseArgs(int argc, char** argv, Args& args) {
+ParseResult ParseArgs(int argc, char** argv, Args& args) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string opt = argv[i];
+        if (opt == "--help" || opt == "-h") {
+            return ParseResult::Help;
+        }
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string opt = argv[i];
         if (i + 1 >= argc) {
             std::fprintf(stderr, "Missing value for %s\n", opt.c_str());
-            return false;
+            return ParseResult::Error;
         }
         const char* value = argv[++i];
         if (opt == "--bios") {
             args.bios = value;
         } else if (opt == "--game") {
             args.game = value;
+        } else if (opt == "--system-dir") {
+            args.systemDir = value;
         } else if (opt == "--state") {
             args.state = value;
         } else if (opt == "--dump-state") {
@@ -72,32 +98,32 @@ bool ParseArgs(int argc, char** argv, Args& args) {
         } else if (opt == "--dump-at") {
             if (!ParseInt(value, args.dumpAt)) {
                 std::fprintf(stderr, "Invalid --dump-at value: %s\n", value);
-                return false;
+                return ParseResult::Error;
             }
         } else if (opt == "--frames") {
             if (!ParseInt(value, args.frames) || args.frames == 0) {
                 std::fprintf(stderr, "Invalid --frames value: %s\n", value);
-                return false;
+                return ParseResult::Error;
             }
         } else if (opt == "--warmup") {
             if (!ParseInt(value, args.warmup)) {
                 std::fprintf(stderr, "Invalid --warmup value: %s\n", value);
-                return false;
+                return ParseResult::Error;
             }
         } else {
             std::fprintf(stderr, "Unknown option: %s\n", opt.c_str());
-            return false;
+            return ParseResult::Error;
         }
     }
     if (args.bios.empty()) {
         std::fprintf(stderr, "--bios is required\n");
-        return false;
+        return ParseResult::Error;
     }
     if ((args.dumpAt >= 0) != !args.dumpState.empty()) {
         std::fprintf(stderr, "--dump-at and --dump-state must be used together\n");
-        return false;
+        return ParseResult::Error;
     }
-    return true;
+    return ParseResult::Ok;
 }
 
 bool ReadFile(const std::string& path, std::vector<uint8_t>& out) {
@@ -120,15 +146,89 @@ double AvgMs(const brimir::Profiler& profiler, const char* name) {
     return timing ? timing->avgMs() : 0.0;
 }
 
+// Creates a fresh, uniquely named directory under <temp>/brimir_bench for this
+// run's backup RAM (.srm) and cartridge RAM (.cart). Returns false on error.
+bool CreateRunDirectory(std::filesystem::path& out) {
+    std::error_code ec;
+    const auto temp = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+        std::fprintf(stderr, "Cannot determine the temp directory: %s\n", ec.message().c_str());
+        return false;
+    }
+    const auto base = temp / "brimir_bench";
+    std::filesystem::create_directories(base, ec);
+    if (ec) {
+        std::fprintf(stderr, "Cannot create %s: %s\n", base.string().c_str(), ec.message().c_str());
+        return false;
+    }
+    std::random_device rd;
+    const auto now = static_cast<unsigned long long>(
+        std::chrono::system_clock::now().time_since_epoch().count());
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const unsigned long long nonce = (static_cast<unsigned long long>(rd()) << 32) ^ rd() ^ now;
+        char name[40];
+        std::snprintf(name, sizeof(name), "run-%016llx", nonce);
+        const auto dir = base / name;
+        // create_directory returns false (without error) if it already exists.
+        if (std::filesystem::create_directory(dir, ec)) {
+            out = dir;
+            return true;
+        }
+        if (ec) {
+            std::fprintf(stderr, "Cannot create %s: %s\n", dir.string().c_str(), ec.message().c_str());
+            return false;
+        }
+    }
+    std::fprintf(stderr, "Cannot create a unique run directory under %s\n", base.string().c_str());
+    return false;
+}
+
+int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir);
+
 } // namespace
 
 int main(int argc, char** argv) {
     Args args;
-    if (!ParseArgs(argc, argv, args)) {
-        PrintUsage();
+    switch (ParseArgs(argc, argv, args)) {
+    case ParseResult::Help:
+        PrintUsage(stdout);
+        return 0;
+    case ParseResult::Error:
+        PrintUsage(stderr);
         return 1;
+    case ParseResult::Ok:
+        break;
     }
 
+    if (!args.systemDir.empty()) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(args.systemDir, ec)) {
+            std::fprintf(stderr, "--system-dir is not an existing directory: %s\n", args.systemDir.c_str());
+            return 2;
+        }
+    }
+
+    std::filesystem::path runDir;
+    if (!CreateRunDirectory(runDir)) {
+        return 2;
+    }
+    const std::filesystem::path systemDir = args.systemDir.empty() ? runDir : std::filesystem::path(args.systemDir);
+
+    // The core is destroyed inside Run, so any files it writes on shutdown
+    // land in runDir before it is removed.
+    const int result = Run(args, runDir, systemDir);
+
+    std::error_code ec;
+    std::filesystem::remove_all(runDir, ec);
+    if (ec) {
+        std::fprintf(stderr, "Warning: could not remove %s: %s\n", runDir.string().c_str(), ec.message().c_str());
+    }
+    return result;
+}
+
+namespace {
+
+int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir) {
     brimir::CoreWrapper core;
     if (!core.Initialize()) {
         std::fprintf(stderr, "Failed to initialize the core\n");
@@ -140,11 +240,9 @@ int main(int argc, char** argv) {
     }
 
     if (!args.game.empty()) {
-        std::error_code ec;
-        const auto dir = std::filesystem::temp_directory_path(ec) / "brimir_bench";
-        std::filesystem::create_directories(dir, ec);
-        const std::string dirStr = dir.string();
-        if (!core.LoadGame(args.game.c_str(), dirStr.c_str(), dirStr.c_str())) {
+        const std::string saveStr = saveDir.string();
+        const std::string systemStr = systemDir.string();
+        if (!core.LoadGame(args.game.c_str(), saveStr.c_str(), systemStr.c_str())) {
             std::fprintf(stderr, "Failed to load game: %s\n", core.GetLastError().c_str());
             return 2;
         }
@@ -218,3 +316,5 @@ int main(int argc, char** argv) {
                 share(masterMs + slaveMs));
     return 0;
 }
+
+} // namespace
