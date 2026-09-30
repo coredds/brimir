@@ -181,15 +181,6 @@ set_target_properties(your_tool PROPERTIES
 
 ---
 
-## 📖 Documentation
-
-For detailed analysis of current performance, see:
-- `docs/BENCHMARK_RESULTS.md` - Current benchmark analysis
-- `docs/OPTIMIZATION_RESULTS.md` - Optimization implementation
-- `docs/INTERPRETER_OPTIMIZATION_OPPORTUNITIES.md` - Future improvements
-
----
-
 ## 🤝 Contributing Tools
 
 When adding new tools:

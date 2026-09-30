@@ -47,10 +47,12 @@ We are committed to providing a welcoming and inclusive environment for all cont
 Before contributing, ensure you have:
 
 1. **Development Environment:**
-   - C++20-capable compiler (GCC 11+, Clang 14+, MSVC 2022+)
-   - CMake 3.20 or later
+   - C++20-capable compiler (release CI uses MSVC 2022+, GCC 14 and Apple Clang)
+   - CMake 3.28 or later
+   - Ninja (recommended)
    - Git
-   - vcpkg (will be set up as submodule)
+
+   All third-party libraries are vendored under `vendor/`; there are no submodules or package manager steps.
 
 2. **Knowledge:**
    - C++ programming (especially modern C++20)
@@ -70,19 +72,14 @@ Before contributing, ensure you have:
    cd brimir
    ```
 
-2. **Initialize submodules:**
+2. **Build with tests:**
    ```bash
-   git submodule update --init --recursive
-   ```
-
-3. **Set up build environment:**
-   ```bash
-   # See README.md for detailed build instructions
-   cmake -B build -S .
+   # See README.md for platform-specific build instructions
+   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBRIMIR_BUILD_TESTS=ON
    cmake --build build
    ```
 
-4. **Add upstream remote:**
+3. **Add upstream remote:**
    ```bash
    git remote add upstream https://github.com/coredds/brimir.git
    ```
@@ -100,7 +97,7 @@ Before contributing, ensure you have:
 
 Before creating an issue:
 1. Search existing issues to avoid duplicates
-2. Check if it's already covered in the PRD
+2. Check if it's already covered in [ROADMAP.md](ROADMAP.md)
 3. Gather relevant information (system specs, error messages, steps to reproduce)
 
 When creating an issue:
@@ -122,7 +119,7 @@ When creating an issue:
 2. **Keep your branch updated:**
    ```bash
    git fetch upstream
-   git rebase upstream/main
+   git rebase upstream/master
    ```
 
 3. **Make focused commits:**
@@ -167,7 +164,7 @@ namespace brimir::bridge { }
 ```
 
 #### Code Formatting
-- Use `.clang-format` provided in the repository
+- Match the formatting of the surrounding code
 - 4 spaces for indentation (no tabs)
 - Opening braces on same line for functions/classes
 - Maximum line length: 120 characters
@@ -350,31 +347,29 @@ cmake -B build -S . -DBRIMIR_BUILD_TESTS=ON
 cmake --build build
 
 # Run all tests
-cd build
-ctest
+ctest --test-dir build --output-on-failure
 
-# Run specific test
-./tests/unit/test_core_wrapper
+# Run a subset by Catch2 tag or test name
+./build/bin/brimir_tests "[core]"
 ```
+
+BIOS integration tests run only when a BIOS image is present in `tests/fixtures/`; they are skipped otherwise. Never commit BIOS or ROM images. CI runs the suite on every push and pull request.
 
 ### Writing Tests
 
-- Use the existing test framework
+- Use Catch2 (`#include "catch_amalgamated.hpp"`) and add new files to `tests/CMakeLists.txt`
 - Test public APIs
 - Test edge cases and error conditions
-- Aim for good coverage of new code
+- Avoid placeholder assertions such as `REQUIRE(true)`
+- Write scratch files to a temp directory, never into the source tree
 
 ```cpp
 // Example test
-TEST_CASE("InputManager maps controller correctly") {
-    InputManager manager;
-    manager.SetControllerType(0, ControllerType::StandardPad);
-    
-    // Test button mapping
-    manager.SetButtonState(0, RETRO_DEVICE_ID_JOYPAD_A, true);
-    auto state = manager.GetControllerState(0);
-    
-    REQUIRE(state.buttons.a == true);
+TEST_CASE("CoreWrapper rejects a missing game file", "[core][unit]") {
+    brimir::CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE_FALSE(core.LoadGame("nonexistent_file.iso"));
+    REQUIRE_FALSE(core.GetLastError().empty());
 }
 ```
 
@@ -441,7 +436,6 @@ We value all contributions:
 - Translations (future)
 
 Contributors will be:
-- Listed in CONTRIBUTORS.md
 - Credited in release notes
 - Acknowledged in project documentation
 

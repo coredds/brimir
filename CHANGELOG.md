@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Libretro thread safety** - every entry point now acquires the core lock before checking the core instance, closing a race with `retro_deinit`. `retro_get_region` and the memory data/size queries are now locked as well.
+- **Geometry** - the last-reported frame size is reset on content load/unload, so a new game at the same resolution as the previous one still gets `SET_GEOMETRY` on its first frame.
+- **Game loading** - `LoadGame` reports a specific error for an uninitialized core, empty path and missing file instead of "(no error message)". Loading with neither a system nor a save directory no longer aborts on `create_directories("")` (libstdc++ throws).
+- **Backup RAM scratch image** - the temporary `.bup` is keyed by file name plus a hash of the absolute path, so different games with the same file name no longer share backup RAM.
+- **RTC persistence** - SMPC data is written to a temporary file and renamed into place, so a failed write can no longer truncate the existing file.
+
+### Changed
+- **Repository** - copyrighted BIOS images and ROM cartridge dumps are no longer tracked. Fixed `.gitignore` patterns that never matched because of trailing comments (`*.bin`, `*.bup`, `*.smpc`, `system/`, `tests/fixtures/*.bin`) and added ROM cart dumps (`*.ic[0-9]`).
+- **Vendored dependencies** - removed unused upstream test suites, benchmarks, examples and fuzzers (~2,500 files).
+- **Documentation** - README corrected (GPL-3.0 license, accurate feature list and core options, testing section, known limitations); removed references to documents that are not part of the repository.
+
+### Technical
+- Added `.github/workflows/ci.yml`: builds the core and runs the tests on Windows x64, Linux x64 and macOS ARM64 for pushes to `master` and pull requests. The suite is registered with CTest (`add_test`) so `ctest` now runs it.
+- Test suite cleanup: re-enabled and fixed `test_memory_components`, `test_cd_operations`, `test_system_integration`, `test_bios` and `test_bios_integration` (BIOS tests skip when no image is present); deleted 20 files made of placeholder `REQUIRE(true)` assertions or targeting removed APIs. Added `LoadGame` error-reporting regressions. 106 test cases pass.
+
 ## [0.5.4] - 2026-09-24
 
 ### Fixed

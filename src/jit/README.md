@@ -86,10 +86,10 @@ if (g_jit_enabled && !debug_mode) {
 
 ## References
 
-- [SH-2 JIT Evaluation](../../docs/SH2_JIT_EVALUATION.md)
-- [SH-2 JIT Roadmap](../../docs/SH2_JIT_ROADMAP.md)
+- [JIT status](STATUS.md)
+- [Brimir roadmap, item 20](../../ROADMAP.md)
 - [Yabause SH-2 Dynarec](https://github.com/devmiyax/yabause/tree/master/yabause/src/sh2_dynarec)
-- [Ymir SH-2 Interpreter](../ymir/libs/ymir-core/src/ymir/hw/sh2/)
+- [Ymir SH-2 Interpreter](../core/src/ymir/hw/sh2/)
 
 ---
 
