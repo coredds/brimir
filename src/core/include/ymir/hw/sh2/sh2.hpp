@@ -15,6 +15,7 @@
 #include "sh2_sci.hpp"
 #include "sh2_ubc.hpp"
 #include "sh2_wdt.hpp"
+#include "sh2_jit_iface.hpp" // Brimir: SH-2 JIT hook
 
 #include <ymir/hw/hw_defs.hpp>
 
@@ -111,6 +112,27 @@ public:
         const uint64 ns = m_hostTimeNs;
         m_hostTimeNs = 0;
         return ns;
+    }
+
+    // -------------------------------------------------------------------------
+    // Brimir: SH-2 JIT hook (see src/core/BRIMIR_FORK.md)
+
+    /// @brief Routes Advance<false, false>() through the executor. Pass nullptr to use the interpreter.
+    /// Attaching flushes the executor.
+    void SetJitExecutor(ISH2Executor *executor) {
+        m_jitExecutor = executor;
+        if (executor != nullptr) {
+            executor->Flush();
+        }
+    }
+
+    ISH2Executor *GetJitExecutor() const {
+        return m_jitExecutor;
+    }
+
+    /// @brief Live-state view and callbacks used by the JIT (also used directly by tests).
+    SH2JitContext &GetJitContext() {
+        return m_jitContext;
     }
 
     bool IsMaster() const {
@@ -722,6 +744,21 @@ private:
     // Brimir: host-time profiling state (see SetHostTimeProfiling)
     bool m_profileHostTime = false;
     uint64 m_hostTimeNs = 0;
+
+    // Brimir: SH-2 JIT hook state and context callbacks
+    SH2JitContext m_jitContext;
+    ISH2Executor *m_jitExecutor = nullptr;
+
+    void InitJitContext();
+    static uint64 JitInterpretOne(void *ctx);
+    static uint32 JitRead(void *ctx, uint32 address, uint32 size, bool instrFetch);
+    static void JitWrite(void *ctx, uint32 address, uint32 size, uint32 value);
+    static uint16 JitPeekInstruction(void *ctx, uint32 address);
+    static uint64 JitAccessCycles(void *ctx, uint32 address, uint32 size, bool write);
+    static bool JitBusWait(void *ctx, uint32 address, uint32 size, bool write);
+    static void JitRefillPipeline(void *ctx, uint32 address);
+    static void JitSetupDelaySlot(void *ctx, uint32 target);
+    static void JitEndDelaySlot(void *ctx);
 
     // Retrieves the current absolute cycle count
     uint64 GetCurrentCycleCount() const;

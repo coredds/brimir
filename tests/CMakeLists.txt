@@ -37,6 +37,9 @@ add_executable(brimir_tests
     # BIOS tests (integration cases SKIP when no real BIOS is in tests/fixtures/)
     unit/test_bios.cpp
     unit/test_bios_integration.cpp
+    # SH-2 JIT (isolated SH-2 rig and differential tests)
+    unit/sh2_test_rig.cpp
+    unit/test_sh2_jit_iface.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE

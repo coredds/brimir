@@ -324,6 +324,7 @@ SH2::SH2(sys::SH2Bus &bus, bool master)
     : m_bus(bus)
     , m_logPrefix(master ? "SH2-M" : "SH2-S") {
 
+    InitJitContext(); // Brimir: SH-2 JIT hook
     BCR1.MASTER = !master;
     Reset(true);
 }
@@ -394,6 +395,11 @@ void SH2::Reset(bool hard, bool watchdogInitiated) {
     m_cache.Reset();
 
     TraceReset(m_tracer, PC, R[15], watchdogInitiated);
+
+    // Brimir: compiled code is invalid after a reset
+    if (m_jitExecutor != nullptr) {
+        m_jitExecutor->Flush();
+    }
 }
 
 void SH2::MapMemory(sys::SH2Bus &bus) {
@@ -482,6 +488,16 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
             PC += 2;
         } else {
             return cycles;
+        }
+    }
+
+    // Brimir: SH-2 JIT hook. Only the plain configuration (no debug tracing, no cache emulation) is
+    // compiled; the executor reproduces the loop below at block granularity.
+    if constexpr (!debug && !emulateCache) {
+        if (m_jitExecutor != nullptr) {
+            m_cyclesExecuted = m_jitExecutor->Run(m_jitContext, m_cyclesExecuted, cycles);
+            AdvanceDMA<debug, emulateCache>(m_cyclesExecuted - spilloverCycles);
+            return m_cyclesExecuted;
         }
     }
 
@@ -644,6 +660,11 @@ void SH2::LoadState(const savestate::SH2SaveState &state) {
     m_sleep = state.sleep;
 
     m_intrFlags.pending = !m_delaySlot && INTC.pending.level > SR.ILevel;
+
+    // Brimir: compiled code is invalid after loading a state
+    if (m_jitExecutor != nullptr) {
+        m_jitExecutor->Flush();
+    }
 }
 
 void SH2::PostLoadState(const savestate::SH2SaveState &state) {
@@ -4666,6 +4687,101 @@ FORCE_INLINE uint64 SH2::RTS() {
 #undef DECODE_I_U
 #undef DECODE_I_S
 #undef DECODE_NI
+
+// -----------------------------------------------------------------------------
+// Brimir: SH-2 JIT hook
+
+void SH2::InitJitContext() {
+    m_jitContext.R = R.data();
+    m_jitContext.PC = &PC;
+    m_jitContext.PR = &PR;
+    m_jitContext.GBR = &GBR;
+    m_jitContext.VBR = &VBR;
+    m_jitContext.SR = &SR.u32;
+    m_jitContext.delaySlotTarget = &m_delaySlotTarget;
+    m_jitContext.delaySlot = &m_delaySlot;
+    m_jitContext.wbReg = &m_wbReg;
+    m_jitContext.intrPending = &m_intrFlags.pending;
+    m_jitContext.intrAllow = &m_intrFlags.allow;
+    m_jitContext.fetchedOpcodes = &m_fetchedOpcodes;
+    m_jitContext.cyclesExecuted = &m_cyclesExecuted;
+    m_jitContext.sh2 = this;
+    m_jitContext.interpretOne = &SH2::JitInterpretOne;
+    m_jitContext.read = &SH2::JitRead;
+    m_jitContext.write = &SH2::JitWrite;
+    m_jitContext.peekInstruction = &SH2::JitPeekInstruction;
+    m_jitContext.accessCycles = &SH2::JitAccessCycles;
+    m_jitContext.busWait = &SH2::JitBusWait;
+    m_jitContext.refillPipeline = &SH2::JitRefillPipeline;
+    m_jitContext.setupDelaySlot = &SH2::JitSetupDelaySlot;
+    m_jitContext.endDelaySlot = &SH2::JitEndDelaySlot;
+}
+
+uint64 SH2::JitInterpretOne(void *ctx) {
+    return static_cast<SH2 *>(ctx)->InterpretNext<false, false>();
+}
+
+uint32 SH2::JitRead(void *ctx, uint32 address, uint32 size, bool instrFetch) {
+    auto &sh2 = *static_cast<SH2 *>(ctx);
+    if (instrFetch) {
+        switch (size) {
+        case 1: return sh2.MemRead<uint8, true, false, false>(address);
+        case 2: return sh2.MemRead<uint16, true, false, false>(address);
+        default: return sh2.MemRead<uint32, true, false, false>(address);
+        }
+    }
+    switch (size) {
+    case 1: return sh2.MemRead<uint8, false, false, false>(address);
+    case 2: return sh2.MemRead<uint16, false, false, false>(address);
+    default: return sh2.MemRead<uint32, false, false, false>(address);
+    }
+}
+
+void SH2::JitWrite(void *ctx, uint32 address, uint32 size, uint32 value) {
+    auto &sh2 = *static_cast<SH2 *>(ctx);
+    switch (size) {
+    case 1: sh2.MemWrite<uint8, false, false, false>(address, static_cast<uint8>(value)); break;
+    case 2: sh2.MemWrite<uint16, false, false, false>(address, static_cast<uint16>(value)); break;
+    default: sh2.MemWrite<uint32, false, false, false>(address, value); break;
+    }
+}
+
+uint16 SH2::JitPeekInstruction(void *ctx, uint32 address) {
+    return static_cast<SH2 *>(ctx)->MemRead<uint16, true, true, false>(address);
+}
+
+uint64 SH2::JitAccessCycles(void *ctx, uint32 address, uint32 size, bool write) {
+    auto &sh2 = *static_cast<SH2 *>(ctx);
+    if (write) {
+        switch (size) {
+        case 1: return sh2.AccessCycles<uint8, true, false>(address);
+        case 2: return sh2.AccessCycles<uint16, true, false>(address);
+        default: return sh2.AccessCycles<uint32, true, false>(address);
+        }
+    }
+    switch (size) {
+    case 1: return sh2.AccessCycles<uint8, false, false>(address);
+    case 2: return sh2.AccessCycles<uint16, false, false>(address);
+    default: return sh2.AccessCycles<uint32, false, false>(address);
+    }
+}
+
+bool SH2::JitBusWait(void *ctx, uint32 address, uint32 size, bool write) {
+    return static_cast<SH2 *>(ctx)->m_bus.IsBusWait(address, size, write);
+}
+
+void SH2::JitRefillPipeline(void *ctx, uint32 address) {
+    auto &sh2 = *static_cast<SH2 *>(ctx);
+    sh2.m_fetchedOpcodes = sh2.MemRead<uint32, true, false, false>(address);
+}
+
+void SH2::JitSetupDelaySlot(void *ctx, uint32 target) {
+    static_cast<SH2 *>(ctx)->SetupDelaySlot(target);
+}
+
+void SH2::JitEndDelaySlot(void *ctx) {
+    static_cast<SH2 *>(ctx)->AdvancePC<false, false, true>();
+}
 
 // -----------------------------------------------------------------------------
 // Probe implementation
