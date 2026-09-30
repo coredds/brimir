@@ -152,6 +152,10 @@ bool CoreWrapper::Initialize() {
     try {
         // Create the Saturn emulator instance
         m_saturn = std::make_unique<ymir::Saturn>();
+
+        // Apply a profiling state chosen before initialization
+        m_saturn->masterSH2.SetHostTimeProfiling(m_profiler.IsEnabled());
+        m_saturn->slaveSH2.SetHostTimeProfiling(m_profiler.IsEnabled());
         
         // NOTE: Ymir requires a file-backed memory-mapped backup RAM
         // We'll set the path later when the game loads (need game name for per-game saves)
@@ -935,6 +939,10 @@ size_t CoreWrapper::GetSystemRAMHighSize() const {
 
 void CoreWrapper::SetProfilingEnabled(bool enabled) {
     m_profiler.SetEnabled(enabled);
+    if (m_saturn) {
+        m_saturn->masterSH2.SetHostTimeProfiling(enabled);
+        m_saturn->slaveSH2.SetHostTimeProfiling(enabled);
+    }
 }
 
 void CoreWrapper::RunFrame() {
@@ -962,6 +970,12 @@ void CoreWrapper::RunFrame() {
         {
             ScopedTimer ymirTimer(m_profiler, "Ymir_RunFrame");
             m_saturn->RunFrame();
+        }
+
+        // Per-frame SH-2 host time, accumulated inside SH2::Advance
+        if (m_profiler.IsEnabled()) {
+            m_profiler.AddSample("SH2_Master", static_cast<double>(m_saturn->masterSH2.ConsumeHostTimeNs()) / 1e6);
+            m_profiler.AddSample("SH2_Slave", static_cast<double>(m_saturn->slaveSH2.ConsumeHostTimeNs()) / 1e6);
         }
 
         // Track frames for SRAM sync optimization

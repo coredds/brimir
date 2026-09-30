@@ -97,6 +97,22 @@ public:
     template <bool debug, bool emulateCache>
     uint64 Step();
 
+    // -------------------------------------------------------------------------
+    // Brimir: host-time profiling (see src/core/BRIMIR_FORK.md)
+
+    /// @brief Enables or disables host wall-time accounting for Advance(). Always clears the counter.
+    void SetHostTimeProfiling(bool enable) {
+        m_profileHostTime = enable;
+        m_hostTimeNs = 0;
+    }
+
+    /// @brief Returns the host time spent in Advance() since the last call, in nanoseconds, and resets it.
+    uint64 ConsumeHostTimeNs() {
+        const uint64 ns = m_hostTimeNs;
+        m_hostTimeNs = 0;
+        return ns;
+    }
+
     bool IsMaster() const {
         return !BCR1.MASTER;
     }
@@ -702,6 +718,10 @@ private:
 
     // Number of cycles executed in the current Advance invocation
     uint64 m_cyclesExecuted;
+
+    // Brimir: host-time profiling state (see SetHostTimeProfiling)
+    bool m_profileHostTime = false;
+    uint64 m_hostTimeNs = 0;
 
     // Retrieves the current absolute cycle count
     uint64 GetCurrentCycleCount() const;

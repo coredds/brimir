@@ -290,6 +290,9 @@ public:
     /// @brief Reset profiling data
     void ResetProfiling() { m_profiler.Reset(); }
 
+    /// @brief Read-only access to the profiler (for tools and tests)
+    const Profiler& GetProfiler() const { return m_profiler; }
+
 private:
     /// @brief Callback for when VDP completes a frame
     void OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height);

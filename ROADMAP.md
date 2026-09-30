@@ -8,7 +8,7 @@ Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroAr
 
 ## Guiding Principle
 
-**Ymir hardware layer stays verbatim upstream.** No patches, no namespace modifications. The Ymir source tree under `src/core/` is a direct copy of upstream. All Brimir features must be implemented in the Bridge layer (`src/bridge/`), the Libretro layer (`src/libretro/`), or proposed upstream to Ymir.
+**Ymir hardware layer stays verbatim upstream, except the SH-2.** The Ymir source tree under `src/core/` is a direct copy of upstream with one exception: the SH-2 CPU (`src/core/include/ymir/hw/sh2/*`, `src/core/src/ymir/hw/sh2/*`) is Brimir-owned so the SH-2 JIT can hook into it. Changes and hand-ported upstream fixes are logged in [`src/core/BRIMIR_FORK.md`](src/core/BRIMIR_FORK.md). All other Brimir features must be implemented in the Bridge layer (`src/bridge/`), the Libretro layer (`src/libretro/`), or proposed upstream to Ymir.
 
 Feature categories below are tagged:
 - **Bridge** — Implementable purely in Brimir's bridge/libretro code, zero Ymir changes

@@ -188,9 +188,9 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 brimir/
   src/
     core/
-      include/ymir/   Ymir hardware layer (verbatim upstream sync)
+      include/ymir/   Ymir hardware layer (verbatim upstream sync, except the SH-2 fork)
       include/brimir/ Brimir-specific additions
-      src/ymir/       Ymir source files (verbatim)
+      src/ymir/       Ymir source files (verbatim, except the SH-2 fork)
     bridge/           CoreWrapper -- interface between emulator and frontends
     libretro/         Libretro API implementation and core options
   include/         Public headers (libretro.h, CoreWrapper)
@@ -222,7 +222,7 @@ Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license a
 
 ## Credits
 
-Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The entire hardware layer under `src/core/` is synced verbatim from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. Brimir wraps this hardware layer in a libretro core, adding performance optimizations and frontend integration without modifying the emulation engine. Both projects are licensed under GPL.
+Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The hardware layer under `src/core/` is synced from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. The SH-2 files are a Brimir-maintained fork of Ymir's SH-2 for the upcoming JIT; see `src/core/BRIMIR_FORK.md`. Brimir wraps this hardware layer in a libretro core, adding performance optimizations and frontend integration without modifying the emulation engine. Both projects are licensed under GPL.
 
 ## Contributing
 
