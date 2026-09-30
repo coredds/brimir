@@ -75,11 +75,13 @@ target_include_directories(brimir_tests PRIVATE
 
 target_compile_definitions(brimir_tests PRIVATE BRIMIR_BUILD_TESTS)
 
-# Enable CTest support
-include(CTest)
-
-# Note: Using amalgamated Catch2, so we don't need catch_discover_tests
-# Run tests manually with: ./build/bin/Debug/brimir_tests.exe or ctest
+# Register with CTest (enable_testing() is called from the top-level CMakeLists).
+# The amalgamated Catch2 build has no catch_discover_tests, so the whole suite
+# runs as a single CTest entry. Run with: ctest --test-dir build --output-on-failure
+add_test(NAME brimir_tests
+    COMMAND brimir_tests
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
 
 # Copy test fixtures if they exist
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
