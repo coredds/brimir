@@ -70,7 +70,8 @@ A plain struct the fork fills in once per `SH2` instance. It points at the live 
 - general registers `R[16]`, `PC`, `PR`, `SR`, `GBR`, `VBR`, `MACH`, `MACL`
 - pipeline state: delay-slot flag and target, fetched-opcode buffer, `m_wbReg`
 - `m_cyclesExecuted` and the cycle target
-- interrupt flags (`m_intrFlags`)
+- interrupt flags (`m_intrFlags`) and the 32-bit instruction fetch buffer
+- `m_cyclesExecuted`, kept current by the executor before every interpreter call and (via the `SyncCycles` IR op) before every memory access, because on-chip timers (WDT, FRT) read it
 - a reference to the SH2's `sys::SH2Bus`
 - callbacks into the fork: "interpret exactly one instruction" (`InterpretNext<false, false>()`), and slow-path bus read/write helpers equivalent to `MemRead`/`MemWrite` with cache emulation off
 
@@ -150,7 +151,8 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 ### 6.1 Block cache
 
 - One cache per CPU (the CPUs run different code and each has its own on-chip cache data array).
-- Keyed by a normalized guest PC: the cached region (`0x0xxxxxxx`) and the cache-through region (`0x2xxxxxxx`) alias the same memory and share a key. The cache data array regions keep separate keys.
+- Keyed by the full guest PC. Block exits write constant PCs that include the partition bits, so the cached (`0x0xxxxxxx`) and cache-through (`0x2xxxxxxx`) aliases of the same code get separate blocks.
+- A block starting at `PC & 2` runs only if the fetch buffer's low halfword matches memory; otherwise the interpreter executes the buffered opcode, as the hardware would.
 - Direct-mapped hash table with an overflow map. Each block stores its guest address range and a copy of its original opcodes.
 - Size cap: 32 MB per CPU by default. When full, the whole cache is flushed.
 
@@ -167,6 +169,8 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 - Pages with a direct `array` pointer: inline big-endian load/store plus the page's wait-state cycles.
 - All other pages (MMIO, on-chip I/O at `0xFFFFxxxx`, cache address/purge regions): call the slow-path helper, which behaves exactly like `MemRead` / `MemWrite` with cache emulation off.
 - Misaligned accesses: same masking as the interpreter. Ymir raises no address-error exception and neither does the JIT.
+- Milestone 1 routes every access (including RAM) through the fork's own `MemRead`/`MemWrite`/`AccessCycles`/`IsBusWait` via context callbacks, which is exact by construction. The inline RAM fast path above is a milestone 2 optimization.
+- Known deviation: a store into the currently executing block's own code takes effect at the next block entry (check-on-entry), not at the next instruction.
 
 ### 6.4 Save states, rewind, run-ahead
 

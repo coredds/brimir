@@ -2,6 +2,9 @@
 add_library(brimir-jit STATIC
     src/ir.cpp
     src/interp_backend.cpp
+    src/frontend.cpp
+    src/block_cache.cpp
+    src/executor.cpp
 )
 
 target_include_directories(brimir-jit PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
