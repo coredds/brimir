@@ -69,7 +69,8 @@ Desktop.ini
 .cursor/
 query_saturn.py
 
-# CodeWhale AI
+# AI agent workspaces / session notes
+.superpowers/
 .codewhale/
 codewhale/
 
@@ -85,10 +86,14 @@ third_party/
 node_modules/
 
 # ROMs and BIOS files (NEVER commit copyrighted content!)
-# BIOS files
-*.bin         # Sega Saturn BIOS (sega_101.bin, mpr-17933.bin, etc.)
+# NOTE: git does not support trailing comments; keep comments on their own line.
+# Sega Saturn BIOS (sega_101.bin, mpr-17933.bin, etc.)
+*.bin
 *.bios
-system/       # RetroArch system directory
+# ROM cartridge dumps (e.g. mpr-18811-mx.ic1)
+*.ic[0-9]
+# RetroArch system directory
+system/
 bios/
 
 # ROM images
@@ -106,8 +111,10 @@ roms/
 *.srm
 *.state
 *.sav
-*.bup         # Ymir backup RAM files
-*.smpc        # Ymir SMPC persistent data (RTC)
+# Ymir backup RAM files
+*.bup
+# Ymir SMPC persistent data (RTC)
+*.smpc
 saves/
 states/
 
@@ -125,8 +132,10 @@ tests/bios/
 tests/system/
 
 # Test fixtures - BIOS and ROM files
-tests/fixtures/*.bin      # BIOS files (sega_101.bin, sega_100.bin, etc.)
+# BIOS files (sega_101.bin, sega_100.bin, etc.)
+tests/fixtures/*.bin
 tests/fixtures/*.bios
+tests/fixtures/*.ic[0-9]
 tests/fixtures/*.iso
 tests/fixtures/*.cue
 tests/fixtures/*.chd
