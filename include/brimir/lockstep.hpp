@@ -26,8 +26,11 @@ class CoreWrapper;
 // the virtual (emulated-time) clock so both cores read the same date and time.
 void PrepareLockstepCore(CoreWrapper &core);
 
-// Compares the emulated state of two cores after the same frames: both SH-2s (CPU and on-chip
-// peripherals), the slave SH-2 enable flag, low and high work RAM, and the last output frame.
+// Compares the emulated state of two cores after the same frames, in this order: both SH-2s (CPU
+// and on-chip peripherals, field by field), the slave SH-2 enable flag, low and high work RAM, the
+// save state of every other subsystem (scheduler, system, SCU, SMPC, VDP, SCSP, the CD block -- HLE
+// or SH-1/YGR/CD drive/DRAM when LLE -- and the spillover counters; reported per subsystem as
+// "<subsystem> state differs (byte offset N)"), and the last output frame.
 // Returns "" if identical, otherwise the first difference ("a" is the first core).
 std::string CompareCores(CoreWrapper &a, CoreWrapper &b);
 
@@ -36,7 +39,9 @@ struct LockstepResult {
     std::string divergence; // "" if the cores stayed identical
 };
 
-// Runs both cores frame by frame and compares them after every frame; stops at the first difference.
+// Runs both cores frame by frame; after every frame drains and compares both cores' audio samples
+// ("audio sample count differs" / "audio differs at sample N"), then calls CompareCores. Stops at the
+// first difference.
 LockstepResult RunLockstep(CoreWrapper &a, CoreWrapper &b, int frames);
 
 } // namespace brimir

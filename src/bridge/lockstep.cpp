@@ -5,11 +5,16 @@
 #include "brimir/lockstep.hpp"
 #include "brimir/core_wrapper.hpp"
 
+#include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <type_traits>
+#include <vector>
 
 namespace brimir {
 
@@ -20,6 +25,202 @@ std::string Describe(const char *label, const char *field, uint64_t a, uint64_t 
     std::snprintf(buf, sizeof(buf), "%s%s differs: a=0x%llX b=0x%llX", label, field,
                   static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
     return buf;
+}
+
+std::string StateDiffers(const char *subsystem, size_t offset) {
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "%s state differs (byte offset %zu)", subsystem, offset);
+    return buf;
+}
+
+template <typename T>
+void ZeroBytes(T &obj) {
+    static_assert(std::is_trivially_copyable_v<T>, "only trivially copyable state can be cleared bytewise");
+    std::memset(static_cast<void *>(&obj), 0, sizeof(T));
+}
+
+template <typename T>
+size_t OffsetIn(const T &base, const void *member) {
+    return static_cast<size_t>(static_cast<const char *>(member) - reinterpret_cast<const char *>(&base));
+}
+
+// Returns the offset of the first differing byte of a member, or SIZE_MAX if equal.
+template <typename T>
+size_t FirstDiffByte(const T &a, const T &b) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto *pa = reinterpret_cast<const unsigned char *>(&a);
+    const auto *pb = reinterpret_cast<const unsigned char *>(&b);
+    if (std::memcmp(pa, pb, sizeof(T)) == 0) {
+        return SIZE_MAX;
+    }
+    for (size_t i = 0; i < sizeof(T); ++i) {
+        if (pa[i] != pb[i]) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+// Clears every byte of the state that Saturn::SaveState writes into, padding included, so the
+// bytewise comparison sees only data. SCUSaveState and SMPCSaveState hold std::vectors and cannot be
+// cleared bytewise; their trivially copyable members are cleared and the rest is compared by value.
+void ClearSaveState(ymir::savestate::SaveState &s) {
+    ZeroBytes(s.scheduler);
+    ZeroBytes(s.system);
+    ZeroBytes(s.msh2);
+    ZeroBytes(s.ssh2);
+    ZeroBytes(s.scu.dma);
+    ZeroBytes(s.scu.dsp);
+    ZeroBytes(s.vdp);
+    ZeroBytes(s.scsp);
+    ZeroBytes(s.cdblock);
+    ZeroBytes(s.sh1);
+    ZeroBytes(s.ygr);
+    ZeroBytes(s.cddrive);
+    ZeroBytes(s.cdblockDRAM);
+    s.cdblockLLE = false;
+    s.msh2SpilloverCycles = 0;
+    s.ssh2SpilloverCycles = 0;
+    s.sh1SpilloverCycles = 0;
+    s.sh1FracCycles = 0;
+}
+
+template <typename T>
+std::string DiffBytes(const char *subsystem, const T &a, const T &b) {
+    if (const size_t off = FirstDiffByte(a, b); off != SIZE_MAX) {
+        return StateDiffers(subsystem, off);
+    }
+    return {};
+}
+
+// SCUSaveState is not trivially copyable (cartData), so it is compared member by member. The
+// reported offset is the member's offset within SCUSaveState (plus the byte within it for arrays).
+std::string DiffSCU(const ymir::savestate::SCUSaveState &a, const ymir::savestate::SCUSaveState &b) {
+    if (const size_t off = FirstDiffByte(a.dma, b.dma); off != SIZE_MAX) {
+        return StateDiffers("scu", OffsetIn(a, &a.dma) + off);
+    }
+    if (const size_t off = FirstDiffByte(a.dsp, b.dsp); off != SIZE_MAX) {
+        return StateDiffers("scu", OffsetIn(a, &a.dsp) + off);
+    }
+#define BRIMIR_DIFF_MEMBER(field)                                                                            \
+    if (a.field != b.field) {                                                                                \
+        return StateDiffers("scu", OffsetIn(a, &a.field));                                                   \
+    }
+    BRIMIR_DIFF_MEMBER(cartType)
+    BRIMIR_DIFF_MEMBER(cartData)
+    BRIMIR_DIFF_MEMBER(intrMask)
+    BRIMIR_DIFF_MEMBER(intrStatus)
+    BRIMIR_DIFF_MEMBER(abusIntrsPendingAck)
+    BRIMIR_DIFF_MEMBER(pendingIntrLevel)
+    BRIMIR_DIFF_MEMBER(pendingIntrIndex)
+    BRIMIR_DIFF_MEMBER(timer0Counter)
+    BRIMIR_DIFF_MEMBER(timer0Compare)
+    BRIMIR_DIFF_MEMBER(timer1Reload)
+    BRIMIR_DIFF_MEMBER(timer1Mode)
+    BRIMIR_DIFF_MEMBER(timerEnable)
+    BRIMIR_DIFF_MEMBER(wramSizeSelect)
+#undef BRIMIR_DIFF_MEMBER
+    return {};
+}
+
+// SMPCSaveState is not trivially copyable (intback.report), so it is compared member by member.
+std::string DiffSMPC(const ymir::savestate::SMPCSaveState &a, const ymir::savestate::SMPCSaveState &b) {
+#define BRIMIR_DIFF_MEMBER(field)                                                                            \
+    if (a.field != b.field) {                                                                                \
+        return StateDiffers("smpc", OffsetIn(a, &a.field));                                                  \
+    }
+    BRIMIR_DIFF_MEMBER(IREG)
+    BRIMIR_DIFF_MEMBER(OREG)
+    BRIMIR_DIFF_MEMBER(COMREG)
+    BRIMIR_DIFF_MEMBER(SR)
+    BRIMIR_DIFF_MEMBER(SF)
+    BRIMIR_DIFF_MEMBER(PDR1)
+    BRIMIR_DIFF_MEMBER(PDR2)
+    BRIMIR_DIFF_MEMBER(DDR1)
+    BRIMIR_DIFF_MEMBER(DDR2)
+    BRIMIR_DIFF_MEMBER(IOSEL)
+    BRIMIR_DIFF_MEMBER(EXLE)
+    BRIMIR_DIFF_MEMBER(intback.getPeripheralData)
+    BRIMIR_DIFF_MEMBER(intback.optimize)
+    BRIMIR_DIFF_MEMBER(intback.port1mode)
+    BRIMIR_DIFF_MEMBER(intback.port2mode)
+    BRIMIR_DIFF_MEMBER(intback.report)
+    BRIMIR_DIFF_MEMBER(intback.reportOffset)
+    BRIMIR_DIFF_MEMBER(intback.inProgress)
+    BRIMIR_DIFF_MEMBER(busValue)
+    BRIMIR_DIFF_MEMBER(resetDisable)
+    BRIMIR_DIFF_MEMBER(commandEventState)
+    BRIMIR_DIFF_MEMBER(rtcTimestamp)
+    BRIMIR_DIFF_MEMBER(rtcSysClockCount)
+#undef BRIMIR_DIFF_MEMBER
+    return {};
+}
+
+// Compares the save state of every subsystem other than the SH-2s (compared field by field by
+// CompareCores) and the disc hash (identical by construction). Returns the first difference.
+std::string DiffSaturnState(const ymir::Saturn &sa, const ymir::Saturn &sb) {
+    // Several MB each; kept per thread so lockstep runs do not allocate every frame.
+    static thread_local std::unique_ptr<ymir::savestate::SaveState> xa = std::make_unique<ymir::savestate::SaveState>();
+    static thread_local std::unique_ptr<ymir::savestate::SaveState> xb = std::make_unique<ymir::savestate::SaveState>();
+    auto &a = *xa;
+    auto &b = *xb;
+    ClearSaveState(a);
+    ClearSaveState(b);
+    sa.SaveState(a);
+    sb.SaveState(b);
+
+    if (std::string d = DiffBytes("scheduler", a.scheduler, b.scheduler); !d.empty()) {
+        return d;
+    }
+    if (std::string d = DiffBytes("system", a.system, b.system); !d.empty()) {
+        return d;
+    }
+    if (std::string d = DiffSCU(a.scu, b.scu); !d.empty()) {
+        return d;
+    }
+    if (std::string d = DiffSMPC(a.smpc, b.smpc); !d.empty()) {
+        return d;
+    }
+    if (std::string d = DiffBytes("vdp", a.vdp, b.vdp); !d.empty()) {
+        return d;
+    }
+    if (std::string d = DiffBytes("scsp", a.scsp, b.scsp); !d.empty()) {
+        return d;
+    }
+    if (a.cdblockLLE != b.cdblockLLE) {
+        return Describe("", "cdblockLLE", a.cdblockLLE, b.cdblockLLE);
+    }
+    if (!a.cdblockLLE) {
+        if (std::string d = DiffBytes("cdblock", a.cdblock, b.cdblock); !d.empty()) {
+            return d;
+        }
+    } else {
+        if (std::string d = DiffBytes("sh1", a.sh1, b.sh1); !d.empty()) {
+            return d;
+        }
+        if (std::string d = DiffBytes("ygr", a.ygr, b.ygr); !d.empty()) {
+            return d;
+        }
+        if (std::string d = DiffBytes("cddrive", a.cddrive, b.cddrive); !d.empty()) {
+            return d;
+        }
+        if (std::string d = DiffBytes("cdblockDRAM", a.cdblockDRAM, b.cdblockDRAM); !d.empty()) {
+            return d;
+        }
+    }
+    if (a.msh2SpilloverCycles != b.msh2SpilloverCycles) {
+        return Describe("", "msh2SpilloverCycles", a.msh2SpilloverCycles, b.msh2SpilloverCycles);
+    }
+    if (a.ssh2SpilloverCycles != b.ssh2SpilloverCycles) {
+        return Describe("", "ssh2SpilloverCycles", a.ssh2SpilloverCycles, b.ssh2SpilloverCycles);
+    }
+    if (a.sh1SpilloverCycles != b.sh1SpilloverCycles) {
+        return Describe("", "sh1SpilloverCycles", a.sh1SpilloverCycles, b.sh1SpilloverCycles);
+    }
+    if (a.sh1FracCycles != b.sh1FracCycles) {
+        return Describe("", "sh1FracCycles", a.sh1FracCycles, b.sh1FracCycles);
+    }
+    return {};
 }
 
 } // namespace
@@ -215,6 +416,9 @@ std::string CompareCores(CoreWrapper &a, CoreWrapper &b) {
     if (std::string diff = compareRam("WRAMHigh", sa->mem.WRAMHigh, sb->mem.WRAMHigh); !diff.empty()) {
         return diff;
     }
+    if (std::string diff = DiffSaturnState(*sa, *sb); !diff.empty()) {
+        return diff;
+    }
 
     const unsigned w = a.GetFramebufferWidth();
     const unsigned h = a.GetFramebufferHeight();
@@ -241,12 +445,43 @@ std::string CompareCores(CoreWrapper &a, CoreWrapper &b) {
     return {};
 }
 
+namespace {
+
+// Drains both cores' audio output and compares it. Returns "" if identical.
+std::string CompareAudio(CoreWrapper &a, CoreWrapper &b) {
+    constexpr size_t kMaxStereoSamples = 4096;
+    static thread_local std::vector<int16_t> bufA(kMaxStereoSamples * 2);
+    static thread_local std::vector<int16_t> bufB(kMaxStereoSamples * 2);
+    const size_t na = a.GetAudioSamples(bufA.data(), kMaxStereoSamples);
+    const size_t nb = b.GetAudioSamples(bufB.data(), kMaxStereoSamples);
+    char buf[96];
+    if (na != nb) {
+        std::snprintf(buf, sizeof(buf), "audio sample count differs: a=%zu b=%zu", na, nb);
+        return buf;
+    }
+    if (std::memcmp(bufA.data(), bufB.data(), na * 2 * sizeof(int16_t)) != 0) {
+        for (size_t i = 0; i < na * 2; ++i) {
+            if (bufA[i] != bufB[i]) {
+                std::snprintf(buf, sizeof(buf), "audio differs at sample %zu", i / 2);
+                return buf;
+            }
+        }
+    }
+    return {};
+}
+
+} // namespace
+
 LockstepResult RunLockstep(CoreWrapper &a, CoreWrapper &b, int frames) {
     LockstepResult result;
     for (int frame = 0; frame < frames; ++frame) {
         a.RunFrame();
         b.RunFrame();
         ++result.framesRun;
+        result.divergence = CompareAudio(a, b);
+        if (!result.divergence.empty()) {
+            break;
+        }
         result.divergence = CompareCores(a, b);
         if (!result.divergence.empty()) {
             break;
