@@ -421,7 +421,7 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
     const uint64 jitCycles = jit->sh2->Advance<false, false>(50000);
     const uint64 refCycles = ref->sh2->Advance<false, false>(50000);
     REQUIRE(refCycles == jitCycles);
-    const std::string diff = sh2test::DiffRigs(*ref, *jit);
+    const std::string diff = sh2test::DiffRigs(*ref, *jit, true);
     INFO(diff);
     REQUIRE(diff.empty());
     CHECK(jit->State().R[3] != 0u); // the timer actually advanced
@@ -560,7 +560,7 @@ TEST_CASE("JIT Advance matches interpreter Advance for every cycle target", "[ji
         const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
         INFO("target " << target);
         REQUIRE(jitCycles == refCycles);
-        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
         INFO(diff);
         REQUIRE(diff.empty());
         sawDelaySlotStop = sawDelaySlotStop || p.jit->State().delaySlot;
@@ -590,7 +590,7 @@ TEST_CASE("JIT Advance matches interpreter Advance for every cycle target with B
         const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
         INFO("target " << target);
         REQUIRE(jitCycles == refCycles);
-        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
         INFO(diff);
         REQUIRE(diff.empty());
         sawBeforeBranchStop = sawBeforeBranchStop || p.jit->State().PC == kCode + 4;
@@ -633,7 +633,7 @@ TEST_CASE("Interrupts raised inside a block are taken at the same instruction", 
     const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
     const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
     REQUIRE(jitCycles == refCycles);
-    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
     INFO(diff);
     REQUIRE(diff.empty());
     REQUIRE(p.ref->State().R[3] == 0u); // the interpreter took the interrupt before the adds

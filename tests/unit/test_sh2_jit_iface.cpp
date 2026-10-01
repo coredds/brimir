@@ -56,7 +56,7 @@ TEST_CASE("Advance routes through an attached executor with identical results", 
 
     REQUIRE(exec.runCalls == 1);
     REQUIRE(refCycles == jitCycles);
-    const std::string diff = sh2test::DiffRigs(*ref, *jit);
+    const std::string diff = sh2test::DiffRigs(*ref, *jit, true);
     INFO(diff);
     REQUIRE(diff.empty());
 }
