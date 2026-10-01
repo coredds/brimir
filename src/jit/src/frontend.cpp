@@ -55,9 +55,10 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
     return static_cast<uint32_t>(instr & 0xFFu) << shift;
 }
 
-// ALU, shift, compare, @(R0,GBR) logic, system-register transfer, multiply, divide-step, MAC and
-// TAS opcodes (handler table sections 4, 5, 6 and 9.2-9.6); each has a Delay_ variant with
-// identical semantics (LDC SR passes the delay-slot flag to SetSR, with the same net effect).
+// ALU, shift, compare, @(R0,GBR) logic, system-register transfer (register and memory forms),
+// multiply, divide-step, MAC and TAS opcodes (handler table sections 4, 5, 6 and 9.2-9.8); each
+// has a Delay_ variant with identical semantics (LDC SR passes the delay-slot flag to SetSR, with
+// the same net effect).
 #define BRIMIR_JIT_ALU_OPS(X)                                                                                         \
     X(EXTSB) X(EXTSW) X(EXTUB) X(EXTUW) X(SWAPB) X(SWAPW) X(XTRCT) X(ADDC) X(ADDV) X(AND_R) X(AND_I) X(NEG) X(NEGC)  \
         X(NOT) X(OR_R) X(OR_I) X(ROTCL) X(ROTCR) X(ROTL) X(ROTR) X(SHAL) X(SHAR) X(SHLL) X(SHLL2) X(SHLL8)           \

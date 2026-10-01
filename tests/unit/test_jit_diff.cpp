@@ -167,7 +167,8 @@ void FillTargetArea(Pair &p) {
 
 // Random-program generation (fuzz test). Register roles keep every access and branch inside known
 // memory: R0-R7 and R13-R15 data; R8-R11 data addresses (never written); R12 branch register; GBR
-// always holds one of the R8-R11 addresses.
+// always holds one of the R8-R11 addresses; PR a return target. LDC.L/LDS.L into GBR, SR, VBR and
+// PR are restricted to keep these (see the Fmt::M case).
 uint32_t RemapDest(uint32_t r) {
     return (r >= 8 && r <= 12) ? r - 8 : r;
 }
@@ -179,12 +180,13 @@ uint16_t WithLo(uint16_t w, uint32_t r) { // bits 7..4
 }
 
 // Address forms whose base cannot be one of the fixed R8-R11 addresses: R0-indexed (R0 is a data
-// register) and post-increment/pre-decrement (the base is written). The generator emits a setup
-// instruction right before them (`mov #imm,R0` or `mov Rbase,Rd`); the pair is never split by a
-// branch target or a delay slot.
+// register) and post-increment/pre-decrement (the base is written). The generator emits setup
+// instructions right before them (`mov #imm,R0` or `mov Rbase,Rd`, plus a store for the restricted
+// system-register loads, see FuzzInstr); the group is never split by a branch target or a delay slot.
 bool NeedsSetup(jitspec::Addr a) {
     using jitspec::Addr;
-    return a == Addr::RmR0 || a == Addr::RnR0 || a == Addr::GbrR0 || a == Addr::RnPreDec || a == Addr::RmPostInc;
+    return a == Addr::RmR0 || a == Addr::RnR0 || a == Addr::GbrR0 || a == Addr::RnPreDec || a == Addr::RmPostInc ||
+           a == Addr::MacPair;
 }
 
 // One random non-branch instruction from the compiled-opcode table, plus its setup instruction if
@@ -234,7 +236,24 @@ std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) 
     case Fmt::NI: w = WithHi(w, RemapDest(hi)); break;
     case Fmt::M: // LDC/LDS sources
         if (spec.addr == Addr::RmPostInc) {
-            w = WithHi(w, setupBase()); // LDC.L/LDS.L @Rm+: Rm is a copy of an address register
+            // LDC.L/LDS.L @Rm+: Rm is a copy of an address register. The loads that the register
+            // roles constrain only load a value stored right before them through @-Rm (Rm ends up
+            // back at the address register's value):
+            //   ldc.l @Rm+,GBR: mov.l Raddr,@-Rm  (GBR = one of R8-R11, like LDC_GBR_R)
+            //   ldc.l @Rm+,SR:  stc.l SR,@-Rm     (SR unchanged: keeps the I-level and S bit)
+            //   ldc.l @Rm+,VBR: stc.l VBR,@-Rm    (VBR unchanged)
+            //   lds.l @Rm+,PR:  sts.l PR,@-Rm     (PR stays a return target)
+            const uint32_t d = setupBase();
+            if (name == "LDC_GBR_M") {
+                setup.push_back(Nm(0x2006, d, addrReg())); // mov.l Raddr,@-Rd
+            } else if (name == "LDC_SR_M") {
+                setup.push_back(Nm(0x4003, d, 0)); // stc.l SR,@-Rd
+            } else if (name == "LDC_VBR_M") {
+                setup.push_back(Nm(0x4023, d, 0)); // stc.l VBR,@-Rd
+            } else if (name == "LDS_PR_M") {
+                setup.push_back(Nm(0x4022, d, 0)); // sts.l PR,@-Rd
+            }
+            w = WithHi(w, d);
         } else if (name == "LDC_GBR_R") {
             w = WithHi(w, addrReg());
         } else if (name == "LDS_PR_R") {
@@ -263,6 +282,11 @@ std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) 
         case Addr::RmPostInc: {
             const uint32_t d = setupBase();
             w = WithLo(WithHi(w, RemapDest(hi)), d);
+            break;
+        }
+        case Addr::MacPair: { // mac.x @Rd+,@Rd+ (n == m): both operands from one copied address
+            const uint32_t d = setupBase();
+            w = WithLo(WithHi(w, d), d);
             break;
         }
         default: break;
@@ -550,18 +574,20 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
 // Random programs of every compiled instruction (jitspec::CompiledOpcodes()) plus all branch kinds,
 // with delay slots, loops, calls, MMIO and bus waits. Register roles (see FuzzInstr) keep execution
 // and data accesses inside known memory: R0-R7, R13-R15 data; R8-R11 data addresses (never
-// written); GBR one of R8-R11; R12 the branch register; PR a return target. R12 is per program
-// either an absolute program address (JMP/JSR, and LDS PR,R12) or a fixed displacement
-// (BRAF/BSRF: target = PC + 4 + R12).
+// written); GBR one of R8-R11 (LDC GBR,Rm and LDC.L @Rm+,GBR only load one of them); R12 the
+// branch register; PR a return target (LDS.L @Rm+,PR only reloads PR). R12 is per program either
+// an absolute program address (JMP/JSR, and LDS PR,R12) or a fixed displacement (BRAF/BSRF:
+// target = PC + 4 + R12).
 TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]") {
     constexpr int kPrograms = 300;
     constexpr int kLength = 24;
     constexpr int kSteps = 80;
-    // Coverage lower bounds. Measured with all 300 programs passing: steps=15527 blocksRun=15378
-    // interpreted=149 compiles=1134, i.e. 99% of steps in blocks. kMinBlocksRun is ~65% of the
-    // measured count; kMinBlockPercent is 90, leaving room for generator changes but failing if
-    // a regression sends a meaningful share of steps back to the interpreter.
-    constexpr uint64_t kMinBlocksRun = 10000;
+    // Coverage lower bounds. Measured with all 300 programs passing (milestone 2A, MAC and the
+    // restricted system-register loads included): steps=15284 blocksRun=15142 interpreted=142
+    // compiles=1048, i.e. 99% of steps in blocks. kMinBlocksRun is ~65% of the measured count;
+    // kMinBlockPercent is 90, leaving room for generator changes but failing if a regression sends
+    // a meaningful share of steps back to the interpreter.
+    constexpr uint64_t kMinBlocksRun = 9800;
     constexpr uint64_t kMinBlockPercent = 90;
     bool diverged = false;
     uint64_t totalSteps = 0;
@@ -574,9 +600,9 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     std::vector<const jitspec::OpSpec *> nonBranch;
     std::vector<const jitspec::OpSpec *> singles;
     for (const jitspec::OpSpec &spec : jitspec::CompiledOpcodes()) {
-        // MAC.W/MAC.L post-increment two address registers, which the register roles below never
-        // allow (R8-R11 are never written); they are left out until the generator supports them.
-        if (spec.slotOk && spec.addr != jitspec::Addr::MacPair) {
+        // MAC.W/MAC.L (Addr::MacPair) are included: FuzzInstr emits them as `mov Rbase,Rd ;
+        // mac.x @Rd+,@Rd+`, so no address register is written.
+        if (spec.slotOk) {
             nonBranch.push_back(&spec);
             if (!NeedsSetup(spec.addr)) {
                 singles.push_back(&spec);
@@ -611,13 +637,16 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
             }
             bool delayed = false;
             if (pick < 12) {
-                // A setup pair must fit before the end and never sits in a delay slot.
+                // A setup group must fit before the end and never sits in a delay slot.
                 const auto &pool = (prevDelayed || last) ? singles : nonBranch;
                 const jitspec::OpSpec *spec = pool[rng() % pool.size()];
                 while (!absR12 && isLdsPr(spec)) {
                     spec = pool[rng() % pool.size()]; // R12 is not an absolute address here
                 }
                 const std::vector<uint16_t> words = FuzzInstr(*spec, rng);
+                if (i + static_cast<int>(words.size()) > kLength) {
+                    continue; // a setup group must fit before the end: draw again
+                }
                 for (size_t k = 0; k < words.size(); ++k) {
                     program.push_back(words[k]);
                     branchKind.push_back(Br::None);
