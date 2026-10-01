@@ -2,6 +2,7 @@
 add_library(brimir-jit STATIC
     src/ir.cpp
     src/interp_backend.cpp
+    src/sh2_helpers.cpp
     src/frontend.cpp
     src/block_cache.cpp
     src/executor.cpp

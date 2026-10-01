@@ -266,7 +266,8 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_sh2_jit",
         "SH-2 JIT (Experimental)",
         nullptr,
-        "Experimental. Run the SH-2 CPUs through the JIT. It compiles most SH-2 instructions and is "
+        "Experimental. Run the SH-2 CPUs through the JIT. It compiles all SH-2 instructions except "
+        "exception entry/return and SLEEP and is "
         "validated to produce exactly the interpreter's results, but it currently runs compiled code "
         "through an IR interpreter and is about 2x SLOWER than the default interpreter. For testing "
         "only. Not used while SH-2 cache emulation is active.",

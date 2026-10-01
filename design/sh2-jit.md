@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 1 complete (plans 1A–1D); next: milestone 2 (x64 backend)
+**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend next (plan 2B)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -228,7 +228,7 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 
 ### 7.3 Game-level regression (local)
 
-`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Milestone 1 game validation results are in [sh2-validation.md](sh2-validation.md).
+`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Game validation results (milestones 1 and 2A) are in [sh2-validation.md](sh2-validation.md).
 
 ## 8. Measurement
 
@@ -266,7 +266,7 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 
 ### Milestone 2 - full coverage and x64 backend
 
-Design: [sh2-jit-m2.md](sh2-jit-m2.md). Remaining instructions (multiply, MAC, divide step, TAS, memory forms of LDC/LDS/STC/STS), then native x64 code generation from the IR with asmjit, staying bit-exact. Target: SH-2 time at least 2x lower than the interpreter, after which the JIT becomes the default on x86-64.
+Design: [sh2-jit-m2.md](sh2-jit-m2.md). Remaining instructions (multiply, MAC, divide step, TAS, memory forms of LDC/LDS/STC/STS; done in milestone 2A), then native x64 code generation from the IR with asmjit, staying bit-exact. Target: SH-2 time at least 2x lower than the interpreter, after which the JIT becomes the default on x86-64.
 
 ### Milestone 3 — ARM64 backend (separate spec)
 

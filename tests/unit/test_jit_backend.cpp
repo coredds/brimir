@@ -6,6 +6,7 @@
 
 #include <brimir/jit/interp_backend.hpp>
 #include <brimir/jit/ir.hpp>
+#include <brimir/jit/sh2_helpers.hpp>
 
 #include <memory>
 
@@ -287,6 +288,121 @@ TEST_CASE("Backend: system registers, MAC and interrupt-allow", "[jit][backend]"
     CHECK(st.R[7] == 0x06003000u);
     CHECK_FALSE(st.intrAllow);
     CHECK_FALSE(*ctx.intrAllow);
+}
+
+TEST_CASE("Backend: 32x32 multiplies", "[jit][backend]") {
+    struct Case {
+        uint32_t a, b, lo, hiS, hiU;
+    };
+    const Case cases[] = {
+        {0x80000000u, 0x80000000u, 0x00000000u, 0x40000000u, 0x40000000u},
+        {0xFFFFFFFFu, 0xFFFFFFFFu, 0x00000001u, 0x00000000u, 0xFFFFFFFEu},
+        {0x12345678u, 0x9ABCDEF0u, 0x242D2080u, 0xF8CC93D6u, 0x0B00EA4Eu},
+    };
+    for (const Case &c : cases) {
+        Fixture f;
+        const ValueId a = f.b.Const(c.a);
+        const ValueId b = f.b.Const(c.b);
+        f.b.SetReg(1, f.b.Mul(a, b));
+        f.b.SetReg(2, f.b.MulHiS(a, b));
+        f.b.SetReg(3, f.b.MulHiU(a, b));
+        f.b.Exit(kCode + 2, 1);
+        f.Run();
+        const auto st = f.rig->State();
+        INFO("a " << c.a << " b " << c.b);
+        CHECK(st.R[1] == c.lo);
+        CHECK(st.R[2] == c.hiS);
+        CHECK(st.R[3] == c.hiU);
+    }
+}
+
+TEST_CASE("Backend: SetSRBits changes only the masked bits", "[jit][backend]") {
+    Fixture f;
+    auto s = f.rig->BaseState(kCode);
+    s.SR = 0x0F0; // ILevel 15, S/Q/M/T clear
+    f.rig->Load(s);
+    auto &ctx = f.rig->sh2->GetJitContext();
+    *ctx.intrAllow = true;
+    f.b.SetSRBits(f.b.Const(0xFFFFFFFF), 0x301);
+    f.b.Exit(kCode + 2, 1);
+    f.Run();
+    CHECK(f.rig->State().SR == 0x3F1u); // M, Q, T set; S and ILevel untouched
+    CHECK(*ctx.intrAllow);              // no LDC-style side effects
+
+    Fixture g;
+    auto s2 = g.rig->BaseState(kCode);
+    s2.SR = 0x3F3;
+    g.rig->Load(s2);
+    g.b.SetSRBits(g.b.Const(0), 0x301);
+    g.b.Exit(kCode + 2, 1);
+    g.Run();
+    CHECK(g.rig->State().SR == 0x0F2u);
+}
+
+TEST_CASE("Backend: Div1 applies Div1Step through the context", "[jit][backend]") {
+    for (const bool rmIsRn : {false, true}) {
+        Fixture f;
+        auto s = f.rig->BaseState(kCode);
+        s.SR = 0x0F0 | 0x200 | 0x1; // M = 1, Q = 0, T = 1
+        s.R[1] = 0x12345678;
+        s.R[2] = 0x80000001;
+        f.rig->Load(s);
+        f.b.SetReg(2, f.b.Div1(f.b.GetReg(2), f.b.GetReg(1), rmIsRn));
+        f.b.Exit(kCode + 2, 1);
+        f.Run();
+
+        uint32_t sr = s.SR;
+        const uint32_t expected = Div1Step(0x80000001, 0x12345678, rmIsRn, sr);
+        const auto st = f.rig->State();
+        INFO("rmIsRn " << rmIsRn);
+        CHECK(st.R[2] == expected);
+        CHECK(st.SR == sr);
+        CHECK(st.R[1] == 0x12345678u);
+    }
+}
+
+TEST_CASE("Backend: MacW and MacL apply the helpers to MACH:MACL", "[jit][backend]") {
+    for (const bool sBit : {false, true}) {
+        for (const bool isLong : {false, true}) {
+            Fixture f;
+            auto s = f.rig->BaseState(kCode);
+            s.SR = 0x0F0 | (sBit ? 0x2u : 0u);
+            s.MACH = 0x00007FFF;
+            s.MACL = 0x7FFFFFF0;
+            f.rig->Load(s);
+            const ValueId op1 = f.b.Const(isLong ? 0x7FFFFFFFu : 0x00007FFFu);
+            const ValueId op2 = f.b.Const(isLong ? 0x7FFFFFFFu : 0x00007FFFu);
+            if (isLong) {
+                f.b.MacL(op1, op2);
+            } else {
+                f.b.MacW(op1, op2);
+            }
+            f.b.Exit(kCode + 2, 1);
+            f.Run();
+
+            const uint64_t mac = 0x00007FFF7FFFFFF0ull;
+            const uint64_t expected = isLong ? MacLStep(mac, sBit, 0x7FFFFFFF, 0x7FFFFFFF)
+                                             : MacWStep(mac, sBit, 0x7FFF, 0x7FFF);
+            const auto st = f.rig->State();
+            INFO("S " << sBit << " long " << isLong);
+            CHECK(st.MACH == static_cast<uint32_t>(expected >> 32));
+            CHECK(st.MACL == static_cast<uint32_t>(expected));
+            CHECK(st.SR == s.SR);
+        }
+    }
+}
+
+TEST_CASE("Backend: AddAccessCyclesRMWByte uses the RMW-cycles callback", "[jit][backend]") {
+    for (const uint32_t address : {0x26040000u, 0x22000000u}) {
+        Fixture f;
+        auto &ctx = f.rig->sh2->GetJitContext();
+        f.b.AddAccessCyclesRMWByte(f.b.Const(address));
+        f.b.AddCycles(4);
+        f.b.Exit(kCode + 2, 1);
+        const ExitInfo info = f.Run();
+        INFO("address " << address);
+        CHECK(info.cycles == ctx.accessCyclesRMWByte(ctx.sh2, address) + 4);
+    }
 }
 
 TEST_CASE("Backend: SetSR masks reserved bits and recomputes interrupt flags", "[jit][backend]") {

@@ -4718,6 +4718,7 @@ void SH2::InitJitContext() {
     m_jitContext.MACL = &MAC.L;
     m_jitContext.MACH = &MAC.H;
     m_jitContext.setSR = &SH2::JitSetSR;
+    m_jitContext.accessCyclesRMWByte = &SH2::JitAccessCyclesRMWByte;
 }
 
 uint64 SH2::JitInterpretOne(void *ctx) {
@@ -4794,6 +4795,10 @@ void SH2::JitSetSR(void *ctx, uint32 value, bool delaySlot) {
         .pending = !delaySlot && sh2.INTC.pending.level > sh2.SR.ILevel,
         .allow = false,
     }));
+}
+
+uint64 SH2::JitAccessCyclesRMWByte(void *ctx, uint32 address) {
+    return static_cast<SH2 *>(ctx)->AccessCyclesRMWByte<false>(address);
 }
 
 // -----------------------------------------------------------------------------

@@ -148,6 +148,17 @@ TEST_CASE("JIT context callbacks mirror interpreter memory semantics", "[jit][sh
     REQUIRE(rig->State().SR == 0x3F3u);
     REQUIRE_FALSE(rig->State().intrAllow);
 
+    // accessCyclesRMWByte is TAS's AccessCyclesRMWByte: partitions 000/001/101 use the bus byte-read
+    // cycles - 1 (even in the cached area, where a plain access costs 1); others read + write.
+    REQUIRE(ctx.accessCyclesRMWByte != nullptr);
+    CHECK(ctx.accessCyclesRMWByte(ctx.sh2, 0x02000000) == 7);  // 000, MMIO: r8 = 8
+    CHECK(ctx.accessCyclesRMWByte(ctx.sh2, 0x06040000) == 1);  // 000, RAM: r8 = 2
+    CHECK(ctx.accessCyclesRMWByte(ctx.sh2, 0x22000000) == 7);  // 001, MMIO
+    CHECK(ctx.accessCyclesRMWByte(ctx.sh2, 0x26040000) == 1);  // 001, RAM
+    CHECK(ctx.accessCyclesRMWByte(ctx.sh2, 0xA2000000) == 7);  // 101, MMIO
+    CHECK(ctx.accessCyclesRMWByte(ctx.sh2, 0xFFFFFE10) == 8);  // 111, I/O: 4 + 4
+    CHECK(ctx.accessCyclesRMWByte(ctx.sh2, 0x40000000) == 2);  // 010: 1 + 1
+
     // interpretOne executes exactly one instruction with the interpreter.
     rig->WriteCode(kCode + 0x200, {0x7005}); // add #5,R0
     auto s = rig->BaseState(kCode + 0x200);

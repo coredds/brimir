@@ -113,13 +113,13 @@ void FillLiteralPool(Pair &p, std::mt19937 &rng) {
     p.WriteCode(kCode + 8, pool);
 }
 
-// State for one random instance: registers and GBR from Encode, random T, wbReg, PR and MAC.
+// State for one random instance: registers and GBR from Encode, random T/Q/M, wbReg, PR and MAC.
 ymir::savestate::SH2SaveState RandomState(Pair &p, std::mt19937 &rng, uint32_t pc,
                                           const std::array<uint32_t, 16> &regs, uint32_t gbr) {
     auto state = p.ref->BaseState(pc);
     state.R = regs;
     state.GBR = gbr;
-    state.SR = 0xF0 | (rng() & 1u);
+    state.SR = 0xF0 | (rng() & 0x303u); // random T, S, Q and M (MAC uses S; DIV0S/DIV0U/DIV1 use Q and M)
     state.wbReg = RandomWb(rng);
     state.PR = rng();
     state.MACH = rng();
@@ -167,14 +167,21 @@ TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
         "ROTCR", "ROTL",   "ROTR",   "SHAL",   "SHAR",  "SHLL",  "SHLL2",  "SHLL8",    "SHLL16", "SHLR",
         "SHLR2", "SHLR8",  "SHLR16", "SUB",    "SUBC",  "SUBV",  "XOR_R",  "XOR_I",    "CMP_EQ_I", "CMP_GE",
         "CMP_GT", "CMP_HI", "CMP_HS", "CMP_PL", "CMP_PZ", "CMP_STR", "TST_R", "TST_I",  "CLRMAC",
+        // Handler table sections 9.2-9.4: multiplies and divide steps.
+        "MUL",   "MULS",   "MULU",   "DMULS",  "DMULU", "DIV0S", "DIV0U", "DIV1",
     };
+    // DIV0S/DIV0U/DIV1 read or write SR.Q and SR.M: run every (T, Q, M) combination for them.
+    const auto usesQM = [](const std::string &name) { return name.rfind("DIV", 0) == 0; };
     // CMP/STR sets T when any byte lane of Rn ^ Rm is zero. Pairs that make exactly one lane equal:
     //   lane 1: 0x7FFFFFFF ^ 0xFF00FF00 = 0x80FF00FF;  lane 2: 0x00000001 ^ 0xFF00FF00 = 0xFF00FF01
     //   lane 3: 0x12345678 ^ 0x12FFFFFF = 0x00CBA987;  lane 0: 0x12345678 ^ 0xFFFFFF78 = 0xEDCBA900
     // (bits 31..24 are lane 3). kImms has one entry per kValues entry (indexed by the same bi).
+    // MULS/MULU edges: 0x8000 / 0xFFFF in the low half, with dirty upper halves (0xABCD8000,
+    // 0x5555FFFF) that the 16-bit multiplies must ignore.
     static constexpr uint32_t kValues[] = {0,          1,          0x7FFFFFFF, 0x80000000, 0xFFFFFFFF,
-                                           0x0000FFFF, 0xFF00FF00, 0x12345678, 0x12FFFFFF, 0xFFFFFF78};
-    static constexpr uint32_t kImms[] = {0x00, 0x01, 0x7F, 0x80, 0xFF, 0xF0, 0x0F, 0x78, 0x12, 0x34};
+                                           0x0000FFFF, 0xFF00FF00, 0x12345678, 0x12FFFFFF, 0xFFFFFF78,
+                                           0x00008000, 0xABCD8000, 0x5555FFFF};
+    static constexpr uint32_t kImms[] = {0x00, 0x01, 0x7F, 0x80, 0xFF, 0xF0, 0x0F, 0x78, 0x12, 0x34, 0x55, 0xAA, 0xC3};
     static_assert(std::size(kImms) == std::size(kValues));
 
     const auto specs = jitspec::CompiledOpcodes();
@@ -201,10 +208,11 @@ TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
                 if (bi > 0 && (spec->fmt == jitspec::Fmt::N || spec->fmt == jitspec::Fmt::Z)) {
                     continue; // single-operand forms: only `a` matters
                 }
-                for (uint32_t t : {0u, 1u}) {
-                    if (failed) {
-                        break;
-                    }
+                // srBits: bit 0 = T, bit 1 = Q, bit 2 = M.
+                const uint32_t srCombos = usesQM(name) ? 8u : 2u;
+                for (uint32_t srBits = 0; srBits < srCombos && !failed; ++srBits) {
+                    const uint32_t t = srBits & 1u;
+                    const uint32_t qm = (srBits >> 1) << 8; // Q = bit 8, M = bit 9
                     auto regs = RandomRegs(rng);
                     const uint32_t a = kValues[ai];
                     const uint32_t n = rng() % 16;
@@ -231,7 +239,7 @@ TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
                     const uint32_t pc = kCode + (rng() & 1u) * 2;
                     p.WriteCode(pc, {instr, kSleepOp});
                     auto state = RandomState(p, rng, pc, regs, rng());
-                    state.SR = 0xF0 | t;
+                    state.SR = 0xF0 | qm | t;
                     p.Load(state);
 
                     std::string operands;
@@ -243,7 +251,8 @@ TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
                     default: buf[0] = '\0'; break; // Z: no register operands
                     }
                     operands = buf;
-                    INFO(name << " instr " << Hex({instr}) << operands << " T=" << t);
+                    INFO(name << " instr " << Hex({instr}) << operands << " T=" << t << " Q=" << ((qm >> 8) & 1u)
+                              << " M=" << (qm >> 9));
                     const uint64_t blocksBefore = p.exec.GetStats().blocksRun;
                     const auto info = p.Step();
                     CHECK(info.retired == 1);
@@ -314,7 +323,7 @@ TEST_CASE("Every slot-capable opcode matches the interpreter in a delay slot", "
                 p.WriteCode(pc, {br, slot, kSleepOp});
 
                 auto state = RandomState(p, rng, pc, regs, gbr);
-                state.SR = 0xF0 | t;
+                state.SR = 0xF0 | (state.SR & 0x302u) | t; // keep the random S, Q and M
                 state.PR = pr;
                 p.Load(state);
 

@@ -133,6 +133,34 @@ constexpr OpSpec kSpecs[] = {
     {"BRAF",       0x0023, Fmt::M, Addr::None,      0, false},
     {"BSRF",       0x0003, Fmt::M, Addr::None,      0, false},
     {"JSR",        0x400B, Fmt::M, Addr::None,      0, false},
+    // Milestone 2A task 2: multiply and divide-step (handler table sections 9.2-9.4)
+    {"MUL",        0x0007, Fmt::NM, Addr::None,     0, true},
+    {"MULS",       0x200F, Fmt::NM, Addr::None,     0, true},
+    {"MULU",       0x200E, Fmt::NM, Addr::None,     0, true},
+    {"DMULS",      0x300D, Fmt::NM, Addr::None,     0, true},
+    {"DMULU",      0x3005, Fmt::NM, Addr::None,     0, true},
+    {"DIV0S",      0x2007, Fmt::NM, Addr::None,     0, true},
+    {"DIV0U",      0x0019, Fmt::Z,  Addr::None,     0, true},
+    {"DIV1",       0x3004, Fmt::NM, Addr::None,     0, true},
+    // Milestone 2A task 3: MAC.W / MAC.L and TAS (handler table sections 9.5, 9.6; no bus-wait check)
+    {"MACW",       0x400F, Fmt::NM, Addr::MacPair,  2, true},
+    {"MACL",       0x000F, Fmt::NM, Addr::MacPair,  4, true},
+    {"TAS",        0x401B, Fmt::N,  Addr::Rn,       1, true},
+    // Milestone 2A task 4: memory forms of LDC/LDS/STC/STS (handler table sections 9.7, 9.8; no
+    // bus-wait check; all clear interrupt-allow). Loaded SR/VBR/PR values are random: the rig has
+    // no interrupt pending and SLEEP follows.
+    {"LDC_GBR_M",  0x4017, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDC_SR_M",   0x4007, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDC_VBR_M",  0x4027, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDS_MACH_M", 0x4006, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDS_MACL_M", 0x4016, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDS_PR_M",   0x4026, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"STC_GBR_M",  0x4013, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STC_SR_M",   0x4003, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STC_VBR_M",  0x4023, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STS_MACH_M", 0x4002, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STS_MACL_M", 0x4012, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STS_PR_M",   0x4022, Fmt::N,  Addr::RnPreDec,  4, true},
 };
 // clang-format on
 
@@ -212,6 +240,14 @@ uint16_t Encode(const OpSpec &spec, std::mt19937 &rng, std::array<uint32_t, 16> 
         }
         case Addr::RnPreDec: regs[n] = a + size; break;
         case Addr::RmPostInc: regs[m] = a; break;
+        case Addr::MacPair:
+            // @Rn is read first, then @Rm (= @(Rn + size) when n == m). RandomDataAddress offsets stay
+            // below 0x10000, so a + size is still inside the same region.
+            regs[n] = a;
+            if (m != n) {
+                regs[m] = RandomDataAddress(rng, size, forceMmio);
+            }
+            break;
         }
     }
     return static_cast<uint16_t>(word);
