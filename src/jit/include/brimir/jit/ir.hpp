@@ -32,6 +32,7 @@ enum class Op : uint8_t {
     WbStall,
     SetWb,
     SyncCycles,
+    CheckBoundary,
     Refill,
     SetupDelaySlot,
     EndDelaySlot,
@@ -84,6 +85,7 @@ public:
     void WbStall(uint32_t mask);
     void SetWb(uint8_t reg);
     void SyncCycles();
+    void CheckBoundary(uint32_t pc, uint8_t retired);
     void Refill(uint32_t address);
     void SetupDelaySlot(ValueId target);
     void EndDelaySlot();

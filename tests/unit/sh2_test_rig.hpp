@@ -14,6 +14,8 @@
 #include <ymir/savestate/savestate_sh2.hpp>
 #include <ymir/sys/bus.hpp>
 
+#include <brimir/lockstep.hpp>
+
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -25,10 +27,18 @@ namespace sh2test {
 constexpr uint32_t kRamSize = 0x100000;
 constexpr uint32_t kSleep = 0x001B; // SLEEP: never supported by the JIT, ends test programs
 
+struct MmioAccess {
+    char kind;    // 'R' read, 'W' write, 'B' bus-wait query
+    uint8_t size; // bytes
+    uint32_t address;
+    uint32_t value; // value read or written (0 for bus-wait queries)
+};
+
 struct Mmio {
     std::array<uint8_t, 0x10000> data{};
     uint32_t busWaitQueries = 0;
     uint32_t busWaitEvery = 0;
+    std::vector<MmioAccess> log; // every access in order, for bus-sequence comparison
 };
 
 class Rig {
@@ -56,7 +66,10 @@ public:
     std::unique_ptr<ymir::sh2::SH2> sh2;
 };
 
-// Returns a description of the first difference in CPU state, RAM or MMIO, or "" if identical.
-std::string DiffRigs(const Rig &a, const Rig &b);
+// Returns a description of the first difference, or "" if identical: SH-2 state (a = interpreter,
+// b = JIT), RAM, MMIO contents and the MMIO access log. comparePeripherals also compares timers,
+// DMAC and the pending interrupt; use it only when both rigs ran through SH2::Advance (per-step
+// tests use SH2::Step on the reference, which advances timers while the JIT's step does not).
+std::string DiffRigs(const Rig &a, const Rig &b, bool comparePeripherals = false);
 
 } // namespace sh2test

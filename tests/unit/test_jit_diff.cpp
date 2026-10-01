@@ -417,12 +417,11 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
     jit->Load(state);
     jit->sh2->SetJitExecutor(&exec);
 
-    // The JIT stops on a block boundary; that point is also an instruction boundary for the
-    // interpreter, so advancing the interpreter to the same count lands on the same state.
+    // With instruction-exact boundaries, both stop at the same instruction for the same target.
     const uint64 jitCycles = jit->sh2->Advance<false, false>(50000);
-    const uint64 refCycles = ref->sh2->Advance<false, false>(jitCycles);
+    const uint64 refCycles = ref->sh2->Advance<false, false>(50000);
     REQUIRE(refCycles == jitCycles);
-    const std::string diff = sh2test::DiffRigs(*ref, *jit);
+    const std::string diff = sh2test::DiffRigs(*ref, *jit, true);
     INFO(diff);
     REQUIRE(diff.empty());
     CHECK(jit->State().R[3] != 0u); // the timer actually advanced
@@ -436,10 +435,10 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     constexpr int kLength = 24;
     constexpr int kSteps = 80;
     // Coverage lower bounds, ~65% of the values measured with all 300 programs passing
-    // (steps=15731 blocksRun=14652 interpreted=1079 compiles=1124, i.e. 93% of steps in blocks).
+    // (steps=15730 blocksRun=14700 interpreted=1030 compiles=1122, i.e. 93% of steps in blocks).
     constexpr uint64_t kMinBlocksRun = 9500;
-    constexpr uint64_t kMinCompiles = 730;
     constexpr uint64_t kMinBlockPercent = 60;
+    bool diverged = false;
     uint64_t totalSteps = 0;
     uint64_t totalBlocksRun = 0;
     uint64_t totalInterpreted = 0;
@@ -467,19 +466,71 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
             } else if (i == kLength - 1 && pick >= 13) {
                 pick = rng() % 13; // no delayed branch last: its slot would be SLEEP
             }
+            // Every random draw goes into a named local first, so the program does not depend on
+            // the compiler's argument evaluation order.
             uint16_t instr = kNop;
             switch (pick) {
             case 0: instr = kNop; break;
-            case 1: instr = MovR(dataReg(), dataReg()); break;
-            case 2: instr = MovI(dataReg(), rng()); break;
-            case 3: instr = MovBL(dataReg(), addrReg()); break;
-            case 4: instr = MovLL(dataReg(), addrReg()); break;
-            case 5: instr = MovBS(addrReg(), dataReg()); break;
-            case 6: instr = MovLS(addrReg(), dataReg()); break;
-            case 7: instr = MovLI(dataReg(), rng() % 16); break;
-            case 8: instr = Add(dataReg(), dataReg()); break;
-            case 9: instr = AddI(dataReg(), rng()); break;
-            case 10: instr = CmpEq(dataReg(), dataReg()); break;
+            case 1: {
+                const uint32_t n = dataReg();
+                const uint32_t m = dataReg();
+                instr = MovR(n, m);
+                break;
+            }
+            case 2: {
+                const uint32_t n = dataReg();
+                const uint32_t imm = rng();
+                instr = MovI(n, imm);
+                break;
+            }
+            case 3: {
+                const uint32_t n = dataReg();
+                const uint32_t m = addrReg();
+                instr = MovBL(n, m);
+                break;
+            }
+            case 4: {
+                const uint32_t n = dataReg();
+                const uint32_t m = addrReg();
+                instr = MovLL(n, m);
+                break;
+            }
+            case 5: {
+                const uint32_t n = addrReg();
+                const uint32_t m = dataReg();
+                instr = MovBS(n, m);
+                break;
+            }
+            case 6: {
+                const uint32_t n = addrReg();
+                const uint32_t m = dataReg();
+                instr = MovLS(n, m);
+                break;
+            }
+            case 7: {
+                const uint32_t n = dataReg();
+                const uint32_t disp = rng() % 16;
+                instr = MovLI(n, disp);
+                break;
+            }
+            case 8: {
+                const uint32_t n = dataReg();
+                const uint32_t m = dataReg();
+                instr = Add(n, m);
+                break;
+            }
+            case 9: {
+                const uint32_t n = dataReg();
+                const uint32_t imm = rng();
+                instr = AddI(n, imm);
+                break;
+            }
+            case 10: {
+                const uint32_t n = dataReg();
+                const uint32_t m = dataReg();
+                instr = CmpEq(n, m);
+                break;
+            }
             case 11: instr = Dt(dataReg()); break;
             case 12: instr = (rng() & 1u) ? Bt(targetDisp(i)) : Bf(targetDisp(i)); break;
             case 13: instr = (rng() & 1u) ? Bts(targetDisp(i)) : Bfs(targetDisp(i)); break;
@@ -526,14 +577,123 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         totalInterpreted += p.exec.GetStats().interpreted;
         totalCompiles += p.exec.Cache().Compiles();
         if (failed) {
+            diverged = true;
             break; // stop at the first failing program
         }
     }
 
     // The premise of the test: most steps ran compiled blocks rather than the interpreter.
+    // Compile attempts include empty fallback blocks, so totalCompiles is informational only.
     WARN("fuzz coverage: steps=" << totalSteps << " blocksRun=" << totalBlocksRun
                                  << " interpreted=" << totalInterpreted << " compiles=" << totalCompiles);
-    CHECK(totalBlocksRun >= kMinBlocksRun);
-    CHECK(totalCompiles >= kMinCompiles);
-    CHECK(totalBlocksRun * 100 >= totalSteps * kMinBlockPercent);
+    if (!diverged) {
+        // A divergence already failed the test; don't bury it under threshold failures.
+        CHECK(totalBlocksRun >= kMinBlocksRun);
+        CHECK(totalBlocksRun * 100 >= totalSteps * kMinBlockPercent);
+    }
+}
+
+// With instruction-exact boundaries, Advance() through the JIT must stop at exactly the same
+// instruction as the interpreter for any cycle target, including between a branch and its slot.
+TEST_CASE("JIT Advance matches interpreter Advance for every cycle target", "[jit][diff][exact]") {
+    // loop: mov.l @R8,R1 ; add R1,R2 ; mov.l R2,@R9 ; dt R3 ; bf/s loop ; add #1,R4 ; bra loop ; nop
+    const std::vector<uint16_t> loop = {MovLL(1, 8), Add(2, 1), MovLS(9, 2), Dt(3),
+                                        Bfs(0xFA),   AddI(4, 1), Bra(0xFF8), kNop};
+    bool sawDelaySlotStop = false;
+    for (uint32_t target = 1; target <= 400; ++target) {
+        Pair p;
+        p.SetBusWaitEvery(target % 3 == 0 ? 2u : 0u);
+        p.WriteCode(kCode, loop);
+        p.Write32(0x06040000, 0x01020304);
+        auto state = p.ref->BaseState(kCode);
+        state.R[3] = 3;
+        state.R[8] = 0x26040000;
+        state.R[9] = (target & 1u) ? kMmio + 0x10 : 0x26040010;
+        p.Load(state);
+        p.jit->sh2->SetJitExecutor(&p.exec);
+
+        const uint64 refCycles = p.ref->sh2->Advance<false, false>(target);
+        const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
+        INFO("target " << target);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+        INFO(diff);
+        REQUIRE(diff.empty());
+        sawDelaySlotStop = sawDelaySlotStop || p.jit->State().delaySlot;
+    }
+    CHECK(sawDelaySlotStop); // some target stopped between bf/s and its slot
+}
+
+// Same sweep with a non-delayed BF that ends a multi-instruction block, so the boundary check
+// before it decides whether a target between cmp/eq and bf stops there. BF is taken on most
+// iterations and falls through when R5 reaches R6.
+TEST_CASE("JIT Advance matches interpreter Advance for every cycle target with BT/BF", "[jit][diff][exact]") {
+    // loop: add #1,R5 ; cmp/eq R6,R5 ; bf loop ; mov #0,R5 ; bt loop ; nop
+    // bf at offset 4 -> disp = (0 - 4 - 4) / 2 = -4; bt at offset 8 -> disp = (0 - 8 - 4) / 2 = -6.
+    // T stays 1 after the fall-through, so bt is always taken; mov #0,R5 restarts the count.
+    const std::vector<uint16_t> loop = {AddI(5, 1), CmpEq(5, 6), Bf(0xFC), MovI(5, 0), Bt(0xFA), kNop};
+    bool sawBeforeBranchStop = false;
+    for (uint32_t target = 1; target <= 400; ++target) {
+        Pair p;
+        p.WriteCode(kCode, loop);
+        auto state = p.ref->BaseState(kCode);
+        state.R[5] = 0;
+        state.R[6] = 3;
+        p.Load(state);
+        p.jit->sh2->SetJitExecutor(&p.exec);
+
+        const uint64 refCycles = p.ref->sh2->Advance<false, false>(target);
+        const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
+        INFO("target " << target);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+        INFO(diff);
+        REQUIRE(diff.empty());
+        sawBeforeBranchStop = sawBeforeBranchStop || p.jit->State().PC == kCode + 4;
+    }
+    CHECK(sawBeforeBranchStop); // some target stopped right before bf
+}
+
+// A 32/32 division by zero (write to DVDNT) raises the DIVU overflow interrupt synchronously,
+// inside the store. The interpreter takes it before the next instruction; so must the JIT.
+TEST_CASE("Interrupts raised inside a block are taken at the same instruction", "[jit][diff][exact]") {
+    constexpr uint32_t kVbr = 0x06008000;
+    constexpr uint32_t kVector = 0x50; // not 0x40, the reset vector of IRL
+    constexpr uint32_t kHandler = 0x06009000;
+    constexpr uint32_t kStack = 0x0600F000;
+    Pair p;
+    for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+        rig->Write32(kVbr + kVector * 4, kHandler);
+        rig->WriteCode(kHandler, {static_cast<uint16_t>(kSleep)});
+        auto &ctx = rig->sh2->GetJitContext();
+        ctx.write(ctx.sh2, 0xFFFFFF00, 4, 0);       // DVSR = 0: the next division overflows
+        ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);     // DVCR.OVFIE = 1
+        ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kVector); // VCRDIV: vector number
+        ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);    // IPRA: DIVU interrupt level 15
+    }
+    // mov.l R1,@R2 (R2 = DVDNT) ; add #1,R3 ; add #1,R3 ; sleep
+    p.WriteCode(kCode, {MovLS(2, 1), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    // Interrupt mask 14: blocks IRL, which RecalcInterrupts (called by the DVCR write) always
+    // raises at its reset level 1, but lets the level-15 DIVU interrupt through.
+    state.SR = 0xE0;
+    state.VBR = kVbr;
+    state.R[1] = 1234;
+    state.R[2] = 0xFFFFFF04;
+    state.R[3] = 0;
+    state.R[15] = kStack; // stack for exception entry
+    p.Load(state);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+    REQUIRE_FALSE(*p.ref->sh2->GetJitContext().intrPending); // nothing pending before the store
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().R[3] == 0u); // the interpreter took the interrupt before the adds
+    REQUIRE(p.ref->State().sleep);      // and ran the handler
+    REQUIRE(p.ref->Read32(kStack - 8) == kCode + 2); // stacked PC: taken right after the store
+    REQUIRE(p.exec.GetStats().blocksRun >= 1);       // the store ran in a compiled block
 }

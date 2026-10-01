@@ -173,3 +173,44 @@ TEST_CASE("Backend: delay slot setup and dynamic exit", "[jit][backend]") {
     REQUIRE_FALSE(st.delaySlot);
     REQUIRE(st.delaySlotTarget == kCode + 0x80);
 }
+
+TEST_CASE("Backend: CheckBoundary stops at the cycle target or a pending interrupt", "[jit][backend]") {
+    Fixture f;
+    auto &ctx = f.rig->sh2->GetJitContext();
+    f.b.AddCycles(5);
+    f.b.CheckBoundary(kCode + 2, 1);
+    f.b.AddCycles(7);
+    f.b.Exit(kCode + 4, 2);
+    REQUIRE(VerifyBlock(f.block).empty());
+    *ctx.cyclesExecuted = 100;
+
+    SECTION("budget left") {
+        const ExitInfo info = RunBlock(f.block, ctx, 106);
+        REQUIRE_FALSE(info.boundary);
+        REQUIRE(info.cycles == 12);
+        REQUIRE(info.retired == 2);
+        REQUIRE(*ctx.PC == kCode + 4);
+    }
+    SECTION("budget used up") {
+        const ExitInfo info = RunBlock(f.block, ctx, 105);
+        REQUIRE(info.boundary);
+        REQUIRE(info.cycles == 5);
+        REQUIRE(info.retired == 1);
+        REQUIRE(*ctx.PC == kCode + 2);
+    }
+    SECTION("interrupt pending and allowed") {
+        *ctx.intrPending = true;
+        *ctx.intrAllow = true;
+        const ExitInfo info = RunBlock(f.block, ctx);
+        REQUIRE(info.boundary);
+        REQUIRE(info.cycles == 5);
+        REQUIRE(*ctx.PC == kCode + 2);
+    }
+    SECTION("interrupt pending but not allowed") {
+        *ctx.intrPending = true;
+        *ctx.intrAllow = false;
+        const ExitInfo info = RunBlock(f.block, ctx);
+        REQUIRE_FALSE(info.boundary);
+        REQUIRE(info.cycles == 12);
+    }
+}

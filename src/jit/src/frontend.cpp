@@ -255,6 +255,13 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
             b.Refill(address);
         }
     };
+    // The interpreter checks the cycle budget and pending interrupts before every instruction;
+    // the first instruction of a block is covered by the executor's own checks.
+    const auto boundary = [&](uint32_t address, uint8_t retired) {
+        if (retired > 0) {
+            b.CheckBoundary(address, retired);
+        }
+    };
 
     uint32_t pc = startPC;
     uint8_t count = 0;
@@ -273,8 +280,10 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
             }
             block.guestOpcodes.push_back(instr);
             block.guestOpcodes.push_back(slot);
+            boundary(pc, count);
             refillIfAligned(pc);
             LowerDelayedBranch(b, op, instr, pc, count);
+            b.CheckBoundary(pc + 2, static_cast<uint8_t>(count + 1));
             refillIfAligned(pc + 2);
             LowerPlain(b, *slotBase, slot, pc + 2, true, static_cast<uint8_t>(count + 1));
             b.ExitDynamic(static_cast<uint8_t>(count + 2));
@@ -284,6 +293,7 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
 
         if (op == OpcodeType::BT || op == OpcodeType::BF) {
             block.guestOpcodes.push_back(instr);
+            boundary(pc, count);
             refillIfAligned(pc);
             b.SetWb(kWbNone);
             const ValueId t = b.GetT();
@@ -300,6 +310,7 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
             break;
         }
         block.guestOpcodes.push_back(instr);
+        boundary(pc, count);
         refillIfAligned(pc);
         LowerPlain(b, *base, instr, pc, false, count);
         ++count;

@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 1 in progress — foundation implemented (plan `design/plans/2026-09-30-sh2-jit-m1b-foundation.md`); instruction coverage and shadow-verify remain (plan 1C)
+**Status**: Milestone 1 in progress: foundation and instruction-exact execution implemented (plans 1A–1C); instruction coverage and game validation remain (plan 1D)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -11,7 +11,7 @@
 - Speed up emulation of the two Saturn SH-2 CPUs with a dynamic recompiler.
 - Portable design: one architecture-neutral IR with **x64 and ARM64** native backends (milestones 2 and 3). Targets range from desktop x64 to Cortex-A53/A55-class ARM64 handhelds.
 - Keep Ymir's timing model: compiled code computes **the same cycle cost per instruction** as the interpreter, including bus wait states and write-back stalls.
-- Keep architectural state bit-identical to the interpreter at block boundaries.
+- Keep the emulated system identical to the interpreter (instruction-exact boundaries, section 2).
 - Measure before optimizing: know how much of frame time the SH-2s actually use.
 
 ### Non-goals
@@ -24,10 +24,9 @@
 ## 2. Timing model
 
 - Each compiled block accumulates exactly the cycles Ymir's `InterpretNext()` would have returned for the same instructions (fixed costs, `AccessCycles` wait states from the bus page table, pipeline refills, `WritebackCycles` load-use stalls).
-- The cycle budget and pending interrupts are checked **only at block boundaries**, not after every instruction. Consequences:
-  - Blocks may overshoot the `Advance()` target by up to one block (32 instructions; with wait states this can exceed 100 cycles), versus at most one instruction with the interpreter. The spillover counters do **not** absorb this: in `Saturn::Run` the master's overshoot extends `execCycles`, so the slave's target, the SCU, the VDPs and the scheduler all slip by the same amount. Milestone 1 accepts this; bounding it is a plan 1C item (section 11).
-  - Interrupt entry can happen up to one block later than with the interpreter.
-- Games that need instruction-exact behavior will be forced onto the interpreter through a game database flag (deferred to plan 1C).
+- **Instruction-exact boundaries.** Before every instruction after the first, a block makes the same two checks the interpreter makes before every instruction (IR op `CheckBoundary`): the `Advance()` cycle budget (`m_cyclesExecuted < target`) and the interrupt check (pending and allowed). A block therefore stops at exactly the instruction where the interpreter stops and takes interrupts at the same instruction, so a JIT-enabled system runs identically to the interpreter. This is verified by whole-system lockstep runs (section 7.2).
+- This replaced the original block-granular checks (changed during milestone 1). Those let a block overshoot the master/slave sync step in `Saturn::Run`, and the overshoot delayed the slave SH-2, SCU, VDP and scheduler by up to a whole block.
+- The remaining deviations are listed in section 6.5.
 
 ## 3. Ownership: forking the SH-2
 
@@ -83,7 +82,6 @@ A plain struct the fork fills in once per `SH2` instance. It points at the live 
 - the `brimir_sh2_jit` core option is enabled (default **off** until validated)
 - debug tracing is off (`debug == false` template instance)
 - SH-2 cache emulation is off (`emulateCache == false`), which also excludes games with the `ForceSH2Cache` flag
-- the loaded game is not flagged interpreter-only in the game database (deferred to plan 1C; not checked yet)
 
 Otherwise the unchanged interpreter loop runs.
 
@@ -103,9 +101,11 @@ while cycles < target:
         cycles += ctx.interpretOne()
         continue
     intrAllow = true
-    cycles += backend.Run(block, ctx)       // flushes requested inside are deferred (section 6.5)
+    cycles += backend.Run(block, ctx, target) // flushes requested inside are deferred (section 6.5)
 *ctx.cyclesExecuted = cycles
 ```
+
+`backend.Run` receives `target`; the block itself stops before any later instruction once the budget is used up or an interrupt becomes pending (`CheckBoundary`), exactly like the interpreter loop.
 
 `SLEEP` is handled the same way as in the interpreter: `Advance` returns early when the CPU is asleep, before the executor runs.
 
@@ -116,7 +116,7 @@ while cycles < target:
 Decoding starts at the guest PC. A block ends:
 
 - after a branch and its delay slot
-- after `SLEEP`, `TRAPA`, `RTE`, or any instruction that writes `SR` or `VBR` (for example `LDC Rm,SR`), so a newly unmasked interrupt is seen promptly
+- before `SLEEP`, `TRAPA`, `RTE` and instructions that write `SR` or `VBR` while they are not supported (interpreter fallback); once supported, `CheckBoundary` before the next instruction already sees a newly unmasked interrupt
 - **before** any opcode the front end does not support yet (the executor interprets it)
 - at a length cap of 32 guest instructions (tunable)
 
@@ -129,10 +129,12 @@ Linear, single-assignment within a block, about 40 operations, designed to map d
 - **guest state**: load/store general register, `PC`, `PR`, `GBR`, `VBR`, `MACH`/`MACL`, `SR` and individual `SR` bits (T, S, Q, M, interrupt mask)
 - **ALU (32-bit)**: add, sub, and, or, xor, not, neg, shifts and rotates (including through T), sign/zero extend, compare to T, add/sub with carry and overflow into T, multiply, the division steps (`DIV0S`, `DIV0U`, `DIV1`)
 - **memory**: `Load8/16/32`, `Store8/16/32` with a RAM fast path and a bus-handler slow path
-- **control**: conditional exit, exit to a constant target, exit to a register target
+- **control**: conditional exit, exit to a constant target, exit to a register target, boundary check (`CheckBoundary`: cycle budget and pending interrupt before an instruction)
 - **cycles**: `AddCycles(const)`, `AddAccessCycles(size, read|write, addr)` (reads the bus page wait-state table at run time)
 
 The IR ships with a builder, a verifier (checks types, single assignment, terminators) and a text printer used in test failure messages.
+
+LDC/LDS/STC/STS clear the interrupt-allow flag for the next instruction (InterpretNext sets it back to true at the start of every instruction); when these opcodes are compiled, the IR must reproduce both the clear and the per-instruction re-enable, otherwise CheckBoundary would miss or misplace interrupts.
 
 ### 5.3 Cycle-fidelity rule
 
@@ -182,7 +184,8 @@ The JIT holds no architectural state between blocks, so the save-state format do
 ### 6.5 Known deviations
 
 - A store into the currently executing block's own code takes effect at the next block entry (check-on-entry), not at the next instruction.
-- Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction.
+- Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction. An aborted block returns only the cycles accumulated before the abort; the interpreter would return the whole instruction's cost.
+- Dev-log lines that print the current PC (for example on-chip register access traces) show the block's start PC for accesses made by compiled code, because the JIT does not update `PC` inside a block. Emulated state is unaffected.
 
 ## 7. Validation
 
@@ -195,20 +198,19 @@ Catch2, tag `[jit]`, in `tests/unit/`:
 - **random sequences**: generated blocks of supported instructions including branches and delay slots, with a fixed seed in CI (seed printed on failure)
 - IR verifier and printer unit tests
 
-### 7.2 Shadow-verify mode (debug, real games)
+### 7.2 Whole-system lockstep (CI and real games)
 
-A debug core option. For blocks whose memory accesses all hit RAM pages:
+Because blocks stop at the interpreter's instruction boundaries (section 2), a core running the JIT and a core running the interpreter must stay identical. `brimir::RunLockstep` runs two `CoreWrapper` instances frame by frame and compares, after every frame: both SH-2s (CPU, pipeline, cache address and data arrays, on-chip timers, DMAC, pending interrupt), the slave SH-2 enable flag, low and high work RAM, and the output frame. Threaded VDP rendering is turned off for lockstep runs, and the RTC runs in virtual mode (emulated time) instead of reading the host clock, which otherwise makes two interpreter cores diverge in the BIOS.
 
-1. snapshot SH2 state
-2. run the compiled block while logging RAM writes
-3. roll back state and memory, run the same instructions on the interpreter
-4. compare state, writes and cycles, and log the first mismatch with the block's IR
+- A control run (two interpreter cores) proves the emulator is deterministic, so a JIT divergence points at the JIT.
+- CI: null IPL program (300 frames) and, when a BIOS is present in `tests/fixtures/`, the BIOS (600 frames). The null-IPL run is a smoke test only: the program runs a few instructions and then executes SLEEP. Real whole-system coverage needs a BIOS (CI does not have one, so it skips that test) or real games. A synthetic CI workload is planned in plan 1D.
+- Real games: `brimir_bench --lockstep N` (section 7.3).
 
-Blocks that touch MMIO are skipped, because re-executing side effects would be wrong.
+This replaces the shadow-verify mode planned earlier: lockstep checks the whole system, including bus side effects that shadow-verify had to skip.
 
 ### 7.3 Game-level regression (local)
 
-`tools/brimir_bench` runs N frames from save states with the interpreter and, with `--sh2-jit`, with the JIT, and reports crashes and hangs (frame-hash comparison is still to be added). Some drift is expected because interrupts can land up to a block later. Requires the user's own BIOS and discs, so it does not run in CI.
+`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Game validation for milestone 1 is plan 1D.
 
 ## 8. Measurement
 
@@ -241,8 +243,7 @@ Blocks that touch MMIO are skipped, because re-executing side effects would be w
 **Done when**:
 
 - all strict differential tests pass with exact state and cycle totals
-- with the JIT on, the BIOS boots, and a set of games runs 10 minutes each from save states without crashes or hangs
-- shadow-verify reports zero mismatches on those games
+- with the JIT on, the BIOS and a set of games run 10 minutes each (36000 frames) in lockstep with the interpreter without divergence
 - the baseline report is committed
 
 ### Milestone 2 — x64 backend (separate spec)
@@ -255,7 +256,6 @@ Same as milestone 2 for ARM64, validated on a Cortex-A53/A55-class device.
 
 ## 11. Open questions (to settle in later specs)
 
-- Bound block overshoot (plan 1C, before game validation): pass the remaining cycle budget into the block and exit at an instruction boundary once it is used up, so `Saturn::Run` sees at most one instruction of overshoot again (section 2).
 - Block linking and the dispatch fast path (milestone 2).
 - Whether per-page dirty tracking is needed (after profiling milestone 1).
 - JIT support with cache emulation enabled (possibly never).

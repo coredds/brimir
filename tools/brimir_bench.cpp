@@ -7,6 +7,10 @@
 
 #include <brimir/core_wrapper.hpp>
 #include <brimir/jit/executor.hpp>
+#include <brimir/lockstep.hpp>
+
+#include <ymir/sys/saturn.hpp>
+#include <ymir/util/date_time.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +19,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <random>
 #include <string>
@@ -30,9 +35,12 @@ struct Args {
     std::string dumpState;
     std::string systemDir;
     int dumpAt = -1;
+    int lockstep = -1;
     int frames = 1800;
     int warmup = 120;
     bool sh2Jit = false;
+    bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
+    bool warmupGiven = false;
 };
 
 enum class ParseResult { Ok, Help, Error };
@@ -43,6 +51,8 @@ void PrintUsage(std::FILE* out) {
         "                    [--state <file>] [--frames N] [--warmup N] [--sh2-jit]\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
         "                    [--sh2-jit] --dump-at N --dump-state <file>\n"
+        "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
+        "                    --lockstep N\n"
         "       brimir_bench --help\n"
         "\n"
         "  --bios        Saturn BIOS image (required)\n"
@@ -60,6 +70,9 @@ void PrintUsage(std::FILE* out) {
         "  --warmup      unmeasured frames before measuring (default 120)\n"
         "  --dump-at     run N frames, write a save state to --dump-state, and exit\n"
         "  --sh2-jit     run both SH-2s through the experimental JIT (default: interpreter)\n"
+        "  --lockstep    run N frames on a JIT core and an interpreter core side by side and require\n"
+        "                identical state after every frame (exit 3 on divergence). Cannot be combined\n"
+        "                with --sh2-jit, --frames, --warmup or --dump-at.\n"
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -111,11 +124,18 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
                 return ParseResult::Error;
             }
         } else if (opt == "--frames") {
+            args.framesGiven = true;
             if (!ParseInt(value, args.frames) || args.frames == 0) {
                 std::fprintf(stderr, "Invalid --frames value: %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--lockstep") {
+            if (!ParseInt(value, args.lockstep) || args.lockstep == 0) {
+                std::fprintf(stderr, "Invalid --lockstep value: %s\n", value);
+                return ParseResult::Error;
+            }
         } else if (opt == "--warmup") {
+            args.warmupGiven = true;
             if (!ParseInt(value, args.warmup)) {
                 std::fprintf(stderr, "Invalid --warmup value: %s\n", value);
                 return ParseResult::Error;
@@ -131,6 +151,16 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     }
     if ((args.dumpAt >= 0) != !args.dumpState.empty()) {
         std::fprintf(stderr, "--dump-at and --dump-state must be used together\n");
+        return ParseResult::Error;
+    }
+    if (args.lockstep >= 0 && args.dumpAt >= 0) {
+        std::fprintf(stderr, "--lockstep cannot be combined with --dump-at\n");
+        return ParseResult::Error;
+    }
+    // Lockstep always runs one JIT core and one interpreter core for exactly N frames, so these
+    // options would otherwise be silently ignored.
+    if (args.lockstep >= 0 && (args.sh2Jit || args.framesGiven || args.warmupGiven)) {
+        std::fprintf(stderr, "--lockstep cannot be combined with --sh2-jit, --frames or --warmup\n");
         return ParseResult::Error;
     }
     return ParseResult::Ok;
@@ -251,9 +281,10 @@ int main(int argc, char** argv) {
 
 namespace {
 
-int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir) {
-    brimir::CoreWrapper core;
-    core.SetSH2JitEnabled(args.sh2Jit);
+// Initializes `core` and loads BIOS, game and save state per `args`. Returns 0 or exit code 2.
+int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesystem::path& saveDir,
+                const std::filesystem::path& systemDir, bool sh2Jit, bool lockstepCore) {
+    core.SetSH2JitEnabled(sh2Jit);
     if (!core.Initialize()) {
         std::fprintf(stderr, "Failed to initialize the core\n");
         return 2;
@@ -278,6 +309,59 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             std::fprintf(stderr, "Failed to load save state: %s\n", args.state.c_str());
             return 2;
         }
+    }
+
+    // After loading: LoadGame turns threaded VDP rendering back on.
+    if (lockstepCore) {
+        brimir::PrepareLockstepCore(core);
+    }
+    return 0;
+}
+
+int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir) {
+    if (args.lockstep > 0) {
+        brimir::CoreWrapper jitCore;
+        brimir::CoreWrapper refCore;
+        if (const int rc = LoadContent(jitCore, args, saveDir, systemDir, true, true); rc != 0) {
+            return rc;
+        }
+        if (const int rc = LoadContent(refCore, args, saveDir, systemDir, false, true); rc != 0) {
+            return rc;
+        }
+        if (args.state.empty()) {
+            // The virtual RTC would otherwise start at the persisted RTC file's timestamp, which
+            // moves between runs. Start both cores at the same fixed date (the Saturn's JP launch)
+            // so lockstep runs are reproducible. A save state carries its own RTC time.
+            constexpr util::datetime::DateTime kLockstepDate{1994, 11, 22, 2, 0, 0, 0}; // Tuesday
+            for (brimir::CoreWrapper* core : {&jitCore, &refCore}) {
+                if (ymir::Saturn* saturn = core->GetSaturn(); saturn != nullptr) {
+                    saturn->SMPC.GetRTC().SetDateTime(kLockstepDate);
+                }
+            }
+        }
+        constexpr int kChunk = 600;
+        int done = 0;
+        while (done < args.lockstep) {
+            const int frames = std::min(kChunk, args.lockstep - done);
+            const auto result = brimir::RunLockstep(jitCore, refCore, frames);
+            done += result.framesRun;
+            if (!result.divergence.empty()) {
+                std::printf("lockstep divergence at frame %d: %s\n", done - 1, result.divergence.c_str());
+                return 3;
+            }
+            std::printf("lockstep: %d/%d frames identical\n", done, args.lockstep);
+            std::fflush(stdout);
+        }
+        const auto& stats = jitCore.GetSH2JitExecutor(true)->GetStats();
+        std::printf("lockstep: OK, %d frames identical (jit master blocksRun %llu, interpreted %llu)\n",
+                    args.lockstep, static_cast<unsigned long long>(stats.blocksRun),
+                    static_cast<unsigned long long>(stats.interpreted));
+        return 0;
+    }
+
+    brimir::CoreWrapper core;
+    if (const int rc = LoadContent(core, args, saveDir, systemDir, args.sh2Jit, false); rc != 0) {
+        return rc;
     }
 
     if (args.dumpAt >= 0) {

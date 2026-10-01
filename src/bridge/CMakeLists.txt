@@ -2,6 +2,7 @@
 
 add_library(brimir_bridge OBJECT
     core_wrapper.cpp
+    lockstep.cpp
 )
 
 target_include_directories(brimir_bridge PUBLIC

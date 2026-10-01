@@ -81,6 +81,41 @@ SH-2 time is measured inside `SH2::Advance` and includes on-chip peripherals
 (DMA, timers) and bus accesses the CPUs make. VDP rendering runs on worker
 threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
 
+### Lockstep validation
+
+```powershell
+build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000
+```
+
+`--lockstep N` loads the same content (and optional `--state`) into two cores,
+one running both SH-2s through the JIT and one through the interpreter, runs
+them side by side for N frames, and compares them after every frame (see
+`design/sh2-jit.md` section 7.2). Compared: both SH-2s including their cache
+arrays, on-chip timers and DMA controller, low and high work RAM, and the
+output frame.
+
+In this mode threaded VDP rendering is turned off, and the RTC runs on emulated
+time (virtual mode) instead of the host clock, so both cores see the same date
+and time. Unless `--state` is given (a save state carries its own RTC time),
+both cores' RTC starts at 1994-11-22 00:00:00, so runs are reproducible.
+Lockstep runs write the virtual RTC timestamp back to the RTC file in
+`--system-dir`, so point `--system-dir` at a scratch copy, not your real
+RetroArch system folder.
+Progress is printed every 600 frames:
+
+```
+lockstep: 600/36000 frames identical
+...
+lockstep: OK, 36000 frames identical (jit master blocksRun ..., interpreted ...)
+```
+
+On the first difference it prints the frame number (0-based) and the first
+differing field, for example
+`lockstep divergence at frame 1234: master SH-2 R4 differs: a=0x... b=0x...`
+(`a` is the JIT core), and exits with code 3. `--lockstep` cannot be combined
+with `--dump-at`, `--sh2-jit`, `--frames` or `--warmup` (usage error, exit 1):
+it always runs one JIT core and one interpreter core for exactly N frames.
+
 Exit codes: 0 success (including `--help`), 1 usage error (usage is printed to
 stderr), 2 load or setup failure (BIOS, game, state, missing `--system-dir`,
-temp directory errors).
+temp directory errors), 3 lockstep divergence.

@@ -1,5 +1,6 @@
 #include "sh2_test_rig.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -44,22 +45,42 @@ Rig::Rig()
 
     bus.MapNormal(
         0x2000000, 0x3FFFFFF, &mmio,
-        [](uint32_t address, void *ctx) -> uint8_t { return static_cast<Mmio *>(ctx)->data[address & 0xFFFF]; },
+        [](uint32_t address, void *ctx) -> uint8_t {
+            auto &m = *static_cast<Mmio *>(ctx);
+            const uint8_t value = m.data[address & 0xFFFF];
+            m.log.push_back({'R', 1, address, value});
+            return value;
+        },
         [](uint32_t address, void *ctx) -> uint16_t {
-            return ReadBE16(&static_cast<Mmio *>(ctx)->data[address & 0xFFFE]);
+            auto &m = *static_cast<Mmio *>(ctx);
+            const uint16_t value = ReadBE16(&m.data[address & 0xFFFE]);
+            m.log.push_back({'R', 2, address, value});
+            return value;
         },
         [](uint32_t address, void *ctx) -> uint32_t {
-            return ReadBE32(&static_cast<Mmio *>(ctx)->data[address & 0xFFFC]);
+            auto &m = *static_cast<Mmio *>(ctx);
+            const uint32_t value = ReadBE32(&m.data[address & 0xFFFC]);
+            m.log.push_back({'R', 4, address, value});
+            return value;
         },
-        [](uint32_t address, uint8_t value, void *ctx) { static_cast<Mmio *>(ctx)->data[address & 0xFFFF] = value; },
+        [](uint32_t address, uint8_t value, void *ctx) {
+            auto &m = *static_cast<Mmio *>(ctx);
+            m.data[address & 0xFFFF] = value;
+            m.log.push_back({'W', 1, address, value});
+        },
         [](uint32_t address, uint16_t value, void *ctx) {
-            WriteBE16(&static_cast<Mmio *>(ctx)->data[address & 0xFFFE], value);
+            auto &m = *static_cast<Mmio *>(ctx);
+            WriteBE16(&m.data[address & 0xFFFE], value);
+            m.log.push_back({'W', 2, address, value});
         },
         [](uint32_t address, uint32_t value, void *ctx) {
-            WriteBE32(&static_cast<Mmio *>(ctx)->data[address & 0xFFFC], value);
-        },
-        [](uint32_t, uint32_t, bool, void *ctx) -> bool {
             auto &m = *static_cast<Mmio *>(ctx);
+            WriteBE32(&m.data[address & 0xFFFC], value);
+            m.log.push_back({'W', 4, address, value});
+        },
+        [](uint32_t address, uint32_t size, bool, void *ctx) -> bool {
+            auto &m = *static_cast<Mmio *>(ctx);
+            m.log.push_back({'B', static_cast<uint8_t>(size), address, 0});
             if (m.busWaitEvery == 0) {
                 return false;
             }
@@ -111,35 +132,17 @@ ymir::savestate::SH2SaveState Rig::BaseState(uint32_t pc) const {
     return state;
 }
 
-std::string DiffRigs(const Rig &a, const Rig &b) {
-    const auto sa = a.State();
-    const auto sb = b.State();
+std::string DiffRigs(const Rig &a, const Rig &b, bool comparePeripherals) {
+    const auto scope = comparePeripherals ? brimir::SH2DiffScope::CpuAndPeripherals : brimir::SH2DiffScope::Cpu;
+    if (std::string diff = brimir::DiffSH2State(a.State(), b.State(), scope); !diff.empty()) {
+        return diff;
+    }
     char buf[160];
     auto diff = [&](const char *name, uint64_t x, uint64_t y) -> std::string {
         std::snprintf(buf, sizeof(buf), "%s differs: interpreter=0x%llX jit=0x%llX", name,
                       static_cast<unsigned long long>(x), static_cast<unsigned long long>(y));
         return buf;
     };
-    for (int i = 0; i < 16; ++i) {
-        if (sa.R[i] != sb.R[i]) {
-            std::snprintf(buf, sizeof(buf), "R%d", i);
-            return diff(buf, sa.R[i], sb.R[i]);
-        }
-    }
-    if (sa.PC != sb.PC) return diff("PC", sa.PC, sb.PC);
-    if (sa.PR != sb.PR) return diff("PR", sa.PR, sb.PR);
-    if (sa.MACL != sb.MACL) return diff("MACL", sa.MACL, sb.MACL);
-    if (sa.MACH != sb.MACH) return diff("MACH", sa.MACH, sb.MACH);
-    if (sa.SR != sb.SR) return diff("SR", sa.SR, sb.SR);
-    if (sa.GBR != sb.GBR) return diff("GBR", sa.GBR, sb.GBR);
-    if (sa.VBR != sb.VBR) return diff("VBR", sa.VBR, sb.VBR);
-    if (sa.delaySlot != sb.delaySlot) return diff("delaySlot", sa.delaySlot, sb.delaySlot);
-    if (sa.delaySlotTarget != sb.delaySlotTarget) return diff("delaySlotTarget", sa.delaySlotTarget, sb.delaySlotTarget);
-    if (sa.intrAllow != sb.intrAllow) return diff("intrAllow", sa.intrAllow, sb.intrAllow);
-    if (sa.fetchedOpcodes != sb.fetchedOpcodes) return diff("fetchedOpcodes", sa.fetchedOpcodes, sb.fetchedOpcodes);
-    if (sa.wbReg != sb.wbReg) return diff("wbReg", sa.wbReg, sb.wbReg);
-    if (sa.sleep != sb.sleep) return diff("sleep", sa.sleep, sb.sleep);
-    // memcmp fast path; the byte loops only run to locate the first difference.
     if (std::memcmp(a.ram->data(), b.ram->data(), kRamSize) != 0) {
         for (uint32_t i = 0; i < kRamSize; ++i) {
             if ((*a.ram)[i] != (*b.ram)[i]) {
@@ -159,7 +162,22 @@ std::string DiffRigs(const Rig &a, const Rig &b) {
     if (a.mmio.busWaitQueries != b.mmio.busWaitQueries) {
         return diff("busWaitQueries", a.mmio.busWaitQueries, b.mmio.busWaitQueries);
     }
+    const size_t common = std::min(a.mmio.log.size(), b.mmio.log.size());
+    for (size_t i = 0; i < common; ++i) {
+        const MmioAccess &x = a.mmio.log[i];
+        const MmioAccess &y = b.mmio.log[i];
+        if (x.kind != y.kind || x.size != y.size || x.address != y.address || x.value != y.value) {
+            std::snprintf(buf, sizeof(buf),
+                          "MMIO log entry %zu differs: interpreter=%c%u@%08X=%08X jit=%c%u@%08X=%08X", i, x.kind,
+                          x.size, x.address, x.value, y.kind, y.size, y.address, y.value);
+            return buf;
+        }
+    }
+    if (a.mmio.log.size() != b.mmio.log.size()) {
+        return diff("MMIO log length", a.mmio.log.size(), b.mmio.log.size());
+    }
     return {};
 }
 
 } // namespace sh2test
+

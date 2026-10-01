@@ -29,7 +29,9 @@ public:
 
     // Runs one compiled block, or one interpreter instruction when no block applies
     // (pending interrupt, delay slot, or unsupported first instruction; reported as retired = 1).
-    ExitInfo Step(ymir::sh2::SH2JitContext &ctx);
+    // A compiled block stops before any instruction at which *ctx.cyclesExecuted + its cycles
+    // would reach `target`, exactly where the interpreter's Advance loop stops.
+    ExitInfo Step(ymir::sh2::SH2JitContext &ctx, uint64 target = kNoCycleTarget);
 
     const BlockCache &Cache() const {
         return m_cache;
