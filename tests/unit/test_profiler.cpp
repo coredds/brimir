@@ -104,7 +104,8 @@ TEST_CASE("Profiler aggregates concurrent same-name scopes and snapshots", "[pro
     brimir::Profiler profiler;
     profiler.SetEnabled(true);
     std::barrier start(5);
-    std::vector<std::jthread> workers;
+    // std::thread with explicit joins: Apple Clang's libc++ has no std::jthread.
+    std::vector<std::thread> workers;
     for (int worker = 0; worker < 4; ++worker) {
         workers.emplace_back([&] {
             start.arrive_and_wait();
@@ -120,7 +121,9 @@ TEST_CASE("Profiler aggregates concurrent same-name scopes and snapshots", "[pro
         (void)profiler.GetTiming("shared");
         (void)profiler.GetReport();
     }
-    workers.clear(); // Join before checking exact sample counts.
+    for (auto &worker : workers) { // Join before checking exact sample counts.
+        worker.join();
+    }
     const auto timing = profiler.GetTiming("shared");
     REQUIRE(timing);
     CHECK(timing->count == 4000);
@@ -130,7 +133,7 @@ TEST_CASE("Profiler reset and toggles invalidate scopes held by callback threads
     brimir::Profiler profiler;
     profiler.SetEnabled(true);
     std::barrier phase(2);
-    std::jthread callback([&] {
+    std::thread callback([&] {
         for (int i = 0; i < 100; ++i) {
             {
                 brimir::ScopedTimer stale(profiler, "callback");
@@ -157,6 +160,7 @@ TEST_CASE("Profiler reset and toggles invalidate scopes held by callback threads
         CHECK(timings.size() == 1);
         CHECK((timings.contains("callback") && timings.at("callback").count == 1));
     }
+    callback.join();
 }
 
 TEST_CASE("Wrapper profiling can be enabled reset and disabled live", "[profiler][integration]") {
