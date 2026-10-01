@@ -1292,4 +1292,5 @@ git commit -m "test(jit): harden executor flush scope and fuzz determinism"
 ## After this plan: plan 1D
 
 1. Front-end coverage for the rest of the milestone-1 subset (all MOV addressing modes, `MOVA`, `MOVT`, `CLRT`/`SETT`, extensions and swaps, logic and `TST`, `SUB`/`NEG`, carry/overflow variants, remaining compares, shifts and rotates, `BSR`/`BRAF`/`BSRF`/`JSR`, `MOV.L @(disp,PC)` in delay slots). Each opcode gets rows in the per-instruction and delay-slot differential tests and joins the fuzz generator.
+   - LDC/LDS/STC/STS clear the interrupt-allow flag for the next instruction (InterpretNext sets it back to true at the start of every instruction); when these opcodes are compiled, the IR must reproduce both the clear and the per-instruction re-enable, otherwise CheckBoundary would miss or misplace interrupts.
 2. Real-game lockstep validation: BIOS plus the baseline titles, 36000 frames each with `brimir_bench --lockstep` (milestone 1 done criteria), results committed as `design/sh2-validation.md`.

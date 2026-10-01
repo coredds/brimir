@@ -568,6 +568,36 @@ TEST_CASE("JIT Advance matches interpreter Advance for every cycle target", "[ji
     CHECK(sawDelaySlotStop); // some target stopped between bf/s and its slot
 }
 
+// Same sweep with a non-delayed BF that ends a multi-instruction block, so the boundary check
+// before it decides whether a target between cmp/eq and bf stops there. BF is taken on most
+// iterations and falls through when R5 reaches R6.
+TEST_CASE("JIT Advance matches interpreter Advance for every cycle target with BT/BF", "[jit][diff][exact]") {
+    // loop: add #1,R5 ; cmp/eq R6,R5 ; bf loop ; mov #0,R5 ; bt loop ; nop
+    // bf at offset 4 -> disp = (0 - 4 - 4) / 2 = -4; bt at offset 8 -> disp = (0 - 8 - 4) / 2 = -6.
+    // T stays 1 after the fall-through, so bt is always taken; mov #0,R5 restarts the count.
+    const std::vector<uint16_t> loop = {AddI(5, 1), CmpEq(5, 6), Bf(0xFC), MovI(5, 0), Bt(0xFA), kNop};
+    bool sawBeforeBranchStop = false;
+    for (uint32_t target = 1; target <= 400; ++target) {
+        Pair p;
+        p.WriteCode(kCode, loop);
+        auto state = p.ref->BaseState(kCode);
+        state.R[5] = 0;
+        state.R[6] = 3;
+        p.Load(state);
+        p.jit->sh2->SetJitExecutor(&p.exec);
+
+        const uint64 refCycles = p.ref->sh2->Advance<false, false>(target);
+        const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
+        INFO("target " << target);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit);
+        INFO(diff);
+        REQUIRE(diff.empty());
+        sawBeforeBranchStop = sawBeforeBranchStop || p.jit->State().PC == kCode + 4;
+    }
+    CHECK(sawBeforeBranchStop); // some target stopped right before bf
+}
+
 // A 32/32 division by zero (write to DVDNT) raises the DIVU overflow interrupt synchronously,
 // inside the store. The interpreter takes it before the next instruction; so must the JIT.
 TEST_CASE("Interrupts raised inside a block are taken at the same instruction", "[jit][diff][exact]") {

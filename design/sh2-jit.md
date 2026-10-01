@@ -11,7 +11,7 @@
 - Speed up emulation of the two Saturn SH-2 CPUs with a dynamic recompiler.
 - Portable design: one architecture-neutral IR with **x64 and ARM64** native backends (milestones 2 and 3). Targets range from desktop x64 to Cortex-A53/A55-class ARM64 handhelds.
 - Keep Ymir's timing model: compiled code computes **the same cycle cost per instruction** as the interpreter, including bus wait states and write-back stalls.
-- Keep architectural state bit-identical to the interpreter at block boundaries.
+- Keep the emulated system identical to the interpreter (instruction-exact boundaries, section 2).
 - Measure before optimizing: know how much of frame time the SH-2s actually use.
 
 ### Non-goals
@@ -82,7 +82,6 @@ A plain struct the fork fills in once per `SH2` instance. It points at the live 
 - the `brimir_sh2_jit` core option is enabled (default **off** until validated)
 - debug tracing is off (`debug == false` template instance)
 - SH-2 cache emulation is off (`emulateCache == false`), which also excludes games with the `ForceSH2Cache` flag
-- the loaded game is not flagged interpreter-only in the game database (deferred to plan 1C; not checked yet)
 
 Otherwise the unchanged interpreter loop runs.
 
@@ -102,7 +101,7 @@ while cycles < target:
         cycles += ctx.interpretOne()
         continue
     intrAllow = true
-    cycles += backend.Run(block, ctx)       // flushes requested inside are deferred (section 6.5)
+    cycles += backend.Run(block, ctx, target) // flushes requested inside are deferred (section 6.5)
 *ctx.cyclesExecuted = cycles
 ```
 
@@ -134,6 +133,8 @@ Linear, single-assignment within a block, about 40 operations, designed to map d
 - **cycles**: `AddCycles(const)`, `AddAccessCycles(size, read|write, addr)` (reads the bus page wait-state table at run time)
 
 The IR ships with a builder, a verifier (checks types, single assignment, terminators) and a text printer used in test failure messages.
+
+LDC/LDS/STC/STS clear the interrupt-allow flag for the next instruction (InterpretNext sets it back to true at the start of every instruction); when these opcodes are compiled, the IR must reproduce both the clear and the per-instruction re-enable, otherwise CheckBoundary would miss or misplace interrupts.
 
 ### 5.3 Cycle-fidelity rule
 
