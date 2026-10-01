@@ -24,7 +24,8 @@ public:
     BackendKind Kind() const override {
         return BackendKind::X64;
     }
-    // Stub: compiles nothing yet, so every block runs on RunBlock.
+    // Compiles blocks whose ops x64_emitter lowers (no calls out of generated code yet); others
+    // return false and run on RunBlock.
     bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) override;
     ExitInfo Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target = kNoCycleTarget,
                  const bool *abortRequested = nullptr) override;

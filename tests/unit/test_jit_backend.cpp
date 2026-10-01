@@ -2,6 +2,7 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/interp_backend.hpp>
@@ -28,16 +29,21 @@ struct Fixture {
         block.guestInstrCount = 1;
     }
 
-    ExitInfo Run() {
+    // Ir runs RunBlock; a native kind compiles and runs the block (sh2test::RunOnBackend).
+    ExitInfo Run(BackendKind kind = BackendKind::Ir, uint64_t target = kNoCycleTarget) {
         INFO(PrintBlock(block));
+        INFO("backend " << BackendName(kind));
         REQUIRE(VerifyBlock(block).empty());
-        return RunBlock(block, rig->sh2->GetJitContext());
+        return sh2test::RunOnBackend(kind, block, rig->sh2->GetJitContext(), target);
     }
 };
 
 } // namespace
 
+// Tests whose blocks use only ops every native backend lowers run once per available backend.
+
 TEST_CASE("Backend: registers, ALU and T bit", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto s = f.rig->BaseState(kCode);
     s.R[1] = 40;
@@ -55,7 +61,7 @@ TEST_CASE("Backend: registers, ALU and T bit", "[jit][backend]") {
     f.b.SetReg(7, f.b.GetT());
     f.b.Exit(kCode + 2, 1);
 
-    const ExitInfo info = f.Run();
+    const ExitInfo info = f.Run(kind);
     const auto st = f.rig->State();
     REQUIRE(st.R[2] == 42u);
     REQUIRE(st.R[3] == 38u);
@@ -96,6 +102,7 @@ TEST_CASE("Backend: memory, access cycles and write-back stalls", "[jit][backend
 }
 
 TEST_CASE("Backend: SyncCycles publishes the running cycle count", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto &ctx = f.rig->sh2->GetJitContext();
     *ctx.cyclesExecuted = 100;
@@ -104,16 +111,17 @@ TEST_CASE("Backend: SyncCycles publishes the running cycle count", "[jit][backen
     f.b.AddCycles(5);
     f.b.Exit(kCode + 2, 1);
 
-    const ExitInfo info = f.Run();
+    const ExitInfo info = f.Run(kind);
     REQUIRE(info.cycles == 12);
     REQUIRE(*ctx.cyclesExecuted == 107); // the executor, not the backend, publishes the final count
 }
 
 TEST_CASE("Backend: WbStall ignores the 'no register' marker", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f; // BaseState sets wbReg = 0xFF
     f.b.WbStall(0xFFFFFFFFu);
     f.b.Exit(kCode + 2, 1);
-    REQUIRE(f.Run().cycles == 0);
+    REQUIRE(f.Run(kind).cycles == 0);
 }
 
 TEST_CASE("Backend: bus-wait exit leaves state for a retry", "[jit][backend]") {
@@ -176,6 +184,7 @@ TEST_CASE("Backend: delay slot setup and dynamic exit", "[jit][backend]") {
 }
 
 TEST_CASE("Backend: CheckBoundary stops at the cycle target or a pending interrupt", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto &ctx = f.rig->sh2->GetJitContext();
     f.b.AddCycles(5);
@@ -186,14 +195,14 @@ TEST_CASE("Backend: CheckBoundary stops at the cycle target or a pending interru
     *ctx.cyclesExecuted = 100;
 
     SECTION("budget left") {
-        const ExitInfo info = RunBlock(f.block, ctx, 106);
+        const ExitInfo info = f.Run(kind, 106);
         REQUIRE_FALSE(info.boundary);
         REQUIRE(info.cycles == 12);
         REQUIRE(info.retired == 2);
         REQUIRE(*ctx.PC == kCode + 4);
     }
     SECTION("budget used up") {
-        const ExitInfo info = RunBlock(f.block, ctx, 105);
+        const ExitInfo info = f.Run(kind, 105);
         REQUIRE(info.boundary);
         REQUIRE(info.cycles == 5);
         REQUIRE(info.retired == 1);
@@ -202,7 +211,7 @@ TEST_CASE("Backend: CheckBoundary stops at the cycle target or a pending interru
     SECTION("interrupt pending and allowed") {
         *ctx.intrPending = true;
         *ctx.intrAllow = true;
-        const ExitInfo info = RunBlock(f.block, ctx);
+        const ExitInfo info = f.Run(kind);
         REQUIRE(info.boundary);
         REQUIRE(info.cycles == 5);
         REQUIRE(*ctx.PC == kCode + 2);
@@ -210,13 +219,14 @@ TEST_CASE("Backend: CheckBoundary stops at the cycle target or a pending interru
     SECTION("interrupt pending but not allowed") {
         *ctx.intrPending = true;
         *ctx.intrAllow = false;
-        const ExitInfo info = RunBlock(f.block, ctx);
+        const ExitInfo info = f.Run(kind);
         REQUIRE_FALSE(info.boundary);
         REQUIRE(info.cycles == 12);
     }
 }
 
 TEST_CASE("Backend: logic, shifts and compares", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto s = f.rig->BaseState(kCode);
     s.R[1] = 0xF0F0000F;
@@ -236,7 +246,7 @@ TEST_CASE("Backend: logic, shifts and compares", "[jit][backend]") {
     f.b.SetReg(12, f.b.CmpGeU(a, a)); // 1
     f.b.SetReg(13, f.b.CmpGeS(b, a)); // 0
     f.b.Exit(kCode + 2, 1);
-    f.Run();
+    f.Run(kind);
     const auto st = f.rig->State();
     CHECK(st.R[3] == 0x80000001u);
     CHECK(st.R[4] == 0xF0F0FF0Fu);
@@ -252,6 +262,7 @@ TEST_CASE("Backend: logic, shifts and compares", "[jit][backend]") {
 }
 
 TEST_CASE("Backend: system registers, MAC and interrupt-allow", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto s = f.rig->BaseState(kCode);
     s.R[1] = 0x06001234;
@@ -273,7 +284,7 @@ TEST_CASE("Backend: system registers, MAC and interrupt-allow", "[jit][backend]"
     f.b.SetReg(7, f.b.GetDelayTarget());
     f.b.ClearIntrAllow();
     f.b.Exit(kCode + 2, 1);
-    f.Run();
+    f.Run(kind);
     const auto st = f.rig->State();
     CHECK(st.GBR == 0x06001234u);
     CHECK(st.VBR == 0x06001238u);
@@ -291,6 +302,7 @@ TEST_CASE("Backend: system registers, MAC and interrupt-allow", "[jit][backend]"
 }
 
 TEST_CASE("Backend: 32x32 multiplies", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     struct Case {
         uint32_t a, b, lo, hiS, hiU;
     };
@@ -307,7 +319,7 @@ TEST_CASE("Backend: 32x32 multiplies", "[jit][backend]") {
         f.b.SetReg(2, f.b.MulHiS(a, b));
         f.b.SetReg(3, f.b.MulHiU(a, b));
         f.b.Exit(kCode + 2, 1);
-        f.Run();
+        f.Run(kind);
         const auto st = f.rig->State();
         INFO("a " << c.a << " b " << c.b);
         CHECK(st.R[1] == c.lo);
@@ -317,6 +329,7 @@ TEST_CASE("Backend: 32x32 multiplies", "[jit][backend]") {
 }
 
 TEST_CASE("Backend: SetSRBits changes only the masked bits", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto s = f.rig->BaseState(kCode);
     s.SR = 0x0F0; // ILevel 15, S/Q/M/T clear
@@ -325,7 +338,7 @@ TEST_CASE("Backend: SetSRBits changes only the masked bits", "[jit][backend]") {
     *ctx.intrAllow = true;
     f.b.SetSRBits(f.b.Const(0xFFFFFFFF), 0x301);
     f.b.Exit(kCode + 2, 1);
-    f.Run();
+    f.Run(kind);
     CHECK(f.rig->State().SR == 0x3F1u); // M, Q, T set; S and ILevel untouched
     CHECK(*ctx.intrAllow);              // no LDC-style side effects
 
@@ -335,7 +348,7 @@ TEST_CASE("Backend: SetSRBits changes only the masked bits", "[jit][backend]") {
     g.rig->Load(s2);
     g.b.SetSRBits(g.b.Const(0), 0x301);
     g.b.Exit(kCode + 2, 1);
-    g.Run();
+    g.Run(kind);
     CHECK(g.rig->State().SR == 0x0F2u);
 }
 

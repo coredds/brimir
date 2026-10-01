@@ -17,6 +17,7 @@ target_link_libraries(brimir-jit PUBLIC brimir::brimir-core)
 if(BRIMIR_JIT_X64_EFFECTIVE)
     target_sources(brimir-jit PRIVATE
         src/x64/x64_backend.cpp
+        src/x64/x64_emitter.cpp
     )
     target_link_libraries(brimir-jit PRIVATE asmjit::asmjit)
     target_compile_definitions(brimir-jit PUBLIC BRIMIR_JIT_HAS_X64=1)

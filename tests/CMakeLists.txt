@@ -51,6 +51,7 @@ add_executable(brimir_tests
     unit/test_jit_integration.cpp
     unit/test_jit_lockstep.cpp
     unit/jit_test_backend.cpp
+    unit/jit_random_ir.cpp
     unit/test_jit_x64.cpp
 )
 
