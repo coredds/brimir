@@ -24,8 +24,8 @@ public:
     BackendKind Kind() const override {
         return BackendKind::X64;
     }
-    // Compiles blocks whose ops x64_emitter lowers (no calls out of generated code yet); others
-    // return false and run on RunBlock.
+    // Compiles any verified block; fails (the block then runs on RunBlock) only if a state field's
+    // offset from ctx.R does not fit in 32 bits, a state pointer is null, or asmjit fails.
     bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) override;
     ExitInfo Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target = kNoCycleTarget,
                  const bool *abortRequested = nullptr) override;

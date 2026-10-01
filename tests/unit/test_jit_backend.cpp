@@ -1,4 +1,4 @@
-// Brimir - SH-2 JIT IR interpreter backend tests
+// Brimir - SH-2 JIT backend tests (IR interpreter and native backends)
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
@@ -40,7 +40,7 @@ struct Fixture {
 
 } // namespace
 
-// Tests whose blocks use only ops every native backend lowers run once per available backend.
+// Every test runs once per available backend (RunBlock, then each native backend).
 
 TEST_CASE("Backend: registers, ALU and T bit", "[jit][backend]") {
     const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
@@ -77,6 +77,7 @@ TEST_CASE("Backend: registers, ALU and T bit", "[jit][backend]") {
 }
 
 TEST_CASE("Backend: memory, access cycles and write-back stalls", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto s = f.rig->BaseState(kCode);
     s.wbReg = 3;
@@ -94,7 +95,7 @@ TEST_CASE("Backend: memory, access cycles and write-back stalls", "[jit][backend
     f.b.AddCycles(10);
     f.b.Exit(kCode + 2, 1);
 
-    const ExitInfo info = f.Run();
+    const ExitInfo info = f.Run(kind);
     REQUIRE(f.rig->State().R[1] == 0x89ABCDEFu);
     REQUIRE(f.rig->Read16(0x06040010) == 0x1234);
     REQUIRE(f.rig->State().wbReg == 7);
@@ -125,6 +126,7 @@ TEST_CASE("Backend: WbStall ignores the 'no register' marker", "[jit][backend]")
 }
 
 TEST_CASE("Backend: bus-wait exit leaves state for a retry", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     f.rig->mmio.busWaitEvery = 1;
     const ValueId addr = f.b.Const(0x22000000);
@@ -133,7 +135,7 @@ TEST_CASE("Backend: bus-wait exit leaves state for a retry", "[jit][backend]") {
     f.b.SetReg(1, f.b.Load(addr, 4, false));
     f.b.Exit(kCode + 2, 1);
 
-    const ExitInfo info = f.Run();
+    const ExitInfo info = f.Run(kind);
     REQUIRE(info.busWait);
     REQUIRE(info.retired == 0);
     REQUIRE(info.cycles == 12);
@@ -142,6 +144,7 @@ TEST_CASE("Backend: bus-wait exit leaves state for a retry", "[jit][backend]") {
 }
 
 TEST_CASE("Backend: conditional exit with refill", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     f.rig->WriteCode(kCode + 0x40, {0x1111, 0x2222});
     const ValueId one = f.b.Const(1);
@@ -149,7 +152,7 @@ TEST_CASE("Backend: conditional exit with refill", "[jit][backend]") {
     f.b.AddCycles(1);
     f.b.Exit(kCode + 2, 1);
 
-    const ExitInfo info = f.Run();
+    const ExitInfo info = f.Run(kind);
     REQUIRE(info.cycles == 3);
     REQUIRE(info.retired == 1);
     REQUIRE(f.rig->State().PC == kCode + 0x40);
@@ -157,25 +160,27 @@ TEST_CASE("Backend: conditional exit with refill", "[jit][backend]") {
 }
 
 TEST_CASE("Backend: conditional exit not taken falls through", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     const ValueId zero = f.b.Const(0);
     f.b.ExitIf(zero, kCode + 0x40, 3, true, 1);
     f.b.AddCycles(1);
     f.b.Exit(kCode + 2, 1);
 
-    const ExitInfo info = f.Run();
+    const ExitInfo info = f.Run(kind);
     REQUIRE(info.cycles == 1);
     REQUIRE(f.rig->State().PC == kCode + 2);
 }
 
 TEST_CASE("Backend: delay slot setup and dynamic exit", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     f.b.SetupDelaySlot(f.b.Const(kCode + 0x80));
     f.b.Refill(kCode);
     f.b.EndDelaySlot();
     f.b.ExitDynamic(2);
 
-    const ExitInfo info = f.Run();
+    const ExitInfo info = f.Run(kind);
     REQUIRE(info.retired == 2);
     const auto st = f.rig->State();
     REQUIRE(st.PC == kCode + 0x80);
@@ -353,6 +358,7 @@ TEST_CASE("Backend: SetSRBits changes only the masked bits", "[jit][backend]") {
 }
 
 TEST_CASE("Backend: Div1 applies Div1Step through the context", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     for (const bool rmIsRn : {false, true}) {
         Fixture f;
         auto s = f.rig->BaseState(kCode);
@@ -362,7 +368,7 @@ TEST_CASE("Backend: Div1 applies Div1Step through the context", "[jit][backend]"
         f.rig->Load(s);
         f.b.SetReg(2, f.b.Div1(f.b.GetReg(2), f.b.GetReg(1), rmIsRn));
         f.b.Exit(kCode + 2, 1);
-        f.Run();
+        f.Run(kind);
 
         uint32_t sr = s.SR;
         const uint32_t expected = Div1Step(0x80000001, 0x12345678, rmIsRn, sr);
@@ -375,6 +381,7 @@ TEST_CASE("Backend: Div1 applies Div1Step through the context", "[jit][backend]"
 }
 
 TEST_CASE("Backend: MacW and MacL apply the helpers to MACH:MACL", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     for (const bool sBit : {false, true}) {
         for (const bool isLong : {false, true}) {
             Fixture f;
@@ -391,7 +398,7 @@ TEST_CASE("Backend: MacW and MacL apply the helpers to MACH:MACL", "[jit][backen
                 f.b.MacW(op1, op2);
             }
             f.b.Exit(kCode + 2, 1);
-            f.Run();
+            f.Run(kind);
 
             const uint64_t mac = 0x00007FFF7FFFFFF0ull;
             const uint64_t expected = isLong ? MacLStep(mac, sBit, 0x7FFFFFFF, 0x7FFFFFFF)
@@ -406,19 +413,21 @@ TEST_CASE("Backend: MacW and MacL apply the helpers to MACH:MACL", "[jit][backen
 }
 
 TEST_CASE("Backend: AddAccessCyclesRMWByte uses the RMW-cycles callback", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     for (const uint32_t address : {0x26040000u, 0x22000000u}) {
         Fixture f;
         auto &ctx = f.rig->sh2->GetJitContext();
         f.b.AddAccessCyclesRMWByte(f.b.Const(address));
         f.b.AddCycles(4);
         f.b.Exit(kCode + 2, 1);
-        const ExitInfo info = f.Run();
+        const ExitInfo info = f.Run(kind);
         INFO("address " << address);
         CHECK(info.cycles == ctx.accessCyclesRMWByte(ctx.sh2, address) + 4);
     }
 }
 
 TEST_CASE("Backend: SetSR masks reserved bits and recomputes interrupt flags", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
     Fixture f;
     auto s = f.rig->BaseState(kCode);
     s.R[1] = 0xFFFFFFFF;
@@ -426,7 +435,7 @@ TEST_CASE("Backend: SetSR masks reserved bits and recomputes interrupt flags", "
     f.b.SetSR(f.b.GetReg(1), false);
     f.b.SetIntrAllow();
     f.b.Exit(kCode + 2, 1);
-    f.Run();
+    f.Run(kind);
     CHECK(f.rig->State().SR == 0x3F3u);
     CHECK(f.rig->State().intrAllow);
 }

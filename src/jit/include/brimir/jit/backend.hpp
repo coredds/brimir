@@ -19,6 +19,9 @@ BackendKind DefaultBackend();              // X64 when available, else Ir
 const char *BackendName(BackendKind kind); // "ir", "x64"
 bool ParseBackend(std::string_view name, BackendKind &out);
 
+// Generated code for one block. It is only valid with the SH2JitContext of the CPU it was compiled
+// for: guest state is addressed at offsets taken from that context. Each executor owns its own
+// block cache (and backend), so code never runs against another CPU.
 struct NativeCode {
     const void *entry = nullptr; // nullptr: run the block with RunBlock
 };
@@ -31,7 +34,8 @@ public:
     // Returns false, leaving out.entry == nullptr, if this backend cannot compile it.
     virtual bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) = 0;
     // Same contract as RunBlock. An exception thrown by a context callback is rethrown here after
-    // the generated code has returned.
+    // the generated code has returned. `ctx` must be the context `code` was compiled with (same
+    // CPU; see NativeCode).
     virtual ExitInfo Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target = kNoCycleTarget,
                          const bool *abortRequested = nullptr) = 0;
     // Frees all generated code. Never called while generated code runs.

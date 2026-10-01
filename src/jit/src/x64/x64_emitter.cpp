@@ -1,6 +1,7 @@
 #include "x64_emitter.hpp"
 
 #include <cstddef>
+#include <initializer_list>
 #include <limits>
 #include <vector>
 
@@ -45,6 +46,9 @@ constexpr int32_t kFrameEntryCycles = static_cast<int32_t>(offsetof(X64Frame, en
 constexpr int32_t kOutCycles = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, cycles));
 constexpr int32_t kOutRetired = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, retired));
 constexpr int32_t kOutBoundary = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, boundary));
+constexpr int32_t kOutBusWait = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, busWait));
+constexpr int32_t kOutAborted = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, aborted));
+constexpr int32_t kFrameStop = static_cast<int32_t>(offsetof(X64Frame, stop));
 constexpr int32_t kCtxR = static_cast<int32_t>(offsetof(ymir::sh2::SH2JitContext, R));
 
 // 32-bit immediates for 32-bit operations, as asmjit expects them (sign-extended form).
@@ -78,6 +82,11 @@ public:
         for (const BoundaryStub &stub : m_stubs) {
             m_cc.bind(stub.label);
             WriteExit(true, stub.pc, stub.retired, m_cycles, true);
+        }
+        // The shared abort exit taken when a trampoline sets frame->stop.
+        if (m_abortUsed) {
+            m_cc.bind(m_abort);
+            AbortExit(m_cycles);
         }
         m_cc.end_func();
     }
@@ -129,6 +138,53 @@ private:
         }
         m_cc.mov(x86::qword_ptr(m_frame, kOutCycles), cycles);
         m_cc.ret();
+    }
+
+    // RunBlock's abort exit: out.aborted = true, out.cycles; PC and out.retired untouched.
+    void AbortExit(const x86::Gp &cycles) {
+        m_cc.mov(x86::byte_ptr(m_frame, kOutAborted), 1);
+        m_cc.mov(x86::qword_ptr(m_frame, kOutCycles), cycles);
+        m_cc.ret();
+    }
+
+    // Calls a trampoline: frame, then `args` (registers or immediates), result into `ret` if given.
+    // An asmjit failure is reported through the error handler (Compile then fails).
+    template <typename Ret, typename... Args>
+    void Call(Ret (*fn)(X64Frame *, Args...) noexcept, std::initializer_list<Operand> args,
+              const x86::Gp *ret = nullptr) {
+        static_assert(sizeof...(Args) < 4, "trampolines take at most 4 arguments");
+        InvokeNode *node = nullptr;
+        m_cc.invoke(Out(node), reinterpret_cast<uint64_t>(fn), FuncSignature::build<Ret, X64Frame *, Args...>());
+        if (node == nullptr) {
+            return;
+        }
+        node->set_arg(0, m_frame);
+        size_t index = 1;
+        for (const Operand &arg : args) {
+            if (arg.is_reg()) {
+                node->set_arg(index, arg.as<Reg>());
+            } else {
+                node->set_arg(index, arg.as<Imm>());
+            }
+            ++index;
+        }
+        if (ret != nullptr) {
+            node->set_ret(0, *ret);
+        }
+    }
+
+    // Leaves through the shared abort exit if the last trampoline set frame->stop.
+    void CheckStop() {
+        if (!m_abortUsed) {
+            m_abort = m_cc.new_label();
+            m_abortUsed = true;
+        }
+        m_cc.cmp(x86::byte_ptr(m_frame, kFrameStop), 0);
+        m_cc.jne(m_abort);
+    }
+
+    static Imm U32(uint32_t value) {
+        return Imm(static_cast<int32_t>(value));
     }
 
     void Binary(const Inst &in, InstId id) {
@@ -275,20 +331,89 @@ private:
             break;
         }
         case Op::ExitIf: {
-            // Taken (refill = false only): cycles += imm2, PC = imm, return.
+            // Taken: cycles += imm2, refill from imm (if flag; abort exit on stop), PC = imm, return.
             const Label notTaken = m_cc.new_label();
             m_cc.test(Use(in.a), Use(in.a));
             m_cc.jz(notTaken);
             x86::Gp taken = m_cc.new_gp64();
             m_cc.mov(taken, m_cycles);
             AddU32(taken, in.imm2);
+            if (in.flag) {
+                Call(&TrRefill, {U32(in.imm)});
+                const Label go = m_cc.new_label();
+                m_cc.cmp(x86::byte_ptr(m_frame, kFrameStop), 0);
+                m_cc.je(go);
+                AbortExit(taken);
+                m_cc.bind(go);
+            }
             WriteExit(true, in.imm, in.retired, taken, false);
             m_cc.bind(notTaken);
             break;
         }
         case Op::Exit: WriteExit(true, in.imm, in.retired, m_cycles, false); break;
         case Op::ExitDynamic: WriteExit(false, 0, in.retired, m_cycles, false); break;
-        default: break; // CanEmitBlock rejected every other op
+
+        // Calls out of generated code (trampolines, see x64_emitter.hpp).
+        case Op::Load: {
+            const x86::Gp d = Def(in.dst);
+            Call(&TrRead, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &d);
+            CheckStop();
+            break;
+        }
+        case Op::Store:
+            Call(&TrWrite, {Use(in.a), U32(in.size), Use(in.b)});
+            CheckStop();
+            break;
+        case Op::Refill:
+            Call(&TrRefill, {U32(in.imm)});
+            CheckStop();
+            break;
+        case Op::AddAccessCycles: {
+            const x86::Gp c = m_cc.new_gp64();
+            Call(&TrAccessCycles, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &c);
+            CheckStop();
+            m_cc.add(m_cycles, c);
+            break;
+        }
+        case Op::AddAccessCyclesRMWByte: {
+            const x86::Gp c = m_cc.new_gp64();
+            Call(&TrAccessCyclesRMWByte, {Use(in.a)}, &c);
+            CheckStop();
+            m_cc.add(m_cycles, c);
+            break;
+        }
+        case Op::ExitIfBusWait: {
+            // If the bus is busy: PC = imm, out.retired, out.busWait, out.cycles, return.
+            const x86::Gp wait = m_cc.new_gp32();
+            Call(&TrBusWait, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &wait);
+            CheckStop();
+            const Label cont = m_cc.new_label();
+            m_cc.test(wait, wait);
+            m_cc.jz(cont);
+            m_cc.mov(x86::byte_ptr(m_frame, kOutBusWait), 1);
+            WriteExit(true, in.imm, in.retired, m_cycles, false);
+            m_cc.bind(cont);
+            break;
+        }
+        case Op::SetupDelaySlot:
+            Call(&TrSetupDelaySlot, {Use(in.a)});
+            CheckStop();
+            break;
+        case Op::EndDelaySlot:
+            Call(&TrEndDelaySlot, {});
+            CheckStop();
+            break;
+        case Op::SetSR:
+            Call(&TrSetSR, {Use(in.a), U32(in.flag ? 1 : 0)});
+            CheckStop();
+            break;
+        case Op::Div1: {
+            const x86::Gp d = Def(in.dst);
+            Call(&TrDiv1, {Use(in.a), Use(in.b), U32(in.flag ? 1 : 0)}, &d);
+            break;
+        }
+        case Op::MacW: Call(&TrMacW, {Use(in.a), Use(in.b)}); break;
+        case Op::MacL: Call(&TrMacL, {Use(in.a), Use(in.b)}); break;
         }
     }
 
@@ -300,6 +425,8 @@ private:
     x86::Gp m_frame;
     x86::Gp m_regs;   // ctx->R
     x86::Gp m_cycles; // cycles accumulated by this block (ExitInfo::cycles)
+    Label m_abort;    // shared abort exit, created by the first CheckStop
+    bool m_abortUsed = false;
 };
 
 } // namespace
@@ -352,13 +479,21 @@ bool CanEmitBlock(const Block &block) {
         case Op::SyncCycles:
         case Op::CheckBoundary:
         case Op::Exit:
-        case Op::ExitDynamic: break;
+        case Op::ExitDynamic:
         case Op::ExitIf:
-            if (in.flag) {
-                return false; // refill calls out of generated code (Task 3)
-            }
-            break;
-        default: return false;
+        case Op::SetSR:
+        case Op::Div1:
+        case Op::MacW:
+        case Op::MacL:
+        case Op::AddAccessCyclesRMWByte:
+        case Op::Load:
+        case Op::Store:
+        case Op::AddAccessCycles:
+        case Op::Refill:
+        case Op::SetupDelaySlot:
+        case Op::EndDelaySlot:
+        case Op::ExitIfBusWait: break;
+        default: return false; // not a valid op
         }
     }
     return true;

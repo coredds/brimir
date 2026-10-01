@@ -2,6 +2,8 @@
 #include "x64_emitter.hpp"
 #include "x64_factory.hpp"
 
+#include <brimir/jit/sh2_helpers.hpp>
+
 #include <asmjit/x86.h>
 
 #include <exception>
@@ -26,7 +28,140 @@ public:
 
 const bool kNoAbort = false;
 
+// Stores the exception being handled and stops the block.
+void Fail(X64Frame *f) noexcept {
+    f->error = std::current_exception();
+    f->stop = 1;
+}
+
+// After a memory callback or refill: stop if the callback requested an abort (RunBlock's abortNow).
+void CheckAbort(X64Frame *f) noexcept {
+    if (*f->abortRequested) {
+        f->stop = 1;
+    }
+}
+
 } // namespace
+
+// Trampolines (contract in x64_emitter.hpp). Callbacks are read from ctx at call time.
+
+uint32_t TrRead(X64Frame *f, uint32_t address, uint32_t size, uint32_t instrFetch) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        const uint32_t value = ctx.read(ctx.sh2, address, size, instrFetch != 0);
+        CheckAbort(f);
+        return value;
+    } catch (...) {
+        Fail(f);
+        return 0;
+    }
+}
+
+void TrWrite(X64Frame *f, uint32_t address, uint32_t size, uint32_t value) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        ctx.write(ctx.sh2, address, size, value);
+        CheckAbort(f);
+    } catch (...) {
+        Fail(f);
+    }
+}
+
+void TrRefill(X64Frame *f, uint32_t address) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        ctx.refillPipeline(ctx.sh2, address);
+        CheckAbort(f);
+    } catch (...) {
+        Fail(f);
+    }
+}
+
+uint64_t TrAccessCycles(X64Frame *f, uint32_t address, uint32_t size, uint32_t write) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        return ctx.accessCycles(ctx.sh2, address, size, write != 0);
+    } catch (...) {
+        Fail(f);
+        return 0;
+    }
+}
+
+uint64_t TrAccessCyclesRMWByte(X64Frame *f, uint32_t address) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        return ctx.accessCyclesRMWByte(ctx.sh2, address);
+    } catch (...) {
+        Fail(f);
+        return 0;
+    }
+}
+
+uint32_t TrBusWait(X64Frame *f, uint32_t address, uint32_t size, uint32_t write) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        return ctx.busWait(ctx.sh2, address, size, write != 0) ? 1u : 0u;
+    } catch (...) {
+        Fail(f);
+        return 0;
+    }
+}
+
+void TrSetupDelaySlot(X64Frame *f, uint32_t target) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        ctx.setupDelaySlot(ctx.sh2, target);
+    } catch (...) {
+        Fail(f);
+    }
+}
+
+void TrEndDelaySlot(X64Frame *f) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        ctx.endDelaySlot(ctx.sh2);
+    } catch (...) {
+        Fail(f);
+    }
+}
+
+void TrSetSR(X64Frame *f, uint32_t value, uint32_t delaySlot) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        ctx.setSR(ctx.sh2, value, delaySlot != 0);
+    } catch (...) {
+        Fail(f);
+    }
+}
+
+uint32_t TrDiv1(X64Frame *f, uint32_t rn, uint32_t rm, uint32_t rmIsRn) noexcept {
+    return Div1Step(rn, rm, rmIsRn != 0, *f->ctx->SR);
+}
+
+namespace {
+
+// RunBlock's MacW/MacL case.
+template <bool kLong>
+void MacStep(X64Frame *f, uint32_t a, uint32_t b) noexcept {
+    auto &ctx = *f->ctx;
+    const uint64_t mac = (static_cast<uint64_t>(*ctx.MACH) << 32) | *ctx.MACL;
+    const bool s = ((*ctx.SR >> 1) & 1u) != 0;
+    const auto op1 = static_cast<int32_t>(a);
+    const auto op2 = static_cast<int32_t>(b);
+    const uint64_t result = kLong ? MacLStep(mac, s, op1, op2) : MacWStep(mac, s, op1, op2);
+    *ctx.MACH = static_cast<uint32_t>(result >> 32);
+    *ctx.MACL = static_cast<uint32_t>(result);
+}
+
+} // namespace
+
+void TrMacW(X64Frame *f, uint32_t op1, uint32_t op2) noexcept {
+    MacStep<false>(f, op1, op2);
+}
+
+void TrMacL(X64Frame *f, uint32_t op1, uint32_t op2) noexcept {
+    MacStep<true>(f, op1, op2);
+}
 
 X64Backend::X64Backend()
     : m_runtime(std::make_unique<asmjit::JitRuntime>()) {}

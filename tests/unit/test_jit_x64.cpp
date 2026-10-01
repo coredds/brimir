@@ -12,9 +12,13 @@
 #include <brimir/jit/interp_backend.hpp>
 #include <brimir/jit/ir.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <string>
+#include <typeinfo>
+#include <utility>
 #include <vector>
 
 using brimir::jit::BackendKind;
@@ -131,9 +135,9 @@ TEST_CASE("x64 backend: factory", "[jit][x64]") {
     CHECK(x64->CodeBytes() == 0);
 }
 
-// Front-end blocks start with a pipeline Refill, a call out of generated code, so this block still
-// falls back to RunBlock until calls are lowered.
-TEST_CASE("x64 backend: an executor runs blocks it cannot compile like the interpreter", "[jit][x64]") {
+// The backend compiles every block the front end produces (no fallbacks), so the executor runs this
+// one natively.
+TEST_CASE("x64 backend: an executor runs native blocks like the interpreter", "[jit][x64]") {
     if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
         SKIP("no x64 backend");
     }
@@ -165,8 +169,8 @@ TEST_CASE("x64 backend: an executor runs blocks it cannot compile like the inter
 
     const auto &stats = exec.GetStats();
     CHECK(stats.blocksRun == 1);
-    CHECK(stats.compileFallbacks > 0);
-    CHECK(stats.nativeBlocksRun == 0);
+    CHECK(stats.compileFallbacks == 0);
+    CHECK(stats.nativeBlocksRun == 1);
 }
 
 TEST_CASE("x64 backend: CoreWrapper backend selection recreates the executors", "[jit][x64]") {
@@ -212,10 +216,11 @@ TEST_CASE("x64 backend: an IR executor runs without a native backend", "[jit][x6
     CHECK(exec.GetStats().compileFallbacks == 0);
 }
 
-TEST_CASE("x64 matches the IR interpreter on random blocks", "[jit][x64]") {
-    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
-        SKIP("no x64 backend");
-    }
+namespace {
+
+// Runs 2000 random blocks on RunBlock and on the x64 backend, from identical random CPU states,
+// and requires identical outcomes.
+void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
     auto irRig = std::make_unique<Rig>();
     auto x64Rig = std::make_unique<Rig>();
     const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
@@ -223,7 +228,7 @@ TEST_CASE("x64 matches the IR interpreter on random blocks", "[jit][x64]") {
 
     for (uint32_t seed = 0; seed < 2000; ++seed) {
         std::mt19937 rng(seed);
-        const Block block = sh2test::RandomBlock(rng, kCode);
+        const Block block = sh2test::RandomBlock(rng, kCode, opt);
         INFO("seed " << seed << "\n" << brimir::jit::PrintBlock(block));
         REQUIRE(brimir::jit::VerifyBlock(block).empty());
 
@@ -231,11 +236,20 @@ TEST_CASE("x64 matches the IR interpreter on random blocks", "[jit][x64]") {
         cpu.Apply(*irRig);
         cpu.Apply(*x64Rig);
         uint64_t target = kNoCycleTarget;
-        if (rng() % 3 != 0) {
-            target = cpu.cycles + rng() % 41;
+        switch (rng() % 4) {
+        case 0: break;
+        case 1: target = cpu.cycles - std::min<uint64_t>(cpu.cycles, 1 + rng() % 4); break; // below entry
+        default: target = cpu.cycles + rng() % 41; break;
+        }
+        // Bus-wait answers depend on the query count, so both rigs restart it identically.
+        const uint32_t busWaitEvery = opt.memory ? static_cast<uint32_t>(rng() % 3 == 0 ? 0 : 2 + rng() % 2) : 0;
+        for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+            rig->mmio.busWaitEvery = busWaitEvery;
+            rig->mmio.busWaitQueries = 0;
+            rig->mmio.log.clear();
         }
         INFO("entry cycles " << cpu.cycles << " target " << target << " intrPending " << cpu.intrPending
-                             << " intrAllow " << cpu.state.intrAllow);
+                             << " intrAllow " << cpu.state.intrAllow << " busWaitEvery " << busWaitEvery);
 
         auto &x64Ctx = x64Rig->sh2->GetJitContext();
         NativeCode code;
@@ -244,11 +258,32 @@ TEST_CASE("x64 matches the IR interpreter on random blocks", "[jit][x64]") {
         const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext(), target);
         const ExitInfo x64 = backend->Run(code, x64Ctx, target);
         RequireSameOutcome(ir, x64, *irRig, *x64Rig);
+        REQUIRE(x64Rig->State().fetchedOpcodes == irRig->State().fetchedOpcodes);
+        REQUIRE(*x64Ctx.delaySlot == *irRig->sh2->GetJitContext().delaySlot);
 
         if (seed % 256 == 255) {
             backend->Reset(); // keeps memory bounded and exercises compiling after a reset
         }
     }
+}
+
+} // namespace
+
+TEST_CASE("x64 matches the IR interpreter on random blocks", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    CompareRandomBlocks({});
+}
+
+TEST_CASE("x64 matches IR on random blocks with calls and memory", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    sh2test::RandomIrOptions opt;
+    opt.calls = true;
+    opt.memory = true;
+    CompareRandomBlocks(opt);
 }
 
 TEST_CASE("x64 spills", "[jit][x64]") {
@@ -293,47 +328,68 @@ TEST_CASE("x64 boundary at every check", "[jit][x64]") {
     if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
         SKIP("no x64 backend");
     }
-    // A straight 32-instruction block: one check before every instruction after the first.
-    Block block;
-    block.startPC = kCode;
-    block.guestInstrCount = 32;
-    Builder b(block);
-    for (uint32_t i = 0; i < 32; ++i) {
-        if (i > 0) {
-            b.CheckBoundary(kCode + 2 * i, static_cast<uint8_t>(i));
+    // A straight 32-instruction block: one check before every instruction after the first. It
+    // starts by clearing interrupt-allow; with allowAt = k > 0 it allows interrupts again right
+    // before check k, so a pending interrupt can only stop the block there.
+    const auto makeBlock = [](uint32_t allowAt) {
+        Block block;
+        block.startPC = kCode;
+        block.guestInstrCount = 32;
+        Builder b(block);
+        b.ClearIntrAllow();
+        for (uint32_t i = 0; i < 32; ++i) {
+            if (i > 0) {
+                if (i == allowAt) {
+                    b.SetIntrAllow();
+                }
+                b.CheckBoundary(kCode + 2 * i, static_cast<uint8_t>(i));
+            }
+            const uint32_t reg = i % 16;
+            b.SetReg(reg, b.Add(b.GetReg(reg), b.Const(i + 1)));
+            b.AddCycles(1 + i % 3);
         }
-        const uint32_t reg = i % 16;
-        b.SetReg(reg, b.Add(b.GetReg(reg), b.Const(i + 1)));
-        b.AddCycles(1 + i % 3);
-    }
-    b.Exit(kCode + 64, 32);
-    INFO(brimir::jit::PrintBlock(block));
-    REQUIRE(brimir::jit::VerifyBlock(block).empty());
+        b.Exit(kCode + 64, 32);
+        return block;
+    };
 
     auto irRig = std::make_unique<Rig>();
     auto x64Rig = std::make_unique<Rig>();
     const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
     REQUIRE(backend != nullptr);
-    NativeCode code;
-    REQUIRE(backend->Compile(block, x64Rig->sh2->GetJitContext(), code));
 
-    for (const bool interrupt : {false, true}) {
-        for (uint64_t extra = 0; extra <= 40; ++extra) {
-            CpuSetup cpu;
-            cpu.state = irRig->BaseState(kCode);
-            cpu.state.intrAllow = true;
-            cpu.intrPending = interrupt;
-            cpu.cycles = 1000;
-            cpu.Apply(*irRig);
-            cpu.Apply(*x64Rig);
-            const uint64_t target = cpu.cycles + extra;
-            INFO("interrupt " << interrupt << " target entry+" << extra);
-            const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext(), target);
-            const ExitInfo x64 = backend->Run(code, x64Rig->sh2->GetJitContext(), target);
-            RequireSameOutcome(ir, x64, *irRig, *x64Rig);
-            if (interrupt) {
-                CHECK(x64.boundary);
-                CHECK(x64.retired == 1);
+    // allowAt 0: interrupts stay disallowed, only the cycle target stops the block.
+    for (uint32_t allowAt = 0; allowAt < 32; ++allowAt) {
+        const Block block = makeBlock(allowAt);
+        INFO(brimir::jit::PrintBlock(block));
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+        NativeCode code;
+        REQUIRE(backend->Compile(block, x64Rig->sh2->GetJitContext(), code));
+
+        for (const bool interrupt : {false, true}) {
+            for (uint64_t extra = 0; extra <= 41; ++extra) {
+                CpuSetup cpu;
+                cpu.state = irRig->BaseState(kCode);
+                cpu.state.intrAllow = true;
+                cpu.intrPending = interrupt;
+                cpu.cycles = 1000;
+                cpu.Apply(*irRig);
+                cpu.Apply(*x64Rig);
+                const uint64_t target = extra == 41 ? kNoCycleTarget : cpu.cycles + extra;
+                INFO("allowAt " << allowAt << " interrupt " << interrupt << " target entry+" << extra);
+                const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext(), target);
+                const ExitInfo x64 = backend->Run(code, x64Rig->sh2->GetJitContext(), target);
+                RequireSameOutcome(ir, x64, *irRig, *x64Rig);
+                if (interrupt && allowAt > 0) {
+                    CHECK(x64.boundary);
+                    CHECK(x64.retired <= allowAt);
+                    if (target == kNoCycleTarget) {
+                        CHECK(x64.retired == allowAt);
+                    }
+                }
+                if (target == kNoCycleTarget && (!interrupt || allowAt == 0)) {
+                    CHECK_FALSE(x64.boundary);
+                    CHECK(x64.retired == 32);
+                }
             }
         }
     }
@@ -360,4 +416,317 @@ TEST_CASE("x64 code is freed by Reset", "[jit][x64]") {
     CHECK(backend->CodeBytes() > 0);
     backend->Reset();
     CHECK(backend->CodeBytes() == 0);
+}
+
+TEST_CASE("x64 Compile fails cleanly on a context with a null state pointer", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    Block block;
+    block.startPC = kCode;
+    block.guestInstrCount = 1;
+    Builder b(block);
+    b.SetReg(1, b.Add(b.GetReg(1), b.Const(1)));
+    b.AddCycles(1);
+    b.Exit(kCode + 2, 1);
+
+    auto rig = std::make_unique<Rig>();
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    NativeCode good;
+    REQUIRE(backend->Compile(block, rig->sh2->GetJitContext(), good));
+    const size_t bytes = backend->CodeBytes();
+    REQUIRE(bytes > 0);
+
+    using Ctx = ymir::sh2::SH2JitContext;
+    const std::vector<std::pair<const char *, void (*)(Ctx &)>> fields{
+        {"R", [](Ctx &c) { c.R = nullptr; }},
+        {"PC", [](Ctx &c) { c.PC = nullptr; }},
+        {"PR", [](Ctx &c) { c.PR = nullptr; }},
+        {"GBR", [](Ctx &c) { c.GBR = nullptr; }},
+        {"VBR", [](Ctx &c) { c.VBR = nullptr; }},
+        {"SR", [](Ctx &c) { c.SR = nullptr; }},
+        {"MACL", [](Ctx &c) { c.MACL = nullptr; }},
+        {"MACH", [](Ctx &c) { c.MACH = nullptr; }},
+        {"delaySlotTarget", [](Ctx &c) { c.delaySlotTarget = nullptr; }},
+        {"wbReg", [](Ctx &c) { c.wbReg = nullptr; }},
+        {"intrPending", [](Ctx &c) { c.intrPending = nullptr; }},
+        {"intrAllow", [](Ctx &c) { c.intrAllow = nullptr; }},
+        {"cyclesExecuted", [](Ctx &c) { c.cyclesExecuted = nullptr; }},
+    };
+    for (const auto &[name, clear] : fields) {
+        INFO("null " << name);
+        Ctx ctx = rig->sh2->GetJitContext();
+        clear(ctx);
+        static const int sentinel = 0;
+        NativeCode out;
+        out.entry = &sentinel;
+        CHECK_FALSE(backend->Compile(block, ctx, out));
+        CHECK(out.entry == nullptr);
+        CHECK(backend->CodeBytes() == bytes);
+    }
+}
+
+TEST_CASE("x64 values live across calls", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kMmio = 0x22000100;
+    Block block;
+    block.startPC = kCode;
+    block.guestInstrCount = 1;
+    Builder b(block);
+    std::mt19937 rng(77);
+    std::vector<ValueId> values;
+    for (uint32_t i = 0; i < 40; ++i) {
+        const ValueId x = b.Add(b.GetReg(i % 16), b.Const(static_cast<uint32_t>(rng())));
+        values.push_back(i % 3 == 0 ? b.Mul(x, b.Const(static_cast<uint32_t>(rng()) | 1u)) : b.Xor(x, b.Const(i)));
+    }
+    // Two calls with all 40 values live: a callback load from MMIO and SetSR.
+    b.SyncCycles();
+    const ValueId address = b.Const(kMmio);
+    b.AddAccessCycles(address, 4, false);
+    const ValueId loaded = b.Load(address, 4, false);
+    b.SetSR(b.GetReg(5), false);
+    for (uint32_t r = 0; r < 16; ++r) {
+        ValueId acc = loaded;
+        for (uint32_t i = r; i < values.size(); i += 16) {
+            acc = b.Add(acc, values[i]);
+        }
+        b.SetReg(r, acc);
+    }
+    b.SetMACL(b.Xor(values[39], values[0]));
+    b.AddCycles(1);
+    b.Exit(kCode + 2, 1);
+    INFO(brimir::jit::PrintBlock(block));
+    REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+    auto irRig = std::make_unique<Rig>();
+    auto x64Rig = std::make_unique<Rig>();
+    CpuSetup cpu = RandomCpu(*irRig, rng);
+    cpu.intrPending = false;
+    for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+        cpu.Apply(*rig);
+        rig->mmio.data[kMmio & 0xFFFF] = 0xDE;
+        rig->mmio.data[(kMmio & 0xFFFF) + 1] = 0xAD;
+        rig->mmio.data[(kMmio & 0xFFFF) + 2] = 0xBE;
+        rig->mmio.data[(kMmio & 0xFFFF) + 3] = 0xEF;
+    }
+    const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext());
+    const ExitInfo x64 = sh2test::RunOnBackend(BackendKind::X64, block, x64Rig->sh2->GetJitContext());
+    RequireSameOutcome(ir, x64, *irRig, *x64Rig);
+    REQUIRE(x64Rig->mmio.log.size() == 1);
+    CHECK(x64Rig->mmio.log[0].kind == 'R');
+    CHECK(x64Rig->mmio.log[0].value == 0xDEADBEEFu);
+}
+
+namespace {
+
+constexpr uint32_t kAbortMmio = 0x22000200;
+
+// Hooked callbacks that request an abort when they touch the MMIO page, like a WDT access that
+// resets the CPU in the middle of a block.
+bool g_abort = false;
+uint32 (*g_origRead)(void *, uint32, uint32, bool) = nullptr;
+void (*g_origWrite)(void *, uint32, uint32, uint32) = nullptr;
+void (*g_origRefill)(void *, uint32) = nullptr;
+
+bool IsMmio(uint32 address) {
+    return (address >> 24) == 0x22;
+}
+
+uint32 AbortingRead(void *sh2, uint32 address, uint32 size, bool instrFetch) {
+    const uint32 value = g_origRead(sh2, address, size, instrFetch);
+    g_abort = g_abort || IsMmio(address);
+    return value;
+}
+
+void AbortingWrite(void *sh2, uint32 address, uint32 size, uint32 value) {
+    g_origWrite(sh2, address, size, value);
+    g_abort = g_abort || IsMmio(address);
+}
+
+void AbortingRefill(void *sh2, uint32 address) {
+    g_origRefill(sh2, address);
+    g_abort = g_abort || IsMmio(address);
+}
+
+uint32 ThrowingRead(void *sh2, uint32 address, uint32 size, bool instrFetch) {
+    if (IsMmio(address)) {
+        throw std::runtime_error("bus fault reading MMIO");
+    }
+    return g_origRead(sh2, address, size, instrFetch);
+}
+
+} // namespace
+
+TEST_CASE("x64 aborts after each memory kind", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    enum class Kind { Load, Store, Refill, ExitIfRefill };
+    for (const Kind kind : {Kind::Load, Kind::Store, Kind::Refill, Kind::ExitIfRefill}) {
+        INFO("kind " << static_cast<int>(kind));
+        Block block;
+        block.startPC = kCode;
+        block.guestInstrCount = 1;
+        Builder b(block);
+        b.SetReg(1, b.Const(0x1111));
+        b.AddCycles(3);
+        b.SyncCycles();
+        const ValueId address = b.Const(kAbortMmio);
+        switch (kind) {
+        case Kind::Load: b.SetReg(2, b.Load(address, 4, false)); break;
+        case Kind::Store: b.Store(address, 4, b.Const(0xA5A5A5A5)); break;
+        case Kind::Refill: b.Refill(kAbortMmio); break;
+        case Kind::ExitIfRefill: b.ExitIf(b.Const(1), kAbortMmio, 5, true, 1); break;
+        }
+        // Nothing from here on may run.
+        b.SetReg(3, b.Const(0x3333));
+        b.SetT(b.Const(1));
+        b.Store(b.Const(0x06040000), 4, b.Const(0x55555555));
+        b.SetSR(b.Const(0), false);
+        b.AddCycles(7);
+        b.Exit(kCode + 2, 1);
+        INFO(brimir::jit::PrintBlock(block));
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+        auto irRig = std::make_unique<Rig>();
+        auto x64Rig = std::make_unique<Rig>();
+        ExitInfo results[2];
+        Rig *rigs[2] = {irRig.get(), x64Rig.get()};
+        for (int i = 0; i < 2; ++i) {
+            Rig &rig = *rigs[i];
+            rig.Load(rig.BaseState(kCode));
+            auto &ctx = rig.sh2->GetJitContext();
+            g_origRead = ctx.read;
+            g_origWrite = ctx.write;
+            g_origRefill = ctx.refillPipeline;
+            ctx.read = AbortingRead;
+            ctx.write = AbortingWrite;
+            ctx.refillPipeline = AbortingRefill;
+            g_abort = false;
+            results[i] = sh2test::RunOnBackend(i == 0 ? BackendKind::Ir : BackendKind::X64, block, ctx,
+                                               kNoCycleTarget, &g_abort);
+            ctx.read = g_origRead;
+            ctx.write = g_origWrite;
+            ctx.refillPipeline = g_origRefill;
+            CHECK(g_abort);
+        }
+        const ExitInfo &x64 = results[1];
+        RequireSameOutcome(results[0], x64, *irRig, *x64Rig);
+        CHECK(x64.aborted);
+        CHECK(x64.retired == 0);
+        CHECK(x64.cycles == (kind == Kind::ExitIfRefill ? 8u : 3u));
+        const auto st = x64Rig->State();
+        CHECK(st.PC == kCode);
+        CHECK(st.R[1] == 0x1111u);
+        CHECK(st.R[3] != 0x3333u);
+        CHECK(x64Rig->Read32(0x06040000) != 0x55555555u);
+        CHECK(st.SR == irRig->BaseState(kCode).SR);
+    }
+}
+
+TEST_CASE("x64 propagates callback exceptions", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kMmio = 0x22040000;
+
+    SECTION("Run rethrows and leaves the same state as RunBlock") {
+        Block block;
+        block.startPC = kCode;
+        block.guestInstrCount = 1;
+        Builder b(block);
+        b.SetReg(1, b.Const(0x1111));
+        b.AddCycles(3);
+        b.SyncCycles();
+        b.SetReg(2, b.Load(b.Const(kMmio), 4, false));
+        b.SetReg(3, b.Const(0x3333));
+        b.AddCycles(1);
+        b.Exit(kCode + 2, 1);
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+        auto irRig = std::make_unique<Rig>();
+        auto x64Rig = std::make_unique<Rig>();
+        Rig *rigs[2] = {irRig.get(), x64Rig.get()};
+        for (int i = 0; i < 2; ++i) {
+            Rig &rig = *rigs[i];
+            rig.Load(rig.BaseState(kCode));
+            auto &ctx = rig.sh2->GetJitContext();
+            g_origRead = ctx.read;
+            ctx.read = ThrowingRead;
+            bool caught = false;
+            try {
+                sh2test::RunOnBackend(i == 0 ? BackendKind::Ir : BackendKind::X64, block, ctx);
+            } catch (const std::runtime_error &e) {
+                caught = true;
+                CHECK(typeid(e) == typeid(std::runtime_error));
+                CHECK(std::string(e.what()) == "bus fault reading MMIO");
+            }
+            ctx.read = g_origRead;
+            INFO("backend " << i);
+            CHECK(caught);
+        }
+        const std::string diff = sh2test::DiffRigs(*irRig, *x64Rig);
+        INFO(diff);
+        CHECK(diff.empty());
+        CHECK(x64Rig->State().R[1] == 0x1111u);
+        CHECK(x64Rig->State().R[3] != 0x3333u);
+        CHECK(x64Rig->State().PC == kCode);
+    }
+
+    SECTION("Executor::Step rethrows and flushes normally afterwards") {
+        constexpr uint16_t kMovL_R1_R2 = 0x6212; // mov.l @R1,R2
+        const std::vector<uint16_t> program{kMovL_R1_R2, kAdd1_R3, kAdd1_R3, static_cast<uint16_t>(kSleep)};
+        auto irRig = std::make_unique<Rig>();
+        auto x64Rig = std::make_unique<Rig>();
+        brimir::jit::Executor irExec{BackendKind::Ir};
+        brimir::jit::Executor x64Exec{BackendKind::X64};
+        Rig *rigs[2] = {irRig.get(), x64Rig.get()};
+        brimir::jit::Executor *execs[2] = {&irExec, &x64Exec};
+        for (int i = 0; i < 2; ++i) {
+            Rig &rig = *rigs[i];
+            rig.WriteCode(kCode, program);
+            auto state = rig.BaseState(kCode);
+            state.R[1] = kMmio;
+            state.R[2] = 0;
+            state.R[3] = 0;
+            rig.Load(state);
+            auto &ctx = rig.sh2->GetJitContext();
+            g_origRead = ctx.read;
+            ctx.read = ThrowingRead;
+            bool caught = false;
+            try {
+                execs[i]->Step(ctx);
+            } catch (const std::runtime_error &e) {
+                caught = true;
+                CHECK(typeid(e) == typeid(std::runtime_error));
+                CHECK(std::string(e.what()) == "bus fault reading MMIO");
+            }
+            ctx.read = g_origRead;
+            INFO("backend " << i);
+            CHECK(caught);
+        }
+        CHECK(x64Exec.GetStats().nativeBlocksRun == 1);
+        CHECK(x64Exec.GetStats().compileFallbacks == 0);
+        {
+            const std::string diff = sh2test::DiffRigs(*irRig, *x64Rig);
+            INFO(diff);
+            CHECK(diff.empty());
+        }
+
+        // The block is no longer running: a flush applies at once.
+        REQUIRE(x64Exec.Cache().Size() == 1);
+        x64Exec.Flush();
+        CHECK(x64Exec.Cache().Size() == 0);
+
+        // The next step recompiles and runs the block natively.
+        const auto next = x64Exec.Step(x64Rig->sh2->GetJitContext());
+        CHECK_FALSE(next.aborted);
+        CHECK(next.retired == 3);
+        CHECK(x64Rig->State().R[3] == 2u);
+        CHECK(x64Rig->State().PC == kCode + 6);
+        CHECK(x64Exec.GetStats().nativeBlocksRun == 2);
+    }
 }
