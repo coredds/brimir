@@ -23,7 +23,7 @@
 | Guardian Heroes (USA) | US | 36000 | OK, identical | 2,532,479,487 | 59,806,609 | 20:07 | 20.488 | 9.448 | 81.1% / 64.7% |
 | Street Fighter Zero 3 (Japan) | JP | 36000 | OK, identical | 2,320,551,274 | 194,386,819 | ~32 min (re-run, see Findings) | 22.119 | 10.185 | 85.4% / 68.4% |
 
-All lockstep runs exited 0 and ended with `lockstep: OK, 36000 frames identical`. The lockstep summary line reports only the master executor's counters, so slave counters are not available for the lockstep runs. All twelve smoke runs exited 0.
+All lockstep runs ended with `lockstep: OK, 36000 frames identical` (exit 0; the exit code of the Street Fighter Zero 3 re-run was not captured to a file, its log ends with the OK line). The command lines of the BIOS-menu and Virtua Fighter 2 runs were not recorded; they used the US and JP BIOS respectively, as in the baseline and the plan. The lockstep summary line reports only the master executor's counters, so slave counters are not available for the lockstep runs. All twelve smoke runs exited 0.
 
 Smoke-run JIT executor stats (3600 measured frames, after warmup):
 
@@ -36,7 +36,7 @@ Smoke-run JIT executor stats (3600 measured frames, after warmup):
 | Guardian Heroes | 289,585,948 | 10,078,770 | 210,982,027 | 136,527 |
 | Street Fighter Zero 3 | 267,657,925 | 30,697,242 | 188,697,803 | 32,107 |
 
-As expected, the IR-interpreter backend is slower than Ymir's interpreter: frame time is 2.0–2.2x the interpreter's and the SH-2 share rises to 81–86%. Milestone 1 targets exactness, not speed; native backends are milestones 2 and 3.
+As expected, the IR-interpreter backend is slower than Ymir's interpreter: frame time is 1.9–2.2x the interpreter's and the SH-2 share rises to 81–86%. Milestone 1 targets exactness, not speed; native backends are milestones 2 and 3.
 
 ## Opcodes still interpreted
 

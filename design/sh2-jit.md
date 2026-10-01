@@ -79,7 +79,7 @@ A plain struct the fork fills in once per `SH2` instance. It points at the live 
 
 `SH2::Advance` dispatches to the executor only when all of these hold:
 
-- the `brimir_sh2_jit` core option is enabled (default **off** until validated)
+- the `brimir_sh2_jit` core option is enabled (default **off**: validated against the interpreter, but the IR-interpreter backend is still slower than Ymir's interpreter)
 - debug tracing is off (`debug == false` template instance)
 - SH-2 cache emulation is off (`emulateCache == false`), which also excludes games with the `ForceSH2Cache` flag
 
@@ -242,10 +242,10 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 3. `SH2JitContext`, the executor hook, the `brimir_sh2_jit` core option, and the eligibility rules.
 4. `brimir-jit` library:
    - IR, verifier, printer
-   - front end for a core subset: MOV family (register, immediate, load/store in all addressing modes), ALU (add/sub/logic/compare incl. carry/overflow variants), shifts and rotates, `BRA`/`BSR`/`BT`/`BF`/`BT/S`/`BF/S`/`JMP`/`JSR`/`RTS` with delay slots, `NOP`
+   - front end for every SH-2 instruction except multiply/divide-step/MAC, `TAS`, `TRAPA`/`RTE`/`SLEEP`, the memory forms of `LDC`/`LDS`/`STC`/`STS` and illegal opcodes (list in [sh2-validation.md](sh2-validation.md), "Opcodes still interpreted"); exact per-opcode lowering in [sh2-jit-handler-table.md](sh2-jit-handler-table.md)
    - block cache with check-on-entry
    - IR-interpreter backend
-   - fallback to the interpreter for all other opcodes
+   - fallback to the interpreter for the remaining opcodes
 5. Validation layers 7.1 (in CI) and 7.2.
 
 **Done when** (all met; see [sh2-validation.md](sh2-validation.md)):
