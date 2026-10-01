@@ -43,6 +43,17 @@ uint32_t Disp12x2(uint16_t instr) {
     return static_cast<uint32_t>(disp) << 1;
 }
 
+// Field decoders matching sh2.cpp's DECODE_* macros (all displacements unsigned).
+// DECODE_MD / DECODE_ND4: the register is in bits 7..4 (Rm(instr)); disp4 in bits 3..0.
+uint32_t Disp4(uint16_t instr, uint32_t shift) {
+    return static_cast<uint32_t>(instr & 0xFu) << shift;
+}
+
+// DECODE_D_U / DECODE_ND8: disp8 in bits 7..0.
+uint32_t Disp8U(uint16_t instr, uint32_t shift) {
+    return static_cast<uint32_t>(instr & 0xFFu) << shift;
+}
+
 // Maps a supported instruction (normal or delay-slot decode) to its base opcode.
 std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
     if (!delaySlot) {
@@ -51,10 +62,41 @@ std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
         case OpcodeType::MOV_R:
         case OpcodeType::MOV_I:
         case OpcodeType::MOVB_L:
+        case OpcodeType::MOVW_L:
         case OpcodeType::MOVL_L:
+        case OpcodeType::MOVB_L0:
+        case OpcodeType::MOVW_L0:
+        case OpcodeType::MOVL_L0:
+        case OpcodeType::MOVB_L4:
+        case OpcodeType::MOVW_L4:
+        case OpcodeType::MOVL_L4:
+        case OpcodeType::MOVB_LG:
+        case OpcodeType::MOVW_LG:
+        case OpcodeType::MOVL_LG:
+        case OpcodeType::MOVB_M:
+        case OpcodeType::MOVW_M:
+        case OpcodeType::MOVL_M:
+        case OpcodeType::MOVB_P:
+        case OpcodeType::MOVW_P:
+        case OpcodeType::MOVL_P:
         case OpcodeType::MOVB_S:
+        case OpcodeType::MOVW_S:
         case OpcodeType::MOVL_S:
+        case OpcodeType::MOVB_S0:
+        case OpcodeType::MOVW_S0:
+        case OpcodeType::MOVL_S0:
+        case OpcodeType::MOVB_S4:
+        case OpcodeType::MOVW_S4:
+        case OpcodeType::MOVL_S4:
+        case OpcodeType::MOVB_SG:
+        case OpcodeType::MOVW_SG:
+        case OpcodeType::MOVL_SG:
+        case OpcodeType::MOVW_I:
         case OpcodeType::MOVL_I:
+        case OpcodeType::MOVA:
+        case OpcodeType::MOVT:
+        case OpcodeType::CLRT:
+        case OpcodeType::SETT:
         case OpcodeType::ADD:
         case OpcodeType::ADD_I:
         case OpcodeType::CMP_EQ_R:
@@ -62,15 +104,46 @@ std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
         default: return std::nullopt;
         }
     }
-    // MOVL_I is excluded in delay slots: its PC-relative base uses the delay-slot target.
     switch (op) {
     case OpcodeType::Delay_NOP: return OpcodeType::NOP;
     case OpcodeType::Delay_MOV_R: return OpcodeType::MOV_R;
     case OpcodeType::Delay_MOV_I: return OpcodeType::MOV_I;
     case OpcodeType::Delay_MOVB_L: return OpcodeType::MOVB_L;
+    case OpcodeType::Delay_MOVW_L: return OpcodeType::MOVW_L;
     case OpcodeType::Delay_MOVL_L: return OpcodeType::MOVL_L;
+    case OpcodeType::Delay_MOVB_L0: return OpcodeType::MOVB_L0;
+    case OpcodeType::Delay_MOVW_L0: return OpcodeType::MOVW_L0;
+    case OpcodeType::Delay_MOVL_L0: return OpcodeType::MOVL_L0;
+    case OpcodeType::Delay_MOVB_L4: return OpcodeType::MOVB_L4;
+    case OpcodeType::Delay_MOVW_L4: return OpcodeType::MOVW_L4;
+    case OpcodeType::Delay_MOVL_L4: return OpcodeType::MOVL_L4;
+    case OpcodeType::Delay_MOVB_LG: return OpcodeType::MOVB_LG;
+    case OpcodeType::Delay_MOVW_LG: return OpcodeType::MOVW_LG;
+    case OpcodeType::Delay_MOVL_LG: return OpcodeType::MOVL_LG;
+    case OpcodeType::Delay_MOVB_M: return OpcodeType::MOVB_M;
+    case OpcodeType::Delay_MOVW_M: return OpcodeType::MOVW_M;
+    case OpcodeType::Delay_MOVL_M: return OpcodeType::MOVL_M;
+    case OpcodeType::Delay_MOVB_P: return OpcodeType::MOVB_P;
+    case OpcodeType::Delay_MOVW_P: return OpcodeType::MOVW_P;
+    case OpcodeType::Delay_MOVL_P: return OpcodeType::MOVL_P;
     case OpcodeType::Delay_MOVB_S: return OpcodeType::MOVB_S;
+    case OpcodeType::Delay_MOVW_S: return OpcodeType::MOVW_S;
     case OpcodeType::Delay_MOVL_S: return OpcodeType::MOVL_S;
+    case OpcodeType::Delay_MOVB_S0: return OpcodeType::MOVB_S0;
+    case OpcodeType::Delay_MOVW_S0: return OpcodeType::MOVW_S0;
+    case OpcodeType::Delay_MOVL_S0: return OpcodeType::MOVL_S0;
+    case OpcodeType::Delay_MOVB_S4: return OpcodeType::MOVB_S4;
+    case OpcodeType::Delay_MOVW_S4: return OpcodeType::MOVW_S4;
+    case OpcodeType::Delay_MOVL_S4: return OpcodeType::MOVL_S4;
+    case OpcodeType::Delay_MOVB_SG: return OpcodeType::MOVB_SG;
+    case OpcodeType::Delay_MOVW_SG: return OpcodeType::MOVW_SG;
+    case OpcodeType::Delay_MOVL_SG: return OpcodeType::MOVL_SG;
+    case OpcodeType::Delay_MOVW_I: return OpcodeType::MOVW_I;
+    case OpcodeType::Delay_MOVL_I: return OpcodeType::MOVL_I;
+    case OpcodeType::Delay_MOVA: return OpcodeType::MOVA;
+    case OpcodeType::Delay_MOVT: return OpcodeType::MOVT;
+    case OpcodeType::Delay_CLRT: return OpcodeType::CLRT;
+    case OpcodeType::Delay_SETT: return OpcodeType::SETT;
     case OpcodeType::Delay_ADD: return OpcodeType::ADD;
     case OpcodeType::Delay_ADD_I: return OpcodeType::ADD_I;
     case OpcodeType::Delay_CMP_EQ_R: return OpcodeType::CMP_EQ_R;
@@ -85,13 +158,73 @@ bool IsDelayedBranch(OpcodeType op) {
 }
 
 // Lowers a non-branch instruction. `retiredBefore` = instructions completed before this one.
-void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool delaySlot, uint8_t retiredBefore) {
+// In a delay slot, `slotTarget` is the branch target when it is a compile-time constant
+// (kNoValue for dynamic targets: the target is then read back with GetDelayTarget).
+void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool delaySlot, uint8_t retiredBefore,
+                ValueId slotTarget = kNoValue) {
     const uint32_t n = Rn(instr);
     const uint32_t m = Rm(instr);
     const auto advance = [&] {
         if (delaySlot) {
             b.EndDelaySlot();
         }
+    };
+    const auto stall = [&](uint32_t mask) {
+        if (mask != 0) {
+            b.WbStall(mask);
+        }
+    };
+    // Loads: the access cycles, then `preMask` stall (byte forms, and MOVW_L4's first stall), then
+    // the bus-wait check (word/long only), the load, optional post-increment of `incReg`, and the
+    // `postMask` stall after AdvancePC (word/long forms count write-back only on success).
+    const auto load = [&](ValueId address, uint8_t size, uint32_t dst, uint32_t preMask, uint32_t postMask,
+                          uint32_t incReg = 16) {
+        b.AddAccessCycles(address, size, false);
+        stall(preMask);
+        if (size != 1) {
+            b.ExitIfBusWait(address, size, false, pc, retiredBefore);
+        }
+        ValueId value = b.Load(address, size, false);
+        if (size == 1) {
+            value = b.SExt8(value);
+        } else if (size == 2) {
+            value = b.SExt16(value);
+        }
+        b.SetReg(dst, value);
+        if (incReg < 16 && incReg != dst) {
+            b.SetReg(incReg, b.Add(address, b.Const(size)));
+        }
+        advance();
+        stall(postMask);
+        b.SetWb(static_cast<uint8_t>(dst));
+    };
+    // Stores: byte forms stall before the write; word/long forms check bus wait and stall after
+    // AdvancePC. `decReg` receives the (pre-decremented) address after the write.
+    const auto store = [&](ValueId address, uint8_t size, ValueId value, uint32_t mask, uint32_t decReg = 16) {
+        b.AddAccessCycles(address, size, true);
+        if (size == 1) {
+            stall(mask);
+        } else {
+            b.ExitIfBusWait(address, size, true, pc, retiredBefore);
+        }
+        b.Store(address, size, value);
+        if (decReg < 16) {
+            b.SetReg(decReg, address);
+        }
+        advance();
+        if (size != 1) {
+            stall(mask);
+        }
+        b.SetWb(kWbNone);
+    };
+    // The delay-slot branch target (PC-relative instructions in a slot use target - 2 as their PC).
+    const auto delayTarget = [&] { return slotTarget != kNoValue ? slotTarget : b.GetDelayTarget(); };
+    // (PC & ~3) + disp + 4 for MOVL_I / MOVA.
+    const auto alignedPcRel = [&](uint32_t disp) {
+        if (!delaySlot) {
+            return b.Const((pc & ~3u) + disp + 4u);
+        }
+        return b.Add(b.And(b.Sub(delayTarget(), b.Const(2)), b.Const(~3u)), b.Const(disp + 4u));
     };
 
     switch (op) {
@@ -156,14 +289,144 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
         b.SetWb(kWbNone);
         break;
     }
-    case OpcodeType::MOVL_I: {
+    case OpcodeType::MOVW_L:
         b.SyncCycles();
-        const ValueId address = b.Const((pc & ~3u) + ((instr & 0xFFu) << 2) + 4u);
-        b.AddAccessCycles(address, 4, false);
-        b.SetReg(n, b.Load(address, 4, true));
+        load(b.GetReg(m), 2, n, 0, RegBit(m));
+        break;
+    case OpcodeType::MOVB_L0:
+        b.SyncCycles();
+        load(b.Add(b.GetReg(m), b.GetReg(0)), 1, n, RegBit(m) | RegBit(0), 0);
+        break;
+    case OpcodeType::MOVW_L0:
+        b.SyncCycles();
+        load(b.Add(b.GetReg(m), b.GetReg(0)), 2, n, 0, RegBit(m) | RegBit(0));
+        break;
+    case OpcodeType::MOVL_L0:
+        b.SyncCycles();
+        load(b.Add(b.GetReg(m), b.GetReg(0)), 4, n, 0, RegBit(m) | RegBit(0));
+        break;
+    case OpcodeType::MOVB_L4: // no write-back stall at all
+        b.SyncCycles();
+        load(b.Add(b.GetReg(m), b.Const(Disp4(instr, 0))), 1, 0, 0, 0);
+        break;
+    case OpcodeType::MOVW_L4: // WritebackCycles(rm) counted before the wait check and again on success
+        b.SyncCycles();
+        load(b.Add(b.GetReg(m), b.Const(Disp4(instr, 1))), 2, 0, RegBit(m), RegBit(m));
+        break;
+    case OpcodeType::MOVL_L4:
+        b.SyncCycles();
+        load(b.Add(b.GetReg(m), b.Const(Disp4(instr, 2))), 4, n, 0, RegBit(m));
+        break;
+    case OpcodeType::MOVB_LG: // GBR forms have no write-back stall
+        b.SyncCycles();
+        load(b.Add(b.GetGBR(), b.Const(Disp8U(instr, 0))), 1, 0, 0, 0);
+        break;
+    case OpcodeType::MOVW_LG:
+        b.SyncCycles();
+        load(b.Add(b.GetGBR(), b.Const(Disp8U(instr, 1))), 2, 0, 0, 0);
+        break;
+    case OpcodeType::MOVL_LG:
+        b.SyncCycles();
+        load(b.Add(b.GetGBR(), b.Const(Disp8U(instr, 2))), 4, 0, 0, 0);
+        break;
+    case OpcodeType::MOVB_P:
+        b.SyncCycles();
+        load(b.GetReg(m), 1, n, RegBit(m), 0, m);
+        break;
+    case OpcodeType::MOVW_P:
+        b.SyncCycles();
+        load(b.GetReg(m), 2, n, 0, RegBit(m), m);
+        break;
+    case OpcodeType::MOVL_P:
+        b.SyncCycles();
+        load(b.GetReg(m), 4, n, 0, RegBit(m), m);
+        break;
+    case OpcodeType::MOVW_S:
+        b.SyncCycles();
+        store(b.GetReg(n), 2, b.GetReg(m), RegBit(m) | RegBit(n));
+        break;
+    case OpcodeType::MOVB_M:
+    case OpcodeType::MOVW_M:
+    case OpcodeType::MOVL_M: {
+        const uint8_t size = op == OpcodeType::MOVB_M ? 1 : op == OpcodeType::MOVW_M ? 2 : 4;
+        b.SyncCycles();
+        // R[rm] is read before R[rn] is updated: with rn == rm the original value is stored.
+        const ValueId value = b.GetReg(m);
+        store(b.Sub(b.GetReg(n), b.Const(size)), size, value, RegBit(m) | RegBit(n), n);
+        break;
+    }
+    case OpcodeType::MOVB_S0:
+    case OpcodeType::MOVW_S0:
+    case OpcodeType::MOVL_S0: { // stalls on (rn, R0), not rm
+        const uint8_t size = op == OpcodeType::MOVB_S0 ? 1 : op == OpcodeType::MOVW_S0 ? 2 : 4;
+        b.SyncCycles();
+        store(b.Add(b.GetReg(n), b.GetReg(0)), size, b.GetReg(m), RegBit(n) | RegBit(0));
+        break;
+    }
+    case OpcodeType::MOVB_S4:
+    case OpcodeType::MOVW_S4: { // DECODE_ND4: Rn in bits 7..4
+        const uint32_t shift = op == OpcodeType::MOVB_S4 ? 0 : 1;
+        const uint32_t n4 = Rm(instr);
+        b.SyncCycles();
+        store(b.Add(b.GetReg(n4), b.Const(Disp4(instr, shift))), static_cast<uint8_t>(1u << shift), b.GetReg(0),
+              RegBit(n4) | RegBit(0));
+        break;
+    }
+    case OpcodeType::MOVL_S4:
+        b.SyncCycles();
+        store(b.Add(b.GetReg(n), b.Const(Disp4(instr, 2))), 4, b.GetReg(m), RegBit(m) | RegBit(n));
+        break;
+    case OpcodeType::MOVB_SG:
+    case OpcodeType::MOVW_SG:
+    case OpcodeType::MOVL_SG: {
+        const uint32_t shift = op == OpcodeType::MOVB_SG ? 0 : op == OpcodeType::MOVW_SG ? 1 : 2;
+        b.SyncCycles();
+        store(b.Add(b.GetGBR(), b.Const(Disp8U(instr, shift))), static_cast<uint8_t>(1u << shift), b.GetReg(0),
+              RegBit(0));
+        break;
+    }
+    case OpcodeType::MOVW_I: {
+        // PC + disp + 4, no alignment; in a slot PC = delay-slot target - 2.
+        const uint32_t disp = Disp8U(instr, 1);
+        b.SyncCycles();
+        const ValueId address =
+            delaySlot ? b.Add(delayTarget(), b.Const(disp + 2u)) : b.Const(pc + disp + 4u);
+        b.AddAccessCycles(address, 2, false);
+        b.SetReg(n, b.SExt16(b.Load(address, 2, true)));
+        advance();
         b.SetWb(static_cast<uint8_t>(n));
         break;
     }
+    case OpcodeType::MOVL_I: {
+        b.SyncCycles();
+        const ValueId address = alignedPcRel(Disp8U(instr, 2));
+        b.AddAccessCycles(address, 4, false);
+        b.SetReg(n, b.Load(address, 4, true));
+        advance();
+        b.SetWb(static_cast<uint8_t>(n));
+        break;
+    }
+    case OpcodeType::MOVA:
+        b.SetReg(0, alignedPcRel(Disp8U(instr, 2)));
+        advance();
+        b.WbStall(RegBit(0));
+        b.AddCycles(1);
+        b.SetWb(kWbNone);
+        break;
+    case OpcodeType::MOVT:
+        b.SetReg(n, b.GetT());
+        advance();
+        b.WbStall(RegBit(n));
+        b.AddCycles(1);
+        b.SetWb(kWbNone);
+        break;
+    case OpcodeType::CLRT:
+    case OpcodeType::SETT: // fixed 1 cycle, no write-back stall
+        b.SetT(b.Const(op == OpcodeType::SETT ? 1 : 0));
+        advance();
+        b.AddCycles(1);
+        b.SetWb(kWbNone);
+        break;
     case OpcodeType::ADD:
         b.SetReg(n, b.Add(b.GetReg(n), b.GetReg(m)));
         advance();
@@ -199,14 +462,17 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
     }
 }
 
-// Lowers the branch part of a delayed branch (the slot is lowered by the caller).
-void LowerDelayedBranch(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, uint8_t retiredBefore) {
+// Lowers the branch part of a delayed branch (the slot is lowered by the caller). Returns the branch
+// target when it is a compile-time constant, kNoValue for dynamic targets.
+ValueId LowerDelayedBranch(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, uint8_t retiredBefore) {
     switch (op) {
-    case OpcodeType::BRA:
-        b.SetupDelaySlot(b.Const(pc + Disp12x2(instr) + 4u));
+    case OpcodeType::BRA: {
+        const ValueId target = b.Const(pc + Disp12x2(instr) + 4u);
+        b.SetupDelaySlot(target);
         b.SetWb(kWbNone);
         b.AddCycles(2);
-        break;
+        return target;
+    }
     case OpcodeType::BTS:
     case OpcodeType::BFS: {
         b.SetWb(kWbNone);
@@ -214,9 +480,10 @@ void LowerDelayedBranch(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, 
         // Not-taken condition: BT/S is not taken when T == 0, BF/S when T == 1.
         const ValueId notTaken = op == OpcodeType::BTS ? b.CmpEq(t, b.Const(0)) : t;
         b.ExitIf(notTaken, pc + 2u, 1, false, static_cast<uint8_t>(retiredBefore + 1));
-        b.SetupDelaySlot(b.Const(pc + Disp8x2(instr) + 4u));
+        const ValueId target = b.Const(pc + Disp8x2(instr) + 4u);
+        b.SetupDelaySlot(target);
         b.AddCycles(2);
-        break;
+        return target;
     }
     case OpcodeType::JMP: {
         const uint32_t m = Rn(instr);
@@ -234,6 +501,7 @@ void LowerDelayedBranch(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, 
         break;
     default: break;
     }
+    return kNoValue;
 }
 
 } // namespace
@@ -282,10 +550,10 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
             block.guestOpcodes.push_back(slot);
             boundary(pc, count);
             refillIfAligned(pc);
-            LowerDelayedBranch(b, op, instr, pc, count);
+            const ValueId target = LowerDelayedBranch(b, op, instr, pc, count);
             b.CheckBoundary(pc + 2, static_cast<uint8_t>(count + 1));
             refillIfAligned(pc + 2);
-            LowerPlain(b, *slotBase, slot, pc + 2, true, static_cast<uint8_t>(count + 1));
+            LowerPlain(b, *slotBase, slot, pc + 2, true, static_cast<uint8_t>(count + 1), target);
             b.ExitDynamic(static_cast<uint8_t>(count + 2));
             block.guestInstrCount = count + 2u;
             return block;

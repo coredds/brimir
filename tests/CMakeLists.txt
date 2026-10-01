@@ -43,6 +43,8 @@ add_executable(brimir_tests
     unit/test_jit_ir.cpp
     unit/test_jit_backend.cpp
     unit/test_jit_diff.cpp
+    unit/jit_opcode_specs.cpp
+    unit/test_jit_opcodes.cpp
     unit/test_jit_executor.cpp
     unit/test_sh2_state_diff.cpp
     unit/test_jit_integration.cpp
