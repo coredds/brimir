@@ -7,6 +7,7 @@ add_library(brimir-jit STATIC
     src/block_cache.cpp
     src/executor.cpp
     src/backend.cpp
+    src/bus_fast_path.cpp
 )
 
 target_include_directories(brimir-jit PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

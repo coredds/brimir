@@ -9,6 +9,9 @@
 
 #include <ymir/hw/sh2/sh2_jit_iface.hpp>
 
+#include "sh2_test_rig.hpp"
+
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -27,5 +30,20 @@ brimir::jit::ExitInfo RunOnBackend(brimir::jit::BackendKind kind, const brimir::
                                    ymir::sh2::SH2JitContext &ctx,
                                    uint64_t target = brimir::jit::kNoCycleTarget,
                                    const bool *abortRequested = nullptr);
+
+// Bus fast-path test pages, on top of the rig's RAM and MMIO: a read-only 64 KiB ROM page at bus
+// 0x4000000-0x400FFFF (replacing a RAM mirror page) and an unmapped page at 0x5010000-0x501FFFF.
+// SH-2 address offsets (low 29 bits) into each kind of page:
+constexpr uint32_t kFastRamOffset = 0x06001230;
+constexpr uint32_t kFastMmioOffset = 0x02000010;
+constexpr uint32_t kFastRomOffset = 0x04000120;
+constexpr uint32_t kFastUnmappedOffset = 0x05010040;
+using FastRom = std::array<uint8_t, 0x10000>;
+
+// Fills `rom` with a fixed pattern and maps it and the unmapped page on `rig`'s bus.
+void MapFastPathTestPages(Rig &rig, FastRom &rom);
+
+// Every partition (top 3 bits 0-7) x {RAM, MMIO, ROM, unmapped offset} x {+0, +1, +2, +3}.
+std::vector<uint32_t> FastPathTestAddresses();
 
 } // namespace sh2test

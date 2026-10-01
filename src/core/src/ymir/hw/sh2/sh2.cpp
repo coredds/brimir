@@ -4719,6 +4719,19 @@ void SH2::InitJitContext() {
     m_jitContext.MACH = &MAC.H;
     m_jitContext.setSR = &SH2::JitSetSR;
     m_jitContext.accessCyclesRMWByte = &SH2::JitAccessCyclesRMWByte;
+
+    // Brimir: bus page table layout for the JIT's inline fast path.
+    const auto layout = m_bus.GetPageTableLayout();
+    m_jitContext.bus.pages = layout.pages;
+    m_jitContext.bus.pageStride = layout.pageStride;
+    m_jitContext.bus.pageShift = layout.pageShift;
+    m_jitContext.bus.addressMask = layout.addressMask;
+    m_jitContext.bus.arrayOffset = layout.arrayOffset;
+    m_jitContext.bus.arrayWritableOffset = layout.arrayWritableOffset;
+    for (int i = 0; i < 3; ++i) {
+        m_jitContext.bus.readCyclesOffset[i] = layout.readCyclesOffset[i];
+        m_jitContext.bus.writeCyclesOffset[i] = layout.writeCyclesOffset[i];
+    }
 }
 
 uint64 SH2::JitInterpretOne(void *ctx) {

@@ -57,6 +57,13 @@ void TrMacL(X64Frame *f, uint32_t op1, uint32_t op2) noexcept;
 // only runs against that CPU. Returns false, before emitting anything, if the block has an op this
 // emitter does not lower or a state field whose offset from ctx.R does not fit in 32 bits. asmjit
 // errors are reported through the CodeHolder's error handler, not by the return value.
+//
+// With ctx.bus describing a page table, Load/Store/AddAccessCycles/ExitIfBusWait take the inline
+// bus fast path (bus_fast_path.hpp) and call their trampolines only for handler or unmapped pages
+// and partitions that do not reach the bus. The table's contents are read at run time; its address
+// is embedded in the code. An inline access does not test *abortRequested (RunBlock's Load/Store
+// do): it runs no callback, and the flag is only raised by a flush during a memory callback (a
+// watchdog reset), which TrRead/TrWrite/TrRefill already report, so it is always false there.
 bool EmitBlock(asmjit::x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx);
 
 // True if EmitBlock lowers every op of `block` (state offsets aside). Every valid op is lowered, so

@@ -75,14 +75,16 @@ CpuSetup RandomCpu(const Rig &rig, std::mt19937 &rng) {
 }
 
 // Compares everything a block can change: ExitInfo, CPU state (DiffRigs) and the flags DiffRigs
-// does not cover. Stops the test case at the first difference.
-void RequireSameOutcome(const ExitInfo &ir, const ExitInfo &x64, const Rig &irRig, const Rig &x64Rig) {
+// does not cover. Stops the test case at the first difference. comparePeripherals also compares
+// timers, DMAC and interrupts (only meaningful when both rigs went through identical steps).
+void RequireSameOutcome(const ExitInfo &ir, const ExitInfo &x64, const Rig &irRig, const Rig &x64Rig,
+                        bool comparePeripherals = false) {
     REQUIRE(x64.cycles == ir.cycles);
     REQUIRE(x64.retired == ir.retired);
     REQUIRE(x64.busWait == ir.busWait);
     REQUIRE(x64.aborted == ir.aborted);
     REQUIRE(x64.boundary == ir.boundary);
-    const std::string diff = sh2test::DiffRigs(irRig, x64Rig);
+    const std::string diff = sh2test::DiffRigs(irRig, x64Rig, comparePeripherals);
     INFO(diff);
     REQUIRE(diff.empty());
     auto &a = irRig.sh2->GetJitContext();
@@ -257,7 +259,9 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
         REQUIRE(code.entry != nullptr);
         const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext(), target);
         const ExitInfo x64 = backend->Run(code, x64Ctx, target);
-        RequireSameOutcome(ir, x64, *irRig, *x64Rig);
+        // Both rigs ran exactly the same steps, so the peripherals (the FRT the generator touches)
+        // must match too.
+        RequireSameOutcome(ir, x64, *irRig, *x64Rig, true);
         REQUIRE(x64Rig->State().fetchedOpcodes == irRig->State().fetchedOpcodes);
         REQUIRE(*x64Ctx.delaySlot == *irRig->sh2->GetJitContext().delaySlot);
 
@@ -282,6 +286,24 @@ TEST_CASE("x64 matches IR on random blocks with calls and memory", "[jit][x64]")
     }
     sh2test::RandomIrOptions opt;
     opt.calls = true;
+    opt.memory = true;
+    CompareRandomBlocks(opt);
+}
+
+TEST_CASE("x64 matches IR on random blocks with calls only", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    sh2test::RandomIrOptions opt;
+    opt.calls = true;
+    CompareRandomBlocks(opt);
+}
+
+TEST_CASE("x64 matches IR on random blocks with memory only", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    sh2test::RandomIrOptions opt;
     opt.memory = true;
     CompareRandomBlocks(opt);
 }
@@ -728,5 +750,218 @@ TEST_CASE("x64 propagates callback exceptions", "[jit][x64]") {
         CHECK(x64Rig->State().R[3] == 2u);
         CHECK(x64Rig->State().PC == kCode + 6);
         CHECK(x64Exec.GetStats().nativeBlocksRun == 2);
+    }
+}
+
+TEST_CASE("x64 inline memory matches IR", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    auto irRig = std::make_unique<Rig>();
+    auto x64Rig = std::make_unique<Rig>();
+    auto irRom = std::make_unique<sh2test::FastRom>();
+    auto x64Rom = std::make_unique<sh2test::FastRom>();
+    sh2test::MapFastPathTestPages(*irRig, *irRom);
+    sh2test::MapFastPathTestPages(*x64Rig, *x64Rom);
+    const sh2test::FastRom romBefore = *irRom;
+    REQUIRE(*x64Rom == romBefore);
+    for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+        for (uint32_t i = 0; i < 0x40; ++i) {
+            rig->Write32(sh2test::kFastRamOffset - 0x80 + i * 4, 0x01020304u * (i + 1) ^ 0xA5C3E1F7u);
+        }
+        for (uint32_t i = 0; i < 0x100; ++i) {
+            rig->mmio.data[(sh2test::kFastMmioOffset + i - 0x80) & 0xFFFF] = static_cast<uint8_t>(i * 13 + 7);
+        }
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+
+    enum class Kind { Load, LoadFetch, Store, CyclesRead, CyclesWrite, BusWaitRead, BusWaitWrite, Count };
+    uint32_t runs = 0;
+    // A context without the page table compiles every access to its callback.
+    for (const bool pageTable : {true, false}) {
+        for (const uint32_t address : sh2test::FastPathTestAddresses()) {
+            for (const uint8_t size : {uint8_t{1}, uint8_t{2}, uint8_t{4}}) {
+                for (int k = 0; k < static_cast<int>(Kind::Count); ++k) {
+                    const auto kind = static_cast<Kind>(k);
+                    Block block;
+                    block.startPC = kCode;
+                    block.guestInstrCount = 1;
+                    Builder b(block);
+                    b.SetReg(1, b.Const(0x1111));
+                    b.AddCycles(2);
+                    b.SyncCycles();
+                    // The address is computed at run time half of the time.
+                    const ValueId addr =
+                        (address & 1) != 0 ? b.Add(b.GetReg(5), b.Const(address)) : b.Const(address);
+                    switch (kind) {
+                    case Kind::Load: b.SetReg(2, b.Load(addr, size, false)); break;
+                    case Kind::LoadFetch: b.SetReg(2, b.Load(addr, size, true)); break;
+                    case Kind::Store: b.Store(addr, size, b.Const(0xA1B2C3D4u ^ address)); break;
+                    case Kind::CyclesRead: b.AddAccessCycles(addr, size, false); break;
+                    case Kind::CyclesWrite: b.AddAccessCycles(addr, size, true); break;
+                    case Kind::BusWaitRead: b.ExitIfBusWait(addr, size, false, kCode, 0); break;
+                    case Kind::BusWaitWrite: b.ExitIfBusWait(addr, size, true, kCode, 0); break;
+                    case Kind::Count: break;
+                    }
+                    b.SetReg(3, b.Const(0x3333));
+                    b.AddCycles(1);
+                    b.Exit(kCode + 2, 1);
+                    REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+                    for (const uint32_t busWaitEvery : {0u, 1u}) {
+                        INFO("page table " << pageTable << " address 0x" << std::hex << address << std::dec
+                                           << " size " << int{size} << " kind " << k << " busWaitEvery "
+                                           << busWaitEvery);
+                        auto state = irRig->BaseState(kCode);
+                        state.R[2] = 0xDEADBEEF;
+                        state.R[5] = 0; // address = R5 + Const(address)
+                        for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+                            rig->Load(state);
+                            rig->mmio.busWaitEvery = busWaitEvery;
+                            rig->mmio.busWaitQueries = 0;
+                            rig->mmio.log.clear();
+                        }
+                        ymir::sh2::SH2JitContext x64Ctx = x64Rig->sh2->GetJitContext();
+                        if (!pageTable) {
+                            x64Ctx.bus.pages = nullptr;
+                        }
+                        NativeCode code;
+                        REQUIRE(backend->Compile(block, x64Ctx, code));
+                        const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext());
+                        const ExitInfo x64 = backend->Run(code, x64Ctx, kNoCycleTarget);
+                        RequireSameOutcome(ir, x64, *irRig, *x64Rig, true);
+                        REQUIRE(*irRom == romBefore);
+                        REQUIRE(*x64Rom == romBefore);
+                        if (++runs % 512 == 0) {
+                            backend->Reset();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(runs == 2u * 128u * 3u * 7u * 2u);
+}
+
+namespace {
+
+// Each throws an exception naming the callback.
+uint64 ThrowAccessCycles(void *, uint32, uint32, bool) {
+    throw std::runtime_error("accessCycles");
+}
+uint64 ThrowAccessCyclesRMWByte(void *, uint32) {
+    throw std::runtime_error("accessCyclesRMWByte");
+}
+bool ThrowBusWait(void *, uint32, uint32, bool) {
+    throw std::runtime_error("busWait");
+}
+void ThrowSetSR(void *, uint32, bool) {
+    throw std::runtime_error("setSR");
+}
+void ThrowSetupDelaySlot(void *, uint32) {
+    throw std::runtime_error("setupDelaySlot");
+}
+void ThrowEndDelaySlot(void *) {
+    throw std::runtime_error("endDelaySlot");
+}
+uint32 ThrowRead(void *, uint32, uint32, bool) {
+    throw std::runtime_error("read");
+}
+void ThrowWrite(void *, uint32, uint32, uint32) {
+    throw std::runtime_error("write");
+}
+void ThrowRefill(void *, uint32) {
+    throw std::runtime_error("refillPipeline");
+}
+
+} // namespace
+
+TEST_CASE("x64 stops after an exception from every callback", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    using Ctx = ymir::sh2::SH2JitContext;
+    constexpr uint32_t kMmio = 0x22000200;
+    struct Row {
+        const char *name;
+        void (*hook)(Ctx &);
+        void (*emit)(Builder &);
+    };
+    // accessCycles is inline for every address while the context has the page table, so that row
+    // runs on a context without it (the fallback that still calls the callback).
+    const std::vector<Row> rows{
+        {"accessCycles",
+         [](Ctx &c) {
+             c.accessCycles = ThrowAccessCycles;
+             c.bus.pages = nullptr;
+         },
+         [](Builder &b) { b.AddAccessCycles(b.Const(kMmio), 4, false); }},
+        {"accessCyclesRMWByte", [](Ctx &c) { c.accessCyclesRMWByte = ThrowAccessCyclesRMWByte; },
+         [](Builder &b) { b.AddAccessCyclesRMWByte(b.Const(kMmio)); }},
+        {"busWait", [](Ctx &c) { c.busWait = ThrowBusWait; },
+         [](Builder &b) { b.ExitIfBusWait(b.Const(kMmio), 4, false, kCode, 0); }},
+        {"setSR", [](Ctx &c) { c.setSR = ThrowSetSR; }, [](Builder &b) { b.SetSR(b.Const(0), false); }},
+        {"setupDelaySlot", [](Ctx &c) { c.setupDelaySlot = ThrowSetupDelaySlot; },
+         [](Builder &b) { b.SetupDelaySlot(b.Const(kCode + 0x100)); }},
+        {"endDelaySlot", [](Ctx &c) { c.endDelaySlot = ThrowEndDelaySlot; },
+         [](Builder &b) {
+             b.SetupDelaySlot(b.Const(kCode + 0x100));
+             b.EndDelaySlot();
+         }},
+        {"read", [](Ctx &c) { c.read = ThrowRead; }, [](Builder &b) { b.SetReg(2, b.Load(b.Const(kMmio), 4, false)); }},
+        {"write", [](Ctx &c) { c.write = ThrowWrite; },
+         [](Builder &b) { b.Store(b.Const(kMmio), 4, b.Const(0x55)); }},
+        {"refillPipeline", [](Ctx &c) { c.refillPipeline = ThrowRefill; }, [](Builder &b) { b.Refill(kCode + 4); }},
+    };
+
+    for (const Row &row : rows) {
+        INFO("callback " << row.name);
+        Block block;
+        block.startPC = kCode;
+        block.guestInstrCount = 1;
+        Builder b(block);
+        b.SetReg(1, b.Const(0x1111));
+        b.AddCycles(3);
+        b.SyncCycles();
+        row.emit(b);
+        // Nothing from here on may run.
+        b.SetReg(3, b.Const(0x3333));
+        b.SetT(b.Const(1));
+        b.Store(b.Const(0x06040000), 4, b.Const(0x55555555));
+        b.AddCycles(1);
+        b.Exit(kCode + 2, 1);
+        INFO(brimir::jit::PrintBlock(block));
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+        auto irRig = std::make_unique<Rig>();
+        auto x64Rig = std::make_unique<Rig>();
+        Rig *rigs[2] = {irRig.get(), x64Rig.get()};
+        for (int i = 0; i < 2; ++i) {
+            Rig &rig = *rigs[i];
+            rig.Load(rig.BaseState(kCode));
+            rig.mmio.busWaitEvery = 0;
+            Ctx ctx = rig.sh2->GetJitContext(); // a copy: the hooks do not outlive this run
+            row.hook(ctx);
+            bool caught = false;
+            try {
+                sh2test::RunOnBackend(i == 0 ? BackendKind::Ir : BackendKind::X64, block, ctx);
+            } catch (const std::runtime_error &e) {
+                caught = true;
+                CHECK(typeid(e) == typeid(std::runtime_error));
+                CHECK(std::string(e.what()) == row.name);
+            }
+            INFO("backend " << i);
+            CHECK(caught);
+        }
+        const std::string diff = sh2test::DiffRigs(*irRig, *x64Rig, true);
+        INFO(diff);
+        CHECK(diff.empty());
+        const auto st = x64Rig->State();
+        CHECK(st.R[1] == 0x1111u);
+        CHECK(st.R[3] != 0x3333u);
+        CHECK((st.SR & 1u) == (irRig->BaseState(kCode).SR & 1u));
+        CHECK(x64Rig->Read32(0x06040000) != 0x55555555u);
+        CHECK(*x64Rig->sh2->GetJitContext().cyclesExecuted == *irRig->sh2->GetJitContext().cyclesExecuted);
     }
 }

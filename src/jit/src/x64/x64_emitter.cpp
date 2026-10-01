@@ -56,12 +56,38 @@ constexpr int32_t Imm32(uint32_t value) {
     return static_cast<int32_t>(value);
 }
 
+// True if generated code can walk the bus page table (bus_fast_path.hpp): a table is present and
+// every offset fits a 32-bit displacement. Otherwise every access calls its trampoline.
+bool CanInlineBus(const ymir::sh2::SH2JitBusLayout &bus) {
+    constexpr uint32_t kMaxDisp = static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) - 8;
+    if (bus.pages == nullptr || bus.pageStride == 0 || bus.pageShift == 0 || bus.pageShift >= 32 ||
+        bus.arrayOffset > kMaxDisp || bus.arrayWritableOffset > kMaxDisp) {
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (bus.readCyclesOffset[i] > kMaxDisp || bus.writeCyclesOffset[i] > kMaxDisp) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Partition bit sets for `bt mask, address >> 29`.
+constexpr uint32_t kBusPartitions = (1u << 0b000) | (1u << 0b001) | (1u << 0b101); // MemRead/MemWrite to the bus
+constexpr uint32_t kBusCyclePartitions = (1u << 0b001) | (1u << 0b101);            // AccessCycles from the bus
+
+uint32_t SizeIndex(uint32_t size) {
+    return size == 1 ? 0 : size == 2 ? 1 : 2;
+}
+
 class Emitter {
 public:
-    Emitter(x86::Compiler &cc, const Block &block, const StateOffsets &off)
+    Emitter(x86::Compiler &cc, const Block &block, const StateOffsets &off, const ymir::sh2::SH2JitBusLayout &bus)
         : m_cc(cc)
         , m_block(block)
         , m_off(off)
+        , m_bus(bus)
+        , m_inlineBus(CanInlineBus(bus))
         , m_values(block.numValues) {}
 
     void Emit() {
@@ -185,6 +211,180 @@ private:
 
     static Imm U32(uint32_t value) {
         return Imm(static_cast<int32_t>(value));
+    }
+
+    // ---- Inline bus fast path (bus_fast_path.hpp is the C++ reference) ----
+
+    // Jumps to `miss` unless the partition (address >> 29) is in `partitions` (bit set).
+    void JumpUnlessPartition(const x86::Gp &address, uint32_t partitions, const Label &miss) {
+        x86::Gp part = m_cc.new_gp32();
+        x86::Gp mask = m_cc.new_gp32();
+        m_cc.mov(part, address);
+        m_cc.shr(part, 29);
+        m_cc.mov(mask, Imm32(partitions));
+        m_cc.bt(mask, part);
+        m_cc.jnc(miss);
+    }
+
+    // Host pointer to the page entry of `address`: pages + ((address & addressMask) >> pageShift) * stride.
+    x86::Gp PageEntry(const x86::Gp &address) {
+        x86::Gp index = m_cc.new_gp64();
+        m_cc.mov(index.r32(), address); // zero-extends
+        m_cc.and_(index.r32(), Imm32(m_bus.addressMask));
+        m_cc.shr(index.r32(), m_bus.pageShift);
+        if ((m_bus.pageStride & (m_bus.pageStride - 1)) == 0) {
+            uint32_t shift = 0;
+            while ((1u << shift) != m_bus.pageStride) {
+                ++shift;
+            }
+            if (shift != 0) {
+                m_cc.shl(index, shift);
+            }
+        } else {
+            m_cc.imul(index, index, Imm32(m_bus.pageStride));
+        }
+        x86::Gp entry = m_cc.new_gp64();
+        m_cc.mov(entry, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_bus.pages)));
+        m_cc.add(entry, index);
+        return entry;
+    }
+
+    // Loads the page's array pointer into a new register and jumps to `miss` if it is null.
+    x86::Gp PageArrayOrMiss(const x86::Gp &entry, const Label &miss) {
+        x86::Gp array = m_cc.new_gp64();
+        m_cc.mov(array, x86::qword_ptr(entry, static_cast<int32_t>(m_bus.arrayOffset)));
+        m_cc.test(array, array);
+        m_cc.jz(miss);
+        return array;
+    }
+
+    // Offset of the size-aligned address inside its page.
+    x86::Gp PageOffset(const x86::Gp &address, uint32_t size) {
+        const uint32_t pageMask = (1u << m_bus.pageShift) - 1;
+        x86::Gp offset = m_cc.new_gp64();
+        m_cc.mov(offset.r32(), address); // zero-extends
+        m_cc.and_(offset.r32(), Imm32(pageMask & ~(size - 1)));
+        return offset;
+    }
+
+    void LowerLoad(const Inst &in) {
+        const x86::Gp d = Def(in.dst);
+        const Label slow = m_cc.new_label();
+        const Label done = m_cc.new_label();
+        if (m_inlineBus) {
+            const x86::Gp &address = Use(in.a);
+            JumpUnlessPartition(address, kBusPartitions, slow);
+            const x86::Gp entry = PageEntry(address);
+            const x86::Gp array = PageArrayOrMiss(entry, slow);
+            const x86::Gp offset = PageOffset(address, in.size);
+            switch (in.size) {
+            case 1: m_cc.movzx(d, x86::byte_ptr(array, offset)); break;
+            case 2:
+                m_cc.movzx(d, x86::word_ptr(array, offset));
+                m_cc.rol(d.r16(), 8); // big-endian; bits 31-16 stay zero
+                break;
+            default:
+                m_cc.mov(d, x86::dword_ptr(array, offset));
+                m_cc.bswap(d);
+                break;
+            }
+            m_cc.jmp(done);
+        }
+        m_cc.bind(slow);
+        Call(&TrRead, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &d);
+        CheckStop();
+        m_cc.bind(done);
+    }
+
+    void LowerStore(const Inst &in) {
+        const Label slow = m_cc.new_label();
+        const Label done = m_cc.new_label();
+        if (m_inlineBus) {
+            const x86::Gp &address = Use(in.a);
+            JumpUnlessPartition(address, kBusPartitions, slow);
+            const x86::Gp entry = PageEntry(address);
+            const x86::Gp array = PageArrayOrMiss(entry, slow);
+            // Bus::Write: an array page that is not writable drops the write.
+            m_cc.cmp(x86::byte_ptr(entry, static_cast<int32_t>(m_bus.arrayWritableOffset)), 0);
+            m_cc.je(done);
+            const x86::Gp offset = PageOffset(address, in.size);
+            switch (in.size) {
+            case 1: m_cc.mov(x86::byte_ptr(array, offset), Use(in.b).r8()); break;
+            case 2: {
+                x86::Gp t = m_cc.new_gp32();
+                m_cc.mov(t, Use(in.b));
+                m_cc.rol(t.r16(), 8);
+                m_cc.mov(x86::word_ptr(array, offset), t.r16());
+                break;
+            }
+            default: {
+                x86::Gp t = m_cc.new_gp32();
+                m_cc.mov(t, Use(in.b));
+                m_cc.bswap(t);
+                m_cc.mov(x86::dword_ptr(array, offset), t);
+                break;
+            }
+            }
+            m_cc.jmp(done);
+        }
+        m_cc.bind(slow);
+        Call(&TrWrite, {Use(in.a), U32(in.size), Use(in.b)});
+        CheckStop();
+        m_cc.bind(done);
+    }
+
+    void LowerAccessCycles(const Inst &in) {
+        if (!m_inlineBus) {
+            const x86::Gp c = m_cc.new_gp64();
+            Call(&TrAccessCycles, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &c);
+            CheckStop();
+            m_cc.add(m_cycles, c);
+            return;
+        }
+        // SH2::AccessCycles<T, write, emulateCache = false>, no call.
+        const x86::Gp &address = Use(in.a);
+        const Label notBus = m_cc.new_label();
+        const Label io = m_cc.new_label();
+        const Label done = m_cc.new_label();
+        x86::Gp part = m_cc.new_gp32();
+        x86::Gp mask = m_cc.new_gp32();
+        m_cc.mov(part, address);
+        m_cc.shr(part, 29);
+        m_cc.mov(mask, Imm32(kBusCyclePartitions));
+        m_cc.bt(mask, part);
+        m_cc.jnc(notBus);
+        const x86::Gp entry = PageEntry(address);
+        const uint32_t field =
+            in.flag ? m_bus.writeCyclesOffset[SizeIndex(in.size)] : m_bus.readCyclesOffset[SizeIndex(in.size)];
+        m_cc.add(m_cycles, x86::qword_ptr(entry, static_cast<int32_t>(field)));
+        m_cc.jmp(done);
+        m_cc.bind(notBus);
+        m_cc.cmp(part, 0b111);
+        m_cc.je(io);
+        m_cc.add(m_cycles, 1); // cached area (always a hit), purge, cache arrays
+        m_cc.jmp(done);
+        m_cc.bind(io);
+        m_cc.add(m_cycles, 4); // I/O area
+        m_cc.bind(done);
+    }
+
+    void LowerExitIfBusWait(const Inst &in) {
+        // If the bus is busy: PC = imm, out.retired, out.busWait, out.cycles, return.
+        const Label cont = m_cc.new_label();
+        if (m_inlineBus) {
+            // SH2Bus::IsBusWait is false on array pages (any partition).
+            const x86::Gp entry = PageEntry(Use(in.a));
+            m_cc.cmp(x86::qword_ptr(entry, static_cast<int32_t>(m_bus.arrayOffset)), 0);
+            m_cc.jne(cont);
+        }
+        const x86::Gp wait = m_cc.new_gp32();
+        Call(&TrBusWait, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &wait);
+        CheckStop();
+        m_cc.test(wait, wait);
+        m_cc.jz(cont);
+        m_cc.mov(x86::byte_ptr(m_frame, kOutBusWait), 1);
+        WriteExit(true, in.imm, in.retired, m_cycles, false);
+        m_cc.bind(cont);
     }
 
     void Binary(const Inst &in, InstId id) {
@@ -354,27 +554,15 @@ private:
         case Op::ExitDynamic: WriteExit(false, 0, in.retired, m_cycles, false); break;
 
         // Calls out of generated code (trampolines, see x64_emitter.hpp).
-        case Op::Load: {
-            const x86::Gp d = Def(in.dst);
-            Call(&TrRead, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &d);
-            CheckStop();
-            break;
-        }
-        case Op::Store:
-            Call(&TrWrite, {Use(in.a), U32(in.size), Use(in.b)});
-            CheckStop();
-            break;
+        // Load/Store/AddAccessCycles/ExitIfBusWait are inline on array pages (bus fast path), with
+        // the trampoline as the fallback inside the same op.
+        case Op::Load: LowerLoad(in); break;
+        case Op::Store: LowerStore(in); break;
         case Op::Refill:
             Call(&TrRefill, {U32(in.imm)});
             CheckStop();
             break;
-        case Op::AddAccessCycles: {
-            const x86::Gp c = m_cc.new_gp64();
-            Call(&TrAccessCycles, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &c);
-            CheckStop();
-            m_cc.add(m_cycles, c);
-            break;
-        }
+        case Op::AddAccessCycles: LowerAccessCycles(in); break;
         case Op::AddAccessCyclesRMWByte: {
             const x86::Gp c = m_cc.new_gp64();
             Call(&TrAccessCyclesRMWByte, {Use(in.a)}, &c);
@@ -382,19 +570,7 @@ private:
             m_cc.add(m_cycles, c);
             break;
         }
-        case Op::ExitIfBusWait: {
-            // If the bus is busy: PC = imm, out.retired, out.busWait, out.cycles, return.
-            const x86::Gp wait = m_cc.new_gp32();
-            Call(&TrBusWait, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &wait);
-            CheckStop();
-            const Label cont = m_cc.new_label();
-            m_cc.test(wait, wait);
-            m_cc.jz(cont);
-            m_cc.mov(x86::byte_ptr(m_frame, kOutBusWait), 1);
-            WriteExit(true, in.imm, in.retired, m_cycles, false);
-            m_cc.bind(cont);
-            break;
-        }
+        case Op::ExitIfBusWait: LowerExitIfBusWait(in); break;
         case Op::SetupDelaySlot:
             Call(&TrSetupDelaySlot, {Use(in.a)});
             CheckStop();
@@ -420,6 +596,8 @@ private:
     x86::Compiler &m_cc;
     const Block &m_block;
     const StateOffsets &m_off;
+    const ymir::sh2::SH2JitBusLayout &m_bus;
+    bool m_inlineBus; // inline RAM/ROM accesses and access cycles (CanInlineBus)
     std::vector<x86::Gp> m_values; // one 32-bit virtual register per IR value
     std::vector<BoundaryStub> m_stubs;
     x86::Gp m_frame;
@@ -504,7 +682,7 @@ bool EmitBlock(x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitCon
     if (!CanEmitBlock(block) || !ComputeOffsets(ctx, off)) {
         return false;
     }
-    Emitter(cc, block, off).Emit();
+    Emitter(cc, block, off, ctx.bus).Emit();
     return true;
 }
 
