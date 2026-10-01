@@ -14,7 +14,9 @@ namespace jitspec {
 enum class Fmt : uint8_t { Z, N, M, NM, MD, ND4, NMD, D, ND8, I, NI };
 
 // Which registers form a data address (fixed up to point at valid memory before running).
-enum class Addr : uint8_t { None, Rm, Rn, RmR0, RnR0, RmDisp, RnDisp, GbrDisp, GbrR0, RnPreDec, RmPostInc };
+// MacPair: @Rm+ and @Rn+ both read (MAC.W / MAC.L); each register gets its own address, and with
+// n == m the one register points at room for both reads.
+enum class Addr : uint8_t { None, Rm, Rn, RmR0, RnR0, RmDisp, RnDisp, GbrDisp, GbrR0, RnPreDec, RmPostInc, MacPair };
 
 struct OpSpec {
     const char *name;

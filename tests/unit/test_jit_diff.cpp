@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <memory>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -221,6 +222,9 @@ std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) 
         }
         break;
     case Fmt::N:
+        // TAS @Rn: Rn is an address (read-modify-write, Rn itself is not written).
+        w = WithHi(w, spec.addr == Addr::Rn ? addrReg() : RemapDest(hi));
+        break;
     case Fmt::ND8:
     case Fmt::NI: w = WithHi(w, RemapDest(hi)); break;
     case Fmt::M: // LDC/LDS sources
@@ -563,7 +567,9 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     std::vector<const jitspec::OpSpec *> nonBranch;
     std::vector<const jitspec::OpSpec *> singles;
     for (const jitspec::OpSpec &spec : jitspec::CompiledOpcodes()) {
-        if (spec.slotOk) {
+        // MAC.W/MAC.L post-increment two address registers, which the register roles below never
+        // allow (R8-R11 are never written); they are left out until the generator supports them.
+        if (spec.slotOk && spec.addr != jitspec::Addr::MacPair) {
             nonBranch.push_back(&spec);
             if (!NeedsSetup(spec.addr)) {
                 singles.push_back(&spec);
@@ -1080,4 +1086,187 @@ TEST_CASE("LDC SR in a delay slot unmasks a pending interrupt", "[jit][diff][exa
     REQUIRE(p.exec.GetStats().blocksRun > 0);
     // bra and its LDC SR slot form one compiled block.
     REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount == 2u);
+}
+
+namespace {
+
+// Writes a big-endian value of `size` bytes (1, 2 or 4) at `address` on both rigs: RAM for the
+// 0x06/0x26 areas, the MMIO page for 0x22.
+void PokeBoth(Pair &p, uint32_t address, uint32_t size, uint32_t value) {
+    for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+        for (uint32_t i = 0; i < size; ++i) {
+            const uint32_t a = (address & ~(size - 1)) + i;
+            const auto byte = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+            if (((a >> 24) & 0x7u) == 0x2u) { // bus 0x2000000-0x3FFFFFF: MMIO page
+                rig->mmio.data[a & 0xFFFFu] = byte;
+            } else {
+                (*rig->ram)[a & (sh2test::kRamSize - 1)] = byte;
+            }
+        }
+    }
+}
+
+uint8_t PeekByte(const Rig &rig, uint32_t address) {
+    if (((address >> 24) & 0x7u) == 0x2u) {
+        return rig.mmio.data[address & 0xFFFFu];
+    }
+    return (*rig.ram)[address & (sh2test::kRamSize - 1)];
+}
+
+} // namespace
+
+// Handler table section 9.5 and section 9.x notes 1-3: MAC.W / MAC.L saturation and wrap edges,
+// with S = 0 and S = 1, n == m, overlapping and misaligned operand addresses, and operands in
+// cached RAM, cache-through RAM and MMIO.
+TEST_CASE("MAC saturation edges match the interpreter", "[jit][diff][exact]") {
+    struct MacCase {
+        uint32_t mach, macl, op1, op2; // op1 = @Rm, op2 = @Rn (raw memory values)
+    };
+    // MAC.W: op values are 16-bit (sign-extended by the instruction).
+    static constexpr MacCase kMacW[] = {
+        {0x00000000, 0x7FFFFFFE, 0x0001, 0x0001}, // sum exactly 0x7FFFFFFF: no saturation
+        {0x00000000, 0x7FFFFFFF, 0x0001, 0x0001}, // one past: saturate, MACH |= 1
+        {0x00000000, 0x80000001, 0xFFFF, 0x0001}, // sum exactly -0x80000000: no saturation
+        {0x00000000, 0x80000000, 0xFFFF, 0x0001}, // one below: saturate negative
+        {0x00000001, 0x7FFFFFFF, 0x0002, 0x0003}, // MACH bit 0 already set
+        {0xFFFF0000, 0x7FFFFFFF, 0x0001, 0x0001}, // negative MACH, saturation: not sign-updated
+        {0xFFFF0000, 0x00000005, 0xFFFF, 0x0007}, // negative MACH, no saturation
+        {0x12345678, 0x40000000, 0x8000, 0x8000}, // 0x8000 x 0x8000 = 2^30 -> 0x80000000
+        {0x12345678, 0x3FFFFFFF, 0x8000, 0x8000}, // -> 0x7FFFFFFF exactly
+        {0xFFFFFFFF, 0xFFFFFFFF, 0x0001, 0x0001}, // S=0: 64-bit wrap to 0
+        {0x00000000, 0xFFFFFFFF, 0x0001, 0x0001}, // S=0: carry into MACH
+        {0x00000005, 0x00000000, 0xFFFF, 0x0001}, // S=0: negative product borrows from MACH
+        {0x80000000, 0x00000000, 0x7FFF, 0x8000}, // mixed signs
+    };
+    // MAC.L: MAC = MACH:MACL, saturation range is the signed 48-bit range.
+    static constexpr MacCase kMacL[] = {
+        {0x00007FFF, 0xFFFFFFFE, 0x00000001, 0x00000001}, // sum 0x00007FFFFFFFFFFF: no saturation
+        {0x00007FFF, 0xFFFFFFFF, 0x00000001, 0x00000001}, // +1: saturate positive
+        {0xFFFF8000, 0x00000001, 0xFFFFFFFF, 0x00000001}, // sum 0xFFFF800000000000: no saturation
+        {0xFFFF8000, 0x00000000, 0xFFFFFFFF, 0x00000001}, // -1: saturate negative
+        {0x00008000, 0x00000000, 0x00000000, 0xFFFFFFFF}, // out of range, zero product, negative operand
+        {0xFFFF0000, 0x00000000, 0x00000000, 0x00000005}, // out of range below, product sign positive
+        {0x00000000, 0x00000000, 0x80000000, 0x80000000}, // max product 2^62
+        {0x00000000, 0x00000000, 0x80000000, 0x7FFFFFFF}, // most negative product
+        {0xFFFFFFFF, 0xFFFFFFFF, 0x00000001, 0x00000001}, // S=0: full 64-bit wrap
+        {0x00001234, 0x89ABCDEF, 0x12345678, 0xFEDCBA98}, // in range, mixed signs
+    };
+    // Operand layouts: where Rn / Rm point. Rm == Rn register (n == m) puts op2 at A and op1 at
+    // A + size; overlapping (n != m, same address) reads op2 twice.
+    enum class Layout { Distinct, SameReg, Overlap, Mmio, Misaligned };
+    constexpr uint32_t kRn = 4;
+    constexpr uint32_t kRm = 5;
+
+    for (const bool isLong : {false, true}) {
+        const uint32_t size = isLong ? 4 : 2;
+        const auto cases = isLong ? std::span<const MacCase>(kMacL) : std::span<const MacCase>(kMacW);
+        bool sawMacWSaturation = false;
+        for (const MacCase &c : cases) {
+            for (const uint32_t s : {0u, 1u}) {
+                for (const Layout layout :
+                     {Layout::Distinct, Layout::SameReg, Layout::Overlap, Layout::Mmio, Layout::Misaligned}) {
+                    Pair p;
+                    uint32_t n = kRn;
+                    uint32_t m = kRm;
+                    uint32_t addrN = 0x26040000;
+                    uint32_t addrM = 0x06040100;
+                    switch (layout) {
+                    case Layout::Distinct: break;
+                    case Layout::SameReg:
+                        m = n;
+                        addrN = 0x26040200;
+                        addrM = addrN + size;
+                        break;
+                    case Layout::Overlap: addrM = addrN = 0x26040300; break;
+                    case Layout::Mmio: addrN = kMmio + 0x40; addrM = 0x26040400; break;
+                    case Layout::Misaligned: addrN = 0x26040501; addrM = 0x06040603; break;
+                    }
+                    PokeBoth(p, addrN, size, c.op2);
+                    if (layout != Layout::Overlap) {
+                        PokeBoth(p, addrM, size, c.op1);
+                    }
+                    const uint16_t mac = Nm(isLong ? 0x000F : 0x400F, n, m);
+                    p.WriteCode(kCode, {mac, static_cast<uint16_t>(kSleep)});
+                    auto state = p.ref->BaseState(kCode);
+                    state.R[n] = addrN;
+                    if (m != n) {
+                        state.R[m] = layout == Layout::Overlap ? addrN : addrM;
+                    }
+                    state.SR = 0xF0 | (s << 1);
+                    state.MACH = c.mach;
+                    state.MACL = c.macl;
+                    state.wbReg = static_cast<uint8_t>(layout == Layout::Distinct ? n : 0xFF);
+                    p.Load(state);
+                    p.jit->sh2->SetJitExecutor(&p.exec);
+
+                    INFO((isLong ? "mac.l" : "mac.w") << " S=" << s << " layout " << static_cast<int>(layout)
+                                                      << std::hex << " MACH=" << c.mach << " MACL=" << c.macl
+                                                      << " op1=" << c.op1 << " op2=" << c.op2);
+                    const uint64 refCycles = p.ref->sh2->Advance<false, false>(40);
+                    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(40);
+                    REQUIRE(jitCycles == refCycles);
+                    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+                    INFO(diff);
+                    REQUIRE(diff.empty());
+                    REQUIRE(p.ref->State().sleep);
+                    REQUIRE(p.exec.GetStats().blocksRun >= 1); // the MAC ran compiled
+                    const auto end = p.ref->State();
+                    if (n == m) {
+                        REQUIRE(end.R[n] == addrN + 2 * size);
+                    } else {
+                        REQUIRE(end.R[n] == state.R[n] + size);
+                        REQUIRE(end.R[m] == state.R[m] + size);
+                    }
+                    if (!isLong && s == 1 && layout == Layout::Distinct && end.MACH != c.mach) {
+                        sawMacWSaturation = true; // only saturation changes MACH with S = 1
+                    }
+                }
+            }
+        }
+        if (!isLong) {
+            CHECK(sawMacWSaturation);
+        }
+    }
+}
+
+// Handler table section 9.6 and section 9.x note 6: TAS on each value class, in cached RAM,
+// cache-through RAM and MMIO (AccessCyclesRMWByte differs per partition), with and without a
+// write-back stall on Rn.
+TEST_CASE("TAS matches the interpreter for every partition", "[jit][diff][exact]") {
+    struct Expect {
+        uint8_t before, after;
+        uint32_t t;
+    };
+    static constexpr Expect kValues[] = {{0x00, 0x80, 1}, {0x80, 0x80, 0}, {0x7F, 0xFF, 0}};
+    static constexpr uint32_t kAddresses[] = {0x06040011, 0x26040022, kMmio + 0x33};
+    constexpr uint32_t kRn = 3;
+    for (const Expect &e : kValues) {
+        for (const uint32_t address : kAddresses) {
+            for (const uint8_t wb : {uint8_t{0xFF}, static_cast<uint8_t>(kRn)}) {
+                Pair p;
+                PokeBoth(p, address, 1, e.before);
+                p.WriteCode(kCode, {static_cast<uint16_t>(0x401B | (kRn << 8)), static_cast<uint16_t>(kSleep)});
+                auto state = p.ref->BaseState(kCode);
+                state.R[kRn] = address;
+                state.SR = 0xF0 | (e.t ^ 1u); // start with T opposite to the expected result
+                state.wbReg = wb;
+                p.Load(state);
+                p.jit->sh2->SetJitExecutor(&p.exec);
+
+                INFO("tas.b @R3 at " << std::hex << address << " byte " << uint32_t{e.before} << " wbReg "
+                                     << uint32_t{wb});
+                const uint64 refCycles = p.ref->sh2->Advance<false, false>(40);
+                const uint64 jitCycles = p.jit->sh2->Advance<false, false>(40);
+                REQUIRE(jitCycles == refCycles);
+                const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+                INFO(diff);
+                REQUIRE(diff.empty());
+                REQUIRE(p.ref->State().sleep);
+                REQUIRE(p.exec.GetStats().blocksRun >= 1); // the TAS ran compiled
+                REQUIRE(PeekByte(*p.ref, address) == e.after);
+                REQUIRE((p.ref->State().SR & 1u) == e.t);
+                REQUIRE(p.ref->State().R[kRn] == address); // Rn unchanged
+            }
+        }
+    }
 }

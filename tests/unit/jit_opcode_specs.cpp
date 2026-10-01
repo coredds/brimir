@@ -142,6 +142,10 @@ constexpr OpSpec kSpecs[] = {
     {"DIV0S",      0x2007, Fmt::NM, Addr::None,     0, true},
     {"DIV0U",      0x0019, Fmt::Z,  Addr::None,     0, true},
     {"DIV1",       0x3004, Fmt::NM, Addr::None,     0, true},
+    // Milestone 2A task 3: MAC.W / MAC.L and TAS (handler table sections 9.5, 9.6; no bus-wait check)
+    {"MACW",       0x400F, Fmt::NM, Addr::MacPair,  2, true},
+    {"MACL",       0x000F, Fmt::NM, Addr::MacPair,  4, true},
+    {"TAS",        0x401B, Fmt::N,  Addr::Rn,       1, true},
 };
 // clang-format on
 
@@ -221,6 +225,14 @@ uint16_t Encode(const OpSpec &spec, std::mt19937 &rng, std::array<uint32_t, 16> 
         }
         case Addr::RnPreDec: regs[n] = a + size; break;
         case Addr::RmPostInc: regs[m] = a; break;
+        case Addr::MacPair:
+            // @Rn is read first, then @Rm (= @(Rn + size) when n == m). RandomDataAddress offsets stay
+            // below 0x10000, so a + size is still inside the same region.
+            regs[n] = a;
+            if (m != n) {
+                regs[m] = RandomDataAddress(rng, size, forceMmio);
+            }
+            break;
         }
     }
     return static_cast<uint16_t>(word);

@@ -119,7 +119,7 @@ ymir::savestate::SH2SaveState RandomState(Pair &p, std::mt19937 &rng, uint32_t p
     auto state = p.ref->BaseState(pc);
     state.R = regs;
     state.GBR = gbr;
-    state.SR = 0xF0 | (rng() & 0x301u); // random T, Q and M (DIV0S/DIV0U/DIV1 use Q and M)
+    state.SR = 0xF0 | (rng() & 0x303u); // random T, S, Q and M (MAC uses S; DIV0S/DIV0U/DIV1 use Q and M)
     state.wbReg = RandomWb(rng);
     state.PR = rng();
     state.MACH = rng();
@@ -323,7 +323,7 @@ TEST_CASE("Every slot-capable opcode matches the interpreter in a delay slot", "
                 p.WriteCode(pc, {br, slot, kSleepOp});
 
                 auto state = RandomState(p, rng, pc, regs, gbr);
-                state.SR = 0xF0 | (state.SR & 0x300u) | t; // keep the random Q and M
+                state.SR = 0xF0 | (state.SR & 0x302u) | t; // keep the random S, Q and M
                 state.PR = pr;
                 p.Load(state);
 

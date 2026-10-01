@@ -54,9 +54,9 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
     return static_cast<uint32_t>(instr & 0xFFu) << shift;
 }
 
-// ALU, shift, compare, @(R0,GBR) logic, system-register transfer, multiply and divide-step opcodes
-// (handler table sections 4, 5, 6 and 9.2-9.4); each has a Delay_ variant with identical semantics
-// (LDC SR passes the delay-slot flag to SetSR, with the same net effect).
+// ALU, shift, compare, @(R0,GBR) logic, system-register transfer, multiply, divide-step, MAC and
+// TAS opcodes (handler table sections 4, 5, 6 and 9.2-9.6); each has a Delay_ variant with
+// identical semantics (LDC SR passes the delay-slot flag to SetSR, with the same net effect).
 #define BRIMIR_JIT_ALU_OPS(X)                                                                                         \
     X(EXTSB) X(EXTSW) X(EXTUB) X(EXTUW) X(SWAPB) X(SWAPW) X(XTRCT) X(ADDC) X(ADDV) X(AND_R) X(AND_I) X(NEG) X(NEGC)  \
         X(NOT) X(OR_R) X(OR_I) X(ROTCL) X(ROTCR) X(ROTL) X(ROTR) X(SHAL) X(SHAR) X(SHLL) X(SHLL2) X(SHLL8)           \
@@ -65,7 +65,7 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
                     X(AND_M) X(OR_M) X(XOR_M) X(TST_M) X(LDC_GBR_R) X(LDC_SR_R) X(LDC_VBR_R) X(LDS_MACH_R)           \
                         X(LDS_MACL_R) X(LDS_PR_R) X(STC_GBR_R) X(STC_SR_R) X(STC_VBR_R) X(STS_MACH_R)                \
                             X(STS_MACL_R) X(STS_PR_R) X(MUL) X(MULS) X(MULU) X(DMULS) X(DMULU) X(DIV0S)    \
-                                X(DIV0U) X(DIV1)
+                                X(DIV0U) X(DIV1) X(MACW) X(MACL) X(TAS)
 
 // Maps a supported instruction (normal or delay-slot decode) to its base opcode.
 std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
@@ -795,6 +795,55 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
         b.SetReg(n, b.Div1(b.GetReg(n), b.GetReg(m), n == m));
         aluTail(RegBit(m) | RegBit(n));
         break;
+
+    // MAC.W / MAC.L (handler table section 9.5): @Rn is read first and Rn post-incremented, then
+    // @Rm (= the incremented Rn when n == m, chosen at compile time). No bus-wait check. Cycles:
+    // both read accesses + WritebackCycles(rm, rn) + 1; one SyncCycles covers both reads.
+    case OpcodeType::MACW:
+    case OpcodeType::MACL: {
+        const uint8_t size = op == OpcodeType::MACW ? 2 : 4;
+        const ValueId inc = b.Const(size);
+        const auto read = [&](ValueId address) {
+            b.AddAccessCycles(address, size, false);
+            const ValueId value = b.Load(address, size, false);
+            return size == 2 ? b.SExt16(value) : value;
+        };
+        b.SyncCycles();
+        const ValueId a2 = b.GetReg(n);
+        const ValueId op2 = read(a2);
+        const ValueId a2Next = b.Add(a2, inc);
+        b.SetReg(n, a2Next);
+        const ValueId a1 = n == m ? a2Next : b.GetReg(m);
+        const ValueId op1 = read(a1);
+        b.SetReg(m, b.Add(a1, inc));
+        if (size == 2) {
+            b.MacW(op1, op2);
+        } else {
+            b.MacL(op1, op2);
+        }
+        advance();
+        b.WbStall(RegBit(m) | RegBit(n));
+        b.AddCycles(1);
+        b.SetWb(kWbNone);
+        break;
+    }
+
+    // TAS (handler table section 9.6): AccessCyclesRMWByte + WritebackCycles(rn) + 4; the read
+    // bypasses the cache (the JIT's loads always do), T = (byte == 0), byte |= 0x80. No bus lock
+    // and no bus-wait check; Rn is unchanged.
+    case OpcodeType::TAS: {
+        b.SyncCycles();
+        const ValueId address = b.GetReg(n);
+        b.AddAccessCyclesRMWByte(address);
+        b.WbStall(RegBit(n));
+        b.AddCycles(4);
+        const ValueId value = b.Load(address, 1, false);
+        b.SetT(b.CmpEq(value, b.Const(0)));
+        b.Store(address, 1, b.Or(value, b.Const(0x80)));
+        advance();
+        b.SetWb(kWbNone);
+        break;
+    }
     default: break; // callers only pass supported opcodes
     }
 }
