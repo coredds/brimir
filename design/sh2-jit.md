@@ -228,7 +228,7 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 
 ### 7.3 Game-level regression (local)
 
-`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Milestone 1 game validation results are in [sh2-validation.md](sh2-validation.md).
+`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Game validation results (milestones 1 and 2A) are in [sh2-validation.md](sh2-validation.md).
 
 ## 8. Measurement
 

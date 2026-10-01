@@ -53,6 +53,9 @@ enum class Op : uint8_t {
     Mul,                    // low 32 bits of a * b
     MulHiS,                 // high 32 bits of sint64(a) * sint64(b)
     MulHiU,                 // high 32 bits of uint64(a) * uint64(b)
+    // Side effects not visible as IR operands (backends caching SR/T/MAC in host registers must
+    // flush/reload around them): SetSRBits writes SR; Div1 reads/writes SR (Q/M/T); MacW/MacL
+    // read SR.S and read/write MACH/MACL.
     SetSRBits,              // imm: mask (T/S/Q/M only); SR = (SR & ~mask) | (a & mask)
     Div1,                   // dst = Div1Step(a = Rn, b = Rm, flag = n == m, SR)
     MacW,                   // MAC = MacWStep(MAC, SR.S, a, b)

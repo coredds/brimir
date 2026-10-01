@@ -341,7 +341,7 @@ All of these **clear `m_intrFlags.allow`** (before AdvancePC).
 Not in the requested list but same family (for the intrAllow decision):
 - LDC_SR_R 0100mmmm00001110 (3334-3346): `SR.u32 = R[rm] & 0x3F3; m_intrFlags = {pending = !delaySlot && INTC.pending.level > SR.ILevel, allow = false}; AdvancePC; cycles WB(rm)+1; None`. In a slot `pending=false` then `AdvancePC<true>` recomputes `pending = level > ILevel` ⇒ same final state. IR: `SetSR(R(m8), delaySlot); adv(); WbStall(B(m8)); AddCycles(1); SetWb(kWbNone)` — and because pending may become true, nothing else is needed: the next `CheckBoundary` reads live flags (but allow=false blocks it for one instruction).
 - LDS_MACH_R / LDS_MACL_R (3361-3382): `MAC.H/L = R[rm]; allow=false; AdvancePC; WB(rm)+1; None`.
-- All memory forms LDC.L/LDS.L/STC.L/STS.L (3473-3653) also clear allow; LDC.L SR also recomputes pending; LDS.L PR sets m_wbReg = PR. (Out of scope; they have **no** bus-wait checks.)
+- All memory forms LDC.L/LDS.L/STC.L/STS.L (3473-3653) also clear allow; LDC.L SR also recomputes pending; LDS.L PR sets m_wbReg = PR. They have **no** bus-wait checks; lowered in §9.7/§9.8.
 
 ### intrAllow handling the JIT must reproduce
 Interpreter: allow-clearing instruction X at pc ⇒ at the start of the next instruction Y, `pending && allow` is false ⇒ Y executes, `allow = true` is set before Y runs ⇒ at Y+1 interrupts are accepted normally.
