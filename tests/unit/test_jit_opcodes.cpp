@@ -33,6 +33,10 @@ constexpr uint16_t kSleepOp = static_cast<uint16_t>(kSleep);
 uint16_t Bra(uint32_t d) { return static_cast<uint16_t>(0xA000 | (d & 0xFFF)); }
 uint16_t Bts(uint32_t d) { return static_cast<uint16_t>(0x8D00 | (d & 0xFF)); }
 uint16_t Jmp(uint32_t m) { return static_cast<uint16_t>(0x402B | (m << 8)); }
+uint16_t Bsr(uint32_t d) { return static_cast<uint16_t>(0xB000 | (d & 0xFFF)); }
+uint16_t Braf(uint32_t m) { return static_cast<uint16_t>(0x0023 | (m << 8)); }
+uint16_t Bsrf(uint32_t m) { return static_cast<uint16_t>(0x0003 | (m << 8)); }
+uint16_t Jsr(uint32_t m) { return static_cast<uint16_t>(0x400B | (m << 8)); }
 
 std::string Hex(const std::vector<uint16_t> &words) {
     std::string out;
@@ -238,7 +242,7 @@ TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
 }
 
 TEST_CASE("Every slot-capable opcode matches the interpreter in a delay slot", "[jit][diff][opcodes]") {
-    enum class Branch { Bra, BtsTaken, BtsNotTaken, Jmp, Rts };
+    enum class Branch { Bra, BtsTaken, BtsNotTaken, Jmp, Rts, Bsr, Braf, Bsrf, Jsr };
     const auto specs = jitspec::CompiledOpcodes();
     for (size_t index = 0; index < specs.size(); ++index) {
         const OpSpec &spec = specs[index];
@@ -248,7 +252,8 @@ TEST_CASE("Every slot-capable opcode matches the interpreter in a delay slot", "
         Pair p;
         std::mt19937 rng(0x0DE60000u + static_cast<uint32_t>(index));
         bool failed = false;
-        for (Branch branch : {Branch::Bra, Branch::BtsTaken, Branch::BtsNotTaken, Branch::Jmp, Branch::Rts}) {
+        for (Branch branch : {Branch::Bra, Branch::BtsTaken, Branch::BtsNotTaken, Branch::Jmp, Branch::Rts,
+                              Branch::Bsr, Branch::Braf, Branch::Bsrf, Branch::Jsr}) {
             for (int iter = 0; iter < 20 && !failed; ++iter) {
                 // Slot stores may hit the target area; restore it so every iteration branches onto SLEEP.
                 FillLiteralPool(p, rng);
@@ -275,6 +280,20 @@ TEST_CASE("Every slot-capable opcode matches the interpreter in a delay slot", "
                     break;
                 }
                 case Branch::Rts: pr = target; br = kRts; break;
+                case Branch::Bsr: br = Bsr(disp); break;
+                case Branch::Braf:
+                case Branch::Bsrf: {
+                    const uint32_t m = rng() % 16;
+                    regs[m] = target - pc - 4; // target = PC + Rm + 4
+                    br = branch == Branch::Braf ? Braf(m) : Bsrf(m);
+                    break;
+                }
+                case Branch::Jsr: {
+                    const uint32_t m = rng() % 16;
+                    regs[m] = target;
+                    br = Jsr(m);
+                    break;
+                }
                 }
                 // Code is written before BaseState so the fetch buffer matches memory.
                 p.WriteCode(kCode, {kNop, kNop});

@@ -114,6 +114,25 @@ constexpr OpSpec kSpecs[] = {
     {"OR_M",     0xCF00, Fmt::I,   Addr::GbrR0,     1, true},
     {"XOR_M",    0xCE00, Fmt::I,   Addr::GbrR0,     1, true},
     {"TST_M",    0xCC00, Fmt::I,   Addr::GbrR0,     1, true},
+    // Milestone 1D task 6: system-register transfers (all clear interrupt-allow). Random LDC VBR
+    // and LDC SR values are harmless: the rig raises no exception and has no interrupt pending.
+    {"LDC_GBR_R",  0x401E, Fmt::M, Addr::None,      0, true},
+    {"LDC_SR_R",   0x400E, Fmt::M, Addr::None,      0, true},
+    {"LDC_VBR_R",  0x402E, Fmt::M, Addr::None,      0, true},
+    {"LDS_MACH_R", 0x400A, Fmt::M, Addr::None,      0, true},
+    {"LDS_MACL_R", 0x401A, Fmt::M, Addr::None,      0, true},
+    {"LDS_PR_R",   0x402A, Fmt::M, Addr::None,      0, true},
+    {"STC_GBR_R",  0x0012, Fmt::N, Addr::None,      0, true},
+    {"STC_SR_R",   0x0002, Fmt::N, Addr::None,      0, true},
+    {"STC_VBR_R",  0x0022, Fmt::N, Addr::None,      0, true},
+    {"STS_MACH_R", 0x000A, Fmt::N, Addr::None,      0, true},
+    {"STS_MACL_R", 0x001A, Fmt::N, Addr::None,      0, true},
+    {"STS_PR_R",   0x002A, Fmt::N, Addr::None,      0, true},
+    // Milestone 1D task 6: remaining delayed branches (covered by the delay-slot test)
+    {"BSR",        0xB000, Fmt::D, Addr::None,      0, false}, // disp12; not encoded randomly
+    {"BRAF",       0x0023, Fmt::M, Addr::None,      0, false},
+    {"BSRF",       0x0003, Fmt::M, Addr::None,      0, false},
+    {"JSR",        0x400B, Fmt::M, Addr::None,      0, false},
 };
 // clang-format on
 

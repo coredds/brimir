@@ -697,3 +697,44 @@ TEST_CASE("Interrupts raised inside a block are taken at the same instruction", 
     REQUIRE(p.ref->Read32(kStack - 8) == kCode + 2); // stacked PC: taken right after the store
     REQUIRE(p.exec.GetStats().blocksRun >= 1);       // the store ran in a compiled block
 }
+
+// LDC Rm,SR that unmasks a pending interrupt: the interpreter still executes the next instruction
+// (interrupt-allow is cleared for one instruction) and takes the interrupt before the one after.
+TEST_CASE("Interrupts unmasked by LDC SR are taken one instruction later", "[jit][diff][exact]") {
+    constexpr uint32_t kVbr = 0x06008000;
+    constexpr uint32_t kVector = 0x50;
+    constexpr uint32_t kHandler = 0x06009000;
+    Pair p;
+    for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+        rig->Write32(kVbr + kVector * 4, kHandler);
+        rig->WriteCode(kHandler, {static_cast<uint16_t>(kSleep)});
+        auto &ctx = rig->sh2->GetJitContext();
+        ctx.write(ctx.sh2, 0xFFFFFF00, 4, 0);       // DVSR = 0
+        ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);     // DVCR.OVFIE = 1
+        ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kVector); // VCRDIV
+        ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);    // IPRA: DIVU level 15
+        ctx.write(ctx.sh2, 0xFFFFFF04, 4, 1234);    // DVDNT: divide by zero -> overflow raised
+    }
+    // ldc R5,SR (R5 = 0: unmask) ; add #1,R3 ; add #1,R3 ; add #1,R3 ; sleep
+    p.WriteCode(kCode, {0x450E, AddI(3, 1), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    state.SR = 0xF0; // mask 15: the level-15 DIVU interrupt is not pending yet
+    state.VBR = kVbr;
+    state.R[3] = 0;
+    state.R[5] = 0;
+    state.R[15] = 0x0600F000;
+    p.Load(state);
+    REQUIRE_FALSE(*p.jit->sh2->GetJitContext().intrPending);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().R[3] == 1u); // exactly one add ran before the interrupt
+    REQUIRE(p.exec.GetStats().blocksRun > 0);
+    // ldc and the adds share one compiled block, so the in-block interrupt-allow rule is exercised.
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount >= 2u);
+}

@@ -54,14 +54,17 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
     return static_cast<uint32_t>(instr & 0xFFu) << shift;
 }
 
-// ALU, shift, compare and @(R0,GBR) logic opcodes (handler table sections 4 and 5); each has a
-// Delay_ variant with identical semantics.
+// ALU, shift, compare, @(R0,GBR) logic and system-register transfer opcodes (handler table
+// sections 4, 5 and 6); each has a Delay_ variant with identical semantics (LDC SR passes the
+// delay-slot flag to SetSR, with the same net effect).
 #define BRIMIR_JIT_ALU_OPS(X)                                                                                         \
     X(EXTSB) X(EXTSW) X(EXTUB) X(EXTUW) X(SWAPB) X(SWAPW) X(XTRCT) X(ADDC) X(ADDV) X(AND_R) X(AND_I) X(NEG) X(NEGC)  \
         X(NOT) X(OR_R) X(OR_I) X(ROTCL) X(ROTCR) X(ROTL) X(ROTR) X(SHAL) X(SHAR) X(SHLL) X(SHLL2) X(SHLL8)           \
             X(SHLL16) X(SHLR) X(SHLR2) X(SHLR8) X(SHLR16) X(SUB) X(SUBC) X(SUBV) X(XOR_R) X(XOR_I) X(CMP_EQ_I)       \
                 X(CMP_GE) X(CMP_GT) X(CMP_HI) X(CMP_HS) X(CMP_PL) X(CMP_PZ) X(CMP_STR) X(TST_R) X(TST_I) X(CLRMAC)   \
-                    X(AND_M) X(OR_M) X(XOR_M) X(TST_M)
+                    X(AND_M) X(OR_M) X(XOR_M) X(TST_M) X(LDC_GBR_R) X(LDC_SR_R) X(LDC_VBR_R) X(LDS_MACH_R)           \
+                        X(LDS_MACL_R) X(LDS_PR_R) X(STC_GBR_R) X(STC_SR_R) X(STC_VBR_R) X(STS_MACH_R)                \
+                            X(STS_MACL_R) X(STS_PR_R)
 
 // Maps a supported instruction (normal or delay-slot decode) to its base opcode.
 std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
@@ -172,8 +175,38 @@ std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
 #undef BRIMIR_JIT_ALU_OPS
 
 bool IsDelayedBranch(OpcodeType op) {
-    return op == OpcodeType::BRA || op == OpcodeType::BTS || op == OpcodeType::BFS || op == OpcodeType::JMP ||
-           op == OpcodeType::RTS;
+    switch (op) {
+    case OpcodeType::BRA:
+    case OpcodeType::BTS:
+    case OpcodeType::BFS:
+    case OpcodeType::JMP:
+    case OpcodeType::RTS:
+    case OpcodeType::BSR:
+    case OpcodeType::BRAF:
+    case OpcodeType::BSRF:
+    case OpcodeType::JSR: return true;
+    default: return false;
+    }
+}
+
+// System-register transfers clear m_intrFlags.allow: no interrupt is accepted before the next
+// instruction (handler table section 6, "intrAllow handling").
+bool ClearsIntrAllow(OpcodeType base) {
+    switch (base) {
+    case OpcodeType::LDC_GBR_R:
+    case OpcodeType::LDC_SR_R:
+    case OpcodeType::LDC_VBR_R:
+    case OpcodeType::LDS_MACH_R:
+    case OpcodeType::LDS_MACL_R:
+    case OpcodeType::LDS_PR_R:
+    case OpcodeType::STC_GBR_R:
+    case OpcodeType::STC_SR_R:
+    case OpcodeType::STC_VBR_R:
+    case OpcodeType::STS_MACH_R:
+    case OpcodeType::STS_MACL_R:
+    case OpcodeType::STS_PR_R: return true;
+    default: return false;
+    }
 }
 
 // Lowers a non-branch instruction. `retiredBefore` = instructions completed before this one.
@@ -683,6 +716,31 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
         b.SetWb(kWbNone);
         break;
     }
+
+    // System-register transfers (handler table section 6). LDC/LDS use DECODE_M (Rm in bits 11..8,
+    // i.e. `n` here). All clear interrupt-allow before AdvancePC; BuildBlock re-enables it after
+    // the next instruction's boundary check.
+    case OpcodeType::LDC_GBR_R: b.SetGBR(b.GetReg(n)); b.ClearIntrAllow(); aluTail(RegBit(n)); break;
+    case OpcodeType::LDC_VBR_R: b.SetVBR(b.GetReg(n)); b.ClearIntrAllow(); aluTail(RegBit(n)); break;
+    case OpcodeType::LDC_SR_R: // SetSR also clears allow and recomputes pending (false in a slot)
+        b.SetSR(b.GetReg(n), delaySlot);
+        aluTail(RegBit(n));
+        break;
+    case OpcodeType::LDS_MACH_R: b.SetMACH(b.GetReg(n)); b.ClearIntrAllow(); aluTail(RegBit(n)); break;
+    case OpcodeType::LDS_MACL_R: b.SetMACL(b.GetReg(n)); b.ClearIntrAllow(); aluTail(RegBit(n)); break;
+    case OpcodeType::LDS_PR_R: b.SetPR(b.GetReg(n)); b.ClearIntrAllow(); aluTail(RegBit(n) | kWbPRBit); break;
+    case OpcodeType::STC_GBR_R: b.SetReg(n, b.GetGBR()); b.ClearIntrAllow(); aluTail(RegBit(n)); break;
+    case OpcodeType::STC_VBR_R: b.SetReg(n, b.GetVBR()); b.ClearIntrAllow(); aluTail(RegBit(n)); break;
+    case OpcodeType::STC_SR_R: b.SetReg(n, b.GetSR()); b.ClearIntrAllow(); aluTail(RegBit(n)); break;
+    case OpcodeType::STS_PR_R: b.SetReg(n, b.GetPR()); b.ClearIntrAllow(); aluTail(RegBit(n) | kWbPRBit); break;
+    case OpcodeType::STS_MACH_R:
+    case OpcodeType::STS_MACL_R: // fixed 1 cycle, no write-back stall, m_wbReg = rn (load-like)
+        b.SetReg(n, op == OpcodeType::STS_MACH_R ? b.GetMACH() : b.GetMACL());
+        b.ClearIntrAllow();
+        advance();
+        b.AddCycles(1);
+        b.SetWb(static_cast<uint8_t>(n));
+        break;
     default: break; // callers only pass supported opcodes
     }
 }
@@ -724,6 +782,42 @@ ValueId LowerDelayedBranch(Builder &b, OpcodeType op, uint16_t instr, uint32_t p
         b.AddCycles(2);
         b.SetWb(kWbNone);
         break;
+    // Calls write PR before the slot runs (the slot may read it). WritebackCycles compares register
+    // indices only, so it is evaluated against the old m_wbReg after PR is written.
+    case OpcodeType::BSR: {
+        b.SetPR(b.Const(pc + 4u));
+        const ValueId target = b.Const(pc + Disp12x2(instr) + 4u);
+        b.SetupDelaySlot(target);
+        b.WbStall(kWbPRBit);
+        b.AddCycles(2);
+        b.SetWb(kWbNone);
+        return target;
+    }
+    case OpcodeType::BRAF:
+    case OpcodeType::BSRF: { // DECODE_M: Rm in bits 11..8; target = PC + Rm + 4
+        const uint32_t m = Rn(instr);
+        const ValueId target = b.Add(b.GetReg(m), b.Const(pc + 4u));
+        uint32_t mask = RegBit(m);
+        if (op == OpcodeType::BSRF) {
+            b.SetPR(b.Const(pc + 4u));
+            mask |= kWbPRBit;
+        }
+        b.SetupDelaySlot(target);
+        b.WbStall(mask);
+        b.AddCycles(2);
+        b.SetWb(kWbNone);
+        break;
+    }
+    case OpcodeType::JSR: {
+        const uint32_t m = Rn(instr);
+        const ValueId target = b.GetReg(m);
+        b.SetPR(b.Const(pc + 4u));
+        b.SetupDelaySlot(target);
+        b.WbStall(RegBit(m) | kWbPRBit);
+        b.AddCycles(2);
+        b.SetWb(kWbNone);
+        break;
+    }
     default: break;
     }
     return kNoValue;
@@ -750,9 +844,18 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
     };
     // The interpreter checks the cycle budget and pending interrupts before every instruction;
     // the first instruction of a block is covered by the executor's own checks.
+    // After an instruction that cleared interrupt-allow, the boundary check of the next one cannot
+    // take an interrupt; InterpretNext then sets allow = true before executing it. When the
+    // allow-clearing instruction ends the block, allow stays false and the executor's pre-entry
+    // check plus its `intrAllow = true` at block entry do the same.
+    bool allowCleared = false;
     const auto boundary = [&](uint32_t address, uint8_t retired) {
         if (retired > 0) {
             b.CheckBoundary(address, retired);
+        }
+        if (allowCleared) {
+            b.SetIntrAllow();
+            allowCleared = false;
         }
     };
 
@@ -806,6 +909,7 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
         boundary(pc, count);
         refillIfAligned(pc);
         LowerPlain(b, *base, instr, pc, false, count);
+        allowCleared = ClearsIntrAllow(*base);
         ++count;
         pc += 2;
     }

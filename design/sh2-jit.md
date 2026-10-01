@@ -116,11 +116,19 @@ while cycles < target:
 Decoding starts at the guest PC. A block ends:
 
 - after a branch and its delay slot
-- before `SLEEP`, `TRAPA`, `RTE` and instructions that write `SR` or `VBR` while they are not supported (interpreter fallback); once supported, `CheckBoundary` before the next instruction already sees a newly unmasked interrupt
+- before `SLEEP`, `TRAPA` and `RTE` (interpreter fallback)
 - **before** any opcode the front end does not support yet (the executor interprets it)
 - at a length cap of 32 guest instructions (tunable)
 
 A branch inside a delay slot (illegal on the SH-2) is left to the interpreter.
+
+Register forms of `LDC`/`LDS`/`STC`/`STS` (including `LDC Rm,SR` and `LDC Rm,VBR`) are compiled inside blocks. They clear interrupt-allow, so the interpreter accepts no interrupt before the next instruction and sets allow back to true just before executing it. The front end reproduces this rule:
+
+- the instruction emits `ClearIntrAllow` (`LDC Rm,SR` emits `SetSR(value, delaySlot)` instead, which also clears allow and recomputes the pending flag from the new mask)
+- the next instruction in the same block gets its `CheckBoundary` as usual (it can still stop on the cycle budget, but cannot take an interrupt), followed by `SetIntrAllow`
+- if the allow-clearing instruction is the last one in the block (block end or delay slot), nothing more is emitted: the executor's pre-entry check (`pending && allow`) and its `intrAllow = true` at block entry behave exactly like `InterpretNext`
+
+So an interrupt unmasked by `LDC Rm,SR` is taken after exactly one further instruction, as in the interpreter.
 
 ### 5.2 IR
 
@@ -134,7 +142,7 @@ Linear, single-assignment within a block, about 40 operations, designed to map d
 
 The IR ships with a builder, a verifier (checks types, single assignment, terminators) and a text printer used in test failure messages.
 
-LDC/LDS/STC/STS clear the interrupt-allow flag for the next instruction (InterpretNext sets it back to true at the start of every instruction); when these opcodes are compiled, the IR must reproduce both the clear and the per-instruction re-enable, otherwise CheckBoundary would miss or misplace interrupts.
+System-register and interrupt-flag ops: `GetGBR`/`SetGBR`, `GetVBR`/`SetVBR`, `GetPR`/`SetPR`, `GetSR`, `SetSR(value, delaySlot)` (the `LDC Rm,SR` state change through a core callback: mask to `0x3F3`, recompute pending, clear allow), `GetMACH`/`GetMACL`/`SetMACH`/`SetMACL`, `ClearIntrAllow`, `SetIntrAllow` and `GetDelayTarget` (the delay-slot target for PC-relative slot instructions under a dynamic-target branch). The calls `BSR`, `BSRF` and `JSR` write `PR` with `SetPR` before the slot; `BRAF`, `BSRF` and `JSR` have dynamic targets. Section 5.1 gives the interrupt-allow rule these ops implement.
 
 ### 5.3 Cycle-fidelity rule
 
