@@ -54,6 +54,15 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
     return static_cast<uint32_t>(instr & 0xFFu) << shift;
 }
 
+// ALU, shift, compare and @(R0,GBR) logic opcodes (handler table sections 4 and 5); each has a
+// Delay_ variant with identical semantics.
+#define BRIMIR_JIT_ALU_OPS(X)                                                                                         \
+    X(EXTSB) X(EXTSW) X(EXTUB) X(EXTUW) X(SWAPB) X(SWAPW) X(XTRCT) X(ADDC) X(ADDV) X(AND_R) X(AND_I) X(NEG) X(NEGC)  \
+        X(NOT) X(OR_R) X(OR_I) X(ROTCL) X(ROTCR) X(ROTL) X(ROTR) X(SHAL) X(SHAR) X(SHLL) X(SHLL2) X(SHLL8)           \
+            X(SHLL16) X(SHLR) X(SHLR2) X(SHLR8) X(SHLR16) X(SUB) X(SUBC) X(SUBV) X(XOR_R) X(XOR_I) X(CMP_EQ_I)       \
+                X(CMP_GE) X(CMP_GT) X(CMP_HI) X(CMP_HS) X(CMP_PL) X(CMP_PZ) X(CMP_STR) X(TST_R) X(TST_I) X(CLRMAC)   \
+                    X(AND_M) X(OR_M) X(XOR_M) X(TST_M)
+
 // Maps a supported instruction (normal or delay-slot decode) to its base opcode.
 std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
     if (!delaySlot) {
@@ -100,11 +109,19 @@ std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
         case OpcodeType::ADD:
         case OpcodeType::ADD_I:
         case OpcodeType::CMP_EQ_R:
-        case OpcodeType::DT: return op;
+        case OpcodeType::DT:
+#define BRIMIR_JIT_ALU_CASE(name) case OpcodeType::name:
+            BRIMIR_JIT_ALU_OPS(BRIMIR_JIT_ALU_CASE)
+#undef BRIMIR_JIT_ALU_CASE
+            return op;
         default: return std::nullopt;
         }
     }
     switch (op) {
+#define BRIMIR_JIT_ALU_DELAY_CASE(name)                                                                               \
+    case OpcodeType::Delay_##name: return OpcodeType::name;
+        BRIMIR_JIT_ALU_OPS(BRIMIR_JIT_ALU_DELAY_CASE)
+#undef BRIMIR_JIT_ALU_DELAY_CASE
     case OpcodeType::Delay_NOP: return OpcodeType::NOP;
     case OpcodeType::Delay_MOV_R: return OpcodeType::MOV_R;
     case OpcodeType::Delay_MOV_I: return OpcodeType::MOV_I;
@@ -151,6 +168,8 @@ std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
     default: return std::nullopt;
     }
 }
+
+#undef BRIMIR_JIT_ALU_OPS
 
 bool IsDelayedBranch(OpcodeType op) {
     return op == OpcodeType::BRA || op == OpcodeType::BTS || op == OpcodeType::BFS || op == OpcodeType::JMP ||
@@ -215,6 +234,13 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
         if (size != 1) {
             stall(mask);
         }
+        b.SetWb(kWbNone);
+    };
+    // "ALU template" tail: AdvancePC, WritebackCycles(mask) + 1, m_wbReg = None.
+    const auto aluTail = [&](uint32_t mask) {
+        advance();
+        b.WbStall(mask);
+        b.AddCycles(1);
         b.SetWb(kWbNone);
     };
     // The delay-slot branch target (PC-relative instructions in a slot use target - 2 as their PC).
@@ -455,6 +481,205 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
         advance();
         b.WbStall(RegBit(n));
         b.AddCycles(1);
+        b.SetWb(kWbNone);
+        break;
+    }
+
+    // Register-only ALU ops (handler table section 4): the result first, then AdvancePC, then
+    // WritebackCycles(mask) + 1 and m_wbReg = None.
+    case OpcodeType::EXTSB: b.SetReg(n, b.SExt8(b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::EXTSW: b.SetReg(n, b.SExt16(b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::EXTUB: b.SetReg(n, b.And(b.GetReg(m), b.Const(0xFF))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::EXTUW:
+        b.SetReg(n, b.And(b.GetReg(m), b.Const(0xFFFF)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    case OpcodeType::SWAPB: {
+        const ValueId x = b.GetReg(m);
+        const ValueId low = b.Or(b.And(b.Shr(x, 8), b.Const(0xFF)), b.Shl(b.And(x, b.Const(0xFF)), 8));
+        b.SetReg(n, b.Or(low, b.And(x, b.Const(0xFFFF0000u))));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::SWAPW: {
+        const ValueId x = b.GetReg(m);
+        b.SetReg(n, b.Or(b.Shl(x, 16), b.Shr(x, 16)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::XTRCT:
+        b.SetReg(n, b.Or(b.Shr(b.GetReg(n), 16), b.Shl(b.GetReg(m), 16)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    case OpcodeType::ADDC: {
+        // tmp1 = Rn + Rm; Rn = tmp1 + T; T = (tmp0 > tmp1) || (tmp1 > Rn)
+        const ValueId a = b.GetReg(n);
+        const ValueId t1 = b.Add(a, b.GetReg(m));
+        const ValueId r = b.Add(t1, b.GetT());
+        b.SetReg(n, r);
+        b.SetT(b.Or(b.CmpGtU(a, t1), b.CmpGtU(t1, r)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::ADDV:
+    case OpcodeType::SUBV: {
+        // dst/src = sign bits before; T = (src == dst [ADDV] / src != dst [SUBV]) & (sign(result) ^ dst)
+        const ValueId a = b.GetReg(n);
+        const ValueId c = b.GetReg(m);
+        const ValueId r = op == OpcodeType::ADDV ? b.Add(a, c) : b.Sub(a, c);
+        b.SetReg(n, r);
+        const ValueId d = b.Shr(a, 31);
+        const ValueId s = b.Shr(c, 31);
+        const ValueId cond = op == OpcodeType::ADDV ? b.CmpEq(s, d) : b.Xor(s, d);
+        b.SetT(b.And(cond, b.Xor(b.Shr(r, 31), d)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::AND_R: b.SetReg(n, b.And(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::OR_R: b.SetReg(n, b.Or(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::XOR_R: b.SetReg(n, b.Xor(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::AND_I: b.SetReg(0, b.And(b.GetReg(0), b.Const(instr & 0xFFu))); aluTail(RegBit(0)); break;
+    case OpcodeType::OR_I: b.SetReg(0, b.Or(b.GetReg(0), b.Const(instr & 0xFFu))); aluTail(RegBit(0)); break;
+    case OpcodeType::XOR_I: b.SetReg(0, b.Xor(b.GetReg(0), b.Const(instr & 0xFFu))); aluTail(RegBit(0)); break;
+    case OpcodeType::NEG: b.SetReg(n, b.Sub(b.Const(0), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::NEGC: {
+        // tmp = -Rm; Rn = tmp - T; T = (0 < tmp) || (tmp < Rn)
+        const ValueId tmp = b.Sub(b.Const(0), b.GetReg(m));
+        const ValueId r = b.Sub(tmp, b.GetT());
+        b.SetReg(n, r);
+        b.SetT(b.Or(b.CmpGtU(tmp, b.Const(0)), b.CmpGtU(r, tmp)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::NOT: b.SetReg(n, b.Not(b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::ROTCL: {
+        const ValueId x = b.GetReg(n);
+        b.SetReg(n, b.Or(b.Shl(x, 1), b.GetT()));
+        b.SetT(b.Shr(x, 31));
+        aluTail(RegBit(n));
+        break;
+    }
+    case OpcodeType::ROTCR: {
+        const ValueId x = b.GetReg(n);
+        b.SetReg(n, b.Or(b.Shr(x, 1), b.Shl(b.GetT(), 31)));
+        b.SetT(b.And(x, b.Const(1)));
+        aluTail(RegBit(n));
+        break;
+    }
+    case OpcodeType::ROTL: {
+        const ValueId x = b.GetReg(n);
+        const ValueId msb = b.Shr(x, 31);
+        b.SetT(msb);
+        b.SetReg(n, b.Or(b.Shl(x, 1), msb));
+        aluTail(RegBit(n));
+        break;
+    }
+    case OpcodeType::ROTR: {
+        const ValueId x = b.GetReg(n);
+        b.SetT(b.And(x, b.Const(1)));
+        b.SetReg(n, b.Or(b.Shr(x, 1), b.Shl(x, 31)));
+        aluTail(RegBit(n));
+        break;
+    }
+    case OpcodeType::SHAL:
+    case OpcodeType::SHLL: { // byte-identical handlers
+        const ValueId x = b.GetReg(n);
+        b.SetT(b.Shr(x, 31));
+        b.SetReg(n, b.Shl(x, 1));
+        aluTail(RegBit(n));
+        break;
+    }
+    case OpcodeType::SHAR:
+    case OpcodeType::SHLR: {
+        const ValueId x = b.GetReg(n);
+        b.SetT(b.And(x, b.Const(1)));
+        b.SetReg(n, op == OpcodeType::SHAR ? b.Sar(x, 1) : b.Shr(x, 1));
+        aluTail(RegBit(n));
+        break;
+    }
+    case OpcodeType::SHLL2: b.SetReg(n, b.Shl(b.GetReg(n), 2)); aluTail(RegBit(n)); break;
+    case OpcodeType::SHLL8: b.SetReg(n, b.Shl(b.GetReg(n), 8)); aluTail(RegBit(n)); break;
+    case OpcodeType::SHLL16: b.SetReg(n, b.Shl(b.GetReg(n), 16)); aluTail(RegBit(n)); break;
+    case OpcodeType::SHLR2: b.SetReg(n, b.Shr(b.GetReg(n), 2)); aluTail(RegBit(n)); break;
+    case OpcodeType::SHLR8: b.SetReg(n, b.Shr(b.GetReg(n), 8)); aluTail(RegBit(n)); break;
+    case OpcodeType::SHLR16: b.SetReg(n, b.Shr(b.GetReg(n), 16)); aluTail(RegBit(n)); break;
+    case OpcodeType::SUB: b.SetReg(n, b.Sub(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::SUBC: {
+        // tmp1 = Rn - Rm; Rn = tmp1 - T; T = (tmp0 < tmp1) || (tmp1 < Rn)
+        const ValueId a = b.GetReg(n);
+        const ValueId t1 = b.Sub(a, b.GetReg(m));
+        const ValueId r = b.Sub(t1, b.GetT());
+        b.SetReg(n, r);
+        b.SetT(b.Or(b.CmpGtU(t1, a), b.CmpGtU(r, t1)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::CMP_EQ_I: b.SetT(b.CmpEq(b.GetReg(0), b.Const(SImm8(instr)))); aluTail(RegBit(0)); break;
+    case OpcodeType::CMP_GE: b.SetT(b.CmpGeS(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::CMP_GT: b.SetT(b.CmpGtS(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::CMP_HI: b.SetT(b.CmpGtU(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::CMP_HS: b.SetT(b.CmpGeU(b.GetReg(n), b.GetReg(m))); aluTail(RegBit(m) | RegBit(n)); break;
+    case OpcodeType::CMP_PL: b.SetT(b.CmpGtS(b.GetReg(n), b.Const(0))); aluTail(RegBit(n)); break;
+    case OpcodeType::CMP_PZ: b.SetT(b.CmpGeS(b.GetReg(n), b.Const(0))); aluTail(RegBit(n)); break;
+    case OpcodeType::CMP_STR: {
+        // T = 1 iff any byte of Rm ^ Rn is zero.
+        const ValueId t = b.Xor(b.GetReg(m), b.GetReg(n));
+        const ValueId byteMask = b.Const(0xFF);
+        const ValueId zero = b.Const(0);
+        const auto zeroByte = [&](uint32_t shift) {
+            const ValueId v = shift == 0 ? t : b.Shr(t, shift);
+            return b.CmpEq(b.And(v, byteMask), zero);
+        };
+        b.SetT(b.Or(b.Or(zeroByte(24), zeroByte(16)), b.Or(zeroByte(8), zeroByte(0))));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::TST_R:
+        b.SetT(b.CmpEq(b.And(b.GetReg(n), b.GetReg(m)), b.Const(0)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    case OpcodeType::TST_I:
+        b.SetT(b.CmpEq(b.And(b.GetReg(0), b.Const(instr & 0xFFu)), b.Const(0)));
+        aluTail(RegBit(0));
+        break;
+    case OpcodeType::CLRMAC: // fixed 1 cycle, no write-back stall
+        b.SetMACH(b.Const(0));
+        b.SetMACL(b.Const(0));
+        advance();
+        b.AddCycles(1);
+        b.SetWb(kWbNone);
+        break;
+
+    // @(R0,GBR) logic (handler table section 5): no bus-wait check, byte accesses. The access-cycle
+    // size differs per handler: AND_M uint8, OR_M uint16, XOR_M uint32 (read + write terms).
+    case OpcodeType::AND_M:
+    case OpcodeType::OR_M:
+    case OpcodeType::XOR_M: {
+        const uint8_t cycleSize = op == OpcodeType::AND_M ? 1 : op == OpcodeType::OR_M ? 2 : 4;
+        const ValueId imm = b.Const(instr & 0xFFu);
+        b.SyncCycles();
+        const ValueId address = b.Add(b.GetGBR(), b.GetReg(0));
+        b.AddAccessCycles(address, cycleSize, false);
+        b.AddAccessCycles(address, cycleSize, true);
+        b.WbStall(RegBit(0));
+        b.AddCycles(1);
+        const ValueId v = b.Load(address, 1, false);
+        const ValueId r = op == OpcodeType::AND_M  ? b.And(v, imm)
+                          : op == OpcodeType::OR_M ? b.Or(v, imm)
+                                                   : b.Xor(v, imm);
+        b.Store(address, 1, r);
+        advance();
+        b.SetWb(kWbNone);
+        break;
+    }
+    case OpcodeType::TST_M: {
+        b.SyncCycles();
+        const ValueId address = b.Add(b.GetGBR(), b.GetReg(0));
+        b.AddAccessCycles(address, 1, false);
+        b.WbStall(RegBit(0));
+        b.AddCycles(2);
+        b.SetT(b.CmpEq(b.And(b.Load(address, 1, false), b.Const(instr & 0xFFu)), b.Const(0)));
+        advance();
         b.SetWb(kWbNone);
         break;
     }

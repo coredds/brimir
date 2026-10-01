@@ -109,7 +109,7 @@ void FillLiteralPool(Pair &p, std::mt19937 &rng) {
     p.WriteCode(kCode + 8, pool);
 }
 
-// State for one random instance: registers and GBR from Encode, random T, wbReg and PR.
+// State for one random instance: registers and GBR from Encode, random T, wbReg, PR and MAC.
 ymir::savestate::SH2SaveState RandomState(Pair &p, std::mt19937 &rng, uint32_t pc,
                                           const std::array<uint32_t, 16> &regs, uint32_t gbr) {
     auto state = p.ref->BaseState(pc);
@@ -118,6 +118,8 @@ ymir::savestate::SH2SaveState RandomState(Pair &p, std::mt19937 &rng, uint32_t p
     state.SR = 0xF0 | (rng() & 1u);
     state.wbReg = RandomWb(rng);
     state.PR = rng();
+    state.MACH = rng();
+    state.MACL = rng();
     return state;
 }
 
@@ -149,6 +151,88 @@ TEST_CASE("Every compiled opcode matches the interpreter", "[jit][diff][opcodes]
             CHECK(info.retired == 1);
             CHECK(p.exec.GetStats().blocksRun > blocksBefore); // compiled, not interpreted
             failed = !p.lastStepMatched || info.retired != 1 || p.exec.GetStats().blocksRun == blocksBefore;
+        }
+    }
+}
+
+TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
+    // Handler table section 4: random registers rarely hit carry, overflow and byte-equality edges.
+    static constexpr const char *kAluOps[] = {
+        "MOVT",  "CLRT",   "SETT",   "EXTSB",  "EXTSW", "EXTUB", "EXTUW",  "SWAPB",    "SWAPW",  "XTRCT",
+        "ADDC",  "ADDV",   "AND_R",  "AND_I",  "NEG",   "NEGC",  "NOT",    "OR_R",     "OR_I",   "ROTCL",
+        "ROTCR", "ROTL",   "ROTR",   "SHAL",   "SHAR",  "SHLL",  "SHLL2",  "SHLL8",    "SHLL16", "SHLR",
+        "SHLR2", "SHLR8",  "SHLR16", "SUB",    "SUBC",  "SUBV",  "XOR_R",  "XOR_I",    "CMP_EQ_I", "CMP_GE",
+        "CMP_GT", "CMP_HI", "CMP_HS", "CMP_PL", "CMP_PZ", "CMP_STR", "TST_R", "TST_I",  "CLRMAC",
+    };
+    static constexpr uint32_t kValues[] = {0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x0000FFFF, 0xFF00FF00};
+    static constexpr uint32_t kImms[] = {0x00, 0x01, 0x7F, 0x80, 0xFF, 0xF0, 0x0F};
+
+    const auto specs = jitspec::CompiledOpcodes();
+    for (size_t opIndex = 0; opIndex < std::size(kAluOps); ++opIndex) {
+        const std::string name = kAluOps[opIndex];
+        const OpSpec *spec = nullptr;
+        for (const OpSpec &s : specs) {
+            if (name == s.name) {
+                spec = &s;
+            }
+        }
+        INFO("opcode " << name);
+        REQUIRE(spec != nullptr);
+
+        Pair p;
+        std::mt19937 rng(0x0DE80000u + static_cast<uint32_t>(opIndex));
+        bool failed = false;
+        // (a, b) pairs plus an aliased pass (b = -1: Rn == Rm) for two-register forms.
+        for (size_t ai = 0; ai < std::size(kValues) && !failed; ++ai) {
+            for (int bi = -1; bi < static_cast<int>(std::size(kValues)) && !failed; ++bi) {
+                if (bi < 0 && spec->fmt != jitspec::Fmt::NM) {
+                    continue;
+                }
+                if (bi > 0 && (spec->fmt == jitspec::Fmt::N || spec->fmt == jitspec::Fmt::Z)) {
+                    continue; // single-operand forms: only `a` matters
+                }
+                for (uint32_t t : {0u, 1u}) {
+                    if (failed) {
+                        break;
+                    }
+                    auto regs = RandomRegs(rng);
+                    const uint32_t a = kValues[ai];
+                    const uint32_t n = rng() % 16;
+                    uint32_t m = (n + 1 + rng() % 15) % 16;
+                    uint32_t word = spec->base;
+                    switch (spec->fmt) {
+                    case jitspec::Fmt::Z: break;
+                    case jitspec::Fmt::N: word |= n << 8; regs[n] = a; break;
+                    case jitspec::Fmt::NM:
+                        if (bi < 0) {
+                            m = n;
+                        }
+                        word |= (n << 8) | (m << 4);
+                        regs[m] = bi < 0 ? a : kValues[bi];
+                        regs[n] = a;
+                        break;
+                    case jitspec::Fmt::I:
+                        word |= kImms[bi < 0 ? 0 : bi];
+                        regs[0] = a;
+                        break;
+                    default: FAIL("unexpected format for " << name); break;
+                    }
+                    const uint16_t instr = static_cast<uint16_t>(word);
+                    const uint32_t pc = kCode + (rng() & 1u) * 2;
+                    p.WriteCode(pc, {instr, kSleepOp});
+                    auto state = RandomState(p, rng, pc, regs, rng());
+                    state.SR = 0xF0 | t;
+                    p.Load(state);
+
+                    INFO(name << " instr " << Hex({instr}) << " Rn=" << std::hex << regs[n] << " Rm=" << regs[m]
+                              << " T=" << t);
+                    const uint64_t blocksBefore = p.exec.GetStats().blocksRun;
+                    const auto info = p.Step();
+                    CHECK(info.retired == 1);
+                    CHECK(p.exec.GetStats().blocksRun > blocksBefore);
+                    failed = !p.lastStepMatched || info.retired != 1 || p.exec.GetStats().blocksRun == blocksBefore;
+                }
+            }
         }
     }
 }
