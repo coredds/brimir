@@ -22,6 +22,9 @@ public:
     };
 
     uint64 Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 target) override;
+
+    // Drops all compiled blocks. When called from inside a running block (a memory access that
+    // resets the CPU), the flush is deferred until the block returns and the block is aborted.
     void Flush() override;
 
     // Runs one compiled block, or one interpreter instruction when no block applies
@@ -38,6 +41,8 @@ public:
 private:
     BlockCache m_cache;
     Stats m_stats;
+    bool m_inBlock = false;      // RunBlock is executing a block owned by m_cache
+    bool m_flushPending = false; // Flush() was requested in a block; also the block's abort flag
 };
 
 } // namespace brimir::jit

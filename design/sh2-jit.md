@@ -170,11 +170,15 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 - All other pages (MMIO, on-chip I/O at `0xFFFFxxxx`, cache address/purge regions): call the slow-path helper, which behaves exactly like `MemRead` / `MemWrite` with cache emulation off.
 - Misaligned accesses: same masking as the interpreter. Ymir raises no address-error exception and neither does the JIT.
 - Milestone 1 routes every access (including RAM) through the fork's own `MemRead`/`MemWrite`/`AccessCycles`/`IsBusWait` via context callbacks, which is exact by construction. The inline RAM fast path above is a milestone 2 optimization.
-- Known deviation: a store into the currently executing block's own code takes effect at the next block entry (check-on-entry), not at the next instruction.
 
 ### 6.4 Save states, rewind, run-ahead
 
 The JIT holds no architectural state between blocks, so the save-state format does not change. Loading a state flushes both block caches. Rewind and run-ahead keep working, with the flush as the only added cost.
+
+### 6.5 Known deviations
+
+- A store into the currently executing block's own code takes effect at the next block entry (check-on-entry), not at the next instruction.
+- Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction.
 
 ## 7. Validation
 

@@ -13,6 +13,11 @@ uint64 Executor::Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 targ
 }
 
 void Executor::Flush() {
+    if (m_inBlock) {
+        // Freeing the running block here would be a use-after-free; Step flushes after RunBlock.
+        m_flushPending = true;
+        return;
+    }
     m_cache.Flush();
 }
 
@@ -45,7 +50,15 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx) {
     // Same as InterpretNext on its non-interrupt path.
     *ctx.intrAllow = true;
     ++m_stats.blocksRun;
-    return RunBlock(block, ctx);
+    m_inBlock = true;
+    m_flushPending = false;
+    const ExitInfo info = RunBlock(block, ctx, &m_flushPending);
+    m_inBlock = false;
+    if (m_flushPending) {
+        m_flushPending = false;
+        m_cache.Flush();
+    }
+    return info;
 }
 
 } // namespace brimir::jit

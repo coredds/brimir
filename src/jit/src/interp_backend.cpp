@@ -4,7 +4,7 @@
 
 namespace brimir::jit {
 
-ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx) {
+ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, const bool *abortRequested) {
     thread_local std::vector<uint32_t> values;
     if (values.size() < block.numValues) {
         values.resize(block.numValues);
@@ -13,6 +13,9 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx) {
 
     const uint64_t entryCycles = *ctx.cyclesExecuted;
     ExitInfo info;
+    // Memory callbacks can reset the CPU (watchdog reset), which requests a cache flush. Stop at
+    // once, without touching PC, which the reset already set.
+    const auto abortNow = [&] { return abortRequested != nullptr && *abortRequested; };
     for (const Inst &in : block.code) {
         switch (in.op) {
         case Op::Const: v[in.dst] = in.imm; break;
@@ -30,8 +33,20 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx) {
         case Op::SExt16:
             v[in.dst] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(v[in.a] & 0xFFFFu)));
             break;
-        case Op::Load: v[in.dst] = ctx.read(ctx.sh2, v[in.a], in.size, in.flag); break;
-        case Op::Store: ctx.write(ctx.sh2, v[in.a], in.size, v[in.b]); break;
+        case Op::Load:
+            v[in.dst] = ctx.read(ctx.sh2, v[in.a], in.size, in.flag);
+            if (abortNow()) {
+                info.aborted = true;
+                return info;
+            }
+            break;
+        case Op::Store:
+            ctx.write(ctx.sh2, v[in.a], in.size, v[in.b]);
+            if (abortNow()) {
+                info.aborted = true;
+                return info;
+            }
+            break;
         case Op::AddCycles: info.cycles += in.imm; break;
         case Op::AddAccessCycles: info.cycles += ctx.accessCycles(ctx.sh2, v[in.a], in.size, in.flag); break;
         case Op::WbStall: {
@@ -43,7 +58,13 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx) {
         }
         case Op::SetWb: *ctx.wbReg = static_cast<uint8_t>(in.imm); break;
         case Op::SyncCycles: *ctx.cyclesExecuted = entryCycles + info.cycles; break;
-        case Op::Refill: ctx.refillPipeline(ctx.sh2, in.imm); break;
+        case Op::Refill:
+            ctx.refillPipeline(ctx.sh2, in.imm);
+            if (abortNow()) {
+                info.aborted = true;
+                return info;
+            }
+            break;
         case Op::SetupDelaySlot: ctx.setupDelaySlot(ctx.sh2, v[in.a]); break;
         case Op::EndDelaySlot: ctx.endDelaySlot(ctx.sh2); break;
         case Op::ExitIfBusWait:
@@ -59,6 +80,10 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx) {
                 info.cycles += in.imm2;
                 if (in.flag) {
                     ctx.refillPipeline(ctx.sh2, in.imm);
+                    if (abortNow()) {
+                        info.aborted = true;
+                        return info;
+                    }
                 }
                 *ctx.PC = in.imm;
                 info.retired = in.retired;
