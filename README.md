@@ -89,7 +89,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
 - **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
-- **SH-2 JIT** — Only an experimental foundation exists, off by default (`SH-2 JIT` core option): an IR interpreter backend covering a small opcode subset, with everything else on Ymir's interpreter. It is not faster yet; native backends are planned (see [design/sh2-jit.md](design/sh2-jit.md) and [ROADMAP.md](ROADMAP.md)).
+- **SH-2 JIT** — Experimental and off by default (`SH-2 JIT` core option). It compiles most SH-2 instructions (multiply/MAC, divide step, `TAS`, exceptions and the memory forms of `LDC`/`LDS`/`STC`/`STS` stay on Ymir's interpreter) and is validated against the interpreter in lockstep (BIOS plus six games, 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). Its backend is an IR interpreter, so it is not faster yet (about 2x slower); native backends are planned (see [design/sh2-jit.md](design/sh2-jit.md) and [ROADMAP.md](ROADMAP.md)).
 
 ## Build Requirements
 

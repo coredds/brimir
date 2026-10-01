@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 1 in progress: foundation and instruction-exact execution implemented (plans 1A–1C); instruction coverage and game validation remain (plan 1D)
+**Status**: Milestone 1 complete (plans 1A–1D); next: milestone 2 (x64 backend)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -218,7 +218,7 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 
 ### 7.3 Game-level regression (local)
 
-`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Game validation for milestone 1 is plan 1D.
+`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Milestone 1 game validation results are in [sh2-validation.md](sh2-validation.md).
 
 ## 8. Measurement
 
@@ -248,11 +248,11 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
    - fallback to the interpreter for all other opcodes
 5. Validation layers 7.1 (in CI) and 7.2.
 
-**Done when**:
+**Done when** (all met; see [sh2-validation.md](sh2-validation.md)):
 
-- all strict differential tests pass with exact state and cycle totals
-- with the JIT on, the BIOS and a set of games run 10 minutes each (36000 frames) in lockstep with the interpreter without divergence
-- the baseline report is committed
+- [x] all strict differential tests pass with exact state and cycle totals
+- [x] with the JIT on, the BIOS and a set of games run 10 minutes each (36000 frames) in lockstep with the interpreter without divergence (BIOS menu plus six games)
+- [x] the baseline report is committed ([sh2-baseline.md](sh2-baseline.md))
 
 ### Milestone 2 — x64 backend (separate spec)
 
