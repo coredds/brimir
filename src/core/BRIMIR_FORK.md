@@ -17,6 +17,9 @@ Everything else under `src/core/` stays verbatim upstream.
 - Log every Brimir change and every upstream SH-2 port in the tables below.
 - On an upstream Ymir sync, do not copy the fork-scope files wholesale. Review
   upstream SH-2 commits since the last port and apply them by hand.
+- After porting an upstream change that touches an SH-2 instruction handler,
+  re-run the `[jit]` tests and keep `SH2::JitSetSR`,
+  `design/sh2-jit-handler-table.md` and the JIT lowering in sync.
 
 ## Brimir changes
 

@@ -9,6 +9,7 @@
 #include <brimir/lockstep.hpp>
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -276,6 +277,43 @@ TEST_CASE("CompareCores detects differences outside the SH-2s and WRAM", "[locks
     const std::string diff = brimir::CompareCores(*a, *b);
     INFO(diff);
     REQUIRE(diff.find("vdp state differs") != std::string::npos);
+}
+
+TEST_CASE("CompareCores detects an internal backup RAM difference", "[lockstep]") {
+    auto a = MakeLockstepCore(false);
+    auto b = MakeLockstepCore(false);
+    a->RunFrame();
+    b->RunFrame();
+    REQUIRE(brimir::CompareCores(*a, *b).empty());
+
+    // Bus write through the backup memory interface (odd bus bytes map to data bytes), then find
+    // the logical byte it changed to know which offset CompareCores must report.
+    auto &bup = b->GetSaturn()->mem.GetInternalBackupRAM();
+    const std::vector<uint8_t> before = bup.ReadAll();
+    REQUIRE(before.size() == 32 * 1024);
+    const uint32_t busAddress = 0x2001; // data byte 0x1000
+    const uint8_t original = bup.ReadByte(busAddress);
+    const uint8_t modified = static_cast<uint8_t>(original ^ 0xA5);
+    bup.WriteByte(busAddress, modified);
+    const std::vector<uint8_t> after = bup.ReadAll();
+    size_t changed = before.size();
+    for (size_t i = 0; i < before.size(); ++i) {
+        if (before[i] != after[i]) {
+            REQUIRE(changed == before.size()); // exactly one byte changed
+            changed = i;
+        }
+    }
+    REQUIRE(changed < before.size());
+
+    char expected[96];
+    std::snprintf(expected, sizeof(expected), "internal backup RAM[0x%04zX] differs: a=0x%X b=0x%X", changed,
+                  static_cast<unsigned>(before[changed]), static_cast<unsigned>(after[changed]));
+    const std::string diff = brimir::CompareCores(*a, *b);
+    INFO(diff);
+    REQUIRE(diff == expected);
+
+    bup.WriteByte(busAddress, original);
+    REQUIRE(brimir::CompareCores(*a, *b).empty());
 }
 
 TEST_CASE("Lockstep: interrupt-driven synthetic workload, JIT vs interpreter", "[lockstep][jit]") {

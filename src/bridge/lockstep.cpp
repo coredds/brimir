@@ -5,7 +5,9 @@
 #include "brimir/lockstep.hpp"
 #include "brimir/core_wrapper.hpp"
 
+#include <ymir/hw/cart/cart.hpp>
 #include <ymir/savestate/savestate.hpp>
+#include <ymir/sys/backup_ram.hpp>
 #include <ymir/sys/saturn.hpp>
 
 #include <cstddef>
@@ -14,6 +16,7 @@
 #include <cstring>
 #include <memory>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace brimir {
@@ -223,6 +226,49 @@ std::string DiffSaturnState(const ymir::Saturn &sa, const ymir::Saturn &sb) {
     return {};
 }
 
+// A BackupMemory without an image (never loaded or created) has no data container: Size() and
+// ReadAll() would dereference null. Its block size is set together with the container.
+bool HasBackupImage(const ymir::bup::IBackupMemory &bup) {
+    return bup.GetBlockSize() != 0;
+}
+
+// Compares the logical contents of two backup memories ("<name>[0xNNNN] differs: a=.. b=..").
+std::string DiffBackupMemory(const char *name, const ymir::bup::IBackupMemory &a, const ymir::bup::IBackupMemory &b) {
+    const bool ha = HasBackupImage(a);
+    const bool hb = HasBackupImage(b);
+    if (ha != hb) {
+        char field[64];
+        std::snprintf(field, sizeof(field), "%s image present", name);
+        return Describe("", field, ha, hb);
+    }
+    if (!ha) {
+        return {}; // neither has an image: both read as 0xFF and drop writes
+    }
+    if (a.Size() != b.Size()) {
+        char field[64];
+        std::snprintf(field, sizeof(field), "%s size", name);
+        return Describe("", field, a.Size(), b.Size());
+    }
+    const std::vector<uint8_t> da = a.ReadAll();
+    const std::vector<uint8_t> db = b.ReadAll();
+    if (da.size() != db.size()) {
+        char field[64];
+        std::snprintf(field, sizeof(field), "%s size", name);
+        return Describe("", field, da.size(), db.size());
+    }
+    if (std::memcmp(da.data(), db.data(), da.size()) == 0) {
+        return {};
+    }
+    for (size_t i = 0; i < da.size(); ++i) {
+        if (da[i] != db[i]) {
+            char field[64];
+            std::snprintf(field, sizeof(field), "%s[0x%04zX]", name, i);
+            return Describe("", field, da[i], db[i]);
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 std::string DiffSH2State(const ymir::savestate::SH2SaveState &a, const ymir::savestate::SH2SaveState &b,
@@ -371,6 +417,15 @@ void PrepareLockstepCore(CoreWrapper &core) {
         // Keep the SCSP on the emulation thread so audio timing cannot depend on host thread
         // scheduling (the option is currently unimplemented upstream; pinned for when it lands).
         saturn->configuration.audio.threadedSCSP = false;
+        // Without a loaded game CoreWrapper never creates the internal backup RAM image, so the
+        // area reads as 0xFF and writes are dropped. Give both cores a formatted in-memory image
+        // so BIOS-only runs exercise (and CompareCores checks) backup RAM like a real console.
+        // LoadGame later replaces it with the per-game image.
+        if (!HasBackupImage(saturn->mem.GetInternalBackupRAM())) {
+            ymir::bup::BackupMemory bup;
+            bup.CreateInMemory(ymir::bup::BackupMemorySize::_256Kbit);
+            saturn->mem.SetInternalBackupRAM(std::move(bup));
+        }
     }
 }
 
@@ -415,6 +470,30 @@ std::string CompareCores(CoreWrapper &a, CoreWrapper &b) {
     }
     if (std::string diff = compareRam("WRAMHigh", sa->mem.WRAMHigh, sb->mem.WRAMHigh); !diff.empty()) {
         return diff;
+    }
+    // Backup memory is outside the save state. ReadAll copies the logical contents without side
+    // effects (CoreWrapper's SRAM accessors are avoided: they move its SRAM sync bookkeeping).
+    if (std::string diff = DiffBackupMemory("internal backup RAM", sa->mem.GetInternalBackupRAM(),
+                                            sb->mem.GetInternalBackupRAM());
+        !diff.empty()) {
+        return diff;
+    }
+    {
+        ymir::cart::BaseCartridge &ca = sa->GetCartridge();
+        ymir::cart::BaseCartridge &cb = sb->GetCartridge();
+        if (ca.GetType() != cb.GetType()) {
+            return Describe("", "cartridge type", static_cast<uint64_t>(ca.GetType()),
+                            static_cast<uint64_t>(cb.GetType()));
+        }
+        auto *ba = ca.As<ymir::cart::CartType::BackupMemory>();
+        auto *bb = cb.As<ymir::cart::CartType::BackupMemory>();
+        if (ba != nullptr && bb != nullptr) {
+            if (std::string diff =
+                    DiffBackupMemory("cartridge backup RAM", ba->GetBackupMemory(), bb->GetBackupMemory());
+                !diff.empty()) {
+                return diff;
+            }
+        }
     }
     if (std::string diff = DiffSaturnState(*sa, *sb); !diff.empty()) {
         return diff;

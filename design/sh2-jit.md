@@ -66,12 +66,12 @@ tests/unit/test_jit_*.cpp   Catch2 differential tests
 
 A plain struct the fork fills in once per `SH2` instance. It points at the live SH2 fields instead of copying them, so the JIT holds no architectural state of its own:
 
-- registers `R[16]`, `PC`, `PR`, `GBR`, `VBR`, `SR`
+- registers `R[16]`, `PC`, `PR`, `GBR`, `VBR`, `SR`, `MACL`, `MACH`
 - pipeline state: delay-slot flag and target, `m_wbReg`, the 32-bit instruction fetch buffer
 - interrupt state: `intrPending`, `intrAllow`
 - `m_cyclesExecuted`, kept current by the executor before every interpreter call and (via the `SyncCycles` IR op) before every memory access, because on-chip timers (WDT, FRT) read it
 - an opaque owner pointer passed to every callback
-- callbacks into the fork: `interpretOne` (`InterpretNext<false, false>()`), `read`/`write` (`MemRead`/`MemWrite` with cache emulation off), `peekInstruction` (side-effect-free fetch for decoding and validation), `accessCycles`, `busWait`, `refillPipeline`, `setupDelaySlot`, `endDelaySlot`
+- callbacks into the fork: `interpretOne` (`InterpretNext<false, false>()`), `read`/`write` (`MemRead`/`MemWrite` with cache emulation off), `peekInstruction` (side-effect-free fetch for decoding and validation), `accessCycles`, `busWait`, `refillPipeline`, `setupDelaySlot`, `endDelaySlot`, `setSR` (`SH2::JitSetSR`: the `LDC Rm,SR` state change -- mask to `0x3F3`, recompute the pending interrupt, clear interrupt-allow)
 
 `brimir-jit` includes only `ymir/core/types.hpp`, `sh2_jit_iface.hpp` and (in the front end) `sh2_decode.hpp`, not `sh2.hpp` or the bus header.
 
@@ -132,7 +132,7 @@ So an interrupt unmasked by `LDC Rm,SR` is taken after exactly one further instr
 
 ### 5.2 IR
 
-Linear, single-assignment within a block, about 40 operations, designed to map directly to x64 and ARM64:
+Linear, single-assignment within a block, about 55 operations, designed to map directly to x64 and ARM64:
 
 - **guest state**: load/store general register, `PC`, `PR`, `GBR`, `VBR`, `MACH`/`MACL`, `SR` and individual `SR` bits (T, S, Q, M, interrupt mask)
 - **ALU (32-bit)**: add, sub, and, or, xor, not, neg, shifts and rotates (including through T), sign/zero extend, compare to T, add/sub with carry and overflow into T, multiply, the division steps (`DIV0S`, `DIV0U`, `DIV1`)
@@ -191,7 +191,7 @@ The JIT holds no architectural state between blocks, so the save-state format do
 
 ### 6.5 Known deviations
 
-- A store into the currently executing block's own code takes effect at the next block entry (check-on-entry), not at the next instruction.
+- Self-modifying code: any write into the currently executing block's own code -- a store in any addressing mode, a read-modify-write (`AND.B`/`OR.B`/`XOR.B #imm,@(R0,GBR)`, `TAS.B`), or a DMA transfer started by a store -- takes effect at the next block entry (check-on-entry), whereas the interpreter fetches fresh opcodes at every aligned PC and so sees the change at the next instruction fetch.
 - Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction. An aborted block returns only the cycles accumulated before the abort; the interpreter would return the whole instruction's cost.
 - Dev-log lines that print the current PC (for example on-chip register access traces) show the block's start PC for accesses made by compiled code, because the JIT does not update `PC` inside a block. Emulated state is unaffected.
 
@@ -208,10 +208,10 @@ Catch2, tag `[jit]`, in `tests/unit/`:
 
 ### 7.2 Whole-system lockstep (CI and real games)
 
-Because blocks stop at the interpreter's instruction boundaries (section 2), a core running the JIT and a core running the interpreter must stay identical. `brimir::RunLockstep` runs two `CoreWrapper` instances frame by frame and compares, after every frame: both SH-2s (field level, including timers, DMAC, cache arrays and the pending interrupt), the slave SH-2 enable flag, work RAM, the full save state of every other subsystem (scheduler, SCU, SMPC, VDP, SCSP, CD block, spillover counters; compared per subsystem), audio samples and the output frame. Threaded VDP rendering is turned off for lockstep runs, and the RTC runs in virtual mode (emulated time) instead of reading the host clock, which otherwise makes two interpreter cores diverge in the BIOS.
+Because blocks stop at the interpreter's instruction boundaries (section 2), a core running the JIT and a core running the interpreter must stay identical. `brimir::RunLockstep` runs two `CoreWrapper` instances frame by frame and compares, after every frame: both SH-2s (field level, including timers, DMAC, cache arrays and the pending interrupt), the slave SH-2 enable flag, low and high work RAM, the 32 KiB internal backup RAM and the contents of an inserted backup memory cartridge (neither is part of the save state), the full save state of every other subsystem (scheduler, system, SCU, SMPC, VDP, SCSP, CD block -- HLE or SH-1/YGR/CD drive/DRAM when LLE -- and spillover counters; compared per subsystem), audio samples and the output frame. Without loaded content no backup RAM image exists (reads return `0xFF`, writes are dropped), so `PrepareLockstepCore` gives both cores a formatted in-memory one. Threaded VDP rendering is turned off for lockstep runs, and the RTC runs in virtual mode (emulated time) instead of reading the host clock, which otherwise makes two interpreter cores diverge in the BIOS.
 
 - A control run (two interpreter cores) proves the emulator is deterministic, so a JIT divergence points at the JIT.
-- CI runs the null-IPL smoke test plus a synthetic interrupt-driven workload (master SH-2 loop with WRAM traffic and FRT compare-match interrupts, 240 frames), each with an interpreter-vs-interpreter control. The slave SH-2 and the other subsystems' interrupts are covered only by BIOS and game runs. (When a BIOS is present in `tests/fixtures/`, the test suite also runs it in lockstep for 600 frames; CI has none.)
+- CI runs the null-IPL smoke test plus a synthetic interrupt-driven workload (master SH-2 loop with WRAM traffic and FRT compare-match interrupts, 240 frames), each with an interpreter-vs-interpreter control. The workload's loop reads FRCH: that read advances the FRT inside the compiled block, so the compare-match interrupt becomes pending mid-block and exercises the block's interrupt boundary checks (otherwise the FRT advances only between `Advance` slices and the interrupt is always pending at block entry). The slave SH-2 and the other subsystems' interrupts are covered only by BIOS and game runs. (When a BIOS is present in `tests/fixtures/`, the test suite also runs it in lockstep for 600 frames; CI has none.)
 - Real games: `brimir_bench --lockstep N` (section 7.3).
 
 This replaces the shadow-verify mode planned earlier: lockstep checks the whole system, including bus side effects that shadow-verify had to skip.

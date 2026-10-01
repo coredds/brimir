@@ -90,9 +90,23 @@ build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lock
 `--lockstep N` loads the same content (and optional `--state`) into two cores,
 one running both SH-2s through the JIT and one through the interpreter, runs
 them side by side for N frames, and compares them after every frame (see
-`design/sh2-jit.md` section 7.2). Compared: both SH-2s including their cache
-arrays, on-chip timers and DMA controller, low and high work RAM, and the
-output frame.
+`design/sh2-jit.md` section 7.2). Compared after every frame, in this order:
+
+- the audio samples produced during the frame (count and values);
+- both SH-2s: registers, pipeline state, cache arrays and the on-chip
+  peripherals (FRT, WDT, DMAC, DIVU, BSC, INTC and the pending interrupt), plus
+  the slave SH-2 enable flag;
+- low and high work RAM;
+- the 32 KiB internal backup RAM, and the contents of a backup memory
+  cartridge if one is inserted;
+- the save state of every other subsystem (scheduler, system, SCU, SMPC, VDP,
+  SCSP, the CD block -- HLE, or SH-1/YGR/CD drive/DRAM when LLE -- and the
+  spillover cycle counters);
+- the output frame.
+
+Without `--game` no backup RAM image is loaded, so lockstep mode gives both
+cores a formatted in-memory one; the BIOS then reads and writes backup RAM as
+on a real console.
 
 In this mode threaded VDP rendering is turned off, and the RTC runs on emulated
 time (virtual mode) instead of the host clock, so both cores see the same date
@@ -111,7 +125,10 @@ lockstep: OK, 36000 frames identical (jit master blocksRun ..., interpreted ...)
 
 On the first difference it prints the frame number (0-based) and the first
 differing field, for example
-`lockstep divergence at frame 1234: master SH-2 R4 differs: a=0x... b=0x...`
+`lockstep divergence at frame 1234: master SH-2 R4 differs: a=0x... b=0x...`,
+`internal backup RAM[0x0123] differs: a=0x... b=0x...` or
+`vdp state differs (byte offset N)` (subsystem save states are compared
+bytewise, so only the offset within the state is reported)
 (`a` is the JIT core), and exits with code 3. `--lockstep` cannot be combined
 with `--dump-at`, `--sh2-jit`, `--frames` or `--warmup` (usage error, exit 1):
 it always runs one JIT core and one interpreter core for exactly N frames.

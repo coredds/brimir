@@ -11,6 +11,7 @@
 namespace brimir::jit {
 
 constexpr uint32_t kMaxBlockInstructions = 32;
+static_assert(kMaxBlockInstructions <= 255, "ExitInfo::retired and Inst::retired are uint8_t");
 
 // Whether code at pc may be compiled: cached (0b000) and cache-through (0b001, 0b101) areas.
 bool IsCompilableAddress(uint32_t pc);

@@ -541,11 +541,12 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     constexpr int kPrograms = 300;
     constexpr int kLength = 24;
     constexpr int kSteps = 80;
-    // Coverage lower bounds, ~65% of the values measured with all 300 programs passing
-    // (steps=15527 blocksRun=15378 interpreted=149 compiles=1134, i.e. 99% of steps
-    // in blocks).
+    // Coverage lower bounds. Measured with all 300 programs passing: steps=15527 blocksRun=15378
+    // interpreted=149 compiles=1134, i.e. 99% of steps in blocks. kMinBlocksRun is ~65% of the
+    // measured count; kMinBlockPercent is 90, leaving room for generator changes but failing if
+    // a regression sends a meaningful share of steps back to the interpreter.
     constexpr uint64_t kMinBlocksRun = 10000;
-    constexpr uint64_t kMinBlockPercent = 64;
+    constexpr uint64_t kMinBlockPercent = 90;
     bool diverged = false;
     uint64_t totalSteps = 0;
     uint64_t totalBlocksRun = 0;
@@ -975,4 +976,44 @@ TEST_CASE("Interrupts unmasked by LDC SR before a delayed branch are taken at th
     REQUIRE(p.exec.GetStats().blocksRun > 0);
     // ldc, bra and the slot form one compiled block.
     REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount == 3u);
+}
+
+// LDC Rm,SR in a delay slot unmasks the pending interrupt. A delay slot never takes an interrupt,
+// and the slot itself clears interrupt-allow for the next instruction, so the interpreter runs the
+// first instruction at the branch target before taking the interrupt.
+TEST_CASE("LDC SR in a delay slot unmasks a pending interrupt", "[jit][diff][exact]") {
+    constexpr uint32_t kBranchTarget = kCode + 0x20;
+    Pair p;
+    RaiseDivuOverflow(p);
+    // kCode: bra kBranchTarget ; ldc R5,SR (slot) ; add #1,R3 ; sleep
+    // bra at kCode: disp = (0x20 - 0 - 4) / 2 = 14.
+    p.WriteCode(kCode, {Bra(14), 0x450E, AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    // kBranchTarget: add #1,R4 ; add #1,R4 ; add #1,R4 ; sleep
+    p.WriteCode(kBranchTarget, {AddI(4, 1), AddI(4, 1), AddI(4, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    state.SR = 0xF0; // mask 15: the level-15 DIVU interrupt is not pending yet
+    state.VBR = kIntrVbr;
+    state.R[3] = 0;
+    state.R[4] = 0;
+    state.R[5] = 0;
+    state.R[15] = kIntrStack;
+    p.Load(state);
+    REQUIRE_FALSE(*p.jit->sh2->GetJitContext().intrPending);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().R[3] == 0u); // the fall-through add never ran
+    REQUIRE(p.ref->State().sleep);      // the handler ran
+    // Interpreter: one instruction at the target runs (the slot's LDC SR cleared interrupt-allow),
+    // then the interrupt is taken.
+    REQUIRE(p.ref->State().R[4] == 1u);
+    REQUIRE(p.ref->Read32(kIntrStack - 8) == kBranchTarget + 2); // stacked PC: after the first add
+    REQUIRE(p.exec.GetStats().blocksRun > 0);
+    // bra and its LDC SR slot form one compiled block.
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount == 2u);
 }
