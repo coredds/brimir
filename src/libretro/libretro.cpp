@@ -45,6 +45,18 @@ static const unsigned g_memdesc_count = sizeof(g_memdesc) / sizeof(g_memdesc[0])
 // Whether the frontend supports RETRO_DEVICE_ID_JOYPAD_MASK (single-call input read)
 static bool g_input_bitmask_supported = false;
 
+// Per-content frame state. Reset on load/unload so a new game always triggers
+// RETRO_ENVIRONMENT_SET_GEOMETRY on its first frame, even at the same resolution.
+static unsigned int g_lastWidth = 0;
+static unsigned int g_lastHeight = 0;
+static size_t g_profileFrameCount = 0;
+
+static void reset_frame_state(void) {
+    g_lastWidth = 0;
+    g_lastHeight = 0;
+    g_profileFrameCount = 0;
+}
+
 // Helper function for logging
 static void brimir_log(retro_log_level level, const char* fmt, ...) {
     if (!log_cb) return;
@@ -98,6 +110,7 @@ struct OptionCache {
     std::string cd_preload = "enabled";
     std::string threaded_vdp1 = "enabled";
     std::string threaded_vdp2 = "enabled";
+    std::string sh2_jit = "disabled";
 } g_options;
 
 static void apply_core_options(bool force) {
@@ -127,6 +140,7 @@ static void apply_core_options(bool force) {
     apply("brimir_cd_preload",              g_options.cd_preload,       [](const char* v){ g_core->SetDiscPreloadEnabled(strcmp(v, "enabled") == 0); });
     apply("brimir_threaded_vdp1",           g_options.threaded_vdp1,    [](const char* v){ g_core->SetThreadedVDP1(strcmp(v, "enabled") == 0); });
     apply("brimir_threaded_vdp2",           g_options.threaded_vdp2,    [](const char* v){ g_core->SetThreadedVDP2(strcmp(v, "enabled") == 0); });
+    apply("brimir_sh2_jit",                 g_options.sh2_jit,          [](const char* v){ g_core->SetSH2JitEnabled(strcmp(v, "enabled") == 0); });
 }
 
 // Libretro API implementation
@@ -232,13 +246,17 @@ RETRO_API void retro_init(void) {
     brimir_log(RETRO_LOG_INFO, "Brimir initializing...");
     brimir_log(RETRO_LOG_INFO, "Based on Ymir emulator by StrikerX3");
     
-    // Create core instance
-    g_core = std::make_unique<brimir::CoreWrapper>();
-    
-    if (!g_core->Initialize()) {
-        brimir_log(RETRO_LOG_ERROR, "Failed to initialize core");
-        g_core.reset();
-        return;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+
+        // Create core instance
+        g_core = std::make_unique<brimir::CoreWrapper>();
+
+        if (!g_core->Initialize()) {
+            brimir_log(RETRO_LOG_ERROR, "Failed to initialize core");
+            g_core.reset();
+            return;
+        }
     }
 
     // Register disk control interface for multi-disc games
@@ -264,8 +282,8 @@ RETRO_API void retro_init(void) {
 RETRO_API void retro_deinit(void) {
     brimir_log(RETRO_LOG_INFO, "Brimir shutting down");
 
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (g_core) {
-        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
         g_core->Shutdown();
         g_core.reset();
     }
@@ -280,7 +298,10 @@ RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     info->library_name = "Brimir";
     info->library_version = BRIMIR_VERSION;
     info->need_fullpath = true;
-    info->valid_extensions = "chd|cue|bin|iso|ccd|img|mds|mdf|m3u";
+    // Only formats Ymir's loader can open directly. Track data files (.bin, .img,
+    // .mdf) must be loaded through their .cue/.ccd/.mds sheet.
+    // Keep in sync with supported_extensions in resources/info/brimir_libretro.info.
+    info->valid_extensions = "chd|cue|ccd|mds|iso|m3u";
 }
 
 RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
@@ -324,18 +345,17 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) 
 RETRO_API void retro_reset(void) {
     brimir_log(RETRO_LOG_INFO, "Reset requested");
 
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (g_core) {
-        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
         g_core->Reset();
     }
 }
 
 RETRO_API void retro_run(void) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
         return;
     }
-
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
 
     // Only re-query core options when the frontend reports a change. This avoids
     // string comparisons and setter calls on every frame when nothing changed.
@@ -345,10 +365,9 @@ RETRO_API void retro_run(void) {
     }
 
     // Performance profiling: dump report every 300 frames if enabled
-    static size_t frame_count = 0;
     if (g_options.profiling == "enabled") {
-        frame_count++;
-        if (frame_count == 300) {
+        g_profileFrameCount++;
+        if (g_profileFrameCount == 300) {
             brimir_log(RETRO_LOG_INFO, "=== Performance Profile (300 frames) ===");
             std::string report = g_core->GetProfilingReport();
             size_t pos = 0;
@@ -362,10 +381,10 @@ RETRO_API void retro_run(void) {
                 pos = end + 1;
             }
             g_core->ResetProfiling();
-            frame_count = 0;
+            g_profileFrameCount = 0;
         }
     } else {
-        frame_count = 0;
+        g_profileFrameCount = 0;
     }
 
     // Poll input
@@ -432,8 +451,7 @@ RETRO_API void retro_run(void) {
         // Update geometry whenever dimensions change, including the first frame.
         // retro_get_system_av_info() reports a fixed fallback base size, so we
         // correct it here as soon as the running content produces its first frame.
-        static unsigned int s_lastWidth = 0, s_lastHeight = 0;
-        if (width != s_lastWidth || height != s_lastHeight) {
+        if (environ_cb && (width != g_lastWidth || height != g_lastHeight)) {
             struct retro_game_geometry geo = {};
             geo.base_width = width;
             geo.base_height = height;
@@ -441,8 +459,8 @@ RETRO_API void retro_run(void) {
             geo.max_height = 512;
             geo.aspect_ratio = 4.0f / 3.0f;
             environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
-            s_lastWidth = width;
-            s_lastHeight = height;
+            g_lastWidth = width;
+            g_lastHeight = height;
         }
         
         video_cb(fb, width, height, pitch);
@@ -459,29 +477,26 @@ RETRO_API void retro_run(void) {
 }
 
 RETRO_API size_t retro_serialize_size(void) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
         return 0;
     }
-
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->GetStateSize();
 }
 
 RETRO_API bool retro_serialize(void* data, size_t size) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
         return false;
     }
-
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->SaveState(data, size);
 }
 
 RETRO_API bool retro_unserialize(const void* data, size_t size) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
         return false;
     }
-
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     return g_core->LoadState(data, size);
 }
 
@@ -502,12 +517,16 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
 
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+
     if (!g_core) {
         brimir_log(RETRO_LOG_ERROR, "Core not initialized");
         return false;
     }
 
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    // New content may report the same resolution as the previous one; force a
+    // geometry update on its first frame regardless.
+    reset_frame_state();
 
     brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path ? game->path : "unknown");
 
@@ -672,48 +691,48 @@ RETRO_API bool retro_load_game_special(unsigned game_type, const struct retro_ga
 RETRO_API void retro_unload_game(void) {
     brimir_log(RETRO_LOG_INFO, "Unloading game");
 
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (g_core) {
-        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
         g_core->UnloadGame();
     }
-
+    reset_frame_state();
 }
 
 // Disk control callbacks
 
 static bool disk_set_eject_state(bool ejected) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     return g_core->SetEjectState(ejected);
 }
 
 static bool disk_get_eject_state(void) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     return g_core->GetEjectState();
 }
 
 static unsigned disk_get_image_index(void) {
-    if (!g_core) return 0;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return 0;
     return static_cast<unsigned>(g_core->GetCurrentDiscIndex());
 }
 
 static bool disk_set_image_index(unsigned index) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     return g_core->SetDiscIndex(index);
 }
 
 static unsigned disk_get_num_images(void) {
-    if (!g_core) return 0;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return 0;
     return static_cast<unsigned>(g_core->GetNumDiscs());
 }
 
 static bool disk_replace_image_index(unsigned index, const struct retro_game_info* info) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     if (info) {
         return g_core->ReplaceDiscIndex(index, info->path);
     } else {
@@ -722,30 +741,31 @@ static bool disk_replace_image_index(unsigned index, const struct retro_game_inf
 }
 
 static bool disk_add_image_index(void) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     return g_core->AddDiscIndex();
 }
 
 static bool disk_set_initial_image(unsigned index, const char* path) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     return g_core->SetInitialDisc(index, path);
 }
 
 static bool disk_get_image_path(unsigned index, char* s, size_t len) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     return g_core->GetDiscPath(index, s, len);
 }
 
 static bool disk_get_image_label(unsigned index, char* s, size_t len) {
-    if (!g_core) return false;
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_core) return false;
     return g_core->GetDiscLabel(index, s, len);
 }
 
 RETRO_API unsigned retro_get_region(void) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (g_core && g_core->IsGameLoaded()) {
         return g_core->GetConsoleRegion() == brimir::ConsoleRegion::PAL
                ? RETRO_REGION_PAL
@@ -755,6 +775,7 @@ RETRO_API unsigned retro_get_region(void) {
 }
 
 RETRO_API void* retro_get_memory_data(unsigned id) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
         return nullptr;
     }
@@ -770,6 +791,7 @@ RETRO_API void* retro_get_memory_data(unsigned id) {
 }
 
 RETRO_API size_t retro_get_memory_size(unsigned id) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
         return 0;
     }

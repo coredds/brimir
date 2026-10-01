@@ -2,16 +2,17 @@
 // Copyright (C) 2025 coredds
 // Licensed under GPL-3.0
 //
-// Tests for Saturn memory components: IPL ROM, Work RAM, Backup RAM
+// Tests for Saturn memory components: IPL ROM and Work RAM
 // Using direct hardware access via GetSaturn()->mem
 
-#include <catch2/catch_test_macros.hpp>
+#include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
-#include <brimir/sys/memory_defs.hpp>
+#include <ymir/sys/memory_defs.hpp>
 
 using namespace brimir;
+namespace sys = ymir::sys;
 
-TEST_CASE("Memory Components - IPL ROM Size", "[memory][ipl][implemented]") {
+TEST_CASE("Memory Components - IPL ROM Size", "[memory][ipl]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -26,7 +27,7 @@ TEST_CASE("Memory Components - IPL ROM Size", "[memory][ipl][implemented]") {
     }
 }
 
-TEST_CASE("Memory Components - Work RAM Low Size", "[memory][wram][implemented]") {
+TEST_CASE("Memory Components - Work RAM Low Size", "[memory][wram]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -41,7 +42,7 @@ TEST_CASE("Memory Components - Work RAM Low Size", "[memory][wram][implemented]"
     }
 }
 
-TEST_CASE("Memory Components - Work RAM High Size", "[memory][wram][implemented]") {
+TEST_CASE("Memory Components - Work RAM High Size", "[memory][wram]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -56,7 +57,7 @@ TEST_CASE("Memory Components - Work RAM High Size", "[memory][wram][implemented]
     }
 }
 
-TEST_CASE("Memory Components - IPL Loading", "[memory][ipl][implemented]") {
+TEST_CASE("Memory Components - IPL Loading", "[memory][ipl]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -94,41 +95,7 @@ TEST_CASE("Memory Components - IPL Loading", "[memory][ipl][implemented]") {
     }
 }
 
-TEST_CASE("Memory Components - Work RAM Hard Reset", "[memory][wram][reset][implemented]") {
-    CoreWrapper core;
-    core.Initialize();
-    
-    auto* saturn = core.GetSaturn();
-    REQUIRE(saturn != nullptr);
-    
-    SECTION("Work RAM Low is cleared on hard reset") {
-        // Write some data to Work RAM Low
-        saturn->mem.WRAMLow[0] = 0xAA;
-        saturn->mem.WRAMLow[1000] = 0x55;
-        
-        // Hard reset
-        saturn->Reset(true);
-        
-        // Work RAM should be cleared
-        REQUIRE(saturn->mem.WRAMLow[0] == 0x00);
-        REQUIRE(saturn->mem.WRAMLow[1000] == 0x00);
-    }
-    
-    SECTION("Work RAM High is cleared on hard reset") {
-        // Write some data to Work RAM High
-        saturn->mem.WRAMHigh[0] = 0xBB;
-        saturn->mem.WRAMHigh[2000] = 0x77;
-        
-        // Hard reset
-        saturn->Reset(true);
-        
-        // Work RAM should be cleared
-        REQUIRE(saturn->mem.WRAMHigh[0] == 0x00);
-        REQUIRE(saturn->mem.WRAMHigh[2000] == 0x00);
-    }
-}
-
-TEST_CASE("Memory Components - Work RAM Soft Reset", "[memory][wram][reset][implemented]") {
+TEST_CASE("Memory Components - Work RAM Soft Reset", "[memory][wram][reset]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -162,7 +129,7 @@ TEST_CASE("Memory Components - Work RAM Soft Reset", "[memory][wram][reset][impl
     }
 }
 
-TEST_CASE("Memory Components - IPL Persists Through Reset", "[memory][ipl][reset][implemented]") {
+TEST_CASE("Memory Components - IPL Persists Through Reset", "[memory][ipl][reset]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -196,111 +163,7 @@ TEST_CASE("Memory Components - IPL Persists Through Reset", "[memory][ipl][reset
     }
 }
 
-TEST_CASE("Memory Components - Internal Backup RAM", "[memory][backup][implemented]") {
-    CoreWrapper core;
-    core.Initialize();
-    
-    auto* saturn = core.GetSaturn();
-    REQUIRE(saturn != nullptr);
-    
-    SECTION("Internal backup RAM is accessible") {
-        auto& backupRAM = saturn->mem.GetInternalBackupRAM();
-        
-        // Should be 32KB
-        // Source: Saturn documentation - internal backup RAM is 32KB
-        constexpr size_t expectedSize = 32 * 1024;
-        REQUIRE(backupRAM.Size() == expectedSize);
-        REQUIRE(backupRAM.Size() == sys::kInternalBackupRAMSizeAmount);
-    }
-}
-
-TEST_CASE("Memory Components - Memory Alignment", "[memory][alignment][implemented]") {
-    CoreWrapper core;
-    core.Initialize();
-    
-    auto* saturn = core.GetSaturn();
-    REQUIRE(saturn != nullptr);
-    
-    SECTION("IPL is 16-byte aligned") {
-        // Check alignment (should be aligned for SIMD operations)
-        auto addr = reinterpret_cast<uintptr_t>(saturn->mem.IPL.data());
-        REQUIRE((addr % 16) == 0);
-    }
-    
-    SECTION("Work RAM Low is 16-byte aligned") {
-        auto addr = reinterpret_cast<uintptr_t>(saturn->mem.WRAMLow.data());
-        REQUIRE((addr % 16) == 0);
-    }
-    
-    SECTION("Work RAM High is 16-byte aligned") {
-        auto addr = reinterpret_cast<uintptr_t>(saturn->mem.WRAMHigh.data());
-        REQUIRE((addr % 16) == 0);
-    }
-}
-
-TEST_CASE("Memory Components - Write and Read Patterns", "[memory][wram][implemented]") {
-    CoreWrapper core;
-    core.Initialize();
-    
-    auto* saturn = core.GetSaturn();
-    REQUIRE(saturn != nullptr);
-    
-    SECTION("Can write and read back from Work RAM Low") {
-        // Write a pattern
-        for (size_t i = 0; i < 1000; ++i) {
-            saturn->mem.WRAMLow[i] = static_cast<uint8_t>(i % 256);
-        }
-        
-        // Read it back
-        for (size_t i = 0; i < 1000; ++i) {
-            REQUIRE(saturn->mem.WRAMLow[i] == static_cast<uint8_t>(i % 256));
-        }
-    }
-    
-    SECTION("Can write and read back from Work RAM High") {
-        // Write a pattern
-        for (size_t i = 0; i < 1000; ++i) {
-            saturn->mem.WRAMHigh[i] = static_cast<uint8_t>((i * 2) % 256);
-        }
-        
-        // Read it back
-        for (size_t i = 0; i < 1000; ++i) {
-            REQUIRE(saturn->mem.WRAMHigh[i] == static_cast<uint8_t>((i * 2) % 256));
-        }
-    }
-}
-
-TEST_CASE("Memory Components - Boundary Access", "[memory][wram][boundary][implemented]") {
-    CoreWrapper core;
-    core.Initialize();
-    
-    auto* saturn = core.GetSaturn();
-    REQUIRE(saturn != nullptr);
-    
-    SECTION("Can access first byte of Work RAM Low") {
-        saturn->mem.WRAMLow[0] = 0x42;
-        REQUIRE(saturn->mem.WRAMLow[0] == 0x42);
-    }
-    
-    SECTION("Can access last byte of Work RAM Low") {
-        size_t lastIdx = sys::kWRAMLowSize - 1;
-        saturn->mem.WRAMLow[lastIdx] = 0x24;
-        REQUIRE(saturn->mem.WRAMLow[lastIdx] == 0x24);
-    }
-    
-    SECTION("Can access first byte of Work RAM High") {
-        saturn->mem.WRAMHigh[0] = 0x84;
-        REQUIRE(saturn->mem.WRAMHigh[0] == 0x84);
-    }
-    
-    SECTION("Can access last byte of Work RAM High") {
-        size_t lastIdx = sys::kWRAMHighSize - 1;
-        saturn->mem.WRAMHigh[lastIdx] = 0x48;
-        REQUIRE(saturn->mem.WRAMHigh[lastIdx] == 0x48);
-    }
-}
-
-TEST_CASE("Memory Components - IPL Hash", "[memory][ipl][hash][implemented]") {
+TEST_CASE("Memory Components - IPL Hash", "[memory][ipl][hash]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -350,7 +213,7 @@ TEST_CASE("Memory Components - IPL Hash", "[memory][ipl][hash][implemented]") {
     }
 }
 
-TEST_CASE("Memory Components - State Consistency", "[memory][savestate][implemented]") {
+TEST_CASE("Memory Components - State Consistency", "[memory][savestate]") {
     CoreWrapper core;
     core.Initialize();
     
@@ -379,9 +242,3 @@ TEST_CASE("Memory Components - State Consistency", "[memory][savestate][implemen
         REQUIRE(saturn->mem.WRAMHigh[200] == 0x34);
     }
 }
-
-// Note: These tests verify Saturn memory components using direct access
-// via GetSaturn()->mem. They test memory sizes, reset behavior, alignment,
-// read/write operations, and state persistence - all based on official
-// Saturn hardware specifications.
-

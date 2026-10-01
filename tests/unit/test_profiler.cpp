@@ -104,7 +104,8 @@ TEST_CASE("Profiler aggregates concurrent same-name scopes and snapshots", "[pro
     brimir::Profiler profiler;
     profiler.SetEnabled(true);
     std::barrier start(5);
-    std::vector<std::jthread> workers;
+    // std::thread with explicit joins: Apple Clang's libc++ has no std::jthread.
+    std::vector<std::thread> workers;
     for (int worker = 0; worker < 4; ++worker) {
         workers.emplace_back([&] {
             start.arrive_and_wait();
@@ -120,7 +121,9 @@ TEST_CASE("Profiler aggregates concurrent same-name scopes and snapshots", "[pro
         (void)profiler.GetTiming("shared");
         (void)profiler.GetReport();
     }
-    workers.clear(); // Join before checking exact sample counts.
+    for (auto &worker : workers) { // Join before checking exact sample counts.
+        worker.join();
+    }
     const auto timing = profiler.GetTiming("shared");
     REQUIRE(timing);
     CHECK(timing->count == 4000);
@@ -130,7 +133,7 @@ TEST_CASE("Profiler reset and toggles invalidate scopes held by callback threads
     brimir::Profiler profiler;
     profiler.SetEnabled(true);
     std::barrier phase(2);
-    std::jthread callback([&] {
+    std::thread callback([&] {
         for (int i = 0; i < 100; ++i) {
             {
                 brimir::ScopedTimer stale(profiler, "callback");
@@ -157,6 +160,7 @@ TEST_CASE("Profiler reset and toggles invalidate scopes held by callback threads
         CHECK(timings.size() == 1);
         CHECK((timings.contains("callback") && timings.at("callback").count == 1));
     }
+    callback.join();
 }
 
 TEST_CASE("Wrapper profiling can be enabled reset and disabled live", "[profiler][integration]") {
@@ -181,4 +185,70 @@ TEST_CASE("Wrapper profiling can be enabled reset and disabled live", "[profiler
     CHECK(core.GetProfilingReport().empty());
     core.RunFrame();
     CHECK_FALSE(core.GetProfilingReport().empty());
+}
+
+TEST_CASE("Profiler AddSample aggregates only while enabled", "[profiler][unit]") {
+    brimir::Profiler profiler;
+    REQUIRE_FALSE(profiler.IsEnabled());
+    profiler.AddSample("X", 1.0);
+    REQUIRE_FALSE(profiler.GetTiming("X").has_value());
+
+    profiler.SetEnabled(true);
+    REQUIRE(profiler.IsEnabled());
+    profiler.AddSample("X", 1.0);
+    profiler.AddSample("X", 3.0);
+
+    const auto timing = profiler.GetTiming("X");
+    REQUIRE(timing.has_value());
+    REQUIRE(timing->count == 2);
+    REQUIRE(timing->totalMs == Catch::Approx(4.0));
+    REQUIRE(timing->minMs == Catch::Approx(1.0));
+    REQUIRE(timing->maxMs == Catch::Approx(3.0));
+}
+
+TEST_CASE("SH-2 host time accounting is off by default and consumable", "[profiler][sh2]") {
+    brimir::CoreWrapper core;
+    REQUIRE(core.Initialize());
+    auto* saturn = core.GetSaturn();
+    REQUIRE(saturn != nullptr);
+
+    // Uses the built-in null IPL program (no BIOS loaded).
+    core.RunFrame();
+    REQUIRE(saturn->masterSH2.ConsumeHostTimeNs() == 0);
+
+    saturn->masterSH2.SetHostTimeProfiling(true);
+    core.RunFrame();
+    REQUIRE(saturn->masterSH2.ConsumeHostTimeNs() > 0);
+    REQUIRE(saturn->masterSH2.ConsumeHostTimeNs() == 0);
+
+    saturn->masterSH2.SetHostTimeProfiling(false);
+    core.RunFrame();
+    REQUIRE(saturn->masterSH2.ConsumeHostTimeNs() == 0);
+}
+
+TEST_CASE("Enabled wrapper profiling records SH-2 time per frame", "[profiler][integration]") {
+    brimir::CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetProfilingEnabled(true);
+    for (int i = 0; i < 3; ++i) {
+        core.RunFrame();
+    }
+
+    const auto master = core.GetProfiler().GetTiming("SH2_Master");
+    const auto slave = core.GetProfiler().GetTiming("SH2_Slave");
+    REQUIRE(master.has_value());
+    REQUIRE(slave.has_value());
+    REQUIRE(master->count == 3);
+    REQUIRE(slave->count == 3);
+    REQUIRE(master->totalMs > 0.0);
+}
+
+TEST_CASE("Profiling enabled before Initialize applies to the SH-2s", "[profiler][integration]") {
+    brimir::CoreWrapper core;
+    core.SetProfilingEnabled(true);
+    REQUIRE(core.Initialize());
+    core.RunFrame();
+    const auto master = core.GetProfiler().GetTiming("SH2_Master");
+    REQUIRE(master.has_value());
+    REQUIRE(master->totalMs > 0.0);
 }

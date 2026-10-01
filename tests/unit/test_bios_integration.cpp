@@ -2,246 +2,224 @@
 // Copyright (C) 2025 coredds
 // Licensed under GPL-3.0
 //
-// These tests run ONLY if real BIOS files are available in tests/fixtures/
-// They are automatically skipped if BIOS files are not present.
+// These tests run ONLY if real BIOS images are present in tests/fixtures/.
+// They SKIP cleanly when no BIOS is available (e.g. on CI).
 
-#include <catch2/catch_test_macros.hpp>
+#include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
+#include <brimir/jit/executor.hpp>
+#include <brimir/lockstep.hpp>
+#include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <vector>
 
 using namespace brimir;
 
 namespace {
 
-// Expected BIOS checksums (MD5)
-struct BIOSInfo {
-    const char* filename;
-    const char* region;
-    size_t expectedSize;
-    const char* expectedMD5;
+constexpr size_t kIPLSize = 512 * 1024;
+
+// Candidate BIOS file names, checked in order.
+const char* const kBIOSCandidates[] = {
+    "sega_101.bin",
+    "sega_100.bin",
+    "Sega Saturn BIOS (EUR).bin",
+    "Sega Saturn BIOS v1.01 (JAP).bin",
+    "Sega Saturn BIOS v1.00 (JAP).bin",
 };
 
-const BIOSInfo knownBIOS[] = {
-    {"sega_101.bin", "US", 512 * 1024, "f273555d7d91e8a5a6bfd9bcf066331c"},
-    {"sega_100.bin", "EU", 512 * 1024, "2aba43c2f1526c5e898dfe1cafbfc53a"},
-    {"sega1003.bin", "JP", 512 * 1024, "3240872c70984b6cbfda1586cab68dbe"},
-};
-
-bool BIOSFileExists(const char* filename) {
-    std::filesystem::path biosPath = std::filesystem::path("tests/fixtures") / filename;
-    return std::filesystem::exists(biosPath);
+std::filesystem::path FixturesDir() {
+    // tests/unit/<this file> -> tests/fixtures
+    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures";
 }
 
-std::filesystem::path GetBIOSPath(const char* filename) {
-    return std::filesystem::path("tests/fixtures") / filename;
+std::vector<std::filesystem::path> AvailableBIOS() {
+    std::vector<std::filesystem::path> found;
+    for (const char* name : kBIOSCandidates) {
+        auto path = FixturesDir() / name;
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(path, ec) && std::filesystem::file_size(path, ec) == kIPLSize) {
+            found.push_back(path);
+        }
+    }
+    return found;
 }
 
-bool AnyBIOSAvailable() {
-    for (const auto& bios : knownBIOS) {
-        if (BIOSFileExists(bios.filename)) {
-            return true;
+std::vector<uint8_t> ReadFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
+
+// Runs up to 600 frames and returns true once the framebuffer shows a non-black pixel.
+bool RendersNonBlackFrame(CoreWrapper &core) {
+    for (int i = 0; i < 600; ++i) {
+        core.RunFrame();
+        if (i < 60 || i % 30 != 0) {
+            continue;
+        }
+        const auto *fb = static_cast<const uint32_t *>(core.GetFramebuffer());
+        const uint32_t w = core.GetFramebufferWidth();
+        const uint32_t h = core.GetFramebufferHeight();
+        const uint32_t stride = core.GetFramebufferPitch() / sizeof(uint32_t);
+        CAPTURE(i, w, h, stride);
+        REQUIRE(fb != nullptr);
+        REQUIRE(w > 0);
+        REQUIRE(h > 0);
+        REQUIRE(stride >= w);
+        for (uint32_t y = 0; y < h; ++y) {
+            for (uint32_t x = 0; x < w; ++x) {
+                if ((fb[y * stride + x] & 0x00FFFFFF) != 0) {
+                    return true;
+                }
+            }
         }
     }
     return false;
 }
 
-} // anonymous namespace
+} // namespace
 
-TEST_CASE("BIOS integration - Real BIOS files", "[bios][integration][!mayfail]") {
-    if (!AnyBIOSAvailable()) {
-        SKIP("No BIOS files found in tests/fixtures/ - skipping integration tests");
+TEST_CASE("BIOS integration - real BIOS images load into IPL ROM", "[bios][integration]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
     }
-    
-    CoreWrapper core;
-    core.Initialize();
-    
-    SECTION("Load US BIOS if available") {
-        if (!BIOSFileExists("sega_101.bin")) {
-            SKIP("US BIOS not available");
-        }
-        
-        auto biosPath = GetBIOSPath("sega_101.bin");
-        bool result = core.LoadIPLFromFile(biosPath.string().c_str());
-        
-        REQUIRE(result);
+
+    for (const auto& biosPath : biosFiles) {
+        INFO("BIOS: " << biosPath.filename().string());
+
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
         REQUIRE(core.IsIPLLoaded());
-        
-        INFO("Successfully loaded US BIOS: " << biosPath);
-    }
-    
-    SECTION("Load EU BIOS if available") {
-        if (!BIOSFileExists("sega_100.bin")) {
-            SKIP("EU BIOS not available");
-        }
-        
-        auto biosPath = GetBIOSPath("sega_100.bin");
-        bool result = core.LoadIPLFromFile(biosPath.string().c_str());
-        
-        REQUIRE(result);
-        REQUIRE(core.IsIPLLoaded());
-        
-        INFO("Successfully loaded EU BIOS: " << biosPath);
-    }
-    
-    SECTION("Load JP BIOS if available") {
-        if (!BIOSFileExists("sega1003.bin")) {
-            SKIP("JP BIOS not available");
-        }
-        
-        auto biosPath = GetBIOSPath("sega1003.bin");
-        bool result = core.LoadIPLFromFile(biosPath.string().c_str());
-        
-        REQUIRE(result);
-        REQUIRE(core.IsIPLLoaded());
-        
-        INFO("Successfully loaded JP BIOS: " << biosPath);
+
+        const auto expected = ReadFile(biosPath);
+        REQUIRE(expected.size() == kIPLSize);
+
+        auto* saturn = core.GetSaturn();
+        REQUIRE(saturn != nullptr);
+        REQUIRE(std::equal(expected.begin(), expected.end(), saturn->mem.IPL.begin()));
     }
 }
 
-TEST_CASE("BIOS boot sequence", "[bios][integration][!mayfail]") {
-    if (!AnyBIOSAvailable()) {
-        SKIP("No BIOS files found - skipping boot tests");
+TEST_CASE("BIOS integration - real BIOS boots and renders", "[bios][integration]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
     }
-    
+
+    const auto& biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
     CoreWrapper core;
-    core.Initialize();
-    
-    // Try to find any available BIOS
-    const char* availableBIOS = nullptr;
-    for (const auto& bios : knownBIOS) {
-        if (BIOSFileExists(bios.filename)) {
-            availableBIOS = bios.filename;
-            break;
-        }
-    }
-    
-    if (!availableBIOS) {
-        SKIP("No BIOS files available");
-    }
-    
-    SECTION("BIOS loads and emulator runs") {
-        auto biosPath = GetBIOSPath(availableBIOS);
-        bool loadResult = core.LoadIPLFromFile(biosPath.string().c_str());
-        REQUIRE(loadResult);
-        
-        // Try to run a frame with BIOS loaded
-        REQUIRE_NOTHROW(core.RunFrame());
-        
-        // Verify video output is available
-        auto fb = core.GetFramebuffer();
-        REQUIRE(fb != nullptr);
-        
-        auto width = core.GetFramebufferWidth();
-        auto height = core.GetFramebufferHeight();
-        REQUIRE(width > 0);
-        REQUIRE(height > 0);
-        
-        INFO("BIOS boot test passed with: " << availableBIOS);
-    }
-    
-    SECTION("Multiple frames with BIOS") {
-        auto biosPath = GetBIOSPath(availableBIOS);
-        core.LoadIPLFromFile(biosPath.string().c_str());
-        
-        // Run several frames
-        for (int i = 0; i < 10; ++i) {
-            REQUIRE_NOTHROW(core.RunFrame());
-        }
-        
-        // Should still be functional
-        REQUIRE(core.IsInitialized());
-        REQUIRE(core.IsIPLLoaded());
-        
-        INFO("Successfully ran 10 frames with BIOS");
-    }
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
+
+    // With no disc inserted the BIOS boots to its system menu / CD player.
+    REQUIRE(RendersNonBlackFrame(core));
+    REQUIRE(core.IsIPLLoaded());
 }
 
-TEST_CASE("BIOS file validation", "[bios][integration][!mayfail]") {
-    if (!AnyBIOSAvailable()) {
-        SKIP("No BIOS files found - skipping validation tests");
+TEST_CASE("BIOS integration - save/load cycles while BIOS is running", "[bios][integration][savestate]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
     }
-    
-    SECTION("Verify BIOS file sizes") {
-        for (const auto& bios : knownBIOS) {
-            if (!BIOSFileExists(bios.filename)) {
-                continue;
-            }
-            
-            auto biosPath = GetBIOSPath(bios.filename);
-            auto fileSize = std::filesystem::file_size(biosPath);
-            
-            REQUIRE(fileSize == bios.expectedSize);
-            
-            INFO(bios.region << " BIOS (" << bios.filename << ") has correct size: " << fileSize << " bytes");
-        }
-    }
-    
-    SECTION("BIOS files are readable") {
-        for (const auto& bios : knownBIOS) {
-            if (!BIOSFileExists(bios.filename)) {
-                continue;
-            }
-            
-            auto biosPath = GetBIOSPath(bios.filename);
-            std::ifstream file(biosPath, std::ios::binary);
-            
-            REQUIRE(file.is_open());
-            REQUIRE(file.good());
-            
-            // Read first 16 bytes to verify file is accessible
-            std::vector<uint8_t> header(16);
-            file.read(reinterpret_cast<char*>(header.data()), 16);
-            
-            REQUIRE(file.gcount() == 16);
-            
-            INFO(bios.region << " BIOS is readable");
-        }
-    }
-}
 
-TEST_CASE("BIOS performance baseline", "[bios][integration][benchmark][!mayfail]") {
-    if (!AnyBIOSAvailable()) {
-        SKIP("No BIOS files found - skipping performance tests");
-    }
-    
+    const auto& biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
     CoreWrapper core;
-    core.Initialize();
-    
-    // Find first available BIOS
-    const char* availableBIOS = nullptr;
-    for (const auto& bios : knownBIOS) {
-        if (BIOSFileExists(bios.filename)) {
-            availableBIOS = bios.filename;
-            break;
-        }
-    }
-    
-    if (!availableBIOS) {
-        SKIP("No BIOS files available");
-    }
-    
-    SECTION("BIOS load time") {
-        auto biosPath = GetBIOSPath(availableBIOS);
-        
-        // Load BIOS (just verify it doesn't take too long)
-        bool result = core.LoadIPLFromFile(biosPath.string().c_str());
-        REQUIRE(result);
-        
-        INFO("BIOS loaded: " << availableBIOS);
-    }
-    
-    SECTION("Frame execution with BIOS") {
-        auto biosPath = GetBIOSPath(availableBIOS);
-        core.LoadIPLFromFile(biosPath.string().c_str());
-        
-        // Run 60 frames (1 second at 60 FPS)
-        for (int i = 0; i < 60; ++i) {
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
+
+    const auto stateSize = core.GetStateSize();
+    std::vector<uint8_t> state(stateSize);
+
+    for (int cycle = 0; cycle < 10; ++cycle) {
+        CAPTURE(cycle);
+        for (int i = 0; i < 5; ++i) {
             core.RunFrame();
         }
-        
-        INFO("Successfully ran 60 frames with BIOS (baseline performance)");
+        REQUIRE(core.SaveState(state.data(), stateSize));
+        REQUIRE(core.LoadState(state.data(), stateSize));
     }
+
+    // A state saved at frame N and restored after running further must rewind WRAM.
+    REQUIRE(core.SaveState(state.data(), stateSize));
+    auto* saturn = core.GetSaturn();
+    REQUIRE(saturn != nullptr);
+    // Copy to the heap: WRAMHigh is 1 MiB, too large for the stack.
+    const std::vector<uint8_t> wramBefore(saturn->mem.WRAMHigh.begin(), saturn->mem.WRAMHigh.end());
+    for (int i = 0; i < 30; ++i) {
+        core.RunFrame();
+    }
+    REQUIRE(core.LoadState(state.data(), stateSize));
+    REQUIRE(std::equal(wramBefore.begin(), wramBefore.end(), saturn->mem.WRAMHigh.begin()));
 }
 
+TEST_CASE("BIOS integration - real BIOS boots and renders with the SH-2 JIT", "[bios][integration][jit]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
+    }
+
+    const auto &biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
+    CoreWrapper core;
+    core.SetSH2JitEnabled(true);
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
+    REQUIRE(RendersNonBlackFrame(core));
+    REQUIRE(core.GetSH2JitExecutor(true)->GetStats().blocksRun > 0);
+}
+
+// Control: the BIOS reads the RTC, which made two interpreter cores diverge (host clock) until
+// PrepareLockstepCore switched to the virtual RTC.
+TEST_CASE("BIOS integration - lockstep control: two interpreter cores stay identical", "[bios][integration][lockstep]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
+    }
+    const auto &biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
+    CoreWrapper a;
+    CoreWrapper b;
+    for (CoreWrapper *core : {&a, &b}) {
+        REQUIRE(core->Initialize());
+        brimir::PrepareLockstepCore(*core);
+        REQUIRE(core->LoadIPLFromFile(biosPath.string().c_str()));
+    }
+    REQUIRE(brimir::SyncLockstepCores(a, b));
+    const auto result = brimir::RunLockstep(a, b, 600);
+    INFO("frame " << result.framesRun << ": " << result.divergence);
+    REQUIRE(result.divergence.empty());
+}
+
+TEST_CASE("BIOS integration - JIT core and interpreter core stay identical", "[bios][integration][jit][lockstep]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
+    }
+    const auto &biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
+    CoreWrapper jit;
+    CoreWrapper ref;
+    jit.SetSH2JitEnabled(true);
+    for (CoreWrapper *core : {&jit, &ref}) {
+        REQUIRE(core->Initialize());
+        brimir::PrepareLockstepCore(*core);
+        REQUIRE(core->LoadIPLFromFile(biosPath.string().c_str()));
+    }
+    REQUIRE(brimir::SyncLockstepCores(ref, jit));
+    const auto result = brimir::RunLockstep(jit, ref, 600);
+    INFO("frame " << result.framesRun << ": " << result.divergence);
+    REQUIRE(result.divergence.empty());
+    REQUIRE(jit.GetSH2JitExecutor(true)->GetStats().blocksRun > 0);
+}

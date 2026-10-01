@@ -18,6 +18,11 @@ enum class DMAResourceSelect : uint8 { DREQ, RXI, TXI, Reserved };
 
 struct DMAChannel {
     DMAChannel() {
+        // Brimir: SAR/DAR/TCR have undefined initial values on hardware and Reset leaves them alone; they were
+        // left uninitialized, so a fresh SH-2 saved heap garbage into its save state.
+        srcAddress = 0;
+        dstAddress = 0;
+        xferCount = 0;
         Reset();
     }
 

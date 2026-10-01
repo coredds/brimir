@@ -51,15 +51,14 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - M68000 sound CPU emulation
 - SCU DSP and DMA emulation
 - CHD and ISO disc format support via libchdr
-- Save state and backup RAM persistence with Japanese character translation
+- Save states (LZ4-compressed) and backup RAM persistence
 - Versioned save states with backward compatibility
 - SRAM managed as a single source of truth for libretro `.srm` files
 - Per-region persistent SMPC/RTC data with automatic migration from the legacy filename
 - Auto-detection of console region from disc; real NTSC/PAL timing reported to the frontend
 - Configurable CD read speed (2x-32x/Max)
 - SH-2 CPU overclocking (100%-300%)
-- RAM expansion cartridge support (1MB, 4MB, 6MB)
-- ROM cartridge support (King of Fighters '95, Ultraman)
+- RAM expansion cartridge support (1MB, 4MB, 6MB), inserted automatically from the game database
 
 ### Rendering
 - **Software Renderer**: Ymir's proven software renderer with pixel-perfect accuracy
@@ -72,9 +71,8 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
   - Blend (field blending)
   - Current (legacy dual-field)
 - **Post-Processing**:
-  - Horizontal blend filter for high-res interlaced modes
   - Configurable overscan cropping (horizontal and vertical)
-  - Frameskip support
+  - Screen rotation (TATE) for vertical games
 
 ### Integration
 - Libretro API v2 with live-updatable core options
@@ -88,7 +86,10 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 
 ## Known Limitations
 
-- **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles. Details and pending investigation notes are in [`docs/superpowers/notes/2026-08-01-vf2-interlaced-audio-dropouts.md`](docs/superpowers/notes/2026-08-01-vf2-interlaced-audio-dropouts.md).
+- **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
+- **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
+- **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
+- **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles most SH-2 instructions (multiply/MAC, divide step, `TAS`, exceptions and the memory forms of `LDC`/`LDS`/`STC`/`STS` stay on Ymir's interpreter) and is validated against the interpreter in lockstep (BIOS plus six games, 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). Its backend is an IR interpreter, so it is not faster yet (about 2x slower); native backends are planned (see [design/sh2-jit.md](design/sh2-jit.md) and [ROADMAP.md](ROADMAP.md)).
 
 ## Build Requirements
 
@@ -119,6 +120,27 @@ cmake --build build-release --target brimir_libretro -j$(nproc)
 
 LTO applies to optimized configurations, not Debug. To disable it completely, set both `BRIMIR_LTO=OFF` and `Brimir_ENABLE_IPO=OFF`. Optional `Brimir_AVX2=ON` raises the x64 CPU requirements and is not enabled in the portable release builds.
 
+On Windows, run the commands from a *Developer PowerShell for VS 2022* (or any shell with the MSVC environment loaded) when using the Ninja generator.
+
+## Testing
+
+Unit and regression tests use Catch2 (amalgamated, in `tests/`) and are registered with CTest:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBRIMIR_BUILD_TESTS=ON
+cmake --build build --target brimir_tests
+ctest --test-dir build --output-on-failure
+
+# Or run the Catch2 binary directly, optionally filtered by tag:
+./build/bin/brimir_tests "[core]"
+```
+
+The suite covers core options, the `CoreWrapper` bridge (save states, SRAM persistence, rotation, overscan, audio), the media loader (CUE/CCD, multi-file, MP3/OGG tracks), Ymir hardware-layer backports, VDP color calculation, CD block HLE and the game database.
+
+A few integration tests boot a real Saturn BIOS. They run only when a BIOS image is placed in `tests/fixtures/` (e.g. `sega_101.bin`) and are skipped otherwise. BIOS images are copyrighted and ignored by git — never commit them.
+
+Continuous integration (`.github/workflows/ci.yml`) builds the core and runs the test suite on Windows x64, Linux x64 and macOS ARM64 for every push to `master` and every pull request. Tagged releases are built by `.github/workflows/release.yml`.
+
 ## Installation
 
 ### Quick Deploy
@@ -139,7 +161,7 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
    - `sega_100.bin` (EU v1.00)
    - `Sega Saturn BIOS v1.01 (JAP).bin`
    - `Sega Saturn BIOS v1.00 (JAP).bin`
-3. Load a Saturn game (.cue, .chd, .iso) through RetroArch.
+3. Load a Saturn game (.cue, .chd, .ccd, .mds, .iso or .m3u playlist) through RetroArch. Raw `.bin`/`.img`/`.mdf` track files must be opened through their `.cue`/`.ccd`/`.mds` sheet.
 
 ## Core Options
 
@@ -148,14 +170,18 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | System | BIOS Selection | Auto, JP v1.01, JP v1.00, US v1.01, US v1.00, EU v1.00, EU alt |
 | System | Auto-Detect Region from Disc | On/Off |
 | System | SH-2 CPU Overclock | 100% (Stock), 125%, 150%, 175%, 200%, 250%, 300% |
+| System | SH-2 JIT (Experimental) | On/Off (default Off; not faster yet, for testing) |
 | System | Performance Profiling | On/Off |
 | Video | Deinterlacing | On/Off |
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
+| Video | Threaded VDP1 Rendering | On/Off |
+| Video | Threaded VDP2 Rendering | On/Off |
 | Video | Screen Rotation (TATE) | None, 90°, 180°, 270° |
 | Video | Overscan Crop | None, Small (~16px), Medium (~32px), Large (~48px) |
 | Audio | Audio Interpolation | Linear, Nearest |
 | Audio | Audio Volume | 0%, 25%, 50%, 75%, 100%, 125%, 150%, 175%, 200% |
 | Media | CD Read Speed | 2x, 4x, 6x, 8x, 12x, 16x, 24x, 32x, Max (200x) |
+| Media | Preload Disc to RAM | On/Off |
 
 ## Project Structure
 
@@ -163,16 +189,18 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 brimir/
   src/
     core/
-      include/ymir/   Ymir hardware layer (verbatim upstream sync)
+      include/ymir/   Ymir hardware layer (verbatim upstream sync, except the SH-2 fork)
       include/brimir/ Brimir-specific additions
-      src/ymir/       Ymir source files (verbatim)
+      src/ymir/       Ymir source files (verbatim, except the SH-2 fork)
     bridge/           CoreWrapper -- interface between emulator and frontends
     libretro/         Libretro API implementation and core options
-    jit/              SH-2 JIT compiler (future)
-  include/         Public headers
+    jit/              SH-2 JIT library (experimental)
+  include/         Public headers (libretro.h, CoreWrapper)
+  resources/info/  Libretro core info file
   vendor/          Vendored dependencies
-  tests/           Unit and integration tests
-  tools/           Development utilities
+  tests/           Catch2 unit and regression tests
+  tools/           Development utilities (brimir_bench headless frame benchmark)
+  cmake/           CMake helper modules
 ```
 
 ## Dependencies
@@ -185,15 +213,19 @@ All dependencies are vendored in the `vendor/` directory:
 - **xxHash** -- Fast hashing
 - **lz4** -- Compression
 - **libchdr** -- CHD disc format support (includes zlib, zstd, lzma)
+- **dr_libs** -- MP3 decoding (dr_mp3) for CUE audio tracks
+- **stb** -- Ogg Vorbis decoding (stb_vorbis) for CUE audio tracks
+
+Upstream test suites, benchmarks and examples are not vendored.
 
 ## License
 
-Licensed under the GPLv2. See LICENSE file for details.
+Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license as Ymir. See [LICENSE](LICENSE).
 
 ## Credits
 
-Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The entire hardware layer under `src/core/` is synced verbatim from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. Brimir wraps this hardware layer in a libretro core, adding performance optimizations and frontend integration without modifying the emulation engine. Both projects are licensed under GPL.
+Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The hardware layer under `src/core/` is synced from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. The SH-2 files are a Brimir-maintained fork of Ymir's SH-2 with hooks for the SH-2 JIT; see `src/core/BRIMIR_FORK.md`. Apart from that fork, Brimir uses the hardware layer unmodified and wraps it in a libretro core, adding performance optimizations and frontend integration. Both projects are licensed under GPL.
 
 ## Contributing
 
-Contributions are welcome. Please ensure code follows the existing style and includes appropriate testing.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards and the pull request process. Please make sure `ctest` passes and add tests for new behavior.

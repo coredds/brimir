@@ -37,6 +37,10 @@ enum class Button : uint16_t;
 }
 }
 
+namespace brimir::jit {
+class Executor;
+} // namespace brimir::jit
+
 namespace brimir {
 
 enum class ConsoleRegion {
@@ -116,7 +120,7 @@ public:
     size_t GetSystemRAMHighSize() const;
 
     /// @brief Force refresh SRAM from Ymir's backup RAM
-    /// This reads from Ymir's .bup file into our buffer
+    /// This reads Ymir's internal backup RAM into our buffer
     void RefreshSRAMFromEmulator();
 
     /// @brief Run one frame of emulation
@@ -228,6 +232,16 @@ public:
     /// @brief Set threaded VDP2 rendering
     void SetThreadedVDP2(bool enable);
 
+    /// @brief Run the SH-2 CPUs through the experimental JIT (see design/sh2-jit.md).
+    /// Remembered across Initialize(). Has no effect while SH-2 cache emulation is active.
+    void SetSH2JitEnabled(bool enable);
+    bool IsSH2JitEnabled() const { return m_sh2JitEnabled; }
+
+    /// @brief The JIT executor of the master or slave SH-2, or nullptr if the JIT was never enabled.
+    const jit::Executor* GetSH2JitExecutor(bool master) const {
+        return master ? m_jitMaster.get() : m_jitSlave.get();
+    }
+
     /// @brief Set deinterlacing enable
     void SetDeinterlacing(bool enable);
 
@@ -290,6 +304,9 @@ public:
     /// @brief Reset profiling data
     void ResetProfiling() { m_profiler.Reset(); }
 
+    /// @brief Read-only access to the profiler (for tools and tests)
+    const Profiler& GetProfiler() const { return m_profiler; }
+
 private:
     /// @brief Callback for when VDP completes a frame
     void OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height);
@@ -348,7 +365,6 @@ private:
     mutable std::vector<uint8_t> m_sramData;
     bool m_sramInitialized = false;
     bool m_sramDataFromFrontend = false;   // True when SetSRAMData or our own .srm load supplied data
-    std::filesystem::path m_sramTempPath;  // Scratch file for Ymir's memory-mapped backup RAM
     std::filesystem::path m_srmPath;       // Canonical .srm path (also managed by the frontend)
     std::filesystem::path m_smpcBaseDir;   // Directory for system-wide RTC persistent data files
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh
@@ -357,6 +373,11 @@ private:
     
     // Performance profiling
     Profiler m_profiler;
+
+    // SH-2 JIT executors (one per CPU), created on first enable
+    bool m_sh2JitEnabled = false;
+    std::unique_ptr<jit::Executor> m_jitMaster;
+    std::unique_ptr<jit::Executor> m_jitSlave;
     
     // Cartridge support
     std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file

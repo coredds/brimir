@@ -6,6 +6,8 @@
 #include <brimir/core_wrapper.hpp>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 using namespace brimir;
@@ -50,6 +52,52 @@ TEST_CASE("CoreWrapper game loading without init fails", "[core][unit]") {
         REQUIRE_FALSE(core.LoadGame("nonexistent_file.iso"));
         REQUIRE(core.IsInitialized());  // core still viable after failed load
     }
+}
+
+TEST_CASE("CoreWrapper LoadGame reports why it failed", "[core][unit][regression]") {
+    using Catch::Matchers::ContainsSubstring;
+
+    CoreWrapper core;
+
+    SECTION("not initialized") {
+        REQUIRE_FALSE(core.LoadGame("game.cue"));
+        REQUIRE_FALSE(core.GetLastError().empty());
+    }
+    SECTION("empty path") {
+        REQUIRE(core.Initialize());
+        REQUIRE_FALSE(core.LoadGame(""));
+        REQUIRE_FALSE(core.GetLastError().empty());
+    }
+    SECTION("missing file names the path") {
+        REQUIRE(core.Initialize());
+        REQUIRE_FALSE(core.LoadGame("nonexistent_file.iso"));
+        REQUIRE_THAT(core.GetLastError(), ContainsSubstring("nonexistent_file.iso"));
+    }
+}
+
+TEST_CASE("CoreWrapper LoadGame without save/system directories reaches disc parsing",
+          "[core][unit][regression]") {
+    using Catch::Matchers::ContainsSubstring;
+
+    // An invalid disc must fail in the disc loader, not earlier while setting
+    // up persistence directories (create_directories("") used to throw).
+    const auto tempDir = std::filesystem::temp_directory_path() / "brimir_no_dirs_test";
+    std::filesystem::remove_all(tempDir);
+    std::filesystem::create_directories(tempDir);
+    const auto gamePath = tempDir / "dummy.iso";
+    {
+        std::ofstream dummy(gamePath, std::ios::binary);
+        dummy.write("not a real disc image", 21);
+    }
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE_FALSE(core.LoadGame(gamePath.string().c_str(), nullptr, nullptr));
+    REQUIRE_FALSE(core.GetLastError().empty());
+    REQUIRE_THAT(core.GetLastError(), !ContainsSubstring("Exception during game load"));
+
+    core.Shutdown();
+    std::filesystem::remove_all(tempDir);
 }
 
 // ============================================================

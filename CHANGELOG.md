@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **SH-2 JIT foundation (experimental, off by default)** - `brimir_sh2_jit` core option. The forked SH-2 hands execution to a new `brimir-jit` library: IR front end for a first instruction subset, per-CPU block cache with check-on-entry invalidation, and an IR-interpreter backend, with interpreter fallback for everything else. Differential tests compare every supported instruction, delay-slot combination, bus-wait retry and random programs against the interpreter for exact state and cycle counts. Not faster yet; see `design/sh2-jit.md`.
+- **`brimir_bench`** - headless frame benchmark reporting ms/frame and the SH-2 share of emulation time; `--sh2-jit` runs it with the JIT and prints executor stats.
+- **SH-2 profiling** - `SH2_Master` and `SH2_Slave` profiler entries with the host time spent in each SH-2 per frame.
+- **SH-2 JIT lockstep validation** - compiled blocks now stop at exactly the interpreter's instruction boundaries (cycle budget and interrupts checked before every instruction), so a JIT core and an interpreter core stay identical except the deviations listed in design/sh2-jit.md section 6.5. `brimir_bench --lockstep N` and new lockstep tests compare both cores after every frame: audio samples, both SH-2s (including cache arrays, timers, DMA and the pending interrupt), work RAM, the internal backup RAM and any backup memory cartridge, the save state of every other subsystem (scheduler, SCU, SMPC, VDP, SCSP, CD block) and the output frame.
+- **SH-2 JIT milestone 1 complete** - the JIT now compiles every SH-2 instruction except multiply/MAC, divide step, `TAS`, `TRAPA`/`RTE`/`SLEEP`, the memory forms of `LDC`/`LDS`/`STC`/`STS` and illegal opcodes, which keep using the interpreter fallback. Lockstep compares the whole system (see the lockstep entry above) and CI covers interrupts with a synthetic workload. The BIOS menu and six games (Virtua Fighter 2, Panzer Dragoon II Zwei, Sega Rally Championship, Burning Rangers, Guardian Heroes, Street Fighter Zero 3) ran 36,000 frames each in lockstep with the interpreter with no divergence; results in `design/sh2-validation.md`. Still an IR interpreter backend, about 2x slower than the interpreter; stays off by default.
+
+### Fixed
+- **Backup RAM** - the internal backup RAM now always exists: a formatted in-memory image is created at initialization and replaced with a fresh one on every game load. Previously it was a copy-on-write memory-mapped scratch file in the temp directory: if mapping failed, later SRAM accesses dereferenced a null image (crash), a failure on a later load left the previous game's backup RAM in place, and an unusable temp directory aborted the whole game load. Saves are unaffected: they were and remain the libretro `.srm` buffer. BIOS-only (no content) boots now see a formatted backup RAM like a real console instead of an absent one.
+- **Libretro thread safety** - every entry point now acquires the core lock before checking the core instance, closing a race with `retro_deinit`. `retro_get_region` and the memory data/size queries are now locked as well.
+- **Geometry** - the last-reported frame size is reset on content load/unload, so a new game at the same resolution as the previous one still gets `SET_GEOMETRY` on its first frame.
+- **Game loading** - `LoadGame` reports a specific error for an uninitialized core, empty path and missing file instead of "(no error message)". Loading with neither a system nor a save directory no longer aborts on `create_directories("")` (libstdc++ throws).
+- **Backup RAM scratch image** - the temporary `.bup` is keyed by file name plus a hash of the absolute path, so different games with the same file name no longer share backup RAM.
+- **RTC persistence** - SMPC data is written to a temporary file and renamed into place, so a failed write can no longer truncate the existing file.
+
+### Changed
+- **Repository** - copyrighted BIOS images and ROM cartridge dumps are no longer tracked. Fixed `.gitignore` patterns that never matched because of trailing comments (`*.bin`, `*.bup`, `*.smpc`, `system/`, `tests/fixtures/*.bin`) and added ROM cart dumps (`*.ic[0-9]`).
+- **Vendored dependencies** - removed unused upstream test suites, benchmarks, examples and fuzzers (~2,500 files).
+- **SH-2 fork policy** - the Ymir SH-2 (`src/core/{include,src}/ymir/hw/sh2/`) is now a Brimir-owned fork for the JIT hook; every change and upstream port is logged in `src/core/BRIMIR_FORK.md`. The rest of the hardware layer stays verbatim upstream.
+- **Documentation** - README corrected (GPL-3.0 license, accurate feature list and core options, testing section, known limitations); removed references to documents that are not part of the repository.
+- **License / core info** - added the GPL-3.0 `LICENSE` file. `brimir_libretro.info` no longer advertises cheat support (stubbed), reports `needs_fullpath = true` and core options v2, and marks every BIOS optional since any one works.
+- **Content extensions** - `.bin`, `.img` and `.mdf` are no longer offered as loadable content; Ymir only opens them through their `.cue`/`.ccd`/`.mds` sheet. The core and `.info` extension lists now match.
+
+### Removed
+- **SH-2 JIT scaffolding** - removed `src/jit/` (~13.6k lines from 2025) together with the `BUILD_JIT_TESTS` / `BRIMIR_ENABLE_JIT_TESTING` CMake options and the `build-all.ps1 -WithJIT` switch. The code no longer compiled against the current Ymir API (removed `brimir/*` headers, three conflicting `SH2SpecDatabase` definitions, undeclared test-generator methods) and the SH2 test hooks it relied on no longer exist. The JIT will be redesigned from scratch; the old code remains in git history.
+- **SH-2 micro-benchmark** - removed `tools/benchmark_sh2`, `tools/run_benchmarks.ps1` and the `build-all.ps1 -WithBenchmarks` switch, replaced by `brimir_bench`.
+
+### Technical
+- Added `.github/workflows/ci.yml`: builds the core and runs the tests on Windows x64, Linux x64 and macOS ARM64 for pushes to `master` and pull requests. The suite is registered with CTest (`add_test`) so `ctest` now runs it.
+- Test suite cleanup: re-enabled and fixed `test_memory_components`, `test_cd_operations`, `test_system_integration`, `test_bios` and `test_bios_integration` (BIOS tests skip when no image is present); deleted 20 files made of placeholder `REQUIRE(true)` assertions or targeting removed APIs. Added `LoadGame` error-reporting regressions. 106 test cases pass.
+
 ## [0.5.4] - 2026-09-24
 
 ### Fixed
