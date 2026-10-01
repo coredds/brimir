@@ -28,7 +28,7 @@ jobs:
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --target brimir_libretro brimir_tests --parallel
+        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench --parallel
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -52,7 +52,7 @@ jobs:
             -DBRIMIR_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --target brimir_libretro brimir_tests --parallel $(nproc)
+        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench --parallel $(nproc)
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -73,7 +73,7 @@ jobs:
             -DBRIMIR_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --target brimir_libretro brimir_tests --parallel $(sysctl -n hw.ncpu)
+        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench --parallel $(sysctl -n hw.ncpu)
 
       - name: Test
         run: ctest --test-dir build --output-on-failure

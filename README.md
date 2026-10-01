@@ -89,7 +89,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
 - **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
-- **SH-2 JIT** — Not implemented yet; the SH-2 CPUs run on Ymir's interpreter. A JIT is planned (see [ROADMAP.md](ROADMAP.md)).
+- **SH-2 JIT** — Only an experimental foundation exists, off by default (`SH-2 JIT` core option): an IR interpreter backend covering a small opcode subset, with everything else on Ymir's interpreter. It is not faster yet; native backends are planned (see [design/sh2-jit.md](design/sh2-jit.md) and [ROADMAP.md](ROADMAP.md)).
 
 ## Build Requirements
 
@@ -170,6 +170,7 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | System | BIOS Selection | Auto, JP v1.01, JP v1.00, US v1.01, US v1.00, EU v1.00, EU alt |
 | System | Auto-Detect Region from Disc | On/Off |
 | System | SH-2 CPU Overclock | 100% (Stock), 125%, 150%, 175%, 200%, 250%, 300% |
+| System | SH-2 JIT (Experimental) | On/Off (default Off; not faster yet, for testing) |
 | System | Performance Profiling | On/Off |
 | Video | Deinterlacing | On/Off |
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
@@ -188,16 +189,17 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 brimir/
   src/
     core/
-      include/ymir/   Ymir hardware layer (verbatim upstream sync)
+      include/ymir/   Ymir hardware layer (verbatim upstream sync, except the SH-2 fork)
       include/brimir/ Brimir-specific additions
-      src/ymir/       Ymir source files (verbatim)
+      src/ymir/       Ymir source files (verbatim, except the SH-2 fork)
     bridge/           CoreWrapper -- interface between emulator and frontends
     libretro/         Libretro API implementation and core options
+    jit/              SH-2 JIT library (experimental)
   include/         Public headers (libretro.h, CoreWrapper)
   resources/info/  Libretro core info file
   vendor/          Vendored dependencies
   tests/           Catch2 unit and regression tests
-  tools/           Development utilities (SH-2 benchmark)
+  tools/           Development utilities (brimir_bench headless frame benchmark)
   cmake/           CMake helper modules
 ```
 
@@ -222,7 +224,7 @@ Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license a
 
 ## Credits
 
-Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The entire hardware layer under `src/core/` is synced verbatim from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. Brimir wraps this hardware layer in a libretro core, adding performance optimizations and frontend integration without modifying the emulation engine. Both projects are licensed under GPL.
+Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The hardware layer under `src/core/` is synced from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. The SH-2 files are a Brimir-maintained fork of Ymir's SH-2 with hooks for the SH-2 JIT; see `src/core/BRIMIR_FORK.md`. Apart from that fork, Brimir uses the hardware layer unmodified and wraps it in a libretro core, adding performance optimizations and frontend integration. Both projects are licensed under GPL.
 
 ## Contributing
 

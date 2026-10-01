@@ -263,6 +263,22 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "100"
     },
     {
+        "brimir_sh2_jit",
+        "SH-2 JIT (Experimental)",
+        nullptr,
+        "Run the SH-2 CPUs through the experimental JIT. Currently an IR interpreter covering a small "
+        "instruction subset: it is not faster yet and exists for testing. Not used while SH-2 cache "
+        "emulation is active.",
+        nullptr,
+        "system",
+        {
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
+            { nullptr, nullptr }
+        },
+        "disabled"
+    },
+    {
         "brimir_profiling",
         "Performance Profiling",
         nullptr,

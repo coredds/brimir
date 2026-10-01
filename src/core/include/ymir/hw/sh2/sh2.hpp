@@ -15,6 +15,7 @@
 #include "sh2_sci.hpp"
 #include "sh2_ubc.hpp"
 #include "sh2_wdt.hpp"
+#include "sh2_jit_iface.hpp" // Brimir: SH-2 JIT hook
 
 #include <ymir/hw/hw_defs.hpp>
 
@@ -47,6 +48,12 @@ namespace ymir::sh2 {
 class SH2 {
 public:
     SH2(sys::SH2Bus &bus, bool master);
+
+    // Brimir: m_jitContext holds pointers into this object, so a copy or move would alias the source.
+    SH2(const SH2 &) = delete;
+    SH2(SH2 &&) = delete;
+    SH2 &operator=(const SH2 &) = delete;
+    SH2 &operator=(SH2 &&) = delete;
 
     void Reset(bool hard, bool watchdogInitiated = false);
 
@@ -96,6 +103,43 @@ public:
     // Returns the number of cycles executed.
     template <bool debug, bool emulateCache>
     uint64 Step();
+
+    // -------------------------------------------------------------------------
+    // Brimir: host-time profiling (see src/core/BRIMIR_FORK.md)
+
+    /// @brief Enables or disables host wall-time accounting for Advance(). Always clears the counter.
+    void SetHostTimeProfiling(bool enable) {
+        m_profileHostTime = enable;
+        m_hostTimeNs = 0;
+    }
+
+    /// @brief Returns the host time spent in Advance() since the last call, in nanoseconds, and resets it.
+    uint64 ConsumeHostTimeNs() {
+        const uint64 ns = m_hostTimeNs;
+        m_hostTimeNs = 0;
+        return ns;
+    }
+
+    // -------------------------------------------------------------------------
+    // Brimir: SH-2 JIT hook (see src/core/BRIMIR_FORK.md)
+
+    /// @brief Routes Advance<false, false>() through the executor. Pass nullptr to use the interpreter.
+    /// Attaching flushes the executor.
+    void SetJitExecutor(ISH2Executor *executor) {
+        m_jitExecutor = executor;
+        if (executor != nullptr) {
+            executor->Flush();
+        }
+    }
+
+    ISH2Executor *GetJitExecutor() const {
+        return m_jitExecutor;
+    }
+
+    /// @brief Live-state view and callbacks used by the JIT (also used directly by tests).
+    SH2JitContext &GetJitContext() {
+        return m_jitContext;
+    }
 
     bool IsMaster() const {
         return !BCR1.MASTER;
@@ -702,6 +746,25 @@ private:
 
     // Number of cycles executed in the current Advance invocation
     uint64 m_cyclesExecuted;
+
+    // Brimir: host-time profiling state (see SetHostTimeProfiling)
+    bool m_profileHostTime = false;
+    uint64 m_hostTimeNs = 0;
+
+    // Brimir: SH-2 JIT hook state and context callbacks
+    SH2JitContext m_jitContext;
+    ISH2Executor *m_jitExecutor = nullptr;
+
+    void InitJitContext();
+    static uint64 JitInterpretOne(void *ctx);
+    static uint32 JitRead(void *ctx, uint32 address, uint32 size, bool instrFetch);
+    static void JitWrite(void *ctx, uint32 address, uint32 size, uint32 value);
+    static uint16 JitPeekInstruction(void *ctx, uint32 address);
+    static uint64 JitAccessCycles(void *ctx, uint32 address, uint32 size, bool write);
+    static bool JitBusWait(void *ctx, uint32 address, uint32 size, bool write);
+    static void JitRefillPipeline(void *ctx, uint32 address);
+    static void JitSetupDelaySlot(void *ctx, uint32 target);
+    static void JitEndDelaySlot(void *ctx);
 
     // Retrieves the current absolute cycle count
     uint64 GetCurrentCycleCount() const;

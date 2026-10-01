@@ -7,6 +7,7 @@
 
 #include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
+#include <brimir/jit/executor.hpp>
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -51,6 +52,33 @@ std::vector<uint8_t> ReadFile(const std::filesystem::path& path) {
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 
+// Runs up to 600 frames and returns true once the framebuffer shows a non-black pixel.
+bool RendersNonBlackFrame(CoreWrapper &core) {
+    for (int i = 0; i < 600; ++i) {
+        core.RunFrame();
+        if (i < 60 || i % 30 != 0) {
+            continue;
+        }
+        const auto *fb = static_cast<const uint32_t *>(core.GetFramebuffer());
+        const uint32_t w = core.GetFramebufferWidth();
+        const uint32_t h = core.GetFramebufferHeight();
+        const uint32_t stride = core.GetFramebufferPitch() / sizeof(uint32_t);
+        CAPTURE(i, w, h, stride);
+        REQUIRE(fb != nullptr);
+        REQUIRE(w > 0);
+        REQUIRE(h > 0);
+        REQUIRE(stride >= w);
+        for (uint32_t y = 0; y < h; ++y) {
+            for (uint32_t x = 0; x < w; ++x) {
+                if ((fb[y * stride + x] & 0x00FFFFFF) != 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 TEST_CASE("BIOS integration - real BIOS images load into IPL ROM", "[bios][integration]") {
@@ -90,34 +118,7 @@ TEST_CASE("BIOS integration - real BIOS boots and renders", "[bios][integration]
     REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
 
     // With no disc inserted the BIOS boots to its system menu / CD player.
-    bool sawNonBlack = false;
-    for (int i = 0; i < 600 && !sawNonBlack; ++i) {
-        REQUIRE_NOTHROW(core.RunFrame());
-        if (i < 60 || i % 30 != 0) {
-            continue;
-        }
-
-        const auto* fb = static_cast<const uint32_t*>(core.GetFramebuffer());
-        const uint32_t w = core.GetFramebufferWidth();
-        const uint32_t h = core.GetFramebufferHeight();
-        const uint32_t pitch = core.GetFramebufferPitch();
-        REQUIRE(fb != nullptr);
-        REQUIRE(w > 0);
-        REQUIRE(h > 0);
-
-        const uint32_t stride = pitch / sizeof(uint32_t);  // pitch is in bytes (XRGB8888)
-        REQUIRE(stride >= w);
-        for (uint32_t y = 0; y < h && !sawNonBlack; ++y) {
-            for (uint32_t x = 0; x < w; ++x) {
-                if ((fb[y * stride + x] & 0x00FFFFFF) != 0) {
-                    sawNonBlack = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    REQUIRE(sawNonBlack);
+    REQUIRE(RendersNonBlackFrame(core));
     REQUIRE(core.IsIPLLoaded());
 }
 
@@ -157,4 +158,21 @@ TEST_CASE("BIOS integration - save/load cycles while BIOS is running", "[bios][i
     }
     REQUIRE(core.LoadState(state.data(), stateSize));
     REQUIRE(std::equal(wramBefore.begin(), wramBefore.end(), saturn->mem.WRAMHigh.begin()));
+}
+
+TEST_CASE("BIOS integration - real BIOS boots and renders with the SH-2 JIT", "[bios][integration][jit]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
+    }
+
+    const auto &biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
+    CoreWrapper core;
+    core.SetSH2JitEnabled(true);
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
+    REQUIRE(RendersNonBlackFrame(core));
+    REQUIRE(core.GetSH2JitExecutor(true)->GetStats().blocksRun > 0);
 }

@@ -3217,4 +3217,5 @@ Written after 1B lands, using what 1B reveals:
 1. Front-end coverage for the rest of the milestone-1 subset: all MOV addressing modes (displacement, R0-indexed, GBR, pre-decrement, post-increment, byte/word variants), `MOVA`, `MOVT`, `CLRT`/`SETT`, `EXTS`/`EXTU`/`SWAP`/`XTRCT`, logic (`AND`/`OR`/`XOR`/`NOT`/`TST` and immediates), `SUB`, `NEG`, carry/overflow variants, remaining compares, shifts and rotates, `BSR`/`BRAF`/`BSRF`/`JSR`, `MOV.L @(disp,PC)` in delay slots. Each opcode gets a row in the per-instruction and delay-slot differential tests.
 2. Shadow-verify mode (spec 7.2) as a debug core option.
 3. Game-database "interpreter only" flag and the eligibility check.
-4. Real-game validation: BIOS plus the baseline titles for 10 minutes each with the JIT on, zero shadow-verify mismatches (spec milestone 1 done criteria).
+4. Bound block overshoot before real-game validation: pass the remaining cycle budget into the block and exit at an instruction boundary when it runs out. Today the master's overshoot (up to one block, which can exceed 100 cycles with wait states) shifts the slave target, SCU, VDPs and scheduler in `Saturn::Run` (spec section 2).
+5. Real-game validation: BIOS plus the baseline titles for 10 minutes each with the JIT on, zero shadow-verify mismatches (spec milestone 1 done criteria).

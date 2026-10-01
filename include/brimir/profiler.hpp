@@ -34,6 +34,24 @@ public:
             m_timings.clear();
         }
     }
+
+    /// @brief Whether samples are currently being collected.
+    bool IsEnabled() const {
+        return (m_state.load(std::memory_order_relaxed) & 1) != 0;
+    }
+
+    /// @brief Record an externally measured duration as one sample. Ignored while disabled.
+    void AddSample(const std::string& name, double ms) {
+        std::lock_guard lock(m_mutex);
+        if (!(m_state.load(std::memory_order_relaxed) & 1)) {
+            return;
+        }
+        auto& timing = m_timings[name];
+        timing.totalMs += ms;
+        timing.count++;
+        timing.minMs = std::min(timing.minMs, ms);
+        timing.maxMs = std::max(timing.maxMs, ms);
+    }
     
     /// @brief Get a snapshot, never a pointer into mutable aggregates.
     std::optional<Timing> GetTiming(const std::string& name) const {

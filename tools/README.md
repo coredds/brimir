@@ -1,196 +1,86 @@
-# Brimir Development Tools
+# Brimir tools
 
-Utilities for performance measurement, testing, and development.
+## brimir_bench — headless frame benchmark
 
----
+Runs real content without a frontend and reports host time per frame and the
+share of emulation time spent in each SH-2 CPU. Used for the SH-2 JIT baseline
+(`design/sh2-baseline.md`) and for before/after comparisons.
 
-## 📊 Benchmarking Tools
-
-### benchmark_sh2
-
-**Purpose**: Microbenchmark suite for SH-2 interpreter optimizations
-
-**Location**: `tools/benchmark_sh2.cpp`
-
-**What it measures**:
-- Byte swap operations (16/32/64-bit)
-- Bit extraction (4/8/12-bit fields)
-- Instruction decode (full SH-2 decode)
-- Memory access with endian conversion
-- Combined real-world operations
-
-**Usage**:
+Build:
 
 ```powershell
-# Build
-cmake --build build --config Release --target benchmark_sh2
-
-# Run
-.\build\bin\Release\Release\benchmark_sh2.exe
-
-# Save results
-.\build\bin\Release\Release\benchmark_sh2.exe > benchmark_results.txt
+cmake --build build --target brimir_bench
 ```
 
-**Expected Output**:
-```
-Byte Swap 32-bit                    0.32 ns/op
-Bit Extract [4:7]                   0.51 ns/op
-Instruction Decode (SH-2)           0.87 ns/op
-Memory Read 32-bit                  0.38 ns/op
-```
+Run `brimir_bench --help` for all options.
 
-**Interpreting Results**:
-- **< 1 ns/op**: Excellent (single-cycle or near-optimal)
-- **1-2 ns/op**: Good (2-6 cycles)
-- **2-5 ns/op**: Acceptable (hot path overhead)
-- **> 5 ns/op**: Needs investigation
-
----
-
-## 🔨 Building Tools
-
-### Quick Build
+Benchmark a game from boot (no controller input, so it stays on the title or
+attract screens):
 
 ```powershell
-# All tools
-cmake --build build --config Release
-
-# Specific tool
-cmake --build build --config Release --target benchmark_sh2
+build\bin\brimir_bench.exe --bios system\sega_101.bin --game "D:\Saturn\Game.cue" --system-dir system --frames 1800
 ```
 
-### CMake Configuration
+`--system-dir` must point to a directory that holds a configured
+`brimir_saturn_rtc_<jp|us_eu>.smpc` (BIOS language and clock settings, STE=1).
+The suffix follows the region of the BIOS image, not the disc, so you need a
+configured file for each BIOS region you use. Completing the BIOS
+language/clock setup once in RetroArch with Brimir only configures the file for
+the region of the BIOS used there. Either repeat the setup with each BIOS
+region, or copy the configured file to the other name (for example
+`brimir_saturn_rtc_us_eu.smpc` to `brimir_saturn_rtc_jp.smpc`; this is how the
+committed baseline was measured). Without a configured file the BIOS stops at
+its first-boot setup screen, waits for input, and never boots the disc (the
+slave SH-2 then reports 0.000 ms).
 
-Tools are automatically built when you configure the project:
+The core writes RTC files back into the system directory, as it does under
+RetroArch, and may also create or rewrite `brimir_saturn_rtc_none.smpc`. Use a
+scratch copy of the system directory rather than the real RetroArch folder.
+`--system-dir` has no effect without `--game` (the no-disc path does not load
+SMPC settings). If it is omitted, the per-run temp directory is used, which is
+always unconfigured.
+
+Backup RAM (`.srm`) and cartridge RAM (`.cart`) are written to a fresh
+directory under `%TEMP%\brimir_bench\run-*` that is removed on exit, so saves
+from earlier runs never affect results.
+
+Benchmark gameplay: create a save state at the point of interest, then measure
+from it. `--dump-at` runs N frames from the loaded content (and optional
+`--state`) and writes the core's raw state data:
 
 ```powershell
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+build\bin\brimir_bench.exe --bios system\sega_101.bin --game Game.cue --system-dir system --dump-at 3600 --dump-state game.bstate
+build\bin\brimir_bench.exe --bios system\sega_101.bin --game Game.cue --system-dir system --state game.bstate --frames 1800
 ```
 
----
+RetroArch `.state` files are accepted only if they contain the raw core data
+(no RetroArch container header, no compression); otherwise loading fails with an
+error.
 
-## 📈 Performance Tracking
+`--sh2-jit` runs both SH-2s through the experimental JIT (`design/sh2-jit.md`)
+instead of the interpreter, the same as the `brimir_sh2_jit` core option. Run
+the same content with and without it to compare. The report then also prints
+per-CPU executor totals since startup (warmup included): `blocksRun` (compiled
+blocks executed) and `interpreted` (instructions handed to the interpreter).
 
-### Baseline Results (December 2024)
+Output:
 
-**Platform**: Windows x64, MSVC 2022, Modern CPU with BMI2
-
-| Operation | Time (ns/op) | Status |
-|-----------|--------------|--------|
-| Byte Swap 32-bit | 0.32 | ✅ Baseline |
-| Bit Extract 4-bit | 0.51 | ✅ Baseline |
-| Instruction Decode | 0.87 | ✅ Baseline |
-| Memory Read 32-bit | 0.38 | ✅ Baseline |
-
-**How to track**:
-1. Run benchmark before making changes
-2. Save results to file
-3. Make your changes
-4. Run benchmark again
-5. Compare results
-
-**Example**:
-```powershell
-# Before
-.\build\bin\Release\Release\benchmark_sh2.exe > before.txt
-
-# Make changes...
-
-# After
-cmake --build build --config Release --target benchmark_sh2
-.\build\bin\Release\Release\benchmark_sh2.exe > after.txt
-
-# Compare
-Compare-Object (Get-Content before.txt) (Get-Content after.txt)
+```
+content      : Game.cue
+frames       : 1800 (warmup 120)
+sh2 jit      : off
+ms/frame     : avg 7.912  p50 7.804  p95 9.120  p99 10.301  max 14.022
+fps (host)   : 126.4
+Ymir_RunFrame: 7.850 ms/frame
+SH2 master   : 3.120 ms/frame (39.7% of Ymir_RunFrame)
+SH2 slave    : 1.004 ms/frame (12.8% of Ymir_RunFrame)
+SH2 total    : 4.124 ms/frame (52.5% of Ymir_RunFrame)
 ```
 
----
+SH-2 time is measured inside `SH2::Advance` and includes on-chip peripherals
+(DMA, timers) and bus accesses the CPUs make. VDP rendering runs on worker
+threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
 
-## 🧪 Future Tools (Planned)
-
-### emulator_test (Planned)
-- Full emulator validation suite
-- Saturn Open SDK test generation
-- 1190+ instruction tests
-- Dual-execution validation (interpreter vs JIT)
-
-### jit_benchmark (Planned)
-- JIT compiler performance measurement
-- Block compilation times
-- Runtime overhead analysis
-- Comparison vs interpreter
-
-### profiler_helper (Planned)
-- Integration with Visual Studio Profiler
-- Hot path identification
-- Call graph visualization
-- Performance regression detection
-
----
-
-## 📝 Adding New Tools
-
-### Template
-
-```cpp
-/**
- * @file your_tool.cpp
- * @brief Brief description
- */
-
-#include <brimir/core/types.hpp>
-#include <iostream>
-
-int main() {
-    std::cout << "Tool output\n";
-    return 0;
-}
-```
-
-### CMakeLists.txt
-
-```cmake
-add_executable(your_tool your_tool.cpp)
-target_link_libraries(your_tool PRIVATE brimir::brimir-core)
-target_compile_features(your_tool PRIVATE cxx_std_20)
-
-set_target_properties(your_tool PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}"
-)
-```
-
----
-
-## 🎯 Best Practices
-
-### Benchmarking
-
-1. **Always use Release builds** for meaningful results
-2. **Run multiple times** to verify consistency
-3. **Close background applications** to reduce noise
-4. **Use fixed CPU frequency** if available (disable boost)
-5. **Warm up** - First run may be slower
-
-### Performance Testing
-
-1. **Baseline first** - Always measure before optimizing
-2. **Isolate changes** - One optimization at a time
-3. **Document results** - Keep track of what works
-4. **Regression test** - Don't break existing performance
-
----
-
-## 🤝 Contributing Tools
-
-When adding new tools:
-1. Add to `tools/CMakeLists.txt`
-2. Document in this README
-3. Add usage examples
-4. Include expected output samples
-5. Update main project documentation
-
----
-
-**Last Updated**: December 1, 2024
-
+Exit codes: 0 success (including `--help`), 1 usage error (usage is printed to
+stderr), 2 load or setup failure (BIOS, game, state, missing `--system-dir`,
+temp directory errors).

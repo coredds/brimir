@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Approved design, milestone 1 not started
+**Status**: Milestone 1 in progress — foundation implemented (plan `design/plans/2026-09-30-sh2-jit-m1b-foundation.md`); instruction coverage and shadow-verify remain (plan 1C)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -25,9 +25,9 @@
 
 - Each compiled block accumulates exactly the cycles Ymir's `InterpretNext()` would have returned for the same instructions (fixed costs, `AccessCycles` wait states from the bus page table, pipeline refills, `WritebackCycles` load-use stalls).
 - The cycle budget and pending interrupts are checked **only at block boundaries**, not after every instruction. Consequences:
-  - Blocks may overshoot the `Advance()` target by at most one block. The existing master/slave spillover counters in `Saturn::Run` already absorb overshoot (today it is at most one instruction).
+  - Blocks may overshoot the `Advance()` target by up to one block (32 instructions; with wait states this can exceed 100 cycles), versus at most one instruction with the interpreter. The spillover counters do **not** absorb this: in `Saturn::Run` the master's overshoot extends `execCycles`, so the slave's target, the SCU, the VDPs and the scheduler all slip by the same amount. Milestone 1 accepts this; bounding it is a plan 1C item (section 11).
   - Interrupt entry can happen up to one block later than with the interpreter.
-- Games that need instruction-exact behavior are forced onto the interpreter through a game database flag.
+- Games that need instruction-exact behavior will be forced onto the interpreter through a game database flag (deferred to plan 1C).
 
 ## 3. Ownership: forking the SH-2
 
@@ -67,14 +67,14 @@ tests/unit/test_jit_*.cpp   Catch2 differential tests
 
 A plain struct the fork fills in once per `SH2` instance. It points at the live SH2 fields instead of copying them, so the JIT holds no architectural state of its own:
 
-- general registers `R[16]`, `PC`, `PR`, `SR`, `GBR`, `VBR`, `MACH`, `MACL`
-- pipeline state: delay-slot flag and target, fetched-opcode buffer, `m_wbReg`
-- `m_cyclesExecuted` and the cycle target
-- interrupt flags (`m_intrFlags`)
-- a reference to the SH2's `sys::SH2Bus`
-- callbacks into the fork: "interpret exactly one instruction" (`InterpretNext<false, false>()`), and slow-path bus read/write helpers equivalent to `MemRead`/`MemWrite` with cache emulation off
+- registers `R[16]`, `PC`, `PR`, `GBR`, `VBR`, `SR`
+- pipeline state: delay-slot flag and target, `m_wbReg`, the 32-bit instruction fetch buffer
+- interrupt state: `intrPending`, `intrAllow`
+- `m_cyclesExecuted`, kept current by the executor before every interpreter call and (via the `SyncCycles` IR op) before every memory access, because on-chip timers (WDT, FRT) read it
+- an opaque owner pointer passed to every callback
+- callbacks into the fork: `interpretOne` (`InterpretNext<false, false>()`), `read`/`write` (`MemRead`/`MemWrite` with cache emulation off), `peekInstruction` (side-effect-free fetch for decoding and validation), `accessCycles`, `busWait`, `refillPipeline`, `setupDelaySlot`, `endDelaySlot`
 
-`brimir-jit` includes only the context header and the bus header, not `sh2.hpp`.
+`brimir-jit` includes only `ymir/core/types.hpp`, `sh2_jit_iface.hpp` and (in the front end) `sh2_decode.hpp`, not `sh2.hpp` or the bus header.
 
 ### 4.2 Eligibility
 
@@ -83,7 +83,7 @@ A plain struct the fork fills in once per `SH2` instance. It points at the live 
 - the `brimir_sh2_jit` core option is enabled (default **off** until validated)
 - debug tracing is off (`debug == false` template instance)
 - SH-2 cache emulation is off (`emulateCache == false`), which also excludes games with the `ForceSH2Cache` flag
-- the loaded game is not flagged interpreter-only in the game database
+- the loaded game is not flagged interpreter-only in the game database (deferred to plan 1C; not checked yet)
 
 Otherwise the unchanged interpreter loop runs.
 
@@ -91,16 +91,20 @@ Otherwise the unchanged interpreter loop runs.
 
 ```
 while cycles < target:
-    if interrupt pending and allowed:
-        cycles += ctx.interpretOne()        // Ymir handles entry + acknowledge
+    *ctx.cyclesExecuted = cycles            // on-chip timers read it
+    if in delay slot or (interrupt pending and allowed):
+        cycles += ctx.interpretOne()        // Ymir handles slot / entry + acknowledge
         continue
-    block = cache.Lookup(PC)                // compile on miss
-    if block is invalid (opcodes changed):  // check-on-entry
-        cache.Drop(block); block = compile
+    if PC & 2 and fetch buffer low half != memory at PC:
+        cycles += ctx.interpretOne()        // run the buffered opcode, as the interpreter does
+        continue
+    block = cache.Get(PC)                   // compile on miss; check-on-entry recompiles on change
     if block is empty (first opcode unsupported):
         cycles += ctx.interpretOne()
         continue
-    cycles += backend.Run(block, ctx)
+    intrAllow = true
+    cycles += backend.Run(block, ctx)       // flushes requested inside are deferred (section 6.5)
+*ctx.cyclesExecuted = cycles
 ```
 
 `SLEEP` is handled the same way as in the interpreter: `Advance` returns early when the CPU is asleep, before the executor runs.
@@ -137,7 +141,7 @@ For every block, the cycles computed by the IR must equal the sum the interprete
 - fixed per-opcode costs are taken from the interpreter's handlers
 - memory access costs use the same bus page table (`GetAccessCycles`) with cache emulation off, and the same partition rules as `SH2::AccessCycles` (for example, 4 cycles for on-chip I/O)
 - pipeline refills (`RefillPipeline`) cost the same as in the interpreter
-- load-use stalls are resolved statically inside a block. Only the block's first instruction reads the incoming `m_wbReg`, and the block writes back its final value.
+- load-use stalls: each instruction's `WbStall` op is evaluated at run time against the live `m_wbReg` (a register mask per instruction), and loads update `m_wbReg` with `SetWb`, exactly as the interpreter does.
 
 The differential tests (section 7.1) compare cycles as well as state.
 
@@ -150,15 +154,17 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 ### 6.1 Block cache
 
 - One cache per CPU (the CPUs run different code and each has its own on-chip cache data array).
-- Keyed by a normalized guest PC: the cached region (`0x0xxxxxxx`) and the cache-through region (`0x2xxxxxxx`) alias the same memory and share a key. The cache data array regions keep separate keys.
-- Direct-mapped hash table with an overflow map. Each block stores its guest address range and a copy of its original opcodes.
-- Size cap: 32 MB per CPU by default. When full, the whole cache is flushed.
+- Keyed by the full guest PC. Block exits write constant PCs that include the partition bits, so the cached (`0x0xxxxxxx`) and cache-through (`0x2xxxxxxx`) aliases of the same code get separate blocks.
+- A block starting at `PC & 2` runs only if the fetch buffer's low halfword matches memory; otherwise the interpreter executes the buffered opcode, as the hardware would.
+- `std::unordered_map` keyed by the full PC. Each block stores its start PC and a copy of its original opcodes.
+- Size cap: `kMaxCachedInsts` = 1M IR instructions per CPU (about 20 MB). When it is reached, the whole cache is flushed before the next compile.
+- If the front end ever produced a block that fails verification, a fallback empty block is cached instead, so that PC always runs on the interpreter.
 
 ### 6.2 Invalidation (milestone 1)
 
-- **Check on entry**: before running a block, compare its stored opcodes (at most 64 bytes) with current memory through the bus page pointer. On mismatch, drop and recompile.
+- **Check on entry**: before running a block, compare its stored opcodes (at most 64 bytes) with current memory through `peekInstruction`. On mismatch, drop and recompile.
 - This is correct regardless of who wrote the code: either CPU, SH-2 DMAC, SCU DMA, CD transfers, or save-state loads. No Ymir write paths need hooks.
-- Full flush on reset, save-state load, cache-emulation toggle, JIT option toggle, and content load.
+- Full flush on reset, save-state load and executor attach (JIT option toggle). New content needs no extra flush beyond the reset that boots it: check-on-entry catches changed code. Toggling cache emulation needs no flush: compiled code never runs while it is on, and when it is turned off, check-on-entry and the fetch-buffer gate (section 4.3) catch any code or buffer that changed meanwhile.
 - Per-page dirty tracking is deferred until profiling shows the entry check matters. It requires hooking RAM write paths.
 
 ### 6.3 Memory access
@@ -167,10 +173,16 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 - Pages with a direct `array` pointer: inline big-endian load/store plus the page's wait-state cycles.
 - All other pages (MMIO, on-chip I/O at `0xFFFFxxxx`, cache address/purge regions): call the slow-path helper, which behaves exactly like `MemRead` / `MemWrite` with cache emulation off.
 - Misaligned accesses: same masking as the interpreter. Ymir raises no address-error exception and neither does the JIT.
+- Milestone 1 routes every access (including RAM) through the fork's own `MemRead`/`MemWrite`/`AccessCycles`/`IsBusWait` via context callbacks, which is exact by construction. The inline RAM fast path above is a milestone 2 optimization.
 
 ### 6.4 Save states, rewind, run-ahead
 
 The JIT holds no architectural state between blocks, so the save-state format does not change. Loading a state flushes both block caches. Rewind and run-ahead keep working, with the flush as the only added cost.
+
+### 6.5 Known deviations
+
+- A store into the currently executing block's own code takes effect at the next block entry (check-on-entry), not at the next instruction.
+- Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction.
 
 ## 7. Validation
 
@@ -196,12 +208,12 @@ Blocks that touch MMIO are skipped, because re-executing side effects would be w
 
 ### 7.3 Game-level regression (local)
 
-`tools/brimir_bench` runs N frames from save states with the interpreter and with the JIT, and reports crashes, hangs, and frame-hash differences. Some drift is expected because interrupts can land up to a block later. Requires the user's own BIOS and discs, so it does not run in CI.
+`tools/brimir_bench` runs N frames from save states with the interpreter and, with `--sh2-jit`, with the JIT, and reports crashes and hangs (frame-hash comparison is still to be added). Some drift is expected because interrupts can land up to a block later. Requires the user's own BIOS and discs, so it does not run in CI.
 
 ## 8. Measurement
 
 - Add per-frame SH-2 timing (master and slave `Advance`) to the existing profiler, next to VDP and SCSP.
-- `tools/brimir_bench`: headless, loads BIOS + content + optional save state, runs N frames, reports ms/frame and per-component shares, with a switch between interpreter and JIT. It replaces the `tools/benchmark_sh2` micro-benchmark, which only times isolated operations.
+- `tools/brimir_bench`: headless, loads BIOS + content + optional save state, runs N frames, reports ms/frame and per-component shares; `--sh2-jit` switches from the interpreter to the JIT and adds per-CPU executor stats (`blocksRun`, `interpreted`). It replaces the `tools/benchmark_sh2` micro-benchmark, which only times isolated operations.
 - The first deliverable of milestone 1 is a baseline report (committed under `design/`) with the SH-2 share of frame time in several games, on at least one x64 machine.
 
 ## 9. Error handling
@@ -243,6 +255,7 @@ Same as milestone 2 for ARM64, validated on a Cortex-A53/A55-class device.
 
 ## 11. Open questions (to settle in later specs)
 
+- Bound block overshoot (plan 1C, before game validation): pass the remaining cycle budget into the block and exit at an instruction boundary once it is used up, so `Saturn::Run` sees at most one instruction of overshoot again (section 2).
 - Block linking and the dispatch fast path (milestone 2).
 - Whether per-page dirty tracking is needed (after profiling milestone 1).
 - JIT support with cache emulation enabled (possibly never).

@@ -110,6 +110,7 @@ struct OptionCache {
     std::string cd_preload = "enabled";
     std::string threaded_vdp1 = "enabled";
     std::string threaded_vdp2 = "enabled";
+    std::string sh2_jit = "disabled";
 } g_options;
 
 static void apply_core_options(bool force) {
@@ -139,6 +140,7 @@ static void apply_core_options(bool force) {
     apply("brimir_cd_preload",              g_options.cd_preload,       [](const char* v){ g_core->SetDiscPreloadEnabled(strcmp(v, "enabled") == 0); });
     apply("brimir_threaded_vdp1",           g_options.threaded_vdp1,    [](const char* v){ g_core->SetThreadedVDP1(strcmp(v, "enabled") == 0); });
     apply("brimir_threaded_vdp2",           g_options.threaded_vdp2,    [](const char* v){ g_core->SetThreadedVDP2(strcmp(v, "enabled") == 0); });
+    apply("brimir_sh2_jit",                 g_options.sh2_jit,          [](const char* v){ g_core->SetSH2JitEnabled(strcmp(v, "enabled") == 0); });
 }
 
 // Libretro API implementation

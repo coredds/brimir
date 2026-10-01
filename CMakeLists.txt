@@ -118,6 +118,9 @@ if(TARGET chdr-static)
     target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS})
 endif()
 
+# SH-2 JIT library (design/sh2-jit.md)
+add_subdirectory(src/jit)
+
 # Bridge layer - adapts core to libretro
 add_subdirectory(src/bridge)
 
@@ -134,7 +137,7 @@ add_library(brimir_libretro SHARED
 )
 
 # Link with Brimir core
-target_link_libraries(brimir_libretro PRIVATE brimir::brimir-core)
+target_link_libraries(brimir_libretro PRIVATE brimir-jit brimir::brimir-core)
 
 # Platform-specific link dependencies
 if(UNIX)
@@ -177,14 +180,14 @@ if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
             list(APPEND brimir_ipo_targets brimir_bridge brimir_libretro_api)
         endif()
         if(Brimir_ENABLE_IPO)
-            list(APPEND brimir_ipo_targets brimir-core benchmark_sh2)
+            list(APPEND brimir_ipo_targets brimir-core brimir-jit brimir_bench)
         endif()
     else()
         message(WARNING "IPO/LTO requested but not supported: ${ipo_error}")
     endif()
 endif()
 
-foreach(target IN ITEMS brimir-core brimir_bridge brimir_libretro_api brimir_libretro brimir_tests benchmark_sh2)
+foreach(target IN ITEMS brimir-core brimir-jit brimir_bridge brimir_libretro_api brimir_libretro brimir_tests brimir_bench)
     if(TARGET ${target})
         set(enable_ipo FALSE)
         if(target IN_LIST brimir_ipo_targets)
