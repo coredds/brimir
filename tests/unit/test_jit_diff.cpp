@@ -184,7 +184,6 @@ TEST_CASE("JIT matches the interpreter for each supported instruction", "[jit][d
 
 TEST_CASE("JIT matches the interpreter for instructions in delay slots", "[jit][diff]") {
     Pair p;
-    FillTargetArea(p);
     std::mt19937 rng(0x5EED0002);
     const Kind slotKinds[] = {Kind::Nop, Kind::MovR, Kind::MovI, Kind::MovBL, Kind::MovLL, Kind::MovBS,
                               Kind::MovLS, Kind::Add, Kind::AddI, Kind::CmpEq, Kind::Dt};
@@ -192,6 +191,9 @@ TEST_CASE("JIT matches the interpreter for instructions in delay slots", "[jit][
     for (Branch branch : {Branch::Bra, Branch::Jmp, Branch::Rts, Branch::Bts, Branch::Bfs}) {
         for (Kind kind : slotKinds) {
             for (int iter = 0; iter < 40; ++iter) {
+                // Slot stores may hit the target area (when the JMP register aliases the store's
+                // base register); restore it so every iteration branches onto SLEEP.
+                FillTargetArea(p);
                 auto regs = RandomRegs(rng);
                 const uint16_t slot = MakeInstr(kind, rng, regs);
                 // Displacements reach kTarget from kCode: (0x100 - 4) / 2 = 126.
@@ -221,6 +223,57 @@ TEST_CASE("JIT matches the interpreter for instructions in delay slots", "[jit][
                 INFO("branch/slot " << Hex({br, slot}));
                 p.Step(); // branch (+ slot when taken)
                 p.Step(); // not-taken BT/S, BF/S: the slot instruction as a normal instruction
+            }
+        }
+    }
+}
+
+TEST_CASE("JIT matches the interpreter for branches at unaligned positions and targets", "[jit][diff]") {
+    // A branch at kCode + 2 puts its slot on a 4-byte boundary (the slot fetch refills); a target
+    // with bit 1 set makes the delay-slot end refill.
+    Pair p;
+    enum class Branch { Bra, Bts, Bf, Jmp, Rts };
+    const uint16_t slots[] = {AddI(5, 0x13), MovLL(7, 6), MovLS(8, 7)};
+    for (uint32_t pc : {kCode, kCode + 2}) {
+        for (uint32_t target : {kTarget, kTarget + 2}) {
+            const uint32_t disp = (target - pc - 4) / 2;
+            for (Branch branch : {Branch::Bra, Branch::Bts, Branch::Bf, Branch::Jmp, Branch::Rts}) {
+                for (uint16_t slot : slots) {
+                    FillTargetArea(p);
+                    uint16_t br = 0;
+                    switch (branch) {
+                    case Branch::Bra: br = Bra(disp); break;
+                    case Branch::Bts: br = Bts(disp); break; // taken (T = 1 below)
+                    case Branch::Bf: br = Bf(disp); break;   // taken (T = 0)
+                    case Branch::Jmp: br = Jmp(9); break;
+                    case Branch::Rts: br = kRts; break;
+                    }
+                    // Code is written before BaseState so the fetch buffer matches memory.
+                    p.WriteCode(kCode, {kNop, kNop});
+                    p.WriteCode(pc, {br, slot, static_cast<uint16_t>(kSleep)});
+
+                    auto state = p.ref->BaseState(pc);
+                    state.R[6] = 0x06040000;
+                    state.R[7] = 0x89ABCDEF;
+                    state.R[8] = 0x06040010;
+                    state.R[9] = target;
+                    state.SR = 0xF0;
+                    state.wbReg = 7;
+                    if (branch == Branch::Bts) {
+                        state.SR |= 1;
+                    }
+                    state.PR = target;
+                    p.Load(state);
+
+                    INFO("branch/slot " << Hex({br, slot}) << " at PC " << std::hex << pc << " target "
+                                        << target);
+                    p.Step();
+                    p.Step();
+                    p.Step();
+                    const uint32_t endPc = p.jit->State().PC;
+                    CHECK(endPc >= kTarget - 0x10);
+                    CHECK(endPc < kTarget + 0x70);
+                }
             }
         }
     }
@@ -348,8 +401,11 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
     auto ref = std::make_unique<Rig>();
     auto jit = std::make_unique<Rig>();
     brimir::jit::Executor exec;
-    // loop: mov.b @R1,R2 (FRC high byte) ; add R2,R3 ; bra loop ; nop
-    const std::vector<uint16_t> loop = {MovBL(2, 1), Add(3, 2), 0xAFFC, kNop};
+    // loop: add #1,R4 ; add #1,R4 ; mov.b @R1,R2 (FRC byte) ; add R2,R3 ; bra loop ; nop
+    // The FRC read is mid-block, after two cycle-consuming instructions, so it only sees the
+    // interpreter's count if the block syncs the cycle counter before the access.
+    // bra at offset 8 -> disp = (0 - 8 - 4) / 2 = -6 = 0xFFA.
+    const std::vector<uint16_t> loop = {AddI(4, 1), AddI(4, 1), MovBL(2, 1), Add(3, 2), 0xAFFA, kNop};
     ref->WriteCode(kCode, loop);
     jit->WriteCode(kCode, loop);
     auto state = ref->BaseState(kCode);
