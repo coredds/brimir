@@ -170,6 +170,7 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | System | BIOS Selection | Auto, JP v1.01, JP v1.00, US v1.01, US v1.00, EU v1.00, EU alt |
 | System | Auto-Detect Region from Disc | On/Off |
 | System | SH-2 CPU Overclock | 100% (Stock), 125%, 150%, 175%, 200%, 250%, 300% |
+| System | SH-2 JIT (Experimental) | On/Off (default Off; not faster yet, for testing) |
 | System | Performance Profiling | On/Off |
 | Video | Deinterlacing | On/Off |
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |

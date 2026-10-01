@@ -3,6 +3,7 @@
 // Licensed under GPL-3.0
 
 #include "brimir/core_wrapper.hpp"
+#include <brimir/jit/executor.hpp>
 
 #include <ymir/ymir.hpp>
 #include <ymir/media/loader/loader.hpp>
@@ -156,6 +157,9 @@ bool CoreWrapper::Initialize() {
         // Apply a profiling state chosen before initialization
         m_saturn->masterSH2.SetHostTimeProfiling(m_profiler.IsEnabled());
         m_saturn->slaveSH2.SetHostTimeProfiling(m_profiler.IsEnabled());
+
+        // Apply an SH-2 JIT state chosen before initialization
+        SetSH2JitEnabled(m_sh2JitEnabled);
         
         // NOTE: Ymir requires a file-backed memory-mapped backup RAM
         // We'll set the path later when the game loads (need game name for per-game saves)
@@ -1630,6 +1634,26 @@ void CoreWrapper::SetThreadedVDP2(bool enable) {
         return;
     }
     m_saturn->configuration.video.threadedVDP2 = enable;
+}
+
+void CoreWrapper::SetSH2JitEnabled(bool enable) {
+    m_sh2JitEnabled = enable;
+    if (!m_saturn) {
+        return; // applied in Initialize()
+    }
+    if (enable) {
+        if (!m_jitMaster) {
+            m_jitMaster = std::make_unique<jit::Executor>();
+        }
+        if (!m_jitSlave) {
+            m_jitSlave = std::make_unique<jit::Executor>();
+        }
+        m_saturn->masterSH2.SetJitExecutor(m_jitMaster.get());
+        m_saturn->slaveSH2.SetJitExecutor(m_jitSlave.get());
+    } else {
+        m_saturn->masterSH2.SetJitExecutor(nullptr);
+        m_saturn->slaveSH2.SetJitExecutor(nullptr);
+    }
 }
 
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {

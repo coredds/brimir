@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Approved design, milestone 1 not started
+**Status**: Milestone 1 in progress — foundation implemented (plan `design/plans/2026-09-30-sh2-jit-m1b-foundation.md`); instruction coverage and shadow-verify remain (plan 1C)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 

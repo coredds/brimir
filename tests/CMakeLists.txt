@@ -43,6 +43,7 @@ add_executable(brimir_tests
     unit/test_jit_ir.cpp
     unit/test_jit_backend.cpp
     unit/test_jit_diff.cpp
+    unit/test_jit_integration.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE

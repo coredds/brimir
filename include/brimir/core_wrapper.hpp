@@ -37,6 +37,10 @@ enum class Button : uint16_t;
 }
 }
 
+namespace brimir::jit {
+class Executor;
+} // namespace brimir::jit
+
 namespace brimir {
 
 enum class ConsoleRegion {
@@ -228,6 +232,16 @@ public:
     /// @brief Set threaded VDP2 rendering
     void SetThreadedVDP2(bool enable);
 
+    /// @brief Run the SH-2 CPUs through the experimental JIT (see design/sh2-jit.md).
+    /// Remembered across Initialize(). Has no effect while SH-2 cache emulation is active.
+    void SetSH2JitEnabled(bool enable);
+    bool IsSH2JitEnabled() const { return m_sh2JitEnabled; }
+
+    /// @brief The JIT executor of the master or slave SH-2, or nullptr if the JIT was never enabled.
+    const jit::Executor* GetSH2JitExecutor(bool master) const {
+        return master ? m_jitMaster.get() : m_jitSlave.get();
+    }
+
     /// @brief Set deinterlacing enable
     void SetDeinterlacing(bool enable);
 
@@ -360,6 +374,11 @@ private:
     
     // Performance profiling
     Profiler m_profiler;
+
+    // SH-2 JIT executors (one per CPU), created on first enable
+    bool m_sh2JitEnabled = false;
+    std::unique_ptr<jit::Executor> m_jitMaster;
+    std::unique_ptr<jit::Executor> m_jitSlave;
     
     // Cartridge support
     std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file

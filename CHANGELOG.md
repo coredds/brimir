@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **SH-2 JIT foundation (experimental, off by default)** - `brimir_sh2_jit` core option. The forked SH-2 hands execution to a new `brimir-jit` library: IR front end for a first instruction subset, per-CPU block cache with check-on-entry invalidation, and an IR-interpreter backend, with interpreter fallback for everything else. Differential tests compare every supported instruction, delay-slot combination, bus-wait retry and random programs against the interpreter for exact state and cycle counts. Not faster yet; see `design/sh2-jit.md`.
+- **`brimir_bench`** - headless frame benchmark reporting ms/frame and the SH-2 share of emulation time.
+
 ### Fixed
 - **Libretro thread safety** - every entry point now acquires the core lock before checking the core instance, closing a race with `retro_deinit`. `retro_get_region` and the memory data/size queries are now locked as well.
 - **Geometry** - the last-reported frame size is reset on content load/unload, so a new game at the same resolution as the previous one still gets `SET_GEOMETRY` on its first frame.
