@@ -264,9 +264,9 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 - [x] with the JIT on, the BIOS and a set of games run 10 minutes each (36000 frames) in lockstep with the interpreter without divergence (BIOS menu plus six games)
 - [x] the baseline report is committed ([sh2-baseline.md](sh2-baseline.md))
 
-### Milestone 2 — x64 backend (separate spec)
+### Milestone 2 - full coverage and x64 backend
 
-Native code generation from the IR, register allocation for the hot guest registers, block linking. Front-end coverage extended toward the full instruction set.
+Design: [sh2-jit-m2.md](sh2-jit-m2.md). Remaining instructions (multiply, MAC, divide step, TAS, memory forms of LDC/LDS/STC/STS), then native x64 code generation from the IR with asmjit, staying bit-exact. Target: SH-2 time at least 2x lower than the interpreter, after which the JIT becomes the default on x86-64.
 
 ### Milestone 3 — ARM64 backend (separate spec)
 
