@@ -146,6 +146,21 @@ constexpr OpSpec kSpecs[] = {
     {"MACW",       0x400F, Fmt::NM, Addr::MacPair,  2, true},
     {"MACL",       0x000F, Fmt::NM, Addr::MacPair,  4, true},
     {"TAS",        0x401B, Fmt::N,  Addr::Rn,       1, true},
+    // Milestone 2A task 4: memory forms of LDC/LDS/STC/STS (handler table sections 9.7, 9.8; no
+    // bus-wait check; all clear interrupt-allow). Loaded SR/VBR/PR values are random: the rig has
+    // no interrupt pending and SLEEP follows.
+    {"LDC_GBR_M",  0x4017, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDC_SR_M",   0x4007, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDC_VBR_M",  0x4027, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDS_MACH_M", 0x4006, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDS_MACL_M", 0x4016, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"LDS_PR_M",   0x4026, Fmt::M,  Addr::RmPostInc, 4, true},
+    {"STC_GBR_M",  0x4013, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STC_SR_M",   0x4003, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STC_VBR_M",  0x4023, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STS_MACH_M", 0x4002, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STS_MACL_M", 0x4012, Fmt::N,  Addr::RnPreDec,  4, true},
+    {"STS_PR_M",   0x4022, Fmt::N,  Addr::RnPreDec,  4, true},
 };
 // clang-format on
 

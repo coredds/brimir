@@ -14,6 +14,7 @@ using ymir::sh2::OpcodeType;
 
 constexpr uint8_t kWbNone = 0xFF;
 constexpr uint32_t kWbPRBit = 1u << 16;
+constexpr uint8_t kWbPR = 0x10; // m_wbReg value for PR (SH2::kWBRegPR)
 
 constexpr uint32_t RegBit(uint32_t reg) {
     return 1u << reg;
@@ -65,7 +66,9 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
                     X(AND_M) X(OR_M) X(XOR_M) X(TST_M) X(LDC_GBR_R) X(LDC_SR_R) X(LDC_VBR_R) X(LDS_MACH_R)           \
                         X(LDS_MACL_R) X(LDS_PR_R) X(STC_GBR_R) X(STC_SR_R) X(STC_VBR_R) X(STS_MACH_R)                \
                             X(STS_MACL_R) X(STS_PR_R) X(MUL) X(MULS) X(MULU) X(DMULS) X(DMULU) X(DIV0S)    \
-                                X(DIV0U) X(DIV1) X(MACW) X(MACL) X(TAS)
+                                X(DIV0U) X(DIV1) X(MACW) X(MACL) X(TAS) X(LDC_GBR_M) X(LDC_SR_M) X(LDC_VBR_M)   \
+                                    X(LDS_MACH_M) X(LDS_MACL_M) X(LDS_PR_M) X(STC_GBR_M) X(STC_SR_M)         \
+                                        X(STC_VBR_M) X(STS_MACH_M) X(STS_MACL_M) X(STS_PR_M)
 
 // Maps a supported instruction (normal or delay-slot decode) to its base opcode.
 std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
@@ -205,7 +208,19 @@ bool ClearsIntrAllow(OpcodeType base) {
     case OpcodeType::STC_VBR_R:
     case OpcodeType::STS_MACH_R:
     case OpcodeType::STS_MACL_R:
-    case OpcodeType::STS_PR_R: return true;
+    case OpcodeType::STS_PR_R:
+    case OpcodeType::LDC_GBR_M:
+    case OpcodeType::LDC_SR_M:
+    case OpcodeType::LDC_VBR_M:
+    case OpcodeType::LDS_MACH_M:
+    case OpcodeType::LDS_MACL_M:
+    case OpcodeType::LDS_PR_M:
+    case OpcodeType::STC_GBR_M:
+    case OpcodeType::STC_SR_M:
+    case OpcodeType::STC_VBR_M:
+    case OpcodeType::STS_MACH_M:
+    case OpcodeType::STS_MACL_M:
+    case OpcodeType::STS_PR_M: return true;
     default: return false;
     }
 }
@@ -742,6 +757,71 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
         b.AddCycles(1);
         b.SetWb(static_cast<uint8_t>(n));
         break;
+
+    // Memory forms (handler table sections 9.7 and 9.8): no bus-wait check. LDC.L/LDS.L load from
+    // @Rm (Rm in bits 11..8) and post-increment it; LDC.L adds 2 cycles, LDS.L none. LDS.L PR
+    // leaves m_wbReg = PR. LDC.L SR goes through SetSR (clears allow, recomputes pending).
+    case OpcodeType::LDC_GBR_M:
+    case OpcodeType::LDC_SR_M:
+    case OpcodeType::LDC_VBR_M:
+    case OpcodeType::LDS_MACH_M:
+    case OpcodeType::LDS_MACL_M:
+    case OpcodeType::LDS_PR_M: {
+        b.SyncCycles();
+        const ValueId address = b.GetReg(n);
+        b.AddAccessCycles(address, 4, false);
+        b.WbStall(RegBit(n));
+        const bool isLdc = op == OpcodeType::LDC_GBR_M || op == OpcodeType::LDC_SR_M || op == OpcodeType::LDC_VBR_M;
+        if (isLdc) {
+            b.AddCycles(2);
+        }
+        const ValueId value = b.Load(address, 4, false);
+        switch (op) {
+        case OpcodeType::LDC_GBR_M: b.SetGBR(value); break;
+        case OpcodeType::LDC_SR_M: b.SetSR(value, delaySlot); break;
+        case OpcodeType::LDC_VBR_M: b.SetVBR(value); break;
+        case OpcodeType::LDS_MACH_M: b.SetMACH(value); break;
+        case OpcodeType::LDS_MACL_M: b.SetMACL(value); break;
+        default: b.SetPR(value); break;
+        }
+        b.SetReg(n, b.Add(address, b.Const(4)));
+        b.ClearIntrAllow();
+        advance();
+        b.SetWb(op == OpcodeType::LDS_PR_M ? kWbPR : kWbNone);
+        break;
+    }
+    // STC.L/STS.L: Rn -= 4 first (no bus-wait exit, so writing Rn before the store is exact), then
+    // store; STC.L adds 2 cycles, STS.L none; STS.L PR stalls on (Rn, PR).
+    case OpcodeType::STC_GBR_M:
+    case OpcodeType::STC_SR_M:
+    case OpcodeType::STC_VBR_M:
+    case OpcodeType::STS_MACH_M:
+    case OpcodeType::STS_MACL_M:
+    case OpcodeType::STS_PR_M: {
+        b.SyncCycles();
+        const ValueId address = b.Sub(b.GetReg(n), b.Const(4));
+        b.SetReg(n, address);
+        b.AddAccessCycles(address, 4, true);
+        b.WbStall(RegBit(n) | (op == OpcodeType::STS_PR_M ? kWbPRBit : 0u));
+        const bool isStc = op == OpcodeType::STC_GBR_M || op == OpcodeType::STC_SR_M || op == OpcodeType::STC_VBR_M;
+        if (isStc) {
+            b.AddCycles(2);
+        }
+        ValueId value = kNoValue;
+        switch (op) {
+        case OpcodeType::STC_GBR_M: value = b.GetGBR(); break;
+        case OpcodeType::STC_SR_M: value = b.GetSR(); break;
+        case OpcodeType::STC_VBR_M: value = b.GetVBR(); break;
+        case OpcodeType::STS_MACH_M: value = b.GetMACH(); break;
+        case OpcodeType::STS_MACL_M: value = b.GetMACL(); break;
+        default: value = b.GetPR(); break;
+        }
+        b.Store(address, 4, value);
+        b.ClearIntrAllow();
+        advance();
+        b.SetWb(kWbNone);
+        break;
+    }
 
     // Multiplies (handler table section 9.2): no multiplier latency is modelled. MUL/DMULx take
     // WritebackCycles(rm, rn) + 3, MULS/MULU the ALU template's + 1.

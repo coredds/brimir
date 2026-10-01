@@ -222,13 +222,20 @@ std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) 
         }
         break;
     case Fmt::N:
-        // TAS @Rn: Rn is an address (read-modify-write, Rn itself is not written).
-        w = WithHi(w, spec.addr == Addr::Rn ? addrReg() : RemapDest(hi));
+        // TAS @Rn: Rn is an address (read-modify-write, Rn itself is not written). STC.L/STS.L
+        // @-Rn: Rn is a copy of an address register (it is written).
+        if (spec.addr == Addr::RnPreDec) {
+            w = WithHi(w, setupBase());
+        } else {
+            w = WithHi(w, spec.addr == Addr::Rn ? addrReg() : RemapDest(hi));
+        }
         break;
     case Fmt::ND8:
     case Fmt::NI: w = WithHi(w, RemapDest(hi)); break;
     case Fmt::M: // LDC/LDS sources
-        if (name == "LDC_GBR_R") {
+        if (spec.addr == Addr::RmPostInc) {
+            w = WithHi(w, setupBase()); // LDC.L/LDS.L @Rm+: Rm is a copy of an address register
+        } else if (name == "LDC_GBR_R") {
             w = WithHi(w, addrReg());
         } else if (name == "LDS_PR_R") {
             w = WithHi(w, 12); // R12 holds an absolute program address (callers ensure it)
@@ -1086,6 +1093,118 @@ TEST_CASE("LDC SR in a delay slot unmasks a pending interrupt", "[jit][diff][exa
     REQUIRE(p.exec.GetStats().blocksRun > 0);
     // bra and its LDC SR slot form one compiled block.
     REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount == 2u);
+}
+
+// Handler table section 9.7 and section 9.x notes 7 and 10: ldc.l @R5+,SR loading 0 from RAM unmasks
+// the pending interrupt; interrupt-allow is cleared, so exactly one following instruction runs.
+TEST_CASE("LDC.L SR unmasking a pending interrupt", "[jit][diff][exact]") {
+    constexpr uint32_t kSrData = 0x26040000;
+    Pair p;
+    RaiseDivuOverflow(p);
+    p.Write32(kSrData, 0);
+    // ldc.l @R5+,SR ; add #1,R3 ; add #1,R3 ; add #1,R3 ; sleep
+    p.WriteCode(kCode, {0x4507, AddI(3, 1), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    state.SR = 0xF0; // mask 15: the level-15 DIVU interrupt is not pending yet
+    state.VBR = kIntrVbr;
+    state.R[3] = 0;
+    state.R[5] = kSrData;
+    state.R[15] = kIntrStack;
+    p.Load(state);
+    REQUIRE_FALSE(*p.jit->sh2->GetJitContext().intrPending);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().R[5] == kSrData + 4);           // post-incremented
+    REQUIRE(p.ref->State().R[3] == 1u);                    // exactly one add ran before the interrupt
+    REQUIRE(p.ref->State().sleep);                         // the handler ran
+    REQUIRE(p.ref->Read32(kIntrStack - 8) == kCode + 4);   // stacked PC: the second add
+    REQUIRE(p.exec.GetStats().blocksRun > 0);
+    // ldc.l and the adds share one compiled block, so the in-block interrupt-allow rule is exercised.
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount >= 2u);
+}
+
+// The same in a delay slot: the slot never takes an interrupt (EndDelaySlot recomputes pending with
+// the new SR), and allow stays cleared for the first instruction at the target.
+TEST_CASE("LDC.L SR in a delay slot unmasks a pending interrupt", "[jit][diff][exact]") {
+    constexpr uint32_t kBranchTarget = kCode + 0x20;
+    constexpr uint32_t kSrData = 0x06040010;
+    Pair p;
+    RaiseDivuOverflow(p);
+    p.Write32(kSrData, 0);
+    // kCode: bra kBranchTarget ; ldc.l @R5+,SR (slot) ; add #1,R3 ; sleep
+    p.WriteCode(kCode, {Bra(14), 0x4507, AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    // kBranchTarget: add #1,R4 ; add #1,R4 ; add #1,R4 ; sleep
+    p.WriteCode(kBranchTarget, {AddI(4, 1), AddI(4, 1), AddI(4, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    state.SR = 0xF0;
+    state.VBR = kIntrVbr;
+    state.R[3] = 0;
+    state.R[4] = 0;
+    state.R[5] = kSrData;
+    state.R[15] = kIntrStack;
+    p.Load(state);
+    REQUIRE_FALSE(*p.jit->sh2->GetJitContext().intrPending);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().R[5] == kSrData + 4);
+    REQUIRE(p.ref->State().R[3] == 0u); // the fall-through add never ran
+    REQUIRE(p.ref->State().sleep);      // the handler ran
+    REQUIRE(p.ref->State().R[4] == 1u); // one instruction at the target, then the interrupt
+    REQUIRE(p.ref->Read32(kIntrStack - 8) == kBranchTarget + 2);
+    REQUIRE(p.exec.GetStats().blocksRun > 0);
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount == 2u);
+}
+
+// Handler table section 9.7 and section 9.x note 8: lds.l @R1+,PR leaves m_wbReg = PR, so the RTS
+// right after it pays the WB(PR) stall. Every cycle target also stops after the first instruction.
+TEST_CASE("LDS.L PR write-back stall", "[jit][diff][exact]") {
+    constexpr uint32_t kPrData = 0x26040020;
+    constexpr uint8_t kWbPR = 0x10;
+    bool sawWbPR = false;
+    for (uint32_t target = 1; target <= 30; ++target) {
+        INFO("target " << target);
+        Pair p;
+        FillTargetArea(p);
+        p.Write32(kPrData, kTarget);
+        // lds.l @R1+,PR ; rts ; nop
+        p.WriteCode(kCode, {0x4126, kRts, kNop, static_cast<uint16_t>(kSleep)});
+        auto state = p.ref->BaseState(kCode);
+        state.R[1] = kPrData;
+        state.wbReg = 0xFF;
+        p.Load(state);
+        p.jit->sh2->SetJitExecutor(&p.exec);
+
+        const uint64 refCycles = p.ref->sh2->Advance<false, false>(target);
+        const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+        INFO(diff);
+        REQUIRE(diff.empty());
+        if (p.ref->State().PC == kCode + 2) { // stopped right after lds.l
+            REQUIRE(p.ref->State().wbReg == kWbPR);
+            REQUIRE(p.jit->State().wbReg == kWbPR);
+            REQUIRE(p.ref->State().PR == kTarget);
+            REQUIRE(p.ref->State().R[1] == kPrData + 4);
+            sawWbPR = true;
+        }
+        if (target == 30) {
+            REQUIRE(p.ref->State().sleep); // returned to the SLEEP-filled target area
+            REQUIRE(p.exec.GetStats().blocksRun > 0);
+        }
+    }
+    CHECK(sawWbPR);
 }
 
 namespace {
