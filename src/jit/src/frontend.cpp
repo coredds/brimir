@@ -54,9 +54,9 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
     return static_cast<uint32_t>(instr & 0xFFu) << shift;
 }
 
-// ALU, shift, compare, @(R0,GBR) logic and system-register transfer opcodes (handler table
-// sections 4, 5 and 6); each has a Delay_ variant with identical semantics (LDC SR passes the
-// delay-slot flag to SetSR, with the same net effect).
+// ALU, shift, compare, @(R0,GBR) logic, system-register transfer, multiply and divide-step opcodes
+// (handler table sections 4, 5, 6 and 9.2-9.4); each has a Delay_ variant with identical semantics
+// (LDC SR passes the delay-slot flag to SetSR, with the same net effect).
 #define BRIMIR_JIT_ALU_OPS(X)                                                                                         \
     X(EXTSB) X(EXTSW) X(EXTUB) X(EXTUW) X(SWAPB) X(SWAPW) X(XTRCT) X(ADDC) X(ADDV) X(AND_R) X(AND_I) X(NEG) X(NEGC)  \
         X(NOT) X(OR_R) X(OR_I) X(ROTCL) X(ROTCR) X(ROTL) X(ROTR) X(SHAL) X(SHAR) X(SHLL) X(SHLL2) X(SHLL8)           \
@@ -64,7 +64,8 @@ uint32_t Disp8U(uint16_t instr, uint32_t shift) {
                 X(CMP_GE) X(CMP_GT) X(CMP_HI) X(CMP_HS) X(CMP_PL) X(CMP_PZ) X(CMP_STR) X(TST_R) X(TST_I) X(CLRMAC)   \
                     X(AND_M) X(OR_M) X(XOR_M) X(TST_M) X(LDC_GBR_R) X(LDC_SR_R) X(LDC_VBR_R) X(LDS_MACH_R)           \
                         X(LDS_MACL_R) X(LDS_PR_R) X(STC_GBR_R) X(STC_SR_R) X(STC_VBR_R) X(STS_MACH_R)                \
-                            X(STS_MACL_R) X(STS_PR_R)
+                            X(STS_MACL_R) X(STS_PR_R) X(MUL) X(MULS) X(MULU) X(DMULS) X(DMULU) X(DIV0S)    \
+                                X(DIV0U) X(DIV1)
 
 // Maps a supported instruction (normal or delay-slot decode) to its base opcode.
 std::optional<OpcodeType> BaseOp(OpcodeType op, bool delaySlot) {
@@ -740,6 +741,59 @@ void LowerPlain(Builder &b, OpcodeType op, uint16_t instr, uint32_t pc, bool del
         advance();
         b.AddCycles(1);
         b.SetWb(static_cast<uint8_t>(n));
+        break;
+
+    // Multiplies (handler table section 9.2): no multiplier latency is modelled. MUL/DMULx take
+    // WritebackCycles(rm, rn) + 3, MULS/MULU the ALU template's + 1.
+    case OpcodeType::MUL:
+        b.SetMACL(b.Mul(b.GetReg(m), b.GetReg(n)));
+        advance();
+        b.WbStall(RegBit(m) | RegBit(n));
+        b.AddCycles(3);
+        b.SetWb(kWbNone);
+        break;
+    case OpcodeType::MULS:
+        b.SetMACL(b.Mul(b.SExt16(b.GetReg(m)), b.SExt16(b.GetReg(n))));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    case OpcodeType::MULU: {
+        const ValueId lo16 = b.Const(0xFFFF);
+        b.SetMACL(b.Mul(b.And(b.GetReg(m), lo16), b.And(b.GetReg(n), lo16)));
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::DMULS:
+    case OpcodeType::DMULU: {
+        const ValueId x = b.GetReg(m);
+        const ValueId y = b.GetReg(n);
+        b.SetMACL(b.Mul(x, y));
+        b.SetMACH(op == OpcodeType::DMULS ? b.MulHiS(x, y) : b.MulHiU(x, y));
+        advance();
+        b.WbStall(RegBit(m) | RegBit(n));
+        b.AddCycles(3);
+        b.SetWb(kWbNone);
+        break;
+    }
+
+    // Divide steps (handler table sections 9.3 and 9.4). SR.M/Q/T are written through SetSRBits
+    // (SetSR would clear interrupt-allow and recompute pending).
+    case OpcodeType::DIV0S: {
+        // M = Rm < 0; Q = Rn < 0; T = M != Q
+        const ValueId mm = b.Shr(b.GetReg(m), 31);
+        const ValueId qq = b.Shr(b.GetReg(n), 31);
+        b.SetSRBits(b.Or(b.Or(b.Shl(mm, 9), b.Shl(qq, 8)), b.Xor(mm, qq)), 0x301);
+        aluTail(RegBit(m) | RegBit(n));
+        break;
+    }
+    case OpcodeType::DIV0U: // M = Q = T = 0; fixed 1 cycle, no write-back stall
+        b.SetSRBits(b.Const(0), 0x301);
+        advance();
+        b.AddCycles(1);
+        b.SetWb(kWbNone);
+        break;
+    case OpcodeType::DIV1: // with n == m, Rm is read after Rn was shifted (handled by Div1Step)
+        b.SetReg(n, b.Div1(b.GetReg(n), b.GetReg(m), n == m));
+        aluTail(RegBit(m) | RegBit(n));
         break;
     default: break; // callers only pass supported opcodes
     }

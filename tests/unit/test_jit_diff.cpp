@@ -446,12 +446,17 @@ TEST_CASE("JIT recompiles a block when its guest code changes", "[jit][diff]") {
 }
 
 TEST_CASE("Unsupported instructions fall back to the interpreter", "[jit][diff]") {
+    // TRAPA is never compiled (milestone 2A leaves TRAPA/RTE/SLEEP to the interpreter).
+    constexpr uint32_t kVbr = 0x06008000;
+    constexpr uint32_t kHandler = 0x06009000;
     Pair p;
-    // mulu.w R2,R1 (unsupported) ; add #1,R0 ; sleep
-    p.WriteCode(kCode, {0x212E, AddI(0, 1), static_cast<uint16_t>(kSleep)});
+    // trapa #0x20 (unsupported) -> handler: add #1,R0 ; sleep
+    p.WriteCode(kCode, {0xC320, static_cast<uint16_t>(kSleep)});
+    p.WriteCode(kHandler, {AddI(0, 1), static_cast<uint16_t>(kSleep)});
+    p.Write32(kVbr + 0x20 * 4, kHandler);
     auto state = p.ref->BaseState(kCode);
-    state.R[1] = 7;
-    state.R[2] = 9;
+    state.VBR = kVbr;
+    state.R[15] = 0x0600F000;
     p.Load(state);
     p.Step();
     REQUIRE(p.exec.GetStats().interpreted == 1);
@@ -462,8 +467,8 @@ TEST_CASE("Unsupported instructions fall back to the interpreter", "[jit][diff]"
 TEST_CASE("Delayed branch with an unsupported slot ends the block before the branch", "[jit][diff]") {
     Pair p;
     FillTargetArea(p);
-    // add #1,R0 ; bra kTarget ; mulu.w R2,R1 (unsupported in the slot)
-    p.WriteCode(kCode, {AddI(0, 1), Bra(125), 0x212E});
+    // add #1,R0 ; bra kTarget ; sleep (SLEEP is never compiled, also not in a slot)
+    p.WriteCode(kCode, {AddI(0, 1), Bra(125), static_cast<uint16_t>(kSleep)});
     p.Load(p.ref->BaseState(kCode));
     const auto first = p.Step();
     REQUIRE(first.retired == 1);
@@ -782,6 +787,65 @@ TEST_CASE("JIT Advance matches interpreter Advance for every cycle target with B
         sawBeforeBranchStop = sawBeforeBranchStop || p.jit->State().PC == kCode + 4;
     }
     CHECK(sawBeforeBranchStop); // some target stopped right before bf
+}
+
+// Handler table section 9.4: full 64/32 division sequences (dividend R2:R0, divisor R1). The
+// 65-instruction sequence spans several 32-instruction blocks; Advance runs in small chunks so it
+// also stops inside blocks.
+TEST_CASE("Division sequences match the interpreter", "[jit][diff][exact]") {
+    constexpr uint16_t kDiv0u = 0x0019;
+    const auto div0s = [](uint32_t n, uint32_t m) { return Nm(0x2007, n, m); };
+    const auto div1 = [](uint32_t n, uint32_t m) { return Nm(0x3004, n, m); };
+    const auto rotcl = [](uint32_t n) { return static_cast<uint16_t>(0x4024 | (n << 8)); };
+    static constexpr uint32_t kInputs[] = {0, 1, 7, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678};
+
+    for (const bool isSigned : {false, true}) {
+        // unsigned: div0u ; 32x (rotcl R0 ; div1 R1,R2) ; sleep
+        // signed:   div0s R1,R2 ; 32x (rotcl R0 ; div1 R1,R2) ; sleep
+        std::vector<uint16_t> program = {isSigned ? div0s(2, 1) : kDiv0u};
+        for (int i = 0; i < 32; ++i) {
+            program.push_back(rotcl(0));
+            program.push_back(div1(2, 1));
+        }
+        program.push_back(static_cast<uint16_t>(kSleep));
+
+        uint32_t combo = 0;
+        for (const uint32_t dividend : kInputs) {
+            for (const uint32_t high : kInputs) {
+                for (const uint32_t divisor : kInputs) {
+                    ++combo;
+                    INFO((isSigned ? "signed" : "unsigned") << " R2:R0=" << std::hex << high << ":" << dividend
+                                                            << " R1=" << divisor);
+                    Pair p;
+                    p.WriteCode(kCode, program);
+                    auto state = p.ref->BaseState(kCode);
+                    state.R[0] = dividend;
+                    state.R[1] = divisor;
+                    state.R[2] = high;
+                    // Start from dirty T/Q/M so DIV0U/DIV0S must clear or set them.
+                    state.SR = (state.SR & ~0x301u) | (combo & 1u) | ((combo & 6u) << 7);
+                    p.Load(state);
+                    p.jit->sh2->SetJitExecutor(&p.exec);
+
+                    const uint64 chunk = 5 + combo % 13;
+                    for (int iter = 0; iter < 64; ++iter) {
+                        const uint64 refCycles = p.ref->sh2->Advance<false, false>(chunk);
+                        const uint64 jitCycles = p.jit->sh2->Advance<false, false>(chunk);
+                        INFO("chunk " << chunk << " iter " << iter);
+                        REQUIRE(jitCycles == refCycles);
+                        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+                        INFO(diff);
+                        REQUIRE(diff.empty());
+                        if (p.ref->State().sleep) {
+                            break;
+                        }
+                    }
+                    REQUIRE(p.ref->State().sleep);
+                    REQUIRE(p.exec.GetStats().blocksRun >= 3); // compiled, across several blocks
+                }
+            }
+        }
+    }
 }
 
 // A 32/32 division by zero (write to DVDNT) raises the DIVU overflow interrupt synchronously,

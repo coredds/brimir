@@ -133,6 +133,15 @@ constexpr OpSpec kSpecs[] = {
     {"BRAF",       0x0023, Fmt::M, Addr::None,      0, false},
     {"BSRF",       0x0003, Fmt::M, Addr::None,      0, false},
     {"JSR",        0x400B, Fmt::M, Addr::None,      0, false},
+    // Milestone 2A task 2: multiply and divide-step (handler table sections 9.2-9.4)
+    {"MUL",        0x0007, Fmt::NM, Addr::None,     0, true},
+    {"MULS",       0x200F, Fmt::NM, Addr::None,     0, true},
+    {"MULU",       0x200E, Fmt::NM, Addr::None,     0, true},
+    {"DMULS",      0x300D, Fmt::NM, Addr::None,     0, true},
+    {"DMULU",      0x3005, Fmt::NM, Addr::None,     0, true},
+    {"DIV0S",      0x2007, Fmt::NM, Addr::None,     0, true},
+    {"DIV0U",      0x0019, Fmt::Z,  Addr::None,     0, true},
+    {"DIV1",       0x3004, Fmt::NM, Addr::None,     0, true},
 };
 // clang-format on
 
