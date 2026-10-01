@@ -1,4 +1,5 @@
 #include "x64_backend.hpp"
+#include "x64_factory.hpp"
 
 #include <stdexcept>
 
@@ -31,6 +32,10 @@ void X64Backend::Reset() {
     m_runtime.reset();
     m_runtime = std::make_unique<asmjit::JitRuntime>();
     m_codeBytes = 0;
+}
+
+std::unique_ptr<INativeBackend> MakeX64Backend() {
+    return std::make_unique<X64Backend>();
 }
 
 } // namespace brimir::jit

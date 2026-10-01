@@ -6,6 +6,8 @@
 #include <brimir/core_wrapper.hpp>
 #include <brimir/jit/executor.hpp>
 
+#include "jit_test_backend.hpp"
+
 #include <vector>
 
 using brimir::CoreWrapper;
@@ -18,6 +20,7 @@ TEST_CASE("SH-2 JIT is off by default and toggles executors", "[jit][integration
     REQUIRE_FALSE(core.IsSH2JitEnabled());
     REQUIRE(saturn->masterSH2.GetJitExecutor() == nullptr);
 
+    core.SetSH2JitBackend(sh2test::TestBackend());
     core.SetSH2JitEnabled(true);
     REQUIRE(core.IsSH2JitEnabled());
     REQUIRE(saturn->masterSH2.GetJitExecutor() != nullptr);
@@ -31,6 +34,7 @@ TEST_CASE("SH-2 JIT is off by default and toggles executors", "[jit][integration
 
 TEST_CASE("SH-2 JIT enabled before Initialize is applied", "[jit][integration]") {
     CoreWrapper core;
+    core.SetSH2JitBackend(sh2test::TestBackend());
     core.SetSH2JitEnabled(true);
     REQUIRE(core.Initialize());
     REQUIRE(core.GetSaturn()->masterSH2.GetJitExecutor() != nullptr);
@@ -39,6 +43,7 @@ TEST_CASE("SH-2 JIT enabled before Initialize is applied", "[jit][integration]")
 TEST_CASE("Frames run with the SH-2 JIT enabled", "[jit][integration]") {
     // Uses the built-in null IPL program (no BIOS loaded).
     CoreWrapper core;
+    core.SetSH2JitBackend(sh2test::TestBackend());
     core.SetSH2JitEnabled(true);
     REQUIRE(core.Initialize());
     for (int i = 0; i < 30; ++i) {
@@ -52,6 +57,7 @@ TEST_CASE("Frames run with the SH-2 JIT enabled", "[jit][integration]") {
 
 TEST_CASE("Save state round trip with the SH-2 JIT flushes the block caches", "[jit][integration]") {
     CoreWrapper core;
+    core.SetSH2JitBackend(sh2test::TestBackend());
     core.SetSH2JitEnabled(true);
     REQUIRE(core.Initialize());
     for (int i = 0; i < 10; ++i) {

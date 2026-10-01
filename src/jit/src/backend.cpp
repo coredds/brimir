@@ -1,7 +1,7 @@
 #include <brimir/jit/backend.hpp>
 
 #if BRIMIR_JIT_HAS_X64
-#include "x64/x64_backend.hpp"
+#include "x64/x64_factory.hpp"
 #endif
 
 namespace brimir::jit {
@@ -43,7 +43,7 @@ bool ParseBackend(std::string_view name, BackendKind &out) {
 std::unique_ptr<INativeBackend> MakeNativeBackend(BackendKind kind) {
 #if BRIMIR_JIT_HAS_X64
     if (kind == BackendKind::X64) {
-        return std::make_unique<X64Backend>();
+        return MakeX64Backend();
     }
 #endif
     (void)kind;

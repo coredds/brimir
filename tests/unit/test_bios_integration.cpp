@@ -9,6 +9,7 @@
 #include <brimir/core_wrapper.hpp>
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
+#include "jit_test_backend.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -171,6 +172,7 @@ TEST_CASE("BIOS integration - real BIOS boots and renders with the SH-2 JIT", "[
     INFO("BIOS: " << biosPath.filename().string());
 
     CoreWrapper core;
+    core.SetSH2JitBackend(sh2test::TestBackend());
     core.SetSH2JitEnabled(true);
     REQUIRE(core.Initialize());
     REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
@@ -211,6 +213,7 @@ TEST_CASE("BIOS integration - JIT core and interpreter core stay identical", "[b
 
     CoreWrapper jit;
     CoreWrapper ref;
+    jit.SetSH2JitBackend(sh2test::TestBackend());
     jit.SetSH2JitEnabled(true);
     for (CoreWrapper *core : {&jit, &ref}) {
         REQUIRE(core->Initialize());
