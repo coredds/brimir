@@ -168,8 +168,14 @@ TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
         "SHLR2", "SHLR8",  "SHLR16", "SUB",    "SUBC",  "SUBV",  "XOR_R",  "XOR_I",    "CMP_EQ_I", "CMP_GE",
         "CMP_GT", "CMP_HI", "CMP_HS", "CMP_PL", "CMP_PZ", "CMP_STR", "TST_R", "TST_I",  "CLRMAC",
     };
-    static constexpr uint32_t kValues[] = {0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x0000FFFF, 0xFF00FF00};
-    static constexpr uint32_t kImms[] = {0x00, 0x01, 0x7F, 0x80, 0xFF, 0xF0, 0x0F};
+    // CMP/STR sets T when any byte lane of Rn ^ Rm is zero. Pairs that make exactly one lane equal:
+    //   lane 1: 0x7FFFFFFF ^ 0xFF00FF00 = 0x80FF00FF;  lane 2: 0x00000001 ^ 0xFF00FF00 = 0xFF00FF01
+    //   lane 3: 0x12345678 ^ 0x12FFFFFF = 0x00CBA987;  lane 0: 0x12345678 ^ 0xFFFFFF78 = 0xEDCBA900
+    // (bits 31..24 are lane 3). kImms has one entry per kValues entry (indexed by the same bi).
+    static constexpr uint32_t kValues[] = {0,          1,          0x7FFFFFFF, 0x80000000, 0xFFFFFFFF,
+                                           0x0000FFFF, 0xFF00FF00, 0x12345678, 0x12FFFFFF, 0xFFFFFF78};
+    static constexpr uint32_t kImms[] = {0x00, 0x01, 0x7F, 0x80, 0xFF, 0xF0, 0x0F, 0x78, 0x12, 0x34};
+    static_assert(std::size(kImms) == std::size(kValues));
 
     const auto specs = jitspec::CompiledOpcodes();
     for (size_t opIndex = 0; opIndex < std::size(kAluOps); ++opIndex) {
@@ -228,8 +234,16 @@ TEST_CASE("ALU edge values match the interpreter", "[jit][diff][opcodes]") {
                     state.SR = 0xF0 | t;
                     p.Load(state);
 
-                    INFO(name << " instr " << Hex({instr}) << " Rn=" << std::hex << regs[n] << " Rm=" << regs[m]
-                              << " T=" << t);
+                    std::string operands;
+                    char buf[48];
+                    switch (spec->fmt) {
+                    case jitspec::Fmt::I: std::snprintf(buf, sizeof(buf), " R0=%X", regs[0]); break;
+                    case jitspec::Fmt::N: std::snprintf(buf, sizeof(buf), " Rn=%X", regs[n]); break;
+                    case jitspec::Fmt::NM: std::snprintf(buf, sizeof(buf), " Rn=%X Rm=%X", regs[n], regs[m]); break;
+                    default: buf[0] = '\0'; break; // Z: no register operands
+                    }
+                    operands = buf;
+                    INFO(name << " instr " << Hex({instr}) << operands << " T=" << t);
                     const uint64_t blocksBefore = p.exec.GetStats().blocksRun;
                     const auto info = p.Step();
                     CHECK(info.retired == 1);

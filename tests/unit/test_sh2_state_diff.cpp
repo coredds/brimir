@@ -39,6 +39,16 @@ TEST_CASE("DiffSH2State compares peripherals only in the peripheral scope", "[ji
     REQUIRE_FALSE(DiffSH2State(a, b, SH2DiffScope::CpuAndPeripherals).empty());
 }
 
+TEST_CASE("DiffSH2State names the differing DMAC channel field", "[jit][diff]") {
+    auto rig = std::make_unique<sh2test::Rig>();
+    const auto a = rig->State();
+    auto b = a;
+    b.dmac.channels[1].TCR ^= 0x10;
+    const std::string diff = DiffSH2State(a, b, SH2DiffScope::CpuAndPeripherals);
+    INFO(diff);
+    CHECK(diff.find("dmac.channels[1].TCR") != std::string::npos);
+}
+
 TEST_CASE("DiffSH2State compares the cache arrays in the CPU scope", "[jit][diff]") {
     auto rig = std::make_unique<sh2test::Rig>();
     const auto a = rig->State();
@@ -75,4 +85,22 @@ TEST_CASE("Test rig logs MMIO accesses and DiffRigs compares the logs", "[jit][d
     auto &ctxB = b->sh2->GetJitContext();
     ctxB.write(ctxB.sh2, 0x22000010, 4, 0xCAFEF00D);
     REQUIRE(sh2test::DiffRigs(*a, *b).find("MMIO log") != std::string::npos);
+}
+
+TEST_CASE("DiffRigs reports an MMIO log entry that differs in a same-length log", "[jit][diff]") {
+    auto a = std::make_unique<sh2test::Rig>();
+    auto b = std::make_unique<sh2test::Rig>();
+    // Same contents, same log length; only the second entry differs (a 16-bit vs a 32-bit read).
+    for (auto *rig : {a.get(), b.get()}) {
+        auto &ctx = rig->sh2->GetJitContext();
+        ctx.write(ctx.sh2, 0x22000010, 4, 0xCAFEF00D);
+    }
+    auto &ctxA = a->sh2->GetJitContext();
+    auto &ctxB = b->sh2->GetJitContext();
+    ctxA.read(ctxA.sh2, 0x22000010, 2, false);
+    ctxB.read(ctxB.sh2, 0x22000010, 4, false);
+    REQUIRE(a->mmio.log.size() == b->mmio.log.size());
+    const std::string diff = sh2test::DiffRigs(*a, *b);
+    INFO(diff);
+    CHECK(diff.find("MMIO log entry 1") != std::string::npos);
 }

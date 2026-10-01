@@ -110,4 +110,14 @@ TEST_CASE("Executor: flush during a store aborts the block after the store", "[j
     CHECK(rig->State().R[3] == 0u);           // nothing after it ran
     CHECK(rig->State().PC == kCode);
     CHECK(exec.Cache().Size() == 0);
+
+    // Recovery: the next step recompiles and runs the block from the start (re-running the store,
+    // here with the same value) through both adds.
+    const auto next = exec.Step(ctx);
+    CHECK_FALSE(next.aborted);
+    CHECK(next.retired == 3);
+    CHECK(rig->Read32(kData) == 0xA5A5A5A5u);
+    CHECK(rig->State().R[3] == 2u);
+    CHECK(rig->State().PC == kCode + 6);
+    CHECK(exec.Cache().Size() == 1);
 }

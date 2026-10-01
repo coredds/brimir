@@ -212,6 +212,54 @@ TEST_CASE("CompareCores detects a difference", "[lockstep]") {
     REQUIRE(brimir::CompareCores(*a, *b).empty());
     b->GetSaturn()->mem.WRAMHigh[0x123] ^= 0xFF;
     REQUIRE(brimir::CompareCores(*a, *b).find("WRAMHigh") != std::string::npos);
+    b->GetSaturn()->mem.WRAMHigh[0x123] ^= 0xFF;
+    REQUIRE(brimir::CompareCores(*a, *b).empty());
+
+    // Slave SH-2 register.
+    auto &slave = b->GetSaturn()->slaveSH2;
+    ymir::savestate::SH2SaveState original{};
+    slave.SaveState(original);
+    auto modified = original;
+    modified.R[3] ^= 1;
+    slave.LoadState(modified);
+    {
+        const std::string diff = brimir::CompareCores(*a, *b);
+        INFO(diff);
+        REQUIRE(diff.find("slave SH-2 R3") != std::string::npos);
+    }
+    slave.LoadState(original);
+    REQUIRE(brimir::CompareCores(*a, *b).empty());
+
+    // Framebuffer pixel (after the frame; the frontend-visible output buffer).
+    REQUIRE(b->GetFramebuffer() != nullptr);
+    REQUIRE(b->GetFramebufferWidth() > 0);
+    REQUIRE(b->GetFramebufferHeight() > 0);
+    auto *pixels = static_cast<uint8_t *>(const_cast<void *>(b->GetFramebuffer()));
+    pixels[0] ^= 0xFF;
+    {
+        const std::string diff = brimir::CompareCores(*a, *b);
+        INFO(diff);
+        REQUIRE(diff.find("frame row") != std::string::npos);
+    }
+}
+
+TEST_CASE("RunLockstep detects an audio difference", "[lockstep][jit]") {
+    auto a = MakeLockstepCore(false);
+    auto b = MakeLockstepCore(false);
+    REQUIRE(brimir::RunLockstep(*a, *b, 2).divergence.empty());
+
+    // Only audio differs: both cores run the same frames, but b's output of one frame is drained
+    // before the lockstep step, so b then yields fewer samples than a.
+    a->RunFrame();
+    b->RunFrame();
+    std::vector<int16_t> scratch(4096 * 2);
+    const size_t drained = b->GetAudioSamples(scratch.data(), 4096);
+    REQUIRE(drained > 0); // the frame produced audio, so the drain makes a difference
+    REQUIRE(brimir::CompareCores(*a, *b).empty());
+
+    const auto result = brimir::RunLockstep(*a, *b, 1);
+    INFO(result.divergence);
+    REQUIRE(result.divergence.find("audio sample count differs") != std::string::npos);
 }
 
 TEST_CASE("CompareCores detects differences outside the SH-2s and WRAM", "[lockstep]") {

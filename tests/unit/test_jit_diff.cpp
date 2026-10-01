@@ -6,6 +6,7 @@
 // memory, bus-wait query sequence and cycle totals.
 
 #include "catch_amalgamated.hpp"
+#include "jit_opcode_specs.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/executor.hpp>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using sh2test::kSleep;
@@ -52,6 +54,10 @@ uint16_t Bf(uint32_t d) { return static_cast<uint16_t>(0x8B00 | (d & 0xFF)); }
 uint16_t Bts(uint32_t d) { return static_cast<uint16_t>(0x8D00 | (d & 0xFF)); }
 uint16_t Bfs(uint32_t d) { return static_cast<uint16_t>(0x8F00 | (d & 0xFF)); }
 uint16_t Bra(uint32_t d) { return static_cast<uint16_t>(0xA000 | (d & 0xFFF)); }
+uint16_t Bsr(uint32_t d) { return static_cast<uint16_t>(0xB000 | (d & 0xFFF)); }
+uint16_t Braf(uint32_t m) { return static_cast<uint16_t>(0x0023 | (m << 8)); }
+uint16_t Bsrf(uint32_t m) { return static_cast<uint16_t>(0x0003 | (m << 8)); }
+uint16_t Jsr(uint32_t m) { return static_cast<uint16_t>(0x400B | (m << 8)); }
 
 std::string Hex(const std::vector<uint16_t> &words) {
     std::string out;
@@ -156,6 +162,104 @@ uint16_t MakeInstr(Kind kind, std::mt19937 &rng, std::array<uint32_t, 16> &regs)
 
 void FillTargetArea(Pair &p) {
     p.WriteCode(kTarget - 0x10, std::vector<uint16_t>(0x40, static_cast<uint16_t>(kSleep)));
+}
+
+// Random-program generation (fuzz test). Register roles keep every access and branch inside known
+// memory: R0-R7 and R13-R15 data; R8-R11 data addresses (never written); R12 branch register; GBR
+// always holds one of the R8-R11 addresses.
+uint32_t RemapDest(uint32_t r) {
+    return (r >= 8 && r <= 12) ? r - 8 : r;
+}
+uint16_t WithHi(uint16_t w, uint32_t r) { // bits 11..8
+    return static_cast<uint16_t>((w & ~0x0F00u) | (r << 8));
+}
+uint16_t WithLo(uint16_t w, uint32_t r) { // bits 7..4
+    return static_cast<uint16_t>((w & ~0x00F0u) | (r << 4));
+}
+
+// Address forms whose base cannot be one of the fixed R8-R11 addresses: R0-indexed (R0 is a data
+// register) and post-increment/pre-decrement (the base is written). The generator emits a setup
+// instruction right before them (`mov #imm,R0` or `mov Rbase,Rd`); the pair is never split by a
+// branch target or a delay slot.
+bool NeedsSetup(jitspec::Addr a) {
+    using jitspec::Addr;
+    return a == Addr::RmR0 || a == Addr::RnR0 || a == Addr::GbrR0 || a == Addr::RnPreDec || a == Addr::RmPostInc;
+}
+
+// One random non-branch instruction from the compiled-opcode table, plus its setup instruction if
+// it needs one (setup first). Jitspec::Encode supplies the random fields; register fields are then
+// constrained to the roles above (its register fixups target single-instruction tests and are
+// discarded here).
+std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) {
+    using jitspec::Addr;
+    using jitspec::Fmt;
+    std::array<uint32_t, 16> scratchRegs{};
+    uint32_t scratchGbr = 0;
+    uint16_t w = jitspec::Encode(spec, rng, scratchRegs, scratchGbr);
+    const auto addrReg = [&] { return 8 + rng() % 4; };
+    const std::string_view name = spec.name;
+    const uint32_t hi = (w >> 8) & 0xFu;
+    std::vector<uint16_t> setup;
+    const auto setupR0 = [&] {
+        // R0 = sign-extended imm8 (-128..127), aligned to the access size.
+        const uint32_t imm = rng() & 0xFFu & ~(static_cast<uint32_t>(spec.size) - 1);
+        setup.push_back(MovI(0, imm));
+    };
+    const auto setupBase = [&] { // Rd = copy of an address register; returns d
+        const uint32_t d = RemapDest(rng() % 16);
+        const uint32_t base = addrReg();
+        setup.push_back(MovR(d, base));
+        return d;
+    };
+
+    switch (spec.fmt) {
+    case Fmt::Z:
+    case Fmt::D: break; // MOVA (R0) and GBR-relative forms: GBR is always an address register
+    case Fmt::I:
+        if (spec.addr == Addr::GbrR0) {
+            setupR0();
+        }
+        break;
+    case Fmt::N:
+    case Fmt::ND8:
+    case Fmt::NI: w = WithHi(w, RemapDest(hi)); break;
+    case Fmt::M: // LDC/LDS sources
+        if (name == "LDC_GBR_R") {
+            w = WithHi(w, addrReg());
+        } else if (name == "LDS_PR_R") {
+            w = WithHi(w, 12); // R12 holds an absolute program address (callers ensure it)
+        }
+        break;
+    case Fmt::MD: w = WithLo(w, addrReg()); break;  // @(disp,Rm) -> R0
+    case Fmt::ND4: w = WithLo(w, addrReg()); break; // R0 -> @(disp,Rn), Rn in bits 7..4
+    case Fmt::NM:
+    case Fmt::NMD:
+        switch (spec.addr) {
+        case Addr::None: w = WithHi(w, RemapDest(hi)); break;
+        case Addr::Rm:
+        case Addr::RmDisp: w = WithLo(WithHi(w, RemapDest(hi)), addrReg()); break;
+        case Addr::Rn:
+        case Addr::RnDisp: w = WithHi(w, addrReg()); break;
+        case Addr::RmR0:
+            setupR0();
+            w = WithLo(WithHi(w, RemapDest(hi)), addrReg());
+            break;
+        case Addr::RnR0:
+            setupR0();
+            w = WithHi(w, addrReg());
+            break;
+        case Addr::RnPreDec: w = WithHi(w, setupBase()); break;
+        case Addr::RmPostInc: {
+            const uint32_t d = setupBase();
+            w = WithLo(WithHi(w, RemapDest(hi)), d);
+            break;
+        }
+        default: break;
+        }
+        break;
+    }
+    setup.push_back(w);
+    return setup;
 }
 
 } // namespace
@@ -427,118 +531,139 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
     CHECK(jit->State().R[3] != 0u); // the timer actually advanced
 }
 
-// Random programs of supported instructions, including branches, delay slots, loops, MMIO and
-// bus waits. Register roles keep execution inside the program: R0-R7 data, R8-R11 data
-// addresses (never written), R12 jump target, PR return target.
+// Random programs of every compiled instruction (jitspec::CompiledOpcodes()) plus all branch kinds,
+// with delay slots, loops, calls, MMIO and bus waits. Register roles (see FuzzInstr) keep execution
+// and data accesses inside known memory: R0-R7, R13-R15 data; R8-R11 data addresses (never
+// written); GBR one of R8-R11; R12 the branch register; PR a return target. R12 is per program
+// either an absolute program address (JMP/JSR, and LDS PR,R12) or a fixed displacement
+// (BRAF/BSRF: target = PC + 4 + R12).
 TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]") {
     constexpr int kPrograms = 300;
     constexpr int kLength = 24;
     constexpr int kSteps = 80;
     // Coverage lower bounds, ~65% of the values measured with all 300 programs passing
-    // (steps=15730 blocksRun=14700 interpreted=1030 compiles=1122, i.e. 93% of steps in blocks).
-    constexpr uint64_t kMinBlocksRun = 9500;
-    constexpr uint64_t kMinBlockPercent = 60;
+    // (steps=15527 blocksRun=15378 interpreted=149 compiles=1134, i.e. 99% of steps
+    // in blocks).
+    constexpr uint64_t kMinBlocksRun = 10000;
+    constexpr uint64_t kMinBlockPercent = 64;
     bool diverged = false;
     uint64_t totalSteps = 0;
     uint64_t totalBlocksRun = 0;
     uint64_t totalInterpreted = 0;
     uint64_t totalCompiles = 0;
 
+    // Non-branch opcodes, and the subset that needs no setup instruction (delay slots and the last
+    // program position hold only those).
+    std::vector<const jitspec::OpSpec *> nonBranch;
+    std::vector<const jitspec::OpSpec *> singles;
+    for (const jitspec::OpSpec &spec : jitspec::CompiledOpcodes()) {
+        if (spec.slotOk) {
+            nonBranch.push_back(&spec);
+            if (!NeedsSetup(spec.addr)) {
+                singles.push_back(&spec);
+            }
+        }
+    }
+
+    enum class Br { None, Bt, Bf, Bts, Bfs, Bra, Bsr, Braf, Bsrf };
     for (int prog = 0; prog < kPrograms; ++prog) {
         const uint32_t seed = 0xF0220000u + static_cast<uint32_t>(prog);
         std::mt19937 rng(seed);
         Pair p;
         p.SetBusWaitEvery((rng() & 1u) ? 3u : 0u);
+        const bool absR12 = (rng() & 1u) != 0;                         // JMP/JSR, else BRAF/BSRF
+        const int relDisp = static_cast<int>(rng() % 13) - 6;          // BRAF/BSRF: R12 = 2 * relDisp
+        const auto isLdsPr = [](const jitspec::OpSpec *s) { return std::string_view(s->name) == "LDS_PR_R"; };
 
-        const auto dataReg = [&] { return rng() % 8; };
-        const auto addrReg = [&] { return 8 + rng() % 4; };
-        // Displacement, in instructions, from instruction i to a random instruction of the program.
-        const auto targetDisp = [&](int i) {
-            return static_cast<uint32_t>(static_cast<int>(rng() % kLength) - i - 2);
-        };
-
+        // Pass 1: instructions, with branch displacements patched in pass 2 once the valid targets
+        // (every instruction except the second of a setup pair) are known.
         std::vector<uint16_t> program;
+        std::vector<Br> branchKind;
+        std::vector<bool> pairSecond;
         bool prevDelayed = false;
-        for (int i = 0; i < kLength; ++i) {
+        while (static_cast<int>(program.size()) < kLength) {
+            const int i = static_cast<int>(program.size());
+            const bool last = i == kLength - 1;
             uint32_t pick = rng() % 16;
             if (prevDelayed && pick >= 12) {
                 pick = rng() % 12; // delay slots never hold branches
-            } else if (i == kLength - 1 && pick >= 13) {
+            } else if (last && pick >= 13) {
                 pick = rng() % 13; // no delayed branch last: its slot would be SLEEP
             }
-            // Every random draw goes into a named local first, so the program does not depend on
-            // the compiler's argument evaluation order.
-            uint16_t instr = kNop;
-            switch (pick) {
-            case 0: instr = kNop; break;
-            case 1: {
-                const uint32_t n = dataReg();
-                const uint32_t m = dataReg();
-                instr = MovR(n, m);
-                break;
+            bool delayed = false;
+            if (pick < 12) {
+                // A setup pair must fit before the end and never sits in a delay slot.
+                const auto &pool = (prevDelayed || last) ? singles : nonBranch;
+                const jitspec::OpSpec *spec = pool[rng() % pool.size()];
+                while (!absR12 && isLdsPr(spec)) {
+                    spec = pool[rng() % pool.size()]; // R12 is not an absolute address here
+                }
+                const std::vector<uint16_t> words = FuzzInstr(*spec, rng);
+                for (size_t k = 0; k < words.size(); ++k) {
+                    program.push_back(words[k]);
+                    branchKind.push_back(Br::None);
+                    pairSecond.push_back(k > 0);
+                }
+            } else {
+                Br kind = Br::None;
+                uint16_t word = 0;
+                const uint32_t sub = rng();
+                switch (pick) {
+                case 12: kind = (sub & 1u) ? Br::Bt : Br::Bf; break;
+                case 13: kind = (sub & 1u) ? Br::Bts : Br::Bfs; break;
+                case 14: kind = (sub & 1u) ? Br::Bra : Br::Bsr; break;
+                default: // register branches through R12, or RTS
+                    switch (sub % 3) {
+                    case 0:
+                        word = absR12 ? Jmp(12) : Braf(12);
+                        kind = absR12 ? Br::None : Br::Braf;
+                        break;
+                    case 1:
+                        word = absR12 ? Jsr(12) : Bsrf(12);
+                        kind = absR12 ? Br::None : Br::Bsrf;
+                        break;
+                    default: word = kRts; break;
+                    }
+                    break;
+                }
+                program.push_back(word);
+                branchKind.push_back(kind);
+                pairSecond.push_back(false);
+                delayed = pick >= 13;
             }
-            case 2: {
-                const uint32_t n = dataReg();
-                const uint32_t imm = rng();
-                instr = MovI(n, imm);
-                break;
+            prevDelayed = delayed;
+        }
+
+        // Pass 2: branch displacements.
+        std::vector<int> targets;
+        for (int i = 0; i < kLength; ++i) {
+            if (!pairSecond[i]) {
+                targets.push_back(i);
             }
-            case 3: {
-                const uint32_t n = dataReg();
-                const uint32_t m = addrReg();
-                instr = MovBL(n, m);
-                break;
+        }
+        const auto randomTarget = [&] { return targets[rng() % targets.size()]; };
+        for (int i = 0; i < kLength; ++i) {
+            Br kind = branchKind[i];
+            if (kind == Br::Braf || kind == Br::Bsrf) {
+                const int t = i + 2 + relDisp;
+                if (t >= 0 && t < kLength && !pairSecond[t]) {
+                    continue; // the fixed R12 displacement lands on a valid target
+                }
+                kind = kind == Br::Braf ? Br::Bra : Br::Bsr; // out of range here: use the disp12 form
             }
-            case 4: {
-                const uint32_t n = dataReg();
-                const uint32_t m = addrReg();
-                instr = MovLL(n, m);
-                break;
+            if (kind == Br::None) {
+                continue;
             }
-            case 5: {
-                const uint32_t n = addrReg();
-                const uint32_t m = dataReg();
-                instr = MovBS(n, m);
-                break;
+            const uint32_t disp = static_cast<uint32_t>(randomTarget() - i - 2);
+            switch (kind) {
+            case Br::Bt: program[i] = Bt(disp); break;
+            case Br::Bf: program[i] = Bf(disp); break;
+            case Br::Bts: program[i] = Bts(disp); break;
+            case Br::Bfs: program[i] = Bfs(disp); break;
+            case Br::Bra: program[i] = Bra(disp); break;
+            case Br::Bsr: program[i] = Bsr(disp); break;
+            default: break;
             }
-            case 6: {
-                const uint32_t n = addrReg();
-                const uint32_t m = dataReg();
-                instr = MovLS(n, m);
-                break;
-            }
-            case 7: {
-                const uint32_t n = dataReg();
-                const uint32_t disp = rng() % 16;
-                instr = MovLI(n, disp);
-                break;
-            }
-            case 8: {
-                const uint32_t n = dataReg();
-                const uint32_t m = dataReg();
-                instr = Add(n, m);
-                break;
-            }
-            case 9: {
-                const uint32_t n = dataReg();
-                const uint32_t imm = rng();
-                instr = AddI(n, imm);
-                break;
-            }
-            case 10: {
-                const uint32_t n = dataReg();
-                const uint32_t m = dataReg();
-                instr = CmpEq(n, m);
-                break;
-            }
-            case 11: instr = Dt(dataReg()); break;
-            case 12: instr = (rng() & 1u) ? Bt(targetDisp(i)) : Bf(targetDisp(i)); break;
-            case 13: instr = (rng() & 1u) ? Bts(targetDisp(i)) : Bfs(targetDisp(i)); break;
-            case 14: instr = Bra(targetDisp(i)); break;
-            default: instr = (rng() & 1u) ? Jmp(12) : kRts; break;
-            }
-            program.push_back(instr);
-            prevDelayed = pick >= 13;
         }
         for (int i = 0; i < 8; ++i) {
             program.push_back(static_cast<uint16_t>(kSleep));
@@ -546,17 +671,21 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         p.WriteCode(kCode, program);
 
         auto state = p.ref->BaseState(kCode);
-        for (int r = 0; r < 8; ++r) {
+        for (int r : {0, 1, 2, 3, 4, 5, 6, 7, 13, 14, 15}) {
             state.R[r] = rng();
         }
         state.R[8] = 0x26040000 + (rng() & 0xFF0u);
         state.R[9] = 0x06040100 + (rng() & 0xFF0u);
         state.R[10] = kMmio + (rng() & 0xF0u);
         state.R[11] = 0x26048000;
-        state.R[12] = kCode + 2 * (rng() % kLength);
-        state.PR = kCode + 2 * (rng() % kLength);
+        state.GBR = state.R[8 + rng() % 4];
+        state.R[12] = absR12 ? kCode + 2 * static_cast<uint32_t>(randomTarget())
+                             : static_cast<uint32_t>(2 * relDisp);
+        state.PR = kCode + 2 * static_cast<uint32_t>(randomTarget());
         state.SR = 0xF0 | (rng() & 1u);
         state.wbReg = static_cast<uint8_t>(rng() % 17);
+        state.MACH = rng();
+        state.MACL = rng();
         p.Load(state);
 
         INFO("seed 0x" << std::hex << seed << " program " << Hex(program));
@@ -661,42 +790,80 @@ TEST_CASE("Interrupts raised inside a block are taken at the same instruction", 
     constexpr uint32_t kVector = 0x50; // not 0x40, the reset vector of IRL
     constexpr uint32_t kHandler = 0x06009000;
     constexpr uint32_t kStack = 0x0600F000;
-    Pair p;
-    for (Rig *rig : {p.ref.get(), p.jit.get()}) {
-        rig->Write32(kVbr + kVector * 4, kHandler);
-        rig->WriteCode(kHandler, {static_cast<uint16_t>(kSleep)});
-        auto &ctx = rig->sh2->GetJitContext();
-        ctx.write(ctx.sh2, 0xFFFFFF00, 4, 0);       // DVSR = 0: the next division overflows
-        ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);     // DVCR.OVFIE = 1
-        ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kVector); // VCRDIV: vector number
-        ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);    // IPRA: DIVU interrupt level 15
+    // Every cycle target up to 60, so Advance also stops mid-block, right after the store and inside
+    // the exception entry; plus the original 200. The handler's SLEEP is reached from target
+    // 14 on (measured; the plan estimated about 40); from there all the end-state assertions apply.
+    constexpr uint32_t kHandlerTarget = 14;
+    std::vector<uint32_t> targets;
+    for (uint32_t target = 1; target <= 60; ++target) {
+        targets.push_back(target);
     }
-    // mov.l R1,@R2 (R2 = DVDNT) ; add #1,R3 ; add #1,R3 ; sleep
-    p.WriteCode(kCode, {MovLS(2, 1), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
-    auto state = p.ref->BaseState(kCode);
-    // Interrupt mask 14: blocks IRL, which RecalcInterrupts (called by the DVCR write) always
-    // raises at its reset level 1, but lets the level-15 DIVU interrupt through.
-    state.SR = 0xE0;
-    state.VBR = kVbr;
-    state.R[1] = 1234;
-    state.R[2] = 0xFFFFFF04;
-    state.R[3] = 0;
-    state.R[15] = kStack; // stack for exception entry
-    p.Load(state);
-    p.jit->sh2->SetJitExecutor(&p.exec);
-    REQUIRE_FALSE(*p.ref->sh2->GetJitContext().intrPending); // nothing pending before the store
+    targets.push_back(200);
+    for (const uint32_t target : targets) {
+        INFO("target " << target);
+        Pair p;
+        for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+            rig->Write32(kVbr + kVector * 4, kHandler);
+            rig->WriteCode(kHandler, {static_cast<uint16_t>(kSleep)});
+            auto &ctx = rig->sh2->GetJitContext();
+            ctx.write(ctx.sh2, 0xFFFFFF00, 4, 0);       // DVSR = 0: the next division overflows
+            ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);     // DVCR.OVFIE = 1
+            ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kVector); // VCRDIV: vector number
+            ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);    // IPRA: DIVU interrupt level 15
+        }
+        // mov.l R1,@R2 (R2 = DVDNT) ; add #1,R3 ; add #1,R3 ; sleep
+        p.WriteCode(kCode, {MovLS(2, 1), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+        auto state = p.ref->BaseState(kCode);
+        // Interrupt mask 14: blocks IRL, which RecalcInterrupts (called by the DVCR write) always
+        // raises at its reset level 1, but lets the level-15 DIVU interrupt through.
+        state.SR = 0xE0;
+        state.VBR = kVbr;
+        state.R[1] = 1234;
+        state.R[2] = 0xFFFFFF04;
+        state.R[3] = 0;
+        state.R[15] = kStack; // stack for exception entry
+        p.Load(state);
+        p.jit->sh2->SetJitExecutor(&p.exec);
+        REQUIRE_FALSE(*p.ref->sh2->GetJitContext().intrPending); // nothing pending before the store
 
-    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
-    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
-    REQUIRE(jitCycles == refCycles);
-    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
-    INFO(diff);
-    REQUIRE(diff.empty());
-    REQUIRE(p.ref->State().R[3] == 0u); // the interpreter took the interrupt before the adds
-    REQUIRE(p.ref->State().sleep);      // and ran the handler
-    REQUIRE(p.ref->Read32(kStack - 8) == kCode + 2); // stacked PC: taken right after the store
-    REQUIRE(p.exec.GetStats().blocksRun >= 1);       // the store ran in a compiled block
+        const uint64 refCycles = p.ref->sh2->Advance<false, false>(target);
+        const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+        INFO(diff);
+        REQUIRE(diff.empty());
+        REQUIRE(p.ref->State().R[3] == 0u); // the adds never ran: the interrupt comes first
+        REQUIRE(p.ref->State().sleep == (target >= kHandlerTarget));
+        if (target >= kHandlerTarget) {
+            REQUIRE(p.ref->Read32(kStack - 8) == kCode + 2); // stacked PC: taken right after the store
+            REQUIRE(p.exec.GetStats().blocksRun >= 1);       // the store ran in a compiled block
+        }
+    }
 }
+
+namespace {
+
+constexpr uint32_t kIntrVbr = 0x06008000;
+constexpr uint32_t kIntrVector = 0x50;
+constexpr uint32_t kIntrHandler = 0x06009000;
+constexpr uint32_t kIntrStack = 0x0600F000;
+
+// On both rigs: a DIVU overflow interrupt (level 15, vector kIntrVector) is already raised, and its
+// handler is a SLEEP. With SR mask 15 it is not pending until an LDC SR unmasks it.
+void RaiseDivuOverflow(Pair &p) {
+    for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+        rig->Write32(kIntrVbr + kIntrVector * 4, kIntrHandler);
+        rig->WriteCode(kIntrHandler, {static_cast<uint16_t>(kSleep)});
+        auto &ctx = rig->sh2->GetJitContext();
+        ctx.write(ctx.sh2, 0xFFFFFF00, 4, 0);           // DVSR = 0
+        ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);         // DVCR.OVFIE = 1
+        ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kIntrVector); // VCRDIV
+        ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);        // IPRA: DIVU level 15
+        ctx.write(ctx.sh2, 0xFFFFFF04, 4, 1234);        // DVDNT: divide by zero -> overflow raised
+    }
+}
+
+} // namespace
 
 // LDC Rm,SR that unmasks a pending interrupt: the interpreter still executes the next instruction
 // (interrupt-allow is cleared for one instruction) and takes the interrupt before the one after.
@@ -737,4 +904,75 @@ TEST_CASE("Interrupts unmasked by LDC SR are taken one instruction later", "[jit
     REQUIRE(p.exec.GetStats().blocksRun > 0);
     // ldc and the adds share one compiled block, so the in-block interrupt-allow rule is exercised.
     REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount >= 2u);
+}
+
+// Chained allow-clearing instructions: ldc R6,GBR runs right after ldc R5,SR (allow is cleared) and
+// clears allow again, so the first add also runs and the interrupt is taken before the second add.
+TEST_CASE("Interrupts unmasked by LDC SR wait for a chain of allow-clearing instructions", "[jit][diff][exact]") {
+    Pair p;
+    RaiseDivuOverflow(p);
+    // ldc R5,SR (unmask) ; ldc R6,GBR ; add #1,R3 ; add #1,R3 ; add #1,R3 ; sleep
+    p.WriteCode(kCode, {0x450E, 0x461E, AddI(3, 1), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    state.SR = 0xF0; // mask 15: the level-15 DIVU interrupt is not pending yet
+    state.VBR = kIntrVbr;
+    state.R[3] = 0;
+    state.R[5] = 0;
+    state.R[6] = 0x12345678;
+    state.R[15] = kIntrStack;
+    p.Load(state);
+    REQUIRE_FALSE(*p.jit->sh2->GetJitContext().intrPending);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().GBR == 0x12345678u);
+    REQUIRE(p.ref->State().R[3] == 1u);                        // ldc SR, ldc GBR, one add, interrupt
+    REQUIRE(p.ref->State().sleep);                             // the handler ran
+    REQUIRE(p.ref->Read32(kIntrStack - 8) == kCode + 6);       // stacked PC: the second add
+    REQUIRE(p.exec.GetStats().blocksRun > 0);
+    // Both ldc and the adds share one compiled block, so the in-block rule is what is exercised.
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount >= 3u);
+}
+
+// The instruction after ldc R5,SR is a delayed branch: the branch and its slot run (a delay slot
+// never takes an interrupt; the slot's PC update re-evaluates pending), and the interrupt is taken
+// at the branch target, before its first instruction.
+TEST_CASE("Interrupts unmasked by LDC SR before a delayed branch are taken at the target", "[jit][diff][exact]") {
+    constexpr uint32_t kBranchTarget = kCode + 0x20;
+    Pair p;
+    RaiseDivuOverflow(p);
+    // kCode: ldc R5,SR ; bra kBranchTarget ; add #1,R3 (slot) ; add #1,R3 ; sleep
+    // bra at kCode + 2: disp = (0x20 - 2 - 4) / 2 = 13.
+    p.WriteCode(kCode, {0x450E, Bra(13), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    // kBranchTarget: add #1,R4 ; add #1,R4 ; sleep
+    p.WriteCode(kBranchTarget, {AddI(4, 1), AddI(4, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    state.SR = 0xF0;
+    state.VBR = kIntrVbr;
+    state.R[3] = 0;
+    state.R[4] = 0;
+    state.R[5] = 0;
+    state.R[15] = kIntrStack;
+    p.Load(state);
+    REQUIRE_FALSE(*p.jit->sh2->GetJitContext().intrPending);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().R[3] == 1u);                      // the slot ran
+    REQUIRE(p.ref->State().R[4] == 0u);                      // nothing at the target ran
+    REQUIRE(p.ref->State().sleep);                           // the handler ran
+    REQUIRE(p.ref->Read32(kIntrStack - 8) == kBranchTarget); // stacked PC: the branch target
+    REQUIRE(p.exec.GetStats().blocksRun > 0);
+    // ldc, bra and the slot form one compiled block.
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount == 3u);
 }
