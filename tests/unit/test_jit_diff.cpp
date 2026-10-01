@@ -425,3 +425,82 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
     REQUIRE(diff.empty());
     CHECK(jit->State().R[3] != 0u); // the timer actually advanced
 }
+
+// Random programs of supported instructions, including branches, delay slots, loops, MMIO and
+// bus waits. Register roles keep execution inside the program: R0-R7 data, R8-R11 data
+// addresses (never written), R12 jump target, PR return target.
+TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]") {
+    constexpr int kPrograms = 300;
+    constexpr int kLength = 24;
+    constexpr int kSteps = 80;
+
+    for (int prog = 0; prog < kPrograms; ++prog) {
+        const uint32_t seed = 0xF0220000u + static_cast<uint32_t>(prog);
+        std::mt19937 rng(seed);
+        Pair p;
+        p.SetBusWaitEvery((rng() & 1u) ? 3u : 0u);
+
+        const auto dataReg = [&] { return rng() % 8; };
+        const auto addrReg = [&] { return 8 + rng() % 4; };
+        // Displacement, in instructions, from instruction i to a random instruction of the program.
+        const auto targetDisp = [&](int i) {
+            return static_cast<uint32_t>(static_cast<int>(rng() % kLength) - i - 2);
+        };
+
+        std::vector<uint16_t> program;
+        bool prevDelayed = false;
+        for (int i = 0; i < kLength; ++i) {
+            uint32_t pick = rng() % 16;
+            if (prevDelayed && pick >= 12) {
+                pick = rng() % 12; // delay slots never hold branches
+            }
+            uint16_t instr = kNop;
+            switch (pick) {
+            case 0: instr = kNop; break;
+            case 1: instr = MovR(dataReg(), dataReg()); break;
+            case 2: instr = MovI(dataReg(), rng()); break;
+            case 3: instr = MovBL(dataReg(), addrReg()); break;
+            case 4: instr = MovLL(dataReg(), addrReg()); break;
+            case 5: instr = MovBS(addrReg(), dataReg()); break;
+            case 6: instr = MovLS(addrReg(), dataReg()); break;
+            case 7: instr = MovLI(dataReg(), rng() % 16); break;
+            case 8: instr = Add(dataReg(), dataReg()); break;
+            case 9: instr = AddI(dataReg(), rng()); break;
+            case 10: instr = CmpEq(dataReg(), dataReg()); break;
+            case 11: instr = Dt(dataReg()); break;
+            case 12: instr = (rng() & 1u) ? Bt(targetDisp(i)) : Bf(targetDisp(i)); break;
+            case 13: instr = (rng() & 1u) ? Bts(targetDisp(i)) : Bfs(targetDisp(i)); break;
+            case 14: instr = Bra(targetDisp(i)); break;
+            default: instr = (rng() & 1u) ? Jmp(12) : kRts; break;
+            }
+            program.push_back(instr);
+            prevDelayed = pick >= 13;
+        }
+        for (int i = 0; i < 8; ++i) {
+            program.push_back(static_cast<uint16_t>(kSleep));
+        }
+        p.WriteCode(kCode, program);
+
+        auto state = p.ref->BaseState(kCode);
+        for (int r = 0; r < 8; ++r) {
+            state.R[r] = rng();
+        }
+        state.R[8] = 0x26040000 + (rng() & 0xFF0u);
+        state.R[9] = 0x06040100 + (rng() & 0xFF0u);
+        state.R[10] = kMmio + (rng() & 0xF0u);
+        state.R[11] = 0x26048000;
+        state.R[12] = kCode + 2 * (rng() % kLength);
+        state.PR = kCode + 2 * (rng() % kLength);
+        state.SR = 0xF0 | (rng() & 1u);
+        state.wbReg = static_cast<uint8_t>(rng() % 17);
+        p.Load(state);
+
+        INFO("seed 0x" << std::hex << seed << " program " << Hex(program));
+        for (int step = 0; step < kSteps; ++step) {
+            p.Step();
+            if (!sh2test::DiffRigs(*p.ref, *p.jit).empty()) {
+                break; // Pair::Step already reported the difference
+            }
+        }
+    }
+}
