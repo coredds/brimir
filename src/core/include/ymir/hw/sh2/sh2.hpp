@@ -768,6 +768,7 @@ private:
     static void JitSetupDelaySlot(void *ctx, uint32 target);
     static void JitEndDelaySlot(void *ctx);
     static void JitSetSR(void *ctx, uint32 value, bool delaySlot);
+    static uint64 JitAccessCyclesRMWByte(void *ctx, uint32 address);
 
     // Retrieves the current absolute cycle count
     uint64 GetCurrentCycleCount() const;

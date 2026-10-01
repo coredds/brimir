@@ -55,6 +55,8 @@ struct SH2JitContext {
     // LDC Rm,SR state change: SR = value & 0x3F3, recompute interrupt pending (none in a delay
     // slot), clear interrupt-allow.
     void (*setSR)(void *sh2, uint32 value, bool delaySlot) = nullptr;
+    // SH2::AccessCyclesRMWByte with cache emulation off (TAS.B read-modify-write cycles).
+    uint64 (*accessCyclesRMWByte)(void *sh2, uint32 address) = nullptr;
 };
 
 class ISH2Executor {

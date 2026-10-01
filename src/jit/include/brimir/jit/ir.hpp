@@ -50,6 +50,14 @@ enum class Op : uint8_t {
     ClearIntrAllow,
     SetIntrAllow,
     GetDelayTarget,
+    Mul,                    // low 32 bits of a * b
+    MulHiS,                 // high 32 bits of sint64(a) * sint64(b)
+    MulHiU,                 // high 32 bits of uint64(a) * uint64(b)
+    SetSRBits,              // imm: mask (T/S/Q/M only); SR = (SR & ~mask) | (a & mask)
+    Div1,                   // dst = Div1Step(a = Rn, b = Rm, flag = n == m, SR)
+    MacW,                   // MAC = MacWStep(MAC, SR.S, a, b)
+    MacL,                   // MAC = MacLStep(MAC, SR.S, a, b)
+    AddAccessCyclesRMWByte, // cycles += ctx.accessCyclesRMWByte(a) (TAS)
     Load,
     Store,
     AddCycles,
@@ -70,7 +78,8 @@ enum class Op : uint8_t {
 struct Inst {
     Op op = Op::Exit;
     uint8_t size = 0;    // access size in bytes (1, 2, 4)
-    bool flag = false;   // Load: instrFetch; AddAccessCycles/ExitIfBusWait: write; ExitIf: refill; SetSR: delaySlot
+    bool flag = false;   // Load: instrFetch; AddAccessCycles/ExitIfBusWait: write; ExitIf: refill; SetSR: delaySlot;
+                         // Div1: rmIsRn
     uint8_t retired = 0; // exit ops: guest instructions completed when the exit is taken
     ValueId dst = kNoValue;
     ValueId a = kNoValue;
@@ -128,6 +137,14 @@ public:
     void ClearIntrAllow();
     void SetIntrAllow();
     ValueId GetDelayTarget();
+    ValueId Mul(ValueId a, ValueId b);
+    ValueId MulHiS(ValueId a, ValueId b);
+    ValueId MulHiU(ValueId a, ValueId b);
+    void SetSRBits(ValueId value, uint32_t mask); // mask: T/S/Q/M bits only (0x303)
+    ValueId Div1(ValueId rn, ValueId rm, bool rmIsRn);
+    void MacW(ValueId op1, ValueId op2);
+    void MacL(ValueId op1, ValueId op2);
+    void AddAccessCyclesRMWByte(ValueId address);
     ValueId Load(ValueId address, uint8_t size, bool instrFetch);
     void Store(ValueId address, uint8_t size, ValueId value);
     void AddCycles(uint32_t cycles);

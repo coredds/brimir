@@ -34,6 +34,10 @@ constexpr OpInfo kOpInfo[] = {
     {"GetMACL", true, 0, false, false},        {"SetMACH", false, 1, false, false},
     {"SetMACL", false, 1, false, false},       {"ClearIntrAllow", false, 0, false, false},
     {"SetIntrAllow", false, 0, false, false},  {"GetDelayTarget", true, 0, false, false},
+    {"Mul", true, 2, false, false},            {"MulHiS", true, 2, false, false},
+    {"MulHiU", true, 2, false, false},         {"SetSRBits", false, 1, false, false},
+    {"Div1", true, 2, false, false},           {"MacW", false, 2, false, false},
+    {"MacL", false, 2, false, false},          {"AddAccessCyclesRMWByte", false, 1, false, false},
     {"Load", true, 1, true, false},
     {"Store", false, 2, true, false},          {"AddCycles", false, 0, false, false},
     {"AddAccessCycles", false, 1, true, false}, {"WbStall", false, 0, false, false},
@@ -248,6 +252,48 @@ ValueId Builder::GetDelayTarget() {
     return Nullary(Op::GetDelayTarget);
 }
 
+ValueId Builder::Mul(ValueId a, ValueId b) {
+    return Binary(Op::Mul, a, b);
+}
+
+ValueId Builder::MulHiS(ValueId a, ValueId b) {
+    return Binary(Op::MulHiS, a, b);
+}
+
+ValueId Builder::MulHiU(ValueId a, ValueId b) {
+    return Binary(Op::MulHiU, a, b);
+}
+
+void Builder::SetSRBits(ValueId value, uint32_t mask) {
+    Inst &inst = Emit(Op::SetSRBits);
+    inst.a = value;
+    inst.imm = mask;
+}
+
+ValueId Builder::Div1(ValueId rn, ValueId rm, bool rmIsRn) {
+    Inst &inst = Emit(Op::Div1);
+    inst.a = rn;
+    inst.b = rm;
+    inst.flag = rmIsRn;
+    return inst.dst = NewValue();
+}
+
+void Builder::MacW(ValueId op1, ValueId op2) {
+    Inst &inst = Emit(Op::MacW);
+    inst.a = op1;
+    inst.b = op2;
+}
+
+void Builder::MacL(ValueId op1, ValueId op2) {
+    Inst &inst = Emit(Op::MacL);
+    inst.a = op1;
+    inst.b = op2;
+}
+
+void Builder::AddAccessCyclesRMWByte(ValueId address) {
+    Sink(Op::AddAccessCyclesRMWByte, address);
+}
+
 ValueId Builder::Load(ValueId address, uint8_t size, bool instrFetch) {
     Inst &inst = Emit(Op::Load);
     inst.a = address;
@@ -381,6 +427,10 @@ std::string VerifyBlock(const Block &block) {
         }
         if ((inst.op == Op::Shl || inst.op == Op::Shr || inst.op == Op::Sar) && (inst.imm < 1 || inst.imm > 31)) {
             return error("shift amount out of range");
+        }
+        if (inst.op == Op::SetSRBits && (inst.imm & ~0x303u) != 0) {
+            // Only T/S/Q/M: ILevel changes need the setSR callback (interrupt recompute)
+            return error("SetSRBits mask outside T/S/Q/M");
         }
         const bool last = i + 1 == block.code.size();
         if (info.isExit && !last) {

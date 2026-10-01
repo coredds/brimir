@@ -122,6 +122,69 @@ TEST_CASE("IR names the logic, shift, compare and system-register ops", "[jit][i
     }
 }
 
+TEST_CASE("IR names the multiply, SR-bit, DIV1, MAC and RMW-cycle ops", "[jit][ir]") {
+    const std::pair<Op, const char *> names[] = {
+        {Op::Mul, "Mul"},
+        {Op::MulHiS, "MulHiS"},
+        {Op::MulHiU, "MulHiU"},
+        {Op::SetSRBits, "SetSRBits"},
+        {Op::Div1, "Div1"},
+        {Op::MacW, "MacW"},
+        {Op::MacL, "MacL"},
+        {Op::AddAccessCyclesRMWByte, "AddAccessCyclesRMWByte"},
+    };
+    for (const auto &[op, name] : names) {
+        CHECK(std::string(OpName(op)) == name);
+    }
+    CHECK(std::string(OpName(Op::Load)) == "Load");
+    CHECK(std::string(OpName(Op::ExitDynamic)) == "ExitDynamic");
+}
+
+TEST_CASE("IR builder records the new ops' operands", "[jit][ir]") {
+    Block block;
+    block.guestInstrCount = 1;
+    Builder b(block);
+    const ValueId x = b.GetReg(1);
+    const ValueId y = b.GetReg(2);
+    const ValueId mul = b.Mul(x, y);
+    const ValueId hiS = b.MulHiS(x, y);
+    const ValueId hiU = b.MulHiU(x, y);
+    const ValueId div = b.Div1(x, y, true);
+    b.SetSRBits(mul, 0x301);
+    b.MacW(hiS, hiU);
+    b.MacL(div, x);
+    b.AddAccessCyclesRMWByte(y);
+    b.Exit(0, 1);
+    REQUIRE(VerifyBlock(block).empty());
+    REQUIRE(block.code[5].op == Op::Div1);
+    REQUIRE(block.code[5].flag);
+    REQUIRE(block.code[5].dst == div);
+    REQUIRE(block.code[6].op == Op::SetSRBits);
+    REQUIRE(block.code[6].a == mul);
+    REQUIRE(block.code[6].imm == 0x301u);
+    REQUIRE(block.code[7].a == hiS);
+    REQUIRE(block.code[7].b == hiU);
+    REQUIRE(block.code[9].op == Op::AddAccessCyclesRMWByte);
+    REQUIRE(block.code[9].a == y);
+}
+
+TEST_CASE("IR verifier restricts SetSRBits to T, S, Q and M", "[jit][ir]") {
+    for (const uint32_t mask : {0x10u, 0xF0u, 0x400u, 0x80000000u}) {
+        Block block;
+        block.guestInstrCount = 1;
+        Builder b(block);
+        b.SetSRBits(b.Const(0), mask);
+        b.Exit(0, 1);
+        CHECK(VerifyBlock(block).find("SetSRBits mask") != std::string::npos);
+    }
+    Block block;
+    block.guestInstrCount = 1;
+    Builder b(block);
+    b.SetSRBits(b.Const(0), 0x303);
+    b.Exit(0, 1);
+    CHECK(VerifyBlock(block).empty());
+}
+
 TEST_CASE("IR verifier rejects shift amounts outside 1..31", "[jit][ir]") {
     for (const uint32_t amount : {0u, 32u}) {
         Block block;

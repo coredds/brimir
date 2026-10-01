@@ -1,4 +1,5 @@
 #include <brimir/jit/interp_backend.hpp>
+#include <brimir/jit/sh2_helpers.hpp>
 
 #include <vector>
 
@@ -58,6 +59,30 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
         case Op::ClearIntrAllow: *ctx.intrAllow = false; break;
         case Op::SetIntrAllow: *ctx.intrAllow = true; break;
         case Op::GetDelayTarget: v[in.dst] = *ctx.delaySlotTarget; break;
+        case Op::Mul: v[in.dst] = v[in.a] * v[in.b]; break;
+        case Op::MulHiS:
+            v[in.dst] = static_cast<uint32_t>(
+                static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v[in.a])) *
+                                      static_cast<int64_t>(static_cast<int32_t>(v[in.b]))) >>
+                32);
+            break;
+        case Op::MulHiU:
+            v[in.dst] = static_cast<uint32_t>((static_cast<uint64_t>(v[in.a]) * static_cast<uint64_t>(v[in.b])) >> 32);
+            break;
+        case Op::SetSRBits: *ctx.SR = (*ctx.SR & ~in.imm) | (v[in.a] & in.imm); break;
+        case Op::Div1: v[in.dst] = Div1Step(v[in.a], v[in.b], in.flag, *ctx.SR); break;
+        case Op::MacW:
+        case Op::MacL: {
+            const uint64_t mac = (static_cast<uint64_t>(*ctx.MACH) << 32) | *ctx.MACL;
+            const bool s = ((*ctx.SR >> 1) & 1u) != 0;
+            const int32_t op1 = static_cast<int32_t>(v[in.a]);
+            const int32_t op2 = static_cast<int32_t>(v[in.b]);
+            const uint64_t result = in.op == Op::MacW ? MacWStep(mac, s, op1, op2) : MacLStep(mac, s, op1, op2);
+            *ctx.MACH = static_cast<uint32_t>(result >> 32);
+            *ctx.MACL = static_cast<uint32_t>(result);
+            break;
+        }
+        case Op::AddAccessCyclesRMWByte: info.cycles += ctx.accessCyclesRMWByte(ctx.sh2, v[in.a]); break;
         case Op::Load:
             v[in.dst] = ctx.read(ctx.sh2, v[in.a], in.size, in.flag);
             if (abortNow()) {
