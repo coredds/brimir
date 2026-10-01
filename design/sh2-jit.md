@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 1 complete (plans 1A–1D); next: milestone 2 (x64 backend)
+**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend next (plan 2B)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
