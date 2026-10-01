@@ -187,6 +187,7 @@ TEST_CASE("Lockstep control: two interpreter cores stay identical", "[lockstep]"
     // Uses the built-in null IPL program (no BIOS loaded).
     auto a = MakeLockstepCore(false);
     auto b = MakeLockstepCore(false);
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
     const auto result = brimir::RunLockstep(*a, *b, 120);
     INFO("frame " << result.framesRun << ": " << result.divergence);
     REQUIRE(result.divergence.empty());
@@ -196,6 +197,7 @@ TEST_CASE("Lockstep control: two interpreter cores stay identical", "[lockstep]"
 TEST_CASE("Lockstep: JIT core matches interpreter core", "[lockstep][jit]") {
     auto jit = MakeLockstepCore(true);
     auto ref = MakeLockstepCore(false);
+    REQUIRE(brimir::SyncLockstepCores(*ref, *jit));
     const auto result = brimir::RunLockstep(*jit, *ref, 300);
     INFO("frame " << result.framesRun << ": " << result.divergence);
     REQUIRE(result.divergence.empty());
@@ -208,6 +210,7 @@ TEST_CASE("Lockstep: JIT core matches interpreter core", "[lockstep][jit]") {
 TEST_CASE("CompareCores detects a difference", "[lockstep]") {
     auto a = MakeLockstepCore(false);
     auto b = MakeLockstepCore(false);
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
     a->RunFrame();
     b->RunFrame();
     REQUIRE(brimir::CompareCores(*a, *b).empty());
@@ -247,6 +250,7 @@ TEST_CASE("CompareCores detects a difference", "[lockstep]") {
 TEST_CASE("RunLockstep detects an audio difference", "[lockstep][jit]") {
     auto a = MakeLockstepCore(false);
     auto b = MakeLockstepCore(false);
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
     REQUIRE(brimir::RunLockstep(*a, *b, 2).divergence.empty());
 
     // Only audio differs: both cores run the same frames, but b's output of one frame is drained
@@ -266,6 +270,7 @@ TEST_CASE("RunLockstep detects an audio difference", "[lockstep][jit]") {
 TEST_CASE("CompareCores detects differences outside the SH-2s and WRAM", "[lockstep]") {
     auto a = MakeLockstepCore(false);
     auto b = MakeLockstepCore(false);
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
     a->RunFrame();
     b->RunFrame();
     REQUIRE(brimir::CompareCores(*a, *b).empty());
@@ -282,6 +287,7 @@ TEST_CASE("CompareCores detects differences outside the SH-2s and WRAM", "[locks
 TEST_CASE("CompareCores detects an internal backup RAM difference", "[lockstep]") {
     auto a = MakeLockstepCore(false);
     auto b = MakeLockstepCore(false);
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
     a->RunFrame();
     b->RunFrame();
     REQUIRE(brimir::CompareCores(*a, *b).empty());
@@ -316,11 +322,35 @@ TEST_CASE("CompareCores detects an internal backup RAM difference", "[lockstep]"
     REQUIRE(brimir::CompareCores(*a, *b).empty());
 }
 
+TEST_CASE("SyncLockstepCores makes two cores identical", "[lockstep]") {
+    auto a = MakeLockstepCore(false);
+    auto b = MakeLockstepCore(false);
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
+    a->RunFrame();
+    b->RunFrame();
+    REQUIRE(brimir::CompareCores(*a, *b).empty());
+
+    // Serialized state outside the SH-2s and WRAM (VDP1 VRAM), plus internal backup RAM, which is
+    // outside the save state and copied separately.
+    b->GetSaturn()->VDP.GetProbe().VDP1WriteVRAM<uint8_t>(0x100, 0x5A);
+    REQUIRE(brimir::CompareCores(*a, *b).find("vdp state differs") != std::string::npos);
+    auto &bup = b->GetSaturn()->mem.GetInternalBackupRAM();
+    bup.WriteByte(0x2001, static_cast<uint8_t>(bup.ReadByte(0x2001) ^ 0xA5));
+    REQUIRE(brimir::CompareCores(*a, *b).find("internal backup RAM") != std::string::npos);
+
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
+    REQUIRE(brimir::CompareCores(*a, *b).empty());
+    const auto result = brimir::RunLockstep(*a, *b, 2);
+    INFO("frame " << result.framesRun << ": " << result.divergence);
+    REQUIRE(result.divergence.empty());
+}
+
 TEST_CASE("Lockstep: interrupt-driven synthetic workload, JIT vs interpreter", "[lockstep][jit]") {
     auto jit = MakeLockstepCore(true);
     auto ref = MakeLockstepCore(false);
     InstallFrtWorkload(*jit);
     InstallFrtWorkload(*ref);
+    REQUIRE(brimir::SyncLockstepCores(*ref, *jit));
 
     const auto result = brimir::RunLockstep(*jit, *ref, 240);
     INFO("frame " << result.framesRun << ": " << result.divergence);
@@ -341,6 +371,7 @@ TEST_CASE("Lockstep control: synthetic workload on two interpreter cores", "[loc
     auto b = MakeLockstepCore(false);
     InstallFrtWorkload(*a);
     InstallFrtWorkload(*b);
+    REQUIRE(brimir::SyncLockstepCores(*a, *b));
     const auto result = brimir::RunLockstep(*a, *b, 240);
     INFO("frame " << result.framesRun << ": " << result.divergence);
     REQUIRE(result.divergence.empty());

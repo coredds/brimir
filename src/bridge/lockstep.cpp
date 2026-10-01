@@ -429,6 +429,51 @@ void PrepareLockstepCore(CoreWrapper &core) {
     }
 }
 
+namespace {
+
+// Copies the bytes of src's backup memory image that differ into dst (both must have an image of the same size).
+// Data byte i is at bus address (i << 1) | 1 (BackupMemory maps odd bus bytes to data bytes).
+void SyncBackupMemory(const ymir::bup::IBackupMemory &src, ymir::bup::IBackupMemory &dst) {
+    if (!HasBackupImage(src) || !HasBackupImage(dst) || src.Size() != dst.Size()) {
+        return; // nothing to copy, or not copyable byte for byte; CompareCores reports the mismatch
+    }
+    const std::vector<uint8_t> ds = src.ReadAll();
+    const std::vector<uint8_t> dd = dst.ReadAll();
+    if (ds.size() != dd.size() || std::memcmp(ds.data(), dd.data(), ds.size()) == 0) {
+        return;
+    }
+    for (size_t i = 0; i < ds.size(); ++i) {
+        if (ds[i] != dd[i]) {
+            dst.WriteByte(static_cast<uint32_t>((i << 1) | 1), ds[i]);
+        }
+    }
+}
+
+} // namespace
+
+bool SyncLockstepCores(CoreWrapper &src, CoreWrapper &dst) {
+    ymir::Saturn *ss = src.GetSaturn();
+    ymir::Saturn *sd = dst.GetSaturn();
+    if (ss == nullptr || sd == nullptr) {
+        return false;
+    }
+    auto state = std::make_unique<ymir::savestate::SaveState>();
+    ClearSaveState(*state);
+    ss->SaveState(*state);
+    // skipROMChecks: both cores run the same IPL/CD block ROM by construction.
+    if (!sd->LoadState(*state, true) || !ss->LoadState(*state, true)) {
+        return false;
+    }
+
+    SyncBackupMemory(ss->mem.GetInternalBackupRAM(), sd->mem.GetInternalBackupRAM());
+    auto *bs = ss->GetCartridge().As<ymir::cart::CartType::BackupMemory>();
+    auto *bd = sd->GetCartridge().As<ymir::cart::CartType::BackupMemory>();
+    if (bs != nullptr && bd != nullptr) {
+        SyncBackupMemory(bs->GetBackupMemory(), bd->GetBackupMemory());
+    }
+    return true;
+}
+
 std::string CompareCores(CoreWrapper &a, CoreWrapper &b) {
     ymir::Saturn *sa = a.GetSaturn();
     ymir::Saturn *sb = b.GetSaturn();

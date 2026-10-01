@@ -195,6 +195,7 @@ TEST_CASE("BIOS integration - lockstep control: two interpreter cores stay ident
         brimir::PrepareLockstepCore(*core);
         REQUIRE(core->LoadIPLFromFile(biosPath.string().c_str()));
     }
+    REQUIRE(brimir::SyncLockstepCores(a, b));
     const auto result = brimir::RunLockstep(a, b, 600);
     INFO("frame " << result.framesRun << ": " << result.divergence);
     REQUIRE(result.divergence.empty());
@@ -216,6 +217,7 @@ TEST_CASE("BIOS integration - JIT core and interpreter core stay identical", "[b
         brimir::PrepareLockstepCore(*core);
         REQUIRE(core->LoadIPLFromFile(biosPath.string().c_str()));
     }
+    REQUIRE(brimir::SyncLockstepCores(ref, jit));
     const auto result = brimir::RunLockstep(jit, ref, 600);
     INFO("frame " << result.framesRun << ": " << result.divergence);
     REQUIRE(result.divergence.empty());

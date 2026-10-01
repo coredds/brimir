@@ -339,6 +339,12 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                 }
             }
         }
+        // Start the JIT core from the reference core's exact state: some upstream fields are never
+        // initialized, so two fresh cores can differ in serialized heap garbage.
+        if (!brimir::SyncLockstepCores(refCore, jitCore)) {
+            std::fprintf(stderr, "Failed to synchronize the lockstep cores\n");
+            return 2;
+        }
         constexpr int kChunk = 600;
         int done = 0;
         while (done < args.lockstep) {

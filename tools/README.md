@@ -115,6 +115,12 @@ both cores' RTC starts at 1994-11-22 00:00:00, so runs are reproducible.
 Lockstep runs write the virtual RTC timestamp back to the RTC file in
 `--system-dir`, so point `--system-dir` at a scratch copy, not your real
 RetroArch system folder.
+
+Before the first frame the JIT core is synchronized from the interpreter core's
+full state (`brimir::SyncLockstepCores`: save state plus backup RAM), because
+some upstream Ymir fields are never initialized and two fresh cores can
+otherwise differ in heap garbage that the comparison sees (see
+`design/sh2-jit.md` section 7.2). A failed synchronization exits with code 2.
 Progress is printed every 600 frames:
 
 ```
