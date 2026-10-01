@@ -388,3 +388,286 @@ Delay-slot interaction: the slot instruction may read PR (e.g. `sts pr` / `rts`-
 11. Bus-wait opcodes in this list (word/long only; never byte): MOVW_L, MOVW_L0, MOVL_L0, MOVW_L4, MOVL_L4, MOVW_LG, MOVL_LG, MOVW_M, MOVL_M, MOVW_P, MOVL_P, MOVW_S, MOVW_S0, MOVL_S0, MOVW_S4, MOVL_S4, MOVW_SG, MOVL_SG. On wait: return only the cycles summed before the check (Access, plus WB(rm) for MOVW_L4), nothing else changes.
 12. `SH2JitContext` lacks MAC and an INTC/pending hook; CLRMAC/STS MACx/LDS MACx and LDC SR need an interface addition in the core fork (sh2_jit_iface.hpp + SH2::InitJitContext at sh2.cpp:4694).
 13. Interrupt flags: LDC (GBR/VBR/SR), LDS (MACH/MACL/PR), STC (GBR/VBR/SR), STS (MACH/MACL/PR) — register and memory forms — clear `allow`; LDC SR / LDC.L SR additionally recompute `pending = !delaySlot && INTC.pending.level > SR.ILevel`. BSR/BRAF/BSRF/JSR clear `pending` via SetupDelaySlot. No other opcode in this list touches m_intrFlags.
+
+## 9. Remaining instructions (milestone 2A)
+
+Source: `sh2.cpp` as of 2026-10-01 (handler line ranges include the leading `// mnemonic` comment). Since §1 was written, `SH2JitContext` gained `MACL`, `MACH` (pointers into `RegMAC`: L = low word, H = high word of `MAC.u64`) and `setSR` (`JitSetSR`, sh2.cpp:4789) — `GetMACH/GetMACL/SetMACH/SetMACL/SetSR` are implementable today.
+
+General facts for this section:
+- **All 23 opcodes are registered with `setOpcode`** (sh2_decode.cpp:205, 225, 229, 246, 253-254, 263-264, 272, 279, 284-319) ⇒ all have a `Delay_` variant; none has delaySlot-dependent semantics except LDC.L SR's `pending` expression (net effect identical, as for LDC SR). Note the decoder name `OpcodeType::MUL` dispatches to handler `SH2::MULL` (sh2.cpp:2404, 2560).
+- **No multiplier latency / busy state is modelled.** There is no "mult unit busy" counter anywhere in sh2.cpp/sh2.hpp; MUL/DMUL use a fixed `+3` (`// TODO: 2 to 4`), MULS/MULU `+1`, MAC `+1`; STS MACH/MACL Rn are a fixed 1 cycle with no stall and STS.L MACx have no MAC-related term. The JIT must *not* add any.
+- **None of these opcodes checks bus wait** (no `IsBusWait` call in any handler below) ⇒ no `ExitIfBusWait`.
+- Every memory access happens **before** `AdvancePC`. All handlers compute every cycle term with the pre-instruction `m_wbReg`; the ones that evaluate `WritebackCycles` after `AdvancePC` are still equivalent because `AdvancePC` never touches `m_wbReg` — only `WbStall` before `SetWb` matters.
+- Misaligned addresses: `MemRead`/`MemWrite` silently align down (`address &= ~(size-1)`, sh2.cpp:689-700, no address error); `AccessCycles` uses the raw address; post-increments/pre-decrements use the raw (unaligned) register value. The JIT's `Load/Store` go through the same `MemRead/MemWrite`, so passing the raw address is exact.
+- `m8` = bits[11:8] (`DECODE_M`), `n` = bits[11:8], `m` = bits[7:4].
+- SR layout (sh2_regs.hpp:16-25): T bit0, S bit1, ILevel bits 4-7, Q bit8, M bit9.
+
+### 9.1 Proposed new IR ops
+
+| Op | Operands / dst | Semantics (exact) | x64 implementation |
+|---|---|---|---|
+| `Mul` | dst; a, b | `uint32(a * b)` (low 32 bits; identical for signed/unsigned) | `imul r32, r32` |
+| `MulHiS` | dst; a, b | `uint32(uint64(sint64(sint32(a)) * sint64(sint32(b))) >> 32)` | `imul r/m32` (one-operand) → EDX, or `movsxd`+`imul r64`+`shr 32` |
+| `MulHiU` | dst; a, b | `uint32((uint64(a) * uint64(b)) >> 32)` | `mul r/m32` → EDX |
+| `SetSRBits` | a; imm = mask | `*ctx.SR = (*ctx.SR & ~mask) \| (a & mask)`. Verifier: `mask & ~0x303u == 0` (only T/S/Q/M — never ILevel, so no interrupt recompute and no `setSR` callback needed). Used with mask `0x301` (M\|Q\|T). | plain RMW on `ctx.SR` |
+| `Div1` | dst; a = Rn, b = Rm; flag = (n == m) | `dst = Div1Step(a, b, flag, *ctx.SR)`; reads SR.T/Q/M, writes SR.Q and SR.T only (see §9.4 for the helper). | `call Div1Step` (pure helper + SR pointer) |
+| `MacW` | a = op1, b = op2 (both already sign-extended 16→32); no dst | `mac = MacWStep(mac, SR.S, sint32(a), sint32(b))` where `mac = (uint64(*ctx.MACH) << 32) \| *ctx.MACL`; writes back both halves. Reads `*ctx.SR` bit1. | `call MacWStep` |
+| `MacL` | a = op1, b = op2 (raw 32-bit longs); no dst | `mac = MacLStep(mac, SR.S, sint32(a), sint32(b))`; same MAC/SR access as `MacW`. | `call MacLStep` |
+| `AddAccessCyclesRMWByte` | a = address | `cycles += ctx.accessCyclesRMWByte(sh2, a)` = `SH2::AccessCyclesRMWByte<false>(a)` | callback, like `AddAccessCycles` |
+
+All new ops keep single assignment: each defines at most one `ValueId`; their side effects go to context state (SR / MAC / cycle counter), exactly like the existing `SetT`, `SetMACL`, `AddAccessCycles`. They are ordered side effects — the optimiser must not reorder `Div1`/`SetSRBits`/`MacW`/`MacL` across `GetT`/`SetT`/`GetSR`/`SetSR`/`Get/SetMACx` or other `Div1`/`Mac*`.
+
+**Helpers** (put in a header shared by the IR interpreter, the x64 backend and the unit tests; the interpreter handlers are the reference to diff against):
+
+```cpp
+// DIV1 step. rmIsRn: the instruction has n == m, so Rm is read AFTER Rn was shifted.
+// Returns the new Rn; updates only Q (bit 8) and T (bit 0) of sr.
+uint32 Div1Step(uint32 rn, uint32 rm, bool rmIsRn, uint32 &sr);
+// MAC.W accumulate. op1 = sext16(@Rm), op2 = sext16(@Rn). Returns the new MAC.u64.
+uint64 MacWStep(uint64 mac, bool s, sint32 op1, sint32 op2);
+// MAC.L accumulate. op1 = @Rm, op2 = @Rn. Returns the new MAC.u64.
+uint64 MacLStep(uint64 mac, bool s, sint32 op1, sint32 op2);
+```
+
+**Interface addition** (core fork, `sh2_jit_iface.hpp` + `InitJitContext`): `uint64 (*accessCyclesRMWByte)(void *sh2, uint32 address)` → `AccessCyclesRMWByte<false>(address)`. It cannot be composed from `accessCycles`: for partition 000 `AccessCycles<…,emulateCache=false>` returns 1, but the RMW helper returns the *bus* byte-read cycles − 1, and the IR has no select op to branch on the partition. (A composition via `accessCycles((a & 0x1FFFFFFF) | 0x20000000, 1, false) - 1` would need a runtime partition test; not worth it.)
+
+Rejected alternative: a single `DMul(a,b,signed)` op writing MAC directly — works, but `Mul`/`MulHiS`/`MulHiU` are reusable, verifier-trivial and map to one x64 instruction each.
+
+### 9.2 Multiplies (register-only; Delay_ yes; no memory; m_wbReg = None; AdvancePC before the WB evaluation; no intr-flag effect)
+
+| Opcode | Encoding / decode | sh2.cpp | Semantics (handler order) | Cycles | IR |
+|---|---|---|---|---|---|
+| MUL (`mul.l Rm,Rn`) | 0000nnnnmmmm0111, NM | 4192-4201 (`MULL`) | `MAC.L = R[rm] * R[rn]` (uint32 wrap; MAC.H unchanged) | `WB(rm,rn) + 3` | `SetMACL(Mul(R(m),R(n))); adv(); WbStall(B(m)\|B(n)); AddCycles(3); SetWb(kWbNone)` |
+| MULS (`muls.w`) | 0010nnnnmmmm1111 | 4203-4212 | `MAC.L = bit::sign_extend<16>(R[rm]) * bit::sign_extend<16>(R[rn]);` (sint32 × sint32 of 16-bit values, max \|2^30\| — no overflow; MAC.H unchanged) | `WB(rm,rn) + 1` | `SetMACL(Mul(SExt16(R(m)),SExt16(R(n))))`; ALU template, mask B(m)\|B(n) |
+| MULU (`mulu.w`) | 0010nnnnmmmm1110 | 4214-4224 | `auto cast = [](uint32 val) { return static_cast<uint32>(static_cast<uint16>(val)); }; MAC.L = cast(R[rm]) * cast(R[rn]);` (uint32 product ≤ 0xFFFE0001; MAC.H unchanged) | `WB(rm,rn) + 1` | `SetMACL(Mul(And(R(m),C(0xFFFF)),And(R(n),C(0xFFFF))))`; ALU template |
+| DMULS (`dmuls.l`) | 0011nnnnmmmm1101 | 4226-4236 | `auto cast = [](uint32 val) { return static_cast<sint64>(static_cast<sint32>(val)); }; MAC.u64 = cast(R[rm]) * cast(R[rn]);` | `WB(rm,rn) + 3` | `x=R(m); y=R(n); SetMACL(Mul(x,y)); SetMACH(MulHiS(x,y)); adv(); WbStall(B(m)\|B(n)); AddCycles(3); SetWb(kWbNone)` |
+| DMULU (`dmulu.l`) | 0011nnnnmmmm0101 | 4238-4247 | `MAC.u64 = static_cast<uint64>(R[rm]) * static_cast<uint64>(R[rn]);` | `WB(rm,rn) + 3` | as DMULS with `MulHiU` |
+
+(The `+3` constants carry the interpreter's `// TODO: 2 to 4, but how is that decided?` — reproduce them as-is.)
+
+### 9.3 DIV0S / DIV0U (Delay_ yes; no memory; m_wbReg = None; no intr-flag effect)
+
+**DIV0S** — `div0s Rm,Rn` — 0010nnnnmmmm0111, NM — sh2.cpp:4249-4260
+```cpp
+SR.M = static_cast<sint32>(R[rm]) < 0;
+SR.Q = static_cast<sint32>(R[rn]) < 0;
+SR.T = SR.M != SR.Q;
+AdvancePC<...>();
+const uint64 cycles = WritebackCycles(rm, rn) + 1;
+m_wbReg = kWBRegNone;
+```
+Cycles `WB(rm,rn) + 1`. IR: `mm=Shr(R(m),31); qq=Shr(R(n),31); SetSRBits(Or(Or(Shl(mm,9),Shl(qq,8)),Xor(mm,qq)), 0x301)`; ALU template mask B(m)|B(n).
+(Composable without `SetSRBits` only via `GetSR` + `SetSR`, but `SetSR` goes through `JitSetSR`, which clears `allow` and recomputes `pending` — wrong for DIV0S. Hence `SetSRBits`.)
+
+**DIV0U** — `div0u` — 0000000000011001 — sh2.cpp:4262-4271
+`SR.M = 0; SR.Q = 0; SR.T = 0; AdvancePC; m_wbReg = None; return 1;` — **fixed 1 cycle, no WB stall** (like CLRT/CLRMAC).
+IR: `SetSRBits(C(0), 0x301); adv(); AddCycles(1); SetWb(kWbNone)`.
+
+### 9.4 DIV1 — `div1 Rm,Rn` — 0011nnnnmmmm0100, NM — sh2.cpp:4273-4313
+1. Delay_: yes, no slot-specific behaviour.
+2. Handler body (verbatim, tracer call omitted):
+```cpp
+const bool oldQ = SR.Q;
+const bool M = SR.M;
+bool Q = oldQ;
+Q = static_cast<sint32>(R[rn]) < 0;
+R[rn] = (R[rn] << 1u) | SR.T;
+
+const uint32 prevVal = R[rn];
+if (oldQ == M) {
+    R[rn] -= R[rm];
+} else {
+    R[rn] += R[rm];
+}
+
+if (oldQ) {
+    if (M) {
+        Q ^= R[rn] <= prevVal;
+    } else {
+        Q ^= R[rn] < prevVal;
+    }
+} else {
+    if (M) {
+        Q ^= R[rn] >= prevVal;
+    } else {
+        Q ^= R[rn] > prevVal;
+    }
+}
+
+SR.T = Q == M;
+SR.Q = Q;
+AdvancePC<...>();
+const uint64 cycles = WritebackCycles(rm, rn) + 1;
+m_wbReg = kWBRegNone;
+```
+   **`R[rm]` is read after `R[rn]` was shifted** ⇒ with n == m the subtrahend/addend is the shifted value (`R[rn]` becomes `0` when oldQ == M, `2*prevVal` otherwise). All compares are unsigned.
+3. Cycles: `WB(rm,rn) + 1`. m_wbReg None. No memory, no bus wait, no intr effect.
+4. Helper (exact transcription):
+```cpp
+uint32 Div1Step(uint32 rn, uint32 rm, bool rmIsRn, uint32 &sr) {
+    const bool oldQ = (sr >> 8) & 1, M = (sr >> 9) & 1, T = sr & 1;
+    bool Q = static_cast<sint32>(rn) < 0;
+    rn = (rn << 1) | T;
+    const uint32 prevVal = rn;
+    const uint32 src = rmIsRn ? rn : rm;
+    rn = (oldQ == M) ? rn - src : rn + src;
+    if (oldQ) Q ^= M ? (rn <= prevVal) : (rn < prevVal);
+    else      Q ^= M ? (rn >= prevVal) : (rn > prevVal);
+    sr = (sr & ~0x101u) | (uint32(Q) << 8) | uint32(Q == M);
+    return rn;
+}
+```
+5. IR: `SetReg(n, Div1(R(n), R(m), /*flag*/ n==m))`; ALU template mask B(m)|B(n). (When n == m the frontend may pass the same `ValueId` twice; the helper ignores `b` when the flag is set.)
+
+### 9.5 MAC.W / MAC.L (Delay_ yes; no bus-wait check; m_wbReg = None; no intr effect)
+
+**MACW** — `mac.w @Rm+,@Rn+` — 0100nnnnmmmm1111, NM — sh2.cpp:4121-4156 (tracer calls omitted):
+```cpp
+const uint32 address2 = R[rn];
+uint64 cycles = AccessCycles<uint16, false, emulateCache>(address2);
+const sint32 op2 = static_cast<sint16>(MemReadWord<emulateCache>(address2));
+R[rn] += 2;
+
+const uint32 address1 = R[rm];
+cycles += AccessCycles<uint16, false, emulateCache>(address1);
+const sint32 op1 = static_cast<sint16>(MemReadWord<emulateCache>(address1));
+R[rm] += 2;
+
+const sint32 mul = op1 * op2;
+if (SR.S) {
+    const sint64 result = static_cast<sint64>(static_cast<sint32>(MAC.L)) + mul;
+    const sint32 saturatedResult = std::clamp<sint64>(result, -0x80000000LL, 0x7FFFFFFFLL);
+    if (result == saturatedResult) {
+        MAC.L = result;
+    } else {
+        MAC.L = saturatedResult;
+        MAC.H |= 1;
+    }
+} else {
+    MAC.u64 += mul;
+}
+
+AdvancePC<...>();
+cycles += WritebackCycles(rm, rn);
+m_wbReg = kWBRegNone;
+return cycles + 1; // TODO: where does the + 1 come from?
+```
+- Read order: **@Rn first** (op2), Rn += 2, **then** Rm is read (op1). With **n == m**: op2 = @R, op1 = @(R+2), R ends at R+4.
+- S=1: only MAC.L is accumulated as 32-bit signed; MAC.H is **not** sign-updated — it is left as is, and only bit 0 is OR-ed in on overflow (both directions). `mul` ∈ [−2^30+2^15, 2^30] never overflows.
+- S=0: full 64-bit add of the sign-extended product (`sint32` → `uint64` conversion sign-extends).
+- Cycles: `Access16R(R[rn]) + Access16R(R[rn]+2 if n==m else R[rm]) + WB(rm,rn) + 1`.
+- `MacWStep(mac, s, op1, op2)`: `mul = op1*op2; if (!s) return mac + uint64(sint64(mul)); r = sint64(sint32(uint32(mac))) + mul; if (r in [INT32_MIN, INT32_MAX]) return (mac & ~0xFFFFFFFF) | uint32(r); return ((mac | (1ull << 32)) & ~0xFFFFFFFFull) | uint32(clamp(r))`.
+- IR:
+  ```
+  SyncCycles
+  a2 = R(n); AddAccessCycles(a2,2,false); v2 = SExt16(Load(a2,2,false)); SetReg(n, Add(a2,C(2)))
+  a1 = (n==m) ? Add(a2,C(2)) : R(m)
+  AddAccessCycles(a1,2,false); v1 = SExt16(Load(a1,2,false)); SetReg(m, Add(a1,C(2)))
+  MacW(v1, v2)
+  adv(); WbStall(B(m)|B(n)); AddCycles(1); SetWb(kWbNone)
+  ```
+  One `SyncCycles` before the first access covers both reads (the interpreter commits cycles only on return). The n==m address is chosen at compile time so correctness does not depend on whether `GetReg` after `SetReg` is forwarded.
+
+**MACL** — `mac.l @Rm+,@Rn+` — 0000nnnnmmmm1111, NM — sh2.cpp:4158-4190:
+```cpp
+const uint32 address2 = R[rn];
+uint64 cycles = AccessCycles<uint32, false, emulateCache>(address2);
+const sint64 op2 = static_cast<sint64>(static_cast<sint32>(MemReadLong<emulateCache>(address2)));
+R[rn] += 4;
+
+const uint32 address1 = R[rm];
+cycles += AccessCycles<uint32, false, emulateCache>(address1);
+const sint64 op1 = static_cast<sint64>(static_cast<sint32>(MemReadLong<emulateCache>(address1)));
+R[rm] += 4;
+
+const sint64 mul = op1 * op2;
+sint64 result = mul + MAC.u64;
+if (SR.S && result > 0x00007FFFFFFFFFFFull && result < 0xFFFF800000000000ull) {
+    if (static_cast<sint32>(op1 ^ op2) < 0) {
+        result = 0xFFFF800000000000ull;
+    } else {
+        result = 0x00007FFFFFFFFFFFull;
+    }
+}
+MAC.u64 = result;
+
+AdvancePC<...>();
+cycles += WritebackCycles(rm, rn);
+m_wbReg = kWBRegNone;
+return cycles + 1; // TODO: where does the + 1 come from?
+```
+- Same read/increment order as MAC.W with 4 (n == m: op2 = @R, op1 = @(R+4), R ends at R+8).
+- Saturation test is done on `uint64(result)` (comparison with `ull` constants converts the signed value): saturate iff the 64-bit sum is outside the signed 48-bit range. **Direction comes from the sign of the product (`op1 ^ op2`, bit 31), not from the sum** — e.g. a zero product with a negative operand saturates to the negative bound if MAC was already out of range. The saturated values are full 64-bit (MACH = `0xFFFF8000` / `0x00007FFF`). No saturation flag bit is set. With S=0 the sum is a plain 64-bit wrap.
+- Cycles: `Access32R(R[rn]) + Access32R(R[rn]+4 if n==m else R[rm]) + WB(rm,rn) + 1`.
+- `MacLStep(mac, s, op1, op2)`: `mul = sint64(op1)*sint64(op2); r = uint64(mul) + mac; if (s && r > 0x00007FFFFFFFFFFF && r < 0xFFFF800000000000) r = (sint32(op1 ^ op2) < 0) ? 0xFFFF800000000000 : 0x00007FFFFFFFFFFF; return r;`
+- IR: as MAC.W with size 4, increment 4, no `SExt16`, and `MacL(v1, v2)`.
+
+### 9.6 TAS — `tas.b @Rn` — 0100nnnn00011011, N — sh2.cpp:4419-4434
+1. Delay_: yes.
+2. Body:
+```cpp
+const uint32 address = R[rn];
+const uint64 cycles = AccessCyclesRMWByte<emulateCache>(address) + WritebackCycles(rn) + 4;
+// TODO: enable bus lock on this read
+const uint8 tmp = MemReadByte<false>(address);
+SR.T = tmp == 0;
+// TODO: disable bus lock on this write
+MemWriteByte<debug, emulateCache>(address, tmp | 0x80);
+AdvancePC<...>();
+m_wbReg = kWBRegNone;
+return cycles;
+```
+3. **No bus lock** (TODO only), no peek, no bus-wait check. Read is `MemReadByte<emulateCache=false>` — always cache-bypassing; the JIT's `read` callback already uses emulateCache=false, so `Load(a,1,false)` is exact. Write is a normal byte write. T = (old byte == 0). Rn unchanged.
+4. Cycles: `AccessCyclesRMWByte(R[rn]) + WB(rn) + 4`, where (sh2.cpp:1042-1056) `AccessCyclesRMWByte(a)` = partitions 000/001/101: `m_bus.GetAccessCycles<uint8,false>(a) - 1` (**bus cycles even for the cached partition**, minus 1); others: `Access8R(a) + Access8W(a)` (010/011/100/110 → 2, 111 → 8).
+5. m_wbReg None. No intr effect.
+6. IR: `SyncCycles; a=R(n); AddAccessCyclesRMWByte(a); WbStall(B(n)); AddCycles(4); v=Load(a,1,false); SetT(CmpEq(v,C(0))); Store(a,1,Or(v,C(0x80))); adv(); SetWb(kWbNone);`
+   (`SetT` before `Store` mirrors the handler; it is unobservable either way.)
+
+### 9.7 LDC.L / LDS.L `@Rm+` (Delay_ yes; no bus-wait check; all clear `allow`; m_wbReg None except LDS.L PR)
+
+Common shape: `address = R[rm]` (`DECODE_M`, rm = bits[11:8]); `cycles = Access32R(address) + WB(rm) [+ 2]`; `<sysreg> = MemReadLong(address)`; `R[rm] += 4`; `m_intrFlags.allow = false`; AdvancePC; `m_wbReg = …`.
+Common IR prefix: `SyncCycles; a=R(m8); AddAccessCycles(a,4,false); WbStall(B(m8));` suffix: `SetReg(m8, Add(a,C(4))); ClearIntrAllow; adv(); SetWb(<wb>)`. Add each to `ClearsIntrAllow`.
+
+| Opcode | Encoding | sh2.cpp | Load target / special | Cycles | m_wbReg | IR middle |
+|---|---|---|---|---|---|---|
+| LDC_GBR_M (`ldc.l @Rm+,GBR`) | 0100mmmm00010111 | 3472-3485 | `GBR = load32` | `Access32R + WB(rm) + 2` | None | `AddCycles(2); SetGBR(Load(a,4,false))` |
+| LDC_SR_M (`ldc.l @Rm+,SR`) | 0100mmmm00000111 | 3487-3503 | `SR.u32 = load32 & 0x3F3; m_intrFlags = {pending = !delaySlot && INTC.pending.level > SR.ILevel, allow = false}` — then `R[rm] += 4`, AdvancePC | `Access32R + WB(rm) + 2` | None | `AddCycles(2); SetSR(Load(a,4,false), delaySlot)` (SetSR already clears allow; the extra `ClearIntrAllow` is harmless) |
+| LDC_VBR_M | 0100mmmm00100111 | 3505-3518 | `VBR = load32` | `Access32R + WB(rm) + 2` | None | `AddCycles(2); SetVBR(Load(a,4,false))` |
+| LDS_MACH_M | 0100mmmm00000110 | 3520-3533 | `MAC.H = load32` | `Access32R + WB(rm)` (**no constant**) | None | `SetMACH(Load(a,4,false))` |
+| LDS_MACL_M | 0100mmmm00010110 | 3535-3548 | `MAC.L = load32` | `Access32R + WB(rm)` | None | `SetMACL(Load(a,4,false))` |
+| LDS_PR_M | 0100mmmm00100110 | 3550-3563 | `PR = load32` | `Access32R + WB(rm)` (no PR term) | **PR (0x10)** | `SetPR(Load(a,4,false))`; suffix `SetWb(kWBRegPR = 0x10)` |
+
+LDC.L SR interrupt detail: in a slot `pending` is set false by the handler and then recomputed by `AdvancePC<true>` (= `EndDelaySlot`) as `INTC.pending.level > SR.ILevel` with the new SR ⇒ same final state as non-slot. `SetSR` must precede `adv()`. `pending` may become true, but `allow = false` blocks acceptance before the next instruction (§6 rule).
+
+### 9.8 STC.L / STS.L `@-Rn` (Delay_ yes; no bus-wait check; all clear `allow`; m_wbReg None)
+
+Common shape (`DECODE_N`): **`R[rn] -= 4` first**; `address = R[rn]`; `cycles = Access32W(address) + WB(rn[, PR]) [+ 2]`; `MemWriteLong(address, <sysreg>)`; `allow = false`; AdvancePC; `m_wbReg = None`.
+Common IR: `SyncCycles; a=Sub(R(n),C(4)); SetReg(n,a); AddAccessCycles(a,4,true); WbStall(<mask>); [AddCycles(2);] Store(a,4,<value>); ClearIntrAllow; adv(); SetWb(kWbNone)`. Add each to `ClearsIntrAllow`.
+
+| Opcode | Encoding | sh2.cpp | Stored value | Cycles | WbStall mask | value |
+|---|---|---|---|---|---|---|
+| STC_SR_M (`stc.l SR,@-Rn`) | 0100nnnn00000011 | 3580-3593 | `SR.u32` (full register incl. Q/M/S/I/T, upper bits as stored — always 0 given the 0x3F3 masks) | `Access32W + WB(rn) + 2` | B(n) | `GetSR()` |
+| STC_GBR_M | 0100nnnn00010011 | 3565-3578 | `GBR` | `Access32W + WB(rn) + 2` | B(n) | `GetGBR()` |
+| STC_VBR_M | 0100nnnn00100011 | 3595-3608 | `VBR` | `Access32W + WB(rn) + 2` | B(n) | `GetVBR()` |
+| STS_MACH_M | 0100nnnn00000010 | 3610-3623 | `MAC.H` | `Access32W + WB(rn)` (**no constant**) | B(n) | `GetMACH()` |
+| STS_MACL_M | 0100nnnn00010010 | 3625-3638 | `MAC.L` | `Access32W + WB(rn)` | B(n) | `GetMACL()` |
+| STS_PR_M | 0100nnnn00100010 | 3640-3653 | `PR` | `Access32W + WB(rn, PR)` (no constant) | B(n)\|PRB | `GetPR()` |
+
+Since there is no bus-wait exit, emitting `SetReg(n,a)` before the store is exact (unlike MOVL_M, where Rn is only decremented on success).
+
+### 9.x Quirks and test notes
+
+1. **MAC.W/MAC.L with n == m**: op2 = @R, op1 = @(R+2/4), R += 4/8. Also n ≠ m with overlapping addresses; both registers post-incremented from their *own* pre-values; misaligned addresses (read aligned down, increment from raw value, `AccessCycles` on the raw address).
+2. **MAC.W S=1**: boundary sums exactly `0x7FFFFFFF`/`-0x80000000` (no saturation, MACH unchanged), one past (saturate, MACH |= 1), MACH with bit0 already set, negative MACH left untouched (not sign-extended), op values `0x8000×0x8000`. S=0: 64-bit wrap and carry into MACH, negative product borrow from MACH.
+3. **MAC.L S=1**: sums at ±2^47 boundaries (`0x00007FFFFFFFFFFF` no-sat, `+1` sat; `0xFFFF800000000000` no-sat, `-1` sat); saturation direction from product sign even when the sum lies the other way (MAC preloaded out of 48-bit range via LDS, product 0 with one negative operand); max product `0x80000000×0x80000000`; S=0 full 64-bit wrap.
+4. **DIV1**: full `div0u` + 32×(`rotcl`/`div1`) unsigned and `div0s` + 32×`div1` signed sequences vs interpreter (random dividends/divisors incl. 0, 1, `0x80000000`, `0xFFFFFFFF`); all 8 (oldQ, M, T) combinations at single-step level; **n == m** (Rm read after shift); DIV0S for each sign combination; DIV0U fixed 1 cycle (no WB stall even after a load into any register).
+5. **Multiply**: MULS with `0x8000`, `0xFFFF` and dirty upper halves; MULU `0xFFFF×0xFFFF`; DMULS mixed signs / `0x80000000²`; DMULU `0xFFFFFFFF²`; MUL/MULS/MULU leave MAC.H unchanged; cycles `+3` (MUL/DMULx) vs `+1` (MULS/MULU) vs `+1` + accesses (MAC); no extra cycles for STS MACx right after a multiply.
+6. **TAS**: byte 0 → T=1, byte 0x80 → T=0 and stays 0x80, byte 0x7F → 0xFF; cycles per partition (000 uses bus cycles − 1, *not* 1; 001/101 bus − 1; 111 → 8; 010/011/100/110 → 2) + WB(rn) + 4; Rn unchanged; in a delay slot.
+7. **LDC.L SR**: in a delay slot (pending recomputed by EndDelaySlot), with a pending interrupt at a level that the new mask unblocks (must be taken *one instruction later*, after the allow-cleared instruction), masks `& 0x3F3` (load `0xFFFFFFFF`), rm == R15 stack pop; LDC.L GBR/VBR/SR `+2`, LDS.L MACH/MACL/PR no constant.
+8. **LDS.L PR** sets `m_wbReg = PR` ⇒ following RTS/STS PR/BSR/JSR/STS.L PR pay the WB(PR) stall; LDS.L MACx/LDC.L set None.
+9. **STC.L SR** stores the full SR (set S, Q, M, ILevel, T = all ones pattern `0x3F3`); STC.L / STS.L with rn == R15 (pre-decrement before the store; WB(rn) uses the pre-instruction m_wbReg, e.g. after `mov.l @r15+,r15`); STS.L PR stall mask (rn, PR) after LDS.L PR.
+10. **Interrupt allow**: every LDC.L/LDS.L/STC.L/STS.L clears allow (an interrupt pending before it must not be taken before the next instruction, but must be taken before the one after); none of MUL/MAC/DIV/TAS touches intr flags.
+11. **No bus-wait** in any §9 opcode, including the 32-bit LDC.L/STC.L/MAC.L accesses — a pending bus wait must *not* produce an exit (differential test with a wait-asserting region).
+12. All §9 opcodes in a delay slot (every one has a `Delay_` variant), particularly MAC.x/TAS/LDC.L SR whose accesses must precede `EndDelaySlot`'s refill.
+
+**State not reachable via `SH2JitContext`**: only `AccessCyclesRMWByte` (TAS) — add `accessCyclesRMWByte`. SR.S/Q/M are reachable through `ctx.SR`, MAC through `ctx.MACL/MACH`, INTC level through `setSR`. The TAS bus lock is not modelled by the interpreter, so nothing is needed for it.
