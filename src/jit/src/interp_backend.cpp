@@ -4,7 +4,7 @@
 
 namespace brimir::jit {
 
-ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, const bool *abortRequested) {
+ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t target, const bool *abortRequested) {
     thread_local std::vector<uint32_t> values;
     if (values.size() < block.numValues) {
         values.resize(block.numValues);
@@ -58,6 +58,16 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, const bool 
         }
         case Op::SetWb: *ctx.wbReg = static_cast<uint8_t>(in.imm); break;
         case Op::SyncCycles: *ctx.cyclesExecuted = entryCycles + info.cycles; break;
+        case Op::CheckBoundary:
+            // The interpreter's per-instruction checks: Advance's budget (m_cyclesExecuted < target)
+            // and InterpretNext's interrupt test (pending && allowed).
+            if (entryCycles + info.cycles >= target || (*ctx.intrPending && *ctx.intrAllow)) {
+                *ctx.PC = in.imm;
+                info.retired = in.retired;
+                info.boundary = true;
+                return info;
+            }
+            break;
         case Op::Refill:
             ctx.refillPipeline(ctx.sh2, in.imm);
             if (abortNow()) {

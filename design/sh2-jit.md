@@ -24,10 +24,9 @@
 ## 2. Timing model
 
 - Each compiled block accumulates exactly the cycles Ymir's `InterpretNext()` would have returned for the same instructions (fixed costs, `AccessCycles` wait states from the bus page table, pipeline refills, `WritebackCycles` load-use stalls).
-- The cycle budget and pending interrupts are checked **only at block boundaries**, not after every instruction. Consequences:
-  - Blocks may overshoot the `Advance()` target by up to one block (32 instructions; with wait states this can exceed 100 cycles), versus at most one instruction with the interpreter. The spillover counters do **not** absorb this: in `Saturn::Run` the master's overshoot extends `execCycles`, so the slave's target, the SCU, the VDPs and the scheduler all slip by the same amount. Milestone 1 accepts this; bounding it is a plan 1C item (section 11).
-  - Interrupt entry can happen up to one block later than with the interpreter.
-- Games that need instruction-exact behavior will be forced onto the interpreter through a game database flag (deferred to plan 1C).
+- **Instruction-exact boundaries.** Before every instruction after the first, a block makes the same two checks the interpreter makes before every instruction (IR op `CheckBoundary`): the `Advance()` cycle budget (`m_cyclesExecuted < target`) and the interrupt check (pending and allowed). A block therefore stops at exactly the instruction where the interpreter stops and takes interrupts at the same instruction, so a JIT-enabled system runs identically to the interpreter. This is verified by whole-system lockstep runs (section 7.2).
+- This replaced the original block-granular checks (changed during milestone 1). Those let a block overshoot the master/slave sync step in `Saturn::Run`, and the overshoot delayed the slave SH-2, SCU, VDP and scheduler by up to a whole block.
+- The remaining deviations are listed in section 6.5.
 
 ## 3. Ownership: forking the SH-2
 
@@ -107,6 +106,8 @@ while cycles < target:
 *ctx.cyclesExecuted = cycles
 ```
 
+`backend.Run` receives `target`; the block itself stops before any later instruction once the budget is used up or an interrupt becomes pending (`CheckBoundary`), exactly like the interpreter loop.
+
 `SLEEP` is handled the same way as in the interpreter: `Advance` returns early when the CPU is asleep, before the executor runs.
 
 ## 5. Blocks and IR
@@ -116,7 +117,7 @@ while cycles < target:
 Decoding starts at the guest PC. A block ends:
 
 - after a branch and its delay slot
-- after `SLEEP`, `TRAPA`, `RTE`, or any instruction that writes `SR` or `VBR` (for example `LDC Rm,SR`), so a newly unmasked interrupt is seen promptly
+- before `SLEEP`, `TRAPA`, `RTE` and instructions that write `SR` or `VBR` while they are not supported (interpreter fallback); once supported, `CheckBoundary` before the next instruction already sees a newly unmasked interrupt
 - **before** any opcode the front end does not support yet (the executor interprets it)
 - at a length cap of 32 guest instructions (tunable)
 
@@ -129,7 +130,7 @@ Linear, single-assignment within a block, about 40 operations, designed to map d
 - **guest state**: load/store general register, `PC`, `PR`, `GBR`, `VBR`, `MACH`/`MACL`, `SR` and individual `SR` bits (T, S, Q, M, interrupt mask)
 - **ALU (32-bit)**: add, sub, and, or, xor, not, neg, shifts and rotates (including through T), sign/zero extend, compare to T, add/sub with carry and overflow into T, multiply, the division steps (`DIV0S`, `DIV0U`, `DIV1`)
 - **memory**: `Load8/16/32`, `Store8/16/32` with a RAM fast path and a bus-handler slow path
-- **control**: conditional exit, exit to a constant target, exit to a register target
+- **control**: conditional exit, exit to a constant target, exit to a register target, boundary check (`CheckBoundary`: cycle budget and pending interrupt before an instruction)
 - **cycles**: `AddCycles(const)`, `AddAccessCycles(size, read|write, addr)` (reads the bus page wait-state table at run time)
 
 The IR ships with a builder, a verifier (checks types, single assignment, terminators) and a text printer used in test failure messages.
@@ -255,7 +256,6 @@ Same as milestone 2 for ARM64, validated on a Cortex-A53/A55-class device.
 
 ## 11. Open questions (to settle in later specs)
 
-- Bound block overshoot (plan 1C, before game validation): pass the remaining cycle budget into the block and exit at an instruction boundary once it is used up, so `Saturn::Run` sees at most one instruction of overshoot again (section 2).
 - Block linking and the dispatch fast path (milestone 2).
 - Whether per-page dirty tracking is needed (after profiling milestone 1).
 - JIT support with cache emulation enabled (possibly never).

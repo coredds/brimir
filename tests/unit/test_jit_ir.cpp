@@ -102,4 +102,5 @@ TEST_CASE("IR printer lists every instruction", "[jit][ir]") {
     REQUIRE(text.find("Exit") != std::string::npos);
     REQUIRE(std::string(OpName(Op::ExitIfBusWait)) == "ExitIfBusWait");
     REQUIRE(std::string(OpName(Op::SyncCycles)) == "SyncCycles");
+    REQUIRE(std::string(OpName(Op::CheckBoundary)) == "CheckBoundary");
 }

@@ -417,10 +417,9 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
     jit->Load(state);
     jit->sh2->SetJitExecutor(&exec);
 
-    // The JIT stops on a block boundary; that point is also an instruction boundary for the
-    // interpreter, so advancing the interpreter to the same count lands on the same state.
+    // With instruction-exact boundaries, both stop at the same instruction for the same target.
     const uint64 jitCycles = jit->sh2->Advance<false, false>(50000);
-    const uint64 refCycles = ref->sh2->Advance<false, false>(jitCycles);
+    const uint64 refCycles = ref->sh2->Advance<false, false>(50000);
     REQUIRE(refCycles == jitCycles);
     const std::string diff = sh2test::DiffRigs(*ref, *jit);
     INFO(diff);
@@ -536,4 +535,79 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     CHECK(totalBlocksRun >= kMinBlocksRun);
     CHECK(totalCompiles >= kMinCompiles);
     CHECK(totalBlocksRun * 100 >= totalSteps * kMinBlockPercent);
+}
+
+// With instruction-exact boundaries, Advance() through the JIT must stop at exactly the same
+// instruction as the interpreter for any cycle target, including between a branch and its slot.
+TEST_CASE("JIT Advance matches interpreter Advance for every cycle target", "[jit][diff][exact]") {
+    // loop: mov.l @R8,R1 ; add R1,R2 ; mov.l R2,@R9 ; dt R3 ; bf/s loop ; add #1,R4 ; bra loop ; nop
+    const std::vector<uint16_t> loop = {MovLL(1, 8), Add(2, 1), MovLS(9, 2), Dt(3),
+                                        Bfs(0xFA),   AddI(4, 1), Bra(0xFF8), kNop};
+    bool sawDelaySlotStop = false;
+    for (uint32_t target = 1; target <= 400; ++target) {
+        Pair p;
+        p.SetBusWaitEvery(target % 3 == 0 ? 2u : 0u);
+        p.WriteCode(kCode, loop);
+        p.Write32(0x06040000, 0x01020304);
+        auto state = p.ref->BaseState(kCode);
+        state.R[3] = 3;
+        state.R[8] = 0x26040000;
+        state.R[9] = (target & 1u) ? kMmio + 0x10 : 0x26040010;
+        p.Load(state);
+        p.jit->sh2->SetJitExecutor(&p.exec);
+
+        const uint64 refCycles = p.ref->sh2->Advance<false, false>(target);
+        const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
+        INFO("target " << target);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit);
+        INFO(diff);
+        REQUIRE(diff.empty());
+        sawDelaySlotStop = sawDelaySlotStop || p.jit->State().delaySlot;
+    }
+    CHECK(sawDelaySlotStop); // some target stopped between bf/s and its slot
+}
+
+// A 32/32 division by zero (write to DVDNT) raises the DIVU overflow interrupt synchronously,
+// inside the store. The interpreter takes it before the next instruction; so must the JIT.
+TEST_CASE("Interrupts raised inside a block are taken at the same instruction", "[jit][diff][exact]") {
+    constexpr uint32_t kVbr = 0x06008000;
+    constexpr uint32_t kVector = 0x50; // not 0x40, the reset vector of IRL
+    constexpr uint32_t kHandler = 0x06009000;
+    constexpr uint32_t kStack = 0x0600F000;
+    Pair p;
+    for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+        rig->Write32(kVbr + kVector * 4, kHandler);
+        rig->WriteCode(kHandler, {static_cast<uint16_t>(kSleep)});
+        auto &ctx = rig->sh2->GetJitContext();
+        ctx.write(ctx.sh2, 0xFFFFFF00, 4, 0);       // DVSR = 0: the next division overflows
+        ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);     // DVCR.OVFIE = 1
+        ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kVector); // VCRDIV: vector number
+        ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);    // IPRA: DIVU interrupt level 15
+    }
+    // mov.l R1,@R2 (R2 = DVDNT) ; add #1,R3 ; add #1,R3 ; sleep
+    p.WriteCode(kCode, {MovLS(2, 1), AddI(3, 1), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+    auto state = p.ref->BaseState(kCode);
+    // Interrupt mask 14: blocks IRL, which RecalcInterrupts (called by the DVCR write) always
+    // raises at its reset level 1, but lets the level-15 DIVU interrupt through.
+    state.SR = 0xE0;
+    state.VBR = kVbr;
+    state.R[1] = 1234;
+    state.R[2] = 0xFFFFFF04;
+    state.R[3] = 0;
+    state.R[15] = kStack; // stack for exception entry
+    p.Load(state);
+    p.jit->sh2->SetJitExecutor(&p.exec);
+    REQUIRE_FALSE(*p.ref->sh2->GetJitContext().intrPending); // nothing pending before the store
+
+    const uint64 refCycles = p.ref->sh2->Advance<false, false>(200);
+    const uint64 jitCycles = p.jit->sh2->Advance<false, false>(200);
+    REQUIRE(jitCycles == refCycles);
+    const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(p.ref->State().R[3] == 0u); // the interpreter took the interrupt before the adds
+    REQUIRE(p.ref->State().sleep);      // and ran the handler
+    REQUIRE(p.ref->Read32(kStack - 8) == kCode + 2); // stacked PC: taken right after the store
+    REQUIRE(p.exec.GetStats().blocksRun >= 1);       // the store ran in a compiled block
 }

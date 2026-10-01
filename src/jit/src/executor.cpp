@@ -6,7 +6,7 @@ uint64 Executor::Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 targ
     while (executed < target) {
         // On-chip timers read the running count, exactly as in the interpreter loop.
         *ctx.cyclesExecuted = executed;
-        executed += Step(ctx).cycles;
+        executed += Step(ctx, target).cycles;
     }
     *ctx.cyclesExecuted = executed;
     return executed;
@@ -21,7 +21,7 @@ void Executor::Flush() {
     m_cache.Flush();
 }
 
-ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx) {
+ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx, uint64 target) {
     const auto interpret = [&] {
         ++m_stats.interpreted;
         ExitInfo info;
@@ -52,7 +52,7 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx) {
     ++m_stats.blocksRun;
     m_inBlock = true;
     m_flushPending = false;
-    const ExitInfo info = RunBlock(block, ctx, &m_flushPending);
+    const ExitInfo info = RunBlock(block, ctx, target, &m_flushPending);
     m_inBlock = false;
     if (m_flushPending) {
         m_flushPending = false;

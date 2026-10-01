@@ -25,7 +25,7 @@ constexpr OpInfo kOpInfo[] = {
     {"Store", false, 2, true, false},          {"AddCycles", false, 0, false, false},
     {"AddAccessCycles", false, 1, true, false}, {"WbStall", false, 0, false, false},
     {"SetWb", false, 0, false, false},         {"SyncCycles", false, 0, false, false},
-    {"Refill", false, 0, false, false},
+    {"CheckBoundary", false, 0, false, false}, {"Refill", false, 0, false, false},
     {"SetupDelaySlot", false, 1, false, false}, {"EndDelaySlot", false, 0, false, false},
     {"ExitIfBusWait", false, 1, true, false},  {"ExitIf", false, 1, false, false},
     {"Exit", false, 0, false, true},           {"ExitDynamic", false, 0, false, true},
@@ -147,6 +147,12 @@ void Builder::SetWb(uint8_t reg) {
 
 void Builder::SyncCycles() {
     Emit(Op::SyncCycles);
+}
+
+void Builder::CheckBoundary(uint32_t pc, uint8_t retired) {
+    Inst &inst = Emit(Op::CheckBoundary);
+    inst.imm = pc;
+    inst.retired = retired;
 }
 
 void Builder::Refill(uint32_t address) {
