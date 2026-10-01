@@ -6,6 +6,7 @@
 // share of time spent in each SH-2. See tools/README.md for usage.
 
 #include <brimir/core_wrapper.hpp>
+#include <brimir/jit/executor.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -31,6 +32,7 @@ struct Args {
     int dumpAt = -1;
     int frames = 1800;
     int warmup = 120;
+    bool sh2Jit = false;
 };
 
 enum class ParseResult { Ok, Help, Error };
@@ -38,9 +40,9 @@ enum class ParseResult { Ok, Help, Error };
 void PrintUsage(std::FILE* out) {
     std::fputs(
         "Usage: brimir_bench --bios <file> [--game <cue|chd|ccd|mds|iso|m3u>] [--system-dir <dir>]\n"
-        "                    [--state <file>] [--frames N] [--warmup N]\n"
+        "                    [--state <file>] [--frames N] [--warmup N] [--sh2-jit]\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
-        "                    --dump-at N --dump-state <file>\n"
+        "                    [--sh2-jit] --dump-at N --dump-state <file>\n"
         "       brimir_bench --help\n"
         "\n"
         "  --bios        Saturn BIOS image (required)\n"
@@ -57,6 +59,7 @@ void PrintUsage(std::FILE* out) {
         "  --frames      measured frames (default 1800)\n"
         "  --warmup      unmeasured frames before measuring (default 120)\n"
         "  --dump-at     run N frames, write a save state to --dump-state, and exit\n"
+        "  --sh2-jit     run both SH-2s through the experimental JIT (default: interpreter)\n"
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -83,6 +86,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     }
     for (int i = 1; i < argc; ++i) {
         const std::string opt = argv[i];
+        if (opt == "--sh2-jit") { // the only option without a value
+            args.sh2Jit = true;
+            continue;
+        }
         if (i + 1 >= argc) {
             std::fprintf(stderr, "Missing value for %s\n", opt.c_str());
             return ParseResult::Error;
@@ -246,6 +253,7 @@ namespace {
 
 int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir) {
     brimir::CoreWrapper core;
+    core.SetSH2JitEnabled(args.sh2Jit);
     if (!core.Initialize()) {
         std::fprintf(stderr, "Failed to initialize the core\n");
         return 2;
@@ -321,6 +329,7 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
 
     std::printf("content      : %s\n", args.game.empty() ? "(BIOS menu)" : args.game.c_str());
     std::printf("frames       : %d (warmup %d)\n", args.frames, args.warmup);
+    std::printf("sh2 jit      : %s\n", args.sh2Jit ? "on" : "off");
     std::printf("ms/frame     : avg %.3f  p50 %.3f  p95 %.3f  p99 %.3f  max %.3f\n", avg,
                 Percentile(frameMs, 0.50), Percentile(frameMs, 0.95), Percentile(frameMs, 0.99),
                 *std::max_element(frameMs.begin(), frameMs.end()));
@@ -330,6 +339,18 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     std::printf("SH2 slave    : %.3f ms/frame (%.1f%% of Ymir_RunFrame)\n", slaveMs, share(slaveMs));
     std::printf("SH2 total    : %.3f ms/frame (%.1f%% of Ymir_RunFrame)\n", masterMs + slaveMs,
                 share(masterMs + slaveMs));
+    if (args.sh2Jit) {
+        // Totals since initialization (warmup included).
+        for (const bool master : {true, false}) {
+            const brimir::jit::Executor* exec = core.GetSH2JitExecutor(master);
+            if (exec != nullptr) {
+                const auto& stats = exec->GetStats();
+                std::printf("jit %-9s: blocksRun %llu  interpreted %llu\n", master ? "master" : "slave",
+                            static_cast<unsigned long long>(stats.blocksRun),
+                            static_cast<unsigned long long>(stats.interpreted));
+            }
+        }
+    }
     return 0;
 }
 

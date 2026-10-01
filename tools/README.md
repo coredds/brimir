@@ -57,11 +57,18 @@ RetroArch `.state` files are accepted only if they contain the raw core data
 (no RetroArch container header, no compression); otherwise loading fails with an
 error.
 
+`--sh2-jit` runs both SH-2s through the experimental JIT (`design/sh2-jit.md`)
+instead of the interpreter, the same as the `brimir_sh2_jit` core option. Run
+the same content with and without it to compare. The report then also prints
+per-CPU executor totals since startup (warmup included): `blocksRun` (compiled
+blocks executed) and `interpreted` (instructions handed to the interpreter).
+
 Output:
 
 ```
 content      : Game.cue
 frames       : 1800 (warmup 120)
+sh2 jit      : off
 ms/frame     : avg 7.912  p50 7.804  p95 9.120  p99 10.301  max 14.022
 fps (host)   : 126.4
 Ymir_RunFrame: 7.850 ms/frame
