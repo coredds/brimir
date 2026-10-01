@@ -745,7 +745,9 @@ private:
     const uint64 *m_currCount = &kNilCurrCounter;
 
     // Number of cycles executed in the current Advance invocation
-    uint64 m_cyclesExecuted;
+    // Brimir: was left uninitialized; on-chip register accesses before the first Advance (debugger, tests) sync the
+    // FRT/WDT to GetCurrentCycleCount(), which adds this value.
+    uint64 m_cyclesExecuted = 0;
 
     // Brimir: host-time profiling state (see SetHostTimeProfiling)
     bool m_profileHostTime = false;
@@ -929,7 +931,7 @@ private:
     // --- WDT module ---
 
     WatchdogTimer WDT;
-    uint8 m_WDTBusValue;
+    uint8 m_WDTBusValue = 0; // Brimir: was left uninitialized (saved in the WDT save state)
 
     template <bool write>
     void AdvanceWDT();

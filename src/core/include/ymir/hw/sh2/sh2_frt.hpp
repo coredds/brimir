@@ -104,6 +104,7 @@ struct FreeRunningTimer {
             OCIAE = false;
             OCIBE = false;
             OVIE = false;
+            anyEnabled = false; // Brimir: was left uninitialized
         }
 
         bool ICIE;    // 7   R/W  ICIE     Input Capture Interrupt Enable
@@ -339,6 +340,7 @@ struct FreeRunningTimer {
 
         void Reset() {
             OCRS = false;
+            unused = 0x00; // Brimir: was left uninitialized (TOCR initial value is E0, bits 3-2 clear)
             OLVLA = false;
             OLVLB = false;
         }
