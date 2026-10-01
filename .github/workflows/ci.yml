@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Every branch push, so feature branches get Windows/Linux/macOS results before
+  # being merged locally (no PR needed). Tags are not matched; releases use release.yml.
   push:
-    branches: [master]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
