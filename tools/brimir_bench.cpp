@@ -9,6 +9,9 @@
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
 
+#include <ymir/sys/saturn.hpp>
+#include <ymir/util/date_time.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -16,6 +19,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <random>
 #include <string>
@@ -312,6 +316,17 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         }
         if (const int rc = LoadContent(refCore, args, saveDir, systemDir, false, true); rc != 0) {
             return rc;
+        }
+        if (args.state.empty()) {
+            // The virtual RTC would otherwise start at the persisted RTC file's timestamp, which
+            // moves between runs. Start both cores at the same fixed date (the Saturn's JP launch)
+            // so lockstep runs are reproducible. A save state carries its own RTC time.
+            constexpr util::datetime::DateTime kLockstepDate{1994, 11, 22, 2, 0, 0, 0}; // Tuesday
+            for (brimir::CoreWrapper* core : {&jitCore, &refCore}) {
+                if (ymir::Saturn* saturn = core->GetSaturn(); saturn != nullptr) {
+                    saturn->SMPC.GetRTC().SetDateTime(kLockstepDate);
+                }
+            }
         }
         constexpr int kChunk = 600;
         int done = 0;

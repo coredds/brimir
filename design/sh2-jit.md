@@ -184,7 +184,8 @@ The JIT holds no architectural state between blocks, so the save-state format do
 ### 6.5 Known deviations
 
 - A store into the currently executing block's own code takes effect at the next block entry (check-on-entry), not at the next instruction.
-- Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction.
+- Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction. An aborted block returns only the cycles accumulated before the abort; the interpreter would return the whole instruction's cost.
+- Dev-log lines that print the current PC (for example on-chip register access traces) show the block's start PC for accesses made by compiled code, because the JIT does not update `PC` inside a block. Emulated state is unaffected.
 
 ## 7. Validation
 

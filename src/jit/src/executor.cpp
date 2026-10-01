@@ -50,15 +50,22 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx, uint64 target) {
     // Same as InterpretNext on its non-interrupt path.
     *ctx.intrAllow = true;
     ++m_stats.blocksRun;
-    m_inBlock = true;
+    // Clears m_inBlock and applies a deferred flush on every exit, including an exception thrown
+    // by a memory callback, so later flushes are never deferred forever.
+    struct BlockScope {
+        Executor &self;
+        ~BlockScope() {
+            self.m_inBlock = false;
+            if (self.m_flushPending) {
+                self.m_flushPending = false;
+                self.m_cache.Flush();
+            }
+        }
+    };
     m_flushPending = false;
-    const ExitInfo info = RunBlock(block, ctx, target, &m_flushPending);
-    m_inBlock = false;
-    if (m_flushPending) {
-        m_flushPending = false;
-        m_cache.Flush();
-    }
-    return info;
+    m_inBlock = true;
+    const BlockScope scope{*this};
+    return RunBlock(block, ctx, target, &m_flushPending);
 }
 
 } // namespace brimir::jit

@@ -95,7 +95,9 @@ timers and DMA controller, low and high work RAM, and the output frame.
 
 In this mode threaded VDP rendering is turned off, and the RTC runs on emulated
 time (virtual mode) instead of the host clock, so both cores see the same date
-and time. Progress is printed every 600 frames:
+and time. Unless `--state` is given (a save state carries its own RTC time),
+both cores' RTC starts at 1994-11-22 00:00:00, so runs are reproducible.
+Progress is printed every 600 frames:
 
 ```
 lockstep: 600/36000 frames identical
@@ -105,7 +107,7 @@ lockstep: OK, 36000 frames identical (jit master blocksRun ..., interpreted ...)
 
 On the first difference it prints the frame number (0-based) and the first
 differing field, for example
-`lockstep divergence at frame 89: WRAMHigh[0x100F5] differs: a=0x0 b=0x1`
+`lockstep divergence at frame 1234: master SH-2 R4 differs: a=0x... b=0x...`
 (`a` is the JIT core), and exits with code 3. `--lockstep` cannot be combined
 with `--dump-at`.
 

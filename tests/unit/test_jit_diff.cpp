@@ -435,10 +435,10 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     constexpr int kLength = 24;
     constexpr int kSteps = 80;
     // Coverage lower bounds, ~65% of the values measured with all 300 programs passing
-    // (steps=15731 blocksRun=14652 interpreted=1079 compiles=1124, i.e. 93% of steps in blocks).
+    // (steps=15730 blocksRun=14700 interpreted=1030 compiles=1122, i.e. 93% of steps in blocks).
     constexpr uint64_t kMinBlocksRun = 9500;
-    constexpr uint64_t kMinCompiles = 730;
     constexpr uint64_t kMinBlockPercent = 60;
+    bool diverged = false;
     uint64_t totalSteps = 0;
     uint64_t totalBlocksRun = 0;
     uint64_t totalInterpreted = 0;
@@ -466,19 +466,71 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
             } else if (i == kLength - 1 && pick >= 13) {
                 pick = rng() % 13; // no delayed branch last: its slot would be SLEEP
             }
+            // Every random draw goes into a named local first, so the program does not depend on
+            // the compiler's argument evaluation order.
             uint16_t instr = kNop;
             switch (pick) {
             case 0: instr = kNop; break;
-            case 1: instr = MovR(dataReg(), dataReg()); break;
-            case 2: instr = MovI(dataReg(), rng()); break;
-            case 3: instr = MovBL(dataReg(), addrReg()); break;
-            case 4: instr = MovLL(dataReg(), addrReg()); break;
-            case 5: instr = MovBS(addrReg(), dataReg()); break;
-            case 6: instr = MovLS(addrReg(), dataReg()); break;
-            case 7: instr = MovLI(dataReg(), rng() % 16); break;
-            case 8: instr = Add(dataReg(), dataReg()); break;
-            case 9: instr = AddI(dataReg(), rng()); break;
-            case 10: instr = CmpEq(dataReg(), dataReg()); break;
+            case 1: {
+                const uint32_t n = dataReg();
+                const uint32_t m = dataReg();
+                instr = MovR(n, m);
+                break;
+            }
+            case 2: {
+                const uint32_t n = dataReg();
+                const uint32_t imm = rng();
+                instr = MovI(n, imm);
+                break;
+            }
+            case 3: {
+                const uint32_t n = dataReg();
+                const uint32_t m = addrReg();
+                instr = MovBL(n, m);
+                break;
+            }
+            case 4: {
+                const uint32_t n = dataReg();
+                const uint32_t m = addrReg();
+                instr = MovLL(n, m);
+                break;
+            }
+            case 5: {
+                const uint32_t n = addrReg();
+                const uint32_t m = dataReg();
+                instr = MovBS(n, m);
+                break;
+            }
+            case 6: {
+                const uint32_t n = addrReg();
+                const uint32_t m = dataReg();
+                instr = MovLS(n, m);
+                break;
+            }
+            case 7: {
+                const uint32_t n = dataReg();
+                const uint32_t disp = rng() % 16;
+                instr = MovLI(n, disp);
+                break;
+            }
+            case 8: {
+                const uint32_t n = dataReg();
+                const uint32_t m = dataReg();
+                instr = Add(n, m);
+                break;
+            }
+            case 9: {
+                const uint32_t n = dataReg();
+                const uint32_t imm = rng();
+                instr = AddI(n, imm);
+                break;
+            }
+            case 10: {
+                const uint32_t n = dataReg();
+                const uint32_t m = dataReg();
+                instr = CmpEq(n, m);
+                break;
+            }
             case 11: instr = Dt(dataReg()); break;
             case 12: instr = (rng() & 1u) ? Bt(targetDisp(i)) : Bf(targetDisp(i)); break;
             case 13: instr = (rng() & 1u) ? Bts(targetDisp(i)) : Bfs(targetDisp(i)); break;
@@ -525,16 +577,20 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         totalInterpreted += p.exec.GetStats().interpreted;
         totalCompiles += p.exec.Cache().Compiles();
         if (failed) {
+            diverged = true;
             break; // stop at the first failing program
         }
     }
 
     // The premise of the test: most steps ran compiled blocks rather than the interpreter.
+    // Compile attempts include empty fallback blocks, so totalCompiles is informational only.
     WARN("fuzz coverage: steps=" << totalSteps << " blocksRun=" << totalBlocksRun
                                  << " interpreted=" << totalInterpreted << " compiles=" << totalCompiles);
-    CHECK(totalBlocksRun >= kMinBlocksRun);
-    CHECK(totalCompiles >= kMinCompiles);
-    CHECK(totalBlocksRun * 100 >= totalSteps * kMinBlockPercent);
+    if (!diverged) {
+        // A divergence already failed the test; don't bury it under threshold failures.
+        CHECK(totalBlocksRun >= kMinBlocksRun);
+        CHECK(totalBlocksRun * 100 >= totalSteps * kMinBlockPercent);
+    }
 }
 
 // With instruction-exact boundaries, Advance() through the JIT must stop at exactly the same
