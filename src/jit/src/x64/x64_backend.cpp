@@ -6,6 +6,7 @@
 
 #include <asmjit/x86.h>
 
+#include <cassert>
 #include <exception>
 
 namespace brimir::jit {
@@ -211,6 +212,9 @@ ExitInfo X64Backend::Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, 
     if (frame.error) {
         std::rethrow_exception(frame.error);
     }
+    // Only the read/write/refill callbacks can request an abort (x64_emitter.hpp), and their
+    // trampolines stop the block when they do, so a block that ran to its end saw no request.
+    assert(frame.out.aborted || !*frame.abortRequested);
     return frame.out;
 }
 

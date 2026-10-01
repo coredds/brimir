@@ -175,6 +175,74 @@ TEST_CASE("x64 backend: an executor runs native blocks like the interpreter", "[
     CHECK(stats.nativeBlocksRun == 1);
 }
 
+TEST_CASE("x64 backend: the native code cap flushes the cache", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr size_t kLimit = 4096;
+    constexpr uint32_t kBlocks = 50;
+    constexpr uint32_t kStride = 0x40;
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), kLimit};
+
+    auto ref = std::make_unique<Rig>();
+    auto jit = std::make_unique<Rig>();
+    for (uint32_t i = 0; i < kBlocks; ++i) {
+        const auto imm = static_cast<uint16_t>(0x7300 | (i + 1)); // add #(i+1),R3
+        const std::vector<uint16_t> program{imm,       kMov_R3_R4, kShll_R4, kAdd1_R3, kMov_R3_R4,
+                                            kShll_R4,  kAdd1_R3,   kShll_R4, static_cast<uint16_t>(kSleep)};
+        ref->WriteCode(kCode + i * kStride, program);
+        jit->WriteCode(kCode + i * kStride, program);
+    }
+    auto state = ref->BaseState(kCode);
+    state.R[3] = 0x1234;
+    ref->Load(state);
+    jit->Load(state);
+
+    auto &ctx = jit->sh2->GetJitContext();
+    size_t largest = 0;
+    uint32_t flushes = 0;
+    // Two passes: the second pass hits blocks still cached and recompiles flushed ones.
+    for (uint32_t pass = 0; pass < 2; ++pass) {
+        for (uint32_t i = 0; i < kBlocks; ++i) {
+            const uint32_t pc = kCode + i * kStride;
+            INFO("pass " << pass << " block " << i);
+            ref->Load(ref->BaseState(pc));
+            jit->Load(jit->BaseState(pc));
+
+            const size_t bytesBefore = backend->CodeBytes();
+            const uint64_t compilesBefore = cache.Compiles();
+            const brimir::jit::CachedBlock &entry = cache.Get(ctx, pc);
+            const size_t bytesAfter = backend->CodeBytes();
+            if (cache.Compiles() != compilesBefore) {
+                const bool flushed = bytesAfter < bytesBefore;
+                flushes += flushed ? 1 : 0;
+                largest = std::max(largest, flushed ? bytesAfter : bytesAfter - bytesBefore);
+            } else {
+                CHECK(bytesAfter == bytesBefore);
+            }
+            CHECK(bytesAfter <= kLimit + largest);
+            REQUIRE(entry.code.entry != nullptr);
+
+            const ExitInfo info = backend->Run(entry.code, ctx);
+            REQUIRE(info.retired == 8);
+            uint64_t refCycles = 0;
+            for (uint32_t n = 0; n < info.retired; ++n) {
+                refCycles += ref->sh2->Step<false, false>();
+            }
+            CHECK(info.cycles == refCycles);
+            const std::string diff = sh2test::DiffRigs(*ref, *jit);
+            INFO(diff);
+            REQUIRE(diff.empty());
+        }
+    }
+    CHECK(flushes >= 1u);
+    CHECK(cache.Size() < kBlocks);
+    CHECK(cache.Invalidations() == 0);
+    CHECK(cache.CompileFallbacks() == 0);
+}
+
 TEST_CASE("x64 backend: CoreWrapper backend selection recreates the executors", "[jit][x64]") {
     if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
         SKIP("no x64 backend");

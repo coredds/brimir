@@ -1,5 +1,7 @@
 #include <brimir/jit/executor.hpp>
 
+#include <brimir/jit/bus_fast_path.hpp>
+
 namespace brimir::jit {
 
 namespace {
@@ -52,7 +54,7 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx, uint64 target) {
     // At PC & 2 the interpreter executes the opcode already in its fetch buffer, which can differ
     // from memory if the code was modified after the fetch. Only compile when they agree.
     const uint32_t pc = *ctx.PC;
-    if ((pc & 2u) != 0 && static_cast<uint16_t>(*ctx.fetchedOpcodes) != ctx.peekInstruction(ctx.sh2, pc)) {
+    if ((pc & 2u) != 0 && static_cast<uint16_t>(*ctx.fetchedOpcodes) != PeekOpcode(ctx, pc)) {
         return interpret();
     }
 

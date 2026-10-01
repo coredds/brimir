@@ -4720,7 +4720,9 @@ void SH2::InitJitContext() {
     m_jitContext.setSR = &SH2::JitSetSR;
     m_jitContext.accessCyclesRMWByte = &SH2::JitAccessCyclesRMWByte;
 
-    // Brimir: bus page table layout for the JIT's inline fast path.
+    // Brimir: bus page table layout for the JIT's inline fast path. The structs are copied field by
+    // field; a field added to only one of them changes its size and fails here.
+    static_assert(sizeof(SH2JitBusLayout) == sizeof(sys::SH2Bus::PageTableLayout));
     const auto layout = m_bus.GetPageTableLayout();
     m_jitContext.bus.pages = layout.pages;
     m_jitContext.bus.pageStride = layout.pageStride;

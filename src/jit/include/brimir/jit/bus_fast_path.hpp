@@ -7,7 +7,7 @@
 // SH2Bus::IsBusWait. When the page has no array (handler page or unmapped), the access must take
 // its SH2JitContext callback instead.
 //
-// All functions require bus.pages != nullptr.
+// All functions except PeekOpcode require bus.pages != nullptr.
 
 #include <ymir/hw/sh2/sh2_jit_iface.hpp>
 
@@ -19,7 +19,8 @@ namespace brimir::jit {
 const uint8_t *PageEntry(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address);
 
 // Partition 0b000/0b001/0b101 data access to an array page: returns the byte pointer for the
-// size-aligned address and sets writable; nullptr when the access must take the callback.
+// size-aligned address and sets writable; nullptr when the access must take the callback (writable
+// is then left untouched).
 uint8_t *FastArrayPointer(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address, uint32_t size, bool &writable);
 
 // SH2::AccessCycles<T, write, emulateCache = false> for every partition:
@@ -33,5 +34,9 @@ bool FastBusWait(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address, bool &
 // Side-effect-free 16-bit instruction peek for partitions 0b000/0b001/0b101 on array pages.
 // Returns false (out untouched) when the peek must take the callback.
 bool FastPeek16(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address, uint16_t &out);
+
+// ctx.peekInstruction(ctx.sh2, address), read with FastPeek16 when the context has a page table and
+// the address is on an array page (same result: the peek callback reads the same array).
+uint16_t PeekOpcode(ymir::sh2::SH2JitContext &ctx, uint32_t address);
 
 } // namespace brimir::jit

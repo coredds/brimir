@@ -76,4 +76,12 @@ bool FastPeek16(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address, uint16_
     return true;
 }
 
+uint16_t PeekOpcode(ymir::sh2::SH2JitContext &ctx, uint32_t address) {
+    uint16_t opcode = 0;
+    if (ctx.bus.pages != nullptr && FastPeek16(ctx.bus, address, opcode)) {
+        return opcode;
+    }
+    return ctx.peekInstruction(ctx.sh2, address);
+}
+
 } // namespace brimir::jit

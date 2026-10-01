@@ -59,6 +59,9 @@ constexpr int32_t Imm32(uint32_t value) {
 // True if generated code can walk the bus page table (bus_fast_path.hpp): a table is present and
 // every offset fits a 32-bit displacement. Otherwise every access calls its trampoline.
 bool CanInlineBus(const ymir::sh2::SH2JitBusLayout &bus) {
+    // A field is read at [entry + offset] with offset as a signed 32-bit displacement. The 8-byte
+    // margin keeps the whole field (at most 8 bytes: a uint64 cycle count or the array pointer)
+    // inside the int32 displacement range.
     constexpr uint32_t kMaxDisp = static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) - 8;
     if (bus.pages == nullptr || bus.pageStride == 0 || bus.pageShift == 0 || bus.pageShift >= 32 ||
         bus.arrayOffset > kMaxDisp || bus.arrayWritableOffset > kMaxDisp) {

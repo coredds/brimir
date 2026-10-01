@@ -1,5 +1,6 @@
 #include <brimir/jit/block_cache.hpp>
 
+#include <brimir/jit/bus_fast_path.hpp>
 #include <brimir/jit/frontend.hpp>
 
 #include <cassert>
@@ -13,25 +14,38 @@ namespace brimir::jit {
 bool BlockCache::IsCurrent(const Block &block, ymir::sh2::SH2JitContext &ctx) {
     for (size_t i = 0; i < block.guestOpcodes.size(); ++i) {
         const uint32_t address = block.startPC + static_cast<uint32_t>(i * 2);
-        if (ctx.peekInstruction(ctx.sh2, address) != block.guestOpcodes[i]) {
+        if (PeekOpcode(ctx, address) != block.guestOpcodes[i]) {
             return false;
         }
     }
     return true;
 }
 
+void BlockCache::Invalidate(BlockMap::iterator it) {
+    // Its native code (if any) stays allocated until the next Flush.
+    RecentSlot &slot = SlotFor(it->first);
+    if (slot.entry == it->second.get()) {
+        slot = RecentSlot{};
+    }
+    ++m_invalidations;
+    m_totalInsts -= it->second->block.code.size();
+    m_blocks.erase(it);
+}
+
 const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
+    RecentSlot &slot = SlotFor(pc);
+    if (slot.entry != nullptr && slot.pc == pc && IsCurrent(slot.entry->block, ctx)) {
+        return *slot.entry;
+    }
     if (auto it = m_blocks.find(pc); it != m_blocks.end()) {
-        if (IsCurrent(it->second->block, ctx)) {
+        if (slot.entry != it->second.get() && IsCurrent(it->second->block, ctx)) {
+            slot = RecentSlot{pc, it->second.get()};
             return *it->second;
         }
-        // Its native code (if any) stays allocated until the next Flush.
-        ++m_invalidations;
-        m_totalInsts -= it->second->block.code.size();
-        m_blocks.erase(it);
+        Invalidate(it);
     }
 
-    if (m_totalInsts >= kMaxCachedInsts) {
+    if (m_totalInsts >= kMaxCachedInsts || (m_native != nullptr && m_native->CodeBytes() >= m_maxNativeCodeBytes)) {
         Flush();
     }
 
@@ -52,12 +66,14 @@ const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
     }
     ++m_compiles;
     m_totalInsts += block.code.size();
-    const CachedBlock &ref = *entry;
+    CachedBlock *ref = entry.get();
     m_blocks.emplace(pc, std::move(entry));
-    return ref;
+    SlotFor(pc) = RecentSlot{pc, ref};
+    return *ref;
 }
 
 void BlockCache::Flush() {
+    m_recent.fill(RecentSlot{});
     m_blocks.clear();
     m_totalInsts = 0;
     if (m_native != nullptr) {
