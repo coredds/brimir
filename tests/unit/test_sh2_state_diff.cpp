@@ -39,6 +39,23 @@ TEST_CASE("DiffSH2State compares peripherals only in the peripheral scope", "[ji
     REQUIRE_FALSE(DiffSH2State(a, b, SH2DiffScope::CpuAndPeripherals).empty());
 }
 
+TEST_CASE("DiffSH2State compares the cache arrays in the CPU scope", "[jit][diff]") {
+    auto rig = std::make_unique<sh2test::Rig>();
+    const auto a = rig->State();
+    auto b = a;
+    b.cache.entries[3].lines[1][7] ^= 0x5A;
+    CHECK(DiffSH2State(a, b, SH2DiffScope::Cpu).find("cache.entries[3].lines[1][7] differs") !=
+          std::string::npos);
+
+    b = a;
+    b.cache.entries[9].tags[2] ^= 0x10;
+    CHECK(DiffSH2State(a, b, SH2DiffScope::Cpu).find("cache.entries[9].tags[2] differs") != std::string::npos);
+
+    b = a;
+    b.cache.lru[3] ^= 1;
+    CHECK(DiffSH2State(a, b, SH2DiffScope::Cpu).find("cache.lru[3] differs") != std::string::npos);
+}
+
 TEST_CASE("Test rig logs MMIO accesses and DiffRigs compares the logs", "[jit][diff]") {
     auto a = std::make_unique<sh2test::Rig>();
     auto b = std::make_unique<sh2test::Rig>();

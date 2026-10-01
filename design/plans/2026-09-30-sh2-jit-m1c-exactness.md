@@ -1291,6 +1291,11 @@ git commit -m "test(jit): harden executor flush scope and fuzz determinism"
 
 ## After this plan: plan 1D
 
+0. **First task: full-state comparison in `CompareCores`.** Save both systems with `Saturn::SaveState` into two value-initialized `ymir::savestate::SaveState` structs and `memcmp` each sub-struct, naming the subsystem that differs (SH-2 fields keep their detailed `DiffSH2State` names). Also compare the audio samples each core produced in the frame.
 1. Front-end coverage for the rest of the milestone-1 subset (all MOV addressing modes, `MOVA`, `MOVT`, `CLRT`/`SETT`, extensions and swaps, logic and `TST`, `SUB`/`NEG`, carry/overflow variants, remaining compares, shifts and rotates, `BSR`/`BRAF`/`BSRF`/`JSR`, `MOV.L @(disp,PC)` in delay slots). Each opcode gets rows in the per-instruction and delay-slot differential tests and joins the fuzz generator.
    - LDC/LDS/STC/STS clear the interrupt-allow flag for the next instruction (InterpretNext sets it back to true at the start of every instruction); when these opcodes are compiled, the IR must reproduce both the clear and the per-instruction re-enable, otherwise CheckBoundary would miss or misplace interrupts.
 2. Real-game lockstep validation: BIOS plus the baseline titles, 36000 frames each with `brimir_bench --lockstep` (milestone 1 done criteria), results committed as `design/sh2-validation.md`.
+   - Per game, also a default-settings smoke run with the JIT (threaded VDP, host RTC), because the lockstep configuration differs from what users run.
+3. Synthetic CI lockstep workload, since the null IPL only runs a few instructions before SLEEP: a work RAM loop on the master SH-2 with SR unmasked and an SCU interrupt such as VBlank enabled, optionally with the slave SH-2 started.
+4. Fork comment fix: `src/core/src/ymir/hw/sh2/sh2.cpp` (around line 494) says the executor works "at block granularity", which is no longer true with instruction-exact boundaries. Fix it with the next fork change and log it in the fork change log.
+5. Small test gaps: a store-abort recovery check, a DMAC channel diff test, `CompareCores` tests for the SH-2 and frame branches, and a DIVU interrupt test over a small sweep of cycle targets.

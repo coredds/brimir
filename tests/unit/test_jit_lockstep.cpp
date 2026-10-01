@@ -42,7 +42,9 @@ TEST_CASE("Lockstep: JIT core matches interpreter core", "[lockstep][jit]") {
     INFO("frame " << result.framesRun << ": " << result.divergence);
     REQUIRE(result.divergence.empty());
     const auto &stats = jit->GetSH2JitExecutor(true)->GetStats();
-    REQUIRE(stats.blocksRun + stats.interpreted > 0);
+    // The null IPL runs only a few instructions before SLEEP, so this is a smoke test; still
+    // require that at least one compiled block ran.
+    REQUIRE(stats.blocksRun > 0);
 }
 
 TEST_CASE("CompareCores detects a difference", "[lockstep]") {

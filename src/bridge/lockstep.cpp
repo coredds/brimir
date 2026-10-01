@@ -81,6 +81,39 @@ std::string DiffSH2State(const ymir::savestate::SH2SaveState &a, const ymir::sav
         }
     }
     BRIMIR_DIFF(cache.CCR)
+    // Compiled code can write the cache address/data arrays through MemWrite even with cache
+    // emulation off, so the arrays are part of the CPU state. memcmp is the fast path; the loops
+    // below only run to name the first difference.
+    for (int i = 0; i < 64; ++i) {
+        const auto &ea = a.cache.entries[i];
+        const auto &eb = b.cache.entries[i];
+        if (std::memcmp(ea.tags.data(), eb.tags.data(), sizeof(ea.tags)) != 0) {
+            for (int w = 0; w < 4; ++w) {
+                if (ea.tags[w] != eb.tags[w]) {
+                    std::snprintf(name, sizeof(name), "cache.entries[%d].tags[%d]", i, w);
+                    return Describe(label, name, ea.tags[w], eb.tags[w]);
+                }
+            }
+        }
+        if (std::memcmp(ea.lines.data(), eb.lines.data(), sizeof(ea.lines)) != 0) {
+            for (int w = 0; w < 4; ++w) {
+                for (int k = 0; k < 16; ++k) {
+                    if (ea.lines[w][k] != eb.lines[w][k]) {
+                        std::snprintf(name, sizeof(name), "cache.entries[%d].lines[%d][%d]", i, w, k);
+                        return Describe(label, name, ea.lines[w][k], eb.lines[w][k]);
+                    }
+                }
+            }
+        }
+    }
+    if (std::memcmp(a.cache.lru.data(), b.cache.lru.data(), sizeof(a.cache.lru)) != 0) {
+        for (int i = 0; i < 64; ++i) {
+            if (a.cache.lru[i] != b.cache.lru[i]) {
+                std::snprintf(name, sizeof(name), "cache.lru[%d]", i);
+                return Describe(label, name, a.cache.lru[i], b.cache.lru[i]);
+            }
+        }
+    }
 
     if (scope == SH2DiffScope::CpuAndPeripherals) {
         BRIMIR_DIFF(intc.pendingSource)
@@ -134,6 +167,9 @@ void PrepareLockstepCore(CoreWrapper &core) {
     // advances with emulated time only.
     if (ymir::Saturn *saturn = core.GetSaturn(); saturn != nullptr) {
         saturn->configuration.rtc.mode = ymir::core::config::rtc::Mode::Virtual;
+        // Keep the SCSP on the emulation thread so audio timing cannot depend on host thread
+        // scheduling (the option is currently unimplemented upstream; pinned for when it lands).
+        saturn->configuration.audio.threadedSCSP = false;
     }
 }
 

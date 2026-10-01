@@ -39,6 +39,8 @@ struct Args {
     int frames = 1800;
     int warmup = 120;
     bool sh2Jit = false;
+    bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
+    bool warmupGiven = false;
 };
 
 enum class ParseResult { Ok, Help, Error };
@@ -69,7 +71,8 @@ void PrintUsage(std::FILE* out) {
         "  --dump-at     run N frames, write a save state to --dump-state, and exit\n"
         "  --sh2-jit     run both SH-2s through the experimental JIT (default: interpreter)\n"
         "  --lockstep    run N frames on a JIT core and an interpreter core side by side and require\n"
-        "                identical state after every frame (exit 3 on divergence)\n"
+        "                identical state after every frame (exit 3 on divergence). Cannot be combined\n"
+        "                with --sh2-jit, --frames, --warmup or --dump-at.\n"
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -121,6 +124,7 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
                 return ParseResult::Error;
             }
         } else if (opt == "--frames") {
+            args.framesGiven = true;
             if (!ParseInt(value, args.frames) || args.frames == 0) {
                 std::fprintf(stderr, "Invalid --frames value: %s\n", value);
                 return ParseResult::Error;
@@ -131,6 +135,7 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
                 return ParseResult::Error;
             }
         } else if (opt == "--warmup") {
+            args.warmupGiven = true;
             if (!ParseInt(value, args.warmup)) {
                 std::fprintf(stderr, "Invalid --warmup value: %s\n", value);
                 return ParseResult::Error;
@@ -150,6 +155,12 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     }
     if (args.lockstep >= 0 && args.dumpAt >= 0) {
         std::fprintf(stderr, "--lockstep cannot be combined with --dump-at\n");
+        return ParseResult::Error;
+    }
+    // Lockstep always runs one JIT core and one interpreter core for exactly N frames, so these
+    // options would otherwise be silently ignored.
+    if (args.lockstep >= 0 && (args.sh2Jit || args.framesGiven || args.warmupGiven)) {
+        std::fprintf(stderr, "--lockstep cannot be combined with --sh2-jit, --frames or --warmup\n");
         return ParseResult::Error;
     }
     return ParseResult::Ok;
