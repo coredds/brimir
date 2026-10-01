@@ -765,6 +765,7 @@ private:
     static void JitRefillPipeline(void *ctx, uint32 address);
     static void JitSetupDelaySlot(void *ctx, uint32 target);
     static void JitEndDelaySlot(void *ctx);
+    static void JitSetSR(void *ctx, uint32 value, bool delaySlot);
 
     // Retrieves the current absolute cycle count
     uint64 GetCurrentCycleCount() const;

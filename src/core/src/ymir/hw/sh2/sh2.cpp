@@ -492,7 +492,7 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
     }
 
     // Brimir: SH-2 JIT hook. Only the plain configuration (no debug tracing, no cache emulation) is
-    // compiled; the executor reproduces the loop below at block granularity.
+    // compiled; the executor stops at the same instruction boundaries as the loop below.
     if constexpr (!debug && !emulateCache) {
         if (m_jitExecutor != nullptr) {
             m_cyclesExecuted = m_jitExecutor->Run(m_jitContext, m_cyclesExecuted, cycles);
@@ -4715,6 +4715,9 @@ void SH2::InitJitContext() {
     m_jitContext.refillPipeline = &SH2::JitRefillPipeline;
     m_jitContext.setupDelaySlot = &SH2::JitSetupDelaySlot;
     m_jitContext.endDelaySlot = &SH2::JitEndDelaySlot;
+    m_jitContext.MACL = &MAC.L;
+    m_jitContext.MACH = &MAC.H;
+    m_jitContext.setSR = &SH2::JitSetSR;
 }
 
 uint64 SH2::JitInterpretOne(void *ctx) {
@@ -4781,6 +4784,16 @@ void SH2::JitSetupDelaySlot(void *ctx, uint32 target) {
 
 void SH2::JitEndDelaySlot(void *ctx) {
     static_cast<SH2 *>(ctx)->AdvancePC<false, false, true>();
+}
+
+void SH2::JitSetSR(void *ctx, uint32 value, bool delaySlot) {
+    // Same state change as LDCSR
+    auto &sh2 = *static_cast<SH2 *>(ctx);
+    sh2.SR.u32 = value & 0x000003F3;
+    sh2.m_intrFlags = std::bit_cast<IntrFlags>(std::bit_cast<uint16>(IntrFlags{
+        .pending = !delaySlot && sh2.INTC.pending.level > sh2.SR.ILevel,
+        .allow = false,
+    }));
 }
 
 // -----------------------------------------------------------------------------

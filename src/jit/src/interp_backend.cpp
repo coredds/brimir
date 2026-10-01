@@ -33,6 +33,31 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
         case Op::SExt16:
             v[in.dst] = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(v[in.a] & 0xFFFFu)));
             break;
+        case Op::And: v[in.dst] = v[in.a] & v[in.b]; break;
+        case Op::Or: v[in.dst] = v[in.a] | v[in.b]; break;
+        case Op::Xor: v[in.dst] = v[in.a] ^ v[in.b]; break;
+        case Op::Not: v[in.dst] = ~v[in.a]; break;
+        case Op::Shl: v[in.dst] = v[in.a] << in.imm; break;
+        case Op::Shr: v[in.dst] = v[in.a] >> in.imm; break;
+        case Op::Sar: v[in.dst] = static_cast<uint32_t>(static_cast<int32_t>(v[in.a]) >> in.imm); break;
+        case Op::CmpGtU: v[in.dst] = v[in.a] > v[in.b] ? 1u : 0u; break;
+        case Op::CmpGeU: v[in.dst] = v[in.a] >= v[in.b] ? 1u : 0u; break;
+        case Op::CmpGtS: v[in.dst] = static_cast<int32_t>(v[in.a]) > static_cast<int32_t>(v[in.b]) ? 1u : 0u; break;
+        case Op::CmpGeS: v[in.dst] = static_cast<int32_t>(v[in.a]) >= static_cast<int32_t>(v[in.b]) ? 1u : 0u; break;
+        case Op::GetGBR: v[in.dst] = *ctx.GBR; break;
+        case Op::SetGBR: *ctx.GBR = v[in.a]; break;
+        case Op::GetVBR: v[in.dst] = *ctx.VBR; break;
+        case Op::SetVBR: *ctx.VBR = v[in.a]; break;
+        case Op::SetPR: *ctx.PR = v[in.a]; break;
+        case Op::GetSR: v[in.dst] = *ctx.SR; break;
+        case Op::SetSR: ctx.setSR(ctx.sh2, v[in.a], in.flag); break;
+        case Op::GetMACH: v[in.dst] = *ctx.MACH; break;
+        case Op::GetMACL: v[in.dst] = *ctx.MACL; break;
+        case Op::SetMACH: *ctx.MACH = v[in.a]; break;
+        case Op::SetMACL: *ctx.MACL = v[in.a]; break;
+        case Op::ClearIntrAllow: *ctx.intrAllow = false; break;
+        case Op::SetIntrAllow: *ctx.intrAllow = true; break;
+        case Op::GetDelayTarget: v[in.dst] = *ctx.delaySlotTarget; break;
         case Op::Load:
             v[in.dst] = ctx.read(ctx.sh2, v[in.a], in.size, in.flag);
             if (abortNow()) {

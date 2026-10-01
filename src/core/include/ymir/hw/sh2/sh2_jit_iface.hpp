@@ -20,6 +20,8 @@ struct SH2JitContext {
     uint32 *GBR = nullptr;
     uint32 *VBR = nullptr;
     uint32 *SR = nullptr; // RegSR::u32, T is bit 0
+    uint32 *MACL = nullptr;
+    uint32 *MACH = nullptr;
     uint32 *delaySlotTarget = nullptr;
     bool *delaySlot = nullptr;
     uint8 *wbReg = nullptr; // 0x0..0xF: R0..R15, 0x10: PR, 0xFF: none
@@ -50,6 +52,9 @@ struct SH2JitContext {
     void (*setupDelaySlot)(void *sh2, uint32 target) = nullptr;
     // SH2::AdvancePC for an instruction executed in a delay slot.
     void (*endDelaySlot)(void *sh2) = nullptr;
+    // LDC Rm,SR state change: SR = value & 0x3F3, recompute interrupt pending (none in a delay
+    // slot), clear interrupt-allow.
+    void (*setSR)(void *sh2, uint32 value, bool delaySlot) = nullptr;
 };
 
 class ISH2Executor {

@@ -25,6 +25,31 @@ enum class Op : uint8_t {
     CmpEq,
     SExt8,
     SExt16,
+    And,
+    Or,
+    Xor,
+    Not,
+    Shl, // imm: amount 1..31
+    Shr, // imm: amount 1..31
+    Sar, // imm: amount 1..31
+    CmpGtU,
+    CmpGeU,
+    CmpGtS,
+    CmpGeS,
+    GetGBR,
+    SetGBR,
+    GetVBR,
+    SetVBR,
+    SetPR,
+    GetSR,
+    SetSR, // flag: delaySlot
+    GetMACH,
+    GetMACL,
+    SetMACH,
+    SetMACL,
+    ClearIntrAllow,
+    SetIntrAllow,
+    GetDelayTarget,
     Load,
     Store,
     AddCycles,
@@ -45,7 +70,7 @@ enum class Op : uint8_t {
 struct Inst {
     Op op = Op::Exit;
     uint8_t size = 0;    // access size in bytes (1, 2, 4)
-    bool flag = false;   // Load: instrFetch; AddAccessCycles/ExitIfBusWait: write; ExitIf: refill
+    bool flag = false;   // Load: instrFetch; AddAccessCycles/ExitIfBusWait: write; ExitIf: refill; SetSR: delaySlot
     uint8_t retired = 0; // exit ops: guest instructions completed when the exit is taken
     ValueId dst = kNoValue;
     ValueId a = kNoValue;
@@ -78,6 +103,31 @@ public:
     ValueId CmpEq(ValueId a, ValueId b);
     ValueId SExt8(ValueId a);
     ValueId SExt16(ValueId a);
+    ValueId And(ValueId a, ValueId b);
+    ValueId Or(ValueId a, ValueId b);
+    ValueId Xor(ValueId a, ValueId b);
+    ValueId Not(ValueId a);
+    ValueId Shl(ValueId a, uint32_t amount); // amount 1..31
+    ValueId Shr(ValueId a, uint32_t amount); // logical, amount 1..31
+    ValueId Sar(ValueId a, uint32_t amount); // arithmetic, amount 1..31
+    ValueId CmpGtU(ValueId a, ValueId b);
+    ValueId CmpGeU(ValueId a, ValueId b);
+    ValueId CmpGtS(ValueId a, ValueId b);
+    ValueId CmpGeS(ValueId a, ValueId b);
+    ValueId GetGBR();
+    void SetGBR(ValueId value);
+    ValueId GetVBR();
+    void SetVBR(ValueId value);
+    void SetPR(ValueId value);
+    ValueId GetSR();
+    void SetSR(ValueId value, bool delaySlot);
+    ValueId GetMACH();
+    ValueId GetMACL();
+    void SetMACH(ValueId value);
+    void SetMACL(ValueId value);
+    void ClearIntrAllow();
+    void SetIntrAllow();
+    ValueId GetDelayTarget();
     ValueId Load(ValueId address, uint8_t size, bool instrFetch);
     void Store(ValueId address, uint8_t size, ValueId value);
     void AddCycles(uint32_t cycles);
@@ -97,6 +147,10 @@ public:
 private:
     ValueId NewValue();
     Inst &Emit(Op op);
+    ValueId Binary(Op op, ValueId a, ValueId b);
+    ValueId Unary(Op op, ValueId a, uint32_t imm = 0);
+    ValueId Nullary(Op op);
+    void Sink(Op op, ValueId a);
 
     Block &m_block;
 };

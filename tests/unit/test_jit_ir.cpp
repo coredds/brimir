@@ -5,6 +5,9 @@
 
 #include <brimir/jit/ir.hpp>
 
+#include <string>
+#include <utility>
+
 using namespace brimir::jit;
 
 TEST_CASE("IR builder assigns sequential values and records operands", "[jit][ir]") {
@@ -83,6 +86,60 @@ TEST_CASE("IR verifier rejects malformed blocks", "[jit][ir]") {
         b.Exit(0, 1);
         REQUIRE(VerifyBlock(block).find("register index") != std::string::npos);
     }
+}
+
+TEST_CASE("IR names the logic, shift, compare and system-register ops", "[jit][ir]") {
+    const std::pair<Op, const char *> names[] = {
+        {Op::And, "And"},
+        {Op::Or, "Or"},
+        {Op::Xor, "Xor"},
+        {Op::Not, "Not"},
+        {Op::Shl, "Shl"},
+        {Op::Shr, "Shr"},
+        {Op::Sar, "Sar"},
+        {Op::CmpGtU, "CmpGtU"},
+        {Op::CmpGeU, "CmpGeU"},
+        {Op::CmpGtS, "CmpGtS"},
+        {Op::CmpGeS, "CmpGeS"},
+        {Op::GetGBR, "GetGBR"},
+        {Op::SetGBR, "SetGBR"},
+        {Op::GetVBR, "GetVBR"},
+        {Op::SetVBR, "SetVBR"},
+        {Op::SetPR, "SetPR"},
+        {Op::GetSR, "GetSR"},
+        {Op::SetSR, "SetSR"},
+        {Op::GetMACH, "GetMACH"},
+        {Op::GetMACL, "GetMACL"},
+        {Op::SetMACH, "SetMACH"},
+        {Op::SetMACL, "SetMACL"},
+        {Op::ClearIntrAllow, "ClearIntrAllow"},
+        {Op::SetIntrAllow, "SetIntrAllow"},
+        {Op::GetDelayTarget, "GetDelayTarget"},
+        {Op::Load, "Load"},
+    };
+    for (const auto &[op, name] : names) {
+        CHECK(std::string(OpName(op)) == name);
+    }
+}
+
+TEST_CASE("IR verifier rejects shift amounts outside 1..31", "[jit][ir]") {
+    for (const uint32_t amount : {0u, 32u}) {
+        Block block;
+        block.guestInstrCount = 1;
+        Builder b(block);
+        b.SetReg(1, b.Shl(b.GetReg(1), amount));
+        b.Exit(0, 1);
+        CHECK(VerifyBlock(block).find("shift amount") != std::string::npos);
+    }
+    Block block;
+    block.guestInstrCount = 1;
+    Builder b(block);
+    const ValueId r = b.GetReg(1);
+    b.SetReg(1, b.Shl(r, 1));
+    b.SetReg(2, b.Shr(r, 31));
+    b.SetReg(3, b.Sar(r, 16));
+    b.Exit(0, 1);
+    CHECK(VerifyBlock(block).empty());
 }
 
 TEST_CASE("IR printer lists every instruction", "[jit][ir]") {

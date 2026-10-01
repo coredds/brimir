@@ -137,6 +137,17 @@ TEST_CASE("JIT context callbacks mirror interpreter memory semantics", "[jit][sh
     REQUIRE(*ctx.PC == kCode + 0x102);
     REQUIRE(rig->State().fetchedOpcodes == 0xAAAABBBBu); // target & 2 -> refill
 
+    // MACH/MACL alias the MAC register halves.
+    *ctx.MACH = 0x01234567;
+    *ctx.MACL = 0x89ABCDEF;
+    REQUIRE(rig->State().MACH == 0x01234567u);
+    REQUIRE(rig->State().MACL == 0x89ABCDEFu);
+
+    // setSR performs LDC Rm,SR: reserved bits masked, interrupt-allow cleared.
+    ctx.setSR(ctx.sh2, 0xFFFFFFFF, false);
+    REQUIRE(rig->State().SR == 0x3F3u);
+    REQUIRE_FALSE(rig->State().intrAllow);
+
     // interpretOne executes exactly one instruction with the interpreter.
     rig->WriteCode(kCode + 0x200, {0x7005}); // add #5,R0
     auto s = rig->BaseState(kCode + 0x200);

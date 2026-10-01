@@ -214,3 +214,90 @@ TEST_CASE("Backend: CheckBoundary stops at the cycle target or a pending interru
         REQUIRE(info.cycles == 12);
     }
 }
+
+TEST_CASE("Backend: logic, shifts and compares", "[jit][backend]") {
+    Fixture f;
+    auto s = f.rig->BaseState(kCode);
+    s.R[1] = 0xF0F0000F;
+    s.R[2] = 0x8000FF01;
+    f.rig->Load(s);
+    const ValueId a = f.b.GetReg(1);
+    const ValueId b = f.b.GetReg(2);
+    f.b.SetReg(3, f.b.And(a, b));
+    f.b.SetReg(4, f.b.Or(a, b));
+    f.b.SetReg(5, f.b.Xor(a, b));
+    f.b.SetReg(6, f.b.Not(a));
+    f.b.SetReg(7, f.b.Shl(b, 4));
+    f.b.SetReg(8, f.b.Shr(b, 4));
+    f.b.SetReg(9, f.b.Sar(b, 4));
+    f.b.SetReg(10, f.b.CmpGtU(b, a)); // 0x8000FF01 > 0xF0F0000F unsigned? no -> 0
+    f.b.SetReg(11, f.b.CmpGtS(a, b)); // -252706801 > -2147418367 -> 1
+    f.b.SetReg(12, f.b.CmpGeU(a, a)); // 1
+    f.b.SetReg(13, f.b.CmpGeS(b, a)); // 0
+    f.b.Exit(kCode + 2, 1);
+    f.Run();
+    const auto st = f.rig->State();
+    CHECK(st.R[3] == 0x80000001u);
+    CHECK(st.R[4] == 0xF0F0FF0Fu);
+    CHECK(st.R[5] == 0x70F0FF0Eu);
+    CHECK(st.R[6] == 0x0F0FFFF0u);
+    CHECK(st.R[7] == 0x000FF010u);
+    CHECK(st.R[8] == 0x08000FF0u);
+    CHECK(st.R[9] == 0xF8000FF0u);
+    CHECK(st.R[10] == 0u);
+    CHECK(st.R[11] == 1u);
+    CHECK(st.R[12] == 1u);
+    CHECK(st.R[13] == 0u);
+}
+
+TEST_CASE("Backend: system registers, MAC and interrupt-allow", "[jit][backend]") {
+    Fixture f;
+    auto s = f.rig->BaseState(kCode);
+    s.R[1] = 0x06001234;
+    s.SR = 0xF1; // mask 15, T = 1
+    s.delaySlotTarget = 0x06003000;
+    f.rig->Load(s);
+    auto &ctx = f.rig->sh2->GetJitContext();
+    const ValueId v = f.b.GetReg(1);
+    f.b.SetGBR(v);
+    f.b.SetVBR(f.b.Add(v, f.b.Const(4)));
+    f.b.SetPR(f.b.Add(v, f.b.Const(8)));
+    f.b.SetMACH(f.b.Const(0x11112222));
+    f.b.SetMACL(f.b.Const(0x33334444));
+    f.b.SetReg(2, f.b.GetGBR());
+    f.b.SetReg(3, f.b.GetVBR());
+    f.b.SetReg(4, f.b.GetMACH());
+    f.b.SetReg(5, f.b.GetMACL());
+    f.b.SetReg(6, f.b.GetSR());
+    f.b.SetReg(7, f.b.GetDelayTarget());
+    f.b.ClearIntrAllow();
+    f.b.Exit(kCode + 2, 1);
+    f.Run();
+    const auto st = f.rig->State();
+    CHECK(st.GBR == 0x06001234u);
+    CHECK(st.VBR == 0x06001238u);
+    CHECK(st.PR == 0x0600123Cu);
+    CHECK(st.MACH == 0x11112222u);
+    CHECK(st.MACL == 0x33334444u);
+    CHECK(st.R[2] == 0x06001234u);
+    CHECK(st.R[3] == 0x06001238u);
+    CHECK(st.R[4] == 0x11112222u);
+    CHECK(st.R[5] == 0x33334444u);
+    CHECK(st.R[6] == 0xF1u);
+    CHECK(st.R[7] == 0x06003000u);
+    CHECK_FALSE(st.intrAllow);
+    CHECK_FALSE(*ctx.intrAllow);
+}
+
+TEST_CASE("Backend: SetSR masks reserved bits and recomputes interrupt flags", "[jit][backend]") {
+    Fixture f;
+    auto s = f.rig->BaseState(kCode);
+    s.R[1] = 0xFFFFFFFF;
+    f.rig->Load(s);
+    f.b.SetSR(f.b.GetReg(1), false);
+    f.b.SetIntrAllow();
+    f.b.Exit(kCode + 2, 1);
+    f.Run();
+    CHECK(f.rig->State().SR == 0x3F3u);
+    CHECK(f.rig->State().intrAllow);
+}

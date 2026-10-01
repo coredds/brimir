@@ -21,7 +21,20 @@ constexpr OpInfo kOpInfo[] = {
     {"GetT", true, 0, false, false},           {"SetT", false, 1, false, false},
     {"Add", true, 2, false, false},            {"Sub", true, 2, false, false},
     {"CmpEq", true, 2, false, false},          {"SExt8", true, 1, false, false},
-    {"SExt16", true, 1, false, false},         {"Load", true, 1, true, false},
+    {"SExt16", true, 1, false, false},         {"And", true, 2, false, false},
+    {"Or", true, 2, false, false},             {"Xor", true, 2, false, false},
+    {"Not", true, 1, false, false},            {"Shl", true, 1, false, false},
+    {"Shr", true, 1, false, false},            {"Sar", true, 1, false, false},
+    {"CmpGtU", true, 2, false, false},         {"CmpGeU", true, 2, false, false},
+    {"CmpGtS", true, 2, false, false},         {"CmpGeS", true, 2, false, false},
+    {"GetGBR", true, 0, false, false},         {"SetGBR", false, 1, false, false},
+    {"GetVBR", true, 0, false, false},         {"SetVBR", false, 1, false, false},
+    {"SetPR", false, 1, false, false},         {"GetSR", true, 0, false, false},
+    {"SetSR", false, 1, false, false},         {"GetMACH", true, 0, false, false},
+    {"GetMACL", true, 0, false, false},        {"SetMACH", false, 1, false, false},
+    {"SetMACL", false, 1, false, false},       {"ClearIntrAllow", false, 0, false, false},
+    {"SetIntrAllow", false, 0, false, false},  {"GetDelayTarget", true, 0, false, false},
+    {"Load", true, 1, true, false},
     {"Store", false, 2, true, false},          {"AddCycles", false, 0, false, false},
     {"AddAccessCycles", false, 1, true, false}, {"WbStall", false, 0, false, false},
     {"SetWb", false, 0, false, false},         {"SyncCycles", false, 0, false, false},
@@ -109,6 +122,130 @@ ValueId Builder::SExt16(ValueId a) {
     Inst &inst = Emit(Op::SExt16);
     inst.a = a;
     return inst.dst = NewValue();
+}
+
+ValueId Builder::Binary(Op op, ValueId a, ValueId b) {
+    Inst &inst = Emit(op);
+    inst.a = a;
+    inst.b = b;
+    return inst.dst = NewValue();
+}
+
+ValueId Builder::Unary(Op op, ValueId a, uint32_t imm) {
+    Inst &inst = Emit(op);
+    inst.a = a;
+    inst.imm = imm;
+    return inst.dst = NewValue();
+}
+
+ValueId Builder::Nullary(Op op) {
+    return Emit(op).dst = NewValue();
+}
+
+void Builder::Sink(Op op, ValueId a) {
+    Emit(op).a = a;
+}
+
+ValueId Builder::And(ValueId a, ValueId b) {
+    return Binary(Op::And, a, b);
+}
+
+ValueId Builder::Or(ValueId a, ValueId b) {
+    return Binary(Op::Or, a, b);
+}
+
+ValueId Builder::Xor(ValueId a, ValueId b) {
+    return Binary(Op::Xor, a, b);
+}
+
+ValueId Builder::Not(ValueId a) {
+    return Unary(Op::Not, a);
+}
+
+ValueId Builder::Shl(ValueId a, uint32_t amount) {
+    return Unary(Op::Shl, a, amount);
+}
+
+ValueId Builder::Shr(ValueId a, uint32_t amount) {
+    return Unary(Op::Shr, a, amount);
+}
+
+ValueId Builder::Sar(ValueId a, uint32_t amount) {
+    return Unary(Op::Sar, a, amount);
+}
+
+ValueId Builder::CmpGtU(ValueId a, ValueId b) {
+    return Binary(Op::CmpGtU, a, b);
+}
+
+ValueId Builder::CmpGeU(ValueId a, ValueId b) {
+    return Binary(Op::CmpGeU, a, b);
+}
+
+ValueId Builder::CmpGtS(ValueId a, ValueId b) {
+    return Binary(Op::CmpGtS, a, b);
+}
+
+ValueId Builder::CmpGeS(ValueId a, ValueId b) {
+    return Binary(Op::CmpGeS, a, b);
+}
+
+ValueId Builder::GetGBR() {
+    return Nullary(Op::GetGBR);
+}
+
+void Builder::SetGBR(ValueId value) {
+    Sink(Op::SetGBR, value);
+}
+
+ValueId Builder::GetVBR() {
+    return Nullary(Op::GetVBR);
+}
+
+void Builder::SetVBR(ValueId value) {
+    Sink(Op::SetVBR, value);
+}
+
+void Builder::SetPR(ValueId value) {
+    Sink(Op::SetPR, value);
+}
+
+ValueId Builder::GetSR() {
+    return Nullary(Op::GetSR);
+}
+
+void Builder::SetSR(ValueId value, bool delaySlot) {
+    Inst &inst = Emit(Op::SetSR);
+    inst.a = value;
+    inst.flag = delaySlot;
+}
+
+ValueId Builder::GetMACH() {
+    return Nullary(Op::GetMACH);
+}
+
+ValueId Builder::GetMACL() {
+    return Nullary(Op::GetMACL);
+}
+
+void Builder::SetMACH(ValueId value) {
+    Sink(Op::SetMACH, value);
+}
+
+void Builder::SetMACL(ValueId value) {
+    Sink(Op::SetMACL, value);
+}
+
+void Builder::ClearIntrAllow() {
+    Emit(Op::ClearIntrAllow);
+}
+
+void Builder::SetIntrAllow() {
+    Emit(Op::SetIntrAllow);
+}
+
+ValueId Builder::GetDelayTarget() {
+    return Nullary(Op::GetDelayTarget);
 }
 
 ValueId Builder::Load(ValueId address, uint8_t size, bool instrFetch) {
@@ -241,6 +378,9 @@ std::string VerifyBlock(const Block &block) {
         }
         if ((inst.op == Op::GetReg || inst.op == Op::SetReg) && inst.imm > 15) {
             return error("register index out of range");
+        }
+        if ((inst.op == Op::Shl || inst.op == Op::Shr || inst.op == Op::Sar) && (inst.imm < 1 || inst.imm > 31)) {
+            return error("shift amount out of range");
         }
         const bool last = i + 1 == block.code.size();
         if (info.isExit && !last) {
