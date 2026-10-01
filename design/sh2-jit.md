@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 1 in progress — foundation implemented (plan `design/plans/2026-09-30-sh2-jit-m1b-foundation.md`); instruction coverage and shadow-verify remain (plan 1C)
+**Status**: Milestone 1 in progress: foundation and instruction-exact execution implemented (plans 1A–1C); instruction coverage and game validation remain (plan 1D)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -197,20 +197,19 @@ Catch2, tag `[jit]`, in `tests/unit/`:
 - **random sequences**: generated blocks of supported instructions including branches and delay slots, with a fixed seed in CI (seed printed on failure)
 - IR verifier and printer unit tests
 
-### 7.2 Shadow-verify mode (debug, real games)
+### 7.2 Whole-system lockstep (CI and real games)
 
-A debug core option. For blocks whose memory accesses all hit RAM pages:
+Because blocks stop at the interpreter's instruction boundaries (section 2), a core running the JIT and a core running the interpreter must stay identical. `brimir::RunLockstep` runs two `CoreWrapper` instances frame by frame and compares, after every frame: both SH-2s (CPU, pipeline, on-chip timers, DMAC, pending interrupt), the slave SH-2 enable flag, low and high work RAM, and the output frame. Threaded VDP rendering is turned off for lockstep runs, and the RTC runs in virtual mode (emulated time) instead of reading the host clock, which otherwise makes two interpreter cores diverge in the BIOS.
 
-1. snapshot SH2 state
-2. run the compiled block while logging RAM writes
-3. roll back state and memory, run the same instructions on the interpreter
-4. compare state, writes and cycles, and log the first mismatch with the block's IR
+- A control run (two interpreter cores) proves the emulator is deterministic, so a JIT divergence points at the JIT.
+- CI: null IPL program (300 frames) and, when a BIOS is present in `tests/fixtures/`, the BIOS (600 frames).
+- Real games: `brimir_bench --lockstep N` (section 7.3).
 
-Blocks that touch MMIO are skipped, because re-executing side effects would be wrong.
+This replaces the shadow-verify mode planned earlier: lockstep checks the whole system, including bus side effects that shadow-verify had to skip.
 
 ### 7.3 Game-level regression (local)
 
-`tools/brimir_bench` runs N frames from save states with the interpreter and, with `--sh2-jit`, with the JIT, and reports crashes and hangs (frame-hash comparison is still to be added). Some drift is expected because interrupts can land up to a block later. Requires the user's own BIOS and discs, so it does not run in CI.
+`brimir_bench --bios <bios> --game <game> --system-dir <dir> --lockstep N` runs N frames of real content on a JIT core and an interpreter core and reports the first divergence (exit code 3). It requires the user's own BIOS and discs, so it does not run in CI. Game validation for milestone 1 is plan 1D.
 
 ## 8. Measurement
 
@@ -243,8 +242,7 @@ Blocks that touch MMIO are skipped, because re-executing side effects would be w
 **Done when**:
 
 - all strict differential tests pass with exact state and cycle totals
-- with the JIT on, the BIOS boots, and a set of games runs 10 minutes each from save states without crashes or hangs
-- shadow-verify reports zero mismatches on those games
+- with the JIT on, the BIOS and a set of games run 10 minutes each (36000 frames) in lockstep with the interpreter without divergence
 - the baseline report is committed
 
 ### Milestone 2 — x64 backend (separate spec)

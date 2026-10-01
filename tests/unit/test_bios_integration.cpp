@@ -8,6 +8,7 @@
 #include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <brimir/jit/executor.hpp>
+#include <brimir/lockstep.hpp>
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -175,4 +176,48 @@ TEST_CASE("BIOS integration - real BIOS boots and renders with the SH-2 JIT", "[
     REQUIRE(core.LoadIPLFromFile(biosPath.string().c_str()));
     REQUIRE(RendersNonBlackFrame(core));
     REQUIRE(core.GetSH2JitExecutor(true)->GetStats().blocksRun > 0);
+}
+
+// Control: the BIOS reads the RTC, which made two interpreter cores diverge (host clock) until
+// PrepareLockstepCore switched to the virtual RTC.
+TEST_CASE("BIOS integration - lockstep control: two interpreter cores stay identical", "[bios][integration][lockstep]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
+    }
+    const auto &biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
+    CoreWrapper a;
+    CoreWrapper b;
+    for (CoreWrapper *core : {&a, &b}) {
+        REQUIRE(core->Initialize());
+        brimir::PrepareLockstepCore(*core);
+        REQUIRE(core->LoadIPLFromFile(biosPath.string().c_str()));
+    }
+    const auto result = brimir::RunLockstep(a, b, 600);
+    INFO("frame " << result.framesRun << ": " << result.divergence);
+    REQUIRE(result.divergence.empty());
+}
+
+TEST_CASE("BIOS integration - JIT core and interpreter core stay identical", "[bios][integration][jit][lockstep]") {
+    const auto biosFiles = AvailableBIOS();
+    if (biosFiles.empty()) {
+        SKIP("No BIOS files found in " << FixturesDir().string());
+    }
+    const auto &biosPath = biosFiles.front();
+    INFO("BIOS: " << biosPath.filename().string());
+
+    CoreWrapper jit;
+    CoreWrapper ref;
+    jit.SetSH2JitEnabled(true);
+    for (CoreWrapper *core : {&jit, &ref}) {
+        REQUIRE(core->Initialize());
+        brimir::PrepareLockstepCore(*core);
+        REQUIRE(core->LoadIPLFromFile(biosPath.string().c_str()));
+    }
+    const auto result = brimir::RunLockstep(jit, ref, 600);
+    INFO("frame " << result.framesRun << ": " << result.divergence);
+    REQUIRE(result.divergence.empty());
+    REQUIRE(jit.GetSH2JitExecutor(true)->GetStats().blocksRun > 0);
 }

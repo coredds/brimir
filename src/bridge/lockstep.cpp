@@ -3,9 +3,13 @@
 // Licensed under GPL-3.0
 
 #include "brimir/lockstep.hpp"
+#include "brimir/core_wrapper.hpp"
+
+#include <ymir/sys/saturn.hpp>
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace brimir {
 
@@ -120,6 +124,99 @@ std::string DiffSH2State(const ymir::savestate::SH2SaveState &a, const ymir::sav
     }
 #undef BRIMIR_DIFF
     return {};
+}
+
+void PrepareLockstepCore(CoreWrapper &core) {
+    core.SetThreadedVDP1(false);
+    core.SetThreadedVDP2(false);
+    // The default RTC mode reads the host clock, so two cores run one after the other can see
+    // different seconds (the BIOS diverges within a few seconds of emulated time). The virtual RTC
+    // advances with emulated time only.
+    if (ymir::Saturn *saturn = core.GetSaturn(); saturn != nullptr) {
+        saturn->configuration.rtc.mode = ymir::core::config::rtc::Mode::Virtual;
+    }
+}
+
+std::string CompareCores(CoreWrapper &a, CoreWrapper &b) {
+    ymir::Saturn *sa = a.GetSaturn();
+    ymir::Saturn *sb = b.GetSaturn();
+    if (sa == nullptr || sb == nullptr) {
+        return "core not initialized";
+    }
+
+    ymir::savestate::SH2SaveState x{};
+    ymir::savestate::SH2SaveState y{};
+    sa->masterSH2.SaveState(x);
+    sb->masterSH2.SaveState(y);
+    if (std::string diff = DiffSH2State(x, y, SH2DiffScope::CpuAndPeripherals, "master SH-2 "); !diff.empty()) {
+        return diff;
+    }
+    sa->slaveSH2.SaveState(x);
+    sb->slaveSH2.SaveState(y);
+    if (std::string diff = DiffSH2State(x, y, SH2DiffScope::CpuAndPeripherals, "slave SH-2 "); !diff.empty()) {
+        return diff;
+    }
+    if (sa->slaveSH2Enabled != sb->slaveSH2Enabled) {
+        return Describe("", "slaveSH2Enabled", sa->slaveSH2Enabled, sb->slaveSH2Enabled);
+    }
+
+    const auto compareRam = [](const char *name, const auto &ra, const auto &rb) -> std::string {
+        if (std::memcmp(ra.data(), rb.data(), ra.size()) == 0) {
+            return {};
+        }
+        for (size_t i = 0; i < ra.size(); ++i) {
+            if (ra[i] != rb[i]) {
+                char field[48];
+                std::snprintf(field, sizeof(field), "%s[0x%05zX]", name, i);
+                return Describe("", field, ra[i], rb[i]);
+            }
+        }
+        return {};
+    };
+    if (std::string diff = compareRam("WRAMLow", sa->mem.WRAMLow, sb->mem.WRAMLow); !diff.empty()) {
+        return diff;
+    }
+    if (std::string diff = compareRam("WRAMHigh", sa->mem.WRAMHigh, sb->mem.WRAMHigh); !diff.empty()) {
+        return diff;
+    }
+
+    const unsigned w = a.GetFramebufferWidth();
+    const unsigned h = a.GetFramebufferHeight();
+    const unsigned pitch = a.GetFramebufferPitch();
+    if (w != b.GetFramebufferWidth() || h != b.GetFramebufferHeight() || pitch != b.GetFramebufferPitch()) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "frame size differs: a=%ux%u (pitch %u) b=%ux%u (pitch %u)", w, h, pitch,
+                      b.GetFramebufferWidth(), b.GetFramebufferHeight(), b.GetFramebufferPitch());
+        return buf;
+    }
+    const auto *fa = static_cast<const uint8_t *>(a.GetFramebuffer());
+    const auto *fb = static_cast<const uint8_t *>(b.GetFramebuffer());
+    if (fa != nullptr && fb != nullptr) {
+        for (unsigned row = 0; row < h; ++row) {
+            const uint8_t *ra = fa + static_cast<size_t>(row) * pitch;
+            const uint8_t *rb = fb + static_cast<size_t>(row) * pitch;
+            if (std::memcmp(ra, rb, static_cast<size_t>(w) * 4) != 0) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "frame row %u differs", row);
+                return buf;
+            }
+        }
+    }
+    return {};
+}
+
+LockstepResult RunLockstep(CoreWrapper &a, CoreWrapper &b, int frames) {
+    LockstepResult result;
+    for (int frame = 0; frame < frames; ++frame) {
+        a.RunFrame();
+        b.RunFrame();
+        ++result.framesRun;
+        result.divergence = CompareCores(a, b);
+        if (!result.divergence.empty()) {
+            break;
+        }
+    }
+    return result;
 }
 
 } // namespace brimir

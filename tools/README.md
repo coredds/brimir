@@ -81,6 +81,34 @@ SH-2 time is measured inside `SH2::Advance` and includes on-chip peripherals
 (DMA, timers) and bus accesses the CPUs make. VDP rendering runs on worker
 threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
 
+### Lockstep validation
+
+```powershell
+build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000
+```
+
+`--lockstep N` loads the same content (and optional `--state`) into two cores,
+one running both SH-2s through the JIT and one through the interpreter, runs
+them side by side for N frames, and compares them after every frame (see
+`design/sh2-jit.md` section 7.2). Compared: both SH-2s including their on-chip
+timers and DMA controller, low and high work RAM, and the output frame.
+
+In this mode threaded VDP rendering is turned off, and the RTC runs on emulated
+time (virtual mode) instead of the host clock, so both cores see the same date
+and time. Progress is printed every 600 frames:
+
+```
+lockstep: 600/36000 frames identical
+...
+lockstep: OK, 36000 frames identical (jit master blocksRun ..., interpreted ...)
+```
+
+On the first difference it prints the frame number (0-based) and the first
+differing field, for example
+`lockstep divergence at frame 89: WRAMHigh[0x100F5] differs: a=0x0 b=0x1`
+(`a` is the JIT core), and exits with code 3. `--lockstep` cannot be combined
+with `--dump-at`.
+
 Exit codes: 0 success (including `--help`), 1 usage error (usage is printed to
 stderr), 2 load or setup failure (BIOS, game, state, missing `--system-dir`,
-temp directory errors).
+temp directory errors), 3 lockstep divergence.
