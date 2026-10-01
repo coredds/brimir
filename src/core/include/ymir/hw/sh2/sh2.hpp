@@ -49,6 +49,12 @@ class SH2 {
 public:
     SH2(sys::SH2Bus &bus, bool master);
 
+    // Brimir: m_jitContext holds pointers into this object, so a copy or move would alias the source.
+    SH2(const SH2 &) = delete;
+    SH2(SH2 &&) = delete;
+    SH2 &operator=(const SH2 &) = delete;
+    SH2 &operator=(SH2 &&) = delete;
+
     void Reset(bool hard, bool watchdogInitiated = false);
 
     void MapCallbacks(CBAcknowledgeExternalInterrupt callback) {

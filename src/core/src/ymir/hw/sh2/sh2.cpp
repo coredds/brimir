@@ -8,7 +8,7 @@
 
 #include <algorithm>
 #include <cassert>
-#include <chrono>
+#include <chrono> // Brimir: host-time profiling
 #include <ostream>
 #include <string>
 #include <string_view>

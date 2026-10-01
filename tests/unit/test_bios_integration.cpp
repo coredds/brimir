@@ -63,9 +63,11 @@ bool RendersNonBlackFrame(CoreWrapper &core) {
         const uint32_t w = core.GetFramebufferWidth();
         const uint32_t h = core.GetFramebufferHeight();
         const uint32_t stride = core.GetFramebufferPitch() / sizeof(uint32_t);
-        if (fb == nullptr || w == 0 || h == 0 || stride < w) {
-            continue;
-        }
+        CAPTURE(i, w, h, stride);
+        REQUIRE(fb != nullptr);
+        REQUIRE(w > 0);
+        REQUIRE(h > 0);
+        REQUIRE(stride >= w);
         for (uint32_t y = 0; y < h; ++y) {
             for (uint32_t x = 0; x < w; ++x) {
                 if ((fb[y * stride + x] & 0x00FFFFFF) != 0) {
