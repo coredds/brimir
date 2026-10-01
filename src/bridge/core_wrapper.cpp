@@ -19,6 +19,9 @@
 #include <ymir/hw/smpc/smpc_defs.hpp>
 #include <ymir/util/bit_ops.hpp>
 
+#include <ymir/sys/backup_ram.hpp>
+
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -132,6 +135,20 @@ bool SavePersistentSMPCDataToFile(const ymir::smpc::PersistentSMPCData &data,
     return true;
 }
 
+// Gives the Saturn a freshly formatted, in-memory 32 KiB internal backup RAM.
+//
+// The image must always exist: BackupMemory::Size() and ReadAll() dereference it unconditionally,
+// and the CoreWrapper SRAM paths call them. It is in-memory on purpose: the persistent save is the
+// libretro .srm buffer (m_sramData), which is copied into this image on the first frame and read
+// back from it, so a file-backed image would add a failure mode (temp directory, mmap) without
+// persisting anything.
+void ResetInternalBackupRAM(ymir::Saturn &saturn) {
+    ymir::bup::BackupMemory bup;
+    bup.CreateInMemory(ymir::bup::BackupMemorySize::_256Kbit);
+    [[maybe_unused]] const bool ok = saturn.mem.SetInternalBackupRAM(std::move(bup));
+    assert(ok && "a 256 Kbit image always matches the internal backup RAM size");
+}
+
 } // namespace
 
 namespace brimir {
@@ -161,10 +178,10 @@ bool CoreWrapper::Initialize() {
         // Apply an SH-2 JIT state chosen before initialization
         SetSH2JitEnabled(m_sh2JitEnabled);
         
-        // NOTE: Ymir requires a file-backed memory-mapped backup RAM
-        // We'll set the path later when the game loads (need game name for per-game saves)
-        // For now, just mark as uninitialized
-        
+        // Internal backup RAM exists from the start, like on a real console (BIOS-only boots see a
+        // formatted backup RAM). LoadGame replaces it with a fresh image for each game.
+        ResetInternalBackupRAM(*m_saturn);
+
         // Configure Ymir with optimized settings for libretro
         // Threaded VDP1/VDP2 provides better frame pacing and async rendering
         m_saturn->configuration.video.threadedVDP1 = true;
@@ -312,36 +329,13 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         }
         m_initialDiscSet = false;
 
-        // Set up a scratch backup RAM path for Ymir's memory-mapped internal RAM.
-        // This is NOT the persistent save; it is only used as a formatted scratch
-        // image while the game is running. The user's actual saves live in the
-        // .srm file in the save directory, which the core loads/saves explicitly.
-        // The name includes a hash of the absolute path so that different games
-        // sharing a file name (e.g. "Disc 1.cue" in separate folders) never share
-        // a scratch image.
-        std::filesystem::path gameFileName = gamePath.stem();
-        {
-            std::error_code absError;
-            const auto absGamePath = std::filesystem::absolute(gamePath, absError);
-            const size_t pathHash = std::hash<std::string>{}((absError ? gamePath : absGamePath).generic_string());
-            char hashSuffix[24];
-            std::snprintf(hashSuffix, sizeof(hashSuffix), "-%016llx.bup", static_cast<unsigned long long>(pathHash));
-            m_sramTempPath = std::filesystem::temp_directory_path() / "Brimir" /
-                             (gameFileName.string() + hashSuffix);
-        }
-        
-        // Ensure parent directory exists
-        std::filesystem::create_directories(m_sramTempPath.parent_path());
-        
-        // Load backup RAM from persistent file (creates if doesn't exist)
-        // Use copyOnWrite=true to allow modifications without affecting the file on disk
-        std::error_code error;
-        m_saturn->LoadInternalBackupMemoryImage(m_sramTempPath, true, error);
-        if (error) {
-            m_lastError = "Failed to load backup RAM from " + m_sramTempPath.string() + ": " + error.message();
-            // Don't fail game load - just continue with fresh backup RAM
-        }
-        
+        // Internal backup RAM: a fresh formatted in-memory image per game, so a previous
+        // game's backup RAM never carries over. This is NOT the persistent save; the
+        // user's saves live in the .srm file in the save directory, which is loaded into
+        // m_sramData below and copied into this image on the first frame.
+        ResetInternalBackupRAM(*m_saturn);
+        const std::filesystem::path gameFileName = gamePath.stem();
+
         // Load SMPC persistent data (RTC clock settings!)
         // This is system-wide (not per-game) as the RTC is a console setting, not a game setting.
         // The filename is qualified by the loaded IPL ROM region to keep per-console settings separate.
@@ -792,7 +786,7 @@ void* CoreWrapper::GetSRAMData() {
 
     // Initialize buffer on first call (for RetroArch to load .srm into).
     // This does not count as frontend-provided data; LoadGame will reload
-    // from the .bup fallback if no .srm was supplied.
+    // from Ymir's freshly formatted backup RAM if no .srm was supplied.
     if (m_sramData.empty()) {
         m_sramData.resize(GetSRAMSize());
         // DON'T read from Ymir yet - let RetroArch load .srm first!
@@ -802,7 +796,7 @@ void* CoreWrapper::GetSRAMData() {
     // Refresh SRAM from Ymir periodically so RetroArch can save the latest
     // state. Do NOT refresh before the first RunFrame: m_sramData is still
     // the frontend's .srm buffer at that point, and RefreshSRAMFromEmulator()
-    // would overwrite it with the empty/formatted .bup contents.
+    // would overwrite it with the empty/formatted backup RAM contents.
     if (m_gameLoaded && m_sramInitialized && !m_sramFirstLoad) {
         constexpr uint32_t kSRAMSyncInterval = 300;
 
@@ -821,12 +815,7 @@ size_t CoreWrapper::GetSRAMSize() const {
         return 0;
     }
 
-    // Saturn internal backup RAM is 32 KiB. Until LoadGame() has finished,
-    // Ymir's backup RAM may not be safely queried, so return the fixed size.
-    if (!m_gameLoaded) {
-        return kSaturnInternalBackupRAMSize;
-    }
-
+    // The internal backup RAM image always exists (see ResetInternalBackupRAM).
     return m_saturn->mem.GetInternalBackupRAM().Size();
 }
 
@@ -888,7 +877,7 @@ void CoreWrapper::RefreshSRAMFromEmulator() {
         return;
     }
     
-    // Force read from Ymir's .bup file into our buffer
+    // Force read from Ymir's internal backup RAM into our buffer
     // This overwrites whatever RetroArch loaded from .srm
     m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
     m_sramCacheDirty = false;
@@ -957,7 +946,7 @@ void CoreWrapper::RunFrame() {
     // On the first frame after a game is loaded, copy the canonical SRAM buffer
     // down into Ymir. By this point the frontend has had a chance to load the
     // .srm into the pointer returned by GetSRAMData(); copying earlier (in
-    // GetSRAMData itself) used the unmodified .bup contents and erased any .srm.
+    // GetSRAMData itself) used the freshly formatted backup RAM contents and erased any .srm.
     if (m_gameLoaded && m_sramInitialized && m_sramFirstLoad) {
         WriteSRAMToYmir();
         m_sramFirstLoad = false;

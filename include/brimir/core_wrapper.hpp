@@ -120,7 +120,7 @@ public:
     size_t GetSystemRAMHighSize() const;
 
     /// @brief Force refresh SRAM from Ymir's backup RAM
-    /// This reads from Ymir's .bup file into our buffer
+    /// This reads Ymir's internal backup RAM into our buffer
     void RefreshSRAMFromEmulator();
 
     /// @brief Run one frame of emulation
@@ -365,7 +365,6 @@ private:
     mutable std::vector<uint8_t> m_sramData;
     bool m_sramInitialized = false;
     bool m_sramDataFromFrontend = false;   // True when SetSRAMData or our own .srm load supplied data
-    std::filesystem::path m_sramTempPath;  // Scratch file for Ymir's memory-mapped backup RAM
     std::filesystem::path m_srmPath;       // Canonical .srm path (also managed by the frontend)
     std::filesystem::path m_smpcBaseDir;   // Directory for system-wide RTC persistent data files
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh

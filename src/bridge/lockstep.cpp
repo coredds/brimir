@@ -417,15 +417,7 @@ void PrepareLockstepCore(CoreWrapper &core) {
         // Keep the SCSP on the emulation thread so audio timing cannot depend on host thread
         // scheduling (the option is currently unimplemented upstream; pinned for when it lands).
         saturn->configuration.audio.threadedSCSP = false;
-        // Without a loaded game CoreWrapper never creates the internal backup RAM image, so the
-        // area reads as 0xFF and writes are dropped. Give both cores a formatted in-memory image
-        // so BIOS-only runs exercise (and CompareCores checks) backup RAM like a real console.
-        // LoadGame later replaces it with the per-game image.
-        if (!HasBackupImage(saturn->mem.GetInternalBackupRAM())) {
-            ymir::bup::BackupMemory bup;
-            bup.CreateInMemory(ymir::bup::BackupMemorySize::_256Kbit);
-            saturn->mem.SetInternalBackupRAM(std::move(bup));
-        }
+        // Internal backup RAM needs no setup: CoreWrapper always provides a formatted image.
     }
 }
 

@@ -104,10 +104,6 @@ them side by side for N frames, and compares them after every frame (see
   spillover cycle counters);
 - the output frame.
 
-Without `--game` no backup RAM image is loaded, so lockstep mode gives both
-cores a formatted in-memory one; the BIOS then reads and writes backup RAM as
-on a real console.
-
 In this mode threaded VDP rendering is turned off, and the RTC runs on emulated
 time (virtual mode) instead of the host clock, so both cores see the same date
 and time. Unless `--state` is given (a save state carries its own RTC time),

@@ -23,9 +23,7 @@ class CoreWrapper;
 // Prepares a core for lockstep runs (call after Initialize, and again after LoadGame, which turns
 // threaded VDP rendering back on): threaded VDP rendering is turned off
 // so frames are produced on the emulation thread, the RTC is switched from the host clock to
-// the virtual (emulated-time) clock so both cores read the same date and time, and, if no game
-// has loaded a backup RAM image yet, a formatted in-memory 32 KiB internal backup RAM is created
-// (otherwise the area reads 0xFF and drops writes, and BIOS-only runs would not exercise it).
+// the virtual (emulated-time) clock so both cores read the same date and time.
 void PrepareLockstepCore(CoreWrapper &core);
 
 // Starts two lockstep cores from identical emulated state. Call once, after both cores are fully set
