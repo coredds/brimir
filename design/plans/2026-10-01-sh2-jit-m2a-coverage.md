@@ -180,6 +180,7 @@ All are slot-capable, all clear interrupt-allow (add them to `ClearsIntrAllow`),
 
 - [ ] **Step 1: Fuzz.** The fuzz generator draws from `CompiledOpcodes()`, so it picks up the new specs automatically. Make the needed adjustments:
   - LDC.L GBR/VBR/SR and LDS.L PR change state that the fuzz relies on (GBR invariant, PR absolute mode). Restrict them the same way the register forms are restricted today (read the existing rules in the generator), and keep those rules documented in comments.
+  - **MAC.W/MAC.L in fuzz (deferred from Task 3):** the fuzz pool currently filters out `Addr::MacPair` specs. Include them using a single setup instruction `mov Rbase,Rd` (Rbase in R8–R11) followed by the n == m form `mac.x @Rd+,@Rd+`, following the existing setup-pair rules; keep the filter's comment accurate.
   - Re-measure coverage and set the thresholds at about 65% of the measured values. Expected: passes, runtime still under 5 s in Release.
 - [ ] **Step 2: Game lockstep.** Use the Release + LTO build `build-bench` (`cmake --build build-bench --target brimir_bench`), the BIOS and title list from `design/plans/2026-10-01-sh2-jit-m1d-coverage-validation.md` Task 8, and a scratch system dir as there. Run lockstep for 36,000 frames on:
   - **Sega Rally Championship** and **Burning Rangers**, which interpret the most today;
