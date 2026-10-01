@@ -266,7 +266,7 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 
 ### Milestone 2 - full coverage and x64 backend
 
-Design: [sh2-jit-m2.md](sh2-jit-m2.md). Remaining instructions (multiply, MAC, divide step, TAS, memory forms of LDC/LDS/STC/STS), then native x64 code generation from the IR with asmjit, staying bit-exact. Target: SH-2 time at least 2x lower than the interpreter, after which the JIT becomes the default on x86-64.
+Design: [sh2-jit-m2.md](sh2-jit-m2.md). Remaining instructions (multiply, MAC, divide step, TAS, memory forms of LDC/LDS/STC/STS; done in milestone 2A), then native x64 code generation from the IR with asmjit, staying bit-exact. Target: SH-2 time at least 2x lower than the interpreter, after which the JIT becomes the default on x86-64.
 
 ### Milestone 3 — ARM64 backend (separate spec)
 

@@ -189,8 +189,8 @@ bool NeedsSetup(jitspec::Addr a) {
            a == Addr::MacPair;
 }
 
-// One random non-branch instruction from the compiled-opcode table, plus its setup instruction if
-// it needs one (setup first). Jitspec::Encode supplies the random fields; register fields are then
+// One random non-branch instruction from the compiled-opcode table, plus its setup instructions if
+// it needs any (setup first, forming one group). Jitspec::Encode supplies the random fields; register fields are then
 // constrained to the roles above (its register fixups target single-instruction tests and are
 // discarded here).
 std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) {
@@ -240,8 +240,8 @@ std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) 
             // roles constrain only load a value stored right before them through @-Rm (Rm ends up
             // back at the address register's value):
             //   ldc.l @Rm+,GBR: mov.l Raddr,@-Rm  (GBR = one of R8-R11, like LDC_GBR_R)
-            //   ldc.l @Rm+,SR:  stc.l SR,@-Rm     (SR unchanged: keeps the I-level and S bit)
-            //   ldc.l @Rm+,VBR: stc.l VBR,@-Rm    (VBR unchanged)
+            //   ldc.l @Rm+,SR:  stc.l SR,@-Rm     (SR unchanged; LDC Rm,SR still randomizes it)
+            //   ldc.l @Rm+,VBR: stc.l VBR,@-Rm    (VBR unchanged; LDC Rm,VBR still randomizes it)
             //   lds.l @Rm+,PR:  sts.l PR,@-Rm     (PR stays a return target)
             const uint32_t d = setupBase();
             if (name == "LDC_GBR_M") {
@@ -621,7 +621,7 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         const auto isLdsPr = [](const jitspec::OpSpec *s) { return std::string_view(s->name) == "LDS_PR_R"; };
 
         // Pass 1: instructions, with branch displacements patched in pass 2 once the valid targets
-        // (every instruction except the second of a setup pair) are known.
+        // (the first word of every instruction group) are known.
         std::vector<uint16_t> program;
         std::vector<Br> branchKind;
         std::vector<bool> pairSecond;
