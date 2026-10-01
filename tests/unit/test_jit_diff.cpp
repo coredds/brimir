@@ -7,6 +7,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "jit_opcode_specs.hpp"
+#include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/executor.hpp>
@@ -73,7 +74,7 @@ std::string Hex(const std::vector<uint16_t> &words) {
 struct Pair {
     std::unique_ptr<Rig> ref = std::make_unique<Rig>();
     std::unique_ptr<Rig> jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     bool lastStepMatched = true; // whether the most recent Step() found identical cycles and state
 
     void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
@@ -546,7 +547,7 @@ TEST_CASE("A stale fetch buffer at PC & 2 runs on the interpreter", "[jit][diff]
 TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[jit][diff]") {
     auto ref = std::make_unique<Rig>();
     auto jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     // loop: add #1,R4 ; add #1,R4 ; mov.b @R1,R2 (FRC byte) ; add R2,R3 ; bra loop ; nop
     // The FRC read is mid-block, after two cycle-consuming instructions, so it only sees the
     // interpreter's count if the block syncs the cycle counter before the access.

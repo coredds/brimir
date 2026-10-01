@@ -7,6 +7,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "jit_opcode_specs.hpp"
+#include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/executor.hpp>
@@ -51,7 +52,7 @@ std::string Hex(const std::vector<uint16_t> &words) {
 struct Pair {
     std::unique_ptr<Rig> ref = std::make_unique<Rig>();
     std::unique_ptr<Rig> jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     bool lastStepMatched = true; // whether the most recent Step() found identical cycles and state
 
     void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {

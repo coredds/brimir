@@ -2,6 +2,19 @@
 
 namespace brimir::jit {
 
+namespace {
+
+BackendKind EffectiveBackend(BackendKind kind) {
+    return IsBackendAvailable(kind) ? kind : BackendKind::Ir;
+}
+
+} // namespace
+
+Executor::Executor(BackendKind kind)
+    : m_kind(EffectiveBackend(kind))
+    , m_native(MakeNativeBackend(m_kind))
+    , m_cache(m_native.get()) {}
+
 uint64 Executor::Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 target) {
     while (executed < target) {
         // On-chip timers read the running count, exactly as in the interpreter loop.
@@ -14,7 +27,8 @@ uint64 Executor::Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 targ
 
 void Executor::Flush() {
     if (m_inBlock) {
-        // Freeing the running block here would be a use-after-free; Step flushes after RunBlock.
+        // Freeing the running block (or its native code) here would be a use-after-free; Step
+        // flushes after the block returns.
         m_flushPending = true;
         return;
     }
@@ -42,7 +56,9 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx, uint64 target) {
         return interpret();
     }
 
-    const Block &block = m_cache.Get(ctx, pc);
+    const CachedBlock &entry = m_cache.Get(ctx, pc);
+    m_stats.compileFallbacks = m_cache.CompileFallbacks();
+    const Block &block = entry.block;
     if (block.guestInstrCount == 0) {
         return interpret();
     }
@@ -65,6 +81,10 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx, uint64 target) {
     m_flushPending = false;
     m_inBlock = true;
     const BlockScope scope{*this};
+    if (entry.code.entry != nullptr) {
+        ++m_stats.nativeBlocksRun;
+        return m_native->Run(entry.code, ctx, target, &m_flushPending);
+    }
     return RunBlock(block, ctx, target, &m_flushPending);
 }
 

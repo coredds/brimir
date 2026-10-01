@@ -2,6 +2,7 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/executor.hpp>
@@ -14,7 +15,24 @@ using sh2test::Rig;
 namespace {
 
 constexpr uint32_t kCode = 0x06001000;
-constexpr uint32_t kData = 0x06040000;
+// On the rig's MMIO page: every access goes through the memory callback, even once a native
+// backend inlines RAM accesses, so the flushing callbacks below always run.
+constexpr uint32_t kData = 0x22040000;
+
+// The rig's MMIO page is 64 KiB, mirrored; data is big-endian.
+void WriteMmio32(Rig &rig, uint32_t address, uint32_t value) {
+    const uint32_t off = address & 0xFFFC;
+    rig.mmio.data[off + 0] = static_cast<uint8_t>(value >> 24);
+    rig.mmio.data[off + 1] = static_cast<uint8_t>(value >> 16);
+    rig.mmio.data[off + 2] = static_cast<uint8_t>(value >> 8);
+    rig.mmio.data[off + 3] = static_cast<uint8_t>(value);
+}
+
+uint32_t ReadMmio32(const Rig &rig, uint32_t address) {
+    const uint32_t off = address & 0xFFFC;
+    return (static_cast<uint32_t>(rig.mmio.data[off + 0]) << 24) | (static_cast<uint32_t>(rig.mmio.data[off + 1]) << 16) |
+           (static_cast<uint32_t>(rig.mmio.data[off + 2]) << 8) | rig.mmio.data[off + 3];
+}
 
 constexpr uint16_t kMovL_R1_R2 = 0x6212; // mov.l @R1,R2
 constexpr uint16_t kAdd1_R3 = 0x7301;    // add #1,R3
@@ -42,9 +60,9 @@ void FlushingWrite(void *sh2, uint32 address, uint32 size, uint32 value) {
 
 TEST_CASE("Executor: flush during a block is deferred and aborts the block", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     rig->WriteCode(kCode, {kMovL_R1_R2, kAdd1_R3, kAdd1_R3, kSleep});
-    rig->Write32(kData, 0x12345678);
+    WriteMmio32(*rig, kData, 0x12345678);
     auto state = rig->BaseState(kCode);
     state.R[1] = kData;
     state.R[2] = 0;
@@ -77,7 +95,7 @@ TEST_CASE("Executor: flush during a block is deferred and aborts the block", "[j
 
 TEST_CASE("Executor: flush outside a block clears the cache immediately", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
     rig->Load(rig->BaseState(kCode));
 
@@ -89,7 +107,7 @@ TEST_CASE("Executor: flush outside a block clears the cache immediately", "[jit]
 
 TEST_CASE("Executor: flush during a store aborts the block after the store", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     rig->WriteCode(kCode, {kMovL_R2_atR1, kAdd1_R3, kAdd1_R3, kSleep});
     auto state = rig->BaseState(kCode);
     state.R[1] = kData;
@@ -106,7 +124,7 @@ TEST_CASE("Executor: flush during a store aborts the block after the store", "[j
     g_exec = nullptr;
 
     CHECK(info.aborted);
-    CHECK(rig->Read32(kData) == 0xA5A5A5A5u); // the store itself completed
+    CHECK(ReadMmio32(*rig, kData) == 0xA5A5A5A5u); // the store itself completed
     CHECK(rig->State().R[3] == 0u);           // nothing after it ran
     CHECK(rig->State().PC == kCode);
     CHECK(exec.Cache().Size() == 0);
@@ -116,7 +134,7 @@ TEST_CASE("Executor: flush during a store aborts the block after the store", "[j
     const auto next = exec.Step(ctx);
     CHECK_FALSE(next.aborted);
     CHECK(next.retired == 3);
-    CHECK(rig->Read32(kData) == 0xA5A5A5A5u);
+    CHECK(ReadMmio32(*rig, kData) == 0xA5A5A5A5u);
     CHECK(rig->State().R[3] == 2u);
     CHECK(rig->State().PC == kCode + 6);
     CHECK(exec.Cache().Size() == 1);

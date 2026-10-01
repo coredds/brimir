@@ -50,6 +50,8 @@ add_executable(brimir_tests
     unit/test_sh2_state_diff.cpp
     unit/test_jit_integration.cpp
     unit/test_jit_lockstep.cpp
+    unit/jit_test_backend.cpp
+    unit/test_jit_x64.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
@@ -72,6 +74,16 @@ add_test(NAME brimir_tests
     COMMAND brimir_tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# With the x64 backend built, the default entry runs the JIT tests on x64; this one keeps the
+# IR backend (RunBlock) covered too.
+if(BRIMIR_JIT_X64_EFFECTIVE)
+    add_test(NAME brimir_tests_jit_ir
+        COMMAND brimir_tests "[jit]"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+    set_tests_properties(brimir_tests_jit_ir PROPERTIES ENVIRONMENT "BRIMIR_JIT_BACKEND=ir")
+endif()
 
 # Copy test fixtures if they exist
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

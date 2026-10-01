@@ -39,6 +39,7 @@ enum class Button : uint16_t;
 
 namespace brimir::jit {
 class Executor;
+enum class BackendKind : uint8_t;
 } // namespace brimir::jit
 
 namespace brimir {
@@ -237,6 +238,12 @@ public:
     void SetSH2JitEnabled(bool enable);
     bool IsSH2JitEnabled() const { return m_sh2JitEnabled; }
 
+    /// @brief Select the JIT code backend (default: jit::DefaultBackend()). An unavailable kind
+    /// selects the IR backend. Changing it drops both executors (and their compiled blocks); if the
+    /// JIT is enabled they are recreated with the new backend. Remembered across Initialize().
+    void SetSH2JitBackend(jit::BackendKind kind);
+    jit::BackendKind GetSH2JitBackend() const { return m_sh2JitBackend; }
+
     /// @brief The JIT executor of the master or slave SH-2, or nullptr if the JIT was never enabled.
     const jit::Executor* GetSH2JitExecutor(bool master) const {
         return master ? m_jitMaster.get() : m_jitSlave.get();
@@ -376,6 +383,7 @@ private:
 
     // SH-2 JIT executors (one per CPU), created on first enable
     bool m_sh2JitEnabled = false;
+    jit::BackendKind m_sh2JitBackend; // set to jit::DefaultBackend() in the constructor
     std::unique_ptr<jit::Executor> m_jitMaster;
     std::unique_ptr<jit::Executor> m_jitSlave;
     
