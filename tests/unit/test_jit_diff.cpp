@@ -67,6 +67,7 @@ struct Pair {
     std::unique_ptr<Rig> ref = std::make_unique<Rig>();
     std::unique_ptr<Rig> jit = std::make_unique<Rig>();
     brimir::jit::Executor exec;
+    bool lastStepMatched = true; // whether the most recent Step() found identical cycles and state
 
     void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
         ref->WriteCode(address, words);
@@ -99,6 +100,7 @@ struct Pair {
         const std::string diff = sh2test::DiffRigs(*ref, *jit);
         INFO(diff);
         CHECK(diff.empty());
+        lastStepMatched = info.cycles == refCycles && diff.empty();
         return info;
     }
 };
@@ -433,6 +435,15 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     constexpr int kPrograms = 300;
     constexpr int kLength = 24;
     constexpr int kSteps = 80;
+    // Coverage lower bounds, ~65% of the values measured with all 300 programs passing
+    // (steps=15731 blocksRun=14652 interpreted=1079 compiles=1124, i.e. 93% of steps in blocks).
+    constexpr uint64_t kMinBlocksRun = 9500;
+    constexpr uint64_t kMinCompiles = 730;
+    constexpr uint64_t kMinBlockPercent = 60;
+    uint64_t totalSteps = 0;
+    uint64_t totalBlocksRun = 0;
+    uint64_t totalInterpreted = 0;
+    uint64_t totalCompiles = 0;
 
     for (int prog = 0; prog < kPrograms; ++prog) {
         const uint32_t seed = 0xF0220000u + static_cast<uint32_t>(prog);
@@ -453,6 +464,8 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
             uint32_t pick = rng() % 16;
             if (prevDelayed && pick >= 12) {
                 pick = rng() % 12; // delay slots never hold branches
+            } else if (i == kLength - 1 && pick >= 13) {
+                pick = rng() % 13; // no delayed branch last: its slot would be SLEEP
             }
             uint16_t instr = kNop;
             switch (pick) {
@@ -496,11 +509,31 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         p.Load(state);
 
         INFO("seed 0x" << std::hex << seed << " program " << Hex(program));
+        bool failed = false;
         for (int step = 0; step < kSteps; ++step) {
+            INFO("step " << std::dec << step);
             p.Step();
-            if (!sh2test::DiffRigs(*p.ref, *p.jit).empty()) {
-                break; // Pair::Step already reported the difference
+            ++totalSteps;
+            if (!p.lastStepMatched) {
+                failed = true; // Pair::Step already reported the difference
+                break;
+            }
+            if (p.ref->State().sleep && p.jit->State().sleep) {
+                break; // both asleep: remaining steps would only re-run SLEEP
             }
         }
+        totalBlocksRun += p.exec.GetStats().blocksRun;
+        totalInterpreted += p.exec.GetStats().interpreted;
+        totalCompiles += p.exec.Cache().Compiles();
+        if (failed) {
+            break; // stop at the first failing program
+        }
     }
+
+    // The premise of the test: most steps ran compiled blocks rather than the interpreter.
+    WARN("fuzz coverage: steps=" << totalSteps << " blocksRun=" << totalBlocksRun
+                                 << " interpreted=" << totalInterpreted << " compiles=" << totalCompiles);
+    CHECK(totalBlocksRun >= kMinBlocksRun);
+    CHECK(totalCompiles >= kMinCompiles);
+    CHECK(totalBlocksRun * 100 >= totalSteps * kMinBlockPercent);
 }

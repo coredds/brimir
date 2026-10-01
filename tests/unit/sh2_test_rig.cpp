@@ -139,16 +139,21 @@ std::string DiffRigs(const Rig &a, const Rig &b) {
     if (sa.fetchedOpcodes != sb.fetchedOpcodes) return diff("fetchedOpcodes", sa.fetchedOpcodes, sb.fetchedOpcodes);
     if (sa.wbReg != sb.wbReg) return diff("wbReg", sa.wbReg, sb.wbReg);
     if (sa.sleep != sb.sleep) return diff("sleep", sa.sleep, sb.sleep);
-    for (uint32_t i = 0; i < kRamSize; ++i) {
-        if ((*a.ram)[i] != (*b.ram)[i]) {
-            std::snprintf(buf, sizeof(buf), "RAM[0x%05X]", i);
-            return diff(buf, (*a.ram)[i], (*b.ram)[i]);
+    // memcmp fast path; the byte loops only run to locate the first difference.
+    if (std::memcmp(a.ram->data(), b.ram->data(), kRamSize) != 0) {
+        for (uint32_t i = 0; i < kRamSize; ++i) {
+            if ((*a.ram)[i] != (*b.ram)[i]) {
+                std::snprintf(buf, sizeof(buf), "RAM[0x%05X]", i);
+                return diff(buf, (*a.ram)[i], (*b.ram)[i]);
+            }
         }
     }
-    for (size_t i = 0; i < a.mmio.data.size(); ++i) {
-        if (a.mmio.data[i] != b.mmio.data[i]) {
-            std::snprintf(buf, sizeof(buf), "MMIO[0x%04zX]", i);
-            return diff(buf, a.mmio.data[i], b.mmio.data[i]);
+    if (std::memcmp(a.mmio.data.data(), b.mmio.data.data(), a.mmio.data.size()) != 0) {
+        for (size_t i = 0; i < a.mmio.data.size(); ++i) {
+            if (a.mmio.data[i] != b.mmio.data[i]) {
+                std::snprintf(buf, sizeof(buf), "MMIO[0x%04zX]", i);
+                return diff(buf, a.mmio.data[i], b.mmio.data[i]);
+            }
         }
     }
     if (a.mmio.busWaitQueries != b.mmio.busWaitQueries) {
