@@ -93,7 +93,8 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 //      TrChainedInDelaySlot and returns);
 //   3. counts the block in out.blocksRun.
 // A static Exit, a taken ExitIf and ExitDynamic then chain when frame->allowChain: after writing PC
-// and out as usual they store *cyclesExecuted = entryCycles + cycles, return nullptr if
+// and out as usual they return nullptr if *abortRequested (a flush requested by a callback that
+// did not stop the block), store *cyclesExecuted = entryCycles + cycles, return nullptr if
 // cycles >= limit, and otherwise return the entry of the link slot whose pc equals PC (nullptr on a
 // miss), setting frame->chained. Boundary, bus-wait, abort and stale exits never chain.
 //

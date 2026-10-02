@@ -1271,7 +1271,11 @@ TEST_CASE("Chained run equals stepped run", "[jit][x64]") {
         REQUIRE(chained.nativeBlocksRun == stepped.nativeBlocksRun);
         REQUIRE(chained.interpreted == stepped.interpreted);
         REQUIRE(chained.compileFallbacks == stepped.compileFallbacks);
-        REQUIRE(chained.staleEntries == stepped.staleEntries);
+        // Stale entries may legitimately differ between chained and stepped runs (see
+        // Executor::Stats::staleEntries), and with them the counts above. The fuzz programs never
+        // write their own code (stores only reach the data areas), so there are none here.
+        REQUIRE(chained.staleEntries == 0u);
+        REQUIRE(stepped.staleEntries == 0u);
         REQUIRE(chainExec.Cache().Compiles() == stepExec.Cache().Compiles());
         REQUIRE(stepped.chainedBlocks == 0u);
         totalChained += chained.chainedBlocks;
@@ -1414,7 +1418,14 @@ TEST_CASE("Stale block inside a chain", "[jit][x64]") {
     uint32_t r4AtChange = 0;
     for (int i = 0; i < 60; ++i) {
         INFO("advance " << i << (modified ? " (B changed)" : ""));
+        const bool firstAfterChange = modified && p.exec.GetStats().staleEntries == 0;
+        const uint64_t chainedBefore = p.exec.GetStats().chainedBlocks;
         p.Advance(modified ? 61 : 13);
+        if (firstAfterChange) {
+            // This Advance starts at A and reaches B by chaining: B is found stale there.
+            CHECK(p.exec.GetStats().staleEntries == 1u);
+            CHECK(p.exec.GetStats().chainedBlocks > chainedBefore);
+        }
         const auto st = p.ref->State();
         if (!modified && i >= 8 && st.PC == kCode && !st.delaySlot) {
             REQUIRE(p.exec.GetStats().chainedBlocks >= 1u); // A and B are linked
@@ -1600,5 +1611,102 @@ TEST_CASE("Chained blocks see the state a step would give them", "[jit][x64]") {
         CHECK(records[1][i].kind == records[0][i].kind);
         CHECK(records[1][i].address == records[0][i].address);
         CHECK(records[1][i].cyclesExecuted == records[0][i].cyclesExecuted);
+    }
+}
+namespace {
+
+brimir::jit::Executor *g_srExec = nullptr;
+void (*g_srOrigSetSR)(void *, uint32, bool) = nullptr;
+uint32_t g_srFlushes = 0;
+
+// setSR that requests a flush. Unlike read/write/refill, the setSR trampoline does not stop the
+// block on an abort request (nor does RunBlock): the block runs to its exit.
+void FlushingSetSR(void *sh2, uint32 value, bool delaySlot) {
+    g_srOrigSetSR(sh2, value, delaySlot);
+    ++g_srFlushes;
+    g_srExec->Flush();
+}
+
+} // namespace
+
+// A flush requested by a callback that does not stop the block (here setSR) must end the chain at
+// that block's exit, as a step would: the executor applies the flush and steps on. Chaining on
+// with the request pending would abort the next block at its first memory callback, after part of
+// its effects, and re-run it.
+TEST_CASE("A flush from a non-stopping callback ends the chain", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kLdcR6Sr = 0x460E;   // ldc R6,SR (R6 = 0xF0: SR unchanged)
+    constexpr uint16_t kAdd1_R7 = 0x7701;
+    constexpr uint16_t kLoadR2 = 0x6212;    // mov.l @R1,R2 (R1: MMIO, a read callback)
+    const uint32_t c = kCode + 0x20;
+    const auto setUp = [&](Rig &rig) {
+        // A: add #1,R3 ; ldc R6,SR ; bra C ; nop
+        // C: add #1,R7 ; mov.l @R1,R2 ; add #1,R4 ; bra A ; nop
+        rig.WriteCode(kCode, {kAdd1_R3, kLdcR6Sr, Bra(kCode + 4, c), kNop});
+        rig.WriteCode(c, {kAdd1_R7, kLoadR2, kAdd1_R4, Bra(c + 6, kCode), kNop});
+        auto state = rig.BaseState(kCode);
+        state.R[1] = 0x22040000;
+        state.R[3] = 0;
+        state.R[4] = 0;
+        state.R[6] = 0xF0;
+        state.R[7] = 0;
+        rig.Load(state);
+        return state;
+    };
+    const auto hook = [](brimir::jit::Executor &exec, ymir::sh2::SH2JitContext &ctx) {
+        g_srExec = &exec;
+        g_srOrigSetSR = ctx.setSR;
+        g_srFlushes = 0;
+        ctx.setSR = FlushingSetSR;
+    };
+
+    SECTION("the flush is applied when the block returns") {
+        auto rig = std::make_unique<Rig>();
+        brimir::jit::Executor exec{BackendKind::X64};
+        const auto state = setUp(*rig);
+        auto &ctx = rig->sh2->GetJitContext();
+        const ExitInfo a = exec.Step(ctx); // compiles A
+        REQUIRE(a.retired == 4);
+        rig->Load(state); // not attached: no flush
+        hook(exec, ctx);
+        const uint64 executed = exec.Run(ctx, 0, a.cycles); // exactly A
+        ctx.setSR = g_srOrigSetSR;
+        CHECK(executed == a.cycles);
+        CHECK(g_srFlushes == 1u);
+        CHECK(exec.Cache().Size() == 0u);
+        CHECK(rig->State().PC == c);
+        CHECK(rig->State().R[3] == 1u);
+    }
+
+    SECTION("chained and stepped runs stay identical") {
+        std::unique_ptr<Rig> rigs[2];
+        std::unique_ptr<brimir::jit::Executor> execs[2];
+        uint32_t flushes[2] = {};
+        for (int chaining = 0; chaining < 2; ++chaining) {
+            rigs[chaining] = std::make_unique<Rig>();
+            execs[chaining] = std::make_unique<brimir::jit::Executor>(BackendKind::X64);
+            execs[chaining]->SetChaining(chaining != 0);
+            setUp(*rigs[chaining]);
+            auto &ctx = rigs[chaining]->sh2->GetJitContext();
+            hook(*execs[chaining], ctx);
+            execs[chaining]->Run(ctx, 0, 400);
+            ctx.setSR = g_srOrigSetSR;
+            flushes[chaining] = g_srFlushes;
+        }
+        const std::string diff = sh2test::DiffRigs(*rigs[0], *rigs[1], true);
+        INFO(diff);
+        CHECK(diff.empty());
+        CHECK(flushes[1] == flushes[0]);
+        CHECK(flushes[0] >= 3u);
+        const auto end = rigs[1]->State();
+        CHECK(end.R[7] - end.R[4] <= 1u); // C never re-ran after a partial run
+        const auto &stepped = execs[0]->GetStats();
+        const auto &chained = execs[1]->GetStats();
+        CHECK(chained.blocksRun == stepped.blocksRun);
+        CHECK(chained.interpreted == stepped.interpreted);
+        CHECK(execs[1]->Cache().Compiles() == execs[0]->Cache().Compiles());
+        CHECK(execs[1]->Cache().Size() == execs[0]->Cache().Size());
     }
 }

@@ -51,6 +51,12 @@ public:
     // while generated code runs; its native code stays allocated until the next Flush.
     void Invalidate(uint32_t pc);
 
+    // The cached block for pc, or nullptr; no validation, no compile (tests and diagnostics).
+    const CachedBlock *Find(uint32_t pc) const {
+        const auto it = m_blocks.find(pc);
+        return it != m_blocks.end() ? it->second.get() : nullptr;
+    }
+
     size_t Size() const {
         return m_blocks.size();
     }

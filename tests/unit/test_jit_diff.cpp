@@ -1515,6 +1515,14 @@ TEST_CASE("Code page remapped from an array to a handler page", "[jit][diff]") {
         CHECK(pages[1]->reads == pages[0]->reads);   // no known refill value was used
         CHECK_FALSE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).fetchFromArrays);
         const bool native = kind != brimir::jit::BackendKind::Ir;
+        // The cached block itself: x64 recompiled it without fetchFromArrays, as native code that is
+        // off array pages and so not self-validating (the cache checks it). The IR block is the
+        // original one; RunBlock re-checks the pages at every entry.
+        const brimir::jit::CachedBlock *cached = p.exec.Cache().Find(kCode);
+        REQUIRE(cached != nullptr);
+        CHECK(cached->block.fetchFromArrays == !native);
+        CHECK_FALSE(cached->code.selfValidating);
+        CHECK((cached->code.entry != nullptr) == native);
         CHECK(p.exec.GetStats().staleEntries == (native ? 1u : 0u));
         CHECK(p.exec.Cache().Compiles() == (native ? 2u : 1u));
         CHECK(p.exec.Cache().Invalidations() == (native ? 1u : 0u));

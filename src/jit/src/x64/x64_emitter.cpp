@@ -71,6 +71,7 @@ constexpr int32_t kFrameStop = static_cast<int32_t>(offsetof(X64Frame, stop));
 constexpr int32_t kFrameCodeDirty = static_cast<int32_t>(offsetof(X64Frame, codeDirty));
 constexpr int32_t kFrameAllowChain = static_cast<int32_t>(offsetof(X64Frame, allowChain));
 constexpr int32_t kFrameChained = static_cast<int32_t>(offsetof(X64Frame, chained));
+constexpr int32_t kFrameAbortRequested = static_cast<int32_t>(offsetof(X64Frame, abortRequested));
 static_assert(sizeof(ExitInfo::blocksRun) == 4);
 constexpr int32_t kLinkPc = static_cast<int32_t>(offsetof(X64LinkSlot, pc));
 constexpr int32_t kLinkEntry = static_cast<int32_t>(offsetof(X64LinkSlot, entry));
@@ -266,6 +267,15 @@ private:
         }
         m_cc.cmp(x86::byte_ptr(m_frame, kFrameAllowChain), 0);
         m_cc.je(m_retNull);
+        // A flush requested by a callback that does not stop the block (setSR, endDelaySlot,
+        // accessCycles, busWait: RunBlock runs on after them too) must end the chain here, with
+        // this block's exit complete, as RunBlock would return; the executor then flushes. A
+        // chained block would otherwise run with the request pending and abort at its first
+        // memory callback, partway through.
+        x86::Gp abortFlag = m_cc.new_gp_ptr();
+        m_cc.mov(abortFlag, x86::qword_ptr(m_frame, kFrameAbortRequested));
+        m_cc.cmp(x86::byte_ptr(abortFlag), 0);
+        m_cc.jne(m_retNull);
         // *cyclesExecuted = entryCycles + cycles (Executor::Run, before each Step).
         x86::Gp now = m_cc.new_gp64();
         m_cc.mov(now, x86::qword_ptr(m_frame, kFrameEntryCycles));
