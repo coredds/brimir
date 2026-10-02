@@ -272,6 +272,19 @@ Design: [sh2-jit-m2.md](sh2-jit-m2.md). Remaining instructions (multiply, MAC, d
 
 Outcome of 2B: the x64 backend is exact (BIOS menu plus six games, 36000 frames each, identical in lockstep with the interpreter; [sh2-validation.md](sh2-validation.md)), but the 2x target was missed: it takes 1.7–2.2x the interpreter's SH-2 time and stalls while compiling new code ([sh2-x64-performance.md](sh2-x64-performance.md)). The JIT stays off by default. Milestone 2C optimizes the backend along that report's conclusions (refill and delay-slot calls, block linking, per-block bookkeeping, cache capacity and compile cost).
 
+Outcome of 2C ([plan](plans/2026-10-02-sh2-jit-m2c-performance.md)): still exact (36,000-frame x64 lockstep on the BIOS menu and six games, 1,800-frame IR lockstep), and the x64 SH-2 time is now about the interpreter's. Interpreter / x64 is 0.91–1.25: Virtua Fighter 2 1.25, Guardian Heroes 1.11, Panzer Dragoon II Zwei 1.09, Sega Rally 0.98, Burning Rangers 0.97, Street Fighter Zero 3 0.91. Compile stalls fell from ~260 ms to ~28 ms frames. The 2x target is still missed and the JIT stays off by default.
+
+Known problems:
+- Burning Rangers over a long session runs at 0.55x the interpreter, with frames up to 173 ms. It keeps reloading code, which forces recompiles and a full native-code-cap flush about once a minute.
+- Save-state loads (including run-ahead and rewind) flush all compiled code.
+
+Status (2026-10-02): paused, waiting for a decision on the next step. The options:
+1. **A 2D plan toward 2x:** per-instruction cost inside blocks (one budget check per block where exact, compile-time page resolution); inline `DIV1` and inline on-chip register reads (FTCSR polling); reuse of reloaded code and selective eviction instead of whole-cache flushes; cheaper compiles for cold blocks. Reaching 2x is uncertain. The executor must shrink a further 2.4–3.1x, and ~1.1 ms/frame of SH-2 time outside the executor caps the ratio at about 4.5–4.9 even with a free executor.
+2. **Robustness only:** Burning Rangers' code reloads, flushes on save-state load, selective eviction. The JIT stays an experimental option.
+3. **Stop the JIT work here.** On x86-64, whole frames already take ~10–14 ms with the interpreter, so the JIT mainly matters for weaker ARM hosts (milestone 3).
+
+Details and the measured next-step list: [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2C results" → "Next steps".
+
 ### Milestone 3 — ARM64 backend (separate spec)
 
 Same as milestone 2 for ARM64, validated on a Cortex-A53/A55-class device.
