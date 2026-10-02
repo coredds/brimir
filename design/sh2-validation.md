@@ -1,6 +1,6 @@
 # SH-2 JIT validation
 
-Milestone 1 first; milestone 2A is in its own section at the end.
+Milestone 1 first; milestones 2A and 2B are in their own sections at the end.
 
 ## Milestone 1
 
@@ -109,3 +109,42 @@ The executor also falls back to the interpreter for interrupt entry, for a delay
 ### Findings
 
 - No JIT bugs were found; no fixes were needed. Every lockstep run ended with `lockstep: OK, N frames identical` and exit 0 on the first attempt; no run stalled.
+
+## Milestone 2B
+
+**Date**: 2026-10-01
+**Commit**: a86fae7 (the validated code: the parent of the commit that adds this section)
+**Machine and build**: as above (`build-bench`, Ninja, Release, LTO/IPO, MSVC 19.44.35229, `/O2 /Ob2 /DNDEBUG`). Same BIOS files, scratch system dir and commands as the milestone 1 method, plus `--jit-backend x64`.
+
+Plan 2B adds the x64 backend: the executor compiles each block to native x86-64 code with asmjit and runs it instead of the IR interpreter (`RunBlock`), which stays the fallback (`design/sh2-jit-m2.md`).
+
+### Fuzz
+
+The random-program fuzz test ("JIT matches the interpreter on random programs", `test_jit_diff.cpp`) now runs three rigs when the x64 backend is available: the interpreter, an IR executor and an x64 executor run the same 300 programs. After every step the IR rig is compared with the interpreter (as before) and the x64 rig with the IR rig: identical `ExitInfo` (cycles, retired, busWait, aborted, boundary) and `DiffRigs` with peripherals. The test requires `compileFallbacks == 0` and the same `blocksRun`/`interpreted` as the IR rig, with every block run natively. Measured:
+
+- IR rig: steps=15284 blocksRun=15142 interpreted=142 compiles=1048 (unchanged from milestone 2A)
+- x64 rig: blocksRun=15142 nativeBlocksRun=15142 compileFallbacks=0 interpreted=142
+
+### Lockstep (x64 backend)
+
+`brimir_bench --bios <bios> [--game <game> --system-dir <scratch dir>] --lockstep 36000 --jit-backend x64`, run sequentially. All seven runs ended with `lockstep: OK, 36000 frames identical` and exit 0 on the first attempt; no run stalled. Every block on both CPUs ran as native code (`nativeBlocksRun == blocksRun`, `compileFallbacks 0`).
+
+| Title | BIOS | Frames | Result | jit master blocksRun / interpreted | jit slave blocksRun / interpreted | nativeBlocksRun (master / slave) | compileFallbacks | Wall time |
+|---|---|---|---|---|---|---|---|---|
+| BIOS menu (no disc) | US | 36000 | OK, identical (exit 0) | 2,952,071,540 / 894,693 | 0 / 0 | 2,952,071,540 / 0 | 0 / 0 | 14:38 |
+| Virtua Fighter 2 (Japan) (Rev B) | JP | 36000 | OK, identical (exit 0) | 2,417,548,180 / 30,837,846 | 4,074,892,394 / 7,440,566 | 2,417,548,180 / 4,074,892,394 | 0 / 0 | 42:26 |
+| Panzer Dragoon II Zwei (USA) | US | 36000 | OK, identical (exit 0) | 3,266,028,823 / 73,852,344 | 2,069,237,372 / 5,586,014 | 3,266,028,823 / 2,069,237,372 | 0 / 0 | 31:09 |
+| Sega Rally Championship (USA) | US | 36000 | OK, identical (exit 0) | 2,983,278,830 / 19,740,973 | 1,582,039,497 / 1,104,116,598 | 2,983,278,830 / 1,582,039,497 | 0 / 0 | 19:39 |
+| Burning Rangers (USA) | US | 36000 | OK, identical (exit 0) | 2,348,616,009 / 33,446,500 | 2,232,901,296 / 102,482,762 | 2,348,616,009 / 2,232,901,296 | 0 / 0 | 38:29 |
+| Guardian Heroes (USA) | US | 36000 | OK, identical (exit 0) | 2,493,469,510 / 11,301,264 | 2,102,857,379 / 1,170,391 | 2,493,469,510 / 2,102,857,379 | 0 / 0 | 17:15 |
+| Street Fighter Zero 3 (Japan) | JP | 36000 | OK, identical (exit 0) | 2,233,386,250 / 43,262,494 | 1,923,173,206 / 123,208 | 2,233,386,250 / 1,923,173,206 | 0 / 0 | 24:33 |
+
+The lockstep summary now prints both CPUs and the native counters. The master counts of the four titles also run for 36,000 frames in milestone 2A are identical to that table (the backend does not change what is compiled or interpreted). The BIOS menu, Guardian Heroes and Street Fighter Zero 3 ran 1,800 frames in milestone 2A and 36,000 here. The Sega Rally slave's high `interpreted` count is its interrupt load (see the milestone 2A smoke-run notes).
+
+### Performance
+
+Measured separately in `design/sh2-x64-performance.md`: the x64 backend is 1.3–1.7x faster than the IR backend in SH-2 time but still 1.7–2.2x slower than the interpreter, so the 2x target is missed.
+
+### Findings
+
+- No JIT bugs were found; no fixes were needed.

@@ -71,6 +71,10 @@ native backend could not compile; they run on the IR interpreter).
 x86-64 code (only in x86-64 builds; elsewhere the option is rejected). The
 default is `x64` when it is built, else `ir`. It needs `--sh2-jit` or
 `--lockstep` (where it applies to the JIT core); otherwise it is a usage error.
+To compare the backends with the interpreter, run the same content three
+times: without `--sh2-jit`, with `--sh2-jit --jit-backend ir` and with
+`--sh2-jit --jit-backend x64` (`design/sh2-x64-performance.md` uses the
+scenes, warmup and frame counts of `design/sh2-baseline.md`).
 
 Output:
 
@@ -93,8 +97,13 @@ threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
 ### Lockstep validation
 
 ```powershell
-build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000
+build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000 [--jit-backend ir|x64]
 ```
+
+`--jit-backend` selects the JIT core's backend (default `x64` when built). The
+lockstep summary prints the executor counters of both CPUs; with `x64`,
+`nativeBlocksRun` equal to `blocksRun` and `compileFallbacks 0` mean that every
+compiled block ran as native code.
 
 `--lockstep N` loads the same content (and optional `--state`) into two cores,
 one running both SH-2s through the JIT and one through the interpreter, runs
