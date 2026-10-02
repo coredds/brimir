@@ -14,14 +14,19 @@ namespace brimir::jit {
 constexpr uint64_t kNoCycleTarget = ~uint64_t{0};
 
 struct ExitInfo {
+    // For a native chain (INativeBackend::Run with allowChain), cycles is the total of all its
+    // blocks, and the other fields describe how its last block exited.
     uint64_t cycles = 0;
-    uint8_t retired = 0;  // guest instructions fully executed
+    uint8_t retired = 0;  // guest instructions fully executed (the last block of a chain)
     bool busWait = false; // exited on a bus wait; the instruction at PC retries
     bool aborted = false; // stopped mid-block on an abort request; PC was not written
     bool boundary = false; // stopped before an instruction: cycle target reached or interrupt pending
-    // Native code only: a code page is no longer the array page the block was compiled for. Nothing
-    // ran and nothing was written; the executor recompiles the block (RunBlock never sets it).
+    // Native code only: the block at PC no longer matches its guest code (a code page was remapped
+    // or its bytes changed). That block ran nothing and wrote nothing; the executor recompiles it.
+    // In a chain, the blocks before it ran normally (blocksRun > 0). RunBlock never sets it.
     bool stale = false;
+    // Native code only: blocks that passed their entry checks and ran (RunBlock leaves it 0).
+    uint32_t blocksRun = 0;
 };
 
 // Executes a verified, non-empty block against the live SH-2 state.

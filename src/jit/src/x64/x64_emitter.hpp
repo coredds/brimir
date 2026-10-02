@@ -9,29 +9,48 @@
 
 #include <asmjit/x86.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <type_traits>
 
 namespace brimir::jit {
 
-// The one argument of a generated block function. Run fills the inputs, the generated code writes
-// `out` before it returns.
+// The one argument of a generated block function, shared by all blocks of a chain. Run fills the
+// inputs; the generated code writes `out` before it returns or chains.
 struct X64Frame {
     ymir::sh2::SH2JitContext *ctx;
     uint64_t limit;             // boundary when cycles >= limit: target >= entry ? target - entry : 0
-    uint64_t entryCycles;       // *ctx->cyclesExecuted at entry
+    uint64_t entryCycles;       // *ctx->cyclesExecuted when the chain started
     const bool *abortRequested; // never null (points to a static false when the caller passed nullptr)
     uint8_t stop = 0;           // set by trampolines: abort requested or exception caught
     uint8_t codeDirty = 0;      // set by generated code: a data access may have written the block's code
+    uint8_t allowChain = 0;     // input: chainable exits may enter the next linked block
+    uint8_t chained = 0;        // set by generated code: the running block was entered by chaining
     std::exception_ptr error;   // set by trampolines: the exception a callback threw
-    ExitInfo out;               // written by generated code before it returns
+    // Written by generated code. out.cycles counts from the start of the chain: each block starts
+    // from it, so the cycle limit and SyncCycles stay relative to limit and entryCycles.
+    ExitInfo out;
 };
 // Generated code addresses the frame with offsetof.
 static_assert(std::is_standard_layout_v<X64Frame>);
 static_assert(std::is_standard_layout_v<ExitInfo>);
 
-using X64BlockFn = void (*)(X64Frame *frame);
+// A block function returns the entry of the block to run next (chaining) or nullptr to return to
+// the caller. X64Backend::Run calls it in a loop.
+using X64BlockFn = const void *(*)(X64Frame *frame);
+
+// Link table: direct-mapped by PC, owned by X64Backend; generated code embeds its address. An
+// entry matches only its exact pc; an empty slot is {0, nullptr} (a match then returns nullptr).
+struct X64LinkSlot {
+    uint32_t pc;
+    const void *entry;
+};
+static_assert(sizeof(X64LinkSlot) == 16 && offsetof(X64LinkSlot, entry) == 8);
+constexpr uint32_t kLinkSlots = 16384;
+constexpr uint32_t LinkIndex(uint32_t pc) {
+    return (pc >> 1) & (kLinkSlots - 1);
+}
 
 // Trampolines: the only functions generated code calls (defined in x64_backend.cpp). Each loads
 // its callback from frame->ctx at call time. None lets an exception escape: a callback exception
@@ -52,12 +71,31 @@ void TrSetSR(X64Frame *f, uint32_t value, uint32_t delaySlot) noexcept;
 uint32_t TrDiv1(X64Frame *f, uint32_t rn, uint32_t rm, uint32_t rmIsRn) noexcept;
 void TrMacW(X64Frame *f, uint32_t op1, uint32_t op2) noexcept;
 void TrMacL(X64Frame *f, uint32_t op1, uint32_t op2) noexcept;
+// Debug check: a block was chained to while a delay slot was pending, which no chainable exit
+// allows (it asserts; the block then returns to the executor, which interprets the slot).
+void TrChainedInDelaySlot(X64Frame *f) noexcept;
 
-// Emits `block` as one function `void fn(X64Frame *)` into `cc`, which must be attached to a
-// CodeHolder. Guest state is addressed relative to ctx.R with offsets taken from `ctx`, so the code
-// only runs against that CPU. Returns false, before emitting anything, if the block has an op this
-// emitter does not lower or a state field whose offset from ctx.R does not fit in 32 bits. asmjit
-// errors are reported through the CodeHolder's error handler, not by the return value.
+// Emits `block` as one function `const void *fn(X64Frame *)` (X64BlockFn) into `cc`, which must be
+// attached to a CodeHolder. Guest state is addressed relative to ctx.R with offsets taken from
+// `ctx`, so the code only runs against that CPU. Returns false, before emitting anything, if the
+// block has an op this emitter does not lower or a state field whose offset from ctx.R does not fit
+// in 32 bits. asmjit errors are reported through the CodeHolder's error handler, not by the return
+// value.
+//
+// Self-validating blocks and chaining (design/sh2-x64-performance.md, 2C item 2): when the block's
+// guestOpcodes are all on array pages (inline bus), ctx has delaySlot, fetchedOpcodes and
+// intcPendingLevel, and `links` is given, selfValidating is set and the prologue, in this order:
+//   1. checks that every code page still has its compile-time array and that the code bytes in
+//      host memory still equal guestOpcodes; otherwise it returns out.stale and writes nothing else;
+//   2. when frame->chained, repeats Executor::Step's checks: returns nullptr (to the executor) if
+//      an interrupt is pending and allowed, or, at PC & 2, if the fetch buffer's low half is not
+//      the first opcode; then sets *intrAllow = true (a pending delay slot calls
+//      TrChainedInDelaySlot and returns);
+//   3. counts the block in out.blocksRun.
+// A static Exit, a taken ExitIf and ExitDynamic then chain when frame->allowChain: after writing PC
+// and out as usual they store *cyclesExecuted = entryCycles + cycles, return nullptr if
+// cycles >= limit, and otherwise return the entry of the link slot whose pc equals PC (nullptr on a
+// miss), setting frame->chained. Boundary, bus-wait, abort and stale exits never chain.
 //
 // With ctx.bus describing a page table, Load/Store/AddAccessCycles/ExitIfBusWait take the inline
 // bus fast path (bus_fast_path.hpp) and call their trampolines only for handler or unmapped pages
@@ -76,7 +114,8 @@ void TrMacL(X64Frame *f, uint32_t op1, uint32_t op2) noexcept;
 // SetupDelaySlot and EndDelaySlot are inline (SH2::SetupDelaySlot, SH2::AdvancePC<..., true> with
 // cache emulation off) when ctx has delaySlot, fetchedOpcodes and intcPendingLevel; EndDelaySlot
 // calls TrEndDelaySlot for a target with bit 1 set off array pages.
-bool EmitBlock(asmjit::x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx);
+bool EmitBlock(asmjit::x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx,
+               const X64LinkSlot *links, bool &selfValidating);
 
 // True if EmitBlock lowers every op of `block` (state offsets aside). Every valid op is lowered, so
 // this only rejects blocks with out-of-range op values.

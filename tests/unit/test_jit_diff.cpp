@@ -6,7 +6,7 @@
 // memory, bus-wait query sequence and cycle totals.
 
 #include "catch_amalgamated.hpp"
-#include "jit_opcode_specs.hpp"
+#include "jit_fuzz_programs.hpp"
 #include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
@@ -30,6 +30,7 @@ namespace {
 constexpr uint32_t kCode = 0x06001000;
 constexpr uint32_t kTarget = kCode + 0x100; // branch target area, filled with SLEEP
 constexpr uint32_t kMmio = 0x22000000;
+static_assert(kCode == sh2test::kFuzzCode, "the fuzz programs are written at kCode");
 
 // Encoders
 uint16_t Nm(uint16_t base, uint32_t n, uint32_t m) {
@@ -57,10 +58,6 @@ uint16_t Bf(uint32_t d) { return static_cast<uint16_t>(0x8B00 | (d & 0xFF)); }
 uint16_t Bts(uint32_t d) { return static_cast<uint16_t>(0x8D00 | (d & 0xFF)); }
 uint16_t Bfs(uint32_t d) { return static_cast<uint16_t>(0x8F00 | (d & 0xFF)); }
 uint16_t Bra(uint32_t d) { return static_cast<uint16_t>(0xA000 | (d & 0xFFF)); }
-uint16_t Bsr(uint32_t d) { return static_cast<uint16_t>(0xB000 | (d & 0xFFF)); }
-uint16_t Braf(uint32_t m) { return static_cast<uint16_t>(0x0023 | (m << 8)); }
-uint16_t Bsrf(uint32_t m) { return static_cast<uint16_t>(0x0003 | (m << 8)); }
-uint16_t Jsr(uint32_t m) { return static_cast<uint16_t>(0x400B | (m << 8)); }
 
 std::string Hex(const std::vector<uint16_t> &words) {
     std::string out;
@@ -169,138 +166,6 @@ uint16_t MakeInstr(Kind kind, std::mt19937 &rng, std::array<uint32_t, 16> &regs)
 
 void FillTargetArea(Pair &p) {
     p.WriteCode(kTarget - 0x10, std::vector<uint16_t>(0x40, static_cast<uint16_t>(kSleep)));
-}
-
-// Random-program generation (fuzz test). Register roles keep every access and branch inside known
-// memory: R0-R7 and R13-R15 data; R8-R11 data addresses (never written); R12 branch register; GBR
-// always holds one of the R8-R11 addresses; PR a return target. LDC.L/LDS.L into GBR, SR, VBR and
-// PR are restricted to keep these (see the Fmt::M case).
-uint32_t RemapDest(uint32_t r) {
-    return (r >= 8 && r <= 12) ? r - 8 : r;
-}
-uint16_t WithHi(uint16_t w, uint32_t r) { // bits 11..8
-    return static_cast<uint16_t>((w & ~0x0F00u) | (r << 8));
-}
-uint16_t WithLo(uint16_t w, uint32_t r) { // bits 7..4
-    return static_cast<uint16_t>((w & ~0x00F0u) | (r << 4));
-}
-
-// Address forms whose base cannot be one of the fixed R8-R11 addresses: R0-indexed (R0 is a data
-// register) and post-increment/pre-decrement (the base is written). The generator emits setup
-// instructions right before them (`mov #imm,R0` or `mov Rbase,Rd`, plus a store for the restricted
-// system-register loads, see FuzzInstr); the group is never split by a branch target or a delay slot.
-bool NeedsSetup(jitspec::Addr a) {
-    using jitspec::Addr;
-    return a == Addr::RmR0 || a == Addr::RnR0 || a == Addr::GbrR0 || a == Addr::RnPreDec || a == Addr::RmPostInc ||
-           a == Addr::MacPair;
-}
-
-// One random non-branch instruction from the compiled-opcode table, plus its setup instructions if
-// it needs any (setup first, forming one group). Jitspec::Encode supplies the random fields; register fields are then
-// constrained to the roles above (its register fixups target single-instruction tests and are
-// discarded here).
-std::vector<uint16_t> FuzzInstr(const jitspec::OpSpec &spec, std::mt19937 &rng) {
-    using jitspec::Addr;
-    using jitspec::Fmt;
-    std::array<uint32_t, 16> scratchRegs{};
-    uint32_t scratchGbr = 0;
-    uint16_t w = jitspec::Encode(spec, rng, scratchRegs, scratchGbr);
-    const auto addrReg = [&] { return 8 + rng() % 4; };
-    const std::string_view name = spec.name;
-    const uint32_t hi = (w >> 8) & 0xFu;
-    std::vector<uint16_t> setup;
-    const auto setupR0 = [&] {
-        // R0 = sign-extended imm8 (-128..127), aligned to the access size.
-        const uint32_t imm = rng() & 0xFFu & ~(static_cast<uint32_t>(spec.size) - 1);
-        setup.push_back(MovI(0, imm));
-    };
-    const auto setupBase = [&] { // Rd = copy of an address register; returns d
-        const uint32_t d = RemapDest(rng() % 16);
-        const uint32_t base = addrReg();
-        setup.push_back(MovR(d, base));
-        return d;
-    };
-
-    switch (spec.fmt) {
-    case Fmt::Z:
-    case Fmt::D: break; // MOVA (R0) and GBR-relative forms: GBR is always an address register
-    case Fmt::I:
-        if (spec.addr == Addr::GbrR0) {
-            setupR0();
-        }
-        break;
-    case Fmt::N:
-        // TAS @Rn: Rn is an address (read-modify-write, Rn itself is not written). STC.L/STS.L
-        // @-Rn: Rn is a copy of an address register (it is written).
-        if (spec.addr == Addr::RnPreDec) {
-            w = WithHi(w, setupBase());
-        } else {
-            w = WithHi(w, spec.addr == Addr::Rn ? addrReg() : RemapDest(hi));
-        }
-        break;
-    case Fmt::ND8:
-    case Fmt::NI: w = WithHi(w, RemapDest(hi)); break;
-    case Fmt::M: // LDC/LDS sources
-        if (spec.addr == Addr::RmPostInc) {
-            // LDC.L/LDS.L @Rm+: Rm is a copy of an address register. The loads that the register
-            // roles constrain only load a value stored right before them through @-Rm (Rm ends up
-            // back at the address register's value):
-            //   ldc.l @Rm+,GBR: mov.l Raddr,@-Rm  (GBR = one of R8-R11, like LDC_GBR_R)
-            //   ldc.l @Rm+,SR:  stc.l SR,@-Rm     (SR unchanged; LDC Rm,SR still randomizes it)
-            //   ldc.l @Rm+,VBR: stc.l VBR,@-Rm    (VBR unchanged; LDC Rm,VBR still randomizes it)
-            //   lds.l @Rm+,PR:  sts.l PR,@-Rm     (PR stays a return target)
-            const uint32_t d = setupBase();
-            if (name == "LDC_GBR_M") {
-                setup.push_back(Nm(0x2006, d, addrReg())); // mov.l Raddr,@-Rd
-            } else if (name == "LDC_SR_M") {
-                setup.push_back(Nm(0x4003, d, 0)); // stc.l SR,@-Rd
-            } else if (name == "LDC_VBR_M") {
-                setup.push_back(Nm(0x4023, d, 0)); // stc.l VBR,@-Rd
-            } else if (name == "LDS_PR_M") {
-                setup.push_back(Nm(0x4022, d, 0)); // sts.l PR,@-Rd
-            }
-            w = WithHi(w, d);
-        } else if (name == "LDC_GBR_R") {
-            w = WithHi(w, addrReg());
-        } else if (name == "LDS_PR_R") {
-            w = WithHi(w, 12); // R12 holds an absolute program address (callers ensure it)
-        }
-        break;
-    case Fmt::MD: w = WithLo(w, addrReg()); break;  // @(disp,Rm) -> R0
-    case Fmt::ND4: w = WithLo(w, addrReg()); break; // R0 -> @(disp,Rn), Rn in bits 7..4
-    case Fmt::NM:
-    case Fmt::NMD:
-        switch (spec.addr) {
-        case Addr::None: w = WithHi(w, RemapDest(hi)); break;
-        case Addr::Rm:
-        case Addr::RmDisp: w = WithLo(WithHi(w, RemapDest(hi)), addrReg()); break;
-        case Addr::Rn:
-        case Addr::RnDisp: w = WithHi(w, addrReg()); break;
-        case Addr::RmR0:
-            setupR0();
-            w = WithLo(WithHi(w, RemapDest(hi)), addrReg());
-            break;
-        case Addr::RnR0:
-            setupR0();
-            w = WithHi(w, addrReg());
-            break;
-        case Addr::RnPreDec: w = WithHi(w, setupBase()); break;
-        case Addr::RmPostInc: {
-            const uint32_t d = setupBase();
-            w = WithLo(WithHi(w, RemapDest(hi)), d);
-            break;
-        }
-        case Addr::MacPair: { // mac.x @Rd+,@Rd+ (n == m): both operands from one copied address
-            const uint32_t d = setupBase();
-            w = WithLo(WithHi(w, d), d);
-            break;
-        }
-        default: break;
-        }
-        break;
-    }
-    setup.push_back(w);
-    return setup;
 }
 
 } // namespace
@@ -587,7 +452,6 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
 // available, a third rig runs the program on an x64 executor and is compared against the IR rig.
 TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]") {
     constexpr int kPrograms = 300;
-    constexpr int kLength = 24;
     constexpr int kSteps = 80;
     // Coverage lower bounds. Measured with all 300 programs passing (milestone 2A, MAC and the
     // restricted system-register loads included): steps=15284 blocksRun=15142 interpreted=142
@@ -604,21 +468,6 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     uint64_t totalInterpreted = 0;
     uint64_t totalCompiles = 0;
 
-    // Non-branch opcodes, and the subset that needs no setup instruction (delay slots and the last
-    // program position hold only those).
-    std::vector<const jitspec::OpSpec *> nonBranch;
-    std::vector<const jitspec::OpSpec *> singles;
-    for (const jitspec::OpSpec &spec : jitspec::CompiledOpcodes()) {
-        // MAC.W/MAC.L (Addr::MacPair) are included: FuzzInstr emits them as `mov Rbase,Rd ;
-        // mac.x @Rd+,@Rd+`, so no address register is written.
-        if (spec.slotOk) {
-            nonBranch.push_back(&spec);
-            if (!NeedsSetup(spec.addr)) {
-                singles.push_back(&spec);
-            }
-        }
-    }
-
     // Third rig: when the x64 backend is available, an x64 executor runs the same program and must
     // match the IR executor (Pair::exec, always BackendKind::Ir here) after every step: same ExitInfo,
     // same state, memory, bus-wait query sequence and peripherals.
@@ -628,10 +477,8 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     uint64_t x64CompileFallbacks = 0;
     uint64_t x64Interpreted = 0;
 
-    enum class Br { None, Bt, Bf, Bts, Bfs, Bra, Bsr, Braf, Bsrf };
     for (int prog = 0; prog < kPrograms; ++prog) {
         const uint32_t seed = 0xF0220000u + static_cast<uint32_t>(prog);
-        std::mt19937 rng(seed);
         Pair p{brimir::jit::BackendKind::Ir};
         std::unique_ptr<Rig> x64Rig;
         std::unique_ptr<brimir::jit::Executor> x64Exec;
@@ -639,135 +486,15 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
             x64Rig = std::make_unique<Rig>();
             x64Exec = std::make_unique<brimir::jit::Executor>(brimir::jit::BackendKind::X64);
         }
-        const uint32_t busWaitEvery = (rng() & 1u) ? 3u : 0u;
-        p.SetBusWaitEvery(busWaitEvery);
-        if (x64Rig) {
-            x64Rig->mmio.busWaitEvery = busWaitEvery;
-        }
-        const bool absR12 = (rng() & 1u) != 0;                         // JMP/JSR, else BRAF/BSRF
-        const int relDisp = static_cast<int>(rng() % 13) - 6;          // BRAF/BSRF: R12 = 2 * relDisp
-        const auto isLdsPr = [](const jitspec::OpSpec *s) { return std::string_view(s->name) == "LDS_PR_R"; };
-
-        // Pass 1: instructions, with branch displacements patched in pass 2 once the valid targets
-        // (the first word of every instruction group) are known.
-        std::vector<uint16_t> program;
-        std::vector<Br> branchKind;
-        std::vector<bool> pairSecond;
-        bool prevDelayed = false;
-        while (static_cast<int>(program.size()) < kLength) {
-            const int i = static_cast<int>(program.size());
-            const bool last = i == kLength - 1;
-            uint32_t pick = rng() % 16;
-            if (prevDelayed && pick >= 12) {
-                pick = rng() % 12; // delay slots never hold branches
-            } else if (last && pick >= 13) {
-                pick = rng() % 13; // no delayed branch last: its slot would be SLEEP
-            }
-            bool delayed = false;
-            if (pick < 12) {
-                // A setup group must fit before the end and never sits in a delay slot.
-                const auto &pool = (prevDelayed || last) ? singles : nonBranch;
-                const jitspec::OpSpec *spec = pool[rng() % pool.size()];
-                while (!absR12 && isLdsPr(spec)) {
-                    spec = pool[rng() % pool.size()]; // R12 is not an absolute address here
-                }
-                const std::vector<uint16_t> words = FuzzInstr(*spec, rng);
-                if (i + static_cast<int>(words.size()) > kLength) {
-                    continue; // a setup group must fit before the end: draw again
-                }
-                for (size_t k = 0; k < words.size(); ++k) {
-                    program.push_back(words[k]);
-                    branchKind.push_back(Br::None);
-                    pairSecond.push_back(k > 0);
-                }
-            } else {
-                Br kind = Br::None;
-                uint16_t word = 0;
-                const uint32_t sub = rng();
-                switch (pick) {
-                case 12: kind = (sub & 1u) ? Br::Bt : Br::Bf; break;
-                case 13: kind = (sub & 1u) ? Br::Bts : Br::Bfs; break;
-                case 14: kind = (sub & 1u) ? Br::Bra : Br::Bsr; break;
-                default: // register branches through R12, or RTS
-                    switch (sub % 3) {
-                    case 0:
-                        word = absR12 ? Jmp(12) : Braf(12);
-                        kind = absR12 ? Br::None : Br::Braf;
-                        break;
-                    case 1:
-                        word = absR12 ? Jsr(12) : Bsrf(12);
-                        kind = absR12 ? Br::None : Br::Bsrf;
-                        break;
-                    default: word = kRts; break;
-                    }
-                    break;
-                }
-                program.push_back(word);
-                branchKind.push_back(kind);
-                pairSecond.push_back(false);
-                delayed = pick >= 13;
-            }
-            prevDelayed = delayed;
-        }
-
-        // Pass 2: branch displacements.
-        std::vector<int> targets;
-        for (int i = 0; i < kLength; ++i) {
-            if (!pairSecond[i]) {
-                targets.push_back(i);
-            }
-        }
-        const auto randomTarget = [&] { return targets[rng() % targets.size()]; };
-        for (int i = 0; i < kLength; ++i) {
-            Br kind = branchKind[i];
-            if (kind == Br::Braf || kind == Br::Bsrf) {
-                const int t = i + 2 + relDisp;
-                if (t >= 0 && t < kLength && !pairSecond[t]) {
-                    continue; // the fixed R12 displacement lands on a valid target
-                }
-                kind = kind == Br::Braf ? Br::Bra : Br::Bsr; // out of range here: use the disp12 form
-            }
-            if (kind == Br::None) {
-                continue;
-            }
-            const uint32_t disp = static_cast<uint32_t>(randomTarget() - i - 2);
-            switch (kind) {
-            case Br::Bt: program[i] = Bt(disp); break;
-            case Br::Bf: program[i] = Bf(disp); break;
-            case Br::Bts: program[i] = Bts(disp); break;
-            case Br::Bfs: program[i] = Bfs(disp); break;
-            case Br::Bra: program[i] = Bra(disp); break;
-            case Br::Bsr: program[i] = Bsr(disp); break;
-            default: break;
-            }
-        }
-        for (int i = 0; i < 8; ++i) {
-            program.push_back(static_cast<uint16_t>(kSleep));
-        }
+        const sh2test::FuzzProgram fuzz = sh2test::MakeFuzzProgram(seed);
+        const std::vector<uint16_t> &program = fuzz.words;
+        p.SetBusWaitEvery(fuzz.busWaitEvery);
         p.WriteCode(kCode, program);
+        p.Load(fuzz.state);
         if (x64Rig) {
+            x64Rig->mmio.busWaitEvery = fuzz.busWaitEvery;
             x64Rig->WriteCode(kCode, program);
-        }
-
-        auto state = p.ref->BaseState(kCode);
-        for (int r : {0, 1, 2, 3, 4, 5, 6, 7, 13, 14, 15}) {
-            state.R[r] = rng();
-        }
-        state.R[8] = 0x26040000 + (rng() & 0xFF0u);
-        state.R[9] = 0x06040100 + (rng() & 0xFF0u);
-        state.R[10] = kMmio + (rng() & 0xF0u);
-        state.R[11] = 0x26048000;
-        state.GBR = state.R[8 + rng() % 4];
-        state.R[12] = absR12 ? kCode + 2 * static_cast<uint32_t>(randomTarget())
-                             : static_cast<uint32_t>(2 * relDisp);
-        state.PR = kCode + 2 * static_cast<uint32_t>(randomTarget());
-        state.SR = 0xF0 | (rng() & 1u);
-        state.wbReg = static_cast<uint8_t>(rng() % 17);
-        state.MACH = rng();
-        state.MACL = rng();
-        p.Load(state);
-        if (x64Rig) {
-            x64Rig->Load(state);
+            x64Rig->Load(fuzz.state);
         }
 
         INFO("seed 0x" << std::hex << seed << " program " << Hex(program));
@@ -1699,6 +1426,104 @@ TEST_CASE("Remapped code page", "[jit][diff]") {
         // The recompiled block is current: no further stale entries.
         p.Load(state);
         REQUIRE(p.Step().retired == 3);
+        CHECK(p.exec.GetStats().staleEntries == (native ? 1u : 0u));
+        CHECK(p.exec.Cache().Compiles() == (native ? 2u : 1u));
+    }
+}
+
+namespace {
+
+// A 64 KiB page served by read/write handlers over its own bytes (big-endian), with peeks over the
+// same bytes. Counts the handler reads (instruction fetches and data loads).
+struct HandlerPage {
+    std::array<uint8_t, 0x10000> data{};
+    uint32_t reads = 0;
+};
+
+uint32_t PageRead(HandlerPage &page, uint32_t address, uint32_t size, bool count) {
+    if (count) {
+        ++page.reads;
+    }
+    const uint32_t off = address & 0xFFFFu & ~(size - 1);
+    uint32_t value = 0;
+    for (uint32_t i = 0; i < size; ++i) {
+        value = (value << 8) | page.data[off + i];
+    }
+    return value;
+}
+
+void PageWrite(HandlerPage &page, uint32_t address, uint32_t size, uint32_t value) {
+    const uint32_t off = address & 0xFFFFu & ~(size - 1);
+    for (uint32_t i = 0; i < size; ++i) {
+        page.data[off + i] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+    }
+}
+
+void MapHandlerPage(Rig &rig, HandlerPage &page, uint32_t start) {
+    const uint32_t end = start + 0xFFFF;
+    rig.bus.MapNormal(
+        start, end, &page,
+        [](uint32_t a, void *c) -> uint8_t { return static_cast<uint8_t>(PageRead(*static_cast<HandlerPage *>(c), a, 1, true)); },
+        [](uint32_t a, void *c) -> uint16_t { return static_cast<uint16_t>(PageRead(*static_cast<HandlerPage *>(c), a, 2, true)); },
+        [](uint32_t a, void *c) -> uint32_t { return PageRead(*static_cast<HandlerPage *>(c), a, 4, true); },
+        [](uint32_t a, uint8_t v, void *c) { PageWrite(*static_cast<HandlerPage *>(c), a, 1, v); },
+        [](uint32_t a, uint16_t v, void *c) { PageWrite(*static_cast<HandlerPage *>(c), a, 2, v); },
+        [](uint32_t a, uint32_t v, void *c) { PageWrite(*static_cast<HandlerPage *>(c), a, 4, v); });
+    rig.bus.MapSideEffectFree(
+        start, end, &page,
+        [](uint32_t a, void *c) -> uint8_t { return static_cast<uint8_t>(PageRead(*static_cast<HandlerPage *>(c), a, 1, false)); },
+        [](uint32_t a, void *c) -> uint16_t { return static_cast<uint16_t>(PageRead(*static_cast<HandlerPage *>(c), a, 2, false)); },
+        [](uint32_t a, void *c) -> uint32_t { return PageRead(*static_cast<HandlerPage *>(c), a, 4, false); });
+}
+
+} // namespace
+
+// The page holding a compiled block (known refills, fetchFromArrays) is remapped from an array to a
+// handler page with the same bytes. The IR backend's entry re-check of the pages fails, so it calls
+// refillPipeline instead of storing known values; the x64 block reports stale once and is
+// recompiled without fetchFromArrays. Both make exactly the interpreter's handler reads.
+TEST_CASE("Code page remapped from an array to a handler page", "[jit][diff]") {
+    constexpr uint32_t kData = 0x06002000; // same 64 KiB page as the code
+    for (const auto kind : sh2test::AvailableBackends()) {
+        INFO("backend " << brimir::jit::BackendName(kind));
+        // Declared before the rigs: their buses point at these pages until the rigs are gone.
+        std::array<std::unique_ptr<HandlerPage>, 2> pages;
+        Pair p{kind};
+        // add #1,R3 ; mov.l @R9,R2 ; add #1,R3 ; sleep (tail word of the 3-instruction block)
+        p.WriteCode(kCode, {AddI(3, 1), MovLL(2, 9), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+        p.Write32(kData, 0x11111111);
+        auto state = p.ref->BaseState(kCode);
+        state.R[3] = 0;
+        state.R[9] = kData;
+        p.Load(state);
+        REQUIRE(p.Step().retired == 3);
+        REQUIRE(p.exec.Cache().Compiles() == 1);
+        REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).fetchFromArrays);
+
+        // Remap bus 0x6000000-0x600FFFF (SH-2 0x06000000) on both rigs to handlers over a copy.
+        Rig *rigs[2] = {p.ref.get(), p.jit.get()};
+        for (int i = 0; i < 2; ++i) {
+            pages[i] = std::make_unique<HandlerPage>();
+            std::copy_n(rigs[i]->ram->begin(), 0x10000, pages[i]->data.begin());
+            PageWrite(*pages[i], kData, 4, 0x22222222);
+            MapHandlerPage(*rigs[i], *pages[i], 0x6000000);
+        }
+        p.Load(state);
+        REQUIRE(p.Step().retired == 3);
+        CHECK(p.jit->State().R[2] == 0x22222222u);
+        CHECK(pages[0]->reads >= 3u);                // two refills and the load
+        CHECK(pages[1]->reads == pages[0]->reads);   // no known refill value was used
+        CHECK_FALSE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).fetchFromArrays);
+        const bool native = kind != brimir::jit::BackendKind::Ir;
+        CHECK(p.exec.GetStats().staleEntries == (native ? 1u : 0u));
+        CHECK(p.exec.Cache().Compiles() == (native ? 2u : 1u));
+        CHECK(p.exec.Cache().Invalidations() == (native ? 1u : 0u));
+        CHECK(p.exec.GetStats().blocksRun == 2u);
+
+        // Again: the block is current (validated through the peek callback), no stale entry.
+        p.Load(state);
+        REQUIRE(p.Step().retired == 3);
+        CHECK(pages[1]->reads == pages[0]->reads);
         CHECK(p.exec.GetStats().staleEntries == (native ? 1u : 0u));
         CHECK(p.exec.Cache().Compiles() == (native ? 2u : 1u));
     }

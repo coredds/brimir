@@ -23,7 +23,8 @@ public:
         uint64_t interpreted = 0;      // single instructions run by the interpreter
         uint64_t nativeBlocksRun = 0;  // compiled blocks run as native code
         uint64_t compileFallbacks = 0; // blocks the native backend could not compile (run with RunBlock)
-        uint64_t staleEntries = 0;     // native blocks dropped at entry because a code page was remapped
+        uint64_t staleEntries = 0;     // native blocks dropped at entry: guest code or code page changed
+        uint64_t chainedBlocks = 0;    // native blocks entered from another block (Run with chaining)
     };
 
     // Runs compiled blocks on `kind`; an unavailable kind falls back to BackendKind::Ir.
@@ -36,7 +37,15 @@ public:
         return m_kind;
     }
 
+    // Steps until `target`, writing *ctx.cyclesExecuted = executed before each step. With chaining
+    // (the default), a native block hands control to the next linked block itself, with the same
+    // checks and the same *ctx.cyclesExecuted updates as these steps (INativeBackend::Run).
     uint64 Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 target) override;
+
+    // Enables or disables block chaining in Run (tests and diagnostics; Step never chains).
+    void SetChaining(bool enabled) {
+        m_chaining = enabled;
+    }
 
     // Drops all compiled blocks. When called from inside a running block (a memory access that
     // resets the CPU), the flush is deferred until the block returns and the block is aborted.
@@ -56,14 +65,18 @@ public:
     }
 
 private:
-    // Runs a compiled block (native or RunBlock) with the in-block flush deferral.
-    ExitInfo RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint64 target);
+    // Step; with allowChain, a native block may chain to further blocks (Run).
+    ExitInfo StepImpl(ymir::sh2::SH2JitContext &ctx, uint64 target, bool allowChain);
+
+    // Runs a compiled block (native or RunBlock, and a native chain) with the in-block flush deferral.
+    ExitInfo RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint64 target, bool allowChain);
 
     BackendKind m_kind;
     std::unique_ptr<INativeBackend> m_native; // nullptr for BackendKind::Ir; declared before m_cache
     BlockCache m_cache;
     Stats m_stats;
-    bool m_inBlock = false;      // a block owned by m_cache is executing (native or RunBlock)
+    bool m_chaining = true;
+    bool m_inBlock = false;      // a block (or chain) owned by m_cache is executing
     bool m_flushPending = false; // Flush() was requested in a block; also the block's abort flag
 };
 

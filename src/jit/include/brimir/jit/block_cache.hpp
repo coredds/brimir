@@ -39,14 +39,16 @@ public:
         : m_native(native)
         , m_maxNativeCodeBytes(maxNativeCodeBytes) {}
 
-    // Returns the block for pc, compiling it on a miss or when its guest code changed.
+    // Returns the block for pc, compiling it on a miss or when its guest code changed. A native
+    // block with code.selfValidating is returned without checking its guest code (its prologue
+    // does, see ExitInfo::stale) and is published to the backend's link table.
     const CachedBlock &Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc);
 
     // Drops every block and, with a native backend, all of its generated code.
     void Flush();
 
-    // Drops the block for pc, if cached (a stale native block: its code pages were remapped).
-    // Never called while that block runs; its native code stays allocated until the next Flush.
+    // Drops the block for pc, if cached (a stale native block), and unpublishes it. Never called
+    // while generated code runs; its native code stays allocated until the next Flush.
     void Invalidate(uint32_t pc);
 
     size_t Size() const {
@@ -74,6 +76,9 @@ private:
     };
 
     static bool IsCurrent(const Block &block, ymir::sh2::SH2JitContext &ctx);
+
+    // IsCurrent, except for self-validating native blocks; publishes those.
+    bool Validate(const CachedBlock &entry, uint32_t pc, ymir::sh2::SH2JitContext &ctx);
 
     RecentSlot &SlotFor(uint32_t pc) {
         return m_recent[(pc >> 1) & (kRecentSlots - 1)];

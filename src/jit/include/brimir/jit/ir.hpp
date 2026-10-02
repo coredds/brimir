@@ -98,6 +98,15 @@ struct Inst {
 //   - no data access of this block run may have written the block's code before the refill
 //     ("codeDirty", RunBlock in interp_backend.cpp is the reference);
 // otherwise it calls refillPipeline(imm) like an unknown Refill.
+//
+// Refill callbacks never set codeDirty, which is sound because the front end never emits a
+// refill callback that can write memory before a known Refill: with fetchFromArrays every
+// Refill inside guestOpcodes is known, and its fallback fetches from an array page (no side
+// effects); the only unknown Refill (the last instruction's, when the tail word is not
+// compilable) and the runtime refills (taken ExitIf, EndDelaySlot) come after every known one.
+// VerifyBlock does not enforce this (hand-built and random test blocks mix them freely); a front
+// end change that emits an unknown Refill before a known one must make the backends set codeDirty
+// after such a callback.
 struct Block {
     uint32_t startPC = 0;
     // Guest code at startPC, startPC+2, ... (check-on-entry): the guestInstrCount instruction words,

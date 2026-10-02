@@ -250,11 +250,19 @@ Measured at the end of each milestone 2C task (`design/plans/2026-10-02-sh2-jit-
 | 2B (5799542) | Street Fighter Zero 3 | 6.690 (6.586 / 6.690 / 6.747) | 15.121 (15.121 / 14.974 / 15.151) | 0.442 | 280.969 | 249,823,349 / 188,696,964 | 0 / 0 |
 | 1: known refills, inline delay slots | Panzer Dragoon II Zwei | 7.409 (7.445 / 7.409 / 7.404) | 11.378 (11.378 / 11.398 / 11.336) | 0.651 | 19.320 | 355,340,100 / 205,691,327 | 0 / 0 |
 | 1: known refills, inline delay slots | Street Fighter Zero 3 | 6.637 (6.611 / 6.637 / 6.770) | 14.282 (14.279 / 14.327 / 14.282) | 0.465 | 328.892 | 249,823,349 / 188,696,964 | 0 / 0 |
+| 2: block chaining, in-block validation | Panzer Dragoon II Zwei | 7.554 (7.641 / 7.554 / 7.545) | 7.963 (7.919 / 7.963 / 8.091) | 0.949 | 15.745 | 355,340,100 / 205,691,327 | 0 / 0 |
+| 2: block chaining, in-block validation | Street Fighter Zero 3 | 6.841 (6.875 / 6.841 / 6.791) | 11.610 (11.610 / 11.428 / 11.717) | 0.589 | 369.887 | 249,823,349 / 188,696,964 | 0 / 0 |
 
 Task 1 notes:
 - x64 SH2 total fell 14.6% in Panzer Dragoon II Zwei (13.33 to 11.38 ms/frame) and 5.5% in Street Fighter Zero 3 (15.12 to 14.28), whose x64 time is dominated by compile churn (profile above).
 - Every x64 run reported `staleEntries 0` on both CPUs; block counts are identical to the 2B runs.
 - Street Fighter Zero 3's max frame rose from 278–282 ms to 319–329 ms. The inline refills, delay slots, entry checks and store classification make each block's code larger and its compile slower, which shows up in the flush-and-recompile stalls (Task 5 addresses them).
+
+Task 2 notes:
+- x64 SH2 total fell 30.0% in Panzer Dragoon II Zwei (11.38 to 7.96 ms/frame) and 18.7% in Street Fighter Zero 3 (14.28 to 11.61). Block counts are identical to the earlier rows (the chain runs exactly the blocks the executor's steps ran).
+- Share of native blocks entered by chaining (`chainedBlocks / nativeBlocksRun`), and blocks per chain (`nativeBlocksRun / (nativeBlocksRun - chainedBlocks)`): PD2 master 81.8% / 5.5, slave 73.8% / 3.8; SFZ3 master 74.9% / 4.0, slave 72.8% / 3.7.
+- `staleEntries` is now 49 (PD2) and 258 (SFZ3) on the master, 0 on the slave: native blocks validate their own code at entry, so a code change found there is counted as stale (it used to be a block-cache invalidation in `IsCurrent`, which native blocks no longer call).
+- Street Fighter Zero 3's max frame rose again, to 356–378 ms: the prologue's code compare and the chain exits make each block's code larger still (Task 5).
 
 ## Reproduce
 

@@ -66,8 +66,14 @@ constexpr int32_t kOutBoundary = static_cast<int32_t>(offsetof(X64Frame, out) + 
 constexpr int32_t kOutBusWait = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, busWait));
 constexpr int32_t kOutAborted = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, aborted));
 constexpr int32_t kOutStale = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, stale));
+constexpr int32_t kOutBlocksRun = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, blocksRun));
 constexpr int32_t kFrameStop = static_cast<int32_t>(offsetof(X64Frame, stop));
 constexpr int32_t kFrameCodeDirty = static_cast<int32_t>(offsetof(X64Frame, codeDirty));
+constexpr int32_t kFrameAllowChain = static_cast<int32_t>(offsetof(X64Frame, allowChain));
+constexpr int32_t kFrameChained = static_cast<int32_t>(offsetof(X64Frame, chained));
+static_assert(sizeof(ExitInfo::blocksRun) == 4);
+constexpr int32_t kLinkPc = static_cast<int32_t>(offsetof(X64LinkSlot, pc));
+constexpr int32_t kLinkEntry = static_cast<int32_t>(offsetof(X64LinkSlot, entry));
 constexpr int32_t kCtxR = static_cast<int32_t>(offsetof(ymir::sh2::SH2JitContext, R));
 
 // 32-bit immediates for 32-bit operations, as asmjit expects them (sign-extended form).
@@ -104,17 +110,25 @@ uint32_t SizeIndex(uint32_t size) {
 
 class Emitter {
 public:
-    Emitter(x86::Compiler &cc, const Block &block, const StateOffsets &off, const ymir::sh2::SH2JitBusLayout &bus)
+    Emitter(x86::Compiler &cc, const Block &block, const StateOffsets &off, const ymir::sh2::SH2JitBusLayout &bus,
+            const X64LinkSlot *links)
         : m_cc(cc)
         , m_block(block)
         , m_off(off)
         , m_bus(bus)
         , m_inlineBus(CanInlineBus(bus))
+        , m_links(links)
         , m_values(block.numValues) {
+        // The block's code in host memory, if it is all on array pages now.
+        const bool onArrays =
+            m_inlineBus && !block.guestOpcodes.empty() &&
+            FindCodeHostRanges(bus, block.startPC, static_cast<uint32_t>(block.guestOpcodes.size()), m_ranges);
+        // Self-validation compares those bytes at entry; the chained-entry gates need the
+        // delay-slot flag and the fetch buffer (hasDelaySlot), and chaining needs the link table.
+        m_selfValidating = onArrays && off.hasDelaySlot && links != nullptr;
         // Known refills need the inline bus (for the entry check and the store classification),
         // the fetch buffer's offset, and code on array pages now as when the front end checked.
-        m_known = m_inlineBus && off.hasFetchedOpcodes && block.fetchFromArrays &&
-                  FindCodeHostRanges(bus, block.startPC, static_cast<uint32_t>(block.guestOpcodes.size()), m_ranges);
+        m_known = onArrays && off.hasFetchedOpcodes && block.fetchFromArrays;
         if (m_known) {
             for (size_t i = 0; i < block.code.size(); ++i) {
                 if (block.code[i].op == Op::Refill && block.code[i].flag) {
@@ -125,18 +139,37 @@ public:
         }
     }
 
+    bool SelfValidating() const {
+        return m_selfValidating;
+    }
+
     void Emit() {
-        FuncNode *func = m_cc.add_func(FuncSignature::build<void, X64Frame *>());
+        FuncNode *func = m_cc.add_func(FuncSignature::build<const void *, X64Frame *>());
         m_frame = m_cc.new_gp_ptr("frame");
         func->set_arg(0, m_frame);
-        if (m_known) {
-            EmitEntryCheck();
-        }
+        m_retNull = m_cc.new_label();
         m_regs = m_cc.new_gp_ptr("regs");
         m_cc.mov(m_regs, x86::qword_ptr(m_frame, kFrameCtx));
         m_cc.mov(m_regs, x86::qword_ptr(m_regs, kCtxR));
+
+        // Prologue (x64_emitter.hpp): validation, chained-entry gates, block count.
+        if (m_selfValidating || m_known) {
+            m_stale = m_cc.new_label();
+            EmitPageCheck();
+            if (m_selfValidating) {
+                EmitCodeCheck();
+            }
+        }
+        if (m_selfValidating) {
+            EmitChainGates();
+        }
+        m_cc.add(x86::dword_ptr(m_frame, kOutBlocksRun), 1);
+        if (m_known) {
+            m_cc.mov(x86::byte_ptr(m_frame, kFrameCodeDirty), 0); // per block: a chain shares the frame
+        }
+        // Cycles count from the start of the chain (0 for its first block).
         m_cycles = m_cc.new_gp64("cycles");
-        m_cc.xor_(m_cycles, m_cycles);
+        m_cc.mov(m_cycles, x86::qword_ptr(m_frame, kOutCycles));
 
         for (size_t i = 0; i < m_block.code.size(); ++i) {
             // Data accesses before the last known refill classify themselves for codeDirty.
@@ -148,18 +181,30 @@ public:
         for (const BoundaryStub &stub : m_stubs) {
             m_cc.bind(stub.label);
             WriteExit(true, stub.pc, stub.retired, m_cycles, true);
+            m_cc.jmp(m_retNull);
         }
         // Stale entry: out.stale only (nothing else was written).
-        if (m_known) {
+        if (m_selfValidating || m_known) {
             m_cc.bind(m_stale);
             m_cc.mov(x86::byte_ptr(m_frame, kOutStale), 1);
-            m_cc.ret();
+            m_cc.jmp(m_retNull);
+        }
+        // Chained entry with a pending delay slot (never happens; see TrChainedInDelaySlot).
+        if (m_selfValidating) {
+            m_cc.bind(m_delaySlotStub);
+            Call(&TrChainedInDelaySlot, {});
+            m_cc.jmp(m_retNull);
         }
         // The shared abort exit taken when a trampoline sets frame->stop.
         if (m_abortUsed) {
             m_cc.bind(m_abort);
             AbortExit(m_cycles);
         }
+        // Every non-chaining exit: return nullptr to X64Backend::Run.
+        m_cc.bind(m_retNull);
+        x86::Gp none = m_cc.new_gp_ptr();
+        m_cc.xor_(none, none);
+        m_cc.ret(none);
         m_cc.end_func();
     }
 
@@ -199,7 +244,8 @@ private:
         }
     }
 
-    // Writes PC (if setPC), out.retired, out.boundary (if boundary) and out.cycles, then returns.
+    // Writes PC (if setPC), out.retired, out.boundary (if boundary) and out.cycles. The caller then
+    // returns (jmp m_retNull) or chains (ChainExit).
     void WriteExit(bool setPC, uint32_t pc, uint8_t retired, const x86::Gp &cycles, bool boundary) {
         if (setPC) {
             m_cc.mov(State32(m_off.PC), Imm32(pc));
@@ -209,14 +255,53 @@ private:
             m_cc.mov(x86::byte_ptr(m_frame, kOutBoundary), 1);
         }
         m_cc.mov(x86::qword_ptr(m_frame, kOutCycles), cycles);
-        m_cc.ret();
+    }
+
+    // After WriteExit of a chainable exit: what Executor::Run does before its next Step, then the
+    // link-table lookup for PC (`pc` when constPC, else read back from the state).
+    void ChainExit(bool constPC, uint32_t pc, const x86::Gp &cycles) {
+        if (m_links == nullptr) {
+            m_cc.jmp(m_retNull);
+            return;
+        }
+        m_cc.cmp(x86::byte_ptr(m_frame, kFrameAllowChain), 0);
+        m_cc.je(m_retNull);
+        // *cyclesExecuted = entryCycles + cycles (Executor::Run, before each Step).
+        x86::Gp now = m_cc.new_gp64();
+        m_cc.mov(now, x86::qword_ptr(m_frame, kFrameEntryCycles));
+        m_cc.add(now, cycles);
+        m_cc.mov(x86::qword_ptr(m_regs, m_off.cyclesExecuted), now);
+        // Run's loop ends once the target is reached.
+        m_cc.cmp(cycles, x86::qword_ptr(m_frame, kFrameLimit));
+        m_cc.jae(m_retNull);
+        x86::Gp slot = m_cc.new_gp64();
+        if (constPC) {
+            m_cc.mov(slot, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&m_links[LinkIndex(pc)])));
+            m_cc.cmp(x86::dword_ptr(slot, kLinkPc), Imm32(pc));
+        } else {
+            x86::Gp next = m_cc.new_gp32();
+            x86::Gp index = m_cc.new_gp64();
+            m_cc.mov(next, State32(m_off.PC));
+            m_cc.mov(index.r32(), next); // zero-extends
+            m_cc.shr(index.r32(), 1);
+            m_cc.and_(index.r32(), Imm32(kLinkSlots - 1));
+            m_cc.shl(index, 4); // sizeof(X64LinkSlot)
+            m_cc.mov(slot, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_links)));
+            m_cc.add(slot, index);
+            m_cc.cmp(x86::dword_ptr(slot, kLinkPc), next);
+        }
+        m_cc.jne(m_retNull);
+        x86::Gp entry = m_cc.new_gp_ptr();
+        m_cc.mov(entry, x86::qword_ptr(slot, kLinkEntry));
+        m_cc.mov(x86::byte_ptr(m_frame, kFrameChained), 1);
+        m_cc.ret(entry);
     }
 
     // RunBlock's abort exit: out.aborted = true, out.cycles; PC and out.retired untouched.
     void AbortExit(const x86::Gp &cycles) {
         m_cc.mov(x86::byte_ptr(m_frame, kOutAborted), 1);
         m_cc.mov(x86::qword_ptr(m_frame, kOutCycles), cycles);
-        m_cc.ret();
+        m_cc.jmp(m_retNull);
     }
 
     // Calls a trampoline: frame, then `args` (registers or immediates), result into `ret` if given.
@@ -426,9 +511,9 @@ private:
         m_mayBeDirty = true;
     }
 
-    // Entry check of a block with known refills: every code page still has its compile-time array.
-    void EmitEntryCheck() {
-        m_stale = m_cc.new_label();
+    // Entry check of a self-validating block or one with known refills: every code page still has
+    // its compile-time array (so m_ranges still points at the block's code).
+    void EmitPageCheck() {
         std::vector<const uint8_t *> entries;
         for (size_t i = 0; i < m_block.guestOpcodes.size(); ++i) {
             const uint8_t *entry = brimir::jit::PageEntry(m_bus, m_block.startPC + static_cast<uint32_t>(i * 2));
@@ -445,6 +530,79 @@ private:
             m_cc.cmp(x86::qword_ptr(e, static_cast<int32_t>(m_bus.arrayOffset)), expected);
             m_cc.jne(m_stale);
         }
+    }
+
+    // Self-validation, after EmitPageCheck: the code bytes in host memory (big-endian words, as on
+    // the bus) still equal guestOpcodes. With the page check this is BlockCache::IsCurrent, which
+    // reads the same arrays through FastPeek16. Compared 8 bytes at a time, then 4 and 2.
+    void EmitCodeCheck() {
+        std::vector<uint8_t> bytes;
+        bytes.reserve(m_block.guestOpcodes.size() * 2);
+        for (const uint16_t op : m_block.guestOpcodes) {
+            bytes.push_back(static_cast<uint8_t>(op >> 8));
+            bytes.push_back(static_cast<uint8_t>(op));
+        }
+        size_t pos = 0; // FindCodeHostRanges fills the ranges in word order
+        for (uint32_t r = 0; r < m_ranges.count; ++r) {
+            const auto length = static_cast<size_t>(m_ranges.hi[r] - m_ranges.lo[r]);
+            x86::Gp base = m_cc.new_gp64();
+            m_cc.mov(base, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_ranges.lo[r])));
+            size_t o = 0;
+            while (length - o >= 8) {
+                uint64_t v = 0;
+                std::memcpy(&v, bytes.data() + pos + o, 8);
+                x86::Gp expected = m_cc.new_gp64();
+                m_cc.mov(expected, v);
+                m_cc.cmp(x86::qword_ptr(base, static_cast<int32_t>(o)), expected);
+                m_cc.jne(m_stale);
+                o += 8;
+            }
+            if (length - o >= 4) {
+                uint32_t v = 0;
+                std::memcpy(&v, bytes.data() + pos + o, 4);
+                m_cc.cmp(x86::dword_ptr(base, static_cast<int32_t>(o)), Imm32(v));
+                m_cc.jne(m_stale);
+                o += 4;
+            }
+            if (length - o >= 2) {
+                uint16_t v = 0;
+                std::memcpy(&v, bytes.data() + pos + o, 2);
+                m_cc.cmp(x86::word_ptr(base, static_cast<int32_t>(o)), Imm(static_cast<int16_t>(v)));
+                m_cc.jne(m_stale);
+                o += 2;
+            }
+            assert(o == length);
+            pos += length;
+        }
+        assert(pos == bytes.size());
+    }
+
+    // Executor::Step's checks, repeated when this block is entered by chaining (they hold for the
+    // executor's own entry, which already made them).
+    void EmitChainGates() {
+        m_delaySlotStub = m_cc.new_label();
+        const Label notChained = m_cc.new_label();
+        const Label noInterrupt = m_cc.new_label();
+        m_cc.cmp(x86::byte_ptr(m_frame, kFrameChained), 0);
+        m_cc.je(notChained);
+        // Step: delay slot pending -> interpreter. No chainable exit leaves one pending.
+        m_cc.cmp(State8(m_off.delaySlot), 0);
+        m_cc.jne(m_delaySlotStub);
+        // Step: interrupt pending and allowed -> interpreter (interrupt entry).
+        m_cc.cmp(State8(m_off.intrPending), 0);
+        m_cc.je(noInterrupt);
+        m_cc.cmp(State8(m_off.intrAllow), 0);
+        m_cc.jne(m_retNull);
+        m_cc.bind(noInterrupt);
+        if ((m_block.startPC & 2u) != 0) {
+            // Step: at PC & 2 the fetch buffer's low half must be the opcode in memory, which the
+            // code check has just shown to be guestOpcodes[0].
+            m_cc.cmp(x86::word_ptr(m_regs, m_off.fetchedOpcodes), Imm(static_cast<int16_t>(m_block.guestOpcodes[0])));
+            m_cc.jne(m_retNull);
+        }
+        // RunEntry: *intrAllow = true before the block.
+        m_cc.mov(State8(m_off.intrAllow), 1);
+        m_cc.bind(notChained);
     }
 
     void LowerRefill(const Inst &in) {
@@ -602,6 +760,7 @@ private:
         m_cc.jz(cont);
         m_cc.mov(x86::byte_ptr(m_frame, kOutBusWait), 1);
         WriteExit(true, in.imm, in.retired, m_cycles, false);
+        m_cc.jmp(m_retNull);
         m_cc.bind(cont);
     }
 
@@ -770,11 +929,18 @@ private:
                 m_cc.bind(go);
             }
             WriteExit(true, in.imm, in.retired, taken, false);
+            ChainExit(true, in.imm, taken);
             m_cc.bind(notTaken);
             break;
         }
-        case Op::Exit: WriteExit(true, in.imm, in.retired, m_cycles, false); break;
-        case Op::ExitDynamic: WriteExit(false, 0, in.retired, m_cycles, false); break;
+        case Op::Exit:
+            WriteExit(true, in.imm, in.retired, m_cycles, false);
+            ChainExit(true, in.imm, m_cycles);
+            break;
+        case Op::ExitDynamic:
+            WriteExit(false, 0, in.retired, m_cycles, false);
+            ChainExit(false, 0, m_cycles);
+            break;
 
         // Calls out of generated code (trampolines, see x64_emitter.hpp).
         // Load/Store/AddAccessCycles/ExitIfBusWait are inline on array pages (bus fast path), with
@@ -812,6 +978,7 @@ private:
     const StateOffsets &m_off;
     const ymir::sh2::SH2JitBusLayout &m_bus;
     bool m_inlineBus; // inline RAM/ROM accesses and access cycles (CanInlineBus)
+    const X64LinkSlot *m_links; // the backend's link table (nullptr: never chain)
     std::vector<x86::Gp> m_values; // one 32-bit virtual register per IR value
     std::vector<BoundaryStub> m_stubs;
     x86::Gp m_frame;
@@ -821,10 +988,13 @@ private:
     bool m_abortUsed = false;
     bool m_known = false;              // known refills store their value (entry check emitted)
     ptrdiff_t m_lastKnownRefill = -1;  // index of the last known Refill in block.code (m_known)
-    CodeHostRanges m_ranges;           // the block's code in host memory (m_known)
+    CodeHostRanges m_ranges;           // the block's code in host memory (m_selfValidating or m_known)
     bool m_trackDirty = false;         // the op being lowered must classify its accesses for codeDirty
     bool m_mayBeDirty = false;         // an access emitted so far can set codeDirty
-    Label m_stale;                     // stale entry exit (m_known)
+    bool m_selfValidating = false;     // prologue validates the code and gates chained entries
+    Label m_stale;                     // stale entry exit (m_selfValidating or m_known)
+    Label m_delaySlotStub;             // chained entry with a pending delay slot (m_selfValidating)
+    Label m_retNull;                   // return nullptr: every exit that does not chain
 };
 
 } // namespace
@@ -897,12 +1067,16 @@ bool CanEmitBlock(const Block &block) {
     return true;
 }
 
-bool EmitBlock(x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx) {
+bool EmitBlock(x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx,
+               const X64LinkSlot *links, bool &selfValidating) {
+    selfValidating = false;
     StateOffsets off{};
     if (!CanEmitBlock(block) || !ComputeOffsets(ctx, off)) {
         return false;
     }
-    Emitter(cc, block, off, ctx.bus).Emit();
+    Emitter emitter(cc, block, off, ctx.bus, links);
+    emitter.Emit();
+    selfValidating = emitter.SelfValidating();
     return true;
 }
 

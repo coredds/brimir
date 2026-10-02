@@ -348,12 +348,13 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
         if (exec != nullptr) {
             const auto& stats = exec->GetStats();
             std::printf("jit %-9s: blocksRun %llu  interpreted %llu  nativeBlocksRun %llu  compileFallbacks %llu  "
-                        "staleEntries %llu\n",
+                        "staleEntries %llu  chainedBlocks %llu\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(stats.blocksRun),
                         static_cast<unsigned long long>(stats.interpreted),
                         static_cast<unsigned long long>(stats.nativeBlocksRun),
                         static_cast<unsigned long long>(stats.compileFallbacks),
-                        static_cast<unsigned long long>(stats.staleEntries));
+                        static_cast<unsigned long long>(stats.staleEntries),
+                        static_cast<unsigned long long>(stats.chainedBlocks));
         }
     }
 }

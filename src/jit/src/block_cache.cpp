@@ -21,11 +21,24 @@ bool BlockCache::IsCurrent(const Block &block, ymir::sh2::SH2JitContext &ctx) {
     return true;
 }
 
+bool BlockCache::Validate(const CachedBlock &entry, uint32_t pc, ymir::sh2::SH2JitContext &ctx) {
+    if (entry.code.selfValidating) {
+        // Its prologue checks the guest code. Re-publishing restores a link slot that another PC
+        // took over (the table is direct-mapped).
+        m_native->Publish(pc, entry.code);
+        return true;
+    }
+    return IsCurrent(entry.block, ctx);
+}
+
 void BlockCache::Invalidate(BlockMap::iterator it) {
     // Its native code (if any) stays allocated until the next Flush.
     RecentSlot &slot = SlotFor(it->first);
     if (slot.entry == it->second.get()) {
         slot = RecentSlot{};
+    }
+    if (it->second->code.selfValidating) {
+        m_native->Unpublish(it->first);
     }
     ++m_invalidations;
     m_totalInsts -= it->second->block.code.size();
@@ -40,11 +53,11 @@ void BlockCache::Invalidate(uint32_t pc) {
 
 const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
     RecentSlot &slot = SlotFor(pc);
-    if (slot.entry != nullptr && slot.pc == pc && IsCurrent(slot.entry->block, ctx)) {
+    if (slot.entry != nullptr && slot.pc == pc && Validate(*slot.entry, pc, ctx)) {
         return *slot.entry;
     }
     if (auto it = m_blocks.find(pc); it != m_blocks.end()) {
-        if (slot.entry != it->second.get() && IsCurrent(it->second->block, ctx)) {
+        if (slot.entry != it->second.get() && Validate(*it->second, pc, ctx)) {
             slot = RecentSlot{pc, it->second.get()};
             return *it->second;
         }
@@ -75,6 +88,9 @@ const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
     CachedBlock *ref = entry.get();
     m_blocks.emplace(pc, std::move(entry));
     SlotFor(pc) = RecentSlot{pc, ref};
+    if (ref->code.selfValidating) {
+        m_native->Publish(pc, ref->code);
+    }
     return *ref;
 }
 

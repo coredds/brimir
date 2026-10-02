@@ -2,6 +2,7 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_fuzz_programs.hpp"
 #include "jit_random_ir.hpp"
 #include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
@@ -1149,5 +1150,455 @@ TEST_CASE("x64 reports a remapped code page as stale", "[jit][x64]") {
         CHECK(ran.retired == 4);
         CHECK(rig->State().R[3] == 0x77u);
         CHECK(rig->State().fetchedOpcodes == ((uint32_t{kAdd1_R3} << 16) | kAdd1_R3));
+    }
+}
+// ---- Block chaining (milestone 2C item 2, design/sh2-x64-performance.md) ----
+
+namespace {
+
+constexpr uint16_t kNop = 0x0009;
+constexpr uint16_t kAdd1_R4 = 0x7401; // add #1,R4
+
+// bra `to`, placed at `from`.
+uint16_t Bra(uint32_t from, uint32_t to) {
+    const int32_t disp = (static_cast<int32_t>(to) - static_cast<int32_t>(from) - 4) / 2;
+    return static_cast<uint16_t>(0xA000 | (static_cast<uint32_t>(disp) & 0xFFFu));
+}
+
+// An interpreter rig and an x64 rig, both run through SH2::Advance (so peripherals compare too).
+// The x64 executor runs with chaining, as Advance always does.
+struct ChainPair {
+    std::unique_ptr<Rig> ref = std::make_unique<Rig>();
+    std::unique_ptr<Rig> jit = std::make_unique<Rig>();
+    brimir::jit::Executor exec{BackendKind::X64};
+
+    void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
+        ref->WriteCode(address, words);
+        jit->WriteCode(address, words);
+    }
+    // Loads `state` on both rigs and attaches the executor (which flushes it).
+    void Start(const ymir::savestate::SH2SaveState &state) {
+        ref->Load(state);
+        jit->Load(state);
+        jit->sh2->SetJitExecutor(&exec);
+    }
+    // Advance(cycles) on both rigs: same cycles, state, memory, bus accesses and peripherals.
+    void Advance(uint64_t cycles) {
+        const uint64 refCycles = ref->sh2->Advance<false, false>(cycles);
+        const uint64 jitCycles = jit->sh2->Advance<false, false>(cycles);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit, true);
+        INFO(diff);
+        REQUIRE(diff.empty());
+    }
+};
+
+constexpr uint32_t kIntrVbr = 0x06008000;
+constexpr uint32_t kIntrVector = 0x50;
+constexpr uint32_t kIntrHandler = 0x06009000;
+constexpr uint32_t kIntrStack = 0x0600F000;
+
+// The DIVU overflow interrupt (level 15, vector kIntrVector, handler: SLEEP), raised by a write to
+// DVDNT while DVSR is 0 (as in test_jit_diff.cpp's interrupt tests).
+void SetUpDivuInterrupt(Rig &rig) {
+    rig.Write32(kIntrVbr + kIntrVector * 4, kIntrHandler);
+    rig.WriteCode(kIntrHandler, {static_cast<uint16_t>(kSleep)});
+    auto &ctx = rig.sh2->GetJitContext();
+    ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);         // DVCR.OVFIE = 1
+    ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kIntrVector); // VCRDIV
+    ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);        // IPRA: DIVU level 15
+}
+
+} // namespace
+
+// The random programs of the fuzz test (jit_fuzz_programs.hpp), each on three rigs through
+// SH2::Advance in random chunks: the interpreter, an x64 executor that chains blocks, and an x64
+// executor with chaining off (Executor::Run then runs one block per Step). Both must match the
+// interpreter at every Advance return, and chaining must run exactly the stepped executor's blocks.
+TEST_CASE("Chained run equals stepped run", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr int kPrograms = 300;
+    constexpr int kAdvances = 40;
+    uint64_t totalChained = 0;
+    uint64_t totalNative = 0;
+    for (int prog = 0; prog < kPrograms; ++prog) {
+        const uint32_t seed = 0xF0220000u + static_cast<uint32_t>(prog);
+        const sh2test::FuzzProgram fuzz = sh2test::MakeFuzzProgram(seed);
+        INFO("seed 0x" << std::hex << seed);
+        auto ref = std::make_unique<Rig>();
+        auto chainRig = std::make_unique<Rig>();
+        auto stepRig = std::make_unique<Rig>();
+        brimir::jit::Executor chainExec{BackendKind::X64};
+        brimir::jit::Executor stepExec{BackendKind::X64};
+        stepExec.SetChaining(false);
+        for (Rig *rig : {ref.get(), chainRig.get(), stepRig.get()}) {
+            rig->mmio.busWaitEvery = fuzz.busWaitEvery;
+            rig->WriteCode(sh2test::kFuzzCode, fuzz.words);
+            rig->Load(fuzz.state);
+        }
+        chainRig->sh2->SetJitExecutor(&chainExec);
+        stepRig->sh2->SetJitExecutor(&stepExec);
+
+        std::mt19937 rng(seed ^ 0xC4A1u);
+        for (int i = 0; i < kAdvances; ++i) {
+            const uint64_t cycles = 1 + rng() % 64;
+            INFO("advance " << std::dec << i << " cycles " << cycles);
+            const uint64 refCycles = ref->sh2->Advance<false, false>(cycles);
+            const uint64 chainCycles = chainRig->sh2->Advance<false, false>(cycles);
+            const uint64 stepCycles = stepRig->sh2->Advance<false, false>(cycles);
+            REQUIRE(chainCycles == refCycles);
+            REQUIRE(stepCycles == refCycles);
+            {
+                const std::string diff = sh2test::DiffRigs(*ref, *chainRig, true);
+                INFO("chained: " << diff);
+                REQUIRE(diff.empty());
+            }
+            {
+                const std::string diff = sh2test::DiffRigs(*ref, *stepRig, true);
+                INFO("stepped: " << diff);
+                REQUIRE(diff.empty());
+            }
+            if (ref->State().sleep) {
+                break;
+            }
+        }
+        // A chain runs the blocks the stepped executor runs, one per Step.
+        const auto &chained = chainExec.GetStats();
+        const auto &stepped = stepExec.GetStats();
+        REQUIRE(chained.blocksRun == stepped.blocksRun);
+        REQUIRE(chained.nativeBlocksRun == stepped.nativeBlocksRun);
+        REQUIRE(chained.interpreted == stepped.interpreted);
+        REQUIRE(chained.compileFallbacks == stepped.compileFallbacks);
+        REQUIRE(chained.staleEntries == stepped.staleEntries);
+        REQUIRE(chainExec.Cache().Compiles() == stepExec.Cache().Compiles());
+        REQUIRE(stepped.chainedBlocks == 0u);
+        totalChained += chained.chainedBlocks;
+        totalNative += chained.nativeBlocksRun;
+    }
+    // Measured (milestone 2C task 2): 34533 of 42789 native blocks chained (81%). The bound leaves
+    // room for generator changes but fails if chaining mostly stops happening.
+    WARN("chained blocks " << totalChained << " of " << totalNative << " native blocks");
+    CHECK(totalChained * 100 >= totalNative * 60);
+}
+
+// A store raises the DIVU overflow interrupt at the end of a block (in a delay slot, or as the last
+// instruction of a maximum-length block), so no boundary check inside the block sees it. The block
+// chains to B, whose prologue must return to the executor: the interrupt is taken before B runs,
+// exactly where the interpreter takes it.
+TEST_CASE("Chain stops at a pending interrupt", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kStoreDvsr = 0x2762;  // mov.l R6,@R7 (R7 = DVSR)
+    constexpr uint16_t kClearR6 = 0xE600;    // mov #0,R6
+    constexpr uint16_t kStoreDvdnt = 0x2212; // mov.l R1,@R2 (R2 = DVDNT): divides by DVSR
+    for (const bool inDelaySlot : {true, false}) {
+        INFO((inDelaySlot ? "store in a delay slot" : "store ends a maximum-length block"));
+        ChainPair p;
+        // A sets DVSR = R6 (1 on the first pass, 0 afterwards) and then writes DVDNT; B is
+        // add #1,R4 ; bra A ; nop. The first pass compiles A and B; the second raises the interrupt.
+        std::vector<uint16_t> a;
+        uint32_t b = 0;
+        if (inDelaySlot) {
+            b = kCode + 0x20;
+            a = {kStoreDvsr, kClearR6, kAdd1_R3, Bra(kCode + 6, b), kStoreDvdnt};
+        } else {
+            a = {kStoreDvsr, kClearR6};
+            while (a.size() < brimir::jit::kMaxBlockInstructions - 1) {
+                a.push_back(kAdd1_R3);
+            }
+            a.push_back(kStoreDvdnt);
+            b = kCode + 2 * static_cast<uint32_t>(a.size());
+        }
+        p.WriteCode(kCode, a);
+        p.WriteCode(b, {kAdd1_R4, Bra(b + 2, kCode), kNop});
+        for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+            SetUpDivuInterrupt(*rig);
+        }
+        auto state = p.ref->BaseState(kCode);
+        // Interrupt mask 14: blocks IRL (raised at its reset level 1), lets the level-15 DIVU through.
+        state.SR = 0xE0;
+        state.VBR = kIntrVbr;
+        state.R[1] = 1234;
+        state.R[2] = 0xFFFFFF04;
+        state.R[3] = 0;
+        state.R[4] = 0;
+        state.R[6] = 1;
+        state.R[7] = 0xFFFFFF00;
+        state.R[15] = kIntrStack;
+        p.Start(state);
+        REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode).guestInstrCount == a.size());
+
+        p.Advance(400);
+        const auto end = p.ref->State();
+        REQUIRE(end.sleep);                            // the handler ran
+        CHECK(end.R[4] == 1u);                         // B ran on the first pass only
+        CHECK(p.ref->Read32(kIntrStack - 8) == b);     // stacked PC: B, before its first instruction
+        CHECK(p.exec.GetStats().chainedBlocks >= 1u);  // B chained into A for the second pass
+    }
+}
+
+// A ends at the maximum block length with a store over the next word (B's first instruction), after
+// the refill that loaded it into the fetch buffer. The interpreter then runs the old opcode from the
+// buffer. B, compiled earlier with the new opcode and linked, matches memory, so only the chained
+// PC & 2 gate (buffer vs the compiled opcode) keeps it from running.
+TEST_CASE("Chain respects the PC & 2 fetch-buffer gate", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kOld = 0x7401;      // add #1,R4
+    constexpr uint16_t kNew = 0x7410;      // add #16,R4
+    constexpr uint16_t kStoreR2 = 0x2121;  // mov.w R2,@R1 (R1 = B): B = kNew
+    constexpr uint16_t kStoreR5 = 0x2151;  // mov.w R5,@R1: B = kOld
+    const uint32_t a = kCode + 2;          // odd half
+    const uint32_t b = kCode + 0x42;       // odd half, right after A's last instruction
+    // kCode: nop (not run) ; A: 31 x add #1,R3 ; mov.w R2,@R1
+    // B: kNew ; mov.w R5,@R1 ; bra A ; nop
+    // Pass 1: B = kNew already, so the buffer matches and B is compiled with kNew. B then restores
+    // kOld; every later pass refills kOld into the buffer before A's store writes kNew.
+    std::vector<uint16_t> program{kNop};
+    for (uint32_t i = 0; i < brimir::jit::kMaxBlockInstructions - 1; ++i) {
+        program.push_back(kAdd1_R3);
+    }
+    program.push_back(kStoreR2);
+    REQUIRE(kCode + 2 * program.size() == b);
+    program.push_back(kNew);
+    program.push_back(kStoreR5);
+    program.push_back(Bra(b + 4, a));
+    program.push_back(kNop);
+
+    ChainPair p;
+    p.WriteCode(kCode, program);
+    auto state = p.ref->BaseState(a);
+    state.R[1] = b;
+    state.R[2] = kNew;
+    state.R[3] = 0;
+    state.R[4] = 0;
+    state.R[5] = kOld;
+    p.Start(state);
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), a).guestInstrCount ==
+            brimir::jit::kMaxBlockInstructions);
+
+    // About 10 passes of about 37 cycles (fewer than 16, so R4 < 32 tells kOld from kNew).
+    for (int i = 0; i < 4; ++i) {
+        INFO("advance " << i);
+        p.Advance(97);
+    }
+    const auto end = p.ref->State();
+    CHECK(end.R[4] > 16u + 2u); // later passes ran kOld from the fetch buffer...
+    CHECK(end.R[4] < 32u);      // ...never kNew
+    CHECK(p.exec.GetStats().chainedBlocks >= 1u);
+}
+
+// A and B branch to each other. Once both are linked, B's first instruction is changed between
+// Advance calls while the CPU is at A, so the next Advance reaches B by chaining. B's prologue
+// reports stale; the executor recompiles it, and the results match the interpreter.
+TEST_CASE("Stale block inside a chain", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kAdd2_R4 = 0x7402; // add #2,R4
+    const uint32_t b = kCode + 0x20;
+    ChainPair p;
+    // A: add #1,R3 ; bra B ; nop      B: add #1,R4 ; bra A ; nop
+    p.WriteCode(kCode, {kAdd1_R3, Bra(kCode + 2, b), kNop});
+    p.WriteCode(b, {kAdd1_R4, Bra(b + 2, kCode), kNop});
+    auto state = p.ref->BaseState(kCode);
+    state.R[3] = 0;
+    state.R[4] = 0;
+    p.Start(state);
+
+    bool modified = false;
+    uint32_t r4AtChange = 0;
+    for (int i = 0; i < 60; ++i) {
+        INFO("advance " << i << (modified ? " (B changed)" : ""));
+        p.Advance(modified ? 61 : 13);
+        const auto st = p.ref->State();
+        if (!modified && i >= 8 && st.PC == kCode && !st.delaySlot) {
+            REQUIRE(p.exec.GetStats().chainedBlocks >= 1u); // A and B are linked
+            p.WriteCode(b, {kAdd2_R4});
+            modified = true;
+            r4AtChange = st.R[4];
+        }
+    }
+    REQUIRE(modified);
+    const auto &stats = p.exec.GetStats();
+    CHECK(stats.staleEntries == 1u);
+    CHECK(p.exec.Cache().Invalidations() == 1u);
+    CHECK(p.ref->State().R[4] > r4AtChange + 2u); // B now adds 2 per pass
+}
+
+namespace {
+
+brimir::jit::Executor *g_chainExec = nullptr;
+uint32 (*g_chainOrigRead)(void *, uint32, uint32, bool) = nullptr;
+size_t g_cacheSizeAtFlush = 0;
+uint32_t g_chainFlushes = 0;
+
+// Requests a flush on every MMIO read, like a watchdog reset during a memory access.
+uint32 FlushingMmioRead(void *sh2, uint32 address, uint32 size, bool instrFetch) {
+    const uint32 value = g_chainOrigRead(sh2, address, size, instrFetch);
+    if (IsMmio(address)) {
+        g_cacheSizeAtFlush = g_chainExec->Cache().Size();
+        ++g_chainFlushes;
+        g_chainExec->Flush();
+    }
+    return value;
+}
+
+} // namespace
+
+// A flush requested by a block reached through chaining is deferred (the cache stays intact while
+// the chain runs), aborts that block and so the chain, and is applied once Run's block returns.
+TEST_CASE("Flush during a chain", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kLoadR2 = 0x6212; // mov.l @R1,R2 (R1: MMIO)
+    constexpr uint16_t kAdd1_R5 = 0x7501;
+    const uint32_t b = kCode + 0x20;
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{BackendKind::X64};
+    // A: add #1,R3 ; bra B ; nop      B: mov.l @R1,R2 ; add #1,R5 ; sleep
+    rig->WriteCode(kCode, {kAdd1_R3, Bra(kCode + 2, b), kNop});
+    rig->WriteCode(b, {kLoadR2, kAdd1_R5, static_cast<uint16_t>(kSleep)});
+    auto state = rig->BaseState(kCode);
+    state.R[1] = 0x22040000;
+    state.R[2] = 0;
+    state.R[3] = 0;
+    state.R[5] = 0;
+    rig->Load(state);
+    auto &ctx = rig->sh2->GetJitContext();
+
+    // Compile A and B (Step never chains), and measure A's cycles.
+    const ExitInfo first = exec.Step(ctx);
+    REQUIRE(first.retired == 3);
+    REQUIRE(*ctx.PC == b);
+    REQUIRE(exec.Step(ctx).retired == 2);
+    REQUIRE(exec.Cache().Size() == 2);
+    REQUIRE(exec.GetStats().chainedBlocks == 0u);
+
+    // The executor is not attached to the CPU, so loading the state does not flush it.
+    rig->Load(state);
+    g_chainExec = &exec;
+    g_chainOrigRead = ctx.read;
+    g_chainFlushes = 0;
+    ctx.read = FlushingMmioRead;
+    // Budget for A plus one cycle: A chains to B, and Run stops after B aborts.
+    const uint64 executed = exec.Run(ctx, 0, first.cycles + 1);
+    ctx.read = g_chainOrigRead;
+    g_chainExec = nullptr;
+
+    CHECK(g_chainFlushes == 1u);
+    CHECK(g_cacheSizeAtFlush == 2u);  // deferred while the chain ran
+    CHECK(exec.Cache().Size() == 0u); // applied after it returned
+    CHECK(executed > first.cycles);
+    const auto st = rig->State();
+    CHECK(st.PC == b);       // B aborted: PC is the one A wrote
+    CHECK(st.R[3] == 1u);    // A ran
+    CHECK(st.R[5] == 0u);    // B stopped at its load
+    CHECK(exec.GetStats().chainedBlocks == 1u);
+    CHECK(exec.GetStats().nativeBlocksRun == 4u);
+
+    // The next step recompiles B and runs it.
+    const ExitInfo next = exec.Step(ctx);
+    CHECK_FALSE(next.aborted);
+    CHECK(next.retired == 2);
+    CHECK(rig->State().R[5] == 1u);
+}
+namespace {
+
+// Records the refillPipeline and endDelaySlot callbacks with the running cycle count each sees.
+struct CallbackRecord {
+    char kind; // 'R' refillPipeline, 'E' endDelaySlot
+    uint32_t address;
+    uint64_t cyclesExecuted;
+};
+std::vector<CallbackRecord> *g_records = nullptr;
+const ymir::sh2::SH2JitContext *g_recordCtx = nullptr;
+void (*g_recordOrigRefill)(void *, uint32) = nullptr;
+void (*g_recordOrigEndDelaySlot)(void *) = nullptr;
+
+void RecordingRefill(void *sh2, uint32 address) {
+    g_records->push_back({'R', address, *g_recordCtx->cyclesExecuted});
+    g_recordOrigRefill(sh2, address);
+}
+
+void RecordingEndDelaySlot(void *sh2) {
+    g_records->push_back({'E', 0, *g_recordCtx->cyclesExecuted});
+    g_recordOrigEndDelaySlot(sh2);
+}
+
+} // namespace
+
+// A chained block must see what the executor's own step would give it: Executor::Run's
+// *cyclesExecuted update (seen by C's delay-slot end, a callback before any SyncCycles in C), and
+// a codeDirty flag of its own (A's handler write must not turn B's known refill into a callback).
+TEST_CASE("Chained blocks see the state a step would give them", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kMmioTarget = 0x22001002; // handler page, bit 1 set: TrEndDelaySlot
+    constexpr uint16_t kStoreMmio = 0x2122;      // mov.l R2,@R1 (R1: MMIO), before A's last refill
+    constexpr uint16_t kJmpR3 = 0x432B;          // jmp @R3
+    constexpr uint16_t kStoreRam = 0x2452;       // mov.l R5,@R4 (R4: RAM data, not code)
+    const uint32_t b = kCode + 0x20;
+    const uint32_t c = kCode + 0x40;
+    std::vector<CallbackRecord> records[2];
+    uint64_t chainedBlocks[2] = {};
+    for (int chaining = 0; chaining < 2; ++chaining) {
+        INFO("chaining " << chaining);
+        auto rig = std::make_unique<Rig>();
+        brimir::jit::Executor exec{BackendKind::X64};
+        exec.SetChaining(chaining != 0);
+        // A: mov.l R2,@R1 ; bra B ; nop      kMmioTarget: SLEEP
+        // B: mov.l R5,@R4 ; nop ; bra C ; nop (the refill before bra follows B's store, so it
+        // consults codeDirty, which B's store leaves clear)
+        // C: jmp @R3 ; nop (no SyncCycles before the delay-slot end)
+        rig->WriteCode(kCode, {kStoreMmio, Bra(kCode + 2, b), kNop});
+        rig->WriteCode(b, {kStoreRam, kNop, Bra(b + 4, c), kNop});
+        rig->WriteCode(c, {kJmpR3, kNop});
+        for (uint32_t i = 0; i < 4; ++i) {
+            rig->mmio.data[(kMmioTarget + 2 * i) & 0xFFFF] = 0x00;
+            rig->mmio.data[(kMmioTarget + 2 * i + 1) & 0xFFFF] = static_cast<uint8_t>(kSleep);
+        }
+        auto state = rig->BaseState(kCode);
+        state.R[1] = 0x22040000;
+        state.R[2] = 0x12345678;
+        state.R[3] = kMmioTarget;
+        state.R[4] = 0x06040000;
+        state.R[5] = 0x55AA55AA;
+        rig->Load(state);
+        auto &ctx = rig->sh2->GetJitContext();
+        exec.Run(ctx, 1000, 1200); // compiles A and B, and links them
+        REQUIRE(exec.Cache().Size() >= 3);
+        rig->Load(state); // the executor is not attached: no flush
+
+        g_records = &records[chaining];
+        g_recordCtx = &ctx;
+        g_recordOrigRefill = ctx.refillPipeline;
+        g_recordOrigEndDelaySlot = ctx.endDelaySlot;
+        ctx.refillPipeline = RecordingRefill;
+        ctx.endDelaySlot = RecordingEndDelaySlot;
+        const uint64_t chainedBefore = exec.GetStats().chainedBlocks;
+        exec.Run(ctx, 5000, 5200);
+        ctx.refillPipeline = g_recordOrigRefill;
+        ctx.endDelaySlot = g_recordOrigEndDelaySlot;
+        g_records = nullptr;
+        chainedBlocks[chaining] = exec.GetStats().chainedBlocks - chainedBefore;
+        CHECK(rig->State().PC == kMmioTarget); // asleep at the target
+    }
+    CHECK(chainedBlocks[0] == 0u);
+    CHECK(chainedBlocks[1] >= 2u); // B and C were entered by chaining
+    REQUIRE(records[0].size() >= 2u);
+    for (size_t i = 0; i < std::max(records[0].size(), records[1].size()); ++i) {
+        INFO("callback " << i);
+        REQUIRE(i < records[0].size());
+        REQUIRE(i < records[1].size());
+        CHECK(records[1][i].kind == records[0][i].kind);
+        CHECK(records[1][i].address == records[0][i].address);
+        CHECK(records[1][i].cyclesExecuted == records[0][i].cyclesExecuted);
     }
 }

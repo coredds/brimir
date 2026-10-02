@@ -65,9 +65,11 @@ startup (warmup included): `blocksRun` (compiled blocks executed),
 `interpreted` (instructions handed to the interpreter), `nativeBlocksRun`
 (compiled blocks executed as native code), `compileFallbacks` (blocks the
 native backend could not compile; they run on the IR interpreter) and
-`staleEntries` (native blocks dropped at entry because a code page was
-remapped since they were compiled; each is recompiled and run in the same
-step).
+`staleEntries` (native blocks dropped at entry because their code or a code
+page changed since they were compiled; each is recompiled and run) and
+`chainedBlocks` (native blocks entered directly from the previous block,
+without returning to the executor; `nativeBlocksRun / (nativeBlocksRun -
+chainedBlocks)` is the average chain length).
 
 `--jit-backend ir|x64` selects the JIT's code backend (`design/sh2-jit-m2.md`):
 `ir` runs compiled blocks on the IR interpreter, `x64` compiles them to native
@@ -145,8 +147,8 @@ lockstep: 600/36000 frames identical
 ...
 lockstep: OK, 36000 frames identical
 SH2 JIT backend: x64
-jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...
-jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...
+jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
+jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
 ```
 
 On the first difference it prints the frame number (0-based) and the first
