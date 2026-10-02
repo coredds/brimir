@@ -554,6 +554,10 @@ CpuSetup RandomCpu(const Rig &rig, std::mt19937 &rng) {
     s.state.intrAllow = below(2) != 0;
     s.intrPending = below(4) == 0;
     s.cycles = below(3) == 0 ? 0 : (static_cast<uint64_t>(word()) << below(24));
+    // The timers only count forward from the CPU's cycle count (asserted in AdvanceTo); the rig's
+    // timers carry the previous run's count, which may be ahead of the random one.
+    s.state.frt.cycleCount = s.cycles;
+    s.state.wdt.cycleCount = s.cycles;
     return s;
 }
 
