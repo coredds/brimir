@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend next (plan 2B)
+**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact, but the 2x target was missed (plan 2B, see [sh2-x64-performance.md](sh2-x64-performance.md)); optimization next (plan 2C)
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -267,6 +267,8 @@ This replaces the shadow-verify mode planned earlier: lockstep checks the whole 
 ### Milestone 2 - full coverage and x64 backend
 
 Design: [sh2-jit-m2.md](sh2-jit-m2.md). Remaining instructions (multiply, MAC, divide step, TAS, memory forms of LDC/LDS/STC/STS; done in milestone 2A), then native x64 code generation from the IR with asmjit, staying bit-exact. Target: SH-2 time at least 2x lower than the interpreter, after which the JIT becomes the default on x86-64.
+
+Outcome of 2B: the x64 backend is exact (BIOS menu plus six games, 36000 frames each, identical in lockstep with the interpreter; [sh2-validation.md](sh2-validation.md)), but the 2x target was missed: it takes 1.7–2.2x the interpreter's SH-2 time and stalls while compiling new code ([sh2-x64-performance.md](sh2-x64-performance.md)). The JIT stays off by default. Milestone 2C optimizes the backend along that report's conclusions (refill and delay-slot calls, block linking, per-block bookkeeping, cache capacity and compile cost).
 
 ### Milestone 3 — ARM64 backend (separate spec)
 

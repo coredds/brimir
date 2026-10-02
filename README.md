@@ -89,7 +89,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
 - **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
-- **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). Its backend is an IR interpreter, so it is not faster yet (about 2x slower); native backends are planned (see [design/sh2-jit.md](design/sh2-jit.md) and [ROADMAP.md](ROADMAP.md)).
+- **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter, but both are currently slower than the default interpreter (the x64 backend takes about 1.7–2.2x the interpreter's SH-2 time; see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)), and it may stutter (frame spikes) while compiling new code. It is not used while SH-2 cache emulation is active. Optimizations are planned (see [design/sh2-jit.md](design/sh2-jit.md) and [ROADMAP.md](ROADMAP.md)).
 
 ## Build Requirements
 
@@ -215,6 +215,7 @@ All dependencies are vendored in the `vendor/` directory:
 - **libchdr** -- CHD disc format support (includes zlib, zstd, lzma)
 - **dr_libs** -- MP3 decoding (dr_mp3) for CUE audio tracks
 - **stb** -- Ogg Vorbis decoding (stb_vorbis) for CUE audio tracks
+- **asmjit** -- x86-64 code generation for the SH-2 JIT (zlib license; x86-64 builds only)
 
 Upstream test suites, benchmarks and examples are not vendored.
 
@@ -224,7 +225,7 @@ Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license a
 
 ## Credits
 
-Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The hardware layer under `src/core/` is synced from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. The SH-2 files are a Brimir-maintained fork of Ymir's SH-2 with hooks for the SH-2 JIT; see `src/core/BRIMIR_FORK.md`. Apart from that fork, Brimir uses the hardware layer unmodified and wraps it in a libretro core, adding performance optimizations and frontend integration. Both projects are licensed under GPL.
+Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The hardware layer under `src/core/` is synced from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. The SH-2 files are a Brimir-maintained fork of Ymir's SH-2 with hooks for the SH-2 JIT, plus a read-only page-table accessor for the JIT in `ymir/sys/bus.hpp`; see `src/core/BRIMIR_FORK.md`. Apart from these, Brimir uses the hardware layer unmodified and wraps it in a libretro core, adding performance optimizations and frontend integration. Both projects are licensed under GPL.
 
 ## Contributing
 
