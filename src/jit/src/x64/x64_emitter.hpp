@@ -120,6 +120,18 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 // SetupDelaySlot and EndDelaySlot are inline (SH2::SetupDelaySlot, SH2::AdvancePC<..., true> with
 // cache emulation off) when ctx has delaySlot, fetchedOpcodes and intcPendingLevel; EndDelaySlot
 // calls TrEndDelaySlot for a target with bit 1 set off array pages.
+//
+// Register cache (design/sh2-x64-performance.md, 2C item 4): R0-R15 and SR are kept in virtual
+// registers inside the block (rules in x64_emitter.cpp, "Guest register cache"). Memory holds
+// them, as RunBlock would have written them, whenever generated code calls a trampoline that runs
+// a callback (TrDiv1/TrMacW/TrMacL, which read only SR, get SR), returns or chains, and at every
+// CheckBoundary; between those points it may be behind. This relies on no callback writing
+// R0-R15, and on SR being written only by setSR (and by Div1Step; the cache reloads SR after
+// both). The read/write/refill callbacks reach MemRead/MemWrite, whose on-chip register and device
+// side effects change only peripheral and interrupt state (interrupt recomputation reads SR.ILevel,
+// so SR is stored before every call), except a watchdog reset (SH2::Reset writes R, SR and PC),
+// which flushes the executor and so stops the block at that callback (TrRead/TrWrite/TrRefill)
+// before any cached value is used or stored again.
 bool EmitBlock(asmjit::x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx,
                const X64LinkSlot *links, bool &selfValidating);
 

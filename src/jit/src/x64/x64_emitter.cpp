@@ -3,6 +3,7 @@
 #include <brimir/jit/bus_fast_path.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstring>
@@ -210,6 +211,100 @@ public:
     }
 
 private:
+    // ---- Guest register cache (design/sh2-x64-performance.md, 2C item 4) ----
+    //
+    // R0-R15 and SR live in virtual registers inside the block. Lowering is a single pass in op
+    // order, so the cache state is known at compile time at every op. Its rules:
+    //   - GetReg/GetSR load a slot on first use; SetReg/SetT/SetSRBits replace its virtual register
+    //     (IR values are SSA: a slot's register is never written in place) and mark it dirty.
+    //   - Before every trampoline call the dirty slots are stored (callbacks may read them: SR.ILevel
+    //     through interrupt recomputation, and the abort and exception paths must leave RunBlock's
+    //     state). On the op's main path the store makes the slot clean; on a conditional path (an
+    //     inline access's slow path) the slot stays dirty, so both paths agree at the join and a
+    //     later flush only stores the same value again. Div1/MacW/MacL read SR only (x64_backend.cpp):
+    //     only SR is stored before them.
+    //   - Every exit stores the dirty slots: the final exits on the main path; a taken ExitIf on its
+    //     own path, leaving the fall-through cache unchanged. CheckBoundary stores them on the main
+    //     path before its test (write-back once per guest instruction), so its out-of-line stub has
+    //     nothing to store. Keeping slots dirty across checks instead, with each stub storing the
+    //     dirty set of its check, made code 11% larger and compiles slower for no measurable gain
+    //     (design/sh2-x64-performance.md, 2C progress, Task 4). The abort exit needs nothing: it
+    //     is only reached right after a call, before which everything was stored.
+    //   - Callbacks never write R0-R15 (x64_emitter.hpp, "Register cache"). SR is reloaded after
+    //     SetSR and Div1, whose helpers write it, and everything after EndDelaySlot.
+    static constexpr uint32_t kSlotSR = 16;
+    static constexpr uint32_t kSlots = 17;
+    struct CachedSlot {
+        x86::Gp value;
+        bool valid = false;
+        bool dirty = false;
+    };
+    struct DirtyStore {
+        int32_t offset;
+        x86::Gp value;
+    };
+
+    int32_t SlotOffset(uint32_t slot) const {
+        return slot == kSlotSR ? m_off.SR : static_cast<int32_t>(slot * 4);
+    }
+
+    const x86::Gp &CachedGet(uint32_t slot) {
+        CachedSlot &s = m_cache[slot];
+        if (!s.valid) {
+            s.value = m_cc.new_gp32();
+            m_cc.mov(s.value, State32(SlotOffset(slot)));
+            s.valid = true;
+            s.dirty = false;
+        }
+        return s.value;
+    }
+
+    void CachedSet(uint32_t slot, const x86::Gp &value) {
+        CachedSlot &s = m_cache[slot];
+        s.value = value;
+        s.valid = true;
+        s.dirty = true;
+    }
+
+    // The dirty slots now, for a store on another path (a taken ExitIf).
+    std::vector<DirtyStore> DirtySet() const {
+        std::vector<DirtyStore> set;
+        for (uint32_t slot = 0; slot < kSlots; ++slot) {
+            if (m_cache[slot].dirty) {
+                set.push_back({SlotOffset(slot), m_cache[slot].value});
+            }
+        }
+        return set;
+    }
+
+    void StoreDirty(const std::vector<DirtyStore> &set) {
+        for (const DirtyStore &d : set) {
+            m_cc.mov(State32(d.offset), d.value);
+        }
+    }
+
+    // Stores the dirty slots (SR only if srOnly). mainPath: the store is on the op's main path, so
+    // the slots become clean; otherwise they stay dirty (see the rules above).
+    void FlushRegs(bool mainPath, bool srOnly = false) {
+        for (uint32_t slot = srOnly ? kSlotSR : 0; slot < kSlots; ++slot) {
+            CachedSlot &s = m_cache[slot];
+            if (s.dirty) {
+                m_cc.mov(State32(SlotOffset(slot)), s.value);
+                if (mainPath) {
+                    s.dirty = false;
+                }
+            }
+        }
+    }
+
+    // Drops clean slots (reloaded on next use); the caller has stored them first.
+    void InvalidateRegs(bool srOnly = false) {
+        for (uint32_t slot = srOnly ? kSlotSR : 0; slot < kSlots; ++slot) {
+            assert(!m_cache[slot].dirty && "invalidating a dirty cached register");
+            m_cache[slot].valid = false;
+        }
+    }
+
     struct BoundaryStub {
         Label label;
         uint32_t pc;
@@ -321,23 +416,38 @@ private:
               const x86::Gp *ret = nullptr) {
         static_assert(sizeof...(Args) < 4, "trampolines take at most 4 arguments");
         assert(args.size() == sizeof...(Args) && "argument count must match the trampoline signature");
+        // Register arguments and the result go through short-lived copies. Argument and result
+        // registers are fixed-register uses; on a long-lived value (a cached guest register, a
+        // load result kept in the cache) they steer asmjit's bin packing to that one register, and
+        // when it is taken the value is left unassigned and goes through its stack slot at every use.
+        std::array<Operand, 4> copies{};
+        size_t count = 0;
+        for (const Operand &arg : args) {
+            if (arg.is_reg()) {
+                x86::Gp copy = m_cc.new_similar_reg(arg.as<x86::Gp>());
+                m_cc.mov(copy, arg.as<x86::Gp>());
+                copies[count++] = copy;
+            } else {
+                copies[count++] = arg;
+            }
+        }
         InvokeNode *node = nullptr;
         m_cc.invoke(Out(node), reinterpret_cast<uint64_t>(fn), FuncSignature::build<Ret, X64Frame *, Args...>());
         if (node == nullptr) {
             return;
         }
-        node->set_arg(0, m_frame);
-        size_t index = 1;
-        for (const Operand &arg : args) {
-            if (arg.is_reg()) {
-                node->set_arg(index, arg.as<Reg>());
+        node->set_arg(0, m_frame); // the function's argument: its hint is the same register
+        for (size_t i = 0; i < count; ++i) {
+            if (copies[i].is_reg()) {
+                node->set_arg(i + 1, copies[i].as<Reg>());
             } else {
-                node->set_arg(index, arg.as<Imm>());
+                node->set_arg(i + 1, copies[i].as<Imm>());
             }
-            ++index;
         }
         if (ret != nullptr) {
-            node->set_ret(0, *ret);
+            x86::Gp result = m_cc.new_similar_reg(*ret);
+            node->set_ret(0, result);
+            m_cc.mov(*ret, result);
         }
     }
 
@@ -433,6 +543,7 @@ private:
             m_cc.jmp(done);
         }
         m_cc.bind(slow);
+        FlushRegs(!m_inlineBus);
         Call(&TrRead, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &d);
         CheckStop();
         if (m_trackDirty) {
@@ -486,6 +597,7 @@ private:
             m_cc.jmp(done);
         }
         m_cc.bind(slow);
+        FlushRegs(!m_inlineBus);
         Call(&TrWrite, {Use(in.a), U32(in.size), Use(in.b)});
         CheckStop();
         if (m_trackDirty) {
@@ -617,6 +729,7 @@ private:
 
     void LowerRefill(const Inst &in) {
         if (!in.flag || !m_known) {
+            FlushRegs(true);
             Call(&TrRefill, {U32(in.imm)});
             CheckStop();
             return;
@@ -633,6 +746,7 @@ private:
         m_cc.mov(fetched, Imm32(in.imm2));
         m_cc.jmp(done);
         m_cc.bind(slow);
+        FlushRegs(false);
         Call(&TrRefill, {U32(in.imm)});
         CheckStop();
         m_cc.bind(done);
@@ -659,6 +773,7 @@ private:
 
     void LowerSetupDelaySlot(const Inst &in) {
         if (!m_off.hasDelaySlot) {
+            FlushRegs(true);
             Call(&TrSetupDelaySlot, {Use(in.a)});
             CheckStop();
             return;
@@ -670,6 +785,14 @@ private:
     }
 
     void LowerEndDelaySlot() {
+        // Both forms read SR.ILevel from memory (the inline one below, AdvancePC in the callback).
+        // The cache is stored and then dropped (the front end ends the block right after it).
+        FlushRegs(true);
+        LowerEndDelaySlotOp();
+        InvalidateRegs();
+    }
+
+    void LowerEndDelaySlotOp() {
         if (!m_off.hasDelaySlot) {
             Call(&TrEndDelaySlot, {});
             CheckStop();
@@ -722,6 +845,7 @@ private:
     void LowerAccessCycles(const Inst &in) {
         if (!m_inlineBus) {
             const x86::Gp c = m_cc.new_gp64();
+            FlushRegs(true);
             Call(&TrAccessCycles, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &c);
             CheckStop();
             m_cc.add(m_cycles, c);
@@ -764,6 +888,7 @@ private:
             m_cc.jne(cont);
         }
         const x86::Gp wait = m_cc.new_gp32();
+        FlushRegs(!m_inlineBus); // the exit below is only reached from here
         Call(&TrBusWait, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &wait);
         CheckStop();
         m_cc.test(wait, wait);
@@ -790,31 +915,35 @@ private:
     void Lower(const Inst &in) {
         switch (in.op) {
         case Op::Const: m_cc.mov(Def(in.dst), Imm32(in.imm)); break;
-        case Op::GetReg: m_cc.mov(Def(in.dst), State32(static_cast<int32_t>(in.imm * 4))); break;
-        case Op::SetReg: m_cc.mov(State32(static_cast<int32_t>(in.imm * 4)), Use(in.a)); break;
+        // R0-R15 and SR go through the register cache; the IR value is the slot's register.
+        case Op::GetReg: m_values[in.dst] = CachedGet(in.imm); break;
+        case Op::SetReg: CachedSet(in.imm, Use(in.a)); break;
         case Op::GetPR: m_cc.mov(Def(in.dst), State32(m_off.PR)); break;
         case Op::SetPR: m_cc.mov(State32(m_off.PR), Use(in.a)); break;
         case Op::GetT: {
             const x86::Gp d = Def(in.dst);
-            m_cc.mov(d, State32(m_off.SR));
+            m_cc.mov(d, CachedGet(kSlotSR));
             m_cc.and_(d, 1);
             break;
         }
         case Op::SetT: {
             // SR = (SR & ~1) | (a != 0)
             x86::Gp t = m_cc.new_gp32();
+            x86::Gp sr = m_cc.new_gp32();
             m_cc.xor_(t, t);
             m_cc.test(Use(in.a), Use(in.a));
             m_cc.setnz(t.r8());
-            m_cc.and_(State32(m_off.SR), Imm32(~1u));
-            m_cc.or_(State32(m_off.SR), t);
+            m_cc.mov(sr, CachedGet(kSlotSR));
+            m_cc.and_(sr, Imm32(~1u));
+            m_cc.or_(sr, t);
+            CachedSet(kSlotSR, sr);
             break;
         }
         case Op::GetGBR: m_cc.mov(Def(in.dst), State32(m_off.GBR)); break;
         case Op::SetGBR: m_cc.mov(State32(m_off.GBR), Use(in.a)); break;
         case Op::GetVBR: m_cc.mov(Def(in.dst), State32(m_off.VBR)); break;
         case Op::SetVBR: m_cc.mov(State32(m_off.VBR), Use(in.a)); break;
-        case Op::GetSR: m_cc.mov(Def(in.dst), State32(m_off.SR)); break;
+        case Op::GetSR: m_values[in.dst] = CachedGet(kSlotSR); break;
         case Op::GetMACH: m_cc.mov(Def(in.dst), State32(m_off.MACH)); break;
         case Op::GetMACL: m_cc.mov(Def(in.dst), State32(m_off.MACL)); break;
         case Op::SetMACH: m_cc.mov(State32(m_off.MACH), Use(in.a)); break;
@@ -855,7 +984,8 @@ private:
         case Op::MulHiS:
         case Op::MulHiU: {
             // One-operand (i)mul: EDX:EAX = EAX * b, the full 64-bit product of the 32-bit operands.
-            const x86::Gp hi = Def(in.dst);
+            // hi and lo are fixed to EDX/EAX: compute into temporaries (see Call).
+            x86::Gp hi = m_cc.new_gp32();
             x86::Gp lo = m_cc.new_gp32();
             m_cc.mov(lo, Use(in.a));
             if (in.op == Op::MulHiS) {
@@ -863,15 +993,19 @@ private:
             } else {
                 m_cc.mul(hi, lo, Use(in.b));
             }
+            m_cc.mov(Def(in.dst), hi);
             break;
         }
         case Op::SetSRBits: {
             // SR = (SR & ~mask) | (a & mask)
             x86::Gp t = m_cc.new_gp32();
+            x86::Gp sr = m_cc.new_gp32();
             m_cc.mov(t, Use(in.a));
             m_cc.and_(t, Imm32(in.imm));
-            m_cc.and_(State32(m_off.SR), Imm32(~in.imm));
-            m_cc.or_(State32(m_off.SR), t);
+            m_cc.mov(sr, CachedGet(kSlotSR));
+            m_cc.and_(sr, Imm32(~in.imm));
+            m_cc.or_(sr, t);
+            CachedSet(kSlotSR, sr);
             break;
         }
         case Op::AddCycles: AddU32(m_cycles, in.imm); break;
@@ -907,6 +1041,9 @@ private:
             // Stop if cycles >= limit, or an interrupt is pending and allowed. A cycles-only check
             // (ir_opt.hpp) skips the interrupt test; one that relies on inline known refills tests
             // it anyway when this block's known refills call TrRefill (!m_known).
+            // Write-back at each guest-instruction boundary, on the main path (cache rules above):
+            // the out-of-line stub then needs no stores of its own.
+            FlushRegs(true);
             BoundaryStub stub{m_cc.new_label(), in.imm, in.retired};
             m_cc.cmp(m_cycles, x86::qword_ptr(m_frame, kFrameLimit));
             m_cc.jae(stub.label);
@@ -927,6 +1064,8 @@ private:
             const Label notTaken = m_cc.new_label();
             m_cc.test(Use(in.a), Use(in.a));
             m_cc.jz(notTaken);
+            // Taken path only: the fall-through cache stays as it is.
+            StoreDirty(DirtySet());
             x86::Gp taken = m_cc.new_gp64();
             m_cc.mov(taken, m_cycles);
             AddU32(taken, in.imm2);
@@ -949,10 +1088,12 @@ private:
             break;
         }
         case Op::Exit:
+            FlushRegs(true);
             WriteExit(true, in.imm, in.retired, m_cycles, false);
             ChainExit(true, in.imm, m_cycles);
             break;
         case Op::ExitDynamic:
+            FlushRegs(true);
             WriteExit(false, 0, in.retired, m_cycles, false);
             ChainExit(false, 0, m_cycles);
             break;
@@ -966,6 +1107,7 @@ private:
         case Op::AddAccessCycles: LowerAccessCycles(in); break;
         case Op::AddAccessCyclesRMWByte: {
             const x86::Gp c = m_cc.new_gp64();
+            FlushRegs(true);
             Call(&TrAccessCyclesRMWByte, {Use(in.a)}, &c);
             CheckStop();
             m_cc.add(m_cycles, c);
@@ -975,16 +1117,28 @@ private:
         case Op::SetupDelaySlot: LowerSetupDelaySlot(in); break;
         case Op::EndDelaySlot: LowerEndDelaySlot(); break;
         case Op::SetSR:
+            FlushRegs(true);
             Call(&TrSetSR, {Use(in.a), U32(in.flag ? 1 : 0)});
             CheckStop();
+            InvalidateRegs(true); // the callback wrote SR
             break;
         case Op::Div1: {
+            // Div1Step reads and writes SR (M, Q, T) through ctx; it reads nothing else.
             const x86::Gp d = Def(in.dst);
+            FlushRegs(true, true);
             Call(&TrDiv1, {Use(in.a), Use(in.b), U32(in.flag ? 1 : 0)}, &d);
+            InvalidateRegs(true);
             break;
         }
-        case Op::MacW: Call(&TrMacW, {Use(in.a), Use(in.b)}); break;
-        case Op::MacL: Call(&TrMacL, {Use(in.a), Use(in.b)}); break;
+        // MacStep reads SR.S and MACH/MACL through ctx and writes only MACH/MACL.
+        case Op::MacW:
+            FlushRegs(true, true);
+            Call(&TrMacW, {Use(in.a), Use(in.b)});
+            break;
+        case Op::MacL:
+            FlushRegs(true, true);
+            Call(&TrMacL, {Use(in.a), Use(in.b)});
+            break;
         }
     }
 
@@ -996,6 +1150,7 @@ private:
     const X64LinkSlot *m_links; // the backend's link table (nullptr: never chain)
     std::vector<x86::Gp> m_values; // one 32-bit virtual register per IR value
     std::vector<BoundaryStub> m_stubs;
+    std::array<CachedSlot, kSlots> m_cache{}; // R0-R15, SR (register cache rules above)
     x86::Gp m_frame;
     x86::Gp m_regs;   // ctx->R
     x86::Gp m_cycles; // cycles accumulated by this block (ExitInfo::cycles)

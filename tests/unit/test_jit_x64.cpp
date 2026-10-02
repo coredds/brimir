@@ -291,12 +291,123 @@ TEST_CASE("x64 backend: an IR executor runs without a native backend", "[jit][x6
 
 namespace {
 
-// Runs 2000 random blocks on RunBlock and on the x64 backend, from identical random CPU states,
+// Guest registers as callbacks see them. With the register cache (x64_emitter.cpp) the generated
+// code keeps R0-R15 and SR in host registers and must store them before every call out; these
+// hooks record R0-R15 and SR from memory when a callback is entered. Only calls that both backends
+// make are recorded: RunBlock calls back for every access, x64 only off array pages, so reads,
+// writes and refills are recorded for the MMIO page and the I/O area, bus-wait queries for the
+// MMIO page (x64 answers array pages, and any page whose entry has an array, inline), and every
+// setSR and RMW-cycle lookup.
+struct CallView {
+    char kind;
+    uint32_t address;
+    std::array<uint32_t, 17> regs; // R0-R15, SR
+    bool operator==(const CallView &) const = default;
+};
+
+struct CallRecorder {
+    void *sh2 = nullptr;
+    const ymir::sh2::SH2JitContext *ctx = nullptr;
+    std::vector<CallView> log;
+};
+
+std::vector<CallRecorder *> g_recorders;
+ymir::sh2::SH2JitContext g_recOrig; // the original callbacks (the same for every rig)
+
+void RecordCall(void *sh2, char kind, uint32_t address) {
+    for (CallRecorder *r : g_recorders) {
+        if (r->sh2 == sh2) {
+            CallView view{kind, address, {}};
+            for (int i = 0; i < 16; ++i) {
+                view.regs[i] = r->ctx->R[i];
+            }
+            view.regs[16] = *r->ctx->SR;
+            r->log.push_back(view);
+        }
+    }
+}
+
+bool CalledByBoth(uint32 address) {
+    return (address >> 24) == 0x22 || (address >> 29) == 0b111;
+}
+
+uint32 RecRead(void *sh2, uint32 address, uint32 size, bool instrFetch) {
+    if (CalledByBoth(address)) {
+        RecordCall(sh2, 'R', address);
+    }
+    return g_recOrig.read(sh2, address, size, instrFetch);
+}
+void RecWrite(void *sh2, uint32 address, uint32 size, uint32 value) {
+    if (CalledByBoth(address)) {
+        RecordCall(sh2, 'W', address);
+    }
+    g_recOrig.write(sh2, address, size, value);
+}
+void RecRefill(void *sh2, uint32 address) {
+    if (CalledByBoth(address)) {
+        RecordCall(sh2, 'F', address);
+    }
+    g_recOrig.refillPipeline(sh2, address);
+}
+bool RecBusWait(void *sh2, uint32 address, uint32 size, bool write) {
+    if ((address >> 24) == 0x22) {
+        RecordCall(sh2, 'B', address);
+    }
+    return g_recOrig.busWait(sh2, address, size, write);
+}
+void RecSetSR(void *sh2, uint32 value, bool delaySlot) {
+    RecordCall(sh2, 'S', value);
+    g_recOrig.setSR(sh2, value, delaySlot);
+}
+uint64 RecRMW(void *sh2, uint32 address) {
+    RecordCall(sh2, 'M', address);
+    return g_recOrig.accessCyclesRMWByte(sh2, address);
+}
+
+void HookCalls(ymir::sh2::SH2JitContext &ctx, CallRecorder &recorder) {
+    g_recOrig = ctx;
+    recorder.sh2 = ctx.sh2;
+    recorder.ctx = &ctx;
+    recorder.log.clear();
+    g_recorders.push_back(&recorder);
+    ctx.read = RecRead;
+    ctx.write = RecWrite;
+    ctx.refillPipeline = RecRefill;
+    ctx.busWait = RecBusWait;
+    ctx.setSR = RecSetSR;
+    ctx.accessCyclesRMWByte = RecRMW;
+}
+
+void UnhookCalls(ymir::sh2::SH2JitContext &ctx) {
+    ctx.read = g_recOrig.read;
+    ctx.write = g_recOrig.write;
+    ctx.refillPipeline = g_recOrig.refillPipeline;
+    ctx.busWait = g_recOrig.busWait;
+    ctx.setSR = g_recOrig.setSR;
+    ctx.accessCyclesRMWByte = g_recOrig.accessCyclesRMWByte;
+}
+
+std::string DescribeCalls(const std::vector<CallView> &log) {
+    std::string s;
+    for (const CallView &v : log) {
+        s += v.kind;
+        s += " " + std::to_string(v.address) + ":";
+        for (const uint32_t r : v.regs) {
+            s += " " + std::to_string(r);
+        }
+        s += "\n";
+    }
+    return s;
+}
+
+// Runs `seeds` random blocks on RunBlock and on the x64 backend, from identical random CPU states,
 // and requires identical outcomes. A third rig runs each block on RunBlock with every refill
 // turned back into a refillPipeline call (the interpreter's behavior), so known refill values and
 // their codeDirty fallback must reproduce exactly what the callback reads. A fourth runs the block
 // after OptimizeBlock on x64 (cycles-only checks, folded stalls), against RunBlock's original.
-void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
+// With opt.registers the calls both backends make are also recorded (HookCalls) on RunBlock and
+// both x64 runs, and must have seen the same R0-R15 and SR.
+void CompareRandomBlocks(const sh2test::RandomIrOptions &opt, uint32_t seeds = 2000) {
     auto irRig = std::make_unique<Rig>();
     auto x64Rig = std::make_unique<Rig>();
     auto callbackRig = std::make_unique<Rig>();
@@ -304,8 +415,13 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
     const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
     REQUIRE(backend != nullptr);
     uint64_t knownRefills = 0;
+    uint64_t recordedCalls = 0;
+    CallRecorder irCalls;
+    CallRecorder x64Calls;
+    CallRecorder optCalls;
+    g_recorders.clear(); // a failed earlier run may have left entries behind
 
-    for (uint32_t seed = 0; seed < 2000; ++seed) {
+    for (uint32_t seed = 0; seed < seeds; ++seed) {
         std::mt19937 rng(seed);
         const Block block = sh2test::RandomBlock(rng, kCode, opt);
         INFO("seed " << seed << "\n" << brimir::jit::PrintBlock(block));
@@ -346,11 +462,23 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
                              << " intrAllow " << cpu.state.intrAllow << " busWaitEvery " << busWaitEvery);
 
         auto &x64Ctx = x64Rig->sh2->GetJitContext();
+        auto &irCtx = irRig->sh2->GetJitContext();
+        auto &optCtx = optRig->sh2->GetJitContext();
+        if (opt.registers) {
+            HookCalls(irCtx, irCalls);
+            HookCalls(x64Ctx, x64Calls);
+            HookCalls(optCtx, optCalls);
+        }
         NativeCode code;
         REQUIRE(backend->Compile(block, x64Ctx, code));
         REQUIRE(code.entry != nullptr);
-        const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext(), target);
+        const ExitInfo ir = brimir::jit::RunBlock(block, irCtx, target);
         const ExitInfo x64 = backend->Run(code, x64Ctx, target);
+        if (opt.registers) {
+            INFO("RunBlock calls\n" << DescribeCalls(irCalls.log) << "x64 calls\n" << DescribeCalls(x64Calls.log));
+            REQUIRE(x64Calls.log == irCalls.log);
+            recordedCalls += irCalls.log.size();
+        }
         // Both rigs ran exactly the same steps, so the peripherals (the FRT the generator touches)
         // must match too.
         RequireSameOutcome(ir, x64, *irRig, *x64Rig, true);
@@ -362,13 +490,22 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
         REQUIRE(irRig->State().fetchedOpcodes == callbackRig->State().fetchedOpcodes);
         {
             INFO("x64 on the optimized block vs RunBlock on the original\n" << brimir::jit::PrintBlock(optimized));
-            auto &optCtx = optRig->sh2->GetJitContext();
             NativeCode optCode;
             REQUIRE(backend->Compile(optimized, optCtx, optCode));
             const ExitInfo optInfo = backend->Run(optCode, optCtx, target);
+            if (opt.registers) {
+                INFO("RunBlock calls\n" << DescribeCalls(irCalls.log) << "x64 calls\n" << DescribeCalls(optCalls.log));
+                REQUIRE(optCalls.log == irCalls.log);
+            }
             RequireSameOutcome(ir, optInfo, *irRig, *optRig, true);
             REQUIRE(optRig->State().fetchedOpcodes == irRig->State().fetchedOpcodes);
             REQUIRE(*optCtx.delaySlot == *irRig->sh2->GetJitContext().delaySlot);
+        }
+        if (opt.registers) {
+            UnhookCalls(irCtx);
+            UnhookCalls(x64Ctx);
+            UnhookCalls(optCtx);
+            g_recorders.clear();
         }
 
         if (seed % 256 == 255) {
@@ -377,6 +514,9 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
     }
     if (opt.calls) {
         CHECK(knownRefills > 0);
+    }
+    if (opt.registers && (opt.calls || opt.memory)) {
+        CHECK(recordedCalls > 0);
     }
 }
 
@@ -414,6 +554,29 @@ TEST_CASE("x64 matches IR on random blocks with memory only", "[jit][x64]") {
     }
     sh2test::RandomIrOptions opt;
     opt.memory = true;
+    CompareRandomBlocks(opt);
+}
+
+// Register caching: many guest registers set and read across callback loads and stores, SetSR,
+// Div1/MAC, ExitIf and boundary checks at random positions; every recorded callback must see the
+// same R0-R15 and SR as on RunBlock.
+TEST_CASE("x64 matches IR on register-heavy random blocks", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    sh2test::RandomIrOptions opt;
+    opt.calls = true;
+    opt.memory = true;
+    opt.registers = true;
+    CompareRandomBlocks(opt, 4000);
+}
+
+TEST_CASE("x64 matches IR on register-only random blocks", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    sh2test::RandomIrOptions opt;
+    opt.registers = true;
     CompareRandomBlocks(opt);
 }
 
@@ -1116,6 +1279,127 @@ TEST_CASE("x64 stops after an exception from every callback", "[jit][x64]") {
         CHECK(st.R[3] != 0x3333u);
         CHECK((st.SR & 1u) == (irRig->BaseState(kCode).SR & 1u));
         CHECK(x64Rig->Read32(0x06040000) != 0x55555555u);
+        CHECK(*x64Rig->sh2->GetJitContext().cyclesExecuted == *irRig->sh2->GetJitContext().cyclesExecuted);
+    }
+}
+
+// Register caching: every guest register and SR is dirty (in host registers only) when a callback
+// throws or requests an abort, after a passed boundary check and a not-taken ExitIf. The state
+// left in memory must be RunBlock's: all writes before the call, none after it.
+TEST_CASE("x64 leaves dirty guest registers in memory when a callback throws or aborts", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    using Ctx = ymir::sh2::SH2JitContext;
+    constexpr uint32_t kMmio = 0x22000200;
+    struct Row {
+        const char *name; // the exception text, or nullptr for an abort
+        void (*hook)(Ctx &);
+        void (*emit)(Builder &);
+    };
+    const std::vector<Row> rows{
+        {"write", [](Ctx &c) { c.write = ThrowWrite; }, [](Builder &b) { b.Store(b.Const(kMmio), 4, b.GetReg(9)); }},
+        {"read", [](Ctx &c) { c.read = ThrowRead; }, [](Builder &b) { b.SetReg(2, b.Load(b.Const(kMmio), 2, false)); }},
+        {"refillPipeline", [](Ctx &c) { c.refillPipeline = ThrowRefill; }, [](Builder &b) { b.Refill(kMmio); }},
+        {"busWait", [](Ctx &c) { c.busWait = ThrowBusWait; },
+         [](Builder &b) { b.ExitIfBusWait(b.Const(kMmio), 4, true, kCode + 2, 1); }},
+        {"setSR", [](Ctx &c) { c.setSR = ThrowSetSR; }, [](Builder &b) { b.SetSR(b.GetReg(4), false); }},
+        {"accessCyclesRMWByte", [](Ctx &c) { c.accessCyclesRMWByte = ThrowAccessCyclesRMWByte; },
+         [](Builder &b) { b.AddAccessCyclesRMWByte(b.Const(kMmio)); }},
+        {nullptr,
+         [](Ctx &c) {
+             g_origWrite = c.write;
+             c.write = AbortingWrite;
+         },
+         [](Builder &b) { b.Store(b.Const(kMmio), 1, b.GetReg(9)); }},
+        {nullptr,
+         [](Ctx &c) {
+             g_origRead = c.read;
+             c.read = AbortingRead;
+         },
+         [](Builder &b) { b.SetReg(2, b.Load(b.Const(kMmio), 4, false)); }},
+    };
+
+    for (const Row &row : rows) {
+        INFO("callback " << (row.name != nullptr ? row.name : "abort"));
+        Block block;
+        block.startPC = kCode;
+        block.guestInstrCount = 2;
+        Builder b(block);
+        for (uint32_t r = 0; r < 16; ++r) {
+            b.SetReg(r, b.Add(b.GetReg(r), b.Const(0x100 * r + 1)));
+        }
+        b.SetT(b.Const(1));
+        b.SetSRBits(b.Const(0x302), 0x302); // M, Q, S
+        b.AddCycles(1);
+        b.CheckBoundary(kCode + 2, 1);
+        b.ExitIf(b.CmpGtU(b.GetReg(0), b.GetReg(0)), kCode + 0x40, 2, false, 1); // never taken
+        b.SetReg(5, b.Xor(b.GetReg(5), b.GetReg(6)));
+        b.AddCycles(2);
+        b.SyncCycles();
+        row.emit(b);
+        // Nothing from here on may run.
+        b.SetReg(3, b.Const(0x3333));
+        b.SetReg(7, b.Const(0x7777));
+        b.SetT(b.Const(0));
+        b.AddCycles(1);
+        b.Exit(kCode + 4, 2);
+        INFO(brimir::jit::PrintBlock(block));
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+        auto irRig = std::make_unique<Rig>();
+        auto x64Rig = std::make_unique<Rig>();
+        Rig *rigs[2] = {irRig.get(), x64Rig.get()};
+        ExitInfo results[2];
+        auto base = irRig->BaseState(kCode);
+        for (uint32_t r = 0; r < 16; ++r) {
+            base.R[r] = 0x01010101u * r;
+        }
+        base.SR = 0x0F0;
+        for (int i = 0; i < 2; ++i) {
+            Rig &rig = *rigs[i];
+            rig.Load(base);
+            rig.mmio.busWaitEvery = 0;
+            Ctx ctx = rig.sh2->GetJitContext(); // a copy: the hooks do not outlive this run
+            row.hook(ctx);
+            g_abort = false;
+            bool caught = false;
+            try {
+                results[i] = sh2test::RunOnBackend(i == 0 ? BackendKind::Ir : BackendKind::X64, block, ctx,
+                                                   kNoCycleTarget, &g_abort);
+            } catch (const std::runtime_error &e) {
+                caught = true;
+                CHECK(row.name != nullptr);
+                if (row.name != nullptr) {
+                    CHECK(std::string(e.what()) == row.name);
+                }
+            }
+            INFO("backend " << i);
+            CHECK(caught == (row.name != nullptr));
+            if (row.name == nullptr) {
+                CHECK(g_abort);
+                CHECK(results[i].aborted);
+            }
+        }
+        if (row.name == nullptr) {
+            RequireSameOutcome(results[0], results[1], *irRig, *x64Rig, true);
+        }
+        const std::string diff = sh2test::DiffRigs(*irRig, *x64Rig, true);
+        INFO(diff);
+        CHECK(diff.empty());
+        const auto st = x64Rig->State();
+        for (uint32_t r = 0; r < 16; ++r) {
+            INFO("R" << r);
+            if (r == 2 || r == 3 || r == 5 || r == 7) {
+                continue;
+            }
+            CHECK(st.R[r] == 0x01010101u * r + 0x100 * r + 1);
+        }
+        CHECK(st.R[5] == ((0x01010101u * 5 + 0x501) ^ (0x01010101u * 6 + 0x601)));
+        CHECK(st.R[3] != 0x3333u);
+        CHECK(st.R[7] == 0x01010101u * 7 + 0x701);
+        CHECK(st.R[2] == 0x01010101u * 2 + 0x201);
+        CHECK(st.SR == (0x0F0u | 0x302u | 1u));
         CHECK(*x64Rig->sh2->GetJitContext().cyclesExecuted == *irRig->sh2->GetJitContext().cyclesExecuted);
     }
 }

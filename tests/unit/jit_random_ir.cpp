@@ -109,6 +109,32 @@ public:
         }
     }
 
+    // Guest-register traffic (opt.registers).
+    void RegisterOp() {
+        switch (Below(10)) {
+        case 0:
+        case 1:
+        case 2: Def(m_b.GetReg(Below(16))); break;
+        case 3:
+        case 4:
+        case 5: m_b.SetReg(Below(16), Pick()); break;
+        case 6: { // read-modify-write of one register, as most SH-2 instructions do
+            const uint32_t r = Below(16);
+            const ValueId v = m_b.GetReg(r);
+            Def(v);
+            m_b.SetReg(r, Below(2) != 0 ? m_b.Add(v, Pick()) : m_b.Xor(v, m_b.Const(Word())));
+            break;
+        }
+        case 7: Def(Below(2) != 0 ? m_b.GetT() : m_b.GetSR()); break;
+        case 8: m_b.SetT(Pick()); break;
+        default: {
+            static constexpr uint32_t kMasks[] = {0x001, 0x002, 0x100, 0x200, 0x301, 0x303, 0x003, 0x300};
+            m_b.SetSRBits(Pick(), kMasks[Below(8)]);
+            break;
+        }
+        }
+    }
+
     void CycleOp() {
         switch (Below(5)) {
         case 0:
@@ -251,6 +277,10 @@ Block RandomBlock(std::mt19937 &rng, uint32_t startPC, const RandomIrOptions &op
     const auto currentPC = [&] { return startPC + 2 * (retired - 1); };
     // One random op of any enabled kind (no exits, no boundary checks).
     const auto bodyOp = [&] {
+        if (opt.registers && g.Below(2) == 0) {
+            g.RegisterOp();
+            return;
+        }
         const uint32_t pick = g.Below(opt.calls || opt.memory ? 26 : 18);
         if (pick < 11) {
             g.ValueOp();

@@ -27,6 +27,11 @@ struct RandomIrOptions {
     // lookups also use these addresses.
     bool calls = false;
     bool memory = false;
+    // registers: half of the body ops become guest-register traffic (GetReg, SetReg, read-modify-
+    // write of one register, GetT/GetSR, SetT/SetSRBits) on all of R0-R15 and SR, so many guest
+    // registers are read and written between the calls, memory accesses and ExitIf of the other
+    // options (register caching, spill pressure). Off: the generated streams are unchanged.
+    bool registers = false;
 };
 
 // A block that passes VerifyBlock, with 20-200 ops over the allowed set. Values are drawn from a

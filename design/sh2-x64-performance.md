@@ -254,6 +254,8 @@ Measured at the end of each milestone 2C task (`design/plans/2026-10-02-sh2-jit-
 | 2: block chaining, in-block validation | Street Fighter Zero 3 | 6.841 (6.875 / 6.841 / 6.791) | 11.610 (11.610 / 11.428 / 11.717) | 0.589 | 369.887 | 249,823,349 / 188,696,964 | 0 / 0 |
 | 3: IR timing-bookkeeping pass | Panzer Dragoon II Zwei | 7.596 (7.597 / 7.589 / 7.596) | 7.134 (7.134 / 7.111 / 7.158) | 1.065 | 13.627 | 355,340,100 / 205,691,327 | 0 / 0 |
 | 3: IR timing-bookkeeping pass | Street Fighter Zero 3 | 6.744 (6.800 / 6.652 / 6.744) | 9.455 (9.455 / 9.319 / 9.618) | 0.713 | 234.232 | 249,823,349 / 188,696,964 | 0 / 0 |
+| 4: guest registers in host registers | Panzer Dragoon II Zwei | 7.750 (7.752 / 7.726 / 7.750) | 7.161 (7.161 / 7.198 / 7.131) | 1.082 | 13.351 | 355,340,100 / 205,691,327 | 0 / 0 |
+| 4: guest registers in host registers | Street Fighter Zero 3 | 7.275 (7.275 / 7.309 / 7.221) | 10.026 (10.026 / 10.136 / 10.003) | 0.726 | 268.389 | 249,823,349 / 188,696,964 | 0 / 0 |
 
 Task 1 notes:
 - x64 SH2 total fell 14.6% in Panzer Dragoon II Zwei (13.33 to 11.38 ms/frame) and 5.5% in Street Fighter Zero 3 (15.12 to 14.28), whose x64 time is dominated by compile churn (profile above).
@@ -271,6 +273,14 @@ Task 3 notes:
 - Static effect of `OptimizeBlock` over the BIOS lockstep's compiled blocks (`sega_101.bin`, 1200 frames, master: 4218 blocks, 38,065 guest instructions): IR ops per guest instruction 8.92 to 8.17. `WbStall` 0.842 to 0.091 per instruction, `SyncCycles` 0.413 to 0.368, `AddCycles` 0.588 to 0.630 (folded stalls, after merging). Full interrupt tests in `CheckBoundary` 33,847 to 21,485; 3,865 of the 12,362 cycles-only checks rely on inline known refills.
 - Street Fighter Zero 3's max frame fell to 224–257 ms: the blocks are smaller, so each flush-and-recompile stall is shorter.
 - `staleEntries` (master) is now 53 (PD2) and 394 (SFZ3), from 49 and 258. The likely cause (not measured): the block cache's instruction budget counts the optimized ops, so the cache flushes less often and more code changes are found by the prologue instead of being dropped by a flush.
+
+Task 4 notes:
+- The register cache is close to neutral. This session's interpreter totals are 2% (PD2) and 8% (SFZ3) above Task 3's, and the x64 totals moved with them: ratios 1.065 to 1.082 (PD2) and 0.713 to 0.726 (SFZ3), within run-to-run noise of each other. Block counts and `staleEntries` are identical to Task 3.
+- In-session A/B with one binary and temporary switches, x64 SH2 total ms/frame, interleaved runs:
+  - PD2, 3 rounds: write-back at each `CheckBoundary` (the committed form) 7.074 / 7.132 / 7.265; dirty registers kept across checks, stored by each boundary stub 7.278 / 7.205 / 7.209; no caching (load at every `GetReg`, store at every `SetReg`, as before) 7.404 / 7.177 / 7.120. SH2 share of `Ymir_RunFrame` 70.7–70.8%, 70.8–70.9% and 71.0–71.2%: the cache saves at most about 1% of SH-2 time, below the noise of the totals.
+  - SFZ3, 2 rounds: 9.720 / 9.587 (committed form), 10.226 / 9.895 (stores in the stubs), 9.753 / 9.553 (no caching). Max frame 233 / 228, 268 / 254 and 230 / 222 ms. Stores in the stubs make the code larger and compiles slower, which costs SFZ3 more than the cache saves.
+- Code bytes per guest instruction over the BIOS lockstep's compiled blocks (`sega_101.bin`, 1200 frames, 4218 blocks, 38,065 guest instructions): 313.3 before, 298.7 committed. The stub form measured 339.7 (324.5 after routing call arguments through copies). Over PD2's run (19,814 blocks): 303.1 without caching, 304.4 committed, 337.2 with stores in the stubs.
+- Why the effect is small: a guest register access was an L1 load or store next to a much longer inline bus path, boundary check and cycle bookkeeping per instruction; the cache removes those memory accesses but not the per-instruction work around them. The values that cross a slow-path call are spilled around the call by asmjit (cold paths only), and blocks using more host registers save more callee-saved registers in the prologue.
 
 ## Reproduce
 
