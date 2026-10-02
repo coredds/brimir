@@ -171,8 +171,9 @@ private:
         return entry;
     }
 
-    // Builds the IR block for pc and caches it (flushing first at the IR cap); compiles it natively
-    // now if compileNow or the threshold is 1.
+    // Builds the IR block for pc and caches it (first evicting the IR-only blocks at the IR cap, and
+    // flushing everything at the native code cap if it compiles now); compiles it natively now if
+    // compileNow or the threshold is 1.
     const CachedBlock &Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool compileNow);
 
     // Compiles entry natively and frees its IR. At the native code cap it flushes the cache

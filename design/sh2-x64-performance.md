@@ -1,4 +1,6 @@
-# SH-2 x64 backend performance (milestone 2B)
+# SH-2 x64 backend performance (milestones 2B and 2C)
+
+Milestone 2B results and profile first; milestone 2C progress, final results (verdict: **target missed**) and re-profile are in "2C progress" and "Milestone 2C results" at the end.
 
 **Date**: 2026-10-01
 **Commit**: a86fae7 (the measured code: the parent of the commit that adds this report)
@@ -311,6 +313,137 @@ Task 5 notes:
 - **Fix 1: the IR cap evicts only IR-only blocks.** Reaching `kMaxCachedInsts` used to flush the whole cache, native blocks included (SFZ3: about 19,000 native blocks, 54 MB), and would have brought the recompile bursts back. It now drops only the IR-only blocks (and their recent-table slots; they are never in the link table), inside `Get` only; native blocks keep their code and link slots. The bench reports `cachedInsts` and `irEvictions (blocks)` per CPU, and every 1,800 measured frames a `jit progress` line per CPU.
   - SFZ3 long run (x64, `--warmup 2400 --frames 18000`, one run): the master's IR-only instructions were at 827,697 (79% of the cap) at frame 4,200, the end of the progress window. The first eviction came between frames 4,200 and 6,000 (552,881 left afterwards, 34,369 blocks cached), the second between 13,200 and 15,000; 28,940 IR-only blocks evicted in total, while native compiles rose from 19,434 to 34,117. Neither eviction produced one of the five slowest frames: the maximum, 44.9 ms at frame 4,469, compiled 299 blocks natively (32 ms) with no eviction; next 38.5, 32.1, 30.8 and 30.8 ms, all compile bursts of new code. SH2 total over the 18,000 frames 6.450 ms/frame.
   - The progress window (frames 2,400–4,200) has no eviction, so its numbers are unchanged by this fix (not re-measured).
+
+## Milestone 2C results
+
+**Date**: 2026-10-02
+**Commit**: 3aa3090 (the measured code: the parent of the commit that adds this section)
+**Machine and build**: as in the 2B method above (`build-bench`, Ninja, Release, `BRIMIR_LTO=ON`, `Brimir_ENABLE_IPO=ON`, MSVC 19.44.35229, `CMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG`), rebuilt at the measured commit.
+
+**Verdict: target missed.** The target is interpreter SH-2 total / x64 SH-2 total ≥ 2.0 on all six titles. All six titles are below 2.0: Virtua Fighter 2 (1.25), Panzer Dragoon II Zwei (1.09), Sega Rally Championship (0.98), Burning Rangers (0.97), Guardian Heroes (1.11), Street Fighter Zero 3 (0.91). Milestone 2C raised the ratio 1.7–2.6x over 2B (0.45–0.59) and removed the compile stalls of the measurement windows, but the x64 backend is now only about as fast as the interpreter, and a long Burning Rangers session still stalls while it recompiles reloaded code (half the interpreter's speed over 33,600 frames; "Long-session cache behavior" below). The JIT stays off by default.
+
+### Method
+
+The 2B method above, unchanged: same scenes, warmup and frames (`--warmup 2400 --frames 1800` for the games, `--warmup 300 --frames 1800` for the BIOS menu), default settings (threaded VDP, host RTC), the same content and scratch system dir. Three rounds per title, each running the interpreter, `--sh2-jit --jit-backend ir` and `--sh2-jit --jit-backend x64` back to back. The table shows the run with the median SH2 total per mode (the progress-table convention); the last two columns give the SH2 totals and max frame times of all three runs. Load: usual desktop applications, nothing else heavy. All 63 runs exited 0.
+
+The interpreter's SH2 totals in this session are close to the 2B results table (PD2 5.37 vs 5.27, SFZ3 4.96 vs 5.04) and about 25–30% below the "2C progress" sessions; only same-session ratios are compared.
+
+| Title | Mode | ms/frame avg | p95 | max | SH2 master ms (%) | SH2 slave ms (%) | SH2 total ms (%) | SH2 total, 3 runs | max frame ms, 3 runs |
+|---|---|---|---|---|---|---|---|---|---|
+| BIOS menu (US) | interpreter | 8.081 | 8.584 | 9.370 | 1.878 (23.2%) | 0.000 (0.0%) | 1.878 (23.2%) | 1.871 / 1.879 / 1.878 | 9.6 / 9.9 / 9.4 |
+| | IR | 8.853 | 9.533 | 12.356 | 6.501 (73.4%) | 0.000 (0.0%) | 6.501 (73.4%) | 6.501 / 6.538 / 6.454 | 12.4 / 13.1 / 11.3 |
+| | x64 | 8.015 | 8.781 | 11.350 | 1.525 (19.0%) | 0.000 (0.0%) | 1.525 (19.0%) | 1.513 / 1.554 / 1.525 | 10.8 / 10.7 / 11.4 |
+| Virtua Fighter 2 (JP) | interpreter | 7.045 | 9.016 | 12.861 | 3.072 (43.6%) | 1.932 (27.4%) | 5.003 (71.0%) | 5.003 / 4.971 / 5.004 | 12.9 / 11.3 / 11.8 |
+| | IR | 18.992 | 23.770 | 32.970 | 9.669 (50.9%) | 6.935 (36.5%) | 16.604 (87.4%) | 16.596 / 16.604 / 16.628 | 30.5 / 33.0 / 28.5 |
+| | x64 | 6.326 | 7.728 | 11.306 | 2.585 (40.9%) | 1.409 (22.3%) | 3.994 (63.1%) | 4.009 / 3.959 / 3.994 | 10.9 / 10.4 / 11.3 |
+| Panzer Dragoon II Zwei (US) | interpreter | 7.435 | 8.623 | 12.341 | 3.431 (46.2%) | 1.938 (26.1%) | 5.370 (72.2%) | 5.370 / 5.398 / 5.341 | 12.3 / 11.6 / 11.0 |
+| | IR | 18.052 | 20.005 | 23.997 | 10.111 (56.0%) | 5.447 (30.2%) | 15.558 (86.2%) | 15.499 / 15.558 / 15.636 | 26.8 / 24.0 / 25.1 |
+| | x64 | 7.126 | 8.959 | 12.455 | 3.231 (45.3%) | 1.708 (24.0%) | 4.940 (69.3%) | 4.940 / 4.946 / 4.919 | 12.5 / 11.2 / 11.7 |
+| Sega Rally Championship (US) | interpreter | 7.728 | 9.496 | 12.557 | 2.885 (37.3%) | 2.279 (29.5%) | 5.164 (66.8%) | 5.135 / 5.165 / 5.164 | 11.6 / 14.7 / 12.6 |
+| | IR | 18.064 | 24.806 | 28.774 | 9.115 (50.5%) | 6.344 (35.1%) | 15.458 (85.6%) | 15.419 / 15.458 / 15.547 | 28.8 / 28.8 / 31.2 |
+| | x64 | 8.189 | 10.662 | 13.772 | 2.783 (34.0%) | 2.505 (30.6%) | 5.288 (64.6%) | 5.288 / 5.347 / 5.285 | 13.8 / 14.2 / 14.3 |
+| Burning Rangers (US) | interpreter | 9.672 | 11.019 | 13.896 | 4.437 (45.9%) | 2.242 (23.2%) | 6.679 (69.1%) | 6.679 / 6.650 / 6.718 | 13.9 / 13.8 / 14.7 |
+| | IR | 23.671 | 25.639 | 30.610 | 13.480 (57.0%) | 6.960 (29.4%) | 20.441 (86.4%) | 20.410 / 20.648 / 20.441 | 28.8 / 33.4 / 30.6 |
+| | x64 | 10.155 | 12.142 | 16.636 | 4.919 (48.4%) | 1.966 (19.4%) | 6.884 (67.8%) | 6.884 / 6.842 / 6.902 | 16.6 / 14.4 / 17.0 |
+| Guardian Heroes (US) | interpreter | 6.852 | 8.229 | 11.085 | 2.697 (39.4%) | 1.705 (24.9%) | 4.401 (64.2%) | 4.369 / 4.748 / 4.401 | 10.3 / 11.4 / 11.1 |
+| | IR | 16.219 | 19.385 | 24.970 | 8.333 (51.4%) | 4.979 (30.7%) | 13.312 (82.1%) | 13.309 / 13.312 / 13.737 | 23.8 / 25.0 / 25.4 |
+| | x64 | 6.664 | 8.088 | 10.994 | 2.341 (35.1%) | 1.638 (24.6%) | 3.978 (59.7%) | 3.971 / 3.999 / 3.978 | 11.1 / 12.6 / 11.0 |
+| Street Fighter Zero 3 (JP, 4 MB cart) | interpreter | 9.304 | 10.089 | 12.015 | 2.871 (30.9%) | 2.087 (22.4%) | 4.958 (53.3%) | 4.951 / 4.958 / 4.964 | 12.6 / 12.0 / 11.9 |
+| | IR | 18.498 | 21.367 | 26.651 | 9.704 (52.5%) | 6.182 (33.4%) | 15.885 (85.9%) | 15.927 / 15.809 / 15.885 | 27.5 / 27.3 / 26.7 |
+| | x64 | 10.057 | 12.169 | 26.940 | 3.774 (37.5%) | 1.660 (16.5%) | 5.434 (54.0%) | 5.434 / 5.474 / 5.377 | 26.9 / 26.8 / 29.3 |
+
+### Ratios (SH2 total, median runs)
+
+| Title | interpreter / x64 (target ≥ 2.0) | 2B (for reference) | IR / x64 | interpreter / IR |
+|---|---|---|---|---|
+| BIOS menu | 1.231 | 0.553 | 4.263 | 0.289 |
+| Virtua Fighter 2 | **1.253** | 0.488 | 4.157 | 0.301 |
+| Panzer Dragoon II Zwei | **1.087** | 0.583 | 3.149 | 0.345 |
+| Sega Rally Championship | **0.977** | 0.571 | 2.923 | 0.334 |
+| Burning Rangers | **0.970** | 0.546 | 2.969 | 0.327 |
+| Guardian Heroes | **1.106** | 0.588 | 3.346 | 0.331 |
+| Street Fighter Zero 3 | **0.912** | 0.450 | 2.923 | 0.312 |
+
+The BIOS menu is not one of the six target titles; it is listed for reference.
+
+Notes:
+
+- **Max frame times**: x64 max frame 10.4–17.0 ms on five titles (the interpreter's 9.4–14.7 ms) and 26.8–29.3 ms on Street Fighter Zero 3 (interpreter 11.9–12.6 ms, IR 26.7–27.5 ms), from 84–106 ms (Virtua Fighter 2) and 256–264 ms (Street Fighter Zero 3) in 2B. Street Fighter Zero 3's slowest frames are bursts of new code (the measured window built 10,686 blocks and compiled 7,183 natively, 1.22 s, 0.68 ms/frame, in 1,090 of 1,800 frames); no window had a flush or an IR-cap eviction.
+- Every x64 run reported `compileFallbacks 0` on both CPUs. `nativeBlocksRun` (master / slave): BIOS 172,163,971 / 0; VF2 251,174,352 / 431,461,785; PD2 355,251,634 / 205,691,083; Rally 324,759,821 / 157,245,823; BR 266,131,859 / 219,628,117; GH 282,686,600 / 210,935,962; SFZ3 249,659,137 / 188,693,274 (totals since boot).
+- x64 is 2.9–4.3x faster than the IR backend (2B: 1.3–1.7x). The IR backend's own ratio to the interpreter (0.29–0.35) is 5–10% below 2B's (0.32–0.38); the cause was not investigated.
+- Virtua Fighter 2's interpreter runs were steady in this session (4.97–5.00 ms), unlike 2B's fast third round.
+
+### Re-profile (where x64 SH-2 time goes now)
+
+Same method as the 2B profile: a temporary instrumented `build-bench` (not committed; reverted, and `build-bench` rebuilt clean at the measured commit), switched with an environment variable:
+- level 0: counters only (per CPU: `Executor::Run` calls, steps, `Get` calls, native chain runs and blocks, IR runs, interpreter fallbacks, and calls of each x64 trampoline);
+- level 1: plus one `rdtsc` interval around each `Executor::Run`;
+- level 2: plus intervals around each `BlockCache::Get` (it includes compiling), each `X64Backend::Run` (a whole chain, trampolines included), each `RunBlock` (IR runs before tier-up) and each interpreter fallback.
+
+Panzer Dragoon II Zwei, Street Fighter Zero 3 and Burning Rangers, x64, the measurement scene, three interleaved rounds of the three levels (27 runs). Values are means of three runs (spread within 2%). The executor time without instrumentation is estimated as the uninstrumented SH2 total of the table above minus the outside-`Run` time of level 1. Timer overhead, from level 2 minus level 1: 7.2–7.7 ns per interval (2B: 6.7 ns), of which an unknown part falls inside the measured intervals, so timed parts are given as ranges (0 to the full overhead subtracted, plus 0.5–1.5 ns per trampoline-call counter inside the native interval). The counters alone cost about 0.3 ms/frame (level 0 vs uninstrumented).
+
+| ms/frame (both CPUs) | Panzer Dragoon II Zwei | Street Fighter Zero 3 | Burning Rangers |
+|---|---|---|---|
+| Interpreter SH2 total (table above) | 5.370 | 4.958 | 6.679 |
+| x64 SH2 total, uninstrumented (table above) | 4.940 | 5.434 | 6.884 |
+| Outside `Executor::Run` (level 1: SH2 total − Run) | 1.09 | 1.09 | 1.08 |
+| `Executor::Run`, uninstrumented estimate | **3.85** | **4.34** | **5.80** |
+| Native chain runs (generated code + trampolines) | 3.24–3.52 (84–91%) | 2.97–3.26 (68–75%) | 4.98–5.28 (86–91%) |
+| Compiling (bench counter, inside `Get`) | 0.06 (2%) | 0.67 (15%) | 0.08 (1%) |
+| Dispatch: `Get` lookup, `Step` checks, loop | 0.24–0.52 (6–13%) | 0.35–0.64 (8–15%) | 0.32–0.62 (6–11%) |
+| IR runs before tier-up | <0.01 | 0.02 | 0.02 |
+| Interpreter fallbacks | 0.03 | 0.04 | 0.10 |
+| **Budget for 2x**: `Run` ≤ interpreter / 2 − outside | ≤ 1.60 | ≤ 1.39 | ≤ 2.26 |
+
+Structure per 1,800 frames (master / slave):
+
+| | Panzer Dragoon II Zwei | Street Fighter Zero 3 | Burning Rangers |
+|---|---|---|---|
+| `Executor::Run` calls | 27.78M / 27.78M | 28.01M / 28.01M | 26.70M / 26.70M |
+| Native chains / blocks (blocks per chain) | 28.01M / 160.9M (5.7); 27.73M / 105.9M (3.8) | 28.71M / 113.8M (4.0); 27.97M / 98.7M (3.5) | 26.84M / 107.6M (4.0); 26.62M / 113.5M (4.3) |
+| Interpreter fallbacks | 3.69M / 0.07M | 2.11M / 0 | 2.54M / 5.93M |
+| Read trampolines (on-chip registers) | 0.22M / **85.46M** | 0.53M / **78.33M** | 3.13M / **95.73M** |
+| Write trampolines (MMIO) | 2.47M / 1.40M | 2.61M / 0 | 0.98M / 0 |
+| Refill trampolines (not constant) | 2.37M / 1.29M | 3.78M / 0 | 1.66M / 0 |
+| Bus-wait trampolines | 1.32M / 0 | 2.91M / 0 | 3.42M / 0 |
+| `SetSR` / `Div1` trampolines | 0.93M / 0.50M | 1.17M / 8.23M | 0.39M / **44.78M** |
+| Delay-slot setup/end, access-cycles, MAC trampolines | 0 | 0 | 0 |
+
+What changed since the 2B profile (Panzer Dragoon II Zwei, the only title profiled in both): the executor fell from about 7.96 to about 3.85 ms/frame. Dispatch fell from 2.0–3.4 to 0.3–0.6 ms/frame (chaining: 83% of master blocks and 74% of slave blocks are entered from the previous block), and the trampolines from 856M to 96M calls (refills and delay-slot calls are inline stores now). What is left is mostly generated code: native runs take 84–91% of the executor. Writes cost about the same as in 2B (3.9M calls, ~0.5 ms/frame of device work the interpreter also pays) and the slave's 85.5M on-chip reads an estimated 0.2–0.4 ms/frame, so generated code proper is about 2.3–2.8 ms/frame. Over 901.9M guest instructions retired in native blocks per 1,800 frames (2B structure; block counts are unchanged), that is 4.6–5.6 ns per guest instruction, 6.5–7.0 ns with trampolines, against about 8.5 ns per instruction for the interpreter's loop (4.28 ms/frame for 905.7M instructions). The 2x budget is 1.60 ms/frame for the whole executor, about 3.2 ns per instruction all-in.
+
+- **Street Fighter Zero 3**: compiling is the second-largest part (0.67 ms/frame, 15% of the executor): the master keeps building new code (10,686 blocks and 7,183 native compiles in 30 s). The master's `Div1` trampoline runs 8.2M times.
+- **Burning Rangers**: the master's native runs take 4.0 ms/frame for 59.8k blocks per frame, 67 ns per block (PD2's master: 27 ns). Its hot code runs `DIV1` through a trampoline 44.8M times per 1,800 frames (24,900 per frame), each with an SR write-back and reload around the call (`Div1` is a register-cache barrier). The slave polls FTCSR through the read trampoline (95.7M calls).
+- **Outside the executor**: about 1.09 ms/frame of `SH2::Advance` in all three titles, paid in both modes; with a free executor the ratio would be at most 4.9 (PD2), 4.5 (SFZ3) and 6.2 (BR).
+
+### Long-session cache behavior
+
+- **IR-only eviction cost** (temporary timer around `EvictIrOnly`, not committed; Street Fighter Zero 3, x64, `--warmup 2400 --frames 3600`): the master's one eviction, between frames 4,200 and 6,000, took **9.9 ms** and dropped 14,990 IR-only blocks (1.05M IR instructions) of 35,616; the 20,626 native blocks stayed. That frame was not among the five slowest of the window (41.3, 34.0, 27.3, 27.0 and 26.9 ms, all compile bursts of new code). For comparison, an eviction on the IR backend (every block is IR-only, so it empties the cache) took 6.5–8.3 ms for 13,365–15,370 blocks (three evictions in one `--warmup 2400 --frames 1800` run). The cost is about 0.5–0.7 µs per dropped block: freeing each block's IR and map node.
+- **36,000-frame lockstep runs** (x64, `design/sh2-validation.md`, Milestone 2C): IR-cap evictions in Virtua Fighter 2 (1), Panzer Dragoon II Zwei (1) and Street Fighter Zero 3 (4), master only; native-code-cap flushes only in Burning Rangers (master 10, slave 9).
+- **Burning Rangers** loads new code over old code throughout its attract sequence. Over the 36,000-frame lockstep its master built 1,125,913 blocks and compiled 307,507 natively (883,698 invalidations, 142,387 of them stale native blocks found by their prologue); the slave 1,137,419 and 196,276. Stale native code stays allocated until a flush, so each CPU's 128 MB code cap fills about every 3,600 frames, and each fill is a full flush followed by a recompile burst. A long default-settings run shows what that costs (`--warmup 2400 --frames 33600`, one run per mode, measured window = frames 2,400–36,000; build and block counts equal the lockstep run's):
+
+  | Burning Rangers, frames 2,400–36,000 | ms/frame avg | p95 | p99 | max | SH2 total ms/frame |
+  |---|---|---|---|---|---|
+  | interpreter | 9.856 | 12.282 | 13.495 | 16.879 | 6.369 |
+  | x64 | 15.585 | 49.786 | 86.367 | 173.340 | 11.650 (ratio 0.55) |
+
+  - In the window the two CPUs built 2,244,425 blocks and compiled 492,237 natively: 167.8 s of compiling, 5.0 ms/frame on average, in 13,500 of 33,600 frames. 22 flushes (19 at the code cap, the rest requested by the core); no IR-cap eviction.
+  - The churn comes in phases: native compiles (master) rose from 12,592 at frame 6,000 to 164,266 at frame 16,800 and from 166,381 at frame 22,200 to 305,570 at frame 31,200, and barely moved in between. The slave's code changes in the same phases.
+  - The five slowest frames (151–173 ms) each spent 128–135 ms compiling (416–799 native compiles, about 200 µs each; Burning Rangers' blocks are large: 4.7 KB of code per master block, 6.9 KB per slave block). Only the slowest one (frame 9,757) also had a flush.
+  - The 1,800-frame measurement window (frames 2,400–4,200) lies before the first phase, so the results table does not show this.
+- **Memory**: the native code cap is 128 MB per CPU (`kMaxNativeCodeBytes`), so 256 MB in the worst case for both CPUs, plus up to about 20 MB of IR per CPU (`kMaxCachedInsts`). asmjit commits code memory on demand, so a title uses only what it compiles (SFZ3's master: about 54 MB after 4,200 frames). Stale native code (a block dropped after its guest code changed) is reclaimed only at a flush.
+- **Native-code headroom (Street Fighter Zero 3)**: the Task 5 long run (x64, `--warmup 2400 --frames 18000`) ended at about 90.6 MB of 128 MB (71%), growing about 1.3 KB per frame, so a full code-cap flush (every native block dropped, then a recompile burst) is projected at about 50,000 frames (about 14 minutes). Its 36,000-frame lockstep run had none, consistent with that projection.
+- **Known long-session stall sources**: a native-code-cap flush drops every native block of that CPU, and the frames after it recompile the working set; Burning Rangers reaches it within minutes, Street Fighter Zero 3 after about 14 minutes. Follow-up: evict cold or stale native blocks (release their code individually) instead of flushing the whole cache. Burning Rangers' recompiles of reloaded code cost far more than the flushes themselves (above): with the JIT on, it runs at about half the interpreter's speed in those phases, with frequent 50–170 ms frames.
+
+### Next steps
+
+The executor must shrink a further 2.4x (PD2, 3.85 to 1.60 ms/frame), 3.1x (SFZ3) or 2.6x (BR) for 2x. Generated code is now the bulk of it, so the remaining work is mostly per-instruction cost inside blocks:
+
+1. **Per-instruction cost in generated code** (PD2: 60–73% of the executor): each instruction still pays its own cycle bookkeeping, a boundary check, and the bus page-table path for every memory access. Candidates: one budget check per block (or per run of instructions) when the block's worst-case cycles fit in the remaining budget and no callback in it can raise an interrupt, with the per-instruction checks kept as the fallback; resolving the page of constant and GBR/PC-relative addresses at compile time.
+2. **On-chip register reads** (slaves: 78–96M read trampolines per 1,800 frames, mostly polling FTCSR): an inline path for side-effect-free on-chip reads, or an exact fast-forward of proven polling loops.
+3. **`DIV1` inline** (Burning Rangers master 44.8M, SFZ3 8.2M calls): emit the divide step in generated code and drop it as a register-cache barrier.
+4. **Compile cost** (SFZ3 0.67 ms/frame; asmjit's register allocation is 77% of a native compile): a lighter emitter or cheaper allocation for cold blocks; `kNativeCompileThreshold` = 16 is untested.
+5. **Code that is reloaded** (Burning Rangers: 492,237 native compiles in 33,600 frames, SH-2 time 1.8x the interpreter's over that run): reuse native code when the same guest code comes back (key compiled code by its opcodes, not only its PC), raise the native threshold for blocks at PCs that keep going stale, and evict stale and cold native blocks instead of flushing at the code cap (Burning Rangers flushes every ~3,600 frames).
+6. The remaining dispatch (one `Get` and `Step` per `Executor::Run` call, about 31,000 per frame) and interpreter fallbacks are small (under 0.7 ms/frame together).
 
 ## Reproduce
 

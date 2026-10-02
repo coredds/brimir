@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact, but the 2x target was missed (plan 2B, see [sh2-x64-performance.md](sh2-x64-performance.md)); optimization next (plan 2C)
+**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact (plan 2B); optimized in plan 2C to about the interpreter's speed (interpreter / x64 SH-2 time 0.91–1.25 on six games), so the 2x target is still missed and the JIT stays off by default (see [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2C results")
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -167,7 +167,7 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 - Keyed by the full guest PC. Block exits write constant PCs that include the partition bits, so the cached (`0x0xxxxxxx`) and cache-through (`0x2xxxxxxx`) aliases of the same code get separate blocks.
 - A block starting at `PC & 2` runs only if the fetch buffer's low halfword matches memory; otherwise the interpreter executes the buffered opcode, as the hardware would.
 - `std::unordered_map` keyed by the full PC. Each block stores its start PC and a copy of its original opcodes.
-- Size cap: `kMaxCachedInsts` = 1M IR instructions per CPU (about 20 MB). When it is reached, the whole cache is flushed before the next compile. (Milestone 2C: with a native backend, blocks are compiled natively on their `kNativeCompileThreshold`-th run and then drop their IR, so the cap counts IR-only blocks, and reaching it evicts only those; native code has its own cap, `kMaxNativeCodeBytes`. See `design/sh2-x64-performance.md`, 2C progress, Task 5.)
+- Size cap: `kMaxCachedInsts` = 1M IR instructions per CPU (about 20 MB), counting only blocks that still hold IR (IR-only blocks). When it is reached, `Get` evicts the IR-only blocks (and their recent-table slots) before the next build; natively compiled blocks keep their code and link slots. With the IR backend every block is IR-only, so eviction empties the cache, as the original whole-cache flush did. With a native backend, blocks are compiled natively on their `kNativeCompileThreshold`-th run and then drop their IR. Native code has its own cap, `kMaxNativeCodeBytes` (128 MB per CPU); reaching it flushes the whole cache, native blocks included. Stale native code (a block replaced after its code changed) is reclaimed only by such a flush. See `design/sh2-x64-performance.md`, 2C progress, Task 5.
 - If the front end ever produced a block that fails verification, a fallback empty block is cached instead, so that PC always runs on the interpreter.
 
 ### 6.2 Invalidation (milestone 1)

@@ -1,6 +1,6 @@
 # SH-2 JIT Milestone 2 — Full Coverage and x64 Backend — Design
 
-**Status**: Part A done; Part B done (exact, 2x target missed; see [sh2-x64-performance.md](sh2-x64-performance.md)); 2C next
+**Status**: Part A done; Part B done (exact, 2x target missed; see [sh2-x64-performance.md](sh2-x64-performance.md)); 2C done (x64 about at interpreter speed: interpreter / x64 SH-2 time 0.91–1.25; 2x target still missed, JIT off by default; next steps in sh2-x64-performance.md, "Milestone 2C results")
 **Date**: 2026-10-01
 **Builds on**: [sh2-jit.md](sh2-jit.md) (milestone 1: IR, block cache, executor, instruction-exact boundaries, lockstep), [sh2-validation.md](sh2-validation.md), [sh2-jit-handler-table.md](sh2-jit-handler-table.md)
 
