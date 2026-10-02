@@ -1,5 +1,6 @@
 #include "x64_emitter.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <initializer_list>
 #include <limits>
@@ -182,6 +183,7 @@ private:
     void Call(Ret (*fn)(X64Frame *, Args...) noexcept, std::initializer_list<Operand> args,
               const x86::Gp *ret = nullptr) {
         static_assert(sizeof...(Args) < 4, "trampolines take at most 4 arguments");
+        assert(args.size() == sizeof...(Args) && "argument count must match the trampoline signature");
         InvokeNode *node = nullptr;
         m_cc.invoke(Out(node), reinterpret_cast<uint64_t>(fn), FuncSignature::build<Ret, X64Frame *, Args...>());
         if (node == nullptr) {

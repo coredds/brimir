@@ -19,6 +19,7 @@ The upstream `CMakeLists.txt` only references `asmjit-testing/` when `ASMJIT_TES
 | `ASMJIT_NO_AARCH64` | `ON` | only the x86 backend is used |
 | `ASMJIT_NO_FOREIGN` | `ON` | no foreign-architecture backends |
 | `ASMJIT_NO_INSTALL` | `ON` | keep asmjit out of Brimir's install rules |
+| `ASMJIT_NO_UJIT` | `ON` | the UniCompiler backend is not used |
 
 Added with `add_subdirectory(vendor/asmjit EXCLUDE_FROM_ALL)`; its warnings are suppressed like the other vendors.
 
