@@ -5,10 +5,12 @@
 #include <brimir/jit/ir_opt.hpp>
 
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace brimir::jit {
 
@@ -55,20 +57,30 @@ void BlockCache::Invalidate(uint32_t pc) {
 const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
     RecentSlot &slot = SlotFor(pc);
     if (slot.entry != nullptr && slot.pc == pc && Validate(*slot.entry, pc, ctx)) {
-        return *slot.entry;
+        return Hit(*slot.entry, ctx, pc);
     }
     if (auto it = m_blocks.find(pc); it != m_blocks.end()) {
         if (slot.entry != it->second.get() && Validate(*it->second, pc, ctx)) {
             slot = RecentSlot{pc, it->second.get()};
-            return *it->second;
+            return Hit(*it->second, ctx, pc);
         }
         Invalidate(it);
     }
+    return Build(ctx, pc, false);
+}
 
-    if (m_totalInsts >= kMaxCachedInsts || (m_native != nullptr && m_native->CodeBytes() >= m_maxNativeCodeBytes)) {
-        Flush();
+const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool compileNow) {
+    const bool native = m_native != nullptr && (compileNow || m_nativeCompileThreshold <= 1);
+    if (m_totalInsts >= kMaxCachedInsts) {
+        ++m_flushesInstCap;
+        FlushAll();
+    } else if (native && m_native->CodeBytes() >= m_maxNativeCodeBytes && m_native->CodeBytes() > 0) {
+        // Checked before building when this block is compiled at once, so it is built only once.
+        ++m_flushesCodeCap;
+        FlushAll();
     }
 
+    const auto t0 = Clock::now();
     auto entry = std::make_unique<CachedBlock>();
     entry->block = BuildBlock(ctx, pc);
     Block &block = entry->block;
@@ -81,22 +93,60 @@ const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         block.startPC = pc;
         block.guestOpcodes.push_back(opcode);
     }
-    if (m_native != nullptr && block.guestInstrCount > 0 && !m_native->Compile(block, ctx, entry->code)) {
-        entry->code = NativeCode{}; // runs with RunBlock
-        ++m_compileFallbacks;
-    }
+    m_buildNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
     ++m_compiles;
     m_totalInsts += block.code.size();
     CachedBlock *ref = entry.get();
     m_blocks.emplace(pc, std::move(entry));
     SlotFor(pc) = RecentSlot{pc, ref};
-    if (ref->code.selfValidating) {
-        m_native->Publish(pc, ref->code);
+    if (m_native == nullptr || ref->block.guestInstrCount == 0) {
+        return *ref; // RunBlock (or the interpreter) only
     }
+    if (native) {
+        return CompileNative(*ref, ctx, pc);
+    }
+    // This run is the first; the threshold run compiles it.
+    ref->runsUntilNative = m_nativeCompileThreshold - 1;
     return *ref;
 }
 
+const CachedBlock &BlockCache::CompileNative(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
+    assert(m_native != nullptr && entry.code.entry == nullptr && !entry.block.code.empty());
+    entry.runsUntilNative = 0;
+    const size_t bytesBefore = m_native->CodeBytes();
+    if (bytesBefore >= m_maxNativeCodeBytes && bytesBefore > 0) {
+        // Drops entry too; the block is rebuilt from the current guest code and compiled at once
+        // (the code cache is empty now, so this does not flush again).
+        ++m_flushesCodeCap;
+        FlushAll();
+        return Build(ctx, pc, true);
+    }
+
+    const auto t0 = Clock::now();
+    const bool ok = m_native->Compile(entry.block, ctx, entry.code);
+    m_nativeNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+    if (!ok) {
+        entry.code = NativeCode{}; // stays IR-only and runs with RunBlock; never retried
+        ++m_compileFallbacks;
+        return entry;
+    }
+    ++m_nativeCompiles;
+    m_nativeBytes += m_native->CodeBytes() - bytesBefore;
+    // The native code never needs the IR again (see CachedBlock): free it and stop counting it.
+    m_totalInsts -= entry.block.code.size();
+    std::vector<Inst>().swap(entry.block.code);
+    if (entry.code.selfValidating) {
+        m_native->Publish(pc, entry.code);
+    }
+    return entry;
+}
+
 void BlockCache::Flush() {
+    ++m_flushesRequested;
+    FlushAll();
+}
+
+void BlockCache::FlushAll() {
     m_recent.fill(RecentSlot{});
     m_blocks.clear();
     m_totalInsts = 0;

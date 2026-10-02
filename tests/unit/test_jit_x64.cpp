@@ -148,7 +148,7 @@ TEST_CASE("x64 backend: an executor runs native blocks like the interpreter", "[
     }
     auto ref = std::make_unique<Rig>();
     auto jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec{BackendKind::X64};
+    brimir::jit::Executor exec{BackendKind::X64, sh2test::kNativeOnFirstRun};
     CHECK(exec.Backend() == BackendKind::X64);
 
     const std::vector<uint16_t> program{kAdd1_R3, kMov_R3_R4, kShll_R4, static_cast<uint16_t>(kSleep)};
@@ -187,7 +187,7 @@ TEST_CASE("x64 backend: the native code cap flushes the cache", "[jit][x64]") {
     constexpr uint32_t kStride = 0x40;
     const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
     REQUIRE(backend != nullptr);
-    brimir::jit::BlockCache cache{backend.get(), kLimit};
+    brimir::jit::BlockCache cache{backend.get(), kLimit, sh2test::kNativeOnFirstRun};
 
     auto ref = std::make_unique<Rig>();
     auto jit = std::make_unique<Rig>();
@@ -244,6 +244,144 @@ TEST_CASE("x64 backend: the native code cap flushes the cache", "[jit][x64]") {
     CHECK(cache.Size() < kBlocks);
     CHECK(cache.Invalidations() == 0);
     CHECK(cache.CompileFallbacks() == 0);
+    CHECK(cache.FlushesCodeCap() == flushes);
+    CHECK(cache.FlushesInstCap() == 0u);
+    CHECK(cache.CachedInsts() == 0u); // every cached block is native
+}
+
+// With tiered compilation the cap is checked before each native compile, which happens on a
+// block's second run here. Reaching it there flushes the cache, including the block being
+// compiled, which is rebuilt from scratch and compiled.
+TEST_CASE("x64 backend: the native code cap flushes at a tiered compile", "[jit][x64][tier]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr size_t kLimit = 4096;
+    constexpr uint32_t kBlocks = 50;
+    constexpr uint32_t kStride = 0x40;
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), kLimit, 2};
+
+    auto ref = std::make_unique<Rig>();
+    auto jit = std::make_unique<Rig>();
+    for (uint32_t i = 0; i < kBlocks; ++i) {
+        const auto imm = static_cast<uint16_t>(0x7300 | (i + 1)); // add #(i+1),R3
+        const std::vector<uint16_t> program{imm,       kMov_R3_R4, kShll_R4, kAdd1_R3, kMov_R3_R4,
+                                            kShll_R4,  kAdd1_R3,   kShll_R4, static_cast<uint16_t>(kSleep)};
+        ref->WriteCode(kCode + i * kStride, program);
+        jit->WriteCode(kCode + i * kStride, program);
+    }
+    auto state = ref->BaseState(kCode);
+    state.R[3] = 0x1234;
+    ref->Load(state);
+    jit->Load(state);
+
+    auto &ctx = jit->sh2->GetJitContext();
+    uint32_t irRuns = 0;
+    for (uint32_t pass = 0; pass < 2; ++pass) {
+        for (uint32_t i = 0; i < kBlocks; ++i) {
+            const uint32_t pc = kCode + i * kStride;
+            for (uint32_t run = 0; run < 2; ++run) {
+                INFO("pass " << pass << " block " << i << " run " << run);
+                ref->Load(ref->BaseState(pc));
+                jit->Load(jit->BaseState(pc));
+                const uint64_t compilesBefore = cache.Compiles();
+                const brimir::jit::CachedBlock &entry = cache.Get(ctx, pc);
+                ExitInfo info;
+                if (run == 0 && cache.Compiles() != compilesBefore) {
+                    // Built now (first pass, or flushed since): IR-only, not counted as native.
+                    REQUIRE(entry.code.entry == nullptr);
+                    REQUIRE_FALSE(entry.block.code.empty());
+                    CHECK(cache.CachedInsts() == entry.block.code.size());
+                    info = brimir::jit::RunBlock(entry.block, ctx);
+                    ++irRuns;
+                } else {
+                    REQUIRE(entry.code.entry != nullptr);
+                    CHECK(entry.block.code.empty());
+                    CHECK(cache.CachedInsts() == 0u);
+                    info = backend->Run(entry.code, ctx);
+                }
+                REQUIRE(info.retired == 8);
+                uint64_t refCycles = 0;
+                for (uint32_t n = 0; n < info.retired; ++n) {
+                    refCycles += ref->sh2->Step<false, false>();
+                }
+                CHECK(info.cycles == refCycles);
+                const std::string diff = sh2test::DiffRigs(*ref, *jit);
+                INFO(diff);
+                REQUIRE(diff.empty());
+            }
+        }
+    }
+    CHECK(irRuns >= kBlocks + 1); // pass 1 rebuilt at least one flushed block
+    CHECK(cache.FlushesCodeCap() >= 1u);
+    CHECK(cache.FlushesInstCap() == 0u);
+    CHECK(cache.Size() < kBlocks);
+    CHECK(cache.NativeCompiles() >= kBlocks + 1);
+    CHECK(cache.CompileFallbacks() == 0);
+}
+
+// With tiered compilation, a native block whose successor is still IR-only returns to the
+// executor instead of chaining (only native blocks are in the link table); once both are native
+// they chain.
+TEST_CASE("x64 does not chain to an IR-only block", "[jit][x64][tier]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kAdd1_R4 = 0x7401;
+    constexpr uint16_t kNopOp = 0x0009;
+    const auto bra = [](uint32_t at, uint32_t target) {
+        const int32_t disp = (static_cast<int32_t>(target) - static_cast<int32_t>(at) - 4) / 2;
+        return static_cast<uint16_t>(0xA000 | (static_cast<uint32_t>(disp) & 0xFFF));
+    };
+    const uint32_t b = kCode + 0x20;
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{BackendKind::X64, 3};
+    // A: add #1,R3 ; bra B ; nop      B: add #1,R4 ; bra A ; nop
+    rig->WriteCode(kCode, {kAdd1_R3, bra(kCode + 2, b), kNopOp});
+    rig->WriteCode(b, {kAdd1_R4, bra(b + 2, kCode), kNopOp});
+    auto state = rig->BaseState(kCode);
+    state.R[3] = 0;
+    state.R[4] = 0;
+    rig->Load(state);
+    auto &ctx = rig->sh2->GetJitContext();
+
+    // Two IR runs of each (Step never chains).
+    uint64_t cyclesA = 0;
+    uint64_t cyclesB = 0;
+    for (int i = 0; i < 2; ++i) {
+        const ExitInfo a = exec.Step(ctx);
+        REQUIRE(a.retired == 3);
+        REQUIRE(*ctx.PC == b);
+        const ExitInfo bb = exec.Step(ctx);
+        REQUIRE(bb.retired == 3);
+        REQUIRE(*ctx.PC == kCode);
+        cyclesA = a.cycles;
+        cyclesB = bb.cycles;
+    }
+    REQUIRE(exec.GetStats().nativeBlocksRun == 0u);
+
+    // A's third run is native; B is still IR-only, so A returns to the executor, whose next step
+    // compiles B (its third run). B then stops at the budget instead of chaining back to A.
+    *ctx.cyclesExecuted = 0;
+    CHECK(exec.Run(ctx, 0, cyclesA + cyclesB) == cyclesA + cyclesB);
+    CHECK(exec.GetStats().nativeBlocksRun == 2u);
+    CHECK(exec.GetStats().chainedBlocks == 0u);
+    CHECK(exec.GetStats().blocksRun == 6u);
+    CHECK(*ctx.PC == kCode);
+    CHECK(rig->State().R[3] == 3u);
+    CHECK(rig->State().R[4] == 3u);
+    REQUIRE(exec.Cache().Find(kCode)->code.entry != nullptr);
+    REQUIRE(exec.Cache().Find(b)->code.entry != nullptr);
+
+    // Both native: A chains to B, and B to A.
+    exec.Run(ctx, 0, 2 * (cyclesA + cyclesB));
+    CHECK(exec.GetStats().chainedBlocks == 3u);
+    CHECK(exec.GetStats().nativeBlocksRun == 6u);
+    CHECK(rig->State().R[3] == 5u);
+    CHECK(rig->State().R[4] == 5u);
+    CHECK(exec.Cache().NativeCompiles() == 2u);
 }
 
 TEST_CASE("x64 backend: CoreWrapper backend selection recreates the executors", "[jit][x64]") {
@@ -1005,7 +1143,7 @@ TEST_CASE("x64 propagates callback exceptions", "[jit][x64]") {
         auto irRig = std::make_unique<Rig>();
         auto x64Rig = std::make_unique<Rig>();
         brimir::jit::Executor irExec{BackendKind::Ir};
-        brimir::jit::Executor x64Exec{BackendKind::X64};
+        brimir::jit::Executor x64Exec{BackendKind::X64, sh2test::kNativeOnFirstRun};
         Rig *rigs[2] = {irRig.get(), x64Rig.get()};
         brimir::jit::Executor *execs[2] = {&irExec, &x64Exec};
         for (int i = 0; i < 2; ++i) {
@@ -1283,9 +1421,11 @@ TEST_CASE("x64 stops after an exception from every callback", "[jit][x64]") {
     }
 }
 
-// Register caching: every guest register and SR is dirty (in host registers only) when a callback
-// throws or requests an abort, after a passed boundary check and a not-taken ExitIf. The state
-// left in memory must be RunBlock's: all writes before the call, none after it.
+// Register caching: guest registers and SR are dirty (in host registers only) when a callback
+// throws or requests an abort. R0-R7 are written before a passed boundary check (which stores
+// them: the write-back at every CheckBoundary) and a not-taken ExitIf; R8-R15, R5 again, T and
+// M/Q/S are written after them, so they are still dirty at the call. The state left in memory must
+// be RunBlock's: all writes before the call, none after it.
 TEST_CASE("x64 leaves dirty guest registers in memory when a callback throws or aborts", "[jit][x64]") {
     if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
         SKIP("no x64 backend");
@@ -1306,6 +1446,13 @@ TEST_CASE("x64 leaves dirty guest registers in memory when a callback throws or 
         {"setSR", [](Ctx &c) { c.setSR = ThrowSetSR; }, [](Builder &b) { b.SetSR(b.GetReg(4), false); }},
         {"accessCyclesRMWByte", [](Ctx &c) { c.accessCyclesRMWByte = ThrowAccessCyclesRMWByte; },
          [](Builder &b) { b.AddAccessCyclesRMWByte(b.Const(kMmio)); }},
+        // Inline setup (no call); the inline end calls the trampoline: the target has bit 1 set and
+        // is off array pages. SR (and R8-R15) are dirty at that call.
+        {"endDelaySlot", [](Ctx &c) { c.endDelaySlot = ThrowEndDelaySlot; },
+         [](Builder &b) {
+             b.SetupDelaySlot(b.Const(kMmio + 2));
+             b.EndDelaySlot();
+         }},
         {nullptr,
          [](Ctx &c) {
              g_origWrite = c.write;
@@ -1326,14 +1473,18 @@ TEST_CASE("x64 leaves dirty guest registers in memory when a callback throws or 
         block.startPC = kCode;
         block.guestInstrCount = 2;
         Builder b(block);
-        for (uint32_t r = 0; r < 16; ++r) {
+        for (uint32_t r = 0; r < 8; ++r) {
+            b.SetReg(r, b.Add(b.GetReg(r), b.Const(0x100 * r + 1)));
+        }
+        b.AddCycles(1);
+        b.CheckBoundary(kCode + 2, 1); // stores R0-R7
+        b.ExitIf(b.CmpGtU(b.GetReg(0), b.GetReg(0)), kCode + 0x40, 2, false, 1); // never taken
+        // Dirty at the call below:
+        for (uint32_t r = 8; r < 16; ++r) {
             b.SetReg(r, b.Add(b.GetReg(r), b.Const(0x100 * r + 1)));
         }
         b.SetT(b.Const(1));
         b.SetSRBits(b.Const(0x302), 0x302); // M, Q, S
-        b.AddCycles(1);
-        b.CheckBoundary(kCode + 2, 1);
-        b.ExitIf(b.CmpGtU(b.GetReg(0), b.GetReg(0)), kCode + 0x40, 2, false, 1); // never taken
         b.SetReg(5, b.Xor(b.GetReg(5), b.GetReg(6)));
         b.AddCycles(2);
         b.SyncCycles();
@@ -1484,7 +1635,7 @@ uint16_t Bra(uint32_t from, uint32_t to) {
 struct ChainPair {
     std::unique_ptr<Rig> ref = std::make_unique<Rig>();
     std::unique_ptr<Rig> jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec{BackendKind::X64};
+    brimir::jit::Executor exec{BackendKind::X64, sh2test::kNativeOnFirstRun};
 
     void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
         ref->WriteCode(address, words);
@@ -1535,6 +1686,10 @@ TEST_CASE("Chained run equals stepped run", "[jit][x64]") {
     }
     constexpr int kPrograms = 300;
     constexpr int kAdvances = 40;
+    // 1: every block native from its first run. 3: blocks switch from RunBlock to native code in
+    // the middle of the run (tiered compilation), on both executors at the same block run.
+    const uint32_t threshold = GENERATE(sh2test::kNativeOnFirstRun, 3u);
+    INFO("native compile threshold " << threshold);
     uint64_t totalChained = 0;
     uint64_t totalNative = 0;
     for (int prog = 0; prog < kPrograms; ++prog) {
@@ -1544,8 +1699,8 @@ TEST_CASE("Chained run equals stepped run", "[jit][x64]") {
         auto ref = std::make_unique<Rig>();
         auto chainRig = std::make_unique<Rig>();
         auto stepRig = std::make_unique<Rig>();
-        brimir::jit::Executor chainExec{BackendKind::X64};
-        brimir::jit::Executor stepExec{BackendKind::X64};
+        brimir::jit::Executor chainExec{BackendKind::X64, threshold};
+        brimir::jit::Executor stepExec{BackendKind::X64, threshold};
         stepExec.SetChaining(false);
         for (Rig *rig : {ref.get(), chainRig.get(), stepRig.get()}) {
             rig->mmio.busWaitEvery = fuzz.busWaitEvery;
@@ -1591,14 +1746,20 @@ TEST_CASE("Chained run equals stepped run", "[jit][x64]") {
         REQUIRE(chained.staleEntries == 0u);
         REQUIRE(stepped.staleEntries == 0u);
         REQUIRE(chainExec.Cache().Compiles() == stepExec.Cache().Compiles());
+        REQUIRE(chainExec.Cache().NativeCompiles() == stepExec.Cache().NativeCompiles());
         REQUIRE(stepped.chainedBlocks == 0u);
         totalChained += chained.chainedBlocks;
         totalNative += chained.nativeBlocksRun;
     }
     // Measured (milestone 2C task 2): 34533 of 42789 native blocks chained (81%). The bound leaves
     // room for generator changes but fails if chaining mostly stops happening.
-    WARN("chained blocks " << totalChained << " of " << totalNative << " native blocks");
-    CHECK(totalChained * 100 >= totalNative * 60);
+    WARN("threshold " << threshold << ": chained blocks " << totalChained << " of " << totalNative
+                      << " native blocks");
+    if (threshold == 1) {
+        CHECK(totalChained * 100 >= totalNative * 60);
+    } else {
+        CHECK(totalChained > 0u); // fewer: blocks that never reach the threshold stay IR-only
+    }
 }
 
 // A store raises the DIVU overflow interrupt at the end of a block (in a delay slot, or as the last
@@ -1785,7 +1946,7 @@ TEST_CASE("Flush during a chain", "[jit][x64]") {
     constexpr uint16_t kAdd1_R5 = 0x7501;
     const uint32_t b = kCode + 0x20;
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec{BackendKind::X64};
+    brimir::jit::Executor exec{BackendKind::X64, sh2test::kNativeOnFirstRun};
     // A: add #1,R3 ; bra B ; nop      B: mov.l @R1,R2 ; add #1,R5 ; sleep
     rig->WriteCode(kCode, {kAdd1_R3, Bra(kCode + 2, b), kNop});
     rig->WriteCode(b, {kLoadR2, kAdd1_R5, static_cast<uint16_t>(kSleep)});
@@ -1876,7 +2037,7 @@ TEST_CASE("Chained blocks see the state a step would give them", "[jit][x64]") {
     for (int chaining = 0; chaining < 2; ++chaining) {
         INFO("chaining " << chaining);
         auto rig = std::make_unique<Rig>();
-        brimir::jit::Executor exec{BackendKind::X64};
+        brimir::jit::Executor exec{BackendKind::X64, sh2test::kNativeOnFirstRun};
         exec.SetChaining(chaining != 0);
         // A: mov.l R2,@R1 ; bra B ; nop      kMmioTarget: SLEEP
         // B: mov.l R5,@R4 ; nop ; bra C ; nop (the refill before bra follows B's store, so it
@@ -1978,7 +2139,7 @@ TEST_CASE("A flush from a non-stopping callback ends the chain", "[jit][x64]") {
 
     SECTION("the flush is applied when the block returns") {
         auto rig = std::make_unique<Rig>();
-        brimir::jit::Executor exec{BackendKind::X64};
+        brimir::jit::Executor exec{BackendKind::X64, sh2test::kNativeOnFirstRun};
         const auto state = setUp(*rig);
         auto &ctx = rig->sh2->GetJitContext();
         const ExitInfo a = exec.Step(ctx); // compiles A
@@ -2000,7 +2161,7 @@ TEST_CASE("A flush from a non-stopping callback ends the chain", "[jit][x64]") {
         uint32_t flushes[2] = {};
         for (int chaining = 0; chaining < 2; ++chaining) {
             rigs[chaining] = std::make_unique<Rig>();
-            execs[chaining] = std::make_unique<brimir::jit::Executor>(BackendKind::X64);
+            execs[chaining] = std::make_unique<brimir::jit::Executor>(BackendKind::X64, sh2test::kNativeOnFirstRun);
             execs[chaining]->SetChaining(chaining != 0);
             setUp(*rigs[chaining]);
             auto &ctx = rigs[chaining]->sh2->GetJitContext();

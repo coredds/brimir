@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -355,8 +356,44 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
                         static_cast<unsigned long long>(stats.compileFallbacks),
                         static_cast<unsigned long long>(stats.staleEntries),
                         static_cast<unsigned long long>(stats.chainedBlocks));
+            const auto& cache = exec->Cache();
+            const uint64_t native = cache.NativeCompiles();
+            std::printf("cache %-7s: compiles %llu  nativeCompiles %llu  compileMs %.1f (build %.1f  native %.1f)  "
+                        "nativeBytesPerBlock %.0f  invalidations %llu  flushes instCap %llu  codeCap %llu  "
+                        "requested %llu\n",
+                        master ? "master" : "slave", static_cast<unsigned long long>(cache.Compiles()),
+                        static_cast<unsigned long long>(native),
+                        (cache.BuildNs() + cache.NativeCompileNs()) / 1e6, cache.BuildNs() / 1e6,
+                        cache.NativeCompileNs() / 1e6,
+                        native > 0 ? static_cast<double>(cache.NativeBytesCompiled()) / static_cast<double>(native) : 0.0,
+                        static_cast<unsigned long long>(cache.Invalidations()),
+                        static_cast<unsigned long long>(cache.FlushesInstCap()),
+                        static_cast<unsigned long long>(cache.FlushesCodeCap()),
+                        static_cast<unsigned long long>(cache.FlushesRequested()));
         }
     }
+}
+
+// Both executors' compile counters summed, for per-frame deltas.
+struct CompileCounters {
+    uint64_t compiles = 0;
+    uint64_t nativeCompiles = 0;
+    uint64_t compileNs = 0;
+    uint64_t flushes = 0;
+};
+
+CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
+    CompileCounters c;
+    for (const bool master : {true, false}) {
+        if (const brimir::jit::Executor* exec = core.GetSH2JitExecutor(master); exec != nullptr) {
+            const auto& cache = exec->Cache();
+            c.compiles += cache.Compiles();
+            c.nativeCompiles += cache.NativeCompiles();
+            c.compileNs += cache.BuildNs() + cache.NativeCompileNs();
+            c.flushes += cache.FlushesInstCap() + cache.FlushesCodeCap() + cache.FlushesRequested();
+        }
+    }
+    return c;
 }
 
 int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir) {
@@ -437,11 +474,20 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
 
     std::vector<double> frameMs;
     frameMs.reserve(static_cast<size_t>(args.frames));
+    // JIT compile work per measured frame (both CPUs), to explain the slowest frames.
+    std::vector<CompileCounters> frameCompiles;
+    frameCompiles.reserve(static_cast<size_t>(args.frames));
+    const CompileCounters windowStart = ReadCompileCounters(core);
+    CompileCounters before = windowStart;
     for (int i = 0; i < args.frames; ++i) {
         const auto start = std::chrono::steady_clock::now();
         core.RunFrame();
         const auto end = std::chrono::steady_clock::now();
         frameMs.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+        const CompileCounters after = ReadCompileCounters(core);
+        frameCompiles.push_back({after.compiles - before.compiles, after.nativeCompiles - before.nativeCompiles,
+                                 after.compileNs - before.compileNs, after.flushes - before.flushes});
+        before = after;
     }
 
     double total = 0.0;
@@ -470,6 +516,30 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                 share(masterMs + slaveMs));
     if (args.sh2Jit) {
         PrintJitStats(core); // totals since initialization (warmup included)
+        const CompileCounters& w = before;
+        std::printf("jit window   : compiles %llu  nativeCompiles %llu  compileMs %.1f  flushes %llu  "
+                    "framesCompiling %lld\n",
+                    static_cast<unsigned long long>(w.compiles - windowStart.compiles),
+                    static_cast<unsigned long long>(w.nativeCompiles - windowStart.nativeCompiles),
+                    (w.compileNs - windowStart.compileNs) / 1e6,
+                    static_cast<unsigned long long>(w.flushes - windowStart.flushes),
+                    static_cast<long long>(std::count_if(frameCompiles.begin(), frameCompiles.end(),
+                                                         [](const CompileCounters& c) { return c.compiles > 0; })));
+        std::vector<size_t> order(frameMs.size());
+        for (size_t i = 0; i < order.size(); ++i) {
+            order[i] = i;
+        }
+        const size_t shown = std::min<size_t>(5, order.size());
+        std::partial_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(shown), order.end(),
+                          [&](size_t a, size_t b) { return frameMs[a] > frameMs[b]; });
+        for (size_t k = 0; k < shown; ++k) {
+            const size_t i = order[k];
+            const CompileCounters& c = frameCompiles[i];
+            std::printf("slow frame   : %zu  %.3f ms  compiles %llu  nativeCompiles %llu  compileMs %.3f  flushes %llu\n",
+                        static_cast<size_t>(args.warmup) + i, frameMs[i], static_cast<unsigned long long>(c.compiles),
+                        static_cast<unsigned long long>(c.nativeCompiles), c.compileNs / 1e6,
+                        static_cast<unsigned long long>(c.flushes));
+        }
     }
     return 0;
 }

@@ -61,7 +61,7 @@ void FlushingWrite(void *sh2, uint32 address, uint32 size, uint32 value) {
 
 TEST_CASE("Executor: flush during a block is deferred and aborts the block", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec{sh2test::TestBackend()};
+    brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
     rig->WriteCode(kCode, {kMovL_R1_R2, kAdd1_R3, kAdd1_R3, kSleep});
     WriteMmio32(*rig, kData, 0x12345678);
     auto state = rig->BaseState(kCode);
@@ -155,7 +155,7 @@ TEST_CASE("Executor: modified code in RAM is recompiled", "[jit][executor]") {
     const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
     INFO("backend " << brimir::jit::BackendName(kind));
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec{kind};
+    brimir::jit::Executor exec{kind, sh2test::kNativeOnFirstRun};
     auto &ctx = rig->sh2->GetJitContext();
     rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
     auto state = rig->BaseState(kCode);
@@ -196,7 +196,7 @@ TEST_CASE("Executor: code on a handler page is checked through the callback", "[
     INFO("backend " << brimir::jit::BackendName(kind));
     auto rig = std::make_unique<Rig>();
     MapMmioPeeks(*rig);
-    brimir::jit::Executor exec{kind};
+    brimir::jit::Executor exec{kind, sh2test::kNativeOnFirstRun};
     auto &ctx = rig->sh2->GetJitContext();
     WriteMmioCode(*rig, kMmioCode, {kAdd1_R3, kAdd1_R3, kSleep});
     auto state = rig->BaseState(kMmioCode);
@@ -243,7 +243,7 @@ TEST_CASE("Executor: the recent table never returns a stale block", "[jit][execu
     const bool flush = GENERATE(true, false);
     INFO("backend " << brimir::jit::BackendName(kind) << (flush ? " flush" : " invalidation"));
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec{kind};
+    brimir::jit::Executor exec{kind, sh2test::kNativeOnFirstRun};
     auto &ctx = rig->sh2->GetJitContext();
     rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
     auto state = rig->BaseState(kCode);
@@ -281,7 +281,7 @@ TEST_CASE("Executor: the recent table never returns a stale block", "[jit][execu
 
 TEST_CASE("Executor: flush outside a block clears the cache immediately", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec{sh2test::TestBackend()};
+    brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
     rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
     rig->Load(rig->BaseState(kCode));
 
@@ -293,7 +293,7 @@ TEST_CASE("Executor: flush outside a block clears the cache immediately", "[jit]
 
 TEST_CASE("Executor: flush during a store aborts the block after the store", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
-    brimir::jit::Executor exec{sh2test::TestBackend()};
+    brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
     rig->WriteCode(kCode, {kMovL_R2_atR1, kAdd1_R3, kAdd1_R3, kSleep});
     auto state = rig->BaseState(kCode);
     state.R[1] = kData;
@@ -324,4 +324,147 @@ TEST_CASE("Executor: flush during a store aborts the block after the store", "[j
     CHECK(rig->State().R[3] == 2u);
     CHECK(rig->State().PC == kCode + 6);
     CHECK(exec.Cache().Size() == 1);
+}
+
+// Tiered compilation (brimir::jit::kNativeCompileThreshold): a new block runs N-1 times with
+// RunBlock, then its Nth run compiles it natively, frees its IR and runs the native code.
+TEST_CASE("Executor: a block runs N-1 times on IR and then natively", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const uint32_t threshold = GENERATE(2u, 4u, brimir::jit::kNativeCompileThreshold);
+    INFO("threshold " << threshold);
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{brimir::jit::BackendKind::X64, threshold};
+    REQUIRE(exec.Cache().NativeCompileThreshold() == threshold);
+    auto &ctx = rig->sh2->GetJitContext();
+    rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
+    auto state = rig->BaseState(kCode);
+    state.R[3] = 0;
+    rig->Load(state);
+
+    uint32_t run = 1;
+    for (; run < threshold; ++run) {
+        INFO("IR run " << run);
+        rig->Load(rig->BaseState(kCode));
+        REQUIRE(exec.Step(ctx).retired == 2);
+        CHECK(rig->State().R[3] == 2u * run);
+        CHECK(exec.GetStats().blocksRun == run);
+        CHECK(exec.GetStats().nativeBlocksRun == 0u);
+        const brimir::jit::CachedBlock *entry = exec.Cache().Find(kCode);
+        REQUIRE(entry != nullptr);
+        CHECK(entry->code.entry == nullptr);
+        CHECK_FALSE(entry->block.code.empty());
+        CHECK(exec.Cache().CachedInsts() == entry->block.code.size());
+        CHECK(exec.Cache().NativeCompiles() == 0u);
+    }
+
+    // The threshold run, then one more: both native, compiled once.
+    for (uint32_t extra = 0; extra < 2; ++extra, ++run) {
+        INFO("native run " << run);
+        rig->Load(rig->BaseState(kCode));
+        REQUIRE(exec.Step(ctx).retired == 2);
+        CHECK(rig->State().R[3] == 2u * run);
+        CHECK(exec.GetStats().blocksRun == run);
+        CHECK(exec.GetStats().nativeBlocksRun == extra + 1);
+        const brimir::jit::CachedBlock *entry = exec.Cache().Find(kCode);
+        REQUIRE(entry != nullptr);
+        CHECK(entry->code.entry != nullptr);
+        // The IR is gone; what validation and the executor need is kept.
+        CHECK(entry->block.code.empty());
+        CHECK(entry->block.code.capacity() == 0u);
+        CHECK(entry->block.startPC == kCode);
+        CHECK(entry->block.guestInstrCount == 2u);
+        REQUIRE(entry->block.guestOpcodes.size() >= 2u);
+        CHECK(entry->block.guestOpcodes[0] == kAdd1_R3);
+        CHECK(entry->block.guestOpcodes[1] == kAdd1_R3);
+        CHECK(exec.Cache().CachedInsts() == 0u);
+        CHECK(exec.Cache().NativeCompiles() == 1u);
+        CHECK(exec.Cache().Compiles() == 1u);
+    }
+}
+
+TEST_CASE("Executor: the IR backend keeps every block on IR", "[jit][executor][tier]") {
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{brimir::jit::BackendKind::Ir, 2};
+    auto &ctx = rig->sh2->GetJitContext();
+    rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
+    rig->Load(rig->BaseState(kCode));
+    for (uint32_t run = 1; run <= 5; ++run) {
+        rig->Load(rig->BaseState(kCode));
+        REQUIRE(exec.Step(ctx).retired == 2);
+    }
+    CHECK(exec.GetStats().blocksRun == 5u);
+    CHECK(exec.GetStats().nativeBlocksRun == 0u);
+    CHECK(exec.Cache().NativeCompiles() == 0u);
+    const brimir::jit::CachedBlock *entry = exec.Cache().Find(kCode);
+    REQUIRE(entry != nullptr);
+    CHECK_FALSE(entry->block.code.empty());
+    CHECK(exec.Cache().CachedInsts() == entry->block.code.size());
+}
+
+// The IR-instruction budget counts IR-only blocks only. A native block whose code changed is
+// dropped and rebuilt from scratch as an IR-only block (it never needs its freed IR), and a
+// flush drops native blocks the same way.
+TEST_CASE("Executor: kMaxCachedInsts accounting ignores native blocks", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kHot = kCode;
+    constexpr uint32_t kCold = kCode + 0x100;
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{brimir::jit::BackendKind::X64, 2};
+    auto &ctx = rig->sh2->GetJitContext();
+    rig->WriteCode(kHot, {kAdd1_R3, kAdd1_R3, kSleep});
+    rig->WriteCode(kCold, {kAdd16_R3, kAdd1_R3, kAdd1_R3, kSleep});
+    auto state = rig->BaseState(kHot);
+    state.R[3] = 0;
+    rig->Load(state);
+    const auto stepAt = [&](uint32_t pc) {
+        rig->Load(rig->BaseState(pc));
+        return exec.Step(ctx);
+    };
+    const auto &cache = exec.Cache();
+
+    REQUIRE(stepAt(kHot).retired == 2);
+    const size_t hotInsts = cache.CachedInsts();
+    REQUIRE(hotInsts > 0u);
+    REQUIRE(stepAt(kHot).retired == 2); // second run: native
+    REQUIRE(cache.Find(kHot)->code.entry != nullptr);
+    CHECK(cache.CachedInsts() == 0u);
+    REQUIRE(stepAt(kCold).retired == 3);
+    REQUIRE(cache.Find(kCold)->code.entry == nullptr);
+    const size_t coldInsts = cache.Find(kCold)->block.code.size();
+    CHECK(cache.CachedInsts() == coldInsts);
+    CHECK(rig->State().R[3] == 2u + 2u + 16u + 2u);
+
+    // Change the hot block: its prologue reports stale, and it is rebuilt from scratch as IR.
+    rig->WriteCode(kHot + 2, {kAdd16_R3});
+    REQUIRE(stepAt(kHot).retired == 2);
+    CHECK(rig->State().R[3] == 22u + 1u + 16u);
+    CHECK(exec.GetStats().staleEntries == 1u);
+    CHECK(cache.Invalidations() == 1u);
+    const brimir::jit::CachedBlock *hot = cache.Find(kHot);
+    REQUIRE(hot != nullptr);
+    CHECK(hot->code.entry == nullptr);
+    CHECK_FALSE(hot->block.code.empty());
+    CHECK(cache.CachedInsts() == coldInsts + hot->block.code.size());
+    REQUIRE(stepAt(kHot).retired == 2); // native again
+    CHECK(rig->State().R[3] == 39u + 17u);
+    CHECK(cache.Find(kHot)->code.entry != nullptr);
+    CHECK(cache.CachedInsts() == coldInsts);
+    CHECK(cache.NativeCompiles() == 2u);
+
+    // A flush drops everything; the next run builds IR again.
+    exec.Flush();
+    CHECK(cache.Size() == 0u);
+    CHECK(cache.CachedInsts() == 0u);
+    CHECK(cache.FlushesRequested() == 1u);
+    REQUIRE(stepAt(kHot).retired == 2);
+    CHECK(rig->State().R[3] == 56u + 17u);
+    REQUIRE(cache.Find(kHot) != nullptr);
+    CHECK(cache.Find(kHot)->code.entry == nullptr);
+    CHECK(cache.CachedInsts() == cache.Find(kHot)->block.code.size());
+    CHECK(cache.FlushesInstCap() == 0u);
+    CHECK(cache.FlushesCodeCap() == 0u);
 }

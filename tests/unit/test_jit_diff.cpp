@@ -72,12 +72,12 @@ std::string Hex(const std::vector<uint16_t> &words) {
 struct Pair {
     std::unique_ptr<Rig> ref = std::make_unique<Rig>();
     std::unique_ptr<Rig> jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec{sh2test::TestBackend()};
+    brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
     bool lastStepMatched = true; // whether the most recent Step() found identical cycles and state
 
     Pair() = default;
     explicit Pair(brimir::jit::BackendKind kind)
-        : exec{kind} {}
+        : exec{kind, sh2test::kNativeOnFirstRun} {}
 
     void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
         ref->WriteCode(address, words);
@@ -417,7 +417,7 @@ TEST_CASE("A stale fetch buffer at PC & 2 runs on the interpreter", "[jit][diff]
 TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[jit][diff]") {
     auto ref = std::make_unique<Rig>();
     auto jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec{sh2test::TestBackend()};
+    brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
     // loop: add #1,R4 ; add #1,R4 ; mov.b @R1,R2 (FRC byte) ; add R2,R3 ; bra loop ; nop
     // The FRC read is mid-block, after two cycle-consuming instructions, so it only sees the
     // interpreter's count if the block syncs the cycle counter before the access.
@@ -484,7 +484,7 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         std::unique_ptr<brimir::jit::Executor> x64Exec;
         if (withX64) {
             x64Rig = std::make_unique<Rig>();
-            x64Exec = std::make_unique<brimir::jit::Executor>(brimir::jit::BackendKind::X64);
+            x64Exec = std::make_unique<brimir::jit::Executor>(brimir::jit::BackendKind::X64, sh2test::kNativeOnFirstRun);
         }
         const sh2test::FuzzProgram fuzz = sh2test::MakeFuzzProgram(seed);
         const std::vector<uint16_t> &program = fuzz.words;

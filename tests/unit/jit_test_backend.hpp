@@ -21,6 +21,10 @@ namespace sh2test {
 // else DefaultBackend().
 brimir::jit::BackendKind TestBackend();
 
+// Native compile threshold for tests that check native behaviour: compile on a block's first run,
+// as before tiered compilation (brimir::jit::kNativeCompileThreshold).
+constexpr uint32_t kNativeOnFirstRun = 1;
+
 // Every backend available in this build (Ir first).
 std::vector<brimir::jit::BackendKind> AvailableBackends();
 

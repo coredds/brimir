@@ -31,8 +31,10 @@ public:
         uint64_t chainedBlocks = 0;    // native blocks entered from another block (Run with chaining)
     };
 
-    // Runs compiled blocks on `kind`; an unavailable kind falls back to BackendKind::Ir.
-    explicit Executor(BackendKind kind = DefaultBackend());
+    // Runs compiled blocks on `kind`; an unavailable kind falls back to BackendKind::Ir. A block runs
+    // with RunBlock until its nativeCompileThreshold-th run, which compiles it natively
+    // (kNativeCompileThreshold; tests pass 1 for native code on the first run).
+    explicit Executor(BackendKind kind = DefaultBackend(), uint32_t nativeCompileThreshold = kNativeCompileThreshold);
 
     Executor(const Executor &) = delete;
     Executor &operator=(const Executor &) = delete;

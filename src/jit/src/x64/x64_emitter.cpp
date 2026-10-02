@@ -266,20 +266,26 @@ private:
         s.dirty = true;
     }
 
+    // At most one store per slot; fixed size, so taking the set allocates nothing (compile time).
+    struct DirtySetT {
+        std::array<DirtyStore, kSlots> stores;
+        uint32_t count = 0;
+    };
+
     // The dirty slots now, for a store on another path (a taken ExitIf).
-    std::vector<DirtyStore> DirtySet() const {
-        std::vector<DirtyStore> set;
+    DirtySetT DirtySet() const {
+        DirtySetT set;
         for (uint32_t slot = 0; slot < kSlots; ++slot) {
             if (m_cache[slot].dirty) {
-                set.push_back({SlotOffset(slot), m_cache[slot].value});
+                set.stores[set.count++] = {SlotOffset(slot), m_cache[slot].value};
             }
         }
         return set;
     }
 
-    void StoreDirty(const std::vector<DirtyStore> &set) {
-        for (const DirtyStore &d : set) {
-            m_cc.mov(State32(d.offset), d.value);
+    void StoreDirty(const DirtySetT &set) {
+        for (uint32_t i = 0; i < set.count; ++i) {
+            m_cc.mov(State32(set.stores[i].offset), set.stores[i].value);
         }
     }
 

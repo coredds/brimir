@@ -69,7 +69,16 @@ native backend could not compile; they run on the IR interpreter) and
 page changed since they were compiled; each is recompiled and run) and
 `chainedBlocks` (native blocks entered directly from the previous block,
 without returning to the executor; `nativeBlocksRun / (nativeBlocksRun -
-chainedBlocks)` is the average chain length).
+chainedBlocks)` is the average chain length). A `cache` line per CPU adds the
+block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
+(blocks compiled natively: with a native backend a block runs on the IR
+interpreter until its 8th run, `kNativeCompileThreshold`), `compileMs` (host
+time building blocks and compiling them natively), `nativeBytesPerBlock`,
+`invalidations`, and flushes by trigger (`instCap`: IR-instruction cap,
+`codeCap`: native code cap, `requested`: CPU reset, state load, ...). After the
+measured frames, `jit window` sums both CPUs' compile work over the measured
+frames, and five `slow frame` lines list the slowest measured frames (frame
+number counted from startup) with their compile work.
 
 `--jit-backend ir|x64` selects the JIT's code backend (`design/sh2-jit-m2.md`):
 `ir` runs compiled blocks on the IR interpreter, `x64` compiles them to native
@@ -106,9 +115,10 @@ build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lock
 ```
 
 `--jit-backend` selects the JIT core's backend (default `x64` when built). The
-lockstep summary prints the executor counters of both CPUs; with `x64`,
-`nativeBlocksRun` equal to `blocksRun` and `compileFallbacks 0` mean that every
-compiled block ran as native code.
+lockstep summary prints the executor and block-cache counters of both CPUs;
+with `x64`, `compileFallbacks 0` means that every block that reached its native
+compile threshold compiled; `blocksRun - nativeBlocksRun` are the IR runs before
+that threshold.
 
 `--lockstep N` loads the same content (and optional `--state`) into two cores,
 one running both SH-2s through the JIT and one through the interpreter, runs
@@ -148,7 +158,9 @@ lockstep: 600/36000 frames identical
 lockstep: OK, 36000 frames identical
 SH2 JIT backend: x64
 jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
+cache master : compiles ...  nativeCompiles ...  compileMs ... (build ...  native ...)  nativeBytesPerBlock ...  invalidations ...  flushes instCap ...  codeCap ...  requested ...
 jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
+cache slave  : ...
 ```
 
 On the first difference it prints the frame number (0-based) and the first

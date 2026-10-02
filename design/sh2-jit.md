@@ -167,7 +167,7 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 - Keyed by the full guest PC. Block exits write constant PCs that include the partition bits, so the cached (`0x0xxxxxxx`) and cache-through (`0x2xxxxxxx`) aliases of the same code get separate blocks.
 - A block starting at `PC & 2` runs only if the fetch buffer's low halfword matches memory; otherwise the interpreter executes the buffered opcode, as the hardware would.
 - `std::unordered_map` keyed by the full PC. Each block stores its start PC and a copy of its original opcodes.
-- Size cap: `kMaxCachedInsts` = 1M IR instructions per CPU (about 20 MB). When it is reached, the whole cache is flushed before the next compile.
+- Size cap: `kMaxCachedInsts` = 1M IR instructions per CPU (about 20 MB). When it is reached, the whole cache is flushed before the next compile. (Milestone 2C: with a native backend, blocks are compiled natively on their `kNativeCompileThreshold`-th run and then drop their IR, so the cap counts IR-only blocks; native code has its own cap, `kMaxNativeCodeBytes`. See `design/sh2-x64-performance.md`, 2C progress, Task 5.)
 - If the front end ever produced a block that fails verification, a fallback empty block is cached instead, so that PC always runs on the interpreter.
 
 ### 6.2 Invalidation (milestone 1)
