@@ -359,15 +359,16 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
             const auto& cache = exec->Cache();
             const uint64_t native = cache.NativeCompiles();
             std::printf("cache %-7s: compiles %llu  nativeCompiles %llu  compileMs %.1f (build %.1f  native %.1f)  "
-                        "nativeBytesPerBlock %.0f  invalidations %llu  flushes instCap %llu  codeCap %llu  "
-                        "requested %llu\n",
+                        "nativeBytesPerBlock %.0f  invalidations %llu  cachedInsts %zu  irEvictions %llu (blocks %llu)  "
+                        "flushes codeCap %llu  requested %llu\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(cache.Compiles()),
                         static_cast<unsigned long long>(native),
                         (cache.BuildNs() + cache.NativeCompileNs()) / 1e6, cache.BuildNs() / 1e6,
                         cache.NativeCompileNs() / 1e6,
                         native > 0 ? static_cast<double>(cache.NativeBytesCompiled()) / static_cast<double>(native) : 0.0,
                         static_cast<unsigned long long>(cache.Invalidations()),
-                        static_cast<unsigned long long>(cache.FlushesInstCap()),
+                        cache.CachedInsts(), static_cast<unsigned long long>(cache.IrEvictions()),
+                        static_cast<unsigned long long>(cache.IrEvictedBlocks()),
                         static_cast<unsigned long long>(cache.FlushesCodeCap()),
                         static_cast<unsigned long long>(cache.FlushesRequested()));
         }
@@ -380,6 +381,7 @@ struct CompileCounters {
     uint64_t nativeCompiles = 0;
     uint64_t compileNs = 0;
     uint64_t flushes = 0;
+    uint64_t irEvictions = 0;
 };
 
 CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
@@ -390,7 +392,8 @@ CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
             c.compiles += cache.Compiles();
             c.nativeCompiles += cache.NativeCompiles();
             c.compileNs += cache.BuildNs() + cache.NativeCompileNs();
-            c.flushes += cache.FlushesInstCap() + cache.FlushesCodeCap() + cache.FlushesRequested();
+            c.flushes += cache.FlushesCodeCap() + cache.FlushesRequested();
+            c.irEvictions += cache.IrEvictions();
         }
     }
     return c;
@@ -486,8 +489,22 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         frameMs.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         const CompileCounters after = ReadCompileCounters(core);
         frameCompiles.push_back({after.compiles - before.compiles, after.nativeCompiles - before.nativeCompiles,
-                                 after.compileNs - before.compileNs, after.flushes - before.flushes});
+                                 after.compileNs - before.compileNs, after.flushes - before.flushes,
+                                 after.irEvictions - before.irEvictions});
         before = after;
+        // Cache occupancy over long runs: IR-only instructions (IR cap) and native code held.
+        if (args.sh2Jit && (i + 1) % 1800 == 0) {
+            for (const bool master : {true, false}) {
+                if (const brimir::jit::Executor* exec = core.GetSH2JitExecutor(master); exec != nullptr) {
+                    const auto& cache = exec->Cache();
+                    std::printf("jit progress : frame %d  %-6s  blocks %zu  cachedInsts %zu  irEvictions %llu  "
+                                "nativeCompiles %llu\n",
+                                args.warmup + i + 1, master ? "master" : "slave", cache.Size(), cache.CachedInsts(),
+                                static_cast<unsigned long long>(cache.IrEvictions()),
+                                static_cast<unsigned long long>(cache.NativeCompiles()));
+                }
+            }
+        }
     }
 
     double total = 0.0;
@@ -517,12 +534,13 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     if (args.sh2Jit) {
         PrintJitStats(core); // totals since initialization (warmup included)
         const CompileCounters& w = before;
-        std::printf("jit window   : compiles %llu  nativeCompiles %llu  compileMs %.1f  flushes %llu  "
+        std::printf("jit window   : compiles %llu  nativeCompiles %llu  compileMs %.1f  flushes %llu  irEvictions %llu  "
                     "framesCompiling %lld\n",
                     static_cast<unsigned long long>(w.compiles - windowStart.compiles),
                     static_cast<unsigned long long>(w.nativeCompiles - windowStart.nativeCompiles),
                     (w.compileNs - windowStart.compileNs) / 1e6,
                     static_cast<unsigned long long>(w.flushes - windowStart.flushes),
+                    static_cast<unsigned long long>(w.irEvictions - windowStart.irEvictions),
                     static_cast<long long>(std::count_if(frameCompiles.begin(), frameCompiles.end(),
                                                          [](const CompileCounters& c) { return c.compiles > 0; })));
         std::vector<size_t> order(frameMs.size());
@@ -535,10 +553,10 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         for (size_t k = 0; k < shown; ++k) {
             const size_t i = order[k];
             const CompileCounters& c = frameCompiles[i];
-            std::printf("slow frame   : %zu  %.3f ms  compiles %llu  nativeCompiles %llu  compileMs %.3f  flushes %llu\n",
+            std::printf("slow frame   : %zu  %.3f ms  compiles %llu  nativeCompiles %llu  compileMs %.3f  flushes %llu  irEvictions %llu\n",
                         static_cast<size_t>(args.warmup) + i, frameMs[i], static_cast<unsigned long long>(c.compiles),
                         static_cast<unsigned long long>(c.nativeCompiles), c.compileNs / 1e6,
-                        static_cast<unsigned long long>(c.flushes));
+                        static_cast<unsigned long long>(c.flushes), static_cast<unsigned long long>(c.irEvictions));
         }
     }
     return 0;

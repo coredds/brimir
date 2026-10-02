@@ -71,10 +71,10 @@ const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
 
 const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool compileNow) {
     const bool native = m_native != nullptr && (compileNow || m_nativeCompileThreshold <= 1);
-    if (m_totalInsts >= kMaxCachedInsts) {
-        ++m_flushesInstCap;
-        FlushAll();
-    } else if (native && m_native->CodeBytes() >= m_maxNativeCodeBytes && m_native->CodeBytes() > 0) {
+    if (m_totalInsts >= m_maxCachedInsts) {
+        EvictIrOnly();
+    }
+    if (native && m_native->CodeBytes() >= m_maxNativeCodeBytes && m_native->CodeBytes() > 0) {
         // Checked before building when this block is compiled at once, so it is built only once.
         ++m_flushesCodeCap;
         FlushAll();
@@ -139,6 +139,26 @@ const CachedBlock &BlockCache::CompileNative(CachedBlock &entry, ymir::sh2::SH2J
         m_native->Publish(pc, entry.code);
     }
     return entry;
+}
+
+void BlockCache::EvictIrOnly() {
+    ++m_irEvictions;
+    for (auto it = m_blocks.begin(); it != m_blocks.end();) {
+        CachedBlock *entry = it->second.get();
+        if (entry->code.entry != nullptr) {
+            ++it; // native: keeps its code, link slot and recent slot
+            continue;
+        }
+        // IR-only: never published, so no link slot to clear.
+        RecentSlot &slot = SlotFor(it->first);
+        if (slot.entry == entry) {
+            slot = RecentSlot{};
+        }
+        m_totalInsts -= entry->block.code.size();
+        ++m_irEvictedBlocks;
+        it = m_blocks.erase(it);
+    }
+    assert(m_totalInsts == 0 && "every counted IR instruction belongs to an IR-only block");
 }
 
 void BlockCache::Flush() {

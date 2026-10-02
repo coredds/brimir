@@ -74,8 +74,11 @@ block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
 (blocks compiled natively: with a native backend a block runs on the IR
 interpreter until its 8th run, `kNativeCompileThreshold`), `compileMs` (host
 time building blocks and compiling them natively), `nativeBytesPerBlock`,
-`invalidations`, and flushes by trigger (`instCap`: IR-instruction cap,
-`codeCap`: native code cap, `requested`: CPU reset, state load, ...). After the
+`invalidations`, `cachedInsts` (IR instructions of IR-only blocks, against the
+IR cap), `irEvictions` (times the IR cap evicted the IR-only blocks, and how
+many blocks), and flushes by trigger (`codeCap`: native code cap, `requested`:
+CPU reset, state load, ...). Every 1800 measured frames a `jit progress` line
+per CPU shows the cache occupancy. After the
 measured frames, `jit window` sums both CPUs' compile work over the measured
 frames, and five `slow frame` lines list the slowest measured frames (frame
 number counted from startup) with their compile work.
@@ -158,7 +161,7 @@ lockstep: 600/36000 frames identical
 lockstep: OK, 36000 frames identical
 SH2 JIT backend: x64
 jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
-cache master : compiles ...  nativeCompiles ...  compileMs ... (build ...  native ...)  nativeBytesPerBlock ...  invalidations ...  flushes instCap ...  codeCap ...  requested ...
+cache master : compiles ...  nativeCompiles ...  compileMs ... (build ...  native ...)  nativeBytesPerBlock ...  invalidations ...  cachedInsts ...  irEvictions ... (blocks ...)  flushes codeCap ...  requested ...
 jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
 cache slave  : ...
 ```

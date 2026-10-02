@@ -245,7 +245,7 @@ TEST_CASE("x64 backend: the native code cap flushes the cache", "[jit][x64]") {
     CHECK(cache.Invalidations() == 0);
     CHECK(cache.CompileFallbacks() == 0);
     CHECK(cache.FlushesCodeCap() == flushes);
-    CHECK(cache.FlushesInstCap() == 0u);
+    CHECK(cache.IrEvictions() == 0u);
     CHECK(cache.CachedInsts() == 0u); // every cached block is native
 }
 
@@ -316,10 +316,127 @@ TEST_CASE("x64 backend: the native code cap flushes at a tiered compile", "[jit]
     }
     CHECK(irRuns >= kBlocks + 1); // pass 1 rebuilt at least one flushed block
     CHECK(cache.FlushesCodeCap() >= 1u);
-    CHECK(cache.FlushesInstCap() == 0u);
+    CHECK(cache.IrEvictions() == 0u);
     CHECK(cache.Size() < kBlocks);
     CHECK(cache.NativeCompiles() >= kBlocks + 1);
     CHECK(cache.CompileFallbacks() == 0);
+}
+
+// Reaching the IR cap evicts only IR-only blocks: native blocks keep their code and keep running
+// natively without a recompile, evicted blocks are rebuilt from scratch on their next run, and
+// the IR accounting covers exactly the IR-only blocks still cached.
+TEST_CASE("x64 backend: the IR cap evicts only IR-only blocks", "[jit][x64][tier]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kBlocks = 30;
+    constexpr uint32_t kHot = 2; // blocks 0 and 1 become native
+    constexpr uint32_t kStride = 0x40;
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+
+    auto ref = std::make_unique<Rig>();
+    auto jit = std::make_unique<Rig>();
+    for (uint32_t i = 0; i < kBlocks; ++i) {
+        const auto imm = static_cast<uint16_t>(0x7300 | (i + 1)); // add #(i+1),R3
+        const std::vector<uint16_t> program{imm,       kMov_R3_R4, kShll_R4, kAdd1_R3, kMov_R3_R4,
+                                            kShll_R4,  kAdd1_R3,   kShll_R4, static_cast<uint16_t>(kSleep)};
+        ref->WriteCode(kCode + i * kStride, program);
+        jit->WriteCode(kCode + i * kStride, program);
+    }
+    auto state = ref->BaseState(kCode);
+    state.R[3] = 0x1234;
+    ref->Load(state);
+    jit->Load(state);
+    auto &ctx = jit->sh2->GetJitContext();
+
+    // A cap of about three blocks' IR.
+    const size_t blockInsts = brimir::jit::BuildBlock(ctx, kCode).code.size();
+    REQUIRE(blockInsts > 0u);
+    const size_t cap = 3 * blockInsts;
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, 2, cap};
+
+    // Runs pc through the cache (native or RunBlock) and compares it with the interpreter.
+    const auto runAt = [&](uint32_t pc) -> const brimir::jit::CachedBlock & {
+        ref->Load(ref->BaseState(pc));
+        jit->Load(jit->BaseState(pc));
+        const brimir::jit::CachedBlock &entry = cache.Get(ctx, pc);
+        const ExitInfo info =
+            entry.code.entry != nullptr ? backend->Run(entry.code, ctx) : brimir::jit::RunBlock(entry.block, ctx);
+        REQUIRE(info.retired == 8);
+        uint64_t refCycles = 0;
+        for (uint32_t n = 0; n < info.retired; ++n) {
+            refCycles += ref->sh2->Step<false, false>();
+        }
+        CHECK(info.cycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit);
+        INFO(diff);
+        REQUIRE(diff.empty());
+        return entry;
+    };
+    // The IR accounting is the IR of the IR-only blocks still cached.
+    const auto checkAccounting = [&] {
+        size_t irInsts = 0;
+        for (uint32_t i = 0; i < kBlocks; ++i) {
+            if (const brimir::jit::CachedBlock *e = cache.Find(kCode + i * kStride); e != nullptr) {
+                irInsts += e->code.entry == nullptr ? e->block.code.size() : 0;
+                CHECK((e->code.entry == nullptr) != e->block.code.empty());
+            }
+        }
+        CHECK(cache.CachedInsts() == irInsts);
+        CHECK(cache.CachedInsts() <= cap + blockInsts);
+    };
+
+    const void *hotCode[kHot] = {};
+    for (uint32_t i = 0; i < kHot; ++i) {
+        runAt(kCode + i * kStride);
+        hotCode[i] = runAt(kCode + i * kStride).code.entry; // second run: native
+        REQUIRE(hotCode[i] != nullptr);
+    }
+    REQUIRE(cache.NativeCompiles() == kHot);
+    CHECK(cache.CachedInsts() == 0u);
+
+    // Cold blocks, one run each: IR-only, so the cap is reached and evicts them repeatedly.
+    for (uint32_t i = kHot; i < kBlocks; ++i) {
+        INFO("cold block " << i);
+        const uint64_t evictionsBefore = cache.IrEvictions();
+        const brimir::jit::CachedBlock &entry = runAt(kCode + i * kStride);
+        CHECK(entry.code.entry == nullptr);
+        if (cache.IrEvictions() != evictionsBefore) {
+            // Every earlier cold block is gone; only this one counts.
+            for (uint32_t k = kHot; k < i; ++k) {
+                CHECK(cache.Find(kCode + k * kStride) == nullptr);
+            }
+            CHECK(cache.CachedInsts() == entry.block.code.size());
+        }
+        for (uint32_t h = 0; h < kHot; ++h) {
+            const brimir::jit::CachedBlock *hot = cache.Find(kCode + h * kStride);
+            REQUIRE(hot != nullptr);
+            CHECK(hot->code.entry == hotCode[h]);
+        }
+        checkAccounting();
+    }
+    CHECK(cache.IrEvictions() >= 5u);
+    CHECK(cache.IrEvictedBlocks() >= 3 * cache.IrEvictions());
+    CHECK(cache.Size() < kBlocks);
+
+    // The native blocks still run natively, with the same code, without a rebuild.
+    const uint64_t compilesBefore = cache.Compiles();
+    for (uint32_t h = 0; h < kHot; ++h) {
+        CHECK(runAt(kCode + h * kStride).code.entry == hotCode[h]);
+    }
+    CHECK(cache.Compiles() == compilesBefore);
+    CHECK(cache.NativeCompiles() == kHot);
+
+    // An evicted block (its recent slot cleared too) is rebuilt from scratch as IR.
+    REQUIRE(cache.Find(kCode + kHot * kStride) == nullptr);
+    const brimir::jit::CachedBlock &rebuilt = runAt(kCode + kHot * kStride);
+    CHECK(rebuilt.code.entry == nullptr);
+    CHECK(cache.Compiles() == compilesBefore + 1);
+    checkAccounting();
+    CHECK(cache.FlushesCodeCap() == 0u);
+    CHECK(cache.FlushesRequested() == 0u);
+    CHECK(cache.CompileFallbacks() == 0u);
 }
 
 // With tiered compilation, a native block whose successor is still IR-only returns to the

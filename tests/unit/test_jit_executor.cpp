@@ -465,6 +465,6 @@ TEST_CASE("Executor: kMaxCachedInsts accounting ignores native blocks", "[jit][e
     REQUIRE(cache.Find(kHot) != nullptr);
     CHECK(cache.Find(kHot)->code.entry == nullptr);
     CHECK(cache.CachedInsts() == cache.Find(kHot)->block.code.size());
-    CHECK(cache.FlushesInstCap() == 0u);
+    CHECK(cache.IrEvictions() == 0u);
     CHECK(cache.FlushesCodeCap() == 0u);
 }

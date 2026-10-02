@@ -16,13 +16,15 @@
 
 namespace brimir::jit {
 
-// IR instructions of IR-only blocks kept before the cache is flushed (~20 MB of IR). Natively
-// compiled blocks drop their IR and do not count.
+// IR instructions of IR-only blocks kept (~20 MB of IR). Natively compiled blocks drop their IR and
+// do not count. Reaching it evicts every IR-only block; native blocks stay.
 constexpr size_t kMaxCachedInsts = size_t{1} << 20;
 
 // Native code held before the cache is flushed (checked before each native compile). Sized so that
-// Street Fighter Zero 3's master working set fits: 30,600 block PCs at about 2,750 bytes each held
-// about 87 MB (design/sh2-x64-performance.md, 2C progress, Task 5).
+// Street Fighter Zero 3's master working set fits: compiling every block natively without a flush,
+// its master made 31,476 native compiles (about 30,600 PCs plus recompiles of stale blocks, whose old
+// code stays allocated until a flush) at about 2,750 bytes each, 86.6 MB held
+// (design/sh2-x64-performance.md, 2C progress, Task 5).
 constexpr size_t kMaxNativeCodeBytes = size_t{128} << 20;
 
 // A block is built as IR and run with RunBlock first; its Nth run (counting the one right after it
@@ -50,11 +52,14 @@ public:
     // native: the backend that compiles hot blocks, or nullptr to run every block with RunBlock.
     // Not owned; it must outlive the cache. maxNativeCodeBytes: flush limit for the backend's code
     // (tests pass a small value). nativeCompileThreshold: see kNativeCompileThreshold (tests pass
-    // 1 to get native code on the first run; 0 is treated as 1).
+    // 1 to get native code on the first run; 0 is treated as 1). maxCachedInsts: the IR cap (tests
+    // pass a small value).
     explicit BlockCache(INativeBackend *native = nullptr, size_t maxNativeCodeBytes = kMaxNativeCodeBytes,
-                        uint32_t nativeCompileThreshold = kNativeCompileThreshold)
+                        uint32_t nativeCompileThreshold = kNativeCompileThreshold,
+                        size_t maxCachedInsts = kMaxCachedInsts)
         : m_native(native)
         , m_maxNativeCodeBytes(maxNativeCodeBytes)
+        , m_maxCachedInsts(maxCachedInsts)
         , m_nativeCompileThreshold(nativeCompileThreshold == 0 ? 1 : nativeCompileThreshold) {}
 
     // Returns the block for pc, building it on a miss or when its guest code changed, and compiling
@@ -112,11 +117,15 @@ public:
     uint64_t NativeCompileNs() const {
         return m_nativeNs;
     }
-    // Flushes by trigger: the IR-instruction cap, the native code cap, and Flush() calls
-    // (Executor::Flush: CPU reset, state load, ...).
-    uint64_t FlushesInstCap() const {
-        return m_flushesInstCap;
+    // Times the IR cap was reached, and the IR-only blocks evicted then (native blocks are kept).
+    uint64_t IrEvictions() const {
+        return m_irEvictions;
     }
+    uint64_t IrEvictedBlocks() const {
+        return m_irEvictedBlocks;
+    }
+    // Flushes by trigger: the native code cap, and Flush() calls (Executor::Flush: CPU reset, state
+    // load, ...).
     uint64_t FlushesCodeCap() const {
         return m_flushesCodeCap;
     }
@@ -150,6 +159,10 @@ private:
     // Drops every block (Flush without counting it as requested).
     void FlushAll();
 
+    // Drops every IR-only block (and its recent slot) at the IR cap; native blocks, their code and
+    // link slots stay. Only called from Get, never while a block runs.
+    void EvictIrOnly();
+
     // A validated hit: counts the run and compiles the block natively on its threshold run.
     const CachedBlock &Hit(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         if (entry.runsUntilNative != 0 && --entry.runsUntilNative == 0) {
@@ -168,6 +181,7 @@ private:
 
     INativeBackend *m_native;
     size_t m_maxNativeCodeBytes;
+    size_t m_maxCachedInsts;
     uint32_t m_nativeCompileThreshold;
     BlockMap m_blocks;
     std::array<RecentSlot, kRecentSlots> m_recent{};
@@ -179,7 +193,8 @@ private:
     uint64_t m_nativeBytes = 0;
     uint64_t m_buildNs = 0;
     uint64_t m_nativeNs = 0;
-    uint64_t m_flushesInstCap = 0;
+    uint64_t m_irEvictions = 0;
+    uint64_t m_irEvictedBlocks = 0;
     uint64_t m_flushesCodeCap = 0;
     uint64_t m_flushesRequested = 0;
 };
