@@ -62,7 +62,7 @@ Notes:
 
 - Run-to-run spread was within 3% except Virtua Fighter 2, whose third round was faster in all three modes (interpreter 5.44, IR 15.37, x64 8.72 ms SH2 total). Its ratio in that round (0.62) is still far below 2.0. All x64 runs reported `compileFallbacks 0` and `nativeBlocksRun == blocksRun` on both CPUs.
 - Street Fighter Zero 3 on x64 has periodic stalls (p99 44–45 ms, max 256–264 ms in all three runs; the IR backend has max 27–28 ms). They come from block-cache flushes and recompilation (profile below).
-- Virtua Fighter 2 on x64 has a single spike per run (max 105.6 / 83.9 / 95.2 ms; the IR backend has 33–38 ms). The master's block cache fills to the IR-instruction cap once in the measured window, and the following frames recompile hundreds of blocks each (profile below).
+- Virtua Fighter 2 on x64 has a single spike per run (max 105.6 / 83.9 / 95.2 ms; the IR backend has 33.3 / 37.8 / 28.6 ms). The master's block cache fills to the IR-instruction cap once in the measured window, and the following frames recompile hundreds of blocks each (profile below).
 - `blocksRun` differs slightly between runs (Virtua Fighter 2 master: 251,304,014 / 251,304,099 / 251,304,215 in the three IR runs and 251,304,054–251,304,063 in the x64 runs). That is nondeterminism in these default-settings runs (threaded VDP, host RTC), not a backend difference: the three IR runs differ from each other as much as from the x64 runs. Lockstep runs, which are deterministic, give identical counts on both backends (`design/sh2-validation.md`).
 - Interpreter SH2 totals for five of the games are 26–29% below the baseline table measured on 2026-09-30 on the same machine (for example Panzer Dragoon II Zwei 5.27 vs 7.42 ms). Virtua Fighter 2 and the BIOS menu are within 2% of it. The ratios above only compare runs from the same session.
 
@@ -82,6 +82,8 @@ A sampling profiler was not usable here. Visual Studio's `VSDiagnostics.exe` col
 - **Classification**: exit reason of every native block run, compiled length, per-block run counts, IR op counts, native code bytes per compiled block, callback addresses.
 - **Per-frame log**: compiles, compile time, flushes and cache size (blocks, IR instructions, code bytes) per CPU and frame.
 
+An earlier variant of the refill and `SetupDelaySlot` experiments (first instrumented build) made the second call inside the C++ trampoline. It measured only the inner callback (2.2 ns per refill, 1.5 ns per setup) and missed the call from generated code: argument setup, the call, the trampoline frame and the abort check. Those runs are not used; the second build emits the call twice in generated code instead. The `Get` and native-timer experiments come from the first build and the refill/setup ones from the second. Each is compared with the Run-timer-only runs of its own build.
+
 Counts cover the 1,800 measured frames of the baseline scene (warmup 2,400), both CPUs unless a CPU is named. Timed experiments were repeated three times, interleaved, and averaged. The first run of the second instrumented build (Run timer only) was an outlier (SH2 total 15.9 vs 10.6–10.7 ms/frame) and is excluded.
 
 **Timer overhead.** A timed interval costs two `rdtsc` reads plus a counter update. Adding the native timer (266.8M intervals) made `Executor::Run` 1.79 s longer, about 6.7 ns per interval. The trampoline timers used in the first version of this report cost about 10.4 ns per interval: each also tested an enable flag twice and updated two counters. Only part of that cost lands inside the measured interval: the latency of the second `rdtsc` does, the first one's mostly does not. So a timed interval overstates by somewhere between 0 and the full growth. The earlier "about 3 ns" correction was not based on a measurement and was wrong. With up to 10 ns of error on calls that themselves take 5–10 ns, timers cannot measure the trampolines, so the trampoline costs below come from the duplicate-call experiments. Timers are used only for long intervals (`Executor::Run`, `X64Backend::Run`), and those are given as ranges.
@@ -93,18 +95,18 @@ Counts cover the 1,800 measured frames of the baseline scene (warmup 2,400), bot
 | Part | Source | ms/frame | Share of `Executor::Run` (~7.96 ms) |
 |---|---|---|---|
 | SH-2 time outside `Executor::Run` (inside `SH2::Advance`) | base: SH2 total − Run | 1.08 | (not in Run) |
-| Native block runs (`X64Backend::Run`: frame setup, generated code, trampolines) | native timer, 3 runs: 6.25 ms raw, minus 0–0.99 ms timer overhead | 5.25–6.25 | 66–79% |
-| Dispatch (everything in `Run` outside native runs) | 7.96 − native, at least the `Get` cost | 1.75–2.7 | 22–34% |
+| Native block runs (`X64Backend::Run`: frame setup, generated code, trampolines) | native timer, 3 runs: 6.25 ms raw, minus 0–0.99 ms timer overhead, minus 0.24–0.71 ms of instrumentation counters inside the interval (856M trampoline-call increments at 0.5–1.5 ns) | 4.5–6.0 | 57–75% |
+| Dispatch (everything in `Run` outside native runs: `Step` pre-checks, `Get`, `BlockScope`, fallbacks, loop) | 7.96 − native; must exceed the `Get` cost | 2.0–3.4 | 25–43% |
 | of which `BlockCache::Get` incl. `IsCurrent` | duplicate `Get`, 3 runs: +3.15 s / 266.9M = 11.8 ns per call (warm second call, so a lower bound) | ≥ 1.75 | ≥ 22% |
 | Trampolines (inside native runs) | sum of the four rows below | 2.7–3.5 | 34–44% |
 | of which pipeline refill, 622.9M calls | duplicate call, 3 runs: +3.88 s = 6.2 ns per call, including ~1 ns of instrumentation counters | 1.7–2.2 | 21–28% |
 | of which delay-slot setup + end, 72.3M + 69.0M calls | duplicate setup, 3 runs: +0.34 s = 4.6 ns per call; end assumed similar | 0.3–0.4 | 4–5% |
 | of which reads, 85.7M calls (85.5M by the slave, see below) | call cost as for setup, plus an on-chip register read; estimated | 0.2–0.4 | 3–5% |
 | of which writes, 3.9M calls (SCU/VDP registers; the interpreter pays the same device work) | earlier timers, ~240 ns per call (timer overhead negligible here) | ~0.5 | ~6% |
-| Generated code proper (plus `X64Backend::Run` entry/exit) | native − trampolines | 1.8–3.5 | 23–44% |
-| Interpreter fallbacks, 3.8M steps | earlier timers | ~0.03 | <1% |
+| Generated code proper (plus `X64Backend::Run` entry/exit) | native − trampolines | 1.0–3.3 | 13–41% |
+| Interpreter fallbacks (part of dispatch), 3.76M steps | earlier timers | ~0.03 | <1% |
 
-The ranges are coupled: native and dispatch sum to about 7.96, and generated code is native minus trampolines. In round numbers: dispatch about a quarter, trampolines about 40% (refills alone about a quarter), and generated code a quarter to 40%.
+The ranges are coupled: native and dispatch sum to about 7.96, and generated code is native minus trampolines. The native interval of the instrumented build also contained the trampoline-call counters (one increment per call, 856M in total). Their estimated cost is subtracted above, which lowers native and generated code and raises dispatch. In round numbers: trampolines 34–44% (refills alone 21–28%), dispatch a quarter to 40%, generated code an eighth to 40%. Trampolines are the largest and the best-determined part.
 
 **Outside `Executor::Run`.** About 1.08 ms/frame of SH-2 time is spent in `SH2::Advance` outside the executor. Part of it is the measurement itself. `SH2::Advance` reads `std::chrono::steady_clock::now()` twice per call for the SH2 host-time counter; a pair costs 38.6 ns here (microbenchmark), and about half of it falls inside the measured interval. At 55.6M `Advance` calls per 1,800 frames, that is about 0.6 ms/frame. The rest, about 0.5 ms/frame, is the `Advance` call itself, WDT/FRT/DMA updates and the sleep check. The interpreter pays all of it, since the scheduler calls `Advance` with the same slices in both modes.
 
@@ -179,7 +181,7 @@ Structure (classification run):
 - **Slave**: 3.52 blocks per slice. It spends the scene in a 5-instruction loop that polls FTCSR (78.3M read callbacks, one address); 79% of its runs are that loop's taken back-edge, the rest are boundary stops.
 
 **Compile churn is the master's alone.** The slave never flushes and has 598 distinct block PCs (72k IR instructions).
-- **Flushes**: the master's cache was flushed by the IR-instruction cap (`kMaxCachedInsts`, 2^20) at measured frames 2424, 3109 and 3945, and once in the warmup at frame 746. At each measured flush it held 12,500–14,100 blocks, 1.05M IR instructions and 32.9–33.1 MB of native code (below the 64 MB code cap). Frame numbers count from the start of the run; measurement starts at frame 2400. In the first version of this report, the warmup/measurement split came from a counter reset at the start of measurement (3) against the total number of flush messages (4). The per-frame log now confirms it with frame numbers. No flush came from `Executor::Flush` (reset, state load), and no compile replaced an invalidated block.
+- **Flushes**: the master's cache was flushed by the IR-instruction cap (`kMaxCachedInsts`, 2^20) at measured frames 2424, 3109 and 3945, and once in the warmup at frame 746. At each measured flush it held 12,500–14,100 blocks, 1.05M IR instructions and 32.9–33.1 MB of native code (below the 64 MB code cap). Frame numbers count from the start of the run; measurement starts at frame 2400. In the first version of this report, the warmup/measurement split came from a counter reset at the start of measurement (3) against the total number of flush messages (4). The per-frame log now confirms it with frame numbers. In the measured window no flush came from `Executor::Flush` (reset, state load); the only such flushes were at boot (frame 0). No compile in the window replaced an invalidated block.
 - **The working set exceeds the cap, and new code keeps appearing.**
   - The master has compiled 30,627 distinct block start PCs since boot. The sum of their IR sizes is 2.58M IR instructions, 2.5x the cap.
   - During the 1,800 measured frames it compiled 35,454 blocks: 25,060 recompiles of PCs compiled before, mostly after the flushes, and 10,394 blocks at PCs never seen before.
@@ -191,33 +193,37 @@ Structure (classification run):
 - **Worst frames**:
   - 274 ms, 4 frames after a flush: 1,763 compiles, 252 ms of compiling;
   - 205 ms, the flush frame;
-  - 157 ms at frame 3777, not near a flush: 546 recompiles and 19 new PCs, 138 ms of compiling.
+  - 157 ms at frame 3777, not near a flush: 546 compiles (527 recompiles, 19 new PCs), 138 ms of compiling.
 - Without compile time, the x64 SH2 total would be about 8.7 ms/frame and the ratio still about 0.58.
 
 ### Virtua Fighter 2 (x64): max-frame spikes
 
-The per-frame log of two runs shows the same cause as Street Fighter Zero 3. The master's cache hit the IR-instruction cap once in the measured window, at frame 2689 in one run and 2642 in the other; the frame differs because default-settings runs are not deterministic. At that point it held 16,200 blocks, 1.05M IR instructions and 33.3 MB of code. The flush frame and the following four frames recompiled 211–857 blocks each (19–73 ms of compiling per frame, about 100 µs per block), which produced the 84–89 ms maximum and several 35–44 ms frames. Over the window the master compiled 5,540 blocks, 570 ms in total, with 25,000 distinct PCs since boot. The IR backend has the same IR cap, but its compile step is only the front end, which plausibly explains its lower maxima (33–38 ms). This was not measured.
+The per-frame log of two runs shows the same cause as Street Fighter Zero 3. The master's cache hit the IR-instruction cap once in the measured window, at frame 2689 in one run and 2642 in the other; the frame differs because default-settings runs are not deterministic. At that point it held 16,200 blocks, 1.05M IR instructions and 33.3 MB of code. In the flush frame and the next four frames the master compiled 211, 302, 38, 367 and 857 blocks (run 1, frames 2689–2693) and 823, 249, 371, 382 and 58 blocks (run 2, frames 2642–2646). The heavy frames took 19–73 ms of compiling each (about 100 µs per block). That produced the maxima of these two instrumented runs (84.2 and 88.8 ms) and several 35–44 ms frames. The uninstrumented runs in the results table had maxima of 84–106 ms. Over the window the master compiled 5,540 blocks, 570 ms in total, with 25,000 distinct PCs since boot. The IR backend has the same IR cap, but its compile step is only the front end, which plausibly explains its lower maxima (33.3, 37.8 and 28.6 ms in the three runs). This was not measured.
 
 ## Conclusions for a follow-up plan (2C)
 
-In order of expected gain:
+The budget: for 2x, Panzer Dragoon II Zwei's `Executor::Run` must drop from about 7.96 to about 1.55 ms/frame, since about 1.08 ms/frame of `SH2::Advance` lies outside the executor and is paid in both modes. No single item below is enough. Items 1–3 cover the three parts of executor time, ordered by their measured share (best-determined first).
 
-The budget: for 2x, Panzer Dragoon II Zwei's `Executor::Run` must drop from about 7.96 to about 1.55 ms/frame, since about 1.08 ms/frame of `SH2::Advance` lies outside the executor and is paid in both modes. No single item below is enough; together they also have to make the generated code itself about as cheap per instruction as it can be. In order of expected gain:
+1. **Out-of-line calls, mainly pipeline refills.** Trampolines take 34–44% of executor time; refills alone (622.9M calls, about 6 ns each) take 21–28%. A refill cannot simply be dropped, but its call can become a constant store:
+   - **The buffer is visible at almost every instruction.** A `Refill` op writes the 32-bit fetch buffer `m_fetchedOpcodes` (`SH2::JitRefillPipeline`: an instruction-fetch `MemRead<uint32>` at an aligned address; on array pages the bus read has no side effects). Generated code never reads the buffer, but nearly every instruction has a reachable exit after it:
+     - the `CheckBoundary` stubs, which write PC;
+     - `ExitIfBusWait` exits;
+     - abort exits after `CheckStop`;
+     - the final exits.
 
-1. **Generated code** (23–44% of executor time) runs 8.3 IR ops and about 260 bytes of x64 per guest instruction. 45% of the ops are per-instruction timing and boundary bookkeeping (`SetWb`, `WbStall`, `CheckBoundary`, `AddCycles`, `SyncCycles`, `AddAccessCycles`), and a fifth are guest-register loads/stores.
+     At an exit where PC has bit 1 set, `Executor::Step` compares `*ctx.fetchedOpcodes` with memory, and the interpreter executes the next instruction from the buffer (`SH2::FetchInstruction`). Save states and lockstep see the buffer at every exit. So the buffer must hold the right value at every exit, as it does now.
+   - **The value is known at compile time.** On an array page it is the two opcodes at the aligned address. The front end has them in `guestOpcodes`, which `IsCurrent` verifies before every run. So each refill call can become a constant 32-bit store to `m_fetchedOpcodes`. Alternatively, the store can be sunk into each exit path (boundary stubs, bus-wait exits, final exits) with the value current at that exit; abort exits need the value current at their site too. The saving is a call (~6 ns) replaced by one store, or by a store on the exit paths only.
+   - **Where a call or runtime load remains**:
+     - the refill at the block's last aligned instruction also reads the next word, which is not in `guestOpcodes`; it would have to be added and checked;
+     - stores in the block, or write callbacks, that hit the block's own code: memory then differs from `guestOpcodes`;
+     - the refill at a taken BT/BF target reads another block's code;
+     - fetches from non-array pages.
+   - **Delay-slot calls**: setup/end (141M calls, 0.3–0.4 ms/frame) can be inlined as state stores, plus the refill at an odd target, which is again a known value on array pages.
+2. **Per-block dispatch** (25–43%; `Get` alone ≥ 1.75 ms/frame, 11.8 ns per lookup) is paid every 3.3–3.5 retired instructions. Block linking (`design/sh2-jit-m2.md` §4.6) would chain blocks inside generated code, and the design already deferred it to 2C. The `IsCurrent` re-check on every lookup should become write-tracking invalidation (or a per-page generation check), so linked blocks do not need it. The gain is capped by the slice length: about 31 cycles per `Advance` call means at most about 6 (master) or 4 (slave) blocks to chain per call. 59% of block runs end in a taken BT/BF (`ExitIf`) and 26% in a delayed branch, so linking must cover both.
+3. **Generated code** (13–41% of executor time) runs 8.3 IR ops and about 260 bytes of x64 per guest instruction. 45% of the ops are per-instruction timing and boundary bookkeeping (`SetWb`, `WbStall`, `CheckBoundary`, `AddCycles`, `SyncCycles`, `AddAccessCycles`), and a fifth are guest-register loads/stores.
    - Fold the static parts at compile time: write-back state known within a block, constant cycle sums, and boundary checks merged where no callback can change the limit or the interrupt state.
    - Keep guest registers in host registers across a block.
    - Both need care to stay exact at every point where the block can stop.
-2. **Per-block dispatch** (22–34%; `Get` alone ≥ 1.75 ms/frame, 11.8 ns per lookup) is paid every 3.3–3.5 retired instructions. Block linking (`design/sh2-jit-m2.md` §4.6) would chain blocks inside generated code, and the design already deferred it to 2C. The `IsCurrent` re-check on every lookup should become write-tracking invalidation (or a per-page generation check), so linked blocks do not need it. The gain is capped by the slice length: about 31 cycles per `Advance` call means at most about 6 (master) or 4 (slave) blocks to chain per call. 59% of block runs end in a taken BT/BF (`ExitIf`) and 26% in a delayed branch, so linking must cover both.
-3. **Pipeline refills** (622.9M calls, 6 ns each, 21–28% of executor time) could be removed rather than inlined, but not all of them:
-   - **Only the last write is visible.** A `Refill` op only writes the 32-bit fetch buffer `m_fetchedOpcodes` (`SH2::JitRefillPipeline`: `MemRead<uint32, instrFetch>` at an aligned address; on array pages the bus read has no side effects). Generated code never reads that buffer. It is read by the interpreter (`FetchInstruction` at `PC & 2`), by the executor's entry check and by save states/lockstep, all outside the block. So only the last refill before a block exit, or before a stop (abort or exception in a callback), is visible. The earlier ones in the same block can be dropped.
-   - **The value is usually known at compile time.** On an array page it is the two opcodes at the aligned address, and the front end already has them in `guestOpcodes`, which `IsCurrent` verifies before every run.
-   - **Exceptions**:
-     - the refill at the block's last aligned instruction also reads the next word, which is not in `guestOpcodes` (it would have to be added and checked);
-     - a store in the block (or a write callback) that hits the block's own code makes memory differ from `guestOpcodes`;
-     - the refill at a taken BT/BF target reads another block's code;
-     - fetches from non-array pages must keep the call.
-   - **Delay-slot calls**: setup/end (141M calls, 0.3–0.4 ms/frame) can be inlined as state stores, plus the refill at an odd target.
 4. **Cache capacity and compile cost**: count native code instead of IR for the flush cap, or drop the IR of natively compiled blocks.
    - Street Fighter Zero 3's master needs 2.5x the current IR cap (30,600 distinct PCs, 2.58M IR instructions), and Virtua Fighter 2 also hits it.
    - Street Fighter Zero 3 also keeps compiling new PCs (10,400 in 30 s), so compile cost (100–130 µs per block with `x86::Compiler`) matters even without flushes. A lighter emitter for cold blocks, or compiling only after a block has run a few times on `RunBlock`, would bound it.
@@ -225,9 +231,9 @@ The budget: for 2x, Panzer Dragoon II Zwei's `Executor::Run` must drop from abou
 5. **Slave polling loops**: in Panzer Dragoon II Zwei and Street Fighter Zero 3 the slave spends most block runs in a 4–5 instruction loop polling FTCSR through the read trampoline. Two ways to make it cheaper:
    - an inline fast path for on-chip register reads that have no side effects;
    - an exact fast-forward of such a loop to the end of the slice, valid only if nothing can change FTCSR inside the slice; that would need proof against the FRT model.
-6. Interrupt entry and pending delay slots go through the interpreter (3.7M steps in Panzer Dragoon II Zwei). That is a small share.
+6. Interrupt entry and pending delay slots go through the interpreter (3.76M steps in Panzer Dragoon II Zwei). That is a small share.
 
-Even with dispatch and all trampolines gone, Panzer Dragoon II Zwei's generated code would still take 1.8–3.5 ms/frame against a budget of about 1.55 ms/frame for the whole executor. So reaching 2x needs item 1 as well as items 2–4.
+Even with dispatch and all trampolines gone, Panzer Dragoon II Zwei's generated code would still take 1.0–3.3 ms/frame against a budget of about 1.55 ms/frame for the whole executor. At the low end, items 1–2 plus modest code improvements could reach the budget; at the high end, item 3 is essential. A 2C plan that aims for 2x should therefore do items 1 and 2 first (largest and best-measured), then re-profile and size item 3. Item 4 is needed in any case for the stalls.
 
 ## Reproduce
 
