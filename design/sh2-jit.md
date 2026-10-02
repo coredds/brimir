@@ -285,6 +285,23 @@ Status (2026-10-02): paused, waiting for a decision on the next step. The option
 
 Details and the measured next-step list: [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2C results" → "Next steps".
 
+**Clarified goal (2026-10-02).** The JIT exists to make Brimir run well on low-spec machines, both ARM devices (SBCs, handhelds, Android) and low-end x86-64 PCs. The development PC already reaches 60 fps with the interpreter (whole frames ~10–14 ms). The "2x lower SH-2 time on the development PC" target was a proxy for that goal.
+
+This changes the next steps:
+- **Primary metric:** full-frame time (and frame-time spikes) on the low-spec targets, measured on real hardware. The user has an ARM device for this. The development PC remains the place for exactness work (lockstep, fuzz) and relative measurements.
+- **ARM needs milestone 3 (ARM64 backend).** The IR backend is about 3x slower than the interpreter, so without a native backend the JIT cannot help there. The vendored asmjit already contains its ARM64 (`arm`) sources; the build currently disables them with `ASMJIT_NO_AARCH64`. Milestone 3 reuses the 2B/2C design: link table, prologue validation, known refills, IR pass, tiered compile.
+- **Low-spec concerns the fast-PC target did not capture:**
+  - memory: up to 128 MB of native code per SH-2 CPU, too much for 1–2 GB devices;
+  - compile stalls, which scale with CPU speed (~28 ms worst frame here);
+  - code size per block (~2.7 KB average for the master; ~1 KB weighted by runs), which matters for small instruction caches;
+  - Burning Rangers' code reloads, and flushes on save-state load (run-ahead and rewind are common on handhelds).
+
+  Fixes for these, and IR-level work such as fewer per-instruction checks, help both backends.
+- **Proposed order for the next session** (to be confirmed):
+  1. Baseline the interpreter on the ARM device: build `brimir_bench` there, run the six titles, and record frame time and the SH-2 share against the 16.7 ms frame budget.
+  2. Shared work that helps every target: memory caps sized for low-RAM devices, selective eviction and reuse of reloaded code, save-state flush, code size and per-instruction cost in the IR and front end.
+  3. The ARM64 backend (milestone 3), validated by lockstep on the ARM device.
+
 ### Milestone 3 — ARM64 backend (separate spec)
 
 Same as milestone 2 for ARM64, validated on a Cortex-A53/A55-class device.
