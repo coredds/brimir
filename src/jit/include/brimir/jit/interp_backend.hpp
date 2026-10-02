@@ -19,6 +19,9 @@ struct ExitInfo {
     bool busWait = false; // exited on a bus wait; the instruction at PC retries
     bool aborted = false; // stopped mid-block on an abort request; PC was not written
     bool boundary = false; // stopped before an instruction: cycle target reached or interrupt pending
+    // Native code only: a code page is no longer the array page the block was compiled for. Nothing
+    // ran and nothing was written; the executor recompiles the block (RunBlock never sets it).
+    bool stale = false;
 };
 
 // Executes a verified, non-empty block against the live SH-2 state.
@@ -28,6 +31,16 @@ struct ExitInfo {
 // If *abortRequested becomes true during a memory access or pipeline refill (for example a WDT
 // register access that resets the CPU and flushes the cache), the block stops right there: PC is
 // left untouched and the result has aborted = true with the cycles accumulated so far.
+//
+// Known refills (see Block in ir.hpp) store their value instead of calling refillPipeline when the
+// block's code is still on array pages (checked at entry) and the run has not set codeDirty yet.
+// Data accesses are classified like the x64 inline fast path, with FastArrayPointer, even though
+// RunBlock performs all of them through ctx.read/ctx.write:
+//   - an array-page store sets codeDirty if it overlaps the block's code in host memory (any alias);
+//   - a handler write sets it, and so does a handler read outside partition 0b111.
+// On-chip register reads (partition 0b111, SH2::OnChipRegRead) never write memory: they read
+// registers and at most advance the FRT/WDT, which can raise an interrupt or reset the CPU (a reset
+// reads the vectors and refills, and requests the abort below); none of that stores to memory.
 ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t target = kNoCycleTarget,
                   const bool *abortRequested = nullptr);
 

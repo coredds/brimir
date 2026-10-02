@@ -2,6 +2,8 @@
 
 #include <brimir/jit/bus_fast_path.hpp>
 
+#include <cassert>
+
 namespace brimir::jit {
 
 namespace {
@@ -58,13 +60,31 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx, uint64 target) {
         return interpret();
     }
 
-    const CachedBlock &entry = m_cache.Get(ctx, pc);
-    m_stats.compileFallbacks = m_cache.CompileFallbacks();
-    const Block &block = entry.block;
-    if (block.guestInstrCount == 0) {
-        return interpret();
+    // A native block whose code pages were remapped since it was compiled reports `stale` before
+    // doing anything: drop it, recompile and run the new block in this same step. The new block is
+    // compiled against the current pages, so it cannot be stale again.
+    for (int attempt = 0;; ++attempt) {
+        const CachedBlock &entry = m_cache.Get(ctx, pc);
+        m_stats.compileFallbacks = m_cache.CompileFallbacks();
+        if (entry.block.guestInstrCount == 0) {
+            return interpret();
+        }
+        const ExitInfo info = RunEntry(entry, ctx, target);
+        if (!info.stale) {
+            return info;
+        }
+        ++m_stats.staleEntries;
+        --m_stats.blocksRun;
+        --m_stats.nativeBlocksRun;
+        m_cache.Invalidate(pc);
+        if (attempt > 0) {
+            assert(false && "a freshly compiled block reported stale");
+            return interpret();
+        }
     }
+}
 
+ExitInfo Executor::RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint64 target) {
     // Same as InterpretNext on its non-interrupt path.
     *ctx.intrAllow = true;
     ++m_stats.blocksRun;
@@ -87,7 +107,7 @@ ExitInfo Executor::Step(ymir::sh2::SH2JitContext &ctx, uint64 target) {
         ++m_stats.nativeBlocksRun;
         return m_native->Run(entry.code, ctx, target, &m_flushPending);
     }
-    return RunBlock(block, ctx, target, &m_flushPending);
+    return RunBlock(entry.block, ctx, target, &m_flushPending);
 }
 
 } // namespace brimir::jit

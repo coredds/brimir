@@ -39,4 +39,28 @@ bool FastPeek16(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address, uint16_
 // the address is on an array page (same result: the peek callback reads the same array).
 uint16_t PeekOpcode(ymir::sh2::SH2JitContext &ctx, uint32_t address);
 
+// Host memory holding a block's code: the bytes of `words` instruction words from `start` on their
+// array pages, as at most kMaxCodeHostRanges contiguous [lo, hi) ranges. A store through any alias
+// of that memory (cached, cache-through, a mirror) has its host pointer inside a range.
+constexpr uint32_t kMaxCodeHostRanges = 2;
+struct CodeHostRanges {
+    const uint8_t *lo[kMaxCodeHostRanges] = {};
+    const uint8_t *hi[kMaxCodeHostRanges] = {};
+    uint32_t count = 0;
+
+    // Whether [p, p + size) overlaps a range.
+    bool Overlaps(const uint8_t *p, uint32_t size) const {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (p < hi[i] && p + size > lo[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+// Fills `out` and returns true if every word is on an array page (FastPeek16 would succeed) and the
+// code needs at most kMaxCodeHostRanges ranges; otherwise returns false.
+bool FindCodeHostRanges(const ymir::sh2::SH2JitBusLayout &bus, uint32_t start, uint32_t words, CodeHostRanges &out);
+
 } // namespace brimir::jit

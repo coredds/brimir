@@ -96,6 +96,16 @@ TEST_CASE("JIT context callbacks mirror interpreter memory semantics", "[jit][sh
     REQUIRE(*ctx.PC == kCode);
     REQUIRE(*ctx.fetchedOpcodes == rig->State().fetchedOpcodes);
     REQUIRE(ctx.cyclesExecuted != nullptr);
+    {
+        // intcPendingLevel reads INTC.pending.level (save-state field intc.pendingLevel).
+        const auto original = rig->BaseState(kCode);
+        auto state = original;
+        state.intc.pendingLevel = 9;
+        rig->Load(state);
+        REQUIRE(ctx.intcPendingLevel != nullptr);
+        REQUIRE(*ctx.intcPendingLevel == 9);
+        rig->Load(original);
+    }
 
     rig->Write32(0x06040000, 0x11223344);
     REQUIRE(ctx.read(ctx.sh2, 0x26040000, 4, false) == 0x11223344u);

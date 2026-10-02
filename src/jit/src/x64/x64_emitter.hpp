@@ -23,6 +23,7 @@ struct X64Frame {
     uint64_t entryCycles;       // *ctx->cyclesExecuted at entry
     const bool *abortRequested; // never null (points to a static false when the caller passed nullptr)
     uint8_t stop = 0;           // set by trampolines: abort requested or exception caught
+    uint8_t codeDirty = 0;      // set by generated code: a data access may have written the block's code
     std::exception_ptr error;   // set by trampolines: the exception a callback threw
     ExitInfo out;               // written by generated code before it returns
 };
@@ -64,6 +65,17 @@ void TrMacL(X64Frame *f, uint32_t op1, uint32_t op2) noexcept;
 // is embedded in the code. An inline access does not test *abortRequested (RunBlock's Load/Store
 // do): it runs no callback, and the flag is only raised by a flush during a memory callback (a
 // watchdog reset), which TrRead/TrWrite/TrRefill already report, so it is always false there.
+//
+// Fetch buffer (design/sh2-x64-performance.md, 2C item 1), with the inline bus and ctx.fetchedOpcodes:
+//   - known refills (ir.hpp, Block) store their value, unless frame->codeDirty is set; the data
+//     accesses before the last known refill set codeDirty exactly as RunBlock classifies them. A
+//     block with known refills first checks that every code page still has the array pointer it
+//     had at compile time; if not it returns out.stale and writes nothing else.
+//   - the refills of a taken ExitIf and of EndDelaySlot are inline loads on array pages and call
+//     the trampoline otherwise.
+// SetupDelaySlot and EndDelaySlot are inline (SH2::SetupDelaySlot, SH2::AdvancePC<..., true> with
+// cache emulation off) when ctx has delaySlot, fetchedOpcodes and intcPendingLevel; EndDelaySlot
+// calls TrEndDelaySlot for a target with bit 1 set off array pages.
 bool EmitBlock(asmjit::x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx);
 
 // True if EmitBlock lowers every op of `block` (state offsets aside). Every valid op is lowered, so

@@ -23,6 +23,7 @@ public:
         uint64_t interpreted = 0;      // single instructions run by the interpreter
         uint64_t nativeBlocksRun = 0;  // compiled blocks run as native code
         uint64_t compileFallbacks = 0; // blocks the native backend could not compile (run with RunBlock)
+        uint64_t staleEntries = 0;     // native blocks dropped at entry because a code page was remapped
     };
 
     // Runs compiled blocks on `kind`; an unavailable kind falls back to BackendKind::Ir.
@@ -55,6 +56,9 @@ public:
     }
 
 private:
+    // Runs a compiled block (native or RunBlock) with the in-block flush deferral.
+    ExitInfo RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint64 target);
+
     BackendKind m_kind;
     std::unique_ptr<INativeBackend> m_native; // nullptr for BackendKind::Ir; declared before m_cache
     BlockCache m_cache;

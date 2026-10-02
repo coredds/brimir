@@ -32,6 +32,12 @@ void BlockCache::Invalidate(BlockMap::iterator it) {
     m_blocks.erase(it);
 }
 
+void BlockCache::Invalidate(uint32_t pc) {
+    if (auto it = m_blocks.find(pc); it != m_blocks.end()) {
+        Invalidate(it);
+    }
+}
+
 const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
     RecentSlot &slot = SlotFor(pc);
     if (slot.entry != nullptr && slot.pc == pc && IsCurrent(slot.entry->block, ctx)) {

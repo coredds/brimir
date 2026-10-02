@@ -240,6 +240,22 @@ Even with dispatch and all trampolines gone, Panzer Dragoon II Zwei's generated 
 
 So even at the low end of the generated-code range, the executor would still take about 1.9–2.1 ms/frame against the 1.55 budget, and generated code would also have to roughly halve. At the high end, item 3 is essential. A 2C plan that aims for 2x should therefore do items 1 and 2 first (largest and best-measured), then re-profile and size item 3. Item 4 is needed in any case for the stalls.
 
+## 2C progress
+
+Measured at the end of each milestone 2C task (`design/plans/2026-10-02-sh2-jit-m2c-performance.md`), on the machine and build configuration above (`build-bench`, Release + LTO). Panzer Dragoon II Zwei (US BIOS) and Street Fighter Zero 3 (JP BIOS), `--warmup 2400 --frames 1800`, default settings, scratch system dir as in the method above. Three rounds per title, each running the interpreter and then `--sh2-jit --jit-backend x64`. SH2 totals are the medians of the three runs (all three in parentheses); "x64 max" is the max frame time of the median x64 run. The interpreter's SH2 totals in this session are about 41% (PD2) and 33% (SFZ3) above the results table above, measured on 2026-10-01; only ratios within one session are compared.
+
+| Task | Title | Interpreter SH2 total ms | x64 SH2 total ms | Ratio (interp / x64) | x64 max frame ms | x64 nativeBlocksRun master / slave | compileFallbacks |
+|---|---|---|---|---|---|---|---|
+| 2B (5799542) | Panzer Dragoon II Zwei | 7.411 (7.411 / 7.394 / 7.439) | 13.327 (13.327 / 13.362 / 13.303) | 0.556 | 22.854 | 355,340,100 / 205,691,327 | 0 / 0 |
+| 2B (5799542) | Street Fighter Zero 3 | 6.690 (6.586 / 6.690 / 6.747) | 15.121 (15.121 / 14.974 / 15.151) | 0.442 | 280.969 | 249,823,349 / 188,696,964 | 0 / 0 |
+| 1: known refills, inline delay slots | Panzer Dragoon II Zwei | 7.409 (7.445 / 7.409 / 7.404) | 11.378 (11.378 / 11.398 / 11.336) | 0.651 | 19.320 | 355,340,100 / 205,691,327 | 0 / 0 |
+| 1: known refills, inline delay slots | Street Fighter Zero 3 | 6.637 (6.611 / 6.637 / 6.770) | 14.282 (14.279 / 14.327 / 14.282) | 0.465 | 328.892 | 249,823,349 / 188,696,964 | 0 / 0 |
+
+Task 1 notes:
+- x64 SH2 total fell 14.6% in Panzer Dragoon II Zwei (13.33 to 11.38 ms/frame) and 5.5% in Street Fighter Zero 3 (15.12 to 14.28), whose x64 time is dominated by compile churn (profile above).
+- Every x64 run reported `staleEntries 0` on both CPUs; block counts are identical to the 2B runs.
+- Street Fighter Zero 3's max frame rose from 278–282 ms to 319–329 ms. The inline refills, delay slots, entry checks and store classification make each block's code larger and its compile slower, which shows up in the flush-and-recompile stalls (Task 5 addresses them).
+
 ## Reproduce
 
 ```powershell

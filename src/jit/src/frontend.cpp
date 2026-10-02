@@ -1,5 +1,7 @@
 #include <brimir/jit/frontend.hpp>
 
+#include <brimir/jit/bus_fast_path.hpp>
+
 #include <ymir/hw/sh2/sh2_decode.hpp>
 
 #include <cstdint>
@@ -1014,7 +1016,10 @@ bool IsCompilableAddress(uint32_t pc) {
     return partition == 0b000 || partition == 0b001 || partition == 0b101;
 }
 
-Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
+namespace {
+
+// Decodes and lowers the block; FinishBlock then adds the tail word and the known refill values.
+Block DecodeBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
     Block block;
     block.startPC = startPC;
     Builder b(block);
@@ -1110,6 +1115,52 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
 
     b.Exit(pc, count);
     block.guestInstrCount = count;
+    return block;
+}
+
+// Completes a compiled block (guestInstrCount > 0):
+// - the tail word: when the last instruction is 4-byte aligned, its refill also reads the next
+//   word, so that word joins guestOpcodes (and the entry check). It is in the same aligned
+//   longword, so in the same partition. Otherwise no refill reads past the block, and leaving the
+//   word out avoids recompiling when data right after the code changes.
+// - fetchFromArrays: every word of guestOpcodes is on an array page.
+// - known refills: every Refill(a) with a and a + 2 inside guestOpcodes gets imm2 = the two words.
+//   The other refills (taken BT/BF targets, delay-slot targets) read code outside the block and
+//   stay runtime refills; they are ExitIf/EndDelaySlot, not Refill ops.
+void FinishBlock(ymir::sh2::SH2JitContext &ctx, Block &block) {
+    const uint32_t last = block.startPC + 2u * (block.guestInstrCount - 1u);
+    if ((last & 2u) == 0 && IsCompilableAddress(last + 2u)) {
+        block.guestOpcodes.push_back(ctx.peekInstruction(ctx.sh2, last + 2u));
+        block.hasTailWord = true;
+    }
+
+    bool arrays = ctx.bus.pages != nullptr;
+    for (size_t i = 0; i < block.guestOpcodes.size() && arrays; ++i) {
+        uint16_t opcode = 0;
+        arrays = FastPeek16(ctx.bus, block.startPC + static_cast<uint32_t>(i * 2), opcode);
+    }
+    block.fetchFromArrays = arrays;
+
+    const size_t words = block.guestOpcodes.size();
+    for (Inst &inst : block.code) {
+        if (inst.op != Op::Refill || inst.imm < block.startPC) {
+            continue;
+        }
+        const size_t index = (inst.imm - block.startPC) / 2;
+        if (index + 1 < words) {
+            inst.flag = true;
+            inst.imm2 = (static_cast<uint32_t>(block.guestOpcodes[index]) << 16) | block.guestOpcodes[index + 1];
+        }
+    }
+}
+
+} // namespace
+
+Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
+    Block block = DecodeBlock(ctx, startPC);
+    if (block.guestInstrCount > 0) {
+        FinishBlock(ctx, block);
+    }
     return block;
 }
 

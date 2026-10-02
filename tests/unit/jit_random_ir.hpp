@@ -16,11 +16,14 @@ struct RandomIrOptions {
     // calls: adds the ops that call helpers out of generated code, except memory accesses: Div1,
     // MacW, MacL, SetSR, Refill, AddAccessCyclesRMWByte, ExitIf with refill, and (sometimes) one
     // SetupDelaySlot ... EndDelaySlot pair right before a final ExitDynamic, as the front end
-    // emits delayed branches.
+    // emits delayed branches. With calls the block also gets, most of the time, random
+    // guestOpcodes (sometimes with a tail word, mostly fetchFromArrays) and known refills inside
+    // them; the caller must write guestOpcodes to memory at startPC before running the block.
     //
     // memory: adds Load, Store, AddAccessCycles and ExitIfBusWait on addresses in the test rig's
     // RAM (cached 0x06xxxxxx and cache-through 0x26xxxxxx), its MMIO page (0x22xxxxxx) and, rarely,
-    // the FRT registers (0xFFFFFE10-0xFFFFFE1F) or misaligned. With calls, Refill and the RMW-cycle
+    // the FRT registers (0xFFFFFE10-0xFFFFFE1F), the block's own first 128 bytes through the
+    // cached, cache-through and mirror aliases, or misaligned. With calls, Refill and the RMW-cycle
     // lookups also use these addresses.
     bool calls = false;
     bool memory = false;

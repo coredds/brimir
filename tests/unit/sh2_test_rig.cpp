@@ -38,6 +38,7 @@ uint32_t RamOffset(uint32_t address) {
 Rig::Rig()
     : ram(std::make_unique<std::array<uint8_t, kRamSize>>()) {
     ram->fill(0);
+    mmio.owner = this;
     bus.MapArray(0x0000000, 0x1FFFFFF, *ram, true);
     bus.MapArray(0x4000000, 0x7FFFFFF, *ram, true);
     bus.SetAccessCycles(0x0000000, 0x1FFFFFF, 2, 3, 4, 5, 6, 7);
@@ -67,16 +68,25 @@ Rig::Rig()
             auto &m = *static_cast<Mmio *>(ctx);
             m.data[address & 0xFFFF] = value;
             m.log.push_back({'W', 1, address, value});
+            if (m.onWrite != nullptr) {
+                m.onWrite(*m.owner, address);
+            }
         },
         [](uint32_t address, uint16_t value, void *ctx) {
             auto &m = *static_cast<Mmio *>(ctx);
             WriteBE16(&m.data[address & 0xFFFE], value);
             m.log.push_back({'W', 2, address, value});
+            if (m.onWrite != nullptr) {
+                m.onWrite(*m.owner, address);
+            }
         },
         [](uint32_t address, uint32_t value, void *ctx) {
             auto &m = *static_cast<Mmio *>(ctx);
             WriteBE32(&m.data[address & 0xFFFC], value);
             m.log.push_back({'W', 4, address, value});
+            if (m.onWrite != nullptr) {
+                m.onWrite(*m.owner, address);
+            }
         },
         [](uint32_t address, uint32_t size, bool, void *ctx) -> bool {
             auto &m = *static_cast<Mmio *>(ctx);

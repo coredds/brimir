@@ -13,6 +13,7 @@
 #include <brimir/jit/ir.hpp>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <random>
 #include <stdexcept>
@@ -289,22 +290,37 @@ TEST_CASE("x64 backend: an IR executor runs without a native backend", "[jit][x6
 namespace {
 
 // Runs 2000 random blocks on RunBlock and on the x64 backend, from identical random CPU states,
-// and requires identical outcomes.
+// and requires identical outcomes. A third rig runs each block on RunBlock with every refill
+// turned back into a refillPipeline call (the interpreter's behavior), so known refill values and
+// their codeDirty fallback must reproduce exactly what the callback reads.
 void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
     auto irRig = std::make_unique<Rig>();
     auto x64Rig = std::make_unique<Rig>();
+    auto callbackRig = std::make_unique<Rig>();
     const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
     REQUIRE(backend != nullptr);
+    uint64_t knownRefills = 0;
 
     for (uint32_t seed = 0; seed < 2000; ++seed) {
         std::mt19937 rng(seed);
         const Block block = sh2test::RandomBlock(rng, kCode, opt);
         INFO("seed " << seed << "\n" << brimir::jit::PrintBlock(block));
         REQUIRE(brimir::jit::VerifyBlock(block).empty());
+        Block callbackBlock = block;
+        callbackBlock.fetchFromArrays = false;
+        for (brimir::jit::Inst &inst : callbackBlock.code) {
+            if (inst.op == brimir::jit::Op::Refill && inst.flag) {
+                inst.flag = false;
+                inst.imm2 = 0;
+                ++knownRefills;
+            }
+        }
 
         const CpuSetup cpu = RandomCpu(*irRig, rng);
-        cpu.Apply(*irRig);
-        cpu.Apply(*x64Rig);
+        for (Rig *rig : {irRig.get(), x64Rig.get(), callbackRig.get()}) {
+            rig->WriteCode(kCode, block.guestOpcodes); // the entry check's guarantee
+            cpu.Apply(*rig);
+        }
         uint64_t target = kNoCycleTarget;
         switch (rng() % 4) {
         case 0: break;
@@ -313,7 +329,7 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
         }
         // Bus-wait answers depend on the query count, so both rigs restart it identically.
         const uint32_t busWaitEvery = opt.memory ? static_cast<uint32_t>(rng() % 3 == 0 ? 0 : 2 + rng() % 2) : 0;
-        for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+        for (Rig *rig : {irRig.get(), x64Rig.get(), callbackRig.get()}) {
             rig->mmio.busWaitEvery = busWaitEvery;
             rig->mmio.busWaitQueries = 0;
             rig->mmio.log.clear();
@@ -332,10 +348,17 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
         RequireSameOutcome(ir, x64, *irRig, *x64Rig, true);
         REQUIRE(x64Rig->State().fetchedOpcodes == irRig->State().fetchedOpcodes);
         REQUIRE(*x64Ctx.delaySlot == *irRig->sh2->GetJitContext().delaySlot);
+        const ExitInfo callback = brimir::jit::RunBlock(callbackBlock, callbackRig->sh2->GetJitContext(), target);
+        INFO("RunBlock with refill callbacks vs RunBlock with known refills");
+        RequireSameOutcome(callback, ir, *callbackRig, *irRig, true);
+        REQUIRE(irRig->State().fetchedOpcodes == callbackRig->State().fetchedOpcodes);
 
         if (seed % 256 == 255) {
             backend->Reset(); // keeps memory bounded and exercises compiling after a reset
         }
+    }
+    if (opt.calls) {
+        CHECK(knownRefills > 0);
     }
 }
 
@@ -554,6 +577,22 @@ TEST_CASE("x64 Compile fails cleanly on a context with a null state pointer", "[
         CHECK_FALSE(backend->Compile(block, ctx, out));
         CHECK(out.entry == nullptr);
         CHECK(backend->CodeBytes() == bytes);
+    }
+
+    // The fetch buffer, delay-slot flag and pending level are optional: without them refills and
+    // delay-slot ops call their trampolines (the block still compiles).
+    const std::vector<std::pair<const char *, void (*)(Ctx &)>> optional{
+        {"fetchedOpcodes", [](Ctx &c) { c.fetchedOpcodes = nullptr; }},
+        {"delaySlot", [](Ctx &c) { c.delaySlot = nullptr; }},
+        {"intcPendingLevel", [](Ctx &c) { c.intcPendingLevel = nullptr; }},
+    };
+    for (const auto &[name, clear] : optional) {
+        INFO("null " << name);
+        Ctx ctx = rig->sh2->GetJitContext();
+        clear(ctx);
+        NativeCode out;
+        CHECK(backend->Compile(block, ctx, out));
+        CHECK(out.entry != nullptr);
     }
 }
 
@@ -970,11 +1009,27 @@ TEST_CASE("x64 stops after an exception from every callback", "[jit][x64]") {
         {"busWait", [](Ctx &c) { c.busWait = ThrowBusWait; },
          [](Builder &b) { b.ExitIfBusWait(b.Const(kMmio), 4, false, kCode, 0); }},
         {"setSR", [](Ctx &c) { c.setSR = ThrowSetSR; }, [](Builder &b) { b.SetSR(b.Const(0), false); }},
-        {"setupDelaySlot", [](Ctx &c) { c.setupDelaySlot = ThrowSetupDelaySlot; },
+        // Delay-slot setup and end are inline when the context has intcPendingLevel (and the
+        // delay-slot flag and fetch buffer); without it they call their trampolines.
+        {"setupDelaySlot",
+         [](Ctx &c) {
+             c.setupDelaySlot = ThrowSetupDelaySlot;
+             c.intcPendingLevel = nullptr;
+         },
          [](Builder &b) { b.SetupDelaySlot(b.Const(kCode + 0x100)); }},
-        {"endDelaySlot", [](Ctx &c) { c.endDelaySlot = ThrowEndDelaySlot; },
+        {"endDelaySlot",
+         [](Ctx &c) {
+             c.endDelaySlot = ThrowEndDelaySlot;
+             c.intcPendingLevel = nullptr;
+         },
          [](Builder &b) {
              b.SetupDelaySlot(b.Const(kCode + 0x100));
+             b.EndDelaySlot();
+         }},
+        // The inline end calls the trampoline when the target has bit 1 set and is off array pages.
+        {"endDelaySlot", [](Ctx &c) { c.endDelaySlot = ThrowEndDelaySlot; },
+         [](Builder &b) {
+             b.SetupDelaySlot(b.Const(kMmio + 2));
              b.EndDelaySlot();
          }},
         {"read", [](Ctx &c) { c.read = ThrowRead; }, [](Builder &b) { b.SetReg(2, b.Load(b.Const(kMmio), 4, false)); }},
@@ -1031,5 +1086,68 @@ TEST_CASE("x64 stops after an exception from every callback", "[jit][x64]") {
         CHECK((st.SR & 1u) == (irRig->BaseState(kCode).SR & 1u));
         CHECK(x64Rig->Read32(0x06040000) != 0x55555555u);
         CHECK(*x64Rig->sh2->GetJitContext().cyclesExecuted == *irRig->sh2->GetJitContext().cyclesExecuted);
+    }
+}
+
+// A block with known refills checks at entry that its code pages still have the arrays they had
+// at compile time. After a remap it returns out.stale and changes nothing.
+TEST_CASE("x64 reports a remapped code page as stale", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    for (const uint32_t start : {kCode, 0x0600FFF8u}) { // inside one page; across two pages
+        INFO("start 0x" << std::hex << start);
+        auto page = std::make_unique<std::array<uint8_t, 0x10000>>();
+        auto rig = std::make_unique<Rig>();
+        rig->WriteCode(start, {kAdd1_R3, kAdd1_R3, kAdd1_R3, kAdd1_R3, kAdd1_R3});
+        Block block;
+        block.startPC = start;
+        block.guestInstrCount = 4;
+        block.hasTailWord = true;
+        block.fetchFromArrays = true;
+        block.guestOpcodes = {kAdd1_R3, kAdd1_R3, kAdd1_R3, kAdd1_R3, kAdd1_R3};
+        Builder b(block);
+        b.KnownRefill(start, (uint32_t{kAdd1_R3} << 16) | kAdd1_R3);
+        b.SetReg(3, b.Const(0x77));
+        b.AddCycles(4);
+        b.KnownRefill(start + 4, (uint32_t{kAdd1_R3} << 16) | kAdd1_R3);
+        b.Exit(start + 8, 4);
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+        auto state = rig->BaseState(start);
+        state.R[3] = 5;
+        state.fetchedOpcodes = 0xCAFEF00D;
+        rig->Load(state);
+        auto &ctx = rig->sh2->GetJitContext();
+        const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+        REQUIRE(backend != nullptr);
+        NativeCode code;
+        REQUIRE(backend->Compile(block, ctx, code));
+
+        // Same bytes, different array: remap the page holding the last code word.
+        const uint32_t lastPage = (start + 8) & 0x7FF0000u;
+        std::copy_n(rig->ram->begin() + (lastPage & 0xF0000u), 0x10000, page->begin());
+        rig->bus.MapArray(lastPage, lastPage + 0xFFFF, *page, true);
+
+        const auto before = rig->State();
+        const ExitInfo info = backend->Run(code, ctx);
+        CHECK(info.stale);
+        CHECK(info.cycles == 0);
+        CHECK(info.retired == 0);
+        CHECK_FALSE(info.aborted);
+        CHECK_FALSE(info.boundary);
+        const auto after = rig->State();
+        CHECK(after.R[3] == before.R[3]);
+        CHECK(after.PC == before.PC);
+        CHECK(after.fetchedOpcodes == 0xCAFEF00Du);
+
+        // Compiled against the new mapping, the block runs.
+        NativeCode fresh;
+        REQUIRE(backend->Compile(block, ctx, fresh));
+        const ExitInfo ran = backend->Run(fresh, ctx);
+        CHECK_FALSE(ran.stale);
+        CHECK(ran.retired == 4);
+        CHECK(rig->State().R[3] == 0x77u);
+        CHECK(rig->State().fetchedOpcodes == ((uint32_t{kAdd1_R3} << 16) | kAdd1_R3));
     }
 }

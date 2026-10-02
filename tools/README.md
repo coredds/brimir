@@ -63,8 +63,11 @@ the same content with and without it to compare. The report then also prints
 the JIT backend (`SH2 JIT backend: ir|x64`) and per-CPU executor totals since
 startup (warmup included): `blocksRun` (compiled blocks executed),
 `interpreted` (instructions handed to the interpreter), `nativeBlocksRun`
-(compiled blocks executed as native code) and `compileFallbacks` (blocks the
-native backend could not compile; they run on the IR interpreter).
+(compiled blocks executed as native code), `compileFallbacks` (blocks the
+native backend could not compile; they run on the IR interpreter) and
+`staleEntries` (native blocks dropped at entry because a code page was
+remapped since they were compiled; each is recompiled and run in the same
+step).
 
 `--jit-backend ir|x64` selects the JIT's code backend (`design/sh2-jit-m2.md`):
 `ir` runs compiled blocks on the IR interpreter, `x64` compiles them to native
@@ -142,8 +145,8 @@ lockstep: 600/36000 frames identical
 ...
 lockstep: OK, 36000 frames identical
 SH2 JIT backend: x64
-jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...
-jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...
+jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...
+jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...
 ```
 
 On the first difference it prints the frame number (0-based) and the first

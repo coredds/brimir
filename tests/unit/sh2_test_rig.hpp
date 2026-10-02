@@ -27,6 +27,8 @@ namespace sh2test {
 constexpr uint32_t kRamSize = 0x100000;
 constexpr uint32_t kSleep = 0x001B; // SLEEP: never supported by the JIT, ends test programs
 
+class Rig;
+
 struct MmioAccess {
     char kind;    // 'R' read, 'W' write, 'B' bus-wait query
     uint8_t size; // bytes
@@ -39,6 +41,10 @@ struct Mmio {
     uint32_t busWaitQueries = 0;
     uint32_t busWaitEvery = 0;
     std::vector<MmioAccess> log; // every access in order, for bus-sequence comparison
+    // Called after every MMIO write with the rig and the bus address (a device with side effects,
+    // seen alike by the interpreter and the JIT).
+    void (*onWrite)(Rig &rig, uint32_t address) = nullptr;
+    Rig *owner = nullptr; // set by Rig
 };
 
 class Rig {

@@ -45,6 +45,10 @@ public:
     // Drops every block and, with a native backend, all of its generated code.
     void Flush();
 
+    // Drops the block for pc, if cached (a stale native block: its code pages were remapped).
+    // Never called while that block runs; its native code stays allocated until the next Flush.
+    void Invalidate(uint32_t pc);
+
     size_t Size() const {
         return m_blocks.size();
     }

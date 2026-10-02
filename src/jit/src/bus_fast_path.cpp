@@ -84,4 +84,29 @@ uint16_t PeekOpcode(ymir::sh2::SH2JitContext &ctx, uint32_t address) {
     return ctx.peekInstruction(ctx.sh2, address);
 }
 
+bool FindCodeHostRanges(const ymir::sh2::SH2JitBusLayout &bus, uint32_t start, uint32_t words, CodeHostRanges &out) {
+    out = CodeHostRanges{};
+    if (bus.pages == nullptr) {
+        return false;
+    }
+    for (uint32_t i = 0; i < words; ++i) {
+        bool writable = false;
+        const uint8_t *p = FastArrayPointer(bus, start + i * 2, 2, writable);
+        if (p == nullptr) {
+            return false;
+        }
+        if (out.count > 0 && out.hi[out.count - 1] == p) {
+            out.hi[out.count - 1] = p + 2;
+            continue;
+        }
+        if (out.count == kMaxCodeHostRanges) {
+            return false;
+        }
+        out.lo[out.count] = p;
+        out.hi[out.count] = p + 2;
+        ++out.count;
+    }
+    return true;
+}
+
 } // namespace brimir::jit

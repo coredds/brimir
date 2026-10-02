@@ -12,6 +12,7 @@
 
 #include <brimir/jit/executor.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <memory>
@@ -1486,5 +1487,219 @@ TEST_CASE("TAS matches the interpreter for every partition", "[jit][diff][exact]
                 REQUIRE(p.ref->State().R[kRn] == address); // Rn unchanged
             }
         }
+    }
+}
+
+// ---- Fetch buffer: known refills (milestone 2C, design/sh2-x64-performance.md item 1) ----
+
+TEST_CASE("Front end records the tail word, array fetches and known refills", "[jit][diff]") {
+    Pair p;
+    // Four instructions: the last one (kCode+6) is unaligned, so no refill reads past the block.
+    p.WriteCode(kCode, {AddI(3, 1), AddI(3, 2), AddI(3, 3), AddI(3, 4), static_cast<uint16_t>(kSleep)});
+    {
+        const brimir::jit::Block block = brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode);
+        INFO(brimir::jit::PrintBlock(block));
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+        REQUIRE(block.guestInstrCount == 4u);
+        CHECK_FALSE(block.hasTailWord);
+        CHECK(block.guestOpcodes.size() == 4u);
+        CHECK(block.fetchFromArrays);
+        uint32_t known = 0;
+        for (const brimir::jit::Inst &inst : block.code) {
+            if (inst.op == brimir::jit::Op::Refill) {
+                CHECK(inst.flag);
+                CHECK(inst.imm2 == p.jit->Read32(inst.imm));
+                ++known;
+            }
+        }
+        CHECK(known == 2u); // kCode and kCode+4
+    }
+    // From kCode+2: the last instruction (kCode+8) is aligned, so its refill reads the tail word.
+    p.WriteCode(kCode + 8, {AddI(3, 5), static_cast<uint16_t>(kSleep)});
+    {
+        const brimir::jit::Block block = brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode + 2);
+        INFO(brimir::jit::PrintBlock(block));
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+        REQUIRE(block.guestInstrCount == 4u);
+        CHECK(block.hasTailWord);
+        REQUIRE(block.guestOpcodes.size() == 5u);
+        CHECK(block.guestOpcodes.back() == kSleep);
+        uint32_t known = 0;
+        for (const brimir::jit::Inst &inst : block.code) {
+            if (inst.op == brimir::jit::Op::Refill) {
+                CHECK(inst.flag);
+                CHECK(inst.imm2 == p.jit->Read32(inst.imm));
+                ++known;
+            }
+        }
+        CHECK(known == 2u); // kCode+4 and kCode+8 (with the tail word)
+    }
+    // A taken BT/BF refill reads the target, outside the block: it stays a runtime refill.
+    p.WriteCode(kCode, {CmpEq(1, 1), Bt(0x10), static_cast<uint16_t>(kSleep)});
+    {
+        const brimir::jit::Block block = brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kCode);
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+        for (const brimir::jit::Inst &inst : block.code) {
+            if (inst.op == brimir::jit::Op::ExitIf) {
+                CHECK(inst.flag); // refill at the taken target, at run time
+            }
+        }
+    }
+}
+
+namespace {
+
+// Runs Advance(target) on fresh rigs for every target in [1, maxTarget], on every backend, and
+// requires identical state, memory, peripherals and cycles. Returns whether some run stopped at
+// stopPC (so the fetch buffer after that refill was compared).
+bool AdvanceSweep(const std::vector<uint16_t> &program, const ymir::savestate::SH2SaveState &base,
+                  void (*setup)(Pair &), uint32_t maxTarget, uint32_t stopPC) {
+    bool sawStop = false;
+    for (const auto kind : sh2test::AvailableBackends()) {
+        for (uint32_t target = 1; target <= maxTarget; ++target) {
+            Pair p{kind};
+            if (setup != nullptr) {
+                setup(p);
+            }
+            p.WriteCode(kCode, program);
+            auto state = base;
+            state.fetchedOpcodes = p.ref->Read32(kCode);
+            p.Load(state);
+            p.jit->sh2->SetJitExecutor(&p.exec);
+            const uint64 refCycles = p.ref->sh2->Advance<false, false>(target);
+            const uint64 jitCycles = p.jit->sh2->Advance<false, false>(target);
+            INFO("backend " << brimir::jit::BackendName(kind) << " target " << target);
+            REQUIRE(jitCycles == refCycles);
+            const std::string diff = sh2test::DiffRigs(*p.ref, *p.jit, true);
+            INFO(diff);
+            REQUIRE(diff.empty());
+            REQUIRE(p.exec.GetStats().blocksRun >= 1);
+            sawStop = sawStop || p.jit->State().PC == stopPC;
+        }
+    }
+    return sawStop;
+}
+
+// R4-R8 hold the same value, so the old and the new opcodes below (moves between them) have the
+// same effect: a block that ran an overwritten instruction from its compiled copy (the accepted
+// deviation of design/sh2-jit.md section 6.5) still matches the interpreter, and only the fetch
+// buffer can differ.
+constexpr uint16_t kOld0 = 0x6663; // mov R6,R6 at kCode+4
+constexpr uint16_t kOld1 = 0x6773; // mov R7,R7 at kCode+6
+constexpr uint16_t kNew0 = 0x6483; // mov R8,R4
+constexpr uint16_t kNew1 = 0x6873; // mov R7,R8
+
+ymir::savestate::SH2SaveState SmcState(const Rig &rig, uint32_t r1, uint32_t r2) {
+    auto state = rig.BaseState(kCode);
+    state.R[1] = r1;
+    state.R[2] = r2;
+    state.R[3] = 0;
+    for (uint32_t r = 4; r <= 8; ++r) {
+        state.R[r] = 0x5555AAAA;
+    }
+    return state;
+}
+
+} // namespace
+
+// A store over the next instruction pair, then the refill that reads it. The refill must read the
+// new words (codeDirty), through every alias of the code: the cached address, the cache-through
+// address 0x26001000 and the RAM mirror 0x06101000. Targets stop at every boundary, so the fetch
+// buffer is compared right after the refill at kCode+4 (stop at kCode+6).
+TEST_CASE("Self-modifying store before a refill", "[jit][diff][exact]") {
+    struct Store {
+        uint16_t opcode;
+        uint32_t offset; // address offset from kCode
+        uint32_t value;
+    };
+    const Store stores[] = {
+        {MovLS(1, 2), 4, (uint32_t{kNew0} << 16) | kNew1}, // mov.l R2,@R1 over both words
+        {Nm(0x2001, 1, 2), 6, kNew1},                       // mov.w R2,@R1 over the second word
+        {MovBS(1, 2), 6, kNew1 >> 8},                       // mov.b R2,@R1 over its high byte
+    };
+    for (const Store &s : stores) {
+        for (const uint32_t alias : {0x00000000u, 0x20000000u, 0x00100000u}) {
+            INFO("store " << std::hex << s.opcode << " alias " << alias);
+            const std::vector<uint16_t> program{s.opcode,       MovR(5, 5),  kOld0, kOld1, AddI(3, 1),
+                                                static_cast<uint16_t>(kSleep)};
+            Rig scratch;
+            const auto base = SmcState(scratch, kCode + alias + s.offset, s.value);
+            CHECK(AdvanceSweep(program, base, nullptr, 40, kCode + 6));
+        }
+    }
+}
+
+namespace {
+
+// A device whose register write also rewrites the code at kCode+4 (on both rigs alike).
+void PokeCodeOnWrite(Rig &rig, uint32_t address) {
+    (void)address;
+    rig.WriteCode(kCode + 4, {kNew0, kNew1});
+}
+
+void InstallPokeCodeOnWrite(Pair &p) {
+    p.ref->mmio.onWrite = PokeCodeOnWrite;
+    p.jit->mmio.onWrite = PokeCodeOnWrite;
+}
+
+} // namespace
+
+// A write callback (a handler write) that modifies the block's code: the refill after it must
+// read memory (codeDirty after every handler write).
+TEST_CASE("Write callback that modifies code", "[jit][diff][exact]") {
+    const std::vector<uint16_t> program{MovLS(1, 2), MovR(5, 5), kOld0, kOld1, AddI(3, 1),
+                                        static_cast<uint16_t>(kSleep)};
+    Rig scratch;
+    const auto base = SmcState(scratch, kMmio + 0x40, 0x12345678);
+    CHECK(AdvanceSweep(program, base, InstallPokeCodeOnWrite, 40, kCode + 6));
+}
+
+// The page holding a compiled block is remapped to another array with the same code (tail word
+// included, so the entry check by opcode passes) but different data. The x64 block checks its
+// page at entry, reports stale once and is recompiled; the IR backend checks the pages itself
+// and runs the block. Both match the interpreter.
+TEST_CASE("Remapped code page", "[jit][diff]") {
+    constexpr uint32_t kData = 0x06002000; // same 64 KiB page as the code
+    for (const auto kind : sh2test::AvailableBackends()) {
+        INFO("backend " << brimir::jit::BackendName(kind));
+        // Declared before the rigs: their buses point at these pages until the rigs are gone.
+        std::array<std::unique_ptr<std::array<uint8_t, 0x10000>>, 2> pages;
+        Pair p{kind};
+        // add #1,R3 ; mov.l @R9,R2 ; add #1,R3 ; sleep (tail word of the 3-instruction block)
+        p.WriteCode(kCode, {AddI(3, 1), MovLL(2, 9), AddI(3, 1), static_cast<uint16_t>(kSleep)});
+        p.Write32(kData, 0x11111111);
+        auto state = p.ref->BaseState(kCode);
+        state.R[3] = 0;
+        state.R[9] = kData;
+        p.Load(state);
+        REQUIRE(p.Step().retired == 3);
+        REQUIRE(p.exec.Cache().Compiles() == 1);
+        REQUIRE(p.jit->State().R[2] == 0x11111111u);
+
+        // Remap bus 0x6000000-0x600FFFF (SH-2 0x06000000) on both rigs to a copy with new data.
+        Rig *rigs[2] = {p.ref.get(), p.jit.get()};
+        for (int i = 0; i < 2; ++i) {
+            pages[i] = std::make_unique<std::array<uint8_t, 0x10000>>();
+            std::copy_n(rigs[i]->ram->begin(), 0x10000, pages[i]->begin());
+            (*pages[i])[0x2000] = 0x22; // kData & 0xFFFF, big-endian 0x22222222
+            (*pages[i])[0x2001] = 0x22;
+            (*pages[i])[0x2002] = 0x22;
+            (*pages[i])[0x2003] = 0x22;
+            rigs[i]->bus.MapArray(0x6000000, 0x600FFFF, *pages[i], true);
+        }
+        p.Load(state);
+        REQUIRE(p.Step().retired == 3);
+        CHECK(p.jit->State().R[2] == 0x22222222u);
+        const bool native = kind != brimir::jit::BackendKind::Ir;
+        CHECK(p.exec.GetStats().staleEntries == (native ? 1u : 0u));
+        CHECK(p.exec.Cache().Compiles() == (native ? 2u : 1u));
+        CHECK(p.exec.Cache().Invalidations() == (native ? 1u : 0u));
+        CHECK(p.exec.GetStats().blocksRun == 2u);
+
+        // The recompiled block is current: no further stale entries.
+        p.Load(state);
+        REQUIRE(p.Step().retired == 3);
+        CHECK(p.exec.GetStats().staleEntries == (native ? 1u : 0u));
+        CHECK(p.exec.Cache().Compiles() == (native ? 2u : 1u));
     }
 }

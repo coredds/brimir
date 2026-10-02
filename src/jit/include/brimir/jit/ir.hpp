@@ -82,19 +82,33 @@ struct Inst {
     Op op = Op::Exit;
     uint8_t size = 0;    // access size in bytes (1, 2, 4)
     bool flag = false;   // Load: instrFetch; AddAccessCycles/ExitIfBusWait: write; ExitIf: refill; SetSR: delaySlot;
-                         // Div1: rmIsRn
+                         // Div1: rmIsRn; Refill: known (imm2 is the value the fetch reads)
     uint8_t retired = 0; // exit ops: guest instructions completed when the exit is taken
     ValueId dst = kNoValue;
     ValueId a = kNoValue;
     ValueId b = kNoValue;
     uint32_t imm = 0;
-    uint32_t imm2 = 0; // ExitIf: cycles added when taken
+    uint32_t imm2 = 0; // ExitIf: cycles added when taken; known Refill: (op[imm] << 16) | op[imm + 2]
 };
 
+// A known Refill (flag set) reads two words of the block's own guestOpcodes, so imm2 is the value
+// the fetch returns while that code is unchanged. A backend stores imm2 to *ctx.fetchedOpcodes
+// instead of calling refillPipeline only if
+//   - fetchFromArrays is set and the code pages are still the array pages seen at compile time, and
+//   - no data access of this block run may have written the block's code before the refill
+//     ("codeDirty", RunBlock in interp_backend.cpp is the reference);
+// otherwise it calls refillPipeline(imm) like an unknown Refill.
 struct Block {
     uint32_t startPC = 0;
-    std::vector<uint16_t> guestOpcodes; // guest code at startPC, startPC+2, ... (check-on-entry)
-    uint32_t guestInstrCount = 0;       // 0: the first instruction runs on the interpreter
+    // Guest code at startPC, startPC+2, ... (check-on-entry): the guestInstrCount instruction words,
+    // then the tail word when hasTailWord is set.
+    std::vector<uint16_t> guestOpcodes;
+    uint32_t guestInstrCount = 0; // 0: the first instruction runs on the interpreter
+    // guestOpcodes ends with the word after the last instruction, which the refill at a 4-byte
+    // aligned last instruction reads.
+    bool hasTailWord = false;
+    // At compile time every word of guestOpcodes was on an array page (FastPeek16 succeeded).
+    bool fetchFromArrays = false;
     uint16_t numValues = 0;
     std::vector<Inst> code;
 };
@@ -157,6 +171,8 @@ public:
     void SyncCycles();
     void CheckBoundary(uint32_t pc, uint8_t retired);
     void Refill(uint32_t address);
+    // A Refill whose value is known (see Block): value = (op[address] << 16) | op[address + 2].
+    void KnownRefill(uint32_t address, uint32_t value);
     void SetupDelaySlot(ValueId target);
     void EndDelaySlot();
     void ExitIfBusWait(ValueId address, uint8_t size, bool write, uint32_t pc, uint8_t retired);

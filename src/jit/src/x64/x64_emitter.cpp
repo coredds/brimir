@@ -1,7 +1,11 @@
 #include "x64_emitter.hpp"
 
+#include <brimir/jit/bus_fast_path.hpp>
+
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstring>
 #include <initializer_list>
 #include <limits>
 #include <vector>
@@ -16,6 +20,10 @@ using namespace asmjit;
 // field as [R + offset].
 struct StateOffsets {
     int32_t PC, PR, GBR, VBR, SR, MACL, MACH, delaySlotTarget, wbReg, intrPending, intrAllow, cyclesExecuted;
+    // Optional: without them, refills and delay-slot ops call their trampolines.
+    int32_t fetchedOpcodes, delaySlot, intcPendingLevel;
+    bool hasFetchedOpcodes; // fetchedOpcodes is valid
+    bool hasDelaySlot;      // delaySlot, intcPendingLevel and fetchedOpcodes are valid
 };
 
 bool OffsetFromR(const ymir::sh2::SH2JitContext &ctx, const void *field, int32_t &out) {
@@ -33,12 +41,20 @@ bool OffsetFromR(const ymir::sh2::SH2JitContext &ctx, const void *field, int32_t
 }
 
 bool ComputeOffsets(const ymir::sh2::SH2JitContext &ctx, StateOffsets &o) {
-    return ctx.R != nullptr && OffsetFromR(ctx, ctx.PC, o.PC) && OffsetFromR(ctx, ctx.PR, o.PR) &&
-           OffsetFromR(ctx, ctx.GBR, o.GBR) && OffsetFromR(ctx, ctx.VBR, o.VBR) && OffsetFromR(ctx, ctx.SR, o.SR) &&
-           OffsetFromR(ctx, ctx.MACL, o.MACL) && OffsetFromR(ctx, ctx.MACH, o.MACH) &&
-           OffsetFromR(ctx, ctx.delaySlotTarget, o.delaySlotTarget) && OffsetFromR(ctx, ctx.wbReg, o.wbReg) &&
-           OffsetFromR(ctx, ctx.intrPending, o.intrPending) && OffsetFromR(ctx, ctx.intrAllow, o.intrAllow) &&
-           OffsetFromR(ctx, ctx.cyclesExecuted, o.cyclesExecuted);
+    const bool required =
+        ctx.R != nullptr && OffsetFromR(ctx, ctx.PC, o.PC) && OffsetFromR(ctx, ctx.PR, o.PR) &&
+        OffsetFromR(ctx, ctx.GBR, o.GBR) && OffsetFromR(ctx, ctx.VBR, o.VBR) && OffsetFromR(ctx, ctx.SR, o.SR) &&
+        OffsetFromR(ctx, ctx.MACL, o.MACL) && OffsetFromR(ctx, ctx.MACH, o.MACH) &&
+        OffsetFromR(ctx, ctx.delaySlotTarget, o.delaySlotTarget) && OffsetFromR(ctx, ctx.wbReg, o.wbReg) &&
+        OffsetFromR(ctx, ctx.intrPending, o.intrPending) && OffsetFromR(ctx, ctx.intrAllow, o.intrAllow) &&
+        OffsetFromR(ctx, ctx.cyclesExecuted, o.cyclesExecuted);
+    if (!required) {
+        return false;
+    }
+    o.hasFetchedOpcodes = OffsetFromR(ctx, ctx.fetchedOpcodes, o.fetchedOpcodes);
+    o.hasDelaySlot = o.hasFetchedOpcodes && OffsetFromR(ctx, ctx.delaySlot, o.delaySlot) &&
+                     OffsetFromR(ctx, ctx.intcPendingLevel, o.intcPendingLevel);
+    return true;
 }
 
 constexpr int32_t kFrameCtx = static_cast<int32_t>(offsetof(X64Frame, ctx));
@@ -49,7 +65,9 @@ constexpr int32_t kOutRetired = static_cast<int32_t>(offsetof(X64Frame, out) + o
 constexpr int32_t kOutBoundary = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, boundary));
 constexpr int32_t kOutBusWait = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, busWait));
 constexpr int32_t kOutAborted = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, aborted));
+constexpr int32_t kOutStale = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, stale));
 constexpr int32_t kFrameStop = static_cast<int32_t>(offsetof(X64Frame, stop));
+constexpr int32_t kFrameCodeDirty = static_cast<int32_t>(offsetof(X64Frame, codeDirty));
 constexpr int32_t kCtxR = static_cast<int32_t>(offsetof(ymir::sh2::SH2JitContext, R));
 
 // 32-bit immediates for 32-bit operations, as asmjit expects them (sign-extended form).
@@ -92,26 +110,50 @@ public:
         , m_off(off)
         , m_bus(bus)
         , m_inlineBus(CanInlineBus(bus))
-        , m_values(block.numValues) {}
+        , m_values(block.numValues) {
+        // Known refills need the inline bus (for the entry check and the store classification),
+        // the fetch buffer's offset, and code on array pages now as when the front end checked.
+        m_known = m_inlineBus && off.hasFetchedOpcodes && block.fetchFromArrays &&
+                  FindCodeHostRanges(bus, block.startPC, static_cast<uint32_t>(block.guestOpcodes.size()), m_ranges);
+        if (m_known) {
+            for (size_t i = 0; i < block.code.size(); ++i) {
+                if (block.code[i].op == Op::Refill && block.code[i].flag) {
+                    m_lastKnownRefill = static_cast<ptrdiff_t>(i);
+                }
+            }
+            m_known = m_lastKnownRefill >= 0;
+        }
+    }
 
     void Emit() {
         FuncNode *func = m_cc.add_func(FuncSignature::build<void, X64Frame *>());
         m_frame = m_cc.new_gp_ptr("frame");
         func->set_arg(0, m_frame);
+        if (m_known) {
+            EmitEntryCheck();
+        }
         m_regs = m_cc.new_gp_ptr("regs");
         m_cc.mov(m_regs, x86::qword_ptr(m_frame, kFrameCtx));
         m_cc.mov(m_regs, x86::qword_ptr(m_regs, kCtxR));
         m_cycles = m_cc.new_gp64("cycles");
         m_cc.xor_(m_cycles, m_cycles);
 
-        for (const Inst &in : m_block.code) {
-            Lower(in);
+        for (size_t i = 0; i < m_block.code.size(); ++i) {
+            // Data accesses before the last known refill classify themselves for codeDirty.
+            m_trackDirty = m_known && static_cast<ptrdiff_t>(i) < m_lastKnownRefill;
+            Lower(m_block.code[i]);
         }
 
         // Out-of-line boundary exits, after the block's final exit.
         for (const BoundaryStub &stub : m_stubs) {
             m_cc.bind(stub.label);
             WriteExit(true, stub.pc, stub.retired, m_cycles, true);
+        }
+        // Stale entry: out.stale only (nothing else was written).
+        if (m_known) {
+            m_cc.bind(m_stale);
+            m_cc.mov(x86::byte_ptr(m_frame, kOutStale), 1);
+            m_cc.ret();
         }
         // The shared abort exit taken when a trampoline sets frame->stop.
         if (m_abortUsed) {
@@ -298,6 +340,17 @@ private:
         m_cc.bind(slow);
         Call(&TrRead, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &d);
         CheckStop();
+        if (m_trackDirty) {
+            // A handler read outside the on-chip registers (partition 0b111) may write memory.
+            const Label onChip = m_cc.new_label();
+            x86::Gp part = m_cc.new_gp32();
+            m_cc.mov(part, Use(in.a));
+            m_cc.shr(part, 29);
+            m_cc.cmp(part, 0b111);
+            m_cc.je(onChip);
+            SetCodeDirty();
+            m_cc.bind(onChip);
+        }
         m_cc.bind(done);
     }
 
@@ -313,6 +366,11 @@ private:
             m_cc.cmp(x86::byte_ptr(entry, static_cast<int32_t>(m_bus.arrayWritableOffset)), 0);
             m_cc.je(done);
             const x86::Gp offset = PageOffset(address, in.size);
+            if (m_trackDirty) {
+                x86::Gp host = m_cc.new_gp64();
+                m_cc.lea(host, x86::ptr(array, offset));
+                MarkDirtyIfInCode(host, in.size);
+            }
             switch (in.size) {
             case 1: m_cc.mov(x86::byte_ptr(array, offset), Use(in.b).r8()); break;
             case 2: {
@@ -334,6 +392,161 @@ private:
         }
         m_cc.bind(slow);
         Call(&TrWrite, {Use(in.a), U32(in.size), Use(in.b)});
+        CheckStop();
+        if (m_trackDirty) {
+            SetCodeDirty(); // a handler write may write anything
+        }
+        m_cc.bind(done);
+    }
+
+    // ---- Fetch buffer and delay slots ----
+
+    void SetCodeDirty() {
+        m_cc.mov(x86::byte_ptr(m_frame, kFrameCodeDirty), 1);
+        m_mayBeDirty = true;
+    }
+
+    // codeDirty = 1 if [host, host + size) overlaps the block's code (m_ranges, compile-time host
+    // pointers kept valid by the entry check).
+    void MarkDirtyIfInCode(const x86::Gp &host, uint32_t size) {
+        x86::Gp bound = m_cc.new_gp64();
+        x86::Gp end = m_cc.new_gp64();
+        m_cc.lea(end, x86::ptr(host, static_cast<int32_t>(size)));
+        for (uint32_t r = 0; r < m_ranges.count; ++r) {
+            const Label outside = m_cc.new_label();
+            m_cc.mov(bound, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_ranges.hi[r])));
+            m_cc.cmp(host, bound);
+            m_cc.jae(outside);
+            m_cc.mov(bound, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_ranges.lo[r])));
+            m_cc.cmp(end, bound);
+            m_cc.jbe(outside);
+            m_cc.mov(x86::byte_ptr(m_frame, kFrameCodeDirty), 1);
+            m_cc.bind(outside);
+        }
+        m_mayBeDirty = true;
+    }
+
+    // Entry check of a block with known refills: every code page still has its compile-time array.
+    void EmitEntryCheck() {
+        m_stale = m_cc.new_label();
+        std::vector<const uint8_t *> entries;
+        for (size_t i = 0; i < m_block.guestOpcodes.size(); ++i) {
+            const uint8_t *entry = brimir::jit::PageEntry(m_bus, m_block.startPC + static_cast<uint32_t>(i * 2));
+            if (std::find(entries.begin(), entries.end(), entry) != entries.end()) {
+                continue;
+            }
+            entries.push_back(entry);
+            const uint8_t *array = nullptr;
+            std::memcpy(&array, entry + m_bus.arrayOffset, sizeof(array));
+            x86::Gp e = m_cc.new_gp64();
+            x86::Gp expected = m_cc.new_gp64();
+            m_cc.mov(e, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(entry)));
+            m_cc.mov(expected, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(array)));
+            m_cc.cmp(x86::qword_ptr(e, static_cast<int32_t>(m_bus.arrayOffset)), expected);
+            m_cc.jne(m_stale);
+        }
+    }
+
+    void LowerRefill(const Inst &in) {
+        if (!in.flag || !m_known) {
+            Call(&TrRefill, {U32(in.imm)});
+            CheckStop();
+            return;
+        }
+        const x86::Mem fetched = State32(m_off.fetchedOpcodes);
+        if (!m_mayBeDirty) {
+            m_cc.mov(fetched, Imm32(in.imm2)); // no access before this point can set codeDirty
+            return;
+        }
+        const Label slow = m_cc.new_label();
+        const Label done = m_cc.new_label();
+        m_cc.cmp(x86::byte_ptr(m_frame, kFrameCodeDirty), 0);
+        m_cc.jne(slow);
+        m_cc.mov(fetched, Imm32(in.imm2));
+        m_cc.jmp(done);
+        m_cc.bind(slow);
+        Call(&TrRefill, {U32(in.imm)});
+        CheckStop();
+        m_cc.bind(done);
+    }
+
+    // Inline SH2::JitRefillPipeline for a constant address on an array page (an instruction fetch
+    // there has no side effects); jumps to `slow` otherwise (the caller then calls TrRefill).
+    void InlineRefillConst(uint32_t address, const Label &slow) {
+        if (!m_inlineBus || !m_off.hasFetchedOpcodes || ((kBusPartitions >> (address >> 29)) & 1u) == 0) {
+            m_cc.jmp(slow);
+            return;
+        }
+        const uint32_t aligned = address & ~3u;
+        const uint8_t *entry = brimir::jit::PageEntry(m_bus, aligned);
+        x86::Gp e = m_cc.new_gp64();
+        m_cc.mov(e, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(entry)));
+        const x86::Gp array = PageArrayOrMiss(e, slow);
+        const uint32_t pageMask = (1u << m_bus.pageShift) - 1;
+        x86::Gp v = m_cc.new_gp32();
+        m_cc.mov(v, x86::dword_ptr(array, static_cast<int32_t>(aligned & pageMask)));
+        m_cc.bswap(v);
+        m_cc.mov(State32(m_off.fetchedOpcodes), v);
+    }
+
+    void LowerSetupDelaySlot(const Inst &in) {
+        if (!m_off.hasDelaySlot) {
+            Call(&TrSetupDelaySlot, {Use(in.a)});
+            CheckStop();
+            return;
+        }
+        // SH2::SetupDelaySlot
+        m_cc.mov(State8(m_off.delaySlot), 1);
+        m_cc.mov(State32(m_off.delaySlotTarget), Use(in.a));
+        m_cc.mov(State8(m_off.intrPending), 0);
+    }
+
+    void LowerEndDelaySlot() {
+        if (!m_off.hasDelaySlot) {
+            Call(&TrEndDelaySlot, {});
+            CheckStop();
+            return;
+        }
+        // SH2::AdvancePC<debug = false, emulateCache = false, delaySlot = true>:
+        //   PC = target; if (PC & 2) refill from PC; delaySlot = false;
+        //   intrPending = INTC.pending.level > SR.ILevel
+        // The refill is inline on array pages; otherwise TrEndDelaySlot does the whole step.
+        const Label slow = m_cc.new_label();
+        const Label noRefill = m_cc.new_label();
+        const Label done = m_cc.new_label();
+        x86::Gp target = m_cc.new_gp32();
+        m_cc.mov(target, State32(m_off.delaySlotTarget));
+        m_cc.test(target, 2);
+        m_cc.jz(noRefill);
+        if (m_inlineBus) {
+            JumpUnlessPartition(target, kBusPartitions, slow);
+            const x86::Gp entry = PageEntry(target);
+            const x86::Gp array = PageArrayOrMiss(entry, slow);
+            const x86::Gp offset = PageOffset(target, 4);
+            x86::Gp v = m_cc.new_gp32();
+            m_cc.mov(v, x86::dword_ptr(array, offset));
+            m_cc.bswap(v);
+            m_cc.mov(State32(m_off.fetchedOpcodes), v);
+        } else {
+            m_cc.jmp(slow);
+        }
+        m_cc.bind(noRefill);
+        m_cc.mov(State32(m_off.PC), target);
+        m_cc.mov(State8(m_off.delaySlot), 0);
+        x86::Gp level = m_cc.new_gp32();
+        x86::Gp ilevel = m_cc.new_gp32();
+        x86::Gp pending = m_cc.new_gp32();
+        m_cc.movzx(level, State8(m_off.intcPendingLevel));
+        m_cc.mov(ilevel, State32(m_off.SR));
+        m_cc.shr(ilevel, 4);
+        m_cc.and_(ilevel, 0xF);
+        m_cc.xor_(pending, pending); // before cmp: xor changes the flags
+        m_cc.cmp(level, ilevel);
+        m_cc.seta(pending.r8());
+        m_cc.mov(State8(m_off.intrPending), pending.r8());
+        m_cc.jmp(done);
+        m_cc.bind(slow);
+        Call(&TrEndDelaySlot, {});
         CheckStop();
         m_cc.bind(done);
     }
@@ -544,8 +757,13 @@ private:
             m_cc.mov(taken, m_cycles);
             AddU32(taken, in.imm2);
             if (in.flag) {
-                Call(&TrRefill, {U32(in.imm)});
+                // Inline on an array page; otherwise the trampoline (abort exit on stop).
+                const Label slow = m_cc.new_label();
                 const Label go = m_cc.new_label();
+                InlineRefillConst(in.imm, slow);
+                m_cc.jmp(go);
+                m_cc.bind(slow);
+                Call(&TrRefill, {U32(in.imm)});
                 m_cc.cmp(x86::byte_ptr(m_frame, kFrameStop), 0);
                 m_cc.je(go);
                 AbortExit(taken);
@@ -563,10 +781,7 @@ private:
         // the trampoline as the fallback inside the same op.
         case Op::Load: LowerLoad(in); break;
         case Op::Store: LowerStore(in); break;
-        case Op::Refill:
-            Call(&TrRefill, {U32(in.imm)});
-            CheckStop();
-            break;
+        case Op::Refill: LowerRefill(in); break;
         case Op::AddAccessCycles: LowerAccessCycles(in); break;
         case Op::AddAccessCyclesRMWByte: {
             const x86::Gp c = m_cc.new_gp64();
@@ -576,14 +791,8 @@ private:
             break;
         }
         case Op::ExitIfBusWait: LowerExitIfBusWait(in); break;
-        case Op::SetupDelaySlot:
-            Call(&TrSetupDelaySlot, {Use(in.a)});
-            CheckStop();
-            break;
-        case Op::EndDelaySlot:
-            Call(&TrEndDelaySlot, {});
-            CheckStop();
-            break;
+        case Op::SetupDelaySlot: LowerSetupDelaySlot(in); break;
+        case Op::EndDelaySlot: LowerEndDelaySlot(); break;
         case Op::SetSR:
             Call(&TrSetSR, {Use(in.a), U32(in.flag ? 1 : 0)});
             CheckStop();
@@ -610,6 +819,12 @@ private:
     x86::Gp m_cycles; // cycles accumulated by this block (ExitInfo::cycles)
     Label m_abort;    // shared abort exit, created by the first CheckStop
     bool m_abortUsed = false;
+    bool m_known = false;              // known refills store their value (entry check emitted)
+    ptrdiff_t m_lastKnownRefill = -1;  // index of the last known Refill in block.code (m_known)
+    CodeHostRanges m_ranges;           // the block's code in host memory (m_known)
+    bool m_trackDirty = false;         // the op being lowered must classify its accesses for codeDirty
+    bool m_mayBeDirty = false;         // an access emitted so far can set codeDirty
+    Label m_stale;                     // stale entry exit (m_known)
 };
 
 } // namespace
