@@ -2,6 +2,7 @@
 
 #include <brimir/jit/bus_fast_path.hpp>
 #include <brimir/jit/frontend.hpp>
+#include <brimir/jit/ir_opt.hpp>
 
 #include <cassert>
 #include <cstddef>
@@ -71,6 +72,7 @@ const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
     auto entry = std::make_unique<CachedBlock>();
     entry->block = BuildBlock(ctx, pc);
     Block &block = entry->block;
+    OptimizeBlock(block); // both backends run the optimized block; guestOpcodes are unchanged
     if (!VerifyBlock(block).empty()) {
         // Never run a malformed block: fall back to the interpreter for this PC.
         assert(false && "front end produced an invalid block");

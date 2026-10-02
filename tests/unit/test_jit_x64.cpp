@@ -12,6 +12,7 @@
 #include <brimir/jit/executor.hpp>
 #include <brimir/jit/interp_backend.hpp>
 #include <brimir/jit/ir.hpp>
+#include <brimir/jit/ir_opt.hpp>
 
 #include <algorithm>
 #include <array>
@@ -293,11 +294,13 @@ namespace {
 // Runs 2000 random blocks on RunBlock and on the x64 backend, from identical random CPU states,
 // and requires identical outcomes. A third rig runs each block on RunBlock with every refill
 // turned back into a refillPipeline call (the interpreter's behavior), so known refill values and
-// their codeDirty fallback must reproduce exactly what the callback reads.
+// their codeDirty fallback must reproduce exactly what the callback reads. A fourth runs the block
+// after OptimizeBlock on x64 (cycles-only checks, folded stalls), against RunBlock's original.
 void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
     auto irRig = std::make_unique<Rig>();
     auto x64Rig = std::make_unique<Rig>();
     auto callbackRig = std::make_unique<Rig>();
+    auto optRig = std::make_unique<Rig>();
     const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
     REQUIRE(backend != nullptr);
     uint64_t knownRefills = 0;
@@ -317,8 +320,12 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
             }
         }
 
+        Block optimized = block;
+        brimir::jit::OptimizeBlock(optimized);
+        REQUIRE(brimir::jit::VerifyBlock(optimized).empty());
+
         const CpuSetup cpu = RandomCpu(*irRig, rng);
-        for (Rig *rig : {irRig.get(), x64Rig.get(), callbackRig.get()}) {
+        for (Rig *rig : {irRig.get(), x64Rig.get(), callbackRig.get(), optRig.get()}) {
             rig->WriteCode(kCode, block.guestOpcodes); // the entry check's guarantee
             cpu.Apply(*rig);
         }
@@ -330,7 +337,7 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
         }
         // Bus-wait answers depend on the query count, so both rigs restart it identically.
         const uint32_t busWaitEvery = opt.memory ? static_cast<uint32_t>(rng() % 3 == 0 ? 0 : 2 + rng() % 2) : 0;
-        for (Rig *rig : {irRig.get(), x64Rig.get(), callbackRig.get()}) {
+        for (Rig *rig : {irRig.get(), x64Rig.get(), callbackRig.get(), optRig.get()}) {
             rig->mmio.busWaitEvery = busWaitEvery;
             rig->mmio.busWaitQueries = 0;
             rig->mmio.log.clear();
@@ -353,6 +360,16 @@ void CompareRandomBlocks(const sh2test::RandomIrOptions &opt) {
         INFO("RunBlock with refill callbacks vs RunBlock with known refills");
         RequireSameOutcome(callback, ir, *callbackRig, *irRig, true);
         REQUIRE(irRig->State().fetchedOpcodes == callbackRig->State().fetchedOpcodes);
+        {
+            INFO("x64 on the optimized block vs RunBlock on the original\n" << brimir::jit::PrintBlock(optimized));
+            auto &optCtx = optRig->sh2->GetJitContext();
+            NativeCode optCode;
+            REQUIRE(backend->Compile(optimized, optCtx, optCode));
+            const ExitInfo optInfo = backend->Run(optCode, optCtx, target);
+            RequireSameOutcome(ir, optInfo, *irRig, *optRig, true);
+            REQUIRE(optRig->State().fetchedOpcodes == irRig->State().fetchedOpcodes);
+            REQUIRE(*optCtx.delaySlot == *irRig->sh2->GetJitContext().delaySlot);
+        }
 
         if (seed % 256 == 255) {
             backend->Reset(); // keeps memory bounded and exercises compiling after a reset
@@ -472,8 +489,20 @@ TEST_CASE("x64 boundary at every check", "[jit][x64]") {
     REQUIRE(backend != nullptr);
 
     // allowAt 0: interrupts stay disallowed, only the cycle target stops the block.
-    for (uint32_t allowAt = 0; allowAt < 32; ++allowAt) {
-        const Block block = makeBlock(allowAt);
+    // Each block also runs after OptimizeBlock, which tests only cycles at every check except
+    // allowAt's (the others follow ClearIntrAllow or a passed check with no changing op between).
+    for (uint32_t run = 0; run < 64; ++run) {
+        const uint32_t allowAt = run / 2;
+        const bool optimize = (run & 1) != 0;
+        Block block = makeBlock(allowAt);
+        if (optimize) {
+            brimir::jit::OptimizeBlock(block);
+            uint32_t full = 0;
+            for (const brimir::jit::Inst &in : block.code) {
+                full += in.op == brimir::jit::Op::CheckBoundary && !in.flag ? 1 : 0;
+            }
+            CHECK(full == (allowAt > 0 ? 1u : 0u));
+        }
         INFO(brimir::jit::PrintBlock(block));
         REQUIRE(brimir::jit::VerifyBlock(block).empty());
         NativeCode code;
@@ -489,7 +518,8 @@ TEST_CASE("x64 boundary at every check", "[jit][x64]") {
                 cpu.Apply(*irRig);
                 cpu.Apply(*x64Rig);
                 const uint64_t target = extra == 41 ? kNoCycleTarget : cpu.cycles + extra;
-                INFO("allowAt " << allowAt << " interrupt " << interrupt << " target entry+" << extra);
+                INFO("allowAt " << allowAt << " optimized " << optimize << " interrupt " << interrupt
+                                << " target entry+" << extra);
                 const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext(), target);
                 const ExitInfo x64 = backend->Run(code, x64Rig->sh2->GetJitContext(), target);
                 RequireSameOutcome(ir, x64, *irRig, *x64Rig);

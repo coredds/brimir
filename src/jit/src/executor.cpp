@@ -102,7 +102,9 @@ ExitInfo Executor::RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &
     *ctx.intrAllow = true;
     // Clears m_inBlock and applies a deferred flush on every exit, including an exception thrown
     // by a memory callback, so later flushes are never deferred forever. It covers a whole chain:
-    // a flush requested in any of its blocks aborts that block, which ends the chain.
+    // a flush requested by a read, write or refill callback aborts that block; one requested by
+    // any other callback (setSR, endDelaySlot, ...) lets the block finish and ends the chain at that
+    // block's exit. Either way no later block of the chain runs before the flush here.
     struct BlockScope {
         Executor &self;
         ~BlockScope() {

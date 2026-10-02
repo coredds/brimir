@@ -82,14 +82,22 @@ struct Inst {
     Op op = Op::Exit;
     uint8_t size = 0;    // access size in bytes (1, 2, 4)
     bool flag = false;   // Load: instrFetch; AddAccessCycles/ExitIfBusWait: write; ExitIf: refill; SetSR: delaySlot;
-                         // Div1: rmIsRn; Refill: known (imm2 is the value the fetch reads)
+                         // Div1: rmIsRn; Refill: known (imm2 is the value the fetch reads);
+                         // CheckBoundary: cyclesOnly (see below)
     uint8_t retired = 0; // exit ops: guest instructions completed when the exit is taken
     ValueId dst = kNoValue;
     ValueId a = kNoValue;
     ValueId b = kNoValue;
     uint32_t imm = 0;
-    uint32_t imm2 = 0; // ExitIf: cycles added when taken; known Refill: (op[imm] << 16) | op[imm + 2]
+    uint32_t imm2 = 0; // ExitIf: cycles added when taken; known Refill: (op[imm] << 16) | op[imm + 2];
+                       // CheckBoundary: kCheckNeedsInlineRefills or 0
 };
+
+// CheckBoundary(pc, retired) stops the block (PC = pc, boundary) when the cycle budget is reached
+// or an interrupt is pending and allowed. With flag (cyclesOnly, set by OptimizeBlock) only the
+// budget is tested; with imm2 = kCheckNeedsInlineRefills as well, the interrupt is still tested
+// unless the block's known refills store their value in this run (ir_opt.hpp, rule 2).
+constexpr uint32_t kCheckNeedsInlineRefills = 1;
 
 // A known Refill (flag set) reads two words of the block's own guestOpcodes, so imm2 is the value
 // the fetch returns while that code is unchanged. A backend stores imm2 to *ctx.fetchedOpcodes
@@ -178,7 +186,7 @@ public:
     void WbStall(uint32_t mask);
     void SetWb(uint8_t reg);
     void SyncCycles();
-    void CheckBoundary(uint32_t pc, uint8_t retired);
+    void CheckBoundary(uint32_t pc, uint8_t retired, bool cyclesOnly = false, bool needsInlineRefills = false);
     void Refill(uint32_t address);
     // A Refill whose value is known (see Block): value = (op[address] << 16) | op[address + 2].
     void KnownRefill(uint32_t address, uint32_t value);

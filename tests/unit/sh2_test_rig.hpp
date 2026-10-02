@@ -44,7 +44,15 @@ struct Mmio {
     // Called after every MMIO write with the rig and the bus address (a device with side effects,
     // seen alike by the interpreter and the JIT).
     void (*onWrite)(Rig &rig, uint32_t address) = nullptr;
+    // Called after every MMIO read ('R') and bus-wait query ('B'), like onWrite.
+    void (*onAccess)(Rig &rig, char kind, uint32_t address) = nullptr;
     Rig *owner = nullptr; // set by Rig
+
+    void Accessed(char kind, uint32_t address) {
+        if (onAccess != nullptr) {
+            onAccess(*owner, kind, address);
+        }
+    }
 };
 
 class Rig {

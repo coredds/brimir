@@ -904,16 +904,21 @@ private:
             break;
         }
         case Op::CheckBoundary: {
-            // Stop if cycles >= limit, or an interrupt is pending and allowed.
+            // Stop if cycles >= limit, or an interrupt is pending and allowed. A cycles-only check
+            // (ir_opt.hpp) skips the interrupt test; one that relies on inline known refills tests
+            // it anyway when this block's known refills call TrRefill (!m_known).
             BoundaryStub stub{m_cc.new_label(), in.imm, in.retired};
-            const Label cont = m_cc.new_label();
             m_cc.cmp(m_cycles, x86::qword_ptr(m_frame, kFrameLimit));
             m_cc.jae(stub.label);
-            m_cc.cmp(State8(m_off.intrPending), 0);
-            m_cc.je(cont);
-            m_cc.cmp(State8(m_off.intrAllow), 0);
-            m_cc.jne(stub.label);
-            m_cc.bind(cont);
+            const bool testInterrupt = !in.flag || ((in.imm2 & kCheckNeedsInlineRefills) != 0 && !m_known);
+            if (testInterrupt) {
+                const Label cont = m_cc.new_label();
+                m_cc.cmp(State8(m_off.intrPending), 0);
+                m_cc.je(cont);
+                m_cc.cmp(State8(m_off.intrAllow), 0);
+                m_cc.jne(stub.label);
+                m_cc.bind(cont);
+            }
             m_stubs.push_back(stub);
             break;
         }

@@ -102,8 +102,13 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 // bus fast path (bus_fast_path.hpp) and call their trampolines only for handler or unmapped pages
 // and partitions that do not reach the bus. The table's contents are read at run time; its address
 // is embedded in the code. An inline access does not test *abortRequested (RunBlock's Load/Store
-// do): it runs no callback, and the flag is only raised by a flush during a memory callback (a
-// watchdog reset), which TrRead/TrWrite/TrRefill already report, so it is always false there.
+// do), because it runs no callback. A flush requested by a callback that does not stop the block
+// (TrSetSR, TrEndDelaySlot, TrSetupDelaySlot, TrAccessCycles, TrAccessCyclesRMWByte, TrBusWait) is
+// supported only up to the block's exit, where ChainExit ends the chain: an inline array-page
+// Load/Store later in the same block would not abort, while RunBlock's would. This cannot happen
+// today, and the backend relies on it (design/sh2-jit.md section 6.5): in production only
+// SH2::Reset flushes inside a block, and only from read/write callbacks (a watchdog reset through
+// an on-chip register access), which TrRead/TrWrite/TrRefill report by stopping the block.
 //
 // Fetch buffer (design/sh2-x64-performance.md, 2C item 1), with the inline bus and ctx.fetchedOpcodes:
 //   - known refills (ir.hpp, Block) store their value, unless frame->codeDirty is set; the data

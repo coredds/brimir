@@ -50,18 +50,21 @@ Rig::Rig()
             auto &m = *static_cast<Mmio *>(ctx);
             const uint8_t value = m.data[address & 0xFFFF];
             m.log.push_back({'R', 1, address, value});
+            m.Accessed('R', address);
             return value;
         },
         [](uint32_t address, void *ctx) -> uint16_t {
             auto &m = *static_cast<Mmio *>(ctx);
             const uint16_t value = ReadBE16(&m.data[address & 0xFFFE]);
             m.log.push_back({'R', 2, address, value});
+            m.Accessed('R', address);
             return value;
         },
         [](uint32_t address, void *ctx) -> uint32_t {
             auto &m = *static_cast<Mmio *>(ctx);
             const uint32_t value = ReadBE32(&m.data[address & 0xFFFC]);
             m.log.push_back({'R', 4, address, value});
+            m.Accessed('R', address);
             return value;
         },
         [](uint32_t address, uint8_t value, void *ctx) {
@@ -91,6 +94,7 @@ Rig::Rig()
         [](uint32_t address, uint32_t size, bool, void *ctx) -> bool {
             auto &m = *static_cast<Mmio *>(ctx);
             m.log.push_back({'B', static_cast<uint8_t>(size), address, 0});
+            m.Accessed('B', address);
             if (m.busWaitEvery == 0) {
                 return false;
             }

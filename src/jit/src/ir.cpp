@@ -332,10 +332,12 @@ void Builder::SyncCycles() {
     Emit(Op::SyncCycles);
 }
 
-void Builder::CheckBoundary(uint32_t pc, uint8_t retired) {
+void Builder::CheckBoundary(uint32_t pc, uint8_t retired, bool cyclesOnly, bool needsInlineRefills) {
     Inst &inst = Emit(Op::CheckBoundary);
     inst.imm = pc;
     inst.retired = retired;
+    inst.flag = cyclesOnly;
+    inst.imm2 = needsInlineRefills ? kCheckNeedsInlineRefills : 0u;
 }
 
 void Builder::Refill(uint32_t address) {
@@ -463,6 +465,10 @@ std::string VerifyBlock(const Block &block) {
             if (inst.imm2 != expected) {
                 return error("known refill value differs from guestOpcodes");
             }
+        }
+        if (inst.op == Op::CheckBoundary &&
+            (inst.imm2 > kCheckNeedsInlineRefills || (inst.imm2 != 0 && !inst.flag))) {
+            return error("needsInlineRefills without cyclesOnly, or unknown bits");
         }
         const bool last = i + 1 == block.code.size();
         if (info.isExit && !last) {

@@ -137,16 +137,22 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
         }
         case Op::SetWb: *ctx.wbReg = static_cast<uint8_t>(in.imm); break;
         case Op::SyncCycles: *ctx.cyclesExecuted = entryCycles + info.cycles; break;
-        case Op::CheckBoundary:
+        case Op::CheckBoundary: {
             // The interpreter's per-instruction checks: Advance's budget (m_cyclesExecuted < target)
-            // and InterpretNext's interrupt test (pending && allowed).
-            if (entryCycles + info.cycles >= target || (*ctx.intrPending && *ctx.intrAllow)) {
+            // and InterpretNext's interrupt test (pending && allowed). A cycles-only check skips the
+            // interrupt test (known false, ir_opt.hpp), unless it relies on known refills being
+            // inline and they are not in this run: the refills before it then called back (no
+            // Load or Store precedes them, so codeDirty is clear: only !knownUsable falls back).
+            const bool testInterrupt =
+                !in.flag || ((in.imm2 & kCheckNeedsInlineRefills) != 0 && !knownUsable);
+            if (entryCycles + info.cycles >= target || (testInterrupt && *ctx.intrPending && *ctx.intrAllow)) {
                 *ctx.PC = in.imm;
                 info.retired = in.retired;
                 info.boundary = true;
                 return info;
             }
             break;
+        }
         case Op::Refill:
             if (in.flag && knownUsable && !codeDirty) {
                 // The fetch would read these two words of guestOpcodes, unchanged since the entry
