@@ -1,6 +1,6 @@
 # SH-2 JIT validation
 
-Milestone 1 first; milestones 2A and 2B are in their own sections at the end.
+Milestone 1 first; milestones 2A, 2B and 2C are in their own sections at the end.
 
 ## Milestone 1
 
@@ -148,3 +148,54 @@ Measured separately in `design/sh2-x64-performance.md`: the x64 backend is 1.3â€
 ### Findings
 
 - No JIT bugs were found; no fixes were needed.
+
+## Milestone 2C
+
+**Date**: 2026-10-02
+**Commit**: 3aa3090 (the validated code: the parent of the commit that adds this section)
+**Machine and build**: as above (`build-bench`, Ninja, Release, LTO/IPO, MSVC 19.44.35229, `/O2 /Ob2 /DNDEBUG`). Same BIOS files, scratch system dir and commands as the milestone 1 method.
+
+Plan 2C (`design/plans/2026-10-02-sh2-jit-m2c-performance.md`) changes the x64 backend (inline known refills and delay slots, block chaining with in-block validation, guest registers in host registers, tiered native compilation, native-only cache accounting, IR-only eviction) and adds an IR pass (`OptimizeBlock`) that both backends run, so both were validated.
+
+### Lockstep, x64 backend (36,000 frames)
+
+`brimir_bench --bios <bios> [--game <game> --system-dir <scratch dir>] --lockstep 36000 --jit-backend x64`, run sequentially. All seven runs ended with `lockstep: OK, 36000 frames identical` and exit 0 on the first attempt; no run stalled and nothing was written to stderr. `compileFallbacks` is 0 on both CPUs in every run.
+
+| Title | BIOS | Result | jit master blocksRun / interpreted | jit slave blocksRun / interpreted | nativeBlocksRun (master / slave) | IR-cap evictions (blocks), master / slave | Code-cap flushes, master / slave | Wall time |
+|---|---|---|---|---|---|---|---|---|
+| BIOS menu (no disc) | US | OK, identical (exit 0) | 2,952,071,540 / 894,693 | 0 / 0 | 2,952,050,815 / 0 | 0 / 0 | 0 / 0 | 13:13 |
+| Virtua Fighter 2 (Japan) (Rev B) | JP | OK, identical (exit 0) | 2,417,548,180 / 30,837,846 | 4,074,892,394 / 7,440,566 | 2,417,209,193 / 4,074,825,128 | 1 (13,950) / 0 | 0 / 0 | 32:20 |
+| Panzer Dragoon II Zwei (USA) | US | OK, identical (exit 0) | 3,266,028,823 / 73,852,344 | 2,069,237,372 / 5,586,014 | 3,265,702,492 / 2,069,216,967 | 1 (12,358) / 0 | 0 / 0 | 23:18 |
+| Sega Rally Championship (USA) | US | OK, identical (exit 0) | 2,983,278,830 / 19,740,973 | 1,582,039,497 / 1,104,116,598 | 2,983,164,468 / 1,582,017,801 | 0 / 0 | 0 / 0 | 18:39 |
+| Burning Rangers (USA) | US | OK, identical (exit 0) | 2,348,616,009 / 33,446,500 | 2,232,901,296 / 102,482,762 | 2,344,517,907 / 2,229,410,657 | 0 / 0 | **10 / 9** | 24:19 |
+| Guardian Heroes (USA) | US | OK, identical (exit 0) | 2,493,469,510 / 11,301,264 | 2,102,857,379 / 1,170,391 | 2,493,249,100 / 2,102,757,314 | 0 / 0 | 0 / 0 | 15:55 |
+| Street Fighter Zero 3 (Japan) | JP | OK, identical (exit 0) | 2,233,386,250 / 43,262,494 | 1,923,173,206 / 123,208 | 2,232,972,953 / 1,923,163,709 | 4 (56,713) / 0 | 0 / 0 | 20:28 |
+
+- `blocksRun` and `interpreted` are identical to the milestone 2B table on both CPUs for all seven runs: none of the 2C changes alters which instructions are compiled or where blocks stop. `nativeBlocksRun` is now below `blocksRun` by the IR runs before each block reaches `kNativeCompileThreshold` (8) runs.
+- Long-session cache events (the bench prints both counters): the IR cap was reached once in Virtua Fighter 2 and Panzer Dragoon II Zwei and four times in Street Fighter Zero 3, each time evicting only IR-only blocks. Burning Rangers is the only title that reached the 128 MB native-code cap: 10 full flushes on the master and 9 on the slave in 36,000 frames. Its attract sequence keeps loading new code over old code: 1,125,913 blocks built and 307,507 compiled natively on the master (883,698 invalidations, 142,387 stale native blocks found by their prologue), 1,137,419 and 196,276 on the slave, 89.4 s and 83.4 s of compiling. Stale native code stays allocated until a flush, so the cap fills about once a minute on average (10 / 9 flushes in the ~10-minute run), clustered in the code-reload phases. See `design/sh2-x64-performance.md`, "Milestone 2C results".
+- Other titles' code churn over 36,000 frames (master): Virtua Fighter 2 65,131 builds / 38,746 native compiles, Panzer Dragoon II Zwei 62,061 / 37,870, Sega Rally 20,185 / 14,294, Guardian Heroes 40,359 / 26,719, Street Fighter Zero 3 103,184 / 36,601, BIOS menu 4,222 / 2,491.
+
+### Lockstep, IR backend (1,800 frames)
+
+`brimir_bench ... --lockstep 1800 --jit-backend ir`, because `OptimizeBlock` also changed the blocks the IR backend runs. All seven runs ended with `lockstep: OK, 1800 frames identical` and exit 0.
+
+| Title | jit master blocksRun / interpreted | jit slave blocksRun / interpreted | IR-cap evictions (master) | Wall time |
+|---|---|---|---|---|
+| BIOS menu (no disc) | 147,582,397 / 119,591 | 0 / 0 | 0 | 0:49 |
+| Virtua Fighter 2 (Japan) (Rev B) | 121,164,082 / 970,802 | 139,022,597 / 130,532 | 1 | 1:36 |
+| Panzer Dragoon II Zwei (USA) | 139,379,992 / 2,554,481 | 64,432,951 / 43,524 | 1 | 0:59 |
+| Sega Rally Championship (USA) | 119,482,068 / 1,311,301 | 49,740,102 / 35,054,995 | 1 | 1:06 |
+| Burning Rangers (USA) | 128,046,327 / 772,328 | 68,833,193 / 3,504,627 | 1 | 1:21 |
+| Guardian Heroes (USA) | 116,053,331 / 713,444 | 66,995,037 / 18,947 | 1 | 0:59 |
+| Street Fighter Zero 3 (Japan) | 103,429,336 / 1,846,153 | 57,967,706 / 30,735 | 1 | 0:56 |
+
+The BIOS menu, Guardian Heroes and Street Fighter Zero 3 master counts equal the milestone 2A 1,800-frame runs. With the IR backend every block is IR-only, so an IR-cap eviction empties the cache, as the earlier whole-cache flush did.
+
+### Performance
+
+Measured separately in `design/sh2-x64-performance.md` ("Milestone 2C results"): interpreter SH-2 total / x64 SH-2 total is 0.91â€“1.25 on the six titles, so the 2x target is missed and the JIT stays off by default.
+
+### Findings
+
+- No JIT bugs were found; no fixes were needed.
+- Burning Rangers fills the 128 MB native-code cap through stale native code about once a minute on average (10 master / 9 slave flushes in 36,000 frames, ~10 minutes), more often during its code-reload phases (above); this is a performance issue (full flush and recompile), not a correctness one: its lockstep run is identical.

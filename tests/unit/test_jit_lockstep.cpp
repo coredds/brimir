@@ -158,6 +158,10 @@ void InstallFrtWorkload(CoreWrapper &core) {
     // CPU state, with the fetch buffer refilled to match memory at the new PC.
     ymir::savestate::SH2SaveState state{};
     sh2.SaveState(state);
+    // The setup writes above ran outside any instruction, at the current cycle, but an FRT write
+    // syncs the timer to 4 cycles later (AdvanceFRT<true>), so the first FRCH read would move the
+    // timer backwards (asserted in FreeRunningTimer::AdvanceTo). Sync it to the current cycle.
+    state.frt.cycleCount -= 4;
     state.PC = kMainLoop;
     // Interrupt mask 1, not 0: the master's IRL source sits at level 1 / vector 0x40 after reset
     // (INTC levels[IRL] = 1 with the null IPL, SCU IMS = 0xBFFF), and RecalcInterrupts (run by the

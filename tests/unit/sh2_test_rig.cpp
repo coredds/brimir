@@ -38,6 +38,7 @@ uint32_t RamOffset(uint32_t address) {
 Rig::Rig()
     : ram(std::make_unique<std::array<uint8_t, kRamSize>>()) {
     ram->fill(0);
+    mmio.owner = this;
     bus.MapArray(0x0000000, 0x1FFFFFF, *ram, true);
     bus.MapArray(0x4000000, 0x7FFFFFF, *ram, true);
     bus.SetAccessCycles(0x0000000, 0x1FFFFFF, 2, 3, 4, 5, 6, 7);
@@ -49,38 +50,51 @@ Rig::Rig()
             auto &m = *static_cast<Mmio *>(ctx);
             const uint8_t value = m.data[address & 0xFFFF];
             m.log.push_back({'R', 1, address, value});
+            m.Accessed('R', address);
             return value;
         },
         [](uint32_t address, void *ctx) -> uint16_t {
             auto &m = *static_cast<Mmio *>(ctx);
             const uint16_t value = ReadBE16(&m.data[address & 0xFFFE]);
             m.log.push_back({'R', 2, address, value});
+            m.Accessed('R', address);
             return value;
         },
         [](uint32_t address, void *ctx) -> uint32_t {
             auto &m = *static_cast<Mmio *>(ctx);
             const uint32_t value = ReadBE32(&m.data[address & 0xFFFC]);
             m.log.push_back({'R', 4, address, value});
+            m.Accessed('R', address);
             return value;
         },
         [](uint32_t address, uint8_t value, void *ctx) {
             auto &m = *static_cast<Mmio *>(ctx);
             m.data[address & 0xFFFF] = value;
             m.log.push_back({'W', 1, address, value});
+            if (m.onWrite != nullptr) {
+                m.onWrite(*m.owner, address);
+            }
         },
         [](uint32_t address, uint16_t value, void *ctx) {
             auto &m = *static_cast<Mmio *>(ctx);
             WriteBE16(&m.data[address & 0xFFFE], value);
             m.log.push_back({'W', 2, address, value});
+            if (m.onWrite != nullptr) {
+                m.onWrite(*m.owner, address);
+            }
         },
         [](uint32_t address, uint32_t value, void *ctx) {
             auto &m = *static_cast<Mmio *>(ctx);
             WriteBE32(&m.data[address & 0xFFFC], value);
             m.log.push_back({'W', 4, address, value});
+            if (m.onWrite != nullptr) {
+                m.onWrite(*m.owner, address);
+            }
         },
         [](uint32_t address, uint32_t size, bool, void *ctx) -> bool {
             auto &m = *static_cast<Mmio *>(ctx);
             m.log.push_back({'B', static_cast<uint8_t>(size), address, 0});
+            m.Accessed('B', address);
             if (m.busWaitEvery == 0) {
                 return false;
             }

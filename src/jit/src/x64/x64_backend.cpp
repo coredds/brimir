@@ -6,6 +6,7 @@
 
 #include <asmjit/x86.h>
 
+#include <algorithm>
 #include <cassert>
 #include <exception>
 
@@ -164,8 +165,14 @@ void TrMacL(X64Frame *f, uint32_t op1, uint32_t op2) noexcept {
     MacStep<true>(f, op1, op2);
 }
 
+void TrChainedInDelaySlot(X64Frame *f) noexcept {
+    (void)f;
+    assert(false && "a block was chained to with a delay slot pending");
+}
+
 X64Backend::X64Backend()
-    : m_runtime(std::make_unique<asmjit::JitRuntime>()) {}
+    : m_runtime(std::make_unique<asmjit::JitRuntime>())
+    , m_links(std::make_unique<X64LinkSlot[]>(kLinkSlots)) {}
 
 X64Backend::~X64Backend() = default;
 
@@ -182,7 +189,8 @@ bool X64Backend::Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx
     ErrorRecorder errors;
     code.set_error_handler(&errors);
     asmjit::x86::Compiler cc(&code);
-    if (!EmitBlock(cc, block, ctx)) {
+    bool selfValidating = false;
+    if (!EmitBlock(cc, block, ctx, m_links.get(), selfValidating)) {
         return false;
     }
     if (cc.finalize() != asmjit::Error::kOk || errors.error != asmjit::Error::kOk) {
@@ -195,30 +203,52 @@ bool X64Backend::Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx
     }
     m_codeBytes += code.code_size();
     out.entry = reinterpret_cast<const void *>(fn);
+    out.selfValidating = selfValidating;
     return true;
 }
 
 ExitInfo X64Backend::Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target,
-                         const bool *abortRequested) {
+                         const bool *abortRequested, bool allowChain) {
     X64Frame frame{};
     frame.ctx = &ctx;
     frame.entryCycles = *ctx.cyclesExecuted;
     frame.limit = target >= frame.entryCycles ? target - frame.entryCycles : 0;
     frame.abortRequested = abortRequested != nullptr ? abortRequested : &kNoAbort;
+    frame.allowChain = allowChain ? 1 : 0;
 
-    const auto fn = reinterpret_cast<X64BlockFn>(const_cast<void *>(code.entry));
-    fn(&frame);
+    // Each block returns the next block's entry (chaining) or nullptr. A block that stops (abort,
+    // exception, stale entry, boundary, bus wait) always returns nullptr, so no generated code runs
+    // after a trampoline caught an exception or a flush was requested.
+    const void *next = code.entry;
+    do {
+        next = reinterpret_cast<X64BlockFn>(const_cast<void *>(next))(&frame);
+    } while (next != nullptr);
 
     if (frame.error) {
         std::rethrow_exception(frame.error);
     }
-    // Only the read/write/refill callbacks can request an abort (x64_emitter.hpp), and their
-    // trampolines stop the block when they do, so a block that ran to its end saw no request.
-    assert(frame.out.aborted || !*frame.abortRequested);
+    // A block can end normally with an abort requested: callbacks other than read/write/refill
+    // (endDelaySlot's own refill, setSR, ...) do not stop it, as in RunBlock. The chain then ended
+    // at that block's exit (ChainExit), and the executor applies the flush.
     return frame.out;
 }
 
+void X64Backend::Publish(uint32_t pc, const NativeCode &code) {
+    if (code.selfValidating && code.entry != nullptr) {
+        m_links[LinkIndex(pc)] = X64LinkSlot{pc, code.entry};
+    }
+}
+
+void X64Backend::Unpublish(uint32_t pc) {
+    X64LinkSlot &slot = m_links[LinkIndex(pc)];
+    if (slot.pc == pc) {
+        slot = X64LinkSlot{};
+    }
+}
+
 void X64Backend::Reset() {
+    // The link table first: it must never point into freed code.
+    std::fill_n(m_links.get(), kLinkSlots, X64LinkSlot{});
     // Destroying the runtime releases every block it generated.
     m_runtime.reset();
     m_runtime = std::make_unique<asmjit::JitRuntime>();

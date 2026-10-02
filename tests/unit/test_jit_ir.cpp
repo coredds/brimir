@@ -88,6 +88,73 @@ TEST_CASE("IR verifier rejects malformed blocks", "[jit][ir]") {
     }
 }
 
+TEST_CASE("IR verifier checks guest code, the tail word and known refills", "[jit][ir]") {
+    constexpr uint32_t kStart = 0x06001000;
+    // Two instructions plus the tail word, a known refill of the first pair and one of the second.
+    const auto make = [&] {
+        Block block;
+        block.startPC = kStart;
+        block.guestInstrCount = 3;
+        block.hasTailWord = true;
+        block.fetchFromArrays = true;
+        block.guestOpcodes = {0x1111, 0x2222, 0x3333, 0x4444};
+        Builder b(block);
+        b.KnownRefill(kStart, 0x11112222);
+        b.KnownRefill(kStart + 4, 0x33334444);
+        b.Exit(kStart + 6, 3);
+        return block;
+    };
+    REQUIRE(VerifyBlock(make()).empty());
+    CHECK(make().code[0].flag);
+    CHECK(make().code[1].imm2 == 0x33334444u);
+
+    SECTION("word count") {
+        Block block = make();
+        block.hasTailWord = false;
+        CHECK(VerifyBlock(block).find("guestOpcodes does not match") != std::string::npos);
+    }
+    SECTION("tail word without code") {
+        Block block = make();
+        block.guestOpcodes.clear();
+        block.code.erase(block.code.begin(), block.code.begin() + 2);
+        CHECK(VerifyBlock(block).find("tail word without guestOpcodes") != std::string::npos);
+    }
+    SECTION("array fetches without code") {
+        Block block = make();
+        block.guestOpcodes.clear();
+        block.hasTailWord = false;
+        block.code.erase(block.code.begin(), block.code.begin() + 2);
+        CHECK(VerifyBlock(block).find("fetchFromArrays without guestOpcodes") != std::string::npos);
+    }
+    SECTION("known refill value") {
+        Block block = make();
+        block.code[1].imm2 = 0x33334445;
+        CHECK(VerifyBlock(block).find("known refill value differs") != std::string::npos);
+    }
+    SECTION("known refill past the code") {
+        Block block = make();
+        block.code[1].imm = kStart + 8;
+        CHECK(VerifyBlock(block).find("known refill outside guestOpcodes") != std::string::npos);
+    }
+    SECTION("known refill before the code") {
+        Block block = make();
+        block.code[0].imm = kStart - 4;
+        CHECK(VerifyBlock(block).find("known refill outside guestOpcodes") != std::string::npos);
+    }
+    SECTION("known refill at an unaligned address") {
+        Block block = make();
+        block.code[0].imm = kStart + 2;
+        block.code[0].imm2 = 0x22223333;
+        CHECK(VerifyBlock(block).find("known refill outside guestOpcodes") != std::string::npos);
+    }
+    SECTION("an unknown refill may read anything") {
+        Block block = make();
+        block.code[1].flag = false;
+        block.code[1].imm = 0x22000000;
+        CHECK(VerifyBlock(block).empty());
+    }
+}
+
 TEST_CASE("IR names the logic, shift, compare and system-register ops", "[jit][ir]") {
     const std::pair<Op, const char *> names[] = {
         {Op::And, "And"},

@@ -332,14 +332,23 @@ void Builder::SyncCycles() {
     Emit(Op::SyncCycles);
 }
 
-void Builder::CheckBoundary(uint32_t pc, uint8_t retired) {
+void Builder::CheckBoundary(uint32_t pc, uint8_t retired, bool cyclesOnly, bool needsInlineRefills) {
     Inst &inst = Emit(Op::CheckBoundary);
     inst.imm = pc;
     inst.retired = retired;
+    inst.flag = cyclesOnly;
+    inst.imm2 = needsInlineRefills ? kCheckNeedsInlineRefills : 0u;
 }
 
 void Builder::Refill(uint32_t address) {
     Emit(Op::Refill).imm = address;
+}
+
+void Builder::KnownRefill(uint32_t address, uint32_t value) {
+    Inst &inst = Emit(Op::Refill);
+    inst.imm = address;
+    inst.imm2 = value;
+    inst.flag = true;
 }
 
 void Builder::SetupDelaySlot(ValueId target) {
@@ -392,6 +401,18 @@ std::string VerifyBlock(const Block &block) {
     if (block.numValues > kMaxValues) {
         return "too many values";
     }
+    // guestOpcodes is optional for hand-built blocks (empty: nothing is checked on entry), but when
+    // present it holds exactly the instruction words plus the tail word.
+    if (!block.guestOpcodes.empty() &&
+        block.guestOpcodes.size() != block.guestInstrCount + (block.hasTailWord ? 1u : 0u)) {
+        return "guestOpcodes does not match guestInstrCount and hasTailWord";
+    }
+    if (block.hasTailWord && block.guestOpcodes.empty()) {
+        return "tail word without guestOpcodes";
+    }
+    if (block.fetchFromArrays && block.guestOpcodes.empty()) {
+        return "fetchFromArrays without guestOpcodes";
+    }
 
     std::vector<bool> defined(block.numValues, false);
     for (size_t i = 0; i < block.code.size(); ++i) {
@@ -431,6 +452,23 @@ std::string VerifyBlock(const Block &block) {
         if (inst.op == Op::SetSRBits && (inst.imm & ~0x303u) != 0) {
             // Only T/S/Q/M: ILevel changes need the setSR callback (interrupt recompute)
             return error("SetSRBits mask outside T/S/Q/M");
+        }
+        if (inst.op == Op::Refill && inst.flag) {
+            // A known refill reads two words of guestOpcodes, and imm2 must be exactly those words.
+            const uint32_t offset = inst.imm - block.startPC;
+            const size_t words = block.guestOpcodes.size();
+            if ((inst.imm & 3u) != 0 || inst.imm < block.startPC || (offset & 1u) != 0 || offset / 2 + 1 >= words) {
+                return error("known refill outside guestOpcodes");
+            }
+            const uint32_t expected = (static_cast<uint32_t>(block.guestOpcodes[offset / 2]) << 16) |
+                                      block.guestOpcodes[offset / 2 + 1];
+            if (inst.imm2 != expected) {
+                return error("known refill value differs from guestOpcodes");
+            }
+        }
+        if (inst.op == Op::CheckBoundary &&
+            (inst.imm2 > kCheckNeedsInlineRefills || (inst.imm2 != 0 && !inst.flag))) {
+            return error("needsInlineRefills without cyclesOnly, or unknown bits");
         }
         const bool last = i + 1 == block.code.size();
         if (info.isExit && !last) {

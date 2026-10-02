@@ -4704,6 +4704,7 @@ void SH2::InitJitContext() {
     m_jitContext.intrPending = &m_intrFlags.pending;
     m_jitContext.intrAllow = &m_intrFlags.allow;
     m_jitContext.fetchedOpcodes = &m_fetchedOpcodes;
+    m_jitContext.intcPendingLevel = &INTC.pending.level; // Brimir: inline delay-slot end
     m_jitContext.cyclesExecuted = &m_cyclesExecuted;
     m_jitContext.sh2 = this;
     m_jitContext.interpretOne = &SH2::JitInterpretOne;

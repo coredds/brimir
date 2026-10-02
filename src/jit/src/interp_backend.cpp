@@ -1,4 +1,6 @@
 #include <brimir/jit/interp_backend.hpp>
+
+#include <brimir/jit/bus_fast_path.hpp>
 #include <brimir/jit/sh2_helpers.hpp>
 
 #include <vector>
@@ -17,6 +19,31 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
     // Memory callbacks can reset the CPU (watchdog reset), which requests a cache flush. Stop at
     // once, without touching PC, which the reset already set.
     const auto abortNow = [&] { return abortRequested != nullptr && *abortRequested; };
+
+    // Known refills (header comment): usable while the code is on array pages and not dirty.
+    CodeHostRanges codeRanges;
+    const bool knownUsable =
+        block.fetchFromArrays &&
+        FindCodeHostRanges(ctx.bus, block.startPC, static_cast<uint32_t>(block.guestOpcodes.size()), codeRanges);
+    bool codeDirty = false;
+    // Classifies a data access (before it runs, while the page table is as the access sees it).
+    const auto markRead = [&](uint32_t address, uint32_t size) {
+        bool writable = false;
+        if (knownUsable && FastArrayPointer(ctx.bus, address, size, writable) == nullptr && (address >> 29) != 0b111) {
+            codeDirty = true; // handler read outside the on-chip registers
+        }
+    };
+    const auto markWrite = [&](uint32_t address, uint32_t size) {
+        if (!knownUsable) {
+            return;
+        }
+        bool writable = false;
+        const uint8_t *p = FastArrayPointer(ctx.bus, address, size, writable);
+        if (p == nullptr || (writable && codeRanges.Overlaps(p, size))) {
+            codeDirty = true; // handler write, or an array store into the block's code
+        }
+    };
+
     for (const Inst &in : block.code) {
         switch (in.op) {
         case Op::Const: v[in.dst] = in.imm; break;
@@ -84,6 +111,7 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
         }
         case Op::AddAccessCyclesRMWByte: info.cycles += ctx.accessCyclesRMWByte(ctx.sh2, v[in.a]); break;
         case Op::Load:
+            markRead(v[in.a], in.size);
             v[in.dst] = ctx.read(ctx.sh2, v[in.a], in.size, in.flag);
             if (abortNow()) {
                 info.aborted = true;
@@ -91,6 +119,7 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
             }
             break;
         case Op::Store:
+            markWrite(v[in.a], in.size);
             ctx.write(ctx.sh2, v[in.a], in.size, v[in.b]);
             if (abortNow()) {
                 info.aborted = true;
@@ -108,17 +137,29 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
         }
         case Op::SetWb: *ctx.wbReg = static_cast<uint8_t>(in.imm); break;
         case Op::SyncCycles: *ctx.cyclesExecuted = entryCycles + info.cycles; break;
-        case Op::CheckBoundary:
+        case Op::CheckBoundary: {
             // The interpreter's per-instruction checks: Advance's budget (m_cyclesExecuted < target)
-            // and InterpretNext's interrupt test (pending && allowed).
-            if (entryCycles + info.cycles >= target || (*ctx.intrPending && *ctx.intrAllow)) {
+            // and InterpretNext's interrupt test (pending && allowed). A cycles-only check skips the
+            // interrupt test (known false, ir_opt.hpp), unless it relies on known refills being
+            // inline and they are not in this run: the refills before it then called back (no
+            // Load or Store precedes them, so codeDirty is clear: only !knownUsable falls back).
+            const bool testInterrupt =
+                !in.flag || ((in.imm2 & kCheckNeedsInlineRefills) != 0 && !knownUsable);
+            if (entryCycles + info.cycles >= target || (testInterrupt && *ctx.intrPending && *ctx.intrAllow)) {
                 *ctx.PC = in.imm;
                 info.retired = in.retired;
                 info.boundary = true;
                 return info;
             }
             break;
+        }
         case Op::Refill:
+            if (in.flag && knownUsable && !codeDirty) {
+                // The fetch would read these two words of guestOpcodes, unchanged since the entry
+                // check; an array-page fetch has no side effects.
+                *ctx.fetchedOpcodes = in.imm2;
+                break;
+            }
             ctx.refillPipeline(ctx.sh2, in.imm);
             if (abortNow()) {
                 info.aborted = true;

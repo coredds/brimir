@@ -43,6 +43,9 @@ struct SH2JitContext {
     bool *intrPending = nullptr;
     bool *intrAllow = nullptr;
     uint32 *fetchedOpcodes = nullptr; // 32-bit instruction fetch buffer
+    // Brimir: INTC.pending.level (read-only), for an inline end of a delay slot
+    // (SH2::AdvancePC<..., delaySlot = true>: pending = INTC.pending.level > SR.ILevel).
+    const uint8 *intcPendingLevel = nullptr;
 
     // Cycles executed so far in the current Advance() call. On-chip timers (WDT, FRT) read it to
     // sync, so the executor must keep it current before every interpreter call and memory access.

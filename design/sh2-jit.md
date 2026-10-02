@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact, but the 2x target was missed (plan 2B, see [sh2-x64-performance.md](sh2-x64-performance.md)); optimization next (plan 2C)
+**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact (plan 2B); optimized in plan 2C to about the interpreter's speed (interpreter / x64 SH-2 time 0.91–1.25 on six games), so the 2x target is still missed and the JIT stays off by default (see [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2C results")
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -167,7 +167,7 @@ A delayed branch computes its target, runs the slot instruction, then exits to t
 - Keyed by the full guest PC. Block exits write constant PCs that include the partition bits, so the cached (`0x0xxxxxxx`) and cache-through (`0x2xxxxxxx`) aliases of the same code get separate blocks.
 - A block starting at `PC & 2` runs only if the fetch buffer's low halfword matches memory; otherwise the interpreter executes the buffered opcode, as the hardware would.
 - `std::unordered_map` keyed by the full PC. Each block stores its start PC and a copy of its original opcodes.
-- Size cap: `kMaxCachedInsts` = 1M IR instructions per CPU (about 20 MB). When it is reached, the whole cache is flushed before the next compile.
+- Size cap: `kMaxCachedInsts` = 1M IR instructions per CPU (about 20 MB), counting only blocks that still hold IR (IR-only blocks). When it is reached, `Get` evicts the IR-only blocks (and their recent-table slots) before the next build; natively compiled blocks keep their code and link slots. With the IR backend every block is IR-only, so eviction empties the cache, as the original whole-cache flush did. With a native backend, blocks are compiled natively on their `kNativeCompileThreshold`-th run and then drop their IR. Native code has its own cap, `kMaxNativeCodeBytes` (128 MB per CPU); reaching it flushes the whole cache, native blocks included. Stale native code (a block replaced after its code changed) is reclaimed only by such a flush. See `design/sh2-x64-performance.md`, 2C progress, Task 5.
 - If the front end ever produced a block that fails verification, a fallback empty block is cached instead, so that PC always runs on the interpreter.
 
 ### 6.2 Invalidation (milestone 1)
@@ -194,6 +194,8 @@ The JIT holds no architectural state between blocks, so the save-state format do
 - Self-modifying code: any write into the currently executing block's own code -- a store in any addressing mode, a read-modify-write (`AND.B`/`OR.B`/`XOR.B #imm,@(R0,GBR)`, `TAS.B`), or a DMA transfer started by a store -- takes effect at the next block entry (check-on-entry), whereas the interpreter fetches fresh opcodes at every aligned PC and so sees the change at the next instruction fetch.
 - Reset inside an instruction: a compiled access to the WDT registers can trigger a watchdog reset, which calls `SH2::Reset` and flushes the executor. The flush is deferred until the block returns, and the block is aborted right after that access without writing `PC`. The interpreter instead finishes the current instruction after the reset (for example `PC += 2` from the reset vector). Both are artifacts of a reset happening inside an instruction. An aborted block returns only the cycles accumulated before the abort; the interpreter would return the whole instruction's cost.
 - Dev-log lines that print the current PC (for example on-chip register access traces) show the block's start PC for accesses made by compiled code, because the JIT does not update `PC` inside a block. Emulated state is unaffected.
+
+Invariant the x64 backend relies on (not a guest-visible deviation): a cache flush is requested inside a block only by `SH2::Reset`, and only from a read or write callback (a watchdog reset through an on-chip register access). The x64 trampolines for read, write and refill stop the block on the abort flag, as `RunBlock` does. A flush requested from a callback that does not stop the block (`setSR`, `endDelaySlot`, `setupDelaySlot`, `accessCycles`, `accessCyclesRMWByte`, `busWait`) is handled at the block's exit, which ends the chain, but an inline array-page `Load`/`Store` later in the same block does not test the flag, while `RunBlock` would abort there. A core change that flushes from such a callback must make the inline accesses test the flag. The IR pass (`ir_opt.hpp`) never moves a callback past an inline access.
 
 ## 7. Validation
 

@@ -109,6 +109,32 @@ public:
         }
     }
 
+    // Guest-register traffic (opt.registers).
+    void RegisterOp() {
+        switch (Below(10)) {
+        case 0:
+        case 1:
+        case 2: Def(m_b.GetReg(Below(16))); break;
+        case 3:
+        case 4:
+        case 5: m_b.SetReg(Below(16), Pick()); break;
+        case 6: { // read-modify-write of one register, as most SH-2 instructions do
+            const uint32_t r = Below(16);
+            const ValueId v = m_b.GetReg(r);
+            Def(v);
+            m_b.SetReg(r, Below(2) != 0 ? m_b.Add(v, Pick()) : m_b.Xor(v, m_b.Const(Word())));
+            break;
+        }
+        case 7: Def(Below(2) != 0 ? m_b.GetT() : m_b.GetSR()); break;
+        case 8: m_b.SetT(Pick()); break;
+        default: {
+            static constexpr uint32_t kMasks[] = {0x001, 0x002, 0x100, 0x200, 0x301, 0x303, 0x003, 0x300};
+            m_b.SetSRBits(Pick(), kMasks[Below(8)]);
+            break;
+        }
+        }
+    }
+
     void CycleOp() {
         switch (Below(5)) {
         case 0:
@@ -147,7 +173,16 @@ public:
             case 12:
             case 13: address = 0x22000000u | (Below(0x10000) & align); break; // MMIO
             case 14: address = 0xFFFFFE10u + (Below(16) & align); break;     // FRT registers (I/O area)
-            default: address = 0x22000000u | Below(0x10000); break;         // MMIO, any alignment
+            default:
+                if (Below(2) != 0) {
+                    // The block's own code, through the cached, cache-through or mirror alias
+                    // (known refills must notice stores there).
+                    static constexpr uint32_t kAliases[] = {0x00000000u, 0x20000000u, 0x00100000u};
+                    address = ((m_startPC + Below(0x80)) & align) + kAliases[Below(3)];
+                } else {
+                    address = 0x22000000u | Below(0x10000); // MMIO, any alignment
+                }
+                break;
             }
             if (Below(32) == 0) {
                 address |= 1u; // misaligned (odd) for word and long accesses
@@ -219,6 +254,7 @@ public:
     Builder m_b;
     std::vector<ValueId> m_pool;
     RandomIrOptions m_opt;
+    uint32_t m_startPC = 0;
 };
 
 } // namespace
@@ -228,6 +264,7 @@ Block RandomBlock(std::mt19937 &rng, uint32_t startPC, const RandomIrOptions &op
     block.startPC = startPC;
     Generator g(rng, block);
     g.m_opt = opt;
+    g.m_startPC = startPC;
 
     const uint32_t numOps = g.Range(20, 200);
     std::vector<uint32_t> exitIfAt;
@@ -240,6 +277,10 @@ Block RandomBlock(std::mt19937 &rng, uint32_t startPC, const RandomIrOptions &op
     const auto currentPC = [&] { return startPC + 2 * (retired - 1); };
     // One random op of any enabled kind (no exits, no boundary checks).
     const auto bodyOp = [&] {
+        if (opt.registers && g.Below(2) == 0) {
+            g.RegisterOp();
+            return;
+        }
         const uint32_t pick = g.Below(opt.calls || opt.memory ? 26 : 18);
         if (pick < 11) {
             g.ValueOp();
@@ -324,6 +365,28 @@ Block RandomBlock(std::mt19937 &rng, uint32_t startPC, const RandomIrOptions &op
         g.m_b.ExitDynamic(static_cast<uint8_t>(retired));
     }
     block.guestInstrCount = retired;
+
+    // Guest code and known refills (with calls, most of the time): random opcodes, an optional
+    // tail word, and most refills inside them marked known with their value. The caller writes
+    // guestOpcodes to memory at startPC, as the entry check guarantees for real blocks.
+    if (opt.calls && g.Below(4) != 0) {
+        block.hasTailWord = g.Below(2) != 0;
+        const uint32_t words = retired + (block.hasTailWord ? 1u : 0u);
+        for (uint32_t i = 0; i < words; ++i) {
+            block.guestOpcodes.push_back(static_cast<uint16_t>(g.Below(0x10000)));
+        }
+        block.fetchFromArrays = g.Below(8) != 0;
+        for (brimir::jit::Inst &inst : block.code) {
+            if (inst.op != brimir::jit::Op::Refill || inst.imm < startPC || (inst.imm & 3u) != 0 || g.Below(4) == 0) {
+                continue;
+            }
+            const uint32_t index = (inst.imm - startPC) / 2;
+            if (index + 1 < words) {
+                inst.flag = true;
+                inst.imm2 = (static_cast<uint32_t>(block.guestOpcodes[index]) << 16) | block.guestOpcodes[index + 1];
+            }
+        }
+    }
     return block;
 }
 

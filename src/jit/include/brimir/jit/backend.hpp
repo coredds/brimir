@@ -24,6 +24,9 @@ bool ParseBackend(std::string_view name, BackendKind &out);
 // block cache (and backend), so code never runs against another CPU.
 struct NativeCode {
     const void *entry = nullptr; // nullptr: run the block with RunBlock
+    // The code checks at entry that its guest code is unchanged (reporting ExitInfo::stale), so the
+    // block cache does not check it, and it may be published to the backend's link table.
+    bool selfValidating = false;
 };
 
 class INativeBackend {
@@ -33,12 +36,23 @@ public:
     // Compiles a verified block (guestInstrCount > 0) for the CPU whose state ctx points to.
     // Returns false, leaving out.entry == nullptr, if this backend cannot compile it.
     virtual bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) = 0;
-    // Same contract as RunBlock. An exception thrown by a context callback is rethrown here after
-    // the generated code has returned. `ctx` must be the context `code` was compiled with (same
-    // CPU; see NativeCode).
+    // Same contract as RunBlock, for one block. An exception thrown by a context callback is
+    // rethrown here after the generated code has returned. `ctx` must be the context `code` was
+    // compiled with (same CPU; see NativeCode).
+    //
+    // With allowChain, a block that leaves through a static Exit, a taken ExitIf or ExitDynamic
+    // does what Executor::Run does between steps instead of returning: it stores
+    // *ctx.cyclesExecuted = entry + cycles so far, stops if they reached `target`, and otherwise
+    // enters the block published for the new PC, if any. That block first makes Executor::Step's
+    // checks (pending interrupt, PC & 2 fetch buffer) and returns if one fails; the executor then
+    // continues with a normal step. The result covers the whole chain (see ExitInfo).
     virtual ExitInfo Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target = kNoCycleTarget,
-                         const bool *abortRequested = nullptr) = 0;
-    // Frees all generated code. Never called while generated code runs.
+                         const bool *abortRequested = nullptr, bool allowChain = false) = 0;
+    // Link table: makes `code` (selfValidating, compiled for pc) the block chained to at pc, or
+    // removes the block published for pc. Publish without selfValidating is ignored.
+    virtual void Publish(uint32_t pc, const NativeCode &code) = 0;
+    virtual void Unpublish(uint32_t pc) = 0;
+    // Frees all generated code and empties the link table. Never called while generated code runs.
     virtual void Reset() = 0;
     virtual size_t CodeBytes() const = 0; // bytes of generated code currently held
 };

@@ -1,6 +1,7 @@
 # Brimir SH-2 JIT (see design/sh2-jit.md)
 add_library(brimir-jit STATIC
     src/ir.cpp
+    src/ir_opt.cpp
     src/interp_backend.cpp
     src/sh2_helpers.cpp
     src/frontend.cpp

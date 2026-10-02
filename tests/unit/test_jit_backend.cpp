@@ -439,3 +439,123 @@ TEST_CASE("Backend: SetSR masks reserved bits and recomputes interrupt flags", "
     CHECK(f.rig->State().SR == 0x3F3u);
     CHECK(f.rig->State().intrAllow);
 }
+
+namespace {
+
+// Counts refillPipeline callbacks on a rig's context (known refills store their value instead).
+uint32_t g_refills = 0;
+void (*g_origRefill)(void *, uint32) = nullptr;
+
+void CountingRefill(void *sh2, uint32 address) {
+    ++g_refills;
+    g_origRefill(sh2, address);
+}
+
+struct RefillCounter {
+    ymir::sh2::SH2JitContext &ctx;
+    explicit RefillCounter(ymir::sh2::SH2JitContext &c)
+        : ctx(c) {
+        g_refills = 0;
+        g_origRefill = ctx.refillPipeline;
+        ctx.refillPipeline = CountingRefill;
+    }
+    ~RefillCounter() {
+        ctx.refillPipeline = g_origRefill;
+    }
+};
+
+} // namespace
+
+// A known refill stores its value unless a data access before it may have written the block's
+// code (codeDirty) or the code is not on array pages; then it calls refillPipeline, which reads
+// memory. Either way the fetch buffer ends up as the interpreter's fetch would leave it.
+TEST_CASE("Backend: known refills and codeDirty", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    enum class Pre { None, NoArrays, StoreCached, StoreCacheThrough, StoreMirror, StoreByteInCode, StoreAfterCode,
+                     HandlerWrite, HandlerRead, OnChipRead, Count };
+    for (int p = 0; p < static_cast<int>(Pre::Count); ++p) {
+        const auto pre = static_cast<Pre>(p);
+        INFO("case " << p);
+        Fixture f;
+        // Code kCode..kCode+7: three instructions and the tail word.
+        f.rig->WriteCode(kCode, {0x1111, 0x2222, 0x3333, 0x4444, 0x9999});
+        f.block.guestOpcodes = {0x1111, 0x2222, 0x3333, 0x4444};
+        f.block.guestInstrCount = 3;
+        f.block.hasTailWord = true;
+        f.block.fetchFromArrays = pre != Pre::NoArrays;
+        f.b.KnownRefill(kCode, 0x11112222);
+        switch (pre) {
+        case Pre::StoreCached: f.b.Store(f.b.Const(kCode + 4), 2, f.b.Const(0xAAAA)); break;
+        case Pre::StoreCacheThrough: f.b.Store(f.b.Const(kCode + 0x20000000 + 4), 4, f.b.Const(0xBBBBCCCC)); break;
+        case Pre::StoreMirror: f.b.Store(f.b.Const(kCode + 0x100000 + 4), 2, f.b.Const(0xDDDD)); break;
+        case Pre::StoreByteInCode: f.b.Store(f.b.Const(kCode + 5), 1, f.b.Const(0xEE)); break;
+        case Pre::StoreAfterCode: f.b.Store(f.b.Const(kCode + 8), 2, f.b.Const(0x5555)); break;
+        case Pre::HandlerWrite: f.b.Store(f.b.Const(0x22000040), 4, f.b.Const(0x12345678)); break;
+        case Pre::HandlerRead: f.b.SetReg(1, f.b.Load(f.b.Const(0x22000040), 4, false)); break;
+        case Pre::OnChipRead: f.b.SetReg(1, f.b.Load(f.b.Const(0xFFFFFE11), 1, false)); break;
+        default: break;
+        }
+        f.b.KnownRefill(kCode + 4, 0x33334444);
+        f.b.Exit(kCode + 4, 2);
+        REQUIRE(VerifyBlock(f.block).empty());
+        INFO("backend " << BackendName(kind));
+
+        RefillCounter counter{f.rig->sh2->GetJitContext()};
+        f.Run(kind);
+        const uint32_t expectCalls = [&]() -> uint32_t {
+            switch (pre) {
+            case Pre::None:
+            case Pre::StoreAfterCode:
+            case Pre::OnChipRead: return 0; // nothing can have written the code
+            case Pre::NoArrays: return 2;   // every refill calls back
+            default: return 1;              // the refill after the access calls back
+            }
+        }();
+        CHECK(g_refills == expectCalls);
+        CHECK(f.rig->State().fetchedOpcodes == f.rig->Read32(kCode + 4)); // what the fetch reads now
+    }
+}
+
+TEST_CASE("Backend: delay-slot end refills at a target with bit 1 set", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    for (const bool onArray : {true, false}) {
+        for (const bool pendingAfter : {true, false}) {
+            INFO("on array " << onArray << " pending after " << pendingAfter);
+            Fixture f;
+            const uint32_t target = onArray ? kCode + 0x82 : 0x22000082;
+            f.rig->WriteCode(kCode + 0x80, {0x1234, 0x5678});
+            f.rig->mmio.data[0x80] = 0x9A;
+            f.rig->mmio.data[0x81] = 0xBC;
+            f.rig->mmio.data[0x82] = 0xDE;
+            f.rig->mmio.data[0x83] = 0xF0;
+            auto s = f.rig->BaseState(kCode);
+            s.SR = pendingAfter ? 0x30 : 0xF0; // ILevel 3 or 15
+            s.intc.pendingLevel = 5;
+            f.rig->Load(s);
+            f.b.SetupDelaySlot(f.b.Const(target));
+            f.b.EndDelaySlot();
+            f.b.ExitDynamic(2);
+            const ExitInfo info = f.Run(kind);
+            REQUIRE(info.retired == 2);
+            const auto st = f.rig->State();
+            CHECK(st.PC == target);
+            CHECK_FALSE(st.delaySlot);
+            CHECK(st.delaySlotTarget == target);
+            CHECK(st.fetchedOpcodes == (onArray ? 0x12345678u : 0x9ABCDEF0u));
+            CHECK(*f.rig->sh2->GetJitContext().intrPending == pendingAfter);
+        }
+    }
+}
+
+TEST_CASE("Backend: delay-slot setup clears the pending interrupt", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    Fixture f;
+    auto &ctx = f.rig->sh2->GetJitContext();
+    *ctx.intrPending = true;
+    f.b.SetupDelaySlot(f.b.Const(kCode + 0x40));
+    f.b.Exit(kCode + 2, 1);
+    f.Run(kind);
+    CHECK(*ctx.delaySlot);
+    CHECK(*ctx.delaySlotTarget == kCode + 0x40);
+    CHECK_FALSE(*ctx.intrPending);
+}

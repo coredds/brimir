@@ -41,6 +41,7 @@ add_executable(brimir_tests
     unit/sh2_test_rig.cpp
     unit/test_sh2_jit_iface.cpp
     unit/test_jit_ir.cpp
+    unit/test_jit_ir_opt.cpp
     unit/test_jit_backend.cpp
     unit/test_jit_helpers.cpp
     unit/test_jit_diff.cpp
@@ -52,6 +53,7 @@ add_executable(brimir_tests
     unit/test_jit_lockstep.cpp
     unit/jit_test_backend.cpp
     unit/jit_random_ir.cpp
+    unit/jit_fuzz_programs.cpp
     unit/test_jit_x64.cpp
 )
 
