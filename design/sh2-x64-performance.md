@@ -212,13 +212,13 @@ The budget: for 2x, Panzer Dragoon II Zwei's `Executor::Run` must drop from abou
      - the final exits.
 
      At an exit where PC has bit 1 set, `Executor::Step` compares `*ctx.fetchedOpcodes` with memory, and the interpreter executes the next instruction from the buffer (`SH2::FetchInstruction`). Save states and lockstep see the buffer at every exit. So the buffer must hold the right value at every exit, as it does now.
-   - **The value is known at compile time.** On an array page it is the two opcodes at the aligned address. The front end has them in `guestOpcodes`, which `IsCurrent` verifies before every run. So each refill call can become a constant 32-bit store to `m_fetchedOpcodes`. Alternatively, the store can be sunk into each exit path (boundary stubs, bus-wait exits, final exits) with the value current at that exit; abort exits need the value current at their site too. The saving is a call (~6 ns) replaced by one store, or by a store on the exit paths only.
+   - **The value is known at compile time.** On an array page it is the two opcodes at the aligned address. The front end has them in `guestOpcodes`, which `IsCurrent` verifies before every run. `IsCurrent` checks opcode values, not the memory mapping, so the page must still be an array page at run time, or remapping must invalidate the block. With that guarantee, each refill call can become a constant 32-bit store to `m_fetchedOpcodes`. Alternatively, the store can be sunk into each exit path (boundary stubs, bus-wait exits, final exits) with the value current at that exit; abort exits need the value current at their site too. The saving is a call (~6 ns) replaced by one store, or by a store on the exit paths only.
    - **Where a call or runtime load remains**:
      - the refill at the block's last aligned instruction also reads the next word, which is not in `guestOpcodes`; it would have to be added and checked;
      - stores in the block, or write callbacks, that hit the block's own code: memory then differs from `guestOpcodes`;
      - the refill at a taken BT/BF target reads another block's code;
      - fetches from non-array pages.
-   - **Delay-slot calls**: setup/end (141M calls, 0.3–0.4 ms/frame) can be inlined as state stores, plus the refill at an odd target, which is again a known value on array pages.
+   - **Delay-slot calls**: setup/end (141M calls, 0.3–0.4 ms/frame) can be inlined as state stores. The refill that `EndDelaySlot` makes when the target has bit 1 set (`SH2::JitEndDelaySlot` → `AdvancePC<…, true>` refills from `m_delaySlotTarget`) is not a compile-time constant. For JMP/JSR/RTS/BRAF/BSRF the target is a runtime register value, and for BRA/BSR it lies in another block's code, the same exception as a taken BT/BF. It stays a runtime load: inline for array pages, otherwise the call.
 2. **Per-block dispatch** (25–43%; `Get` alone ≥ 1.75 ms/frame, 11.8 ns per lookup) is paid every 3.3–3.5 retired instructions. Block linking (`design/sh2-jit-m2.md` §4.6) would chain blocks inside generated code, and the design already deferred it to 2C. The `IsCurrent` re-check on every lookup should become write-tracking invalidation (or a per-page generation check), so linked blocks do not need it. The gain is capped by the slice length: about 31 cycles per `Advance` call means at most about 6 (master) or 4 (slave) blocks to chain per call. 59% of block runs end in a taken BT/BF (`ExitIf`) and 26% in a delayed branch, so linking must cover both.
 3. **Generated code** (13–41% of executor time) runs 8.3 IR ops and about 260 bytes of x64 per guest instruction. 45% of the ops are per-instruction timing and boundary bookkeeping (`SetWb`, `WbStall`, `CheckBoundary`, `AddCycles`, `SyncCycles`, `AddAccessCycles`), and a fifth are guest-register loads/stores.
    - Fold the static parts at compile time: write-back state known within a block, constant cycle sums, and boundary checks merged where no callback can change the limit or the interrupt state.
@@ -233,7 +233,12 @@ The budget: for 2x, Panzer Dragoon II Zwei's `Executor::Run` must drop from abou
    - an exact fast-forward of such a loop to the end of the slice, valid only if nothing can change FTCSR inside the slice; that would need proof against the FRT model.
 6. Interrupt entry and pending delay slots go through the interpreter (3.76M steps in Panzer Dragoon II Zwei). That is a small share.
 
-Even with dispatch and all trampolines gone, Panzer Dragoon II Zwei's generated code would still take 1.0–3.3 ms/frame against a budget of about 1.55 ms/frame for the whole executor. At the low end, items 1–2 plus modest code improvements could reach the budget; at the high end, item 3 is essential. A 2C plan that aims for 2x should therefore do items 1 and 2 first (largest and best-measured), then re-profile and size item 3. Item 4 is needed in any case for the stalls.
+Even with dispatch and all trampolines gone, Panzer Dragoon II Zwei's generated code would still take 1.0–3.3 ms/frame against a budget of about 1.55 ms/frame for the whole executor. Items 1–2 also leave some cost behind:
+- the write callbacks' device work (~0.5 ms/frame, paid by the interpreter too);
+- the read callbacks, unless item 5 removes them;
+- at least one dispatch per `Executor::Run` call (about 30,900 calls per frame × ≥ 11.8 ns ≈ ≥ 0.36 ms/frame).
+
+So even at the low end of the generated-code range, the executor would still take about 1.9–2.1 ms/frame against the 1.55 budget, and generated code would also have to roughly halve. At the high end, item 3 is essential. A 2C plan that aims for 2x should therefore do items 1 and 2 first (largest and best-measured), then re-profile and size item 3. Item 4 is needed in any case for the stalls.
 
 ## Reproduce
 
