@@ -4,6 +4,7 @@
 
 #include <ymir/hw/sh2/sh2_decode.hpp>
 
+#include <cassert>
 #include <cstdint>
 #include <optional>
 
@@ -1152,6 +1153,21 @@ void FinishBlock(ymir::sh2::SH2JitContext &ctx, Block &block) {
             inst.imm2 = (static_cast<uint32_t>(block.guestOpcodes[index]) << 16) | block.guestOpcodes[index + 1];
         }
     }
+
+#ifndef NDEBUG
+    // ir.hpp: backends never set codeDirty after a refill callback, so with fetchFromArrays no
+    // unknown Refill (a callback) may come before a known one.
+    if (block.fetchFromArrays) {
+        bool unknownSeen = false;
+        for (const Inst &inst : block.code) {
+            if (inst.op != Op::Refill) {
+                continue;
+            }
+            assert(!(inst.flag && unknownSeen) && "unknown Refill before a known one in a fetchFromArrays block");
+            unknownSeen = unknownSeen || !inst.flag;
+        }
+    }
+#endif
 }
 
 } // namespace
