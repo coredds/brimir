@@ -17,6 +17,7 @@
 #include <ymir/util/unreachable.hpp>
 
 #include <concepts>
+#include <cstddef> // Brimir: offsetof in GetPageTableLayout
 #include <type_traits>
 
 namespace ymir::sys {
@@ -326,6 +327,42 @@ public:
         } else if constexpr (std::is_same_v<T, uint32>) {
             return write ? entry.writeCycles32 : entry.readCycles32;
         }
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // Brimir: read-only page-table layout for the SH-2 JIT's inline fast path (src/core/BRIMIR_FORK.md).
+
+    /// @brief Describes the page table so generated code can read it: the page for `address` is at
+    /// `pages + ((address & addressMask) >> pageShift) * pageStride`; the offsets locate its fields.
+    struct PageTableLayout {
+        const uint8 *pages;          ///< &m_pages[0]
+        uint32 pageStride;           ///< sizeof(MemoryPage)
+        uint32 pageShift;            ///< pageGranularityBits
+        uint32 addressMask;          ///< kAddressMask
+        uint32 arrayOffset;          ///< offsetof(MemoryPage, array) (uint8 *)
+        uint32 arrayWritableOffset;  ///< offsetof(MemoryPage, arrayWritable) (bool)
+        uint32 readCyclesOffset[3];  ///< readCycles8/16/32 (uint64)
+        uint32 writeCyclesOffset[3]; ///< writeCycles8/16/32 (uint64)
+    };
+
+    /// @brief Brimir: returns the page table layout. The table lives inside this object, so the
+    /// pointer stays valid for the bus's lifetime.
+    PageTableLayout GetPageTableLayout() const {
+        static_assert(std::is_standard_layout_v<MemoryPage>); // offsetof is well-defined
+        PageTableLayout layout{};
+        layout.pages = reinterpret_cast<const uint8 *>(m_pages.data());
+        layout.pageStride = static_cast<uint32>(sizeof(MemoryPage));
+        layout.pageShift = pageGranularityBits;
+        layout.addressMask = kAddressMask;
+        layout.arrayOffset = static_cast<uint32>(offsetof(MemoryPage, array));
+        layout.arrayWritableOffset = static_cast<uint32>(offsetof(MemoryPage, arrayWritable));
+        layout.readCyclesOffset[0] = static_cast<uint32>(offsetof(MemoryPage, readCycles8));
+        layout.readCyclesOffset[1] = static_cast<uint32>(offsetof(MemoryPage, readCycles16));
+        layout.readCyclesOffset[2] = static_cast<uint32>(offsetof(MemoryPage, readCycles32));
+        layout.writeCyclesOffset[0] = static_cast<uint32>(offsetof(MemoryPage, writeCycles8));
+        layout.writeCyclesOffset[1] = static_cast<uint32>(offsetof(MemoryPage, writeCycles16));
+        layout.writeCyclesOffset[2] = static_cast<uint32>(offsetof(MemoryPage, writeCycles32));
+        return layout;
     }
 
 private:

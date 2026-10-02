@@ -39,6 +39,8 @@ struct Args {
     int frames = 1800;
     int warmup = 120;
     bool sh2Jit = false;
+    bool backendGiven = false; // --jit-backend given explicitly
+    brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
     bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
     bool warmupGiven = false;
 };
@@ -48,11 +50,11 @@ enum class ParseResult { Ok, Help, Error };
 void PrintUsage(std::FILE* out) {
     std::fputs(
         "Usage: brimir_bench --bios <file> [--game <cue|chd|ccd|mds|iso|m3u>] [--system-dir <dir>]\n"
-        "                    [--state <file>] [--frames N] [--warmup N] [--sh2-jit]\n"
+        "                    [--state <file>] [--frames N] [--warmup N] [--sh2-jit [--jit-backend ir|x64]]\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
-        "                    [--sh2-jit] --dump-at N --dump-state <file>\n"
+        "                    [--sh2-jit [--jit-backend ir|x64]] --dump-at N --dump-state <file>\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
-        "                    --lockstep N\n"
+        "                    --lockstep N [--jit-backend ir|x64]\n"
         "       brimir_bench --help\n"
         "\n"
         "  --bios        Saturn BIOS image (required)\n"
@@ -70,6 +72,9 @@ void PrintUsage(std::FILE* out) {
         "  --warmup      unmeasured frames before measuring (default 120)\n"
         "  --dump-at     run N frames, write a save state to --dump-state, and exit\n"
         "  --sh2-jit     run both SH-2s through the experimental JIT (default: interpreter)\n"
+        "  --jit-backend code backend of the JIT: ir (IR interpreter) or x64 (native, x86-64 builds).\n"
+        "                Default: x64 when built, else ir. Needs --sh2-jit or --lockstep (applies\n"
+        "                to the JIT core).\n"
         "  --lockstep    run N frames on a JIT core and an interpreter core side by side and require\n"
         "                identical state after every frame (exit 3 on divergence). Cannot be combined\n"
         "                with --sh2-jit, --frames, --warmup or --dump-at.\n"
@@ -134,6 +139,16 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
                 std::fprintf(stderr, "Invalid --lockstep value: %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--jit-backend") {
+            args.backendGiven = true;
+            if (!brimir::jit::ParseBackend(value, args.backend)) {
+                std::fprintf(stderr, "Invalid --jit-backend value: %s (expected ir or x64)\n", value);
+                return ParseResult::Error;
+            }
+            if (!brimir::jit::IsBackendAvailable(args.backend)) {
+                std::fprintf(stderr, "--jit-backend %s is not available in this build\n", value);
+                return ParseResult::Error;
+            }
         } else if (opt == "--warmup") {
             args.warmupGiven = true;
             if (!ParseInt(value, args.warmup)) {
@@ -161,6 +176,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     // options would otherwise be silently ignored.
     if (args.lockstep >= 0 && (args.sh2Jit || args.framesGiven || args.warmupGiven)) {
         std::fprintf(stderr, "--lockstep cannot be combined with --sh2-jit, --frames or --warmup\n");
+        return ParseResult::Error;
+    }
+    if (args.backendGiven && !args.sh2Jit && args.lockstep < 0) {
+        std::fprintf(stderr, "--jit-backend needs --sh2-jit or --lockstep\n");
         return ParseResult::Error;
     }
     return ParseResult::Ok;
@@ -284,6 +303,9 @@ namespace {
 // Initializes `core` and loads BIOS, game and save state per `args`. Returns 0 or exit code 2.
 int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesystem::path& saveDir,
                 const std::filesystem::path& systemDir, bool sh2Jit, bool lockstepCore) {
+    if (sh2Jit) {
+        core.SetSH2JitBackend(args.backend);
+    }
     core.SetSH2JitEnabled(sh2Jit);
     if (!core.Initialize()) {
         std::fprintf(stderr, "Failed to initialize the core\n");
@@ -316,6 +338,22 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
         brimir::PrepareLockstepCore(core);
     }
     return 0;
+}
+
+// Prints the JIT backend and both executors' counters (totals since the JIT was enabled).
+void PrintJitStats(const brimir::CoreWrapper& core) {
+    std::printf("SH2 JIT backend: %s\n", brimir::jit::BackendName(core.GetSH2JitBackend()));
+    for (const bool master : {true, false}) {
+        const brimir::jit::Executor* exec = core.GetSH2JitExecutor(master);
+        if (exec != nullptr) {
+            const auto& stats = exec->GetStats();
+            std::printf("jit %-9s: blocksRun %llu  interpreted %llu  nativeBlocksRun %llu  compileFallbacks %llu\n",
+                        master ? "master" : "slave", static_cast<unsigned long long>(stats.blocksRun),
+                        static_cast<unsigned long long>(stats.interpreted),
+                        static_cast<unsigned long long>(stats.nativeBlocksRun),
+                        static_cast<unsigned long long>(stats.compileFallbacks));
+        }
+    }
 }
 
 int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir) {
@@ -358,10 +396,8 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             std::printf("lockstep: %d/%d frames identical\n", done, args.lockstep);
             std::fflush(stdout);
         }
-        const auto& stats = jitCore.GetSH2JitExecutor(true)->GetStats();
-        std::printf("lockstep: OK, %d frames identical (jit master blocksRun %llu, interpreted %llu)\n",
-                    args.lockstep, static_cast<unsigned long long>(stats.blocksRun),
-                    static_cast<unsigned long long>(stats.interpreted));
+        std::printf("lockstep: OK, %d frames identical\n", args.lockstep);
+        PrintJitStats(jitCore);
         return 0;
     }
 
@@ -430,16 +466,7 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     std::printf("SH2 total    : %.3f ms/frame (%.1f%% of Ymir_RunFrame)\n", masterMs + slaveMs,
                 share(masterMs + slaveMs));
     if (args.sh2Jit) {
-        // Totals since initialization (warmup included).
-        for (const bool master : {true, false}) {
-            const brimir::jit::Executor* exec = core.GetSH2JitExecutor(master);
-            if (exec != nullptr) {
-                const auto& stats = exec->GetStats();
-                std::printf("jit %-9s: blocksRun %llu  interpreted %llu\n", master ? "master" : "slave",
-                            static_cast<unsigned long long>(stats.blocksRun),
-                            static_cast<unsigned long long>(stats.interpreted));
-            }
-        }
+        PrintJitStats(core); // totals since initialization (warmup included)
     }
     return 0;
 }

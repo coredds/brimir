@@ -12,6 +12,21 @@
 
 namespace ymir::sh2 {
 
+// Brimir: read-only description of the SH-2 bus page table (sys::Bus::PageTableLayout, same fields
+// with the same meaning), filled in by SH2::InitJitContext. The JIT's inline fast path reads pages
+// through it: the page for bus address a is at pages + ((a & addressMask) >> pageShift) * pageStride.
+// pages == nullptr means "no layout": every access takes its callback.
+struct SH2JitBusLayout {
+    const uint8 *pages = nullptr;
+    uint32 pageStride = 0;
+    uint32 pageShift = 0;
+    uint32 addressMask = 0;
+    uint32 arrayOffset = 0;         // uint8 *: the page's slice of the mapped array, or null
+    uint32 arrayWritableOffset = 0; // bool
+    uint32 readCyclesOffset[3] = {};  // uint64: 8/16/32-bit read cycles
+    uint32 writeCyclesOffset[3] = {}; // uint64: 8/16/32-bit write cycles
+};
+
 struct SH2JitContext {
     // Live CPU state of the owning SH2
     uint32 *R = nullptr; // R0..R15
@@ -57,6 +72,9 @@ struct SH2JitContext {
     void (*setSR)(void *sh2, uint32 value, bool delaySlot) = nullptr;
     // SH2::AccessCyclesRMWByte with cache emulation off (TAS.B read-modify-write cycles).
     uint64 (*accessCyclesRMWByte)(void *sh2, uint32 address) = nullptr;
+
+    // Brimir: the bus page table, for inline RAM/ROM accesses and access cycles.
+    SH2JitBusLayout bus;
 };
 
 class ISH2Executor {

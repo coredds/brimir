@@ -7,6 +7,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "jit_opcode_specs.hpp"
+#include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/executor.hpp>
@@ -73,8 +74,12 @@ std::string Hex(const std::vector<uint16_t> &words) {
 struct Pair {
     std::unique_ptr<Rig> ref = std::make_unique<Rig>();
     std::unique_ptr<Rig> jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     bool lastStepMatched = true; // whether the most recent Step() found identical cycles and state
+
+    Pair() = default;
+    explicit Pair(brimir::jit::BackendKind kind)
+        : exec{kind} {}
 
     void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
         ref->WriteCode(address, words);
@@ -546,7 +551,7 @@ TEST_CASE("A stale fetch buffer at PC & 2 runs on the interpreter", "[jit][diff]
 TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[jit][diff]") {
     auto ref = std::make_unique<Rig>();
     auto jit = std::make_unique<Rig>();
-    brimir::jit::Executor exec;
+    brimir::jit::Executor exec{sh2test::TestBackend()};
     // loop: add #1,R4 ; add #1,R4 ; mov.b @R1,R2 (FRC byte) ; add R2,R3 ; bra loop ; nop
     // The FRC read is mid-block, after two cycle-consuming instructions, so it only sees the
     // interpreter's count if the block syncs the cycle counter before the access.
@@ -577,7 +582,8 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
 // written); GBR one of R8-R11 (LDC GBR,Rm and LDC.L @Rm+,GBR only load one of them); R12 the
 // branch register; PR a return target (LDS.L @Rm+,PR only reloads PR). R12 is per program either
 // an absolute program address (JMP/JSR, and LDS PR,R12) or a fixed displacement (BRAF/BSRF:
-// target = PC + 4 + R12).
+// target = PC + 4 + R12). The JIT side is always the IR executor; when the x64 backend is
+// available, a third rig runs the program on an x64 executor and is compared against the IR rig.
 TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]") {
     constexpr int kPrograms = 300;
     constexpr int kLength = 24;
@@ -586,7 +592,9 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     // restricted system-register loads included): steps=15284 blocksRun=15142 interpreted=142
     // compiles=1048, i.e. 99% of steps in blocks. kMinBlocksRun is ~65% of the measured count;
     // kMinBlockPercent is 90, leaving room for generator changes but failing if a regression sends
-    // a meaningful share of steps back to the interpreter.
+    // a meaningful share of steps back to the interpreter. The x64 rig (milestone 2B) measured
+    // blocksRun=15142 nativeBlocksRun=15142 compileFallbacks=0 interpreted=142: exactly the IR rig's
+    // counts, which the checks below require.
     constexpr uint64_t kMinBlocksRun = 9800;
     constexpr uint64_t kMinBlockPercent = 90;
     bool diverged = false;
@@ -610,12 +618,31 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         }
     }
 
+    // Third rig: when the x64 backend is available, an x64 executor runs the same program and must
+    // match the IR executor (Pair::exec, always BackendKind::Ir here) after every step: same ExitInfo,
+    // same state, memory, bus-wait query sequence and peripherals.
+    const bool withX64 = brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64);
+    uint64_t x64BlocksRun = 0;
+    uint64_t x64NativeBlocksRun = 0;
+    uint64_t x64CompileFallbacks = 0;
+    uint64_t x64Interpreted = 0;
+
     enum class Br { None, Bt, Bf, Bts, Bfs, Bra, Bsr, Braf, Bsrf };
     for (int prog = 0; prog < kPrograms; ++prog) {
         const uint32_t seed = 0xF0220000u + static_cast<uint32_t>(prog);
         std::mt19937 rng(seed);
-        Pair p;
-        p.SetBusWaitEvery((rng() & 1u) ? 3u : 0u);
+        Pair p{brimir::jit::BackendKind::Ir};
+        std::unique_ptr<Rig> x64Rig;
+        std::unique_ptr<brimir::jit::Executor> x64Exec;
+        if (withX64) {
+            x64Rig = std::make_unique<Rig>();
+            x64Exec = std::make_unique<brimir::jit::Executor>(brimir::jit::BackendKind::X64);
+        }
+        const uint32_t busWaitEvery = (rng() & 1u) ? 3u : 0u;
+        p.SetBusWaitEvery(busWaitEvery);
+        if (x64Rig) {
+            x64Rig->mmio.busWaitEvery = busWaitEvery;
+        }
         const bool absR12 = (rng() & 1u) != 0;                         // JMP/JSR, else BRAF/BSRF
         const int relDisp = static_cast<int>(rng() % 13) - 6;          // BRAF/BSRF: R12 = 2 * relDisp
         const auto isLdsPr = [](const jitspec::OpSpec *s) { return std::string_view(s->name) == "LDS_PR_R"; };
@@ -717,6 +744,9 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
             program.push_back(static_cast<uint16_t>(kSleep));
         }
         p.WriteCode(kCode, program);
+        if (x64Rig) {
+            x64Rig->WriteCode(kCode, program);
+        }
 
         auto state = p.ref->BaseState(kCode);
         for (int r : {0, 1, 2, 3, 4, 5, 6, 7, 13, 14, 15}) {
@@ -735,16 +765,38 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         state.MACH = rng();
         state.MACL = rng();
         p.Load(state);
+        if (x64Rig) {
+            x64Rig->Load(state);
+        }
 
         INFO("seed 0x" << std::hex << seed << " program " << Hex(program));
         bool failed = false;
         for (int step = 0; step < kSteps; ++step) {
             INFO("step " << std::dec << step);
-            p.Step();
+            const brimir::jit::ExitInfo irInfo = p.Step();
             ++totalSteps;
             if (!p.lastStepMatched) {
                 failed = true; // Pair::Step already reported the difference
                 break;
+            }
+            if (x64Exec) {
+                const brimir::jit::ExitInfo x64Info = x64Exec->Step(x64Rig->sh2->GetJitContext());
+                INFO("x64 vs IR");
+                CHECK(x64Info.cycles == irInfo.cycles);
+                CHECK(x64Info.retired == irInfo.retired);
+                CHECK(x64Info.busWait == irInfo.busWait);
+                CHECK(x64Info.aborted == irInfo.aborted);
+                CHECK(x64Info.boundary == irInfo.boundary);
+                const std::string diff = sh2test::DiffRigs(*p.jit, *x64Rig, true);
+                INFO(diff);
+                CHECK(diff.empty());
+                const bool sameExit = x64Info.cycles == irInfo.cycles && x64Info.retired == irInfo.retired &&
+                                      x64Info.busWait == irInfo.busWait && x64Info.aborted == irInfo.aborted &&
+                                      x64Info.boundary == irInfo.boundary;
+                if (!sameExit || !diff.empty()) {
+                    failed = true;
+                    break;
+                }
             }
             if (p.ref->State().sleep && p.jit->State().sleep) {
                 break; // both asleep: remaining steps would only re-run SLEEP
@@ -753,6 +805,12 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
         totalBlocksRun += p.exec.GetStats().blocksRun;
         totalInterpreted += p.exec.GetStats().interpreted;
         totalCompiles += p.exec.Cache().Compiles();
+        if (x64Exec) {
+            x64BlocksRun += x64Exec->GetStats().blocksRun;
+            x64NativeBlocksRun += x64Exec->GetStats().nativeBlocksRun;
+            x64CompileFallbacks += x64Exec->GetStats().compileFallbacks;
+            x64Interpreted += x64Exec->GetStats().interpreted;
+        }
         if (failed) {
             diverged = true;
             break; // stop at the first failing program
@@ -763,10 +821,22 @@ TEST_CASE("JIT matches the interpreter on random programs", "[jit][diff][fuzz]")
     // Compile attempts include empty fallback blocks, so totalCompiles is informational only.
     WARN("fuzz coverage: steps=" << totalSteps << " blocksRun=" << totalBlocksRun
                                  << " interpreted=" << totalInterpreted << " compiles=" << totalCompiles);
+    if (withX64) {
+        WARN("fuzz x64 coverage: blocksRun=" << x64BlocksRun << " nativeBlocksRun=" << x64NativeBlocksRun
+                                             << " compileFallbacks=" << x64CompileFallbacks
+                                             << " interpreted=" << x64Interpreted);
+    }
     if (!diverged) {
         // A divergence already failed the test; don't bury it under threshold failures.
         CHECK(totalBlocksRun >= kMinBlocksRun);
         CHECK(totalBlocksRun * 100 >= totalSteps * kMinBlockPercent);
+        if (withX64) {
+            // The x64 rig ran the same steps as the IR rig, every block natively.
+            CHECK(x64CompileFallbacks == 0);
+            CHECK(x64BlocksRun == totalBlocksRun);
+            CHECK(x64NativeBlocksRun == x64BlocksRun);
+            CHECK(x64Interpreted == totalInterpreted);
+        }
     }
 }
 

@@ -2,8 +2,10 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
+#include <brimir/jit/bus_fast_path.hpp>
 #include <brimir/jit/sh2_helpers.hpp>
 
 #include <cstdint>
@@ -155,4 +157,73 @@ TEST_CASE("MacLStep matches the interpreter's MAC.L", "[jit][helpers]") {
     // the saturation direction comes from the operand signs, not from the sum.
     CHECK(check(true, 0x0000900000000000ull, 0xFFFFFFFFu, 0u) == 0xFFFF800000000000ull);
     CHECK(check(true, 0xFFFF000000000000ull, 0u, 0u) == 0x00007FFFFFFFFFFFull);
+}
+
+TEST_CASE("Fast path matches the SH-2 callbacks", "[jit][helpers]") {
+    auto rig = std::make_unique<Rig>();
+    auto rom = std::make_unique<sh2test::FastRom>();
+    sh2test::MapFastPathTestPages(*rig, *rom);
+    const sh2test::FastRom romBefore = *rom;
+    for (uint32_t i = 0; i < 0x100; ++i) {
+        rig->Write32(sh2test::kFastRamOffset - 0x80 + i * 4, 0x01020304u * (i + 1) ^ 0xA5C3E1F7u);
+    }
+    rig->mmio.busWaitEvery = 1; // every MMIO bus-wait query answers "wait"
+    auto &ctx = rig->sh2->GetJitContext();
+    const auto &bus = ctx.bus;
+
+    for (const uint32_t address : sh2test::FastPathTestAddresses()) {
+        const uint32_t partition = address >> 29;
+        const uint32_t offset = address & 0x1FFFFFFCu;
+        const bool cacheThroughPartition = partition == 0 || partition == 1 || partition == 5;
+        const bool ramPage = offset == (sh2test::kFastRamOffset & ~3u);
+        const bool romPage = offset == (sh2test::kFastRomOffset & ~3u);
+        const bool arrayPage = ramPage || romPage;
+
+        for (const uint32_t size : {1u, 2u, 4u}) {
+            INFO("address 0x" << std::hex << address << " size " << std::dec << size);
+            for (const bool write : {false, true}) {
+                INFO("write " << write);
+                CHECK(FastAccessCycles(bus, address, size, write) == ctx.accessCycles(ctx.sh2, address, size, write));
+
+                bool needsCallback = false;
+                const bool wait = FastBusWait(bus, address, needsCallback);
+                CHECK(needsCallback == !arrayPage);
+                if (!needsCallback) {
+                    CHECK(wait == ctx.busWait(ctx.sh2, address, size, write));
+                }
+            }
+
+            bool writable = !romPage;
+            const uint8_t *p = FastArrayPointer(bus, address, size, writable);
+            CHECK((p != nullptr) == (cacheThroughPartition && arrayPage));
+            if (p != nullptr) {
+                CHECK(writable == ramPage);
+                uint32_t value = 0;
+                for (uint32_t i = 0; i < size; ++i) {
+                    value = (value << 8) | p[i];
+                }
+                CHECK(value == ctx.read(ctx.sh2, address, size, false));
+                CHECK(value == ctx.read(ctx.sh2, address, size, true));
+            }
+        }
+
+        uint16_t peeked = 0;
+        const bool fast = FastPeek16(bus, address, peeked);
+        CHECK(fast == (cacheThroughPartition && arrayPage));
+        if (fast) {
+            CHECK(peeked == ctx.peekInstruction(ctx.sh2, address));
+        }
+    }
+
+    // Writes to the read-only page are dropped, as Bus::Write does.
+    for (const uint32_t size : {1u, 2u, 4u}) {
+        ctx.write(ctx.sh2, 0x20000000 | sh2test::kFastRomOffset, size, 0xFFFFFFFFu);
+    }
+    CHECK(*rom == romBefore);
+    // The ROM page really replaced the RAM mirror there.
+    bool writable = true;
+    CHECK(FastArrayPointer(bus, sh2test::kFastRomOffset, 1, writable) == &(*rom)[sh2test::kFastRomOffset & 0xFFFF]);
+    CHECK_FALSE(writable);
+    // No handler page was touched: the fast path is only compared where it needs no callback.
+    CHECK(rig->mmio.log.empty());
 }

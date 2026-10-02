@@ -4,6 +4,7 @@
 #include "catch_amalgamated.hpp"
 #include "sh2_test_rig.hpp"
 
+#include <brimir/jit/bus_fast_path.hpp>
 #include <ymir/hw/sh2/sh2_jit_iface.hpp>
 
 #include <memory>
@@ -167,4 +168,25 @@ TEST_CASE("JIT context callbacks mirror interpreter memory semantics", "[jit][sh
     REQUIRE(ctx.interpretOne(ctx.sh2) == 1);
     REQUIRE(rig->State().R[0] == 6u);
     REQUIRE(*ctx.PC == kCode + 0x202);
+}
+
+TEST_CASE("JIT context describes the bus page table", "[jit][sh2]") {
+    auto rig = std::make_unique<Rig>();
+    auto &ctx = rig->sh2->GetJitContext();
+    REQUIRE(ctx.bus.pages != nullptr);
+    CHECK(ctx.bus.pageShift == 16);
+    CHECK(ctx.bus.addressMask == 0x7FFFFFFu);
+    CHECK(ctx.bus.pageStride > 0);
+
+    rig->Write32(0x06001234, 0x89ABCDEF);
+    bool writable = false;
+    const uint8_t *p = brimir::jit::FastArrayPointer(ctx.bus, 0x06001234, 4, writable);
+    REQUIRE(p != nullptr);
+    CHECK(writable);
+    const uint32_t value = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+                           (static_cast<uint32_t>(p[2]) << 8) | p[3];
+    CHECK(value == rig->Read32(0x06001234));
+
+    // A handler page (MMIO) has no array: the access must take the callback.
+    CHECK(brimir::jit::FastArrayPointer(ctx.bus, 0x22000000, 4, writable) == nullptr);
 }

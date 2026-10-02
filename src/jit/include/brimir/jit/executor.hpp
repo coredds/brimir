@@ -3,6 +3,7 @@
 // SH-2 JIT executor: dispatches compiled blocks and falls back to the interpreter
 // (see design/sh2-jit.md section 4.3).
 
+#include <brimir/jit/backend.hpp>
 #include <brimir/jit/block_cache.hpp>
 #include <brimir/jit/frontend.hpp>
 #include <brimir/jit/interp_backend.hpp>
@@ -11,15 +12,28 @@
 #include <ymir/hw/sh2/sh2_jit_iface.hpp>
 
 #include <cstdint>
+#include <memory>
 
 namespace brimir::jit {
 
 class Executor final : public ymir::sh2::ISH2Executor {
 public:
     struct Stats {
-        uint64_t blocksRun = 0;
-        uint64_t interpreted = 0;
+        uint64_t blocksRun = 0;        // compiled blocks run (native or RunBlock)
+        uint64_t interpreted = 0;      // single instructions run by the interpreter
+        uint64_t nativeBlocksRun = 0;  // compiled blocks run as native code
+        uint64_t compileFallbacks = 0; // blocks the native backend could not compile (run with RunBlock)
     };
+
+    // Runs compiled blocks on `kind`; an unavailable kind falls back to BackendKind::Ir.
+    explicit Executor(BackendKind kind = DefaultBackend());
+
+    Executor(const Executor &) = delete;
+    Executor &operator=(const Executor &) = delete;
+
+    BackendKind Backend() const {
+        return m_kind;
+    }
 
     uint64 Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 target) override;
 
@@ -41,9 +55,11 @@ public:
     }
 
 private:
+    BackendKind m_kind;
+    std::unique_ptr<INativeBackend> m_native; // nullptr for BackendKind::Ir; declared before m_cache
     BlockCache m_cache;
     Stats m_stats;
-    bool m_inBlock = false;      // RunBlock is executing a block owned by m_cache
+    bool m_inBlock = false;      // a block owned by m_cache is executing (native or RunBlock)
     bool m_flushPending = false; // Flush() was requested in a block; also the block's abort flag
 };
 

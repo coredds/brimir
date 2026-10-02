@@ -1,6 +1,6 @@
 # SH-2 JIT Milestone 2 — Full Coverage and x64 Backend — Design
 
-**Status**: Approved design, not started
+**Status**: Part A done; Part B done (exact, 2x target missed; see [sh2-x64-performance.md](sh2-x64-performance.md)); 2C next
 **Date**: 2026-10-01
 **Builds on**: [sh2-jit.md](sh2-jit.md) (milestone 1: IR, block cache, executor, instruction-exact boundaries, lockstep), [sh2-validation.md](sh2-validation.md), [sh2-jit-handler-table.md](sh2-jit-handler-table.md)
 
@@ -109,6 +109,17 @@ Without linking, every block returns to the executor's dispatcher. If profiling 
 
 - If asmjit fails to emit a block (out of code memory, unsupported pattern), that block runs on the IR backend instead. The PC is marked so it is not retried, and the failure is logged once.
 - The IR backend is always compiled in and serves as the fallback.
+
+### 4.9 Plan 2B refinements
+
+Plan `design/plans/2026-10-01-sh2-jit-m2b-x64-backend.md` refines this section as follows. Where they differ, these take precedence over 4.2–4.8.
+
+1. **Register allocation (4.3):** asmjit's `x86::Compiler` (virtual registers, spilling and the call ABI) replaces the hand-written linear-scan allocator. Blocks are short (at most 32 guest instructions) and compiled once, so compile time does not matter, and this removes the riskiest hand-written component. *Note (2B measurements):* this assumption did not hold. Compiling takes about 100–130 µs per block, and games that overflow the block cache or keep reaching new code stall for up to ~260 ms while recompiling (see [sh2-x64-performance.md](sh2-x64-performance.md)); 2C addresses this.
+2. **Interface (4.2, 4.8):** `INativeBackend` (`brimir/jit/backend.hpp`) covers native code only. The "IR backend" is the absence of a native backend: the executor runs every block with `RunBlock`, which stays the fallback and the reference. `BackendKind` (`ir`, `x64`) selects it; `DefaultBackend()` is `x64` in x86-64 builds (CMake option `BRIMIR_JIT_X64`), else `ir`.
+3. **Guest state addressing (4.3):** generated code loads `ctx->R` once and addresses every other state field as `[R + offset]`. Each offset is computed at compile time from the `SH2JitContext` pointers. If an offset does not fit in 32 bits, compilation fails and the block runs on `RunBlock`.
+4. **Compile failures (4.8)** are counted in `Executor::Stats::compileFallbacks` (printed by `brimir_bench`) instead of logged.
+5. **Exceptions (4.5):** trampolines out of generated code are `noexcept`; they catch every exception, store it and stop the block. The backend rethrows it after the generated code returns, so callers see the same exception as with `RunBlock`.
+6. **Block linking (4.6)** is not in plan 2B. If plan 2B misses the speed target, the profile goes into a follow-up plan (2C) that adds linking.
 
 ## 5. Validation
 

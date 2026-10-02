@@ -153,7 +153,8 @@ void ResetInternalBackupRAM(ymir::Saturn &saturn) {
 
 namespace brimir {
 
-CoreWrapper::CoreWrapper() {
+CoreWrapper::CoreWrapper()
+    : m_sh2JitBackend(jit::DefaultBackend()) {
     // Reserve framebuffer space (max Saturn resolution)
     m_framebuffer.resize(704 * 512);
 }
@@ -1632,16 +1633,36 @@ void CoreWrapper::SetSH2JitEnabled(bool enable) {
     }
     if (enable) {
         if (!m_jitMaster) {
-            m_jitMaster = std::make_unique<jit::Executor>();
+            m_jitMaster = std::make_unique<jit::Executor>(m_sh2JitBackend);
         }
         if (!m_jitSlave) {
-            m_jitSlave = std::make_unique<jit::Executor>();
+            m_jitSlave = std::make_unique<jit::Executor>(m_sh2JitBackend);
         }
         m_saturn->masterSH2.SetJitExecutor(m_jitMaster.get());
         m_saturn->slaveSH2.SetJitExecutor(m_jitSlave.get());
     } else {
         m_saturn->masterSH2.SetJitExecutor(nullptr);
         m_saturn->slaveSH2.SetJitExecutor(nullptr);
+    }
+}
+
+void CoreWrapper::SetSH2JitBackend(jit::BackendKind kind) {
+    if (!jit::IsBackendAvailable(kind)) {
+        kind = jit::BackendKind::Ir;
+    }
+    if (kind == m_sh2JitBackend) {
+        return;
+    }
+    m_sh2JitBackend = kind;
+    // Detach before dropping the executors: the CPUs must never point at a freed executor.
+    if (m_saturn) {
+        m_saturn->masterSH2.SetJitExecutor(nullptr);
+        m_saturn->slaveSH2.SetJitExecutor(nullptr);
+    }
+    m_jitMaster.reset();
+    m_jitSlave.reset();
+    if (m_sh2JitEnabled) {
+        SetSH2JitEnabled(true); // recreates both with the new backend (or waits for Initialize)
     }
 }
 

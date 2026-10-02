@@ -26,6 +26,7 @@ option(Brimir_AVX2 "Enable AVX2 instructions" OFF)
 option(Brimir_EXTRA_INLINING "Enable more aggressive inlining (slower build)" OFF)
 option(Brimir_DISABLE_FORCE_INLINE "Disable force-inline macros" OFF)
 option(Brimir_ENABLE_IPO "Enable IPO/LTO for brimir-core" ${BRIMIR_LTO})
+option(BRIMIR_JIT_X64 "Build the SH-2 JIT x64 native backend (asmjit; x86-64 targets only)" ON)
 
 # Use fmt as header-only to avoid DLL dependency
 add_compile_definitions(FMT_HEADER_ONLY=1)
@@ -116,6 +117,24 @@ if(TARGET lz4_static)
 endif()
 if(TARGET chdr-static)
     target_compile_options(chdr-static PRIVATE ${EXTERNAL_WARNINGS})
+endif()
+
+# SH-2 JIT x64 native backend (design/sh2-jit-m2.md): asmjit, only when targeting x86-64.
+set(BRIMIR_JIT_X64_EFFECTIVE OFF)
+if(BRIMIR_JIT_X64
+   AND CMAKE_SIZEOF_VOID_P EQUAL 8
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|x64)$"
+   AND NOT "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+    set(BRIMIR_JIT_X64_EFFECTIVE ON)
+endif()
+if(BRIMIR_JIT_X64_EFFECTIVE)
+    set(ASMJIT_STATIC ON CACHE BOOL "" FORCE)
+    set(ASMJIT_NO_AARCH64 ON CACHE BOOL "" FORCE)
+    set(ASMJIT_NO_FOREIGN ON CACHE BOOL "" FORCE)
+    set(ASMJIT_NO_INSTALL ON CACHE BOOL "" FORCE)
+    set(ASMJIT_NO_UJIT ON CACHE BOOL "" FORCE)
+    add_subdirectory(vendor/asmjit EXCLUDE_FROM_ALL)
+    target_compile_options(asmjit PRIVATE ${EXTERNAL_WARNINGS})
 endif()
 
 # SH-2 JIT library (design/sh2-jit.md)
@@ -227,4 +246,5 @@ message(STATUS "  Core IPO: ${Brimir_ENABLE_IPO}")
 message(STATUS "  AVX2: ${Brimir_AVX2}")
 message(STATUS "  Extra inlining: ${Brimir_EXTRA_INLINING}")
 message(STATUS "  Disable force inline: ${Brimir_DISABLE_FORCE_INLINE}")
+message(STATUS "  SH-2 JIT x64 backend: ${BRIMIR_JIT_X64_EFFECTIVE}")
 message(STATUS "")

@@ -3,6 +3,7 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_test_backend.hpp"
 
 #include <brimir/core_wrapper.hpp>
 #include <brimir/jit/executor.hpp>
@@ -20,6 +21,9 @@ namespace {
 
 std::unique_ptr<CoreWrapper> MakeLockstepCore(bool jit) {
     auto core = std::make_unique<CoreWrapper>();
+    if (jit) {
+        core->SetSH2JitBackend(sh2test::TestBackend());
+    }
     core->SetSH2JitEnabled(jit);
     REQUIRE(core->Initialize());
     brimir::PrepareLockstepCore(*core);

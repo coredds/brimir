@@ -60,8 +60,21 @@ error.
 `--sh2-jit` runs both SH-2s through the experimental JIT (`design/sh2-jit.md`)
 instead of the interpreter, the same as the `brimir_sh2_jit` core option. Run
 the same content with and without it to compare. The report then also prints
-per-CPU executor totals since startup (warmup included): `blocksRun` (compiled
-blocks executed) and `interpreted` (instructions handed to the interpreter).
+the JIT backend (`SH2 JIT backend: ir|x64`) and per-CPU executor totals since
+startup (warmup included): `blocksRun` (compiled blocks executed),
+`interpreted` (instructions handed to the interpreter), `nativeBlocksRun`
+(compiled blocks executed as native code) and `compileFallbacks` (blocks the
+native backend could not compile; they run on the IR interpreter).
+
+`--jit-backend ir|x64` selects the JIT's code backend (`design/sh2-jit-m2.md`):
+`ir` runs compiled blocks on the IR interpreter, `x64` compiles them to native
+x86-64 code (only in x86-64 builds; elsewhere the option is rejected). The
+default is `x64` when it is built, else `ir`. It needs `--sh2-jit` or
+`--lockstep` (where it applies to the JIT core); otherwise it is a usage error.
+To compare the backends with the interpreter, run the same content three
+times: without `--sh2-jit`, with `--sh2-jit --jit-backend ir` and with
+`--sh2-jit --jit-backend x64` (`design/sh2-x64-performance.md` uses the
+scenes, warmup and frame counts of `design/sh2-baseline.md`).
 
 Output:
 
@@ -84,8 +97,13 @@ threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
 ### Lockstep validation
 
 ```powershell
-build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000
+build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000 [--jit-backend ir|x64]
 ```
+
+`--jit-backend` selects the JIT core's backend (default `x64` when built). The
+lockstep summary prints the executor counters of both CPUs; with `x64`,
+`nativeBlocksRun` equal to `blocksRun` and `compileFallbacks 0` mean that every
+compiled block ran as native code.
 
 `--lockstep N` loads the same content (and optional `--state`) into two cores,
 one running both SH-2s through the JIT and one through the interpreter, runs
@@ -122,7 +140,10 @@ Progress is printed every 600 frames:
 ```
 lockstep: 600/36000 frames identical
 ...
-lockstep: OK, 36000 frames identical (jit master blocksRun ..., interpreted ...)
+lockstep: OK, 36000 frames identical
+SH2 JIT backend: x64
+jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...
+jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...
 ```
 
 On the first difference it prints the frame number (0-based) and the first
