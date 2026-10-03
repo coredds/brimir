@@ -266,7 +266,14 @@ RETRO_API void retro_deinit(void) {
 
     if (g_core) {
         std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-        g_core->Shutdown();
+        // Same rule as retro_unload_game: never let an exception reach the frontend.
+        try {
+            g_core->Shutdown();
+        } catch (const std::exception& e) {
+            brimir_log(RETRO_LOG_ERROR, "Exception while shutting down: %s", e.what());
+        } catch (...) {
+            brimir_log(RETRO_LOG_ERROR, "Unknown exception while shutting down");
+        }
         g_core.reset();
     }
 }
@@ -674,7 +681,15 @@ RETRO_API void retro_unload_game(void) {
 
     if (g_core) {
         std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-        g_core->UnloadGame();
+        // A C++ exception must never cross the libretro C ABI: the frontend cannot catch it and
+        // the process dies (issue #7). Log it instead so the cause is visible in the frontend log.
+        try {
+            g_core->UnloadGame();
+        } catch (const std::exception& e) {
+            brimir_log(RETRO_LOG_ERROR, "Exception while unloading game: %s", e.what());
+        } catch (...) {
+            brimir_log(RETRO_LOG_ERROR, "Unknown exception while unloading game");
+        }
     }
 
 }

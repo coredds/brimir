@@ -14,6 +14,8 @@ add_executable(brimir_tests
     # Basic smoke tests
     unit/test_basic.cpp
     unit/test_bitmask_enum.cpp
+    # devlog must never throw (issue #7: crash on Close Content in GUI frontends)
+    unit/test_dev_log.cpp
     unit/test_cdblock_hle.cpp
     unit/test_game_db.cpp
     # Ymir hardware-layer backport regressions (SMPC, VDP1, VDP2)
