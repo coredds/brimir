@@ -191,14 +191,10 @@ jobs:
 
             ### ${{ github.ref_name }}
 
+            Hotfix release on top of v0.5.4. It contains only the fix below; save states and saves are unaffected.
+
             **Fixed**
-            - SMPC now ignores SSHON while the slave SH-2 is running. Fixes Guardian Heroes level transitions; Gekitotsu Koushien, Madden NFL 97 (Europe), Ten Pin Alley, UEFA Euro 96 - England, and No-appointment Gals Olympos now go in-game.
-            - VDP1 no longer clears COPR at frame start, fixing lockups in Alone in the Dark - One-Eyed Jack's Revenge.
-            - Threaded VDP1 rendering no longer loses CPU framebuffer writes, fixing the Waialae no Kiseki - Extra 36 Holes title screen.
-            - VDP2 mid-frame back screen/line color and display-disable changes now take effect; EXTEN reads latch HCNT.
-            - Rotation backgrounds no longer overrun line buffers when the resolution changes mid-frame.
-            - VCNT is restored correctly from save states (improves rewind and run-ahead).
-            - SH-2 cache workarounds for Hissatsu! (crash at startup) and No-appointment Gals Olympos (crash during animations).
+            - RetroArch on Windows no longer exits on Quick Menu > Close Content (unhandled C++ exception `0xe06d7363` after `[Brimir] Unloading game`), #7. The emulator's internal debug log threw when it could not write to stdout, which RetroArch on Windows does not provide. Logging no longer throws, and unloading/shutdown report any exception in the RetroArch log instead of crashing.
 
             **Known Limitations**
             - Interlaced / high-res titles (e.g., *Virtua Fighter 2*) may still show audio dropouts on CPU-bound setups when deinterlacing is enabled. Use Deinterlacing Mode = `None` for the best performance in these titles.

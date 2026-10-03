@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `.github/workflows/ci.yml`: builds the core and runs the tests on Windows x64, Linux x64 and macOS ARM64 for pushes to `master` and pull requests. The suite is registered with CTest (`add_test`) so `ctest` now runs it.
 - Test suite cleanup: re-enabled and fixed `test_memory_components`, `test_cd_operations`, `test_system_integration`, `test_bios` and `test_bios_integration` (BIOS tests skip when no image is present); deleted 20 files made of placeholder `REQUIRE(true)` assertions or targeting removed APIs. Added `LoadGame` error-reporting regressions. 106 test cases pass.
 
+## [0.5.5] - 2026-10-03
+
+### Fixed
+- **Crash on Close Content (Windows)** - RetroArch could exit while unloading a game, with an unhandled C++ exception (`0xe06d7363`) right after `[Brimir] Unloading game` ([#7](https://github.com/coredds/brimir/issues/7)). The emulator's internal dev log writes to stdout, which a GUI frontend such as RetroArch on Windows does not provide; once 4 KB of log output had been buffered, the next write failed and the logger threw. During unload nothing caught the exception and the frontend crashed; during gameplay it was swallowed and aborted the current frame. Dev logging no longer throws, and `retro_unload_game` / `retro_deinit` catch any exception and report it in the frontend log instead of letting it reach RetroArch. Saves were never affected: the `.srm` is written before unload.
+
+### Technical
+- Added `test_dev_log.cpp`: dev logging must not throw when stdout cannot be written (observed failing before the fix). All 84 active tests and 647,798 assertions pass on Windows x64 (MSVC 2022).
+- Hotfix release built from v0.5.4; contains only this fix. Save-state layout is unchanged.
+
 ## [0.5.4] - 2026-09-24
 
 ### Fixed

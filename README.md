@@ -8,15 +8,19 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-09-24 and Brimir-specific optimizations.
 
-## What's New in v0.5.4
+## What's New in v0.5.5
+
+- **Crash fix** - RetroArch on Windows no longer exits on Quick Menu > Close Content ([#7](https://github.com/coredds/brimir/issues/7)). Hotfix on top of v0.5.4 with no other changes; save states and saves are unaffected.
+
+## Previous Highlights
+
+### v0.5.4
 
 - **Compatibility fixes** - SMPC now ignores SSHON while the slave SH-2 is running, fixing Guardian Heroes level transitions and letting Gekitotsu Koushien, Madden NFL 97 (Europe), Ten Pin Alley, UEFA Euro 96 - England, and No-appointment Gals Olympos go in-game. VDP1 no longer clears COPR at frame start (fixes Alone in the Dark - One-Eyed Jack's Revenge lockups). SH-2 cache workarounds added for Hissatsu! and No-appointment Gals Olympos.
 - **Threaded VDP1 rendering** - CPU framebuffer writes are no longer lost when the render thread publishes its framebuffer, fixing the Waialae no Kiseki - Extra 36 Holes title screen with the default threaded VDP1 option.
 - **VDP2 correctness** - mid-frame back screen/line color and display-disable changes take effect, EXTEN reads latch HCNT, and rotation backgrounds no longer overrun line buffers when the resolution changes mid-frame.
 - **Save states** - VCNT is now restored correctly, which matters for rewind and run-ahead. Save-state layout is unchanged.
 - **Regression coverage** - 83 active tests with 647,796 assertions pass on Windows x64 and Linux x64.
-
-## Previous Highlights
 
 ### v0.5.3
 
