@@ -178,11 +178,19 @@ namespace detail {
     constexpr void log(fmt::format_string<TArgs...> fmt, TArgs &&...args) {
         static_assert(level < level::off);
         if constexpr (enabled<level, TGroup>) {
-            fmt::memory_buffer buf{};
-            auto out = std::back_inserter(buf);
-            fmt::format_to(out, "{:5s} | {:16s} | ", level::name<level>, TGroup::name);
-            fmt::format_to(out, fmt, static_cast<TArgs &&>(args)...);
-            fmt::println("{}", fmt::to_string(buf));
+            // Logging must never throw. fmt::println throws std::system_error when stdout can't be
+            // written, which is the normal state for a libretro core inside a GUI frontend (e.g.
+            // RetroArch on Windows has no console). An exception here would unwind out of
+            // arbitrary emulator code and out of the libretro API into the frontend.
+            try {
+                fmt::memory_buffer buf{};
+                auto out = std::back_inserter(buf);
+                fmt::format_to(out, "{:5s} | {:16s} | ", level::name<level>, TGroup::name);
+                fmt::format_to(out, fmt, static_cast<TArgs &&>(args)...);
+                fmt::println("{}", fmt::to_string(buf));
+            } catch (...) {
+                // Dev logs are best-effort; drop the message.
+            }
         }
     }
 
@@ -197,11 +205,16 @@ namespace detail {
     constexpr void log(std::string_view nameArgs, fmt::format_string<TArgs...> fmt, TArgs &&...args) {
         static_assert(level < level::off);
         if constexpr (enabled<level, TGroup>) {
-            fmt::memory_buffer buf{};
-            auto out = std::back_inserter(buf);
-            fmt::format_to(out, "{:5s} | {:16s} | ", level::name<level>, TGroup::Name(nameArgs));
-            fmt::format_to(out, fmt, static_cast<TArgs &&>(args)...);
-            fmt::println("{}", fmt::to_string(buf));
+            // Logging must never throw; see the static-name overload above.
+            try {
+                fmt::memory_buffer buf{};
+                auto out = std::back_inserter(buf);
+                fmt::format_to(out, "{:5s} | {:16s} | ", level::name<level>, TGroup::Name(nameArgs));
+                fmt::format_to(out, fmt, static_cast<TArgs &&>(args)...);
+                fmt::println("{}", fmt::to_string(buf));
+            } catch (...) {
+                // Dev logs are best-effort; drop the message.
+            }
         }
     }
 
