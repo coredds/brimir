@@ -40,6 +40,7 @@ struct Args {
     int frames = 1800;
     int warmup = 120;
     bool sh2Jit = false;
+    bool cdPreload = true;     // the core's default (brimir_cd_preload enabled)
     bool backendGiven = false; // --jit-backend given explicitly
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
     bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
@@ -56,6 +57,7 @@ void PrintUsage(std::FILE* out) {
         "                    [--sh2-jit [--jit-backend ir|x64]] --dump-at N --dump-state <file>\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
         "                    --lockstep N [--jit-backend ir|x64]\n"
+        "       (all forms also accept --no-cd-preload)\n"
         "       brimir_bench --help\n"
         "\n"
         "  --bios        Saturn BIOS image (required)\n"
@@ -73,6 +75,11 @@ void PrintUsage(std::FILE* out) {
         "  --warmup      unmeasured frames before measuring (default 120)\n"
         "  --dump-at     run N frames, write a save state to --dump-state, and exit\n"
         "  --sh2-jit     run both SH-2s through the experimental JIT (default: interpreter)\n"
+        "  --no-cd-preload\n"
+        "                read the disc image from the file instead of preloading it into RAM\n"
+        "                (the brimir_cd_preload core option, enabled by default). Preloading\n"
+        "                holds the whole image in memory per core: use this for --lockstep\n"
+        "                on hosts with little RAM.\n"
         "  --jit-backend code backend of the JIT: ir (IR interpreter) or x64 (native, x86-64 builds).\n"
         "                Default: x64 when built, else ir. Needs --sh2-jit or --lockstep (applies\n"
         "                to the JIT core).\n"
@@ -105,8 +112,12 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     }
     for (int i = 1; i < argc; ++i) {
         const std::string opt = argv[i];
-        if (opt == "--sh2-jit") { // the only option without a value
+        if (opt == "--sh2-jit") { // options without a value
             args.sh2Jit = true;
+            continue;
+        }
+        if (opt == "--no-cd-preload") {
+            args.cdPreload = false;
             continue;
         }
         if (i + 1 >= argc) {
@@ -320,6 +331,7 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
     if (!args.game.empty()) {
         const std::string saveStr = saveDir.string();
         const std::string systemStr = systemDir.string();
+        core.SetDiscPreloadEnabled(args.cdPreload);
         if (!core.LoadGame(args.game.c_str(), saveStr.c_str(), systemStr.c_str())) {
             std::fprintf(stderr, "Failed to load game: %s\n", core.GetLastError().c_str());
             return 2;
@@ -522,6 +534,9 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     std::printf("content      : %s\n", args.game.empty() ? "(BIOS menu)" : args.game.c_str());
     std::printf("frames       : %d (warmup %d)\n", args.frames, args.warmup);
     std::printf("sh2 jit      : %s\n", args.sh2Jit ? "on" : "off");
+    if (!args.game.empty()) {
+        std::printf("cd preload   : %s\n", args.cdPreload ? "on" : "off");
+    }
     std::printf("ms/frame     : avg %.3f  p50 %.3f  p95 %.3f  p99 %.3f  max %.3f\n", avg,
                 Percentile(frameMs, 0.50), Percentile(frameMs, 0.95), Percentile(frameMs, 0.99),
                 *std::max_element(frameMs.begin(), frameMs.end()));

@@ -40,6 +40,14 @@ scratch copy of the system directory rather than the real RetroArch folder.
 SMPC settings). If it is omitted, the per-run temp directory is used, which is
 always unconfigured.
 
+By default the disc image is preloaded into RAM, as with the `brimir_cd_preload`
+core option's default. For a CHD that holds the whole compressed file in memory
+(peak RSS 366–489 MB for Panzer Dragoon II Zwei and Street Fighter Zero 3 on a
+Raspberry Pi 3, against 45–53 MB without it). `--no-cd-preload` reads the image from the file
+instead. It does not change emulation, only host memory and I/O; use it for
+`--lockstep` on hosts with little RAM, where two cores would otherwise each hold
+a copy. The report prints `cd preload : on|off` when a game is loaded.
+
 Backup RAM (`.srm`) and cartridge RAM (`.cart`) are written to a fresh
 directory under `%TEMP%\brimir_bench\run-*` that is removed on exit, so saves
 from earlier runs never affect results.
@@ -179,3 +187,53 @@ it always runs one JIT core and one interpreter core for exactly N frames.
 Exit codes: 0 success (including `--help`), 1 usage error (usage is printed to
 stderr), 2 load or setup failure (BIOS, game, state, missing `--system-dir`,
 temp directory errors), 3 lockstep divergence.
+
+## bench/ — benchmark hosts (Linux devices)
+
+Scripts that run the `design/sh2-baseline.md` method (the BIOS menu and the six
+reference titles) on a dedicated Linux device, such as an ARM single-board
+computer or handheld. All of them use one data directory (default `/mnt/data`,
+or `BRIMIR_BENCH_DATA`):
+
+```
+bios/mpr-17933.bin                          US BIOS
+bios/Sega Saturn BIOS v1.01 (JAP).bin       JP BIOS
+bios/system/brimir_saturn_rtc_us_eu.smpc    configured RTC file (see above),
+bios/system/brimir_saturn_rtc_jp.smpc       copied under both names
+games/<No-Intro name>.chd                   the six reference titles
+build/bench/bin/brimir_bench                default binary (BENCH overrides)
+results/<host>/                             output, one folder per device
+```
+
+`setup_host.sh [data dir]` prepares a Debian/Ubuntu-based device once: build and
+measurement tools (cmake, ninja, clang, perf, hyperfine, stress-ng), a
+`cpu-performance` service that sets the `performance` governor at every boot,
+and the directory layout. Build on the device with the bench configuration:
+
+```sh
+cmake -S <source> -B /mnt/data/build/bench -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_LTO=ON
+ninja -C /mnt/data/build/bench -j2 brimir_bench   # LTO peaks at ~520 MB with -j2
+```
+
+`run_bench.sh [rounds] [mode...]` runs every title once per round and mode
+(`interp`, or a JIT backend name such as `ir` or `x64`), with the warmup and
+frame counts of the baseline. Each run starts only when the hottest thermal zone
+is at or below `COOL_C` (default 55 °C). Once a second it samples the
+temperature, the lowest current/maximum frequency ratio over all CPU policies
+and, on a Raspberry Pi, the firmware throttle flags (`vcgencmd`). A run is
+marked invalid if it failed, any CPU policy dropped below 97% of its hardware
+maximum, or the Pi flags show throttling. `summary.tsv` lists every run,
+`medians.tsv` the run with the median average per title and mode (valid runs
+only). `ONLY="pd2 sfz3"` restricts the titles; `PIN=4-7` runs `brimir_bench`
+under `taskset` (for example on the big cores of a big.LITTLE device). Without
+`PIN`, the VDP worker threads run on other cores as they do in the default
+configuration.
+
+`run_lockstep.sh [frames] [backend]` runs `--lockstep` on every title (default
+1800 frames, backend `ir`) and lists the result line of each. It exits 1 if any
+title diverged or failed. It passes `--no-cd-preload` to the game titles
+(`EXTRA_ARGS` overrides it): with preloading, a Virtua Fighter 2 lockstep needs
+more than the 905 MiB of a Raspberry Pi 3.
+
+Start long runs detached so they survive a dropped SSH session, for example
+`setsid -f tools/bench/run_bench.sh 3 interp ir > bench.out 2>&1 < /dev/null`.

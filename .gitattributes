@@ -1,0 +1,2 @@
+# Shell scripts run on Linux devices: keep LF on every checkout.
+*.sh text eol=lf
