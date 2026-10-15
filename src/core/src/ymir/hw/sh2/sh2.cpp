@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <chrono> // Brimir: host-time profiling
 #include <ostream>
 #include <string>
 #include <string_view>
@@ -440,20 +439,20 @@ void SH2::DumpCacheAddressTag(std::ostream &out) const {
 
 namespace {
 
-// Brimir: adds the host wall time of a scope to a counter when enabled.
+// Brimir: adds the host ticks of a scope to a counter when enabled (two cheap tick reads, not two steady_clock reads;
+// SH2::ConsumeHostTimeNs converts the ticks to nanoseconds).
 struct HostTimeScope {
     HostTimeScope(bool enabled, uint64 &counter)
         : m_enabled(enabled)
         , m_counter(counter) {
         if (m_enabled) {
-            m_start = std::chrono::steady_clock::now();
+            m_start = HostTicks();
         }
     }
 
     ~HostTimeScope() {
         if (m_enabled) {
-            const auto elapsed = std::chrono::steady_clock::now() - m_start;
-            m_counter += static_cast<uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+            m_counter += HostTicks() - m_start;
         }
     }
 
@@ -462,14 +461,14 @@ struct HostTimeScope {
 
     bool m_enabled;
     uint64 &m_counter;
-    std::chrono::steady_clock::time_point m_start{};
+    uint64 m_start = 0;
 };
 
 } // namespace
 
 template <bool debug, bool emulateCache>
 FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
-    HostTimeScope hostTime{m_profileHostTime, m_hostTimeNs}; // Brimir: host-time profiling
+    HostTimeScope hostTime{m_profileHostTime, m_hostTicks}; // Brimir: host-time profiling
     m_cyclesExecuted = spilloverCycles;
     AdvanceWDT<false>();
     AdvanceFRT<false>();

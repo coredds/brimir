@@ -15,7 +15,8 @@
 #include "sh2_sci.hpp"
 #include "sh2_ubc.hpp"
 #include "sh2_wdt.hpp"
-#include "sh2_jit_iface.hpp" // Brimir: SH-2 JIT hook
+#include "sh2_host_ticks.hpp" // Brimir: host-time profiling
+#include "sh2_jit_iface.hpp"  // Brimir: SH-2 JIT hook
 
 #include <ymir/hw/hw_defs.hpp>
 
@@ -107,17 +108,30 @@ public:
     // -------------------------------------------------------------------------
     // Brimir: host-time profiling (see src/core/BRIMIR_FORK.md)
 
-    /// @brief Enables or disables host wall-time accounting for Advance(). Always clears the counter.
+    /// @brief Enables or disables host wall-time accounting for Advance(). Always clears the counter. Enabling starts
+    /// the calibration interval that converts host ticks to nanoseconds (see ConsumeHostTimeNs).
     void SetHostTimeProfiling(bool enable) {
         m_profileHostTime = enable;
-        m_hostTimeNs = 0;
+        m_hostTicks = 0;
+        if (enable) {
+            m_calibStartTicks = HostTicks();
+            m_calibStartNs = HostSteadyNs();
+        }
     }
 
     /// @brief Returns the host time spent in Advance() since the last call, in nanoseconds, and resets it.
+    /// Advance() counts cheap host ticks (sh2_host_ticks.hpp); they are converted with the ratio of ticks to
+    /// steady_clock nanoseconds elapsed since profiling was enabled, read now. Returns 0 if no ticks accumulated or
+    /// no calibration interval has elapsed yet.
     uint64 ConsumeHostTimeNs() {
-        const uint64 ns = m_hostTimeNs;
-        m_hostTimeNs = 0;
-        return ns;
+        const uint64 ticks = m_hostTicks;
+        m_hostTicks = 0;
+        if (ticks == 0) {
+            return 0;
+        }
+        const uint64 calibTicks = HostTicks() - m_calibStartTicks;
+        const uint64 calibNs = HostSteadyNs() - m_calibStartNs;
+        return HostTicksToNs(ticks, calibTicks, calibNs);
     }
 
     // -------------------------------------------------------------------------
@@ -751,7 +765,9 @@ private:
 
     // Brimir: host-time profiling state (see SetHostTimeProfiling)
     bool m_profileHostTime = false;
-    uint64 m_hostTimeNs = 0;
+    uint64 m_hostTicks = 0;       // host ticks spent in Advance() since the last ConsumeHostTimeNs
+    uint64 m_calibStartTicks = 0; // HostTicks() when profiling was enabled
+    uint64 m_calibStartNs = 0;    // HostSteadyNs() when profiling was enabled
 
     // Brimir: SH-2 JIT hook state and context callbacks
     SH2JitContext m_jitContext;

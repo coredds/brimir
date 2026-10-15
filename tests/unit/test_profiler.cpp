@@ -4,7 +4,9 @@
 #include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <brimir/profiler.hpp>
+#include <ymir/hw/sh2/sh2_host_ticks.hpp>
 #include <barrier>
+#include <chrono>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -224,6 +226,47 @@ TEST_CASE("SH-2 host time accounting is off by default and consumable", "[profil
     saturn->masterSH2.SetHostTimeProfiling(false);
     core.RunFrame();
     REQUIRE(saturn->masterSH2.ConsumeHostTimeNs() == 0);
+}
+
+TEST_CASE("Host tick conversion handles an empty calibration", "[profiler][sh2]") {
+    CHECK(ymir::sh2::HostTicksToNs(1000, 0, 0) == 0);
+    CHECK(ymir::sh2::HostTicksToNs(1000, 0, 500) == 0);
+    CHECK(ymir::sh2::HostTicksToNs(1000, 10, 0) == 0);
+    CHECK(ymir::sh2::HostTicksToNs(0, 10, 10) == 0);
+}
+
+TEST_CASE("Host tick conversion scales without overflow", "[profiler][sh2]") {
+    constexpr uint64_t ticks = 1ull << 62;
+    const uint64_t ns = ymir::sh2::HostTicksToNs(ticks, 3'000'000'000ull, 1'000'000'000ull);
+    const uint64_t expected = ticks / 3;
+    CHECK(ns + 1 >= expected);
+    CHECK(ns <= expected + 1);
+
+    CHECK(ymir::sh2::HostTicksToNs(3'000'000'000ull, 3'000'000'000ull, 1'000'000'000ull) == 1'000'000'000ull);
+    CHECK(ymir::sh2::HostTicksToNs(123, 1, 1) == 123);
+    CHECK(ymir::sh2::HostTicksToNs(5, 10, 20) == 10);
+}
+
+TEST_CASE("SH-2 host time tracks steady_clock", "[profiler][sh2]") {
+    brimir::CoreWrapper core;
+    REQUIRE(core.Initialize());
+    auto* saturn = core.GetSaturn();
+    REQUIRE(saturn != nullptr);
+
+    saturn->masterSH2.SetHostTimeProfiling(true);
+    CHECK(saturn->masterSH2.ConsumeHostTimeNs() == 0); // nothing counted yet, no calibration interval
+    const auto start = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::steady_clock::duration::zero();
+    while (elapsed < std::chrono::milliseconds(50)) {
+        saturn->masterSH2.Advance<false, false>(64, 0);
+        elapsed = std::chrono::steady_clock::now() - start;
+    }
+    const auto elapsedNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+
+    const uint64_t ns = saturn->masterSH2.ConsumeHostTimeNs();
+    CHECK(ns > 0);
+    CHECK(ns <= elapsedNs + elapsedNs / 10);
+    saturn->masterSH2.SetHostTimeProfiling(false);
 }
 
 TEST_CASE("Enabled wrapper profiling records SH-2 time per frame", "[profiler][integration]") {

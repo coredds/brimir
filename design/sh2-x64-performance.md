@@ -452,3 +452,82 @@ The executor must shrink a further 2.4x (PD2, 3.85 to 1.60 ms/frame), 3.1x (SFZ3
 brimir_bench --bios <BIOS> --game <game> --system-dir <scratch dir> --warmup 2400 --frames 1800 [--sh2-jit --jit-backend ir|x64]
 brimir_bench --bios mpr-17933.bin --warmup 300 --frames 1800 [--sh2-jit --jit-backend ir|x64]    # BIOS menu row
 ```
+
+# Milestone 2D
+
+Milestone 2D (`design/sh2-jit-m2d.md`, plan `design/plans/2026-10-15-sh2-jit-m2d-track-b.md`) starts from the 2C result: x64 about as fast as the interpreter. Step 0 makes the SH-2 host-time accounting cheap, so the baseline below is measured without its overhead.
+
+## Step 0: host-time accounting overhead
+
+`SH2::Advance` used to read `std::chrono::steady_clock` twice per call when profiling is on (38.6 ns per pair in the 2B profile; 55.6M calls per 1,800 frames, about 1.2 ms/frame). It now adds `HostTicks()` (`rdtsc` on x86-64, `cntvct_el0` on AArch64, `steady_clock` elsewhere) and converts to nanoseconds in `ConsumeHostTimeNs()` with the ticks-to-`steady_clock` ratio since profiling was enabled (no busy-wait calibration).
+
+Panzer Dragoon II Zwei, interpreter, `--warmup 2400 --frames 1800`, `build-bench` rebuilt before and after the change, three runs each back to back (2026-10-15, same session):
+
+| | SH2 total ms/frame (3 runs, median) | SH2 master / slave (median run) | `Ymir_RunFrame` ms/frame (3 runs) | ms/frame avg (median run) |
+|---|---|---|---|---|
+| before (`steady_clock`) | 5.681 (5.660 / 5.681 / 5.684) | 3.644 / 2.036 | 7.807 / 7.829 / 7.852 | 7.831 |
+| after (`HostTicks`) | 5.044 (4.992 / 5.044 / 5.059) | 3.263 / 1.781 | 6.490 / 6.537 / 6.552 | 6.538 |
+
+The SH2 total falls 0.64 ms/frame (11%), as predicted (about 0.6): that is the part of the clock reads that fell inside the measured interval. The whole frame falls 1.29 ms (7.83 to 6.54), which is the full cost of the clock reads (2 x 55.6M x 19 ns / 1,800). All profiled SH-2 numbers measured before this step include the overhead. Both modes pay it, so subtracting it raises every ratio a little (Panzer Dragoon II Zwei: 2C 1.087, now 1.126); only same-session ratios are compared.
+
+## 2D baseline
+
+**Date**: 2026-10-15
+**Commit**: the commit that adds this section (parent 7594f84); the measured build is that commit's code
+**Machine and build**: as in the 2B method (AMD Ryzen 7 5700G, `build-bench`, Ninja, Release, `BRIMIR_LTO=ON`, MSVC 19.44.35229), rebuilt after Step 0.
+
+Method: the 2C method unchanged (same scenes, `--warmup 2400 --frames 1800` for games, `--warmup 300 --frames 1800` for the BIOS menu, default settings, scratch system dir with `brimir_saturn_rtc_us_eu.smpc` also as `brimir_saturn_rtc_jp.smpc`, three rounds, each round running every title in the interpreter, `--sh2-jit --jit-backend ir` and `--sh2-jit --jit-backend x64` back to back). The table shows the run with the median SH2 total per mode. All 63 runs exited 0; every x64 run reported `compileFallbacks 0` on both CPUs. Load: usual desktop applications, nothing else heavy.
+
+| Title | Mode | ms/frame avg | p95 | max | SH2 master ms (%) | SH2 slave ms (%) | SH2 total ms (%) | SH2 total, 3 runs | max frame ms, 3 runs |
+|---|---|---|---|---|---|---|---|---|---|
+| BIOS menu (US) | interpreter | 8.034 | 8.513 | 12.2 | 1.666 (20.7%) | 0.000 (0.0%) | 1.666 (20.7%) | 1.676 / 1.666 / 1.661 | 9.0 / 12.2 / 9.0 |
+| | IR | 8.714 | 9.290 | 12.8 | 6.276 (72.0%) | 0.000 (0.0%) | 6.276 (72.0%) | 6.276 / 6.346 / 6.184 | 12.8 / 13.4 / 10.4 |
+| | x64 | 7.829 | 8.500 | 10.4 | 1.227 (15.7%) | 0.000 (0.0%) | 1.227 (15.7%) | 1.240 / 1.227 / 1.214 | 12.0 / 10.4 / 11.7 |
+| Virtua Fighter 2 (JP) | interpreter | 6.236 | 7.536 | 8.6 | 2.806 (45.0%) | 1.654 (26.5%) | 4.460 (71.5%) | 4.460 / 4.441 / 4.492 | 8.6 / 10.0 / 9.6 |
+| | IR | 17.974 | 22.476 | 24.9 | 9.432 (52.5%) | 6.604 (36.7%) | 16.035 (89.2%) | 16.036 / 16.035 / 16.017 | 24.0 / 24.9 / 25.2 |
+| | x64 | 5.756 | 6.576 | 8.1 | 2.356 (40.9%) | 1.169 (20.3%) | 3.525 (61.2%) | 3.525 / 3.520 / 3.541 | 8.1 / 9.7 / 7.9 |
+| Panzer Dragoon II Zwei (US) | interpreter | 6.409 | 7.565 | 9.0 | 3.177 (49.6%) | 1.741 (27.2%) | 4.918 (76.7%) | 4.958 / 4.918 / 4.900 | 9.1 / 9.0 / 8.3 |
+| | IR | 16.948 | 18.754 | 24.0 | 9.740 (57.5%) | 5.262 (31.0%) | 15.001 (88.5%) | 14.973 / 15.029 / 15.001 | 20.3 / 20.0 / 24.0 |
+| | x64 | 6.083 | 7.691 | 8.9 | 2.889 (47.5%) | 1.479 (24.3%) | 4.369 (71.8%) | 4.369 / 4.387 / 4.338 | 8.9 / 9.0 / 9.0 |
+| Sega Rally Championship (US) | interpreter | 7.254 | 8.483 | 9.7 | 2.618 (36.1%) | 2.059 (28.4%) | 4.677 (64.5%) | 4.690 / 4.677 / 4.650 | 10.0 / 9.7 / 10.1 |
+| | IR | 17.166 | 23.763 | 26.2 | 8.964 (52.2%) | 6.109 (35.6%) | 15.073 (87.8%) | 15.116 / 15.073 / 15.034 | 26.3 / 26.2 / 25.7 |
+| | x64 | 7.757 | 9.780 | 11.1 | 2.514 (32.4%) | 2.274 (29.3%) | 4.788 (61.7%) | 4.806 / 4.765 / 4.788 | 13.8 / 11.6 / 11.1 |
+| Burning Rangers (US) | interpreter | 8.711 | 9.855 | 11.4 | 4.291 (49.3%) | 2.027 (23.3%) | 6.318 (72.5%) | 6.318 / 6.309 / 6.387 | 11.4 / 10.5 / 11.5 |
+| | IR | 22.713 | 23.897 | 28.7 | 13.106 (57.7%) | 6.823 (30.0%) | 19.929 (87.7%) | 19.960 / 19.866 / 19.929 | 25.8 / 26.2 / 28.7 |
+| | x64 | 9.145 | 10.784 | 12.6 | 4.656 (50.9%) | 1.766 (19.3%) | 6.422 (70.2%) | 6.406 / 7.317 / 6.422 | 15.5 / 13.0 / 12.6 |
+| Guardian Heroes (US) | interpreter | 6.148 | 7.065 | 9.0 | 2.438 (39.6%) | 1.502 (24.4%) | 3.939 (64.1%) | 3.918 / 3.939 / 4.003 | 9.3 / 9.0 / 8.2 |
+| | IR | 15.431 | 18.295 | 19.3 | 8.168 (52.9%) | 4.897 (31.7%) | 13.066 (84.7%) | 13.107 / 13.066 / 13.001 | 22.0 / 19.3 / 20.0 |
+| | x64 | 6.120 | 6.956 | 10.1 | 2.062 (33.7%) | 1.450 (23.7%) | 3.513 (57.4%) | 3.505 / 3.513 / 3.554 | 8.4 / 10.1 / 8.4 |
+| Street Fighter Zero 3 (JP, 4 MB cart) | interpreter | 8.866 | 9.522 | 11.1 | 2.691 (30.4%) | 1.862 (21.0%) | 4.553 (51.4%) | 4.579 / 4.553 / 4.538 | 11.3 / 11.1 / 11.6 |
+| | IR | 17.407 | 20.164 | 25.8 | 9.431 (54.2%) | 5.936 (34.1%) | 15.367 (88.3%) | 15.367 / 15.432 / 15.346 | 25.8 / 25.6 / 26.2 |
+| | x64 | 9.629 | 11.565 | 27.3 | 3.419 (35.5%) | 1.505 (15.6%) | 4.924 (51.1%) | 4.974 / 4.905 / 4.924 | 26.5 / 26.1 / 27.3 |
+
+### Ratios (SH2 total, median runs)
+
+| Title | interpreter / x64 (target = 2.0) | 2C (with the old accounting) | IR / x64 | interpreter / IR |
+|---|---|---|---|---|
+| BIOS menu | 1.358 | 1.231 | 5.115 | 0.265 |
+| Virtua Fighter 2 | **1.265** | 1.253 | 4.549 | 0.278 |
+| Panzer Dragoon II Zwei | **1.126** | 1.087 | 3.434 | 0.328 |
+| Sega Rally Championship | **0.977** | 0.977 | 3.148 | 0.310 |
+| Burning Rangers | **0.984** | 0.970 | 3.103 | 0.317 |
+| Guardian Heroes | **1.121** | 1.106 | 3.719 | 0.301 |
+| Street Fighter Zero 3 | **0.925** | 0.912 | 3.121 | 0.296 |
+
+Notes:
+
+- Against 2C the ratios of the six target titles moved by at most +0.04 (the BIOS menu by +0.13): the interpreter and x64 each lose about 0.64 ms/frame of accounting overhead, and the x64 total is the smaller one, so the same subtraction raises the ratio a little. The x64 backend is still about as fast as the interpreter; 2.0 is the target to reach with steps 1-6.
+- Absolute SH2 totals fell 0.6-0.8 ms/frame in every mode against 2C (2C interpreter: PD2 5.370, SFZ3 4.958, BR 6.679; now 4.918, 4.553, 6.318); they are not comparable beyond that, as the 2C session ran on a differently loaded machine.
+- `nativeBlocksRun` (master / slave) is identical to 2C for PD2 (355,251,634 / 205,691,083), Rally, BR, GH and SFZ3 and within the known VF2 run-to-run variation (251,174,283 / 431,462,354 here, 251,174,352 / 431,461,785 in 2C), so the same code is measured.
+- One Burning Rangers x64 run (round 2) had an SH2 total of 7.317 ms against 6.406 / 6.422 for the others, with no compile counters different from the others; it is not the median run and does not affect the table.
+
+## 2D progress
+
+Measured at the end of each milestone 2D task (`design/plans/2026-10-15-sh2-jit-m2d-track-b.md`) on the machine and build configuration above, Panzer Dragoon II Zwei and Burning Rangers (US BIOS), Street Fighter Zero 3 and Virtua Fighter 2 (JP BIOS), `--warmup 2400 --frames 1800`, three rounds each. The Task 1 rows are the interpreter and x64 columns of the baseline above (same runs: in that session each round ran the IR backend between the two); later rows run the interpreter and then `--sh2-jit --jit-backend x64` back to back. SH2 totals are the medians of the three runs (all three in parentheses); "x64 max" is the max frame time of the median x64 run; "interpreter max" is the highest max frame time of the three interpreter runs; `compileFallbacks` is master / slave.
+
+| Task | Title | Interpreter SH2 total ms | x64 SH2 total ms | Ratio (interp / x64) | x64 max frame ms | Interpreter max frame ms | compileFallbacks |
+|---|---|---|---|---|---|---|---|
+| 1: cheap host-time accounting (baseline) | Panzer Dragoon II Zwei | 4.918 (4.958 / 4.918 / 4.900) | 4.369 (4.369 / 4.387 / 4.338) | 1.126 | 8.9 | 9.1 | 0 / 0 |
+| 1: cheap host-time accounting (baseline) | Street Fighter Zero 3 | 4.553 (4.579 / 4.553 / 4.538) | 4.924 (4.974 / 4.905 / 4.924) | 0.925 | 27.3 | 11.6 | 0 / 0 |
+| 1: cheap host-time accounting (baseline) | Burning Rangers | 6.318 (6.318 / 6.309 / 6.387) | 6.422 (6.406 / 7.317 / 6.422) | 0.984 | 12.6 | 11.5 | 0 / 0 |
+| 1: cheap host-time accounting (baseline) | Virtua Fighter 2 | 4.460 (4.460 / 4.441 / 4.492) | 3.525 (3.525 / 3.520 / 3.541) | 1.265 | 8.1 | 10.0 | 0 / 0 |
