@@ -2306,3 +2306,58 @@ TEST_CASE("A flush from a non-stopping callback ends the chain", "[jit][x64]") {
         CHECK(execs[1]->Cache().Size() == execs[0]->Cache().Size());
     }
 }
+
+// A chained block counts its cycles from the start of the chain, so its guarded run must compare
+// against the same chain-relative limit as its checks (ir_opt.hpp, rule 5).
+// A: add #1,R3 x3 ; bra B ; nop      B: add #1,R4 x10 ; bra A ; nop
+// Both have guarded runs. After a first run has compiled and linked them, each run starts at A
+// with the target at every instruction of B (on the first and later passes, so B runs second and
+// later in a chain); the chaining x64 executor must stop exactly where the RunBlock executor does.
+TEST_CASE("x64 guarded run in a chained block", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const uint32_t b = kCode + 0x40;
+    const auto setUp = [&](Rig &rig) {
+        rig.WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kAdd1_R3, Bra(kCode + 6, b), kNop});
+        std::vector<uint16_t> bCode(10, kAdd1_R4);
+        bCode.push_back(Bra(b + 20, kCode));
+        bCode.push_back(kNop);
+        rig.WriteCode(b, bCode);
+        auto state = rig.BaseState(kCode);
+        state.R[3] = 0;
+        state.R[4] = 0;
+        rig.Load(state);
+    };
+    auto refRig = std::make_unique<Rig>();
+    auto jitRig = std::make_unique<Rig>();
+    brimir::jit::Executor refExec{BackendKind::Ir};
+    brimir::jit::Executor jitExec{BackendKind::X64, sh2test::kNativeOnFirstRun};
+    setUp(*refRig);
+    setUp(*jitRig);
+    auto &refCtx = refRig->sh2->GetJitContext();
+    auto &jitCtx = jitRig->sh2->GetJitContext();
+    for (const uint32_t pc : {kCode, b}) {
+        Block block = brimir::jit::BuildBlock(jitCtx, pc);
+        brimir::jit::OptimizeBlock(block);
+        INFO(brimir::jit::PrintBlock(block));
+        CHECK(std::count_if(block.code.begin(), block.code.end(),
+                            [](const brimir::jit::Inst &in) { return in.op == brimir::jit::Op::GuardRun; }) == 1);
+    }
+    refExec.Run(refCtx, 0, 200); // compiles A and B, and links them
+    jitExec.Run(jitCtx, 0, 200);
+    const uint64_t chainedBefore = jitExec.GetStats().chainedBlocks;
+    constexpr uint64_t kLoop = 6 + 13; // cycles of A and of B
+    for (uint64_t target = 1; target <= 3 * kLoop; ++target) {
+        INFO("target " << target);
+        setUp(*refRig); // the executors are not attached: no flush
+        setUp(*jitRig);
+        const uint64 refCycles = refExec.Run(refCtx, 0, target);
+        const uint64 jitCycles = jitExec.Run(jitCtx, 0, target);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*refRig, *jitRig, true);
+        INFO(diff);
+        REQUIRE(diff.empty());
+    }
+    CHECK(jitExec.GetStats().chainedBlocks - chainedBefore >= 3 * 2);
+}

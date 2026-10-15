@@ -531,3 +531,9 @@ Measured at the end of each milestone 2D task (`design/plans/2026-10-15-sh2-jit-
 | 1: cheap host-time accounting (baseline) | Street Fighter Zero 3 | 4.553 (4.579 / 4.553 / 4.538) | 4.924 (4.974 / 4.905 / 4.924) | 0.925 | 27.3 | 11.6 | 0 / 0 |
 | 1: cheap host-time accounting (baseline) | Burning Rangers | 6.318 (6.318 / 6.309 / 6.387) | 6.422 (6.406 / 7.317 / 6.422) | 0.984 | 12.6 | 11.5 | 0 / 0 |
 | 1: cheap host-time accounting (baseline) | Virtua Fighter 2 | 4.460 (4.460 / 4.441 / 4.492) | 3.525 (3.525 / 3.520 / 3.541) | 1.265 | 8.1 | 10.0 | 0 / 0 |
+| 2: guarded runs of boundary checks | Panzer Dragoon II Zwei | 4.942 (5.006 / 4.942 / 4.937) | 4.307 (4.317 / 4.302 / 4.307) | 1.147 | 8.8 | 10.0 | 0 / 0 |
+| 2: guarded runs of boundary checks | Street Fighter Zero 3 | 4.698 (4.698 / 4.856 / 4.676) | 4.880 (4.899 / 4.872 / 4.880) | 0.963 | 27.6 | 11.7 | 0 / 0 |
+| 2: guarded runs of boundary checks | Burning Rangers | 6.478 (6.477 / 6.529 / 6.478) | 6.353 (6.353 / 6.499 / 6.323) | 1.020 | 14.6 | 15.9 | 0 / 0 |
+| 2: guarded runs of boundary checks | Virtua Fighter 2 | 4.506 (4.513 / 4.502 / 4.506) | 3.493 (3.500 / 3.493 / 3.473) | 1.290 | 11.2 | 11.2 | 0 / 0 |
+
+Task 2 notes (2026-10-15, interpreter and x64 back to back, no IR runs): every ratio rose by 0.02-0.04 and every x64 median fell by 0.6-1.4% (PD2 4.369 to 4.307, SFZ3 4.924 to 4.880, BR 6.422 to 6.353, VF2 3.525 to 3.493), about the size of the run-to-run spread within a session (x64 up to 0.03 ms; the interpreter up to 0.16 ms on SFZ3), so the gain is small. `nativeBlocksRun` matches the baseline (same code measured). Rule 5 guards only the checks before a block's first Load or Store (after one, every known refill may call back and the next check is a full test, rule 2), which limits it. Cost, BIOS lockstep 1200 (x64, master): 2923 native bytes per block against 2825 with rule 5 disabled (+3.5%), native compile 529.8 ms against 448.7 ms (+18%, each run once).

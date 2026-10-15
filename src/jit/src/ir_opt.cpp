@@ -204,6 +204,97 @@ void ElideInterruptTests(const Block &block, std::vector<Inst> &code) {
     }
 }
 
+// Rule 5: ops allowed between the first and the last check of a guarded run.
+bool AllowedInRun(const Block &block, const Inst &in, bool dataAccessSeen) {
+    switch (in.op) {
+    case Op::SyncCycles:
+    case Op::ExitIf:
+    case Op::Exit:
+    case Op::ExitDynamic:
+    case Op::GuardRun: return false;
+    default: break;
+    }
+    const IntrEffect effect = IntrEffectOf(block, in, dataAccessSeen);
+    return effect == IntrEffect::None || effect == IntrEffect::InlineRefill;
+}
+
+// Rule 5.
+void GuardRuns(const Block &block, std::vector<Inst> &code) {
+    struct Run {
+        size_t first = 0;     // index in code of the first check
+        uint32_t checks = 0;  // 0: no open run
+        uint64_t cycles = 0;  // from the first check to the last one so far
+        uint64_t pending = 0; // since the last check
+        bool needsInline = false;
+    };
+    std::vector<std::pair<size_t, Inst>> guards; // inserted before code[first]
+    Run run;
+    const auto close = [&] {
+        if (run.checks >= 2) {
+            Inst guard;
+            guard.op = Op::GuardRun;
+            guard.imm = static_cast<uint32_t>(run.cycles);
+            guard.imm2 = run.checks;
+            guard.flag = run.needsInline;
+            guards.emplace_back(run.first, guard);
+        }
+        run = {};
+    };
+    bool dataAccessSeen = false;
+    for (size_t i = 0; i < code.size(); ++i) {
+        const Inst &in = code[i];
+        if (in.op == Op::CheckBoundary) {
+            if (!in.flag) {
+                close();
+                continue;
+            }
+            const bool needsInline = (in.imm2 & kCheckNeedsInlineRefills) != 0;
+            if (run.checks > 0) {
+                const uint64_t cycles = run.cycles + run.pending;
+                if (run.checks < kMaxGuardedChecks && cycles <= UINT32_MAX) {
+                    ++run.checks;
+                    run.cycles = cycles;
+                    run.pending = 0;
+                    run.needsInline = run.needsInline || needsInline;
+                    continue;
+                }
+                close();
+            }
+            run.first = i;
+            run.checks = 1;
+            run.needsInline = needsInline;
+            continue;
+        }
+        if (run.checks > 0) {
+            if (in.op == Op::AddCycles) {
+                run.pending += in.imm;
+            } else if (in.op == Op::WbStall) {
+                run.pending += 1; // at most one cycle
+            } else if (!AllowedInRun(block, in, dataAccessSeen)) {
+                close();
+            }
+        }
+        if (in.op == Op::Load || in.op == Op::Store) {
+            dataAccessSeen = true;
+        }
+    }
+    close();
+    if (guards.empty()) {
+        return;
+    }
+    std::vector<Inst> out;
+    out.reserve(code.size() + guards.size());
+    size_t next = 0;
+    for (size_t i = 0; i < code.size(); ++i) {
+        if (next < guards.size() && guards[next].first == i) {
+            out.push_back(guards[next].second);
+            ++next;
+        }
+        out.push_back(code[i]);
+    }
+    code = std::move(out);
+}
+
 } // namespace
 
 void OptimizeBlock(Block &block) {
@@ -214,6 +305,7 @@ void OptimizeBlock(Block &block) {
     MergeCycles(block.code);
     DropRedundantSyncs(block.code);
     ElideInterruptTests(block, block.code);
+    GuardRuns(block, block.code);
 }
 
 } // namespace brimir::jit

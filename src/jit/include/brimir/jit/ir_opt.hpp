@@ -36,6 +36,26 @@ namespace brimir::jit {
 // 4. SyncCycles. A SyncCycles is removed when no AddCycles, AddAccessCycles, WbStall or
 //    AddAccessCyclesRMWByte ran since the previous one or since block entry (where *cyclesExecuted
 //    already equals the entry count).
+//
+// 5. Guarded runs (design/sh2-jit-m2d.md, B1). A guarded run is a maximal sequence of at least 2
+//    cycles-only CheckBoundary ops (rule 2) with only these ops between the first and the last:
+//    ops that cannot change the interrupt state (not in rule 2's changing set: ALU and register
+//    ops, SetSRBits, Div1, MacW, MacL, AddCycles, WbStall, SetWb, ...) and the known refills rule 2
+//    treats as inline; no exit (ExitIf included), no SyncCycles. A GuardRun(maxCycles, checks,
+//    needsInlineRefills) goes right before the first check: maxCycles is the sum of the AddCycles
+//    immediates plus 1 per WbStall from the first check to the last, checks the run length, and
+//    needsInlineRefills is set if any covered check has kCheckNeedsInlineRefills. A run closes
+//    early (and the next one starts at the check that did not fit) at 255 checks or when
+//    maxCycles would exceed 32 bits.
+//    Exact: the covered checks test only the cycle budget (where their interrupt test relies on
+//    inline refills, the guard applies only when the backend runs them inline, as the checks do);
+//    the cycle count only grows inside the run, by at most maxCycles before the last check (no op
+//    there adds cycles but AddCycles and WbStall; a refill callback adds none), and the target is
+//    fixed while a block runs. So if cycles + maxCycles < target at the first check, every
+//    covered check would pass, and skipping them changes nothing.
+//    This extends the plan's rule (checks without kCheckNeedsInlineRefills, no refill inside):
+//    the front end puts a known refill before every 4-byte aligned instruction, so in real code
+//    every check after the first such refill relies on it, and runs without refills hardly exist.
 void OptimizeBlock(Block &block);
 
 } // namespace brimir::jit

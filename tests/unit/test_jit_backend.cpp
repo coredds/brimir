@@ -7,9 +7,11 @@
 
 #include <brimir/jit/interp_backend.hpp>
 #include <brimir/jit/ir.hpp>
+#include <brimir/jit/ir_opt.hpp>
 #include <brimir/jit/sh2_helpers.hpp>
 
 #include <memory>
+#include <string>
 
 using namespace brimir::jit;
 using sh2test::Rig;
@@ -227,6 +229,195 @@ TEST_CASE("Backend: CheckBoundary stops at the cycle target or a pending interru
         const ExitInfo info = f.Run(kind);
         REQUIRE_FALSE(info.boundary);
         REQUIRE(info.cycles == 12);
+    }
+}
+
+namespace {
+
+constexpr uint32_t kMmioCode = 0x22000100; // code on a handler page (no array)
+constexpr uint16_t kAdd1_R3 = 0x7301;
+
+// The raiseAt-th refillPipeline callback raises an interrupt (as a bus device can on a handler
+// page).
+bool *g_guardPending = nullptr;
+void (*g_guardOrigRefill)(void *, uint32) = nullptr;
+uint32_t g_guardRefills = 0;
+uint32_t g_guardRaiseAt = 0;
+
+void RefillRaisingInterrupt(void *sh2, uint32 address) {
+    g_guardOrigRefill(sh2, address);
+    if (++g_guardRefills == g_guardRaiseAt) {
+        *g_guardPending = true;
+    }
+}
+
+// Twelve `add #1,R3` instructions as the front end lowers them, with known refills and a mix of
+// unknown, stalling and folded write-back stalls. allowCleared: ClearIntrAllow first, so every
+// check tests only cycles; otherwise check 1 is a full test and the later checks rely on the
+// known refills being inline (ir_opt.hpp, rule 2).
+Block GuardTestBlock(uint32_t startPC, bool allowCleared) {
+    Block block;
+    block.startPC = startPC;
+    block.guestInstrCount = 12;
+    block.guestOpcodes.assign(12, kAdd1_R3);
+    block.fetchFromArrays = true; // as compiled; the code may since have moved off the arrays
+    Builder b(block);
+    if (allowCleared) {
+        b.ClearIntrAllow();
+    }
+    for (uint32_t i = 0; i < 12; ++i) {
+        const uint32_t pc = startPC + 2 * i;
+        if (i > 0) {
+            b.CheckBoundary(pc, static_cast<uint8_t>(i));
+        }
+        if ((pc & 2u) == 0) {
+            b.KnownRefill(pc, (uint32_t{kAdd1_R3} << 16) | kAdd1_R3);
+        }
+        b.SetReg(3, b.Add(b.GetReg(3), b.Const(1)));
+        b.WbStall(1u << 3);
+        b.AddCycles(1 + i % 3);
+        b.SetWb(i % 2 == 0 ? 3 : 0xFF);
+    }
+    b.Exit(startPC + 24, 12);
+    return block;
+}
+
+struct GuardSetup {
+    uint32_t startPC;
+    bool allowCleared;
+    bool pending;       // an interrupt is pending at entry (intrAllow is true)
+    uint32_t raiseAt;   // the refill callback that raises an interrupt (0: none)
+    uint64_t entry;     // *cyclesExecuted at entry
+};
+
+// Runs `block` on `kind` from the setup's state with `target`; returns the exit and the rig.
+ExitInfo RunGuardBlock(BackendKind kind, const Block &block, const GuardSetup &s, uint64_t target, Rig &rig) {
+    rig.WriteCode(kCode, block.guestOpcodes);
+    for (uint32_t w = 0; w < block.guestOpcodes.size(); ++w) {
+        rig.mmio.data[(kMmioCode & 0xFFFF) + 2 * w] = static_cast<uint8_t>(block.guestOpcodes[w] >> 8);
+        rig.mmio.data[(kMmioCode & 0xFFFF) + 2 * w + 1] = static_cast<uint8_t>(block.guestOpcodes[w]);
+    }
+    auto state = rig.BaseState(s.startPC);
+    rig.mmio.log.clear();
+    state.R[3] = 0; // BaseState keeps the rig's registers
+    state.wbReg = 0xFF;
+    state.intrAllow = true;
+    state.frt.cycleCount = s.entry;
+    state.wdt.cycleCount = s.entry;
+    rig.Load(state);
+    auto &ctx = rig.sh2->GetJitContext();
+    *ctx.intrPending = s.pending;
+    *ctx.cyclesExecuted = s.entry;
+    g_guardOrigRefill = ctx.refillPipeline;
+    g_guardPending = ctx.intrPending;
+    g_guardRefills = 0;
+    g_guardRaiseAt = s.raiseAt;
+    ctx.refillPipeline = &RefillRaisingInterrupt;
+    INFO(PrintBlock(block));
+    REQUIRE(VerifyBlock(block).empty());
+    const ExitInfo info = sh2test::RunOnBackend(kind, block, ctx, target);
+    ctx.refillPipeline = g_guardOrigRefill;
+    return info;
+}
+
+uint32_t CountGuards(const Block &block) {
+    uint32_t guards = 0;
+    for (const Inst &in : block.code) {
+        guards += in.op == Op::GuardRun ? 1 : 0;
+    }
+    return guards;
+}
+
+void RequireSameExit(const ExitInfo &ref, const ExitInfo &opt, const Rig &refRig, const Rig &optRig) {
+    REQUIRE(opt.retired == ref.retired);
+    REQUIRE(opt.boundary == ref.boundary);
+    REQUIRE(opt.cycles == ref.cycles);
+    REQUIRE(opt.aborted == ref.aborted);
+    REQUIRE(optRig.State().PC == refRig.State().PC);
+    const std::string diff = sh2test::DiffRigs(refRig, optRig);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    REQUIRE(*optRig.sh2->GetJitContext().intrPending == *refRig.sh2->GetJitContext().intrPending);
+}
+
+} // namespace
+
+// The budget end at every instruction of a guarded run (and past it), with an interrupt pending at
+// entry or raised by each refill callback (on the handler page, where known refills call back):
+// the optimized block (one GuardRun) stops exactly where the original does.
+TEST_CASE("Backend: GuardRun skips checks only when the run cannot reach the target", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    auto refRig = std::make_unique<Rig>();
+    auto optRig = std::make_unique<Rig>();
+    for (const uint32_t startPC : {kCode, kMmioCode}) {
+        for (const bool allowCleared : {true, false}) {
+            for (const bool pending : {false, true}) {
+                for (uint32_t raiseAt = 0; raiseAt <= (startPC == kMmioCode && !pending ? 6u : 0u); ++raiseAt) {
+                    const GuardSetup s{startPC, allowCleared, pending, raiseAt, 1000};
+                    INFO("startPC " << startPC << " allowCleared " << allowCleared << " pending " << pending
+                                    << " raiseAt " << raiseAt << " backend " << BackendName(kind));
+                    const Block block = GuardTestBlock(startPC, allowCleared);
+                    Block optimized = block;
+                    OptimizeBlock(optimized);
+                    INFO(PrintBlock(optimized));
+                    REQUIRE(CountGuards(optimized) == 1);
+                    const uint64_t total = RunGuardBlock(kind, block, s, kNoCycleTarget, *refRig).cycles;
+                    for (uint64_t offset = 0; offset <= total + 2; ++offset) {
+                        const uint64_t target = offset == total + 2 ? kNoCycleTarget : s.entry + offset;
+                        INFO("target entry+" << offset);
+                        const ExitInfo ref = RunGuardBlock(kind, block, s, target, *refRig);
+                        const ExitInfo opt = RunGuardBlock(kind, optimized, s, target, *optRig);
+                        RequireSameExit(ref, opt, *refRig, *optRig);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Hand-built guards near the top of the cycle range: the guard's sum saturates instead of
+// wrapping (a wrapped sum would skip check 2, which stops the block).
+TEST_CASE("Backend: GuardRun saturates with no cycle target", "[jit][backend]") {
+    const BackendKind kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    const auto makeBlock = [](bool guard, uint32_t maxCycles) {
+        Block block;
+        block.startPC = kCode;
+        block.guestInstrCount = 4;
+        Builder b(block);
+        b.ClearIntrAllow();
+        b.SetReg(3, b.Add(b.GetReg(3), b.Const(1)));
+        b.AddCycles(1);
+        if (guard) {
+            b.GuardRun(maxCycles, 3);
+        }
+        for (uint32_t i = 1; i < 4; ++i) {
+            b.CheckBoundary(kCode + 2 * i, static_cast<uint8_t>(i), true);
+            b.SetReg(3, b.Add(b.GetReg(3), b.Const(1)));
+            b.AddCycles(5);
+        }
+        b.Exit(kCode + 8, 4);
+        return block;
+    };
+    auto refRig = std::make_unique<Rig>();
+    auto optRig = std::make_unique<Rig>();
+    for (const uint32_t maxCycles : {10u, 0xFFFFFFFFu}) {
+        INFO("maxCycles " << maxCycles << " backend " << BackendName(kind));
+        const GuardSetup low{kCode, true, false, 0, 1000};
+        for (const uint64_t target : {kNoCycleTarget, UINT64_MAX - 2}) {
+            INFO("target " << target);
+            const ExitInfo info = RunGuardBlock(kind, makeBlock(true, maxCycles), low, target, *optRig);
+            CHECK_FALSE(info.boundary);
+            CHECK(info.retired == 4);
+            CHECK(info.cycles == 16);
+            CHECK(optRig->State().R[3] == 4u);
+        }
+        // Check 2 runs at entry + 6 = target.
+        const GuardSetup high{kCode, true, false, 0, UINT64_MAX - 8};
+        const ExitInfo ref = RunGuardBlock(kind, makeBlock(false, 0), high, UINT64_MAX - 2, *refRig);
+        const ExitInfo opt = RunGuardBlock(kind, makeBlock(true, maxCycles), high, UINT64_MAX - 2, *optRig);
+        CHECK(ref.boundary);
+        CHECK(ref.retired == 2);
+        RequireSameExit(ref, opt, *refRig, *optRig);
     }
 }
 

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace brimir::jit {
@@ -174,14 +175,19 @@ public:
         m_cc.mov(m_cycles, x86::qword_ptr(m_frame, kOutCycles));
 
         for (size_t i = 0; i < m_block.code.size(); ++i) {
-            // Data accesses before the last known refill classify themselves for codeDirty.
-            m_trackDirty = m_known && static_cast<ptrdiff_t>(i) < m_lastKnownRefill;
-            Lower(m_block.code[i]);
+            if (m_block.code[i].op == Op::GuardRun) {
+                i = LowerGuardRun(i);
+                continue;
+            }
+            LowerAt(i);
         }
 
-        // Out-of-line boundary exits, after the block's final exit.
+        // Out-of-line copies of guarded runs (their guard failed), then the boundary exits, after
+        // the block's final exit.
+        EmitSlowRuns();
         for (const BoundaryStub &stub : m_stubs) {
             m_cc.bind(stub.label);
+            StoreDirty(stub.dirty);
             WriteExit(true, stub.pc, stub.retired, m_cycles, true);
             m_cc.jmp(m_retNull);
         }
@@ -232,6 +238,9 @@ private:
     //     is only reached right after a call, before which everything was stored.
     //   - Callbacks never write R0-R15 (x64_emitter.hpp, "Register cache"). SR is reloaded after
     //     SetSR and Div1, whose helpers write it, and everything after EndDelaySlot.
+    //   - Guarded runs (LowerGuardRun) are the exception to the per-check write-back: inside a run
+    //     the slots stay dirty, and only the out-of-line copy's checks can stop the block, each
+    //     storing its own dirty set in its stub.
     static constexpr uint32_t kSlotSR = 16;
     static constexpr uint32_t kSlots = 17;
     struct CachedSlot {
@@ -315,7 +324,122 @@ private:
         Label label;
         uint32_t pc;
         uint8_t retired;
+        DirtySetT dirty; // stored by the stub (a check in a guarded run's slow copy); else empty
     };
+
+    // ---- Guarded runs (ir.hpp GuardRun, ir_opt.hpp rule 5) ----
+    //
+    // A run is lowered twice. Inline, after the guard (cycles + maxCycles < frame->limit, with a
+    // carry failing it), the guard-passed copy: the covered checks emit nothing (no compare, no
+    // register write-back). Out of line (EmitSlowRuns, after the block's final exit), the copy the
+    // failed guard jumps to: the ops as usual, but its checks keep the slots dirty and store each
+    // check's dirty set in the stub (as a taken ExitIf does), so both copies end with the same
+    // cache state; the slow copy then moves its registers into the fast copy's and jumps back.
+    // Code grows by one extra copy of each run's ops. The guard compares chain-relative cycles
+    // against frame->limit, as CheckBoundary does, so it holds in chained blocks too.
+    // A needsInlineRefills guard in a block without m_known does nothing (its checks test
+    // interrupts): the run is lowered once, as usual.
+    struct SlowRun {
+        size_t first;  // first op after the GuardRun
+        size_t last;   // the last covered check
+        Label slow;    // the out-of-line copy
+        Label join;    // after the inline copy
+        std::array<CachedSlot, kSlots> entryCache;
+        std::array<CachedSlot, kSlots> exitCache;
+        std::vector<std::pair<ValueId, x86::Gp>> exitValues; // the inline copy's defs
+        bool entryMayBeDirty;
+    };
+
+    void LowerAt(size_t i) {
+        // Data accesses before the last known refill classify themselves for codeDirty.
+        m_trackDirty = m_known && static_cast<ptrdiff_t>(i) < m_lastKnownRefill;
+        Lower(m_block.code[i]);
+    }
+
+    // Lowers the GuardRun at index i and the inline copy of its run; returns the index of the last
+    // op lowered.
+    size_t LowerGuardRun(size_t i) {
+        const Inst &guard = m_block.code[i];
+        if (guard.flag && !m_known) {
+            return i;
+        }
+        SlowRun run;
+        run.first = i + 1;
+        run.last = run.first;
+        for (uint32_t checks = 0;; ++run.last) { // VerifyBlock: the covered checks follow
+            if (m_block.code[run.last].op == Op::CheckBoundary && ++checks == guard.imm2) {
+                break;
+            }
+        }
+        run.slow = m_cc.new_label();
+        run.join = m_cc.new_label();
+        run.entryCache = m_cache;
+        run.entryMayBeDirty = m_mayBeDirty;
+
+        x86::Gp end = m_cc.new_gp64();
+        m_cc.mov(end, m_cycles);
+        if (guard.imm != 0) {
+            if (guard.imm <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+                m_cc.add(end, Imm32(guard.imm));
+            } else {
+                x86::Gp t = m_cc.new_gp64();
+                m_cc.mov(t, static_cast<uint64_t>(guard.imm));
+                m_cc.add(end, t);
+            }
+            m_cc.jc(run.slow); // saturated: >= any limit
+        }
+        m_cc.cmp(end, x86::qword_ptr(m_frame, kFrameLimit));
+        m_cc.jae(run.slow);
+
+        m_guardPassed = true;
+        for (size_t j = run.first; j <= run.last; ++j) {
+            LowerAt(j);
+        }
+        m_guardPassed = false;
+        m_cc.bind(run.join);
+        run.exitCache = m_cache;
+        for (size_t j = run.first; j <= run.last; ++j) {
+            const Inst &in = m_block.code[j];
+            if (in.dst != kNoValue) {
+                run.exitValues.emplace_back(in.dst, m_values[in.dst]);
+            }
+        }
+        m_slowRuns.push_back(std::move(run));
+        return m_slowRuns.back().last;
+    }
+
+    void EmitSlowRuns() {
+        const bool mayBeDirty = m_mayBeDirty;
+        for (SlowRun &run : m_slowRuns) {
+            m_cc.bind(run.slow);
+            m_cache = run.entryCache;
+            m_mayBeDirty = run.entryMayBeDirty;
+            m_guardFailed = true;
+            for (size_t j = run.first; j <= run.last; ++j) {
+                LowerAt(j);
+            }
+            m_guardFailed = false;
+            // Into the inline copy's registers. Its registers were all created inside the run, so
+            // none is an operand here: the moves need no ordering.
+            for (uint32_t slot = 0; slot < kSlots; ++slot) {
+                const CachedSlot &have = m_cache[slot];
+                const CachedSlot &want = run.exitCache[slot];
+                assert(have.valid == want.valid && have.dirty == want.dirty && "guarded copies disagree");
+                if (want.valid && have.value.id() != want.value.id()) {
+                    m_cc.mov(want.value, have.value);
+                }
+            }
+            for (const auto &[id, value] : run.exitValues) {
+                if (m_values[id].id() != value.id()) {
+                    m_cc.mov(value, m_values[id]);
+                }
+                m_values[id] = value;
+            }
+            m_cache = run.exitCache;
+            m_cc.jmp(run.join);
+        }
+        m_mayBeDirty = mayBeDirty;
+    }
 
     x86::Mem State32(int32_t off) const {
         return x86::dword_ptr(m_regs, off);
@@ -1043,14 +1167,22 @@ private:
             m_cc.mov(x86::qword_ptr(m_regs, m_off.cyclesExecuted), t);
             break;
         }
+        case Op::GuardRun: break; // LowerGuardRun
         case Op::CheckBoundary: {
             // Stop if cycles >= limit, or an interrupt is pending and allowed. A cycles-only check
             // (ir_opt.hpp) skips the interrupt test; one that relies on inline known refills tests
             // it anyway when this block's known refills call TrRefill (!m_known).
-            // Write-back at each guest-instruction boundary, on the main path (cache rules above):
-            // the out-of-line stub then needs no stores of its own.
-            FlushRegs(true);
-            BoundaryStub stub{m_cc.new_label(), in.imm, in.retired};
+            if (m_guardPassed) {
+                break; // covered by a passed guard: cannot stop the block
+            }
+            BoundaryStub stub{m_cc.new_label(), in.imm, in.retired, {}};
+            if (m_guardFailed) {
+                stub.dirty = DirtySet(); // the slots stay dirty (guarded runs, above)
+            } else {
+                // Write-back at each guest-instruction boundary, on the main path (cache rules
+                // above): the out-of-line stub then needs no stores of its own.
+                FlushRegs(true);
+            }
             m_cc.cmp(m_cycles, x86::qword_ptr(m_frame, kFrameLimit));
             m_cc.jae(stub.label);
             const bool testInterrupt = !in.flag || ((in.imm2 & kCheckNeedsInlineRefills) != 0 && !m_known);
@@ -1156,6 +1288,9 @@ private:
     const X64LinkSlot *m_links; // the backend's link table (nullptr: never chain)
     std::vector<x86::Gp> m_values; // one 32-bit virtual register per IR value
     std::vector<BoundaryStub> m_stubs;
+    std::vector<SlowRun> m_slowRuns;          // guarded runs' out-of-line copies (EmitSlowRuns)
+    bool m_guardPassed = false;               // lowering a guarded run's inline copy
+    bool m_guardFailed = false;               // lowering a guarded run's out-of-line copy
     std::array<CachedSlot, kSlots> m_cache{}; // R0-R15, SR (register cache rules above)
     x86::Gp m_frame;
     x86::Gp m_regs;   // ctx->R
@@ -1222,6 +1357,7 @@ bool CanEmitBlock(const Block &block) {
         case Op::SetWb:
         case Op::SyncCycles:
         case Op::CheckBoundary:
+        case Op::GuardRun:
         case Op::Exit:
         case Op::ExitDynamic:
         case Op::ExitIf:

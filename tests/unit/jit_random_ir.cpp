@@ -321,10 +321,23 @@ Block RandomBlock(std::mt19937 &rng, uint32_t startPC, const RandomIrOptions &op
             continue;
         }
         if (g.Below(20) == 0 && retired < 200) {
-            g.m_b.CheckBoundary(startPC + 2 * retired, static_cast<uint8_t>(retired));
-            ++retired;
-            if (opt.calls && g.Below(2) != 0 && (currentPC() & 2u) == 0) {
-                g.m_b.Refill(currentPC()); // as the front end does before 4-byte aligned instructions
+            // Sometimes a straight stretch of short ALU instructions, as the front end lowers
+            // them: runs of cycles-only checks for OptimizeBlock to guard (ir_opt.hpp, rule 5).
+            const uint32_t stretch = g.Below(4) == 0 ? g.Range(2, 8) : 1;
+            for (uint32_t k = 0; k < stretch && retired < 200; ++k) {
+                if (k > 0) {
+                    g.ValueOp();
+                    g.m_b.SetReg(g.Below(16), g.Pick());
+                    if (g.Below(4) == 0) {
+                        g.m_b.WbStall(1u << g.Below(17));
+                    }
+                    g.m_b.AddCycles(g.Range(1, 3));
+                }
+                g.m_b.CheckBoundary(startPC + 2 * retired, static_cast<uint8_t>(retired));
+                ++retired;
+                if (opt.calls && (stretch > 1 || g.Below(2) != 0) && (currentPC() & 2u) == 0) {
+                    g.m_b.Refill(currentPC()); // as the front end does before 4-byte aligned instructions
+                }
             }
             continue;
         }

@@ -42,7 +42,8 @@ constexpr OpInfo kOpInfo[] = {
     {"Store", false, 2, true, false},          {"AddCycles", false, 0, false, false},
     {"AddAccessCycles", false, 1, true, false}, {"WbStall", false, 0, false, false},
     {"SetWb", false, 0, false, false},         {"SyncCycles", false, 0, false, false},
-    {"CheckBoundary", false, 0, false, false}, {"Refill", false, 0, false, false},
+    {"CheckBoundary", false, 0, false, false}, {"GuardRun", false, 0, false, false},
+    {"Refill", false, 0, false, false},
     {"SetupDelaySlot", false, 1, false, false}, {"EndDelaySlot", false, 0, false, false},
     {"ExitIfBusWait", false, 1, true, false},  {"ExitIf", false, 1, false, false},
     {"Exit", false, 0, false, true},           {"ExitDynamic", false, 0, false, true},
@@ -340,6 +341,13 @@ void Builder::CheckBoundary(uint32_t pc, uint8_t retired, bool cyclesOnly, bool 
     inst.imm2 = needsInlineRefills ? kCheckNeedsInlineRefills : 0u;
 }
 
+void Builder::GuardRun(uint32_t maxCycles, uint8_t checks, bool needsInlineRefills) {
+    Inst &inst = Emit(Op::GuardRun);
+    inst.imm = maxCycles;
+    inst.imm2 = checks;
+    inst.flag = needsInlineRefills;
+}
+
 void Builder::Refill(uint32_t address) {
     Emit(Op::Refill).imm = address;
 }
@@ -469,6 +477,33 @@ std::string VerifyBlock(const Block &block) {
         if (inst.op == Op::CheckBoundary &&
             (inst.imm2 > kCheckNeedsInlineRefills || (inst.imm2 != 0 && !inst.flag))) {
             return error("needsInlineRefills without cyclesOnly, or unknown bits");
+        }
+        if (inst.op == Op::GuardRun) {
+            if (inst.imm2 < 1 || inst.imm2 > kMaxGuardedChecks) {
+                return error("guarded check count out of range");
+            }
+            // The covered checks: cycles-only, needsInlineRefills only with the guard's flag, and
+            // no exit or other guard before the last one.
+            uint32_t covered = 0;
+            for (size_t j = i + 1; j < block.code.size() && covered < inst.imm2; ++j) {
+                const Inst &next = block.code[j];
+                if (Info(next.op).isExit || next.op == Op::ExitIf || next.op == Op::ExitIfBusWait ||
+                    next.op == Op::GuardRun) {
+                    return error("exit or guard inside a guarded run");
+                }
+                if (next.op == Op::CheckBoundary) {
+                    if (!next.flag) {
+                        return error("guarded check is not cycles-only");
+                    }
+                    if ((next.imm2 & kCheckNeedsInlineRefills) != 0 && !inst.flag) {
+                        return error("guarded check relies on inline refills, the guard does not");
+                    }
+                    ++covered;
+                }
+            }
+            if (covered < inst.imm2) {
+                return error("fewer checks than the guard covers");
+            }
         }
         const bool last = i + 1 == block.code.size();
         if (info.isExit && !last) {

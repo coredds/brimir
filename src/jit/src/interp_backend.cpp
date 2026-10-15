@@ -3,6 +3,7 @@
 #include <brimir/jit/bus_fast_path.hpp>
 #include <brimir/jit/sh2_helpers.hpp>
 
+#include <cstdint>
 #include <vector>
 
 namespace brimir::jit {
@@ -43,6 +44,8 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
             codeDirty = true; // handler write, or an array store into the block's code
         }
     };
+
+    uint32_t skipChecks = 0; // checks left in a passed GuardRun's run
 
     for (const Inst &in : block.code) {
         switch (in.op) {
@@ -137,7 +140,20 @@ ExitInfo RunBlock(const Block &block, ymir::sh2::SH2JitContext &ctx, uint64_t ta
         }
         case Op::SetWb: *ctx.wbReg = static_cast<uint8_t>(in.imm); break;
         case Op::SyncCycles: *ctx.cyclesExecuted = entryCycles + info.cycles; break;
+        case Op::GuardRun: {
+            // ir.hpp: skip the covered checks if none of them can stop the block. They test only
+            // cycles here (with needsInlineRefills: only while knownUsable, as below); the cycle
+            // count only grows, by at most imm, until the last one; the target is fixed.
+            const uint64_t now = entryCycles + info.cycles;
+            const uint64_t end = now > UINT64_MAX - in.imm ? UINT64_MAX : now + in.imm;
+            skipChecks = (!in.flag || knownUsable) && end < target ? in.imm2 : 0;
+            break;
+        }
         case Op::CheckBoundary: {
+            if (skipChecks > 0) {
+                --skipChecks;
+                break;
+            }
             // The interpreter's per-instruction checks: Advance's budget (m_cyclesExecuted < target)
             // and InterpretNext's interrupt test (pending && allowed). A cycles-only check skips the
             // interrupt test (known false, ir_opt.hpp), unless it relies on known refills being

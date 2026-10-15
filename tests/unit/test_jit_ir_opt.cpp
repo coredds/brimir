@@ -46,6 +46,9 @@ std::string Describe(const Inst &in) {
         }
         return (in.imm2 & brimir::jit::kCheckNeedsInlineRefills) != 0 ? "CheckBoundary cyclesOnly inlineRefills"
                                                                        : "CheckBoundary cyclesOnly";
+    case Op::GuardRun:
+        return "GuardRun " + std::to_string(in.imm2) + " checks " + std::to_string(in.imm) + " cycles" +
+               (in.flag ? " inlineRefills" : "");
     default: return brimir::jit::OpName(in.op);
     }
 }
@@ -186,6 +189,7 @@ TEST_CASE("IR opt: a check after a full check with no changing op tests only cyc
                      "SetWb 3",
                      "GetT",
                      "ExitIf",
+                     "GuardRun 2 checks 0 cycles", // rule 5
                      "CheckBoundary cyclesOnly",
                      "CheckBoundary cyclesOnly",
                      "Exit"});
@@ -236,8 +240,8 @@ TEST_CASE("IR opt: ClearIntrAllow as the last changing op allows a cycles-only c
               b.CheckBoundary(kCode + 4, 2);
               b.SetIntrAllow();
               b.CheckBoundary(kCode + 6, 3);
-          }) == Ops{"ClearIntrAllow", "CheckBoundary cyclesOnly", "CheckBoundary cyclesOnly", "SetIntrAllow",
-                    "CheckBoundary full", "Exit"});
+          }) == Ops{"ClearIntrAllow", "GuardRun 2 checks 0 cycles", "CheckBoundary cyclesOnly",
+                    "CheckBoundary cyclesOnly", "SetIntrAllow", "CheckBoundary full", "Exit"});
     // A changing op after it.
     CHECK(Optimized([](Builder &b) {
               b.ClearIntrAllow();
@@ -290,7 +294,9 @@ TEST_CASE("IR opt: a known refill keeps the elision only while it is inline", "[
                   b.ClearIntrAllow();
                   b.CheckBoundary(kCode + 10, 5);
               },
-              8, withCode(true)) == Ops{"CheckBoundary full", "Const", "SetReg", "CheckBoundary cyclesOnly", "Refill",
+              8, withCode(true)) == Ops{"CheckBoundary full", "Const", "SetReg",
+                                        "GuardRun 3 checks 0 cycles inlineRefills", // rule 5
+                                        "CheckBoundary cyclesOnly", "Refill",
                                         "CheckBoundary cyclesOnly inlineRefills",
                                         "CheckBoundary cyclesOnly inlineRefills", "ClearIntrAllow",
                                         "CheckBoundary cyclesOnly", "Exit"});
@@ -438,6 +444,202 @@ TEST_CASE("IR opt: a SyncCycles with no cycles since the last one is dropped", "
               b.WbStall(0x1);
               b.SyncCycles();
           }) == Ops{"AddCycles 1", "SyncCycles", "SetWb 255", "Exit"});
+}
+
+// ---- Rule 5: guarded runs ----
+
+namespace {
+
+// The GuardRun ops of an optimized block, as Describe lines.
+Ops Guards(const Ops &ops) {
+    Ops out;
+    for (const std::string &op : ops) {
+        if (op.rfind("GuardRun", 0) == 0) {
+            out.push_back(op);
+        }
+    }
+    return out;
+}
+
+// Instruction i of a straight ALU block: R(i % 16) += i + 1, an unknown write-back stall and
+// 1 + i % 3 cycles (`extra` runs in the middle, before the cycles).
+void AluInstruction(Builder &b, uint32_t i, const std::function<void(Builder &)> &extra = {}) {
+    const uint32_t reg = i % 16;
+    b.SetReg(reg, b.Add(b.GetReg(reg), b.Const(i + 1)));
+    if (extra) {
+        extra(b);
+    }
+    b.WbStall(1u << reg);
+    b.AddCycles(1 + i % 3);
+}
+
+// Cycles AluInstruction adds from instruction `from` up to (not including) `to`, stalls included.
+uint32_t AluCycles(uint32_t from, uint32_t to) {
+    uint32_t cycles = 0;
+    for (uint32_t i = from; i < to; ++i) {
+        cycles += 1 + i % 3 + 1;
+    }
+    return cycles;
+}
+
+} // namespace
+
+TEST_CASE("IR opt: guarded runs cover consecutive cycles-only checks", "[jit][iropt]") {
+    // Ten ALU instructions after ClearIntrAllow: checks 1..9 test only cycles, and nothing between
+    // them can change the interrupt state. maxCycles counts from check 1 to check 9: the cycles of
+    // instructions 1..8 and one per WbStall (the write-back value is unknown).
+    const auto aluBlock = [](uint32_t loadAt) {
+        return [loadAt](Builder &b) {
+            b.ClearIntrAllow();
+            for (uint32_t i = 0; i < 10; ++i) {
+                if (i > 0) {
+                    b.CheckBoundary(kCode + 2 * i, static_cast<uint8_t>(i));
+                }
+                AluInstruction(b, i, [&](Builder &bb) {
+                    if (i == loadAt) {
+                        bb.SetReg(1, bb.Load(bb.Const(0x06000100), 4, false));
+                    }
+                });
+            }
+        };
+    };
+    {
+        const Ops ops = Optimized(aluBlock(99), 10);
+        CHECK(Guards(ops) == Ops{"GuardRun 9 checks " + std::to_string(AluCycles(1, 9)) + " cycles"});
+        // Right before the first check.
+        const auto it = std::find(ops.begin(), ops.end(), Guards(ops).front());
+        REQUIRE(it + 1 != ops.end());
+        CHECK(*(it + 1) == "CheckBoundary cyclesOnly");
+    }
+    // A Load in instruction 4 changes the interrupt state: check 5 is a full test, which splits
+    // the run into checks 1..4 and checks 6..9.
+    CHECK(Guards(Optimized(aluBlock(4), 10)) == Ops{"GuardRun 4 checks " + std::to_string(AluCycles(1, 4)) + " cycles",
+                                                   "GuardRun 4 checks " + std::to_string(AluCycles(6, 9)) + " cycles"});
+    // A run of one check gets no guard: after the Load in instruction 7, check 8 is a full test
+    // and check 9 alone tests only cycles.
+    CHECK(Guards(Optimized(aluBlock(7), 10)) == Ops{"GuardRun 7 checks " + std::to_string(AluCycles(1, 7)) + " cycles"});
+    CHECK(Guards(Optimized(
+              [](Builder &b) {
+                  b.ClearIntrAllow();
+                  b.CheckBoundary(kCode + 2, 1);
+                  b.AddCycles(1);
+              },
+              2))
+              .empty());
+}
+
+TEST_CASE("IR opt: guarded runs end at exits, syncs and changing ops", "[jit][iropt]") {
+    struct Case {
+        const char *name;
+        std::function<void(Builder &)> op;
+        bool checkAfterIsCyclesOnly; // check 3 still tests only cycles (rule 2)
+    };
+    const auto block = [](const std::function<void(Builder &)> &op) {
+        return [op](Builder &b) {
+            b.ClearIntrAllow();
+            b.CheckBoundary(kCode + 2, 1);
+            b.AddCycles(1);
+            b.CheckBoundary(kCode + 4, 2);
+            b.AddCycles(2);
+            op(b);
+            b.CheckBoundary(kCode + 6, 3);
+            b.AddCycles(3);
+            b.CheckBoundary(kCode + 8, 4);
+        };
+    };
+    // Each op between check 2 and check 3 ends the run there. When check 3 still tests only
+    // cycles, checks 3 and 4 form a run of their own.
+    const std::vector<Case> ending{
+        {"SyncCycles", [](Builder &b) { b.SyncCycles(); }, true},
+        {"ExitIf", [](Builder &b) { b.ExitIf(b.GetT(), kCode + 0x40, 1, false, 2); }, true},
+        {"ClearIntrAllow", [](Builder &b) { b.ClearIntrAllow(); }, true},
+        {"SetupDelaySlot", [](Builder &b) { b.SetupDelaySlot(b.Const(kCode)); }, true},
+        {"SetIntrAllow", [](Builder &b) { b.SetIntrAllow(); }, false},
+        {"Refill", [](Builder &b) { b.Refill(kCode + 4); }, false},
+        {"AddAccessCycles", [](Builder &b) { b.AddAccessCycles(b.Const(0x06000100), 4, false); }, false},
+        {"Store", [](Builder &b) { b.Store(b.Const(0x06000100), 4, b.Const(1)); }, false},
+    };
+    for (const Case &c : ending) {
+        INFO(c.name);
+        if (c.checkAfterIsCyclesOnly) {
+            CHECK(Guards(Optimized(block(c.op), 5)) == Ops{"GuardRun 2 checks 1 cycles", "GuardRun 2 checks 3 cycles"});
+        } else {
+            CHECK(Guards(Optimized(block(c.op), 5)) == Ops{"GuardRun 2 checks 1 cycles"});
+        }
+    }
+    // Ops that cannot change the interrupt state (rule 2), Div1/MacW/MacL included, sit inside.
+    const std::vector<Case> inside{
+        {"Div1", [](Builder &b) { b.SetReg(1, b.Div1(b.GetReg(1), b.GetReg(2), false)); }, true},
+        {"MacW", [](Builder &b) { b.MacW(b.GetReg(1), b.GetReg(2)); }, true},
+        {"MacL", [](Builder &b) { b.MacL(b.GetReg(1), b.GetReg(2)); }, true},
+        {"SetSRBits", [](Builder &b) { b.SetSRBits(b.GetReg(1), 0x303); }, true},
+        {"SetWb", [](Builder &b) { b.SetWb(3); }, true},
+        {"WbStall", [](Builder &b) { b.WbStall(1); }, true}, // unknown value: counts 1
+    };
+    for (const Case &c : inside) {
+        INFO(c.name);
+        const std::string cycles = std::string(c.name) == "WbStall" ? "7" : "6";
+        CHECK(Guards(Optimized(block(c.op), 5)) == Ops{"GuardRun 4 checks " + cycles + " cycles"});
+    }
+}
+
+TEST_CASE("IR opt: guarded runs with inline known refills depend on them", "[jit][iropt]") {
+    // check 1 full; checks 2.. cycles-only after a passed check, with known refills between them
+    // (the front end's shape on array pages): one run, whose guard holds only while the refills
+    // are inline (the covered checks rely on them).
+    std::vector<uint16_t> code(8, 0x7301);
+    const uint32_t value = (0x7301u << 16) | 0x7301u;
+    for (const bool arrays : {true, false}) {
+        INFO("fetchFromArrays " << arrays);
+        const Ops ops = Optimized(
+            [&](Builder &b) {
+                for (uint32_t i = 0; i < 8; ++i) {
+                    if (i > 0) {
+                        b.CheckBoundary(kCode + 2 * i, static_cast<uint8_t>(i));
+                    }
+                    if ((i & 1) == 0) {
+                        b.KnownRefill(kCode + 2 * i, value);
+                    }
+                    b.SetReg(3, b.Add(b.GetReg(3), b.Const(1)));
+                    b.AddCycles(1);
+                }
+            },
+            8,
+            [&](Block &block) {
+                block.guestOpcodes = code;
+                block.fetchFromArrays = arrays;
+            });
+        if (arrays) {
+            CHECK(Guards(ops) == Ops{"GuardRun 6 checks 5 cycles inlineRefills"});
+        } else {
+            // The refills always call back: every check after one is a full test.
+            CHECK(Guards(ops).empty());
+        }
+    }
+}
+
+TEST_CASE("IR opt: guarded runs split at 255 checks and at 32-bit cycles", "[jit][iropt]") {
+    const Ops ops = Optimized([](Builder &b) {
+        b.ClearIntrAllow();
+        for (uint32_t i = 1; i <= 260; ++i) {
+            b.CheckBoundary(kCode + 2 * i, static_cast<uint8_t>(i));
+            b.AddCycles(1);
+        }
+    });
+    CHECK(Guards(ops) == Ops{"GuardRun 255 checks 254 cycles", "GuardRun 5 checks 4 cycles"});
+    CHECK(Guards(Optimized([](Builder &b) {
+              b.ClearIntrAllow();
+              b.CheckBoundary(kCode + 2, 1);
+              b.AddCycles(0x80000000u);
+              b.CheckBoundary(kCode + 4, 2);
+              b.AddCycles(0x7FFFFFFFu);
+              b.WbStall(1);
+              b.CheckBoundary(kCode + 6, 3); // 2^32 cycles from check 1: a new run starts here
+              b.AddCycles(0xFFFFFFFFu);
+              b.CheckBoundary(kCode + 8, 4);
+              b.AddCycles(1);
+              b.CheckBoundary(kCode + 10, 5);
+          })) == Ops{"GuardRun 2 checks 2147483648 cycles", "GuardRun 2 checks 4294967295 cycles"});
 }
 
 // ---- Backends ----
@@ -611,6 +813,8 @@ TEST_CASE("IR opt: optimized random blocks run like the originals", "[jit][iropt
     uint64_t opsAfter = 0;
     uint64_t cyclesOnly = 0;
     uint64_t foldedStalls = 0;
+    uint64_t guardedRuns = 0;
+    uint64_t inlineRefillGuards = 0;
 
     for (int variant = 0; variant < 4; ++variant) {
         sh2test::RandomIrOptions opt;
@@ -637,6 +841,8 @@ TEST_CASE("IR opt: optimized random blocks run like the originals", "[jit][iropt
             for (const Inst &in : optimized.code) {
                 stallsAfter += in.op == Op::WbStall ? 1 : 0;
                 cyclesOnly += in.op == Op::CheckBoundary && in.flag ? 1 : 0;
+                guardedRuns += in.op == Op::GuardRun ? 1 : 0;
+                inlineRefillGuards += in.op == Op::GuardRun && in.flag ? 1 : 0;
             }
             foldedStalls += stallsBefore - stallsAfter;
 
@@ -678,8 +884,11 @@ TEST_CASE("IR opt: optimized random blocks run like the originals", "[jit][iropt
         }
     }
     INFO("ops " << opsBefore << " -> " << opsAfter << ", cycles-only checks " << cyclesOnly << ", folded stalls "
-                << foldedStalls);
+                << foldedStalls << ", guarded runs " << guardedRuns << " (" << inlineRefillGuards
+                << " on inline refills)");
     CHECK(opsAfter < opsBefore);
     CHECK(cyclesOnly > 0);
     CHECK(foldedStalls > 0);
+    CHECK(guardedRuns > 0);
+    CHECK(inlineRefillGuards > 0);
 }

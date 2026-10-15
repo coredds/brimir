@@ -69,6 +69,7 @@ enum class Op : uint8_t {
     SetWb,
     SyncCycles,
     CheckBoundary,
+    GuardRun, // imm: maxCycles; imm2: checks (1..255); flag: needsInlineRefills (see below)
     Refill,
     SetupDelaySlot,
     EndDelaySlot,
@@ -83,14 +84,14 @@ struct Inst {
     uint8_t size = 0;    // access size in bytes (1, 2, 4)
     bool flag = false;   // Load: instrFetch; AddAccessCycles/ExitIfBusWait: write; ExitIf: refill; SetSR: delaySlot;
                          // Div1: rmIsRn; Refill: known (imm2 is the value the fetch reads);
-                         // CheckBoundary: cyclesOnly (see below)
+                         // CheckBoundary: cyclesOnly (see below); GuardRun: needsInlineRefills
     uint8_t retired = 0; // exit ops: guest instructions completed when the exit is taken
     ValueId dst = kNoValue;
     ValueId a = kNoValue;
     ValueId b = kNoValue;
     uint32_t imm = 0;
     uint32_t imm2 = 0; // ExitIf: cycles added when taken; known Refill: (op[imm] << 16) | op[imm + 2];
-                       // CheckBoundary: kCheckNeedsInlineRefills or 0
+                       // CheckBoundary: kCheckNeedsInlineRefills or 0; GuardRun: checks
 };
 
 // CheckBoundary(pc, retired) stops the block (PC = pc, boundary) when the cycle budget is reached
@@ -98,6 +99,16 @@ struct Inst {
 // budget is tested; with imm2 = kCheckNeedsInlineRefills as well, the interrupt is still tested
 // unless the block's known refills store their value in this run (ir_opt.hpp, rule 2).
 constexpr uint32_t kCheckNeedsInlineRefills = 1;
+
+// GuardRun(maxCycles, checks, needsInlineRefills) covers the next `checks` CheckBoundary ops, all
+// cycles-only (set by OptimizeBlock, ir_opt.hpp rule 5). If cycles + maxCycles < the cycle target
+// (a saturating sum, with the cycle count the checks compare: RunBlock's entry + block cycles,
+// x64's chain-relative cycles against frame->limit), the covered checks are skipped; otherwise
+// they run as usual. With needsInlineRefills (a covered check has kCheckNeedsInlineRefills) the
+// guard applies only where those checks skip the interrupt test (RunBlock: knownUsable; x64: the
+// block has the known-refill entry check); elsewhere it does nothing. No exit and no other
+// GuardRun lies between a GuardRun and its last covered check (VerifyBlock).
+constexpr uint32_t kMaxGuardedChecks = 255;
 
 // A known Refill (flag set) reads two words of the block's own guestOpcodes, so imm2 is the value
 // the fetch returns while that code is unchanged. A backend stores imm2 to *ctx.fetchedOpcodes
@@ -187,6 +198,7 @@ public:
     void SetWb(uint8_t reg);
     void SyncCycles();
     void CheckBoundary(uint32_t pc, uint8_t retired, bool cyclesOnly = false, bool needsInlineRefills = false);
+    void GuardRun(uint32_t maxCycles, uint8_t checks, bool needsInlineRefills = false);
     void Refill(uint32_t address);
     // A Refill whose value is known (see Block): value = (op[address] << 16) | op[address + 2].
     void KnownRefill(uint32_t address, uint32_t value);
