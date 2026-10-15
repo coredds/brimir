@@ -26,6 +26,7 @@ struct StateOffsets {
     int32_t fetchedOpcodes, delaySlot, intcPendingLevel;
     bool hasFetchedOpcodes; // fetchedOpcodes is valid
     bool hasDelaySlot;      // delaySlot, intcPendingLevel and fetchedOpcodes are valid
+    bool hasOnChipRead;     // ctx.onChipRead is set: data reads in partition 0b111 call TrOnChipRead
 };
 
 bool OffsetFromR(const ymir::sh2::SH2JitContext &ctx, const void *field, int32_t &out) {
@@ -56,6 +57,7 @@ bool ComputeOffsets(const ymir::sh2::SH2JitContext &ctx, StateOffsets &o) {
     o.hasFetchedOpcodes = OffsetFromR(ctx, ctx.fetchedOpcodes, o.fetchedOpcodes);
     o.hasDelaySlot = o.hasFetchedOpcodes && OffsetFromR(ctx, ctx.delaySlot, o.delaySlot) &&
                      OffsetFromR(ctx, ctx.intcPendingLevel, o.intcPendingLevel);
+    o.hasOnChipRead = ctx.onChipRead != nullptr;
     return true;
 }
 
@@ -675,18 +677,37 @@ private:
         }
         m_cc.bind(slow);
         FlushRegs(!m_inlineBus);
-        Call(&TrRead, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &d);
-        CheckStop();
-        if (m_trackDirty) {
-            // A handler read outside the on-chip registers (partition 0b111) may write memory.
-            const Label onChip = m_cc.new_label();
+        if (m_off.hasOnChipRead && !in.flag) {
+            // A data read in partition 0b111 (on-chip registers) cannot write memory: no codeDirty.
+            const Label general = m_cc.new_label();
             x86::Gp part = m_cc.new_gp32();
             m_cc.mov(part, Use(in.a));
             m_cc.shr(part, 29);
             m_cc.cmp(part, 0b111);
-            m_cc.je(onChip);
-            SetCodeDirty();
-            m_cc.bind(onChip);
+            m_cc.jne(general);
+            Call(&TrOnChipRead, {Use(in.a), U32(in.size)}, &d);
+            CheckStop();
+            m_cc.jmp(done);
+            m_cc.bind(general);
+            Call(&TrRead, {Use(in.a), U32(in.size), U32(0)}, &d);
+            CheckStop();
+            if (m_trackDirty) {
+                SetCodeDirty(); // a handler read may write memory
+            }
+        } else {
+            Call(&TrRead, {Use(in.a), U32(in.size), U32(in.flag ? 1 : 0)}, &d);
+            CheckStop();
+            if (m_trackDirty) {
+                // A handler read outside the on-chip registers (partition 0b111) may write memory.
+                const Label onChip = m_cc.new_label();
+                x86::Gp part = m_cc.new_gp32();
+                m_cc.mov(part, Use(in.a));
+                m_cc.shr(part, 29);
+                m_cc.cmp(part, 0b111);
+                m_cc.je(onChip);
+                SetCodeDirty();
+                m_cc.bind(onChip);
+            }
         }
         m_cc.bind(done);
     }

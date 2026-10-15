@@ -777,6 +777,7 @@ private:
     static uint64 JitInterpretOne(void *ctx);
     static uint32 JitRead(void *ctx, uint32 address, uint32 size, bool instrFetch);
     static void JitWrite(void *ctx, uint32 address, uint32 size, uint32 value);
+    static uint32 JitOnChipRead(void *ctx, uint32 address, uint32 size);
     static uint16 JitPeekInstruction(void *ctx, uint32 address);
     static uint64 JitAccessCycles(void *ctx, uint32 address, uint32 size, bool write);
     static bool JitBusWait(void *ctx, uint32 address, uint32 size, bool write);

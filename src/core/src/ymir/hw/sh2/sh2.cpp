@@ -4709,6 +4709,7 @@ void SH2::InitJitContext() {
     m_jitContext.interpretOne = &SH2::JitInterpretOne;
     m_jitContext.read = &SH2::JitRead;
     m_jitContext.write = &SH2::JitWrite;
+    m_jitContext.onChipRead = &SH2::JitOnChipRead; // Brimir: direct on-chip register reads
     m_jitContext.peekInstruction = &SH2::JitPeekInstruction;
     m_jitContext.accessCycles = &SH2::JitAccessCycles;
     m_jitContext.busWait = &SH2::JitBusWait;
@@ -4762,6 +4763,37 @@ void SH2::JitWrite(void *ctx, uint32 address, uint32 size, uint32 value) {
     case 1: sh2.MemWrite<uint8, false, false, false>(address, static_cast<uint8>(value)); break;
     case 2: sh2.MemWrite<uint16, false, false, false>(address, static_cast<uint16>(value)); break;
     default: sh2.MemWrite<uint32, false, false, false>(address, value); break;
+    }
+}
+
+// Brimir: MemRead<T, false, false, false> for partition 0b111 (the I/O area branch), called without
+// the partition switch by the x64 backend. Keep in step with MemRead.
+uint32 SH2::JitOnChipRead(void *ctx, uint32 address, uint32 size) {
+    auto &sh2 = *static_cast<SH2 *>(ctx);
+    const auto read = [&sh2, address]<typename T>() -> uint32 {
+        constexpr uint32 kAddressMask = ~(static_cast<uint32>(sizeof(T)) - 1u);
+        uint32 a = address;
+        if (a & ~kAddressMask) {
+            devlog::trace<grp::mem>(sh2.m_logPrefix, "[PC = {:08X}] WARNING: misaligned {}-bit read from {:08X}",
+                                    sh2.PC, sizeof(T) * 8, a);
+            a &= kAddressMask;
+        }
+        if ((a & 0xE0004000) == 0xE0004000) {
+            if ((a & 0x100) || (a & 0x10001000) == 0x10001000) {
+                return sh2.OnChipRegRead<T, false>(a & 0x1FF);
+            } else {
+                return sh2.OpenBusSeqRead<T>(a);
+            }
+        } else {
+            devlog::trace<grp::reg>(sh2.m_logPrefix, "[PC = {:08X}] Unhandled {}-bit SH-2 I/O area read from {:08X}",
+                                    sh2.PC, sizeof(T) * 8, a);
+            return 0;
+        }
+    };
+    switch (size) {
+    case 1: return read.operator()<uint8>();
+    case 2: return read.operator()<uint16>();
+    default: return read.operator()<uint32>();
     }
 }
 

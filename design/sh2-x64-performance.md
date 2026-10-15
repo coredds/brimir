@@ -273,6 +273,8 @@ Task 2 notes:
 - Street Fighter Zero 3's max frame rose again, to 356–378 ms: the prologue's code compare and the chain exits make each block's code larger still (Task 5).
 
 Task 3 notes:
+
+Task 4 notes (2026-10-15, interpreter and x64 back to back, no IR runs): every x64 median fell (PD2 4.370 to 4.253, -2.7%; SFZ3 4.875 to 4.824, -1.0%; BR 6.217 to 6.148, -1.1%; VF2 3.453 to 3.443, -0.3%), beyond the x64 run-to-run spread of the session (0.013-0.057 ms) on PD2, SFZ3 and BR, within it on VF2. The interpreter column of this session differs from Task 3's by 0.05-0.08 ms on every title (PD2 4.936 to 5.006, SFZ3 4.658 to 4.607, BR 6.451 to 6.389, VF2 4.551 to 4.467), so the ratios (PD2 1.130 to 1.177, SFZ3 0.955 to 0.955, BR 1.038 to 1.039, VF2 1.318 to 1.297) mix the change with interpreter drift; the x64 totals are the evidence. The gain is small: an on-chip read now skips the `ctx.read` size and partition switches, not the register flush, the cycle sync or `OnChipRegRead` itself. `nativeBlocksRun` matches the baseline. Cost, BIOS lockstep 1200 (x64, master): 3063 native bytes per block against 2983 (+2.7%): every Load slow path now holds two calls (a partition test selects `TrOnChipRead` or `TrRead`).
 - x64 SH2 total fell 10.4% in Panzer Dragoon II Zwei (7.96 to 7.13 ms/frame), now 1.065x faster than the interpreter, and 18.6% in Street Fighter Zero 3 (11.61 to 9.46). Block counts are identical to the earlier rows.
 - Static effect of `OptimizeBlock` over the BIOS lockstep's compiled blocks (`sega_101.bin`, 1200 frames, master: 4218 blocks, 38,065 guest instructions): IR ops per guest instruction 8.92 to 8.17. `WbStall` 0.842 to 0.091 per instruction, `SyncCycles` 0.413 to 0.368, `AddCycles` 0.588 to 0.630 (folded stalls, after merging). Full interrupt tests in `CheckBoundary` 33,847 to 21,485; 3,865 of the 12,362 cycles-only checks rely on inline known refills.
 - Street Fighter Zero 3's max frame fell to 224–257 ms: the blocks are smaller, so each flush-and-recompile stall is shorter.
@@ -539,6 +541,10 @@ Measured at the end of each milestone 2D task (`design/plans/2026-10-15-sh2-jit-
 | 3: inline DIV1 | Street Fighter Zero 3 | 4.658 (4.649 / 4.716 / 4.658) | 4.875 (4.884 / 4.875 / 4.852) | 0.955 | 27.6 | 11.6 | 0 / 0 |
 | 3: inline DIV1 | Burning Rangers | 6.451 (6.538 / 6.418 / 6.451) | 6.217 (6.223 / 6.217 / 6.204) | 1.038 | 12.5 | 15.7 | 0 / 0 |
 | 3: inline DIV1 | Virtua Fighter 2 | 4.551 (4.569 / 4.551 / 4.472) | 3.453 (3.453 / 3.522 / 3.452) | 1.318 | 9.0 | 11.0 | 0 / 0 |
+| 4: direct on-chip register reads | Panzer Dragoon II Zwei | 5.006 (5.006 / 5.002 / 5.010) | 4.253 (4.253 / 4.283 / 4.234) | 1.177 | 8.4 | 11.7 | 0 / 0 |
+| 4: direct on-chip register reads | Street Fighter Zero 3 | 4.607 (4.607 / 4.588 / 4.608) | 4.824 (4.824 / 4.837 / 4.819) | 0.955 | 27.0 | 11.1 | 0 / 0 |
+| 4: direct on-chip register reads | Burning Rangers | 6.389 (6.427 / 6.378 / 6.389) | 6.148 (6.161 / 6.148 / 6.104) | 1.039 | 14.8 | 13.2 | 0 / 0 |
+| 4: direct on-chip register reads | Virtua Fighter 2 | 4.467 (4.463 / 4.467 / 4.560) | 3.443 (3.421 / 3.472 / 3.443) | 1.297 | 7.4 | 10.1 | 0 / 0 |
 
 Task 2 notes (2026-10-15, interpreter and x64 back to back, no IR runs): every ratio rose by 0.02-0.04 and every x64 median fell by 0.6-1.4% (PD2 4.369 to 4.307, SFZ3 4.924 to 4.880, BR 6.422 to 6.353, VF2 3.525 to 3.493), about the size of the run-to-run spread within a session (x64 up to 0.03 ms; the interpreter up to 0.16 ms on SFZ3), so the gain is small. `nativeBlocksRun` matches the baseline (same code measured). Rule 5 guards only the checks before a block's first Load or Store (after one, every known refill may call back and the next check is a full test, rule 2), which limits it. Cost, BIOS lockstep 1200 (x64, master): 2923 native bytes per block against 2825 with rule 5 disabled (+3.5%), native compile 529.8 ms against 448.7 ms (+18%, each run once).
 

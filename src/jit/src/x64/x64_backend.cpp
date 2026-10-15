@@ -59,6 +59,18 @@ uint32_t TrRead(X64Frame *f, uint32_t address, uint32_t size, uint32_t instrFetc
     }
 }
 
+uint32_t TrOnChipRead(X64Frame *f, uint32_t address, uint32_t size) noexcept {
+    try {
+        auto &ctx = *f->ctx;
+        const uint32_t value = ctx.onChipRead(ctx.sh2, address, size);
+        CheckAbort(f);
+        return value;
+    } catch (...) {
+        Fail(f);
+        return 0;
+    }
+}
+
 void TrWrite(X64Frame *f, uint32_t address, uint32_t size, uint32_t value) noexcept {
     try {
         auto &ctx = *f->ctx;

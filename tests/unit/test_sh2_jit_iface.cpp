@@ -200,3 +200,56 @@ TEST_CASE("JIT context describes the bus page table", "[jit][sh2]") {
     // A handler page (MMIO) has no array: the access must take the callback.
     CHECK(brimir::jit::FastArrayPointer(ctx.bus, 0x22000000, 4, writable) == nullptr);
 }
+
+TEST_CASE("onChipRead equals the interpreter's on-chip data read", "[jit][sh2]") {
+    auto a = std::make_unique<Rig>(); // reads through ctx.read (SH2::MemRead)
+    auto b = std::make_unique<Rig>(); // reads through ctx.onChipRead
+    auto &ctxA = a->sh2->GetJitContext();
+    auto &ctxB = b->sh2->GetJitContext();
+    REQUIRE(ctxB.onChipRead != nullptr);
+
+    // A base state with running timers and a few written registers, so reads return varied values.
+    ctxA.write(ctxA.sh2, 0xFFFFFE17, 1, 0xE0);   // TOCR
+    ctxA.write(ctxA.sh2, 0xFFFFFE14, 1, 0x02);   // OCRH -> TEMP
+    ctxA.write(ctxA.sh2, 0xFFFFFE15, 1, 0x40);   // OCRL: OCRA = 0x0240
+    ctxA.write(ctxA.sh2, 0xFFFFFE16, 1, 0x00);   // TCR
+    ctxA.write(ctxA.sh2, 0xFFFFFE10, 1, 0x0E);   // TIER
+    ctxA.write(ctxA.sh2, 0xFFFFFE80, 2, 0xA518); // WTCSR: WDT timer enable
+    ctxA.write(ctxA.sh2, 0xFFFFFF00, 4, 0x1234); // DVSR
+    ctxA.write(ctxA.sh2, 0xFFFFFF04, 4, 0x00ABCDEF); // DVDNTL
+    const auto base = a->BaseState(kCode);
+    a->Load(base);
+
+    std::vector<uint32_t> addresses;
+    for (uint32_t address = 0xFFFFFE00; address != 0; ++address) { // through 0xFFFFFFFF
+        addresses.push_back(address);
+    }
+    // Other mirrors and the open-bus and unhandled I/O-area ranges.
+    for (uint32_t offset = 0; offset < 0x200; offset += 3) {
+        addresses.push_back(0xE0004100 + offset);
+        addresses.push_back(0xF0005000 + offset);
+        addresses.push_back(0xE0004000 + offset);
+        addresses.push_back(0xE0000000 + offset);
+    }
+
+    uint32_t reads = 0;
+    for (const uint32_t address : addresses) {
+        for (const uint32_t size : {1u, 2u, 4u}) {
+            for (const uint64 cycles : {uint64{0}, uint64{1234}}) {
+                a->Load(base);
+                b->Load(base);
+                *ctxA.cyclesExecuted = cycles;
+                *ctxB.cyclesExecuted = cycles;
+                const uint32_t expected = ctxA.read(ctxA.sh2, address, size, false);
+                const uint32_t actual = ctxB.onChipRead(ctxB.sh2, address, size);
+                INFO("address " << std::hex << address << " size " << std::dec << size << " cycles " << cycles);
+                REQUIRE(actual == expected);
+                const std::string diff = sh2test::DiffRigs(*a, *b, true);
+                INFO(diff);
+                REQUIRE(diff.empty());
+                ++reads;
+            }
+        }
+    }
+    CHECK(reads > 3000);
+}

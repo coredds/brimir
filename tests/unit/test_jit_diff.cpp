@@ -442,6 +442,39 @@ TEST_CASE("On-chip timer reads see the same cycle counts as the interpreter", "[
     CHECK(jit->State().R[3] != 0u); // the timer actually advanced
 }
 
+TEST_CASE("On-chip timer reads after AddCycles see synced cycles", "[jit][diff]") {
+    auto ref = std::make_unique<Rig>();
+    auto jit = std::make_unique<Rig>();
+    brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
+    // loop: 20 x nop ; mov.w @R1,R5 (FRC) ; mov.b @R2,R6 (FTCSR) ; mov.b @R7,R0 (FRCL) ;
+    //       add R5,R3 ; add R6,R4 ; add R0,R8 ; bra loop ; nop
+    // The 20 NOPs are 20 cycles (AddCycles) in the same block as the reads, which see the FRT only
+    // if the block syncs the cycle counter before each access.
+    std::vector<uint16_t> loop(20, kNop);
+    loop.insert(loop.end(), {Nm(0x6001, 5, 1), MovBL(6, 2), MovBL(0, 7), Add(3, 5), Add(4, 6), Add(8, 0)});
+    loop.push_back(Bra(static_cast<uint32_t>(-(static_cast<int>(loop.size()) * 2 + 4) / 2)));
+    loop.push_back(kNop);
+    ref->WriteCode(kCode, loop);
+    jit->WriteCode(kCode, loop);
+    auto state = ref->BaseState(kCode);
+    state.R[1] = 0xFFFFFE12; // FRC word
+    state.R[2] = 0xFFFFFE11; // FTCSR
+    state.R[7] = 0xFFFFFE13; // FRCL
+    state.R[3] = state.R[4] = state.R[8] = 0;
+    ref->Load(state);
+    jit->Load(state);
+    jit->sh2->SetJitExecutor(&exec);
+
+    const uint64 jitCycles = jit->sh2->Advance<false, false>(5000);
+    const uint64 refCycles = ref->sh2->Advance<false, false>(5000);
+    REQUIRE(refCycles == jitCycles);
+    const std::string diff = sh2test::DiffRigs(*ref, *jit, true);
+    INFO(diff);
+    REQUIRE(diff.empty());
+    CHECK(jit->State().R[3] != 0u); // the timer actually advanced
+    CHECK(jit->State().R[8] != 0u);
+}
+
 // Random programs of every compiled instruction (jitspec::CompiledOpcodes()) plus all branch kinds,
 // with delay slots, loops, calls, MMIO and bus waits. Register roles (see FuzzInstr) keep execution
 // and data accesses inside known memory: R0-R7, R13-R15 data; R8-R11 data addresses (never

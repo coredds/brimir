@@ -597,6 +597,11 @@ uint32 RecRead(void *sh2, uint32 address, uint32 size, bool instrFetch) {
     }
     return g_recOrig.read(sh2, address, size, instrFetch);
 }
+// x64 reads the on-chip registers through onChipRead where RunBlock uses read.
+uint32 RecOnChipRead(void *sh2, uint32 address, uint32 size) {
+    RecordCall(sh2, 'R', address);
+    return g_recOrig.onChipRead(sh2, address, size);
+}
 void RecWrite(void *sh2, uint32 address, uint32 size, uint32 value) {
     if (CalledByBoth(address)) {
         RecordCall(sh2, 'W', address);
@@ -631,6 +636,7 @@ void HookCalls(ymir::sh2::SH2JitContext &ctx, CallRecorder &recorder) {
     recorder.log.clear();
     g_recorders.push_back(&recorder);
     ctx.read = RecRead;
+    ctx.onChipRead = RecOnChipRead;
     ctx.write = RecWrite;
     ctx.refillPipeline = RecRefill;
     ctx.busWait = RecBusWait;
@@ -640,6 +646,7 @@ void HookCalls(ymir::sh2::SH2JitContext &ctx, CallRecorder &recorder) {
 
 void UnhookCalls(ymir::sh2::SH2JitContext &ctx) {
     ctx.read = g_recOrig.read;
+    ctx.onChipRead = g_recOrig.onChipRead;
     ctx.write = g_recOrig.write;
     ctx.refillPipeline = g_recOrig.refillPipeline;
     ctx.busWait = g_recOrig.busWait;

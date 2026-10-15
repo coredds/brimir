@@ -54,12 +54,14 @@ constexpr uint32_t LinkIndex(uint32_t pc) {
 
 // Trampolines: the only functions generated code calls (defined in x64_backend.cpp). Each loads
 // its callback from frame->ctx at call time. None lets an exception escape: a callback exception
-// is stored in frame->error, frame->stop is set and the trampoline returns 0. TrRead, TrWrite and
-// TrRefill also set frame->stop when *frame->abortRequested is true after the callback. Generated
+// is stored in frame->error, frame->stop is set and the trampoline returns 0. TrRead, TrOnChipRead,
+// TrWrite and TrRefill also set frame->stop when *frame->abortRequested is true after the callback. Generated
 // code tests frame->stop after every trampoline except TrMacW/TrMacL, and on stop takes
 // RunBlock's abort exit (out.aborted, out.cycles; PC untouched). Run then rethrows frame->error.
 // bool arguments are passed as uint32_t 0/1.
 uint32_t TrRead(X64Frame *f, uint32_t address, uint32_t size, uint32_t instrFetch) noexcept;
+// TrOnChipRead is TrRead for a data read in partition 0b111 (ctx.onChipRead); it needs ctx.onChipRead.
+uint32_t TrOnChipRead(X64Frame *f, uint32_t address, uint32_t size) noexcept;
 void TrWrite(X64Frame *f, uint32_t address, uint32_t size, uint32_t value) noexcept;
 void TrRefill(X64Frame *f, uint32_t address) noexcept;
 uint64_t TrAccessCycles(X64Frame *f, uint32_t address, uint32_t size, uint32_t write) noexcept;
@@ -107,7 +109,7 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 // Load/Store later in the same block would not abort, while RunBlock's would. This cannot happen
 // today, and the backend relies on it (design/sh2-jit.md section 6.5): in production only
 // SH2::Reset flushes inside a block, and only from read/write callbacks (a watchdog reset through
-// an on-chip register access), which TrRead/TrWrite/TrRefill report by stopping the block.
+// an on-chip register access), which TrRead/TrOnChipRead/TrWrite/TrRefill report by stopping the block.
 //
 // Fetch buffer (design/sh2-x64-performance.md, 2C item 1), with the inline bus and ctx.fetchedOpcodes:
 //   - known refills (ir.hpp, Block) store their value, unless frame->codeDirty is set; the data
@@ -130,7 +132,7 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 // MemRead/MemWrite, whose on-chip register and device side effects change only peripheral and
 // interrupt state (interrupt recomputation reads SR.ILevel, so SR is stored before every call),
 // except a watchdog reset (SH2::Reset writes R, SR and PC), which flushes the executor and so
-// stops the block at that callback (TrRead/TrWrite/TrRefill) before any cached value is used or
+// stops the block at that callback (TrRead/TrOnChipRead/TrWrite/TrRefill) before any cached value is used or
 // stored again.
 bool EmitBlock(asmjit::x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx,
                const X64LinkSlot *links, bool &selfValidating);

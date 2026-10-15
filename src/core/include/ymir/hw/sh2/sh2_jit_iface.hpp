@@ -58,6 +58,10 @@ struct SH2JitContext {
     // SH2::MemRead / MemWrite with cache emulation off. size is 1, 2 or 4; reads are zero-extended.
     uint32 (*read)(void *sh2, uint32 address, uint32 size, bool instrFetch) = nullptr;
     void (*write)(void *sh2, uint32 address, uint32 size, uint32 value) = nullptr;
+    // Brimir: what ctx.read does for a data read (instrFetch = false) whose address is in partition
+    // 0b111 (on-chip registers, open bus, unhandled I/O area), without the partition dispatch.
+    // size is 1, 2 or 4; reads are zero-extended. Undefined for other partitions.
+    uint32 (*onChipRead)(void *sh2, uint32 address, uint32 size) = nullptr;
     // Side-effect-free instruction read, for decoding and block validation.
     uint16 (*peekInstruction)(void *sh2, uint32 address) = nullptr;
     // SH2::AccessCycles with cache emulation off.
