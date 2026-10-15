@@ -1,8 +1,9 @@
 # Brimir fork of the Ymir SH-2
 
 The Ymir hardware layer under `src/core/` is a verbatim copy of upstream
-[Ymir](https://github.com/StrikerX3/ymir), with one exception: the SH-2 CPU is
-Brimir-owned so the SH-2 JIT (see `design/sh2-jit.md`) can hook into it.
+[Ymir](https://github.com/StrikerX3/ymir), with these exceptions: the SH-2 CPU is
+Brimir-owned so the SH-2 JIT (see `design/sh2-jit.md`) can hook into it, and the
+CHD reader's hunk cache is bounded for low-memory hosts.
 
 ## Fork scope
 
@@ -10,6 +11,8 @@ Brimir-owned so the SH-2 JIT (see `design/sh2-jit.md`) can hook into it.
 - `src/core/src/ymir/hw/sh2/*`
 - One read-only accessor in `src/core/include/ymir/sys/bus.hpp`
   (`Bus::PageTableLayout`, `Bus::GetPageTableLayout`) for the SH-2 JIT.
+- The CHD reader's hunk cache: `src/core/src/ymir/media/loader/loader_chd.cpp`
+  (`CHDBinaryReader`) and the new `src/core/include/ymir/media/loader/chd_hunk_cache.hpp`.
 
 Everything else under `src/core/` stays verbatim upstream.
 
@@ -36,6 +39,7 @@ Everything else under `src/core/` stays verbatim upstream.
 | 2026-10-01 | `ymir/sys/bus.hpp`, `sh2_jit_iface.hpp`, `sh2.cpp` | Read-only bus page-table layout for the JIT's inline RAM/ROM accesses and access cycles: `Bus::PageTableLayout` + `Bus::GetPageTableLayout()` (page array pointer, stride, shift, address mask, `offsetof` of `array`, `arrayWritable` and the six cycle fields; `static_assert` that `MemoryPage` is standard layout) and `<cstddef>` include in `bus.hpp`; `SH2JitBusLayout` (same fields) as `SH2JitContext::bus`, copied in `SH2::InitJitContext`. No behavior change: nothing in the core reads it. On an upstream sync of `bus.hpp`, re-apply the accessor and check that `MemoryPage`'s fields and `Read`/`Write`/`IsBusWait`/`GetAccessCycles` still match `src/jit/src/bus_fast_path.cpp` and the x64 emitter. |
 | 2026-10-01 | `sh2.cpp` | `static_assert(sizeof(SH2JitBusLayout) == sizeof(sys::SH2Bus::PageTableLayout))` in `SH2::InitJitContext`, so a field added to only one of the two structs fails to compile. No behavior change. |
 | 2026-10-02 | `sh2_jit_iface.hpp`, `sh2.cpp` | `SH2JitContext::intcPendingLevel` (read-only pointer to `INTC.pending.level`), set in `SH2::InitJitContext`, so the x64 backend can inline the end of a delay slot (`AdvancePC<..., delaySlot = true>`: `pending = INTC.pending.level > SR.ILevel`). No behavior change: nothing in the core reads it. On an upstream sync, check that `AdvancePC` and `SetupDelaySlot` still match the inline lowering in `src/jit/src/x64/x64_emitter.cpp`. |
+| 2026-10-15 | `media/loader/loader_chd.cpp`, `media/loader/chd_hunk_cache.hpp` (new) | `CHDBinaryReader` kept every decompressed hunk it read in an unbounded `std::map`, so memory grew with the disc data read over a session, toward the whole decompressed image (674 MB for Virtua Fighter 2), on top of the `chd_precache` copy when preloading. It now keeps the 64 most recently used hunks (`HunkCache`, about 1.25 MB). A read cache only: no emulation change (IR-JIT executor counters of Panzer Dragoon II Zwei and Street Fighter Zero 3 identical before and after, with and without preload). Measured on a Raspberry Pi 3 without preload over 18,000 frames of attract mode: peak RSS 61.4 MB before (still growing) vs 23.9 MB after (flat) for Virtua Fighter 2, 54.7 vs 24.8 MB for Burning Rangers. Found while investigating a two-core lockstep running out of the Pi's 905 MiB; most of that was the preloaded image (one copy per core), not this cache. Upstream has the same code (checked 2026-10-15); worth reporting. On an upstream sync of `loader_chd.cpp`, keep `HunkCache`. |
 
 ## Upstream SH-2 ports
 

@@ -1,6 +1,7 @@
 #include <ymir/media/loader/loader_chd.hpp>
 
 #include <ymir/media/binary_reader/binary_reader_subview.hpp>
+#include <ymir/media/loader/chd_hunk_cache.hpp> // Brimir: bounded hunk cache (BRIMIR_FORK.md)
 #include <ymir/media/frame_address.hpp>
 
 #include <ymir/core/types.hpp>
@@ -14,7 +15,6 @@
 #include <libchdr/chd.h>
 
 #include <charconv>
-#include <map>
 #include <span>
 #include <string>
 #include <utility>
@@ -28,10 +28,9 @@ public:
     // Initializes a CHD reader from the specified `chd_file` instance.
     // The instance is assumed to be already initialized.
     CHDBinaryReader(chd_file *file)
-        : m_file(file) {
-        m_header = chd_get_header(file);
-        m_hunkBuffer.resize(m_header->hunkbytes);
-    }
+        : m_file(file)
+        , m_header(chd_get_header(file))
+        , m_hunkCache(kCachedHunks, m_header->hunkbytes) {}
     ~CHDBinaryReader() {
         chd_close(m_file);
     }
@@ -68,11 +67,9 @@ public:
         uintmax_t writeOffset = 0;
         uintmax_t remaining = size;
         for (uintmax_t hunkIndex = firstHunk; hunkIndex <= lastHunk; hunkIndex++) {
-            if (!m_hunkCache.contains(hunkIndex)) {
-                chd_read(m_file, hunkIndex, m_hunkBuffer.data());
-                m_hunkCache[hunkIndex] = m_hunkBuffer;
-            }
-            auto &buffer = m_hunkCache[hunkIndex];
+            // Brimir: bounded LRU instead of keeping every hunk read (upstream: unbounded std::map).
+            const auto buffer = m_hunkCache.Get(
+                hunkIndex, [&](std::span<uint8> out) { chd_read(m_file, static_cast<uint32>(hunkIndex), out.data()); });
             const uint32 requested = std::min<size_t>(remaining, m_header->hunkbytes - hunkOffset);
             std::copy_n(buffer.begin() + hunkOffset, requested, output.begin() + writeOffset);
 
@@ -87,10 +84,12 @@ public:
     }
 
 private:
+    // Brimir: about 1.25 MB with the usual CD hunk size (19,584 bytes: 8 sectors of 2,448).
+    static constexpr size_t kCachedHunks = 64;
+
     chd_file *m_file;
     const chd_header *m_header;
-    mutable std::vector<uint8> m_hunkBuffer;
-    mutable std::map<uintmax_t, std::vector<uint8>> m_hunkCache;
+    mutable HunkCache m_hunkCache;
 };
 
 static bool SetTrackInfo(const chd_header *header, std::string_view typestring, Track &track) {

@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 
 #include <ymir/media/disc.hpp>
+#include <ymir/media/loader/chd_hunk_cache.hpp>
 #include <ymir/media/loader/loader.hpp>
 #include <ymir/util/data_ops.hpp>
 #include <ymir/util/scope_guard.hpp>
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -387,4 +389,88 @@ TEST_CASE("CUE loader preserves mono PCM when resampling compressed audio", "[me
         REQUIRE(track.ReadSector(track.endFrameAddress, lastSector));
         REQUIRE(std::equal(lastSector.begin(), lastSector.end(), actual.end() - lastSector.size()));
     }
+}
+
+
+namespace {
+
+// Fills a hunk with a pattern derived from its index and counts the fills (decompressions).
+struct CountingFill {
+    size_t hunkBytes;
+    std::vector<uintmax_t> &filled;
+
+    void operator()(uintmax_t index, std::span<uint8_t> out) const {
+        REQUIRE(out.size() == hunkBytes);
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = static_cast<uint8_t>(index * 31 + i);
+        }
+        filled.push_back(index);
+    }
+};
+
+bool HoldsPattern(std::span<const uint8_t> data, uintmax_t index) {
+    for (size_t i = 0; i < data.size(); ++i) {
+        if (data[i] != static_cast<uint8_t>(index * 31 + i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("CHD hunk cache decompresses a hunk once while it stays cached", "[media][loader][chd]") {
+    constexpr size_t kHunkBytes = 64;
+    std::vector<uintmax_t> filled;
+    const CountingFill fill{kHunkBytes, filled};
+    ymir::media::loader::chd::HunkCache cache{4, kHunkBytes};
+
+    for (int i = 0; i < 3; ++i) {
+        const auto data = cache.Get(7, [&](std::span<uint8_t> out) { fill(7, out); });
+        REQUIRE(data.size() == kHunkBytes);
+        REQUIRE(HoldsPattern(data, 7));
+    }
+    REQUIRE(filled == std::vector<uintmax_t>{7});
+}
+
+TEST_CASE("CHD hunk cache holds at most its capacity", "[media][loader][chd]") {
+    constexpr size_t kHunkBytes = 64;
+    constexpr size_t kCapacity = 4;
+    std::vector<uintmax_t> filled;
+    const CountingFill fill{kHunkBytes, filled};
+    ymir::media::loader::chd::HunkCache cache{kCapacity, kHunkBytes};
+
+    // Reading a whole disc must not keep every hunk.
+    for (uintmax_t index = 0; index < 100; ++index) {
+        REQUIRE(HoldsPattern(cache.Get(index, [&](std::span<uint8_t> out) { fill(index, out); }), index));
+        REQUIRE(cache.Size() <= kCapacity);
+    }
+    REQUIRE(cache.Size() == kCapacity);
+
+    // Hunk 0 was evicted long ago: reading it again decompresses it again, with the right data.
+    filled.clear();
+    REQUIRE(HoldsPattern(cache.Get(0, [&](std::span<uint8_t> out) { fill(0, out); }), 0));
+    REQUIRE(filled == std::vector<uintmax_t>{0});
+}
+
+TEST_CASE("CHD hunk cache evicts the least recently used hunk", "[media][loader][chd]") {
+    constexpr size_t kHunkBytes = 64;
+    std::vector<uintmax_t> filled;
+    const CountingFill fill{kHunkBytes, filled};
+    ymir::media::loader::chd::HunkCache cache{3, kHunkBytes};
+    auto get = [&](uintmax_t index) { return cache.Get(index, [&](std::span<uint8_t> out) { fill(index, out); }); };
+
+    get(1);
+    get(2);
+    get(3);
+    get(1); // 1 is now more recent than 2 and 3
+    get(4); // evicts 2, the least recently used
+
+    filled.clear();
+    REQUIRE(HoldsPattern(get(1), 1));
+    REQUIRE(HoldsPattern(get(3), 3));
+    REQUIRE(HoldsPattern(get(4), 4));
+    REQUIRE(filled.empty());
+    REQUIRE(HoldsPattern(get(2), 2));
+    REQUIRE(filled == std::vector<uintmax_t>{2});
 }
