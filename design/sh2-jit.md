@@ -302,6 +302,17 @@ This changes the next steps:
   2. Shared work that helps every target: memory caps sized for low-RAM devices, selective eviction and reuse of reloaded code, save-state flush, code size and per-instruction cost in the IR and front end.
   3. The ARM64 backend (milestone 3), validated by lockstep on the ARM device.
 
+**Target (2026-10-15).** A fully compatible JIT with a clear performance improvement, on both x86-64 and ARM64. 60 fps on every device is not the target: on the weakest ARM device the time outside the SH-2s already fills the frame budget. Concretely:
+- **Compatible:** identical to the interpreter in lockstep (BIOS menu plus six games, 36,000 frames each) on every backend and on real hardware of each architecture, plus the `[jit]` tests and fuzz on each.
+- **Clearly faster:** lower SH-2 time than the interpreter on every title, measured as the median of three runs in one session on the same device, together with whole-frame time and frame-time spikes (compile stalls must not cancel the gain). This applies to x64 as well: 2C's 0.91–1.25 is not enough, so the 2D items above (option 1) are back in scope.
+- **Fit for low-spec devices:** native-code memory well below the current 128 MB per SH-2 CPU on devices with about 1 GB of RAM.
+
+ARM devices: the lowest is a Raspberry Pi 3 (4x Cortex-A53, in-order, 1.2 GHz, 905 MiB RAM); [interpreter baseline](sh2-baseline-rpi3.md): 61–82 ms per game frame, SH-2 share 67.6–75.6%, and SH-2 time 6.3–6.9x the x64 time against 4.2–5.9x for the rest of the frame. Devices with newer out-of-order ARM cores will be added. Benchmark and lockstep runs on Linux devices use `tools/bench/` (tools/README.md).
+
+Measured on that device (2026-10-15): IR lockstep identical on the BIOS menu and six games (1,800 frames) and the test suite passes on ARM64; the IR backend takes about 3x the interpreter's SH-2 time; `perf` puts about 60% of the emulation thread in interpreter dispatch, instruction fetch through the bus and per-instruction bookkeeping. Low-spec items found there, for the shared work (step 2 above):
+- `brimir_cd_preload` (enabled by default) holds the whole CHD in RAM, 366–489 MB per game; a default that depends on available memory, or off on ARM, is to be decided. The CHD reader's unbounded hunk cache is fixed (CHANGELOG).
+- The software VDP2 render thread spins in its event queue's semaphore (`MAX_SEMA_SPINS = 20000`), about one core busy-waiting (20.9% of all samples). Harmless on four cores, but on two-core devices it would compete with emulation and JIT compiles.
+
 ### Milestone 3 — ARM64 backend (separate spec)
 
 Same as milestone 2 for ARM64, validated on a Cortex-A53/A55-class device.
