@@ -13,6 +13,7 @@
 #include <brimir/jit/interp_backend.hpp>
 #include <brimir/jit/ir.hpp>
 #include <brimir/jit/ir_opt.hpp>
+#include <brimir/jit/sh2_helpers.hpp>
 
 #include <algorithm>
 #include <array>
@@ -2360,4 +2361,143 @@ TEST_CASE("x64 guarded run in a chained block", "[jit][x64]") {
         REQUIRE(diff.empty());
     }
     CHECK(jitExec.GetStats().chainedBlocks - chainedBefore >= 3 * 2);
+}
+
+// Div1 lowers to inline code on the cached SR (x64_emitter.cpp, Op::Div1); Div1Step is the reference.
+TEST_CASE("x64 inline Div1 matches Div1Step", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    constexpr uint32_t kInputs[] = {0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678};
+    for (const bool rmIsRn : {false, true}) {
+        Block block;
+        block.startPC = kCode;
+        block.guestInstrCount = 1;
+        Builder b(block);
+        const ValueId rn = b.GetReg(2);
+        b.SetReg(2, b.Div1(rn, rmIsRn ? rn : b.GetReg(1), rmIsRn));
+        b.AddCycles(1);
+        b.Exit(kCode + 2, 1);
+        REQUIRE(brimir::jit::VerifyBlock(block).empty());
+        for (uint32_t bits = 0; bits < 8; ++bits) {
+            for (const uint32_t rnValue : kInputs) {
+                for (const uint32_t rmValue : kInputs) {
+                    const uint32_t srIn = 0x0F0 | (bits & 1u) | ((bits & 2u) << 7) | ((bits & 4u) << 7);
+                    INFO("rmIsRn " << rmIsRn << " SR 0x" << std::hex << srIn << " rn 0x" << rnValue << " rm 0x"
+                                   << rmValue);
+                    auto rig = std::make_unique<Rig>();
+                    auto state = rig->BaseState(kCode);
+                    state.SR = srIn;
+                    state.R[2] = rnValue;
+                    state.R[1] = rmValue;
+                    rig->Load(state);
+                    auto &ctx = rig->sh2->GetJitContext();
+                    NativeCode code;
+                    REQUIRE(backend->Compile(block, ctx, code));
+                    backend->Run(code, ctx, kNoCycleTarget);
+                    uint32_t sr = srIn;
+                    const uint32_t expected = brimir::jit::Div1Step(rnValue, rmValue, rmIsRn, sr);
+                    const auto st = rig->State();
+                    CHECK(st.R[2] == expected);
+                    CHECK(st.SR == sr);
+                    CHECK(st.R[1] == rmValue);
+                }
+            }
+        }
+        backend->Reset();
+    }
+}
+
+// SetT leaves SR dirty in the register cache and each Div1 leaves it dirty again; the Div1s and GetT
+// must use the cached value, not memory (which holds the entry SR, T clear and Q/M set here).
+TEST_CASE("x64 inline Div1 uses the cached SR", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    Block block;
+    block.startPC = kCode;
+    block.guestInstrCount = 3;
+    Builder b(block);
+    b.SetT(b.Const(1));
+    b.SetReg(2, b.Div1(b.GetReg(2), b.GetReg(1), false));
+    b.SetReg(3, b.Div1(b.GetReg(3), b.GetReg(1), false));
+    b.SetReg(0, b.GetT());
+    b.AddCycles(3);
+    b.Exit(kCode + 6, 3);
+    REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+    for (const uint32_t srIn : {0x0F0u, 0x0F0u | 0x100, 0x0F0u | 0x200, 0x0F0u | 0x300}) {
+        auto irRig = std::make_unique<Rig>();
+        auto x64Rig = std::make_unique<Rig>();
+        auto state = irRig->BaseState(kCode);
+        state.SR = srIn;
+        state.R[1] = 0x0C0FFEE5;
+        state.R[2] = 0x80000001;
+        state.R[3] = 0x7FFFFFF0;
+        state.R[0] = 0xDEADBEEF;
+        for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+            rig->Load(state);
+        }
+        INFO("SR in 0x" << std::hex << srIn);
+        auto &x64Ctx = x64Rig->sh2->GetJitContext();
+        NativeCode code;
+        REQUIRE(backend->Compile(block, x64Ctx, code));
+        const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext());
+        const ExitInfo x64 = backend->Run(code, x64Ctx, kNoCycleTarget);
+        RequireSameOutcome(ir, x64, *irRig, *x64Rig);
+        CHECK(x64Rig->State().R[0] == (x64Rig->State().SR & 1u));
+        CHECK(x64Rig->State().R[2] == irRig->State().R[2]);
+        CHECK(x64Rig->State().R[3] == irRig->State().R[3]);
+    }
+}
+
+// A run of DIV1s is a guarded run: the target falls at every instruction of it, so both copies
+// (with and without per-check stores of the cached SR) must stop exactly where RunBlock does.
+TEST_CASE("x64 inline Div1 in a guarded run", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kDiv1_R1_R2 = 0x3214; // div1 R1,R2
+    constexpr uint16_t kDiv1_R2_R2 = 0x3224; // div1 R2,R2
+    std::vector<uint16_t> program;
+    for (int i = 0; i < 12; ++i) {
+        program.push_back(i % 5 == 4 ? kDiv1_R2_R2 : kDiv1_R1_R2);
+    }
+    program.push_back(static_cast<uint16_t>(kSleep));
+    brimir::jit::Executor refExec{BackendKind::Ir};
+    brimir::jit::Executor jitExec{BackendKind::X64, sh2test::kNativeOnFirstRun};
+    auto refRig = std::make_unique<Rig>();
+    auto jitRig = std::make_unique<Rig>();
+    for (Rig *rig : {refRig.get(), jitRig.get()}) {
+        rig->WriteCode(kCode, program);
+    }
+    auto &refCtx = refRig->sh2->GetJitContext();
+    auto &jitCtx = jitRig->sh2->GetJitContext();
+    Block block = brimir::jit::BuildBlock(jitCtx, kCode);
+    brimir::jit::OptimizeBlock(block);
+    INFO(brimir::jit::PrintBlock(block));
+    REQUIRE(std::count_if(block.code.begin(), block.code.end(),
+                          [](const brimir::jit::Inst &in) { return in.op == brimir::jit::Op::GuardRun; }) >= 1);
+    for (uint32_t srBits = 0; srBits < 8; ++srBits) {
+        for (uint64_t target = 1; target <= 16; ++target) {
+            INFO("SR bits " << srBits << " target " << target);
+            auto state = refRig->BaseState(kCode);
+            state.SR = 0x0F0 | (srBits & 1u) | ((srBits & 6u) << 7);
+            state.R[1] = 0x0C0FFEE5;
+            state.R[2] = 0x80000001u + srBits * 0x01234567u;
+            for (Rig *rig : {refRig.get(), jitRig.get()}) {
+                rig->Load(state);
+            }
+            const uint64 refCycles = refExec.Run(refCtx, 0, target);
+            const uint64 jitCycles = jitExec.Run(jitCtx, 0, target);
+            REQUIRE(jitCycles == refCycles);
+            const std::string diff = sh2test::DiffRigs(*refRig, *jitRig, true);
+            INFO(diff);
+            REQUIRE(diff.empty());
+        }
+    }
 }

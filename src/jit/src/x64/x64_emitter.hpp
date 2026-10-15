@@ -56,7 +56,7 @@ constexpr uint32_t LinkIndex(uint32_t pc) {
 // its callback from frame->ctx at call time. None lets an exception escape: a callback exception
 // is stored in frame->error, frame->stop is set and the trampoline returns 0. TrRead, TrWrite and
 // TrRefill also set frame->stop when *frame->abortRequested is true after the callback. Generated
-// code tests frame->stop after every trampoline except TrDiv1/TrMacW/TrMacL, and on stop takes
+// code tests frame->stop after every trampoline except TrMacW/TrMacL, and on stop takes
 // RunBlock's abort exit (out.aborted, out.cycles; PC untouched). Run then rethrows frame->error.
 // bool arguments are passed as uint32_t 0/1.
 uint32_t TrRead(X64Frame *f, uint32_t address, uint32_t size, uint32_t instrFetch) noexcept;
@@ -68,7 +68,6 @@ uint32_t TrBusWait(X64Frame *f, uint32_t address, uint32_t size, uint32_t write)
 void TrSetupDelaySlot(X64Frame *f, uint32_t target) noexcept;
 void TrEndDelaySlot(X64Frame *f) noexcept;
 void TrSetSR(X64Frame *f, uint32_t value, uint32_t delaySlot) noexcept;
-uint32_t TrDiv1(X64Frame *f, uint32_t rn, uint32_t rm, uint32_t rmIsRn) noexcept;
 void TrMacW(X64Frame *f, uint32_t op1, uint32_t op2) noexcept;
 void TrMacL(X64Frame *f, uint32_t op1, uint32_t op2) noexcept;
 // Debug check: a block was chained to while a delay slot was pending, which no chainable exit
@@ -124,14 +123,15 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 // Register cache (design/sh2-x64-performance.md, 2C item 4): R0-R15 and SR are kept in virtual
 // registers inside the block (rules in x64_emitter.cpp, "Guest register cache"). Memory holds
 // them, as RunBlock would have written them, whenever generated code calls a trampoline that runs
-// a callback (TrDiv1/TrMacW/TrMacL, which read only SR, get SR), returns or chains, and at every
+// a callback (TrMacW/TrMacL, which read only SR, get SR), returns or chains, and at every
 // CheckBoundary; between those points it may be behind. This relies on no callback writing
-// R0-R15, and on SR being written only by setSR (and by Div1Step; the cache reloads SR after
-// both). The read/write/refill callbacks reach MemRead/MemWrite, whose on-chip register and device
-// side effects change only peripheral and interrupt state (interrupt recomputation reads SR.ILevel,
-// so SR is stored before every call), except a watchdog reset (SH2::Reset writes R, SR and PC),
-// which flushes the executor and so stops the block at that callback (TrRead/TrWrite/TrRefill)
-// before any cached value is used or stored again.
+// R0-R15, and on SR being written only by setSR (the cache reloads SR after it) and by generated
+// code through the cache (Div1 is inline). The read/write/refill callbacks reach
+// MemRead/MemWrite, whose on-chip register and device side effects change only peripheral and
+// interrupt state (interrupt recomputation reads SR.ILevel, so SR is stored before every call),
+// except a watchdog reset (SH2::Reset writes R, SR and PC), which flushes the executor and so
+// stops the block at that callback (TrRead/TrWrite/TrRefill) before any cached value is used or
+// stored again.
 bool EmitBlock(asmjit::x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitContext &ctx,
                const X64LinkSlot *links, bool &selfValidating);
 

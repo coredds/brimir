@@ -136,10 +136,6 @@ void TrSetSR(X64Frame *f, uint32_t value, uint32_t delaySlot) noexcept {
     }
 }
 
-uint32_t TrDiv1(X64Frame *f, uint32_t rn, uint32_t rm, uint32_t rmIsRn) noexcept {
-    return Div1Step(rn, rm, rmIsRn != 0, *f->ctx->SR);
-}
-
 namespace {
 
 // RunBlock's MacW/MacL case.

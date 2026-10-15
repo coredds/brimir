@@ -27,8 +27,8 @@ namespace brimir::jit {
 // SetExternalInterrupt), SH2::SetupDelaySlot (false), AdvancePC in a delay slot, JitSetSR,
 // interrupt entry and Reset. intrAllow: the instruction handlers (ClearIntrAllow / SetIntrAllow),
 // JitSetSR (false), InterpretNext (not in a block) and Reset. The x64 backend's inline
-// SetupDelaySlot/EndDelaySlot store the same values. Div1/MacW/MacL (TrDiv1/TrMacW/TrMacL in x64)
-// are pure helpers on their operands, SR and MAC.
+// SetupDelaySlot/EndDelaySlot store the same values. Div1/MacW/MacL (inline Div1, TrMacW/TrMacL in
+// x64) are pure helpers on their operands, SR and MAC.
 
 namespace {
 

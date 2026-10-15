@@ -227,8 +227,8 @@ private:
     //     through interrupt recomputation, and the abort and exception paths must leave RunBlock's
     //     state). On the op's main path the store makes the slot clean; on a conditional path (an
     //     inline access's slow path) the slot stays dirty, so both paths agree at the join and a
-    //     later flush only stores the same value again. Div1/MacW/MacL read SR only (x64_backend.cpp):
-    //     only SR is stored before them.
+    //     later flush only stores the same value again. MacW/MacL read SR only (x64_backend.cpp): only
+    //     SR is stored before them.
     //   - Every exit stores the dirty slots: the final exits on the main path; a taken ExitIf on its
     //     own path, leaving the fall-through cache unchanged. CheckBoundary stores them on the main
     //     path before its test (write-back once per guest instruction), so its out-of-line stub has
@@ -237,7 +237,8 @@ private:
     //     (design/sh2-x64-performance.md, 2C progress, Task 4). The abort exit needs nothing: it
     //     is only reached right after a call, before which everything was stored.
     //   - Callbacks never write R0-R15 (x64_emitter.hpp, "Register cache"). SR is reloaded after
-    //     SetSR and Div1, whose helpers write it, and everything after EndDelaySlot.
+    //     SetSR, whose helper writes it, and everything after EndDelaySlot. Div1 is inline on the
+    //     cached SR: it reads it and sets it dirty, like SetT.
     //   - Guarded runs (LowerGuardRun) are the exception to the per-check write-back: inside a run
     //     the slots stay dirty, and only the out-of-line copy's checks can stop the block, each
     //     storing its own dirty set in its stub.
@@ -1042,6 +1043,70 @@ private:
         m_cc.set(cond, d.r8());
     }
 
+    // Div1Step (sh2_helpers.cpp) on the cached SR, branch-free: the ops and their order are its.
+    // With prev = (Rn << 1) | T and res = prev -/+ src (minus when Q == M), the new Q is
+    // (Rn >> 31) ^ cond, where cond is res <= prev (Q = M = 1), res < prev (Q = 1, M = 0),
+    // res >= prev (Q = 0, M = 1) or res > prev (Q = M = 0), that is
+    //   cond = (res < prev) ^ !Q ^ ((res == prev) & (Q == M)),
+    // since res < prev and res == prev are exclusive. T = (Q == M) with the new Q.
+    void LowerDiv1(const Inst &in) {
+        const x86::Gp sr = CachedGet(kSlotSR);
+        const x86::Gp d = Def(in.dst);
+        const x86::Gp prev = m_cc.new_gp32();
+        const x86::Gp q = m_cc.new_gp32();
+        const x86::Gp sum = m_cc.new_gp32();
+        const x86::Gp adds = m_cc.new_gp32();
+        const x86::Gp lt = m_cc.new_gp32();
+        const x86::Gp eq = m_cc.new_gp32();
+        const x86::Gp t = m_cc.new_gp32();
+        const x86::Gp newSr = m_cc.new_gp32();
+
+        m_cc.mov(t, sr);
+        m_cc.and_(t, 1);
+        m_cc.mov(prev, Use(in.a));
+        m_cc.add(prev, prev);
+        m_cc.or_(prev, t);
+        m_cc.mov(q, Use(in.a));
+        m_cc.shr(q, 31);
+        const x86::Gp &src = in.flag ? prev : Use(in.b); // the handler reads Rm after shifting Rn
+        m_cc.mov(sum, prev);
+        m_cc.add(sum, src);
+        m_cc.mov(d, prev);
+        m_cc.sub(d, src);
+        // Bit 0 of adds: Q != M, that is the step adds.
+        m_cc.mov(adds, sr);
+        m_cc.shr(adds, 1);
+        m_cc.xor_(adds, sr);
+        m_cc.shr(adds, 8);
+        m_cc.xor_(lt, lt); // before cmp: xor changes the flags
+        m_cc.xor_(eq, eq);
+        m_cc.test(adds, 1);
+        m_cc.cmovnz(d, sum);
+        m_cc.cmp(d, prev);
+        m_cc.setb(lt.r8());
+        m_cc.sete(eq.r8());
+        m_cc.xor_(adds, 1);
+        m_cc.and_(eq, adds);
+        m_cc.xor_(lt, eq);
+        m_cc.mov(t, sr);
+        m_cc.shr(t, 8);
+        m_cc.xor_(lt, t);
+        m_cc.xor_(lt, q);
+        m_cc.xor_(lt, 1);
+        m_cc.and_(lt, 1); // the new Q
+        m_cc.mov(t, sr);
+        m_cc.shr(t, 9);
+        m_cc.xor_(t, lt);
+        m_cc.xor_(t, 1);
+        m_cc.and_(t, 1); // the new T
+        m_cc.shl(lt, 8);
+        m_cc.mov(newSr, sr);
+        m_cc.and_(newSr, Imm32(~0x101u));
+        m_cc.or_(newSr, lt);
+        m_cc.or_(newSr, t);
+        CachedSet(kSlotSR, newSr);
+    }
+
     void Lower(const Inst &in) {
         switch (in.op) {
         case Op::Const: m_cc.mov(Def(in.dst), Imm32(in.imm)); break;
@@ -1260,14 +1325,7 @@ private:
             CheckStop();
             InvalidateRegs(true); // the callback wrote SR
             break;
-        case Op::Div1: {
-            // Div1Step reads and writes SR (M, Q, T) through ctx; it reads nothing else.
-            const x86::Gp d = Def(in.dst);
-            FlushRegs(true, true);
-            Call(&TrDiv1, {Use(in.a), Use(in.b), U32(in.flag ? 1 : 0)}, &d);
-            InvalidateRegs(true);
-            break;
-        }
+        case Op::Div1: LowerDiv1(in); break;
         // MacStep reads SR.S and MACH/MACL through ctx and writes only MACH/MACL.
         case Op::MacW:
             FlushRegs(true, true);
