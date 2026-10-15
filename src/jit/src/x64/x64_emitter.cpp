@@ -123,7 +123,9 @@ public:
         , m_bus(bus)
         , m_inlineBus(CanInlineBus(bus))
         , m_links(links)
-        , m_values(block.numValues) {
+        , m_values(block.numValues)
+        , m_isConst(block.numValues, false)
+        , m_constValue(block.numValues, 0) {
         // The block's code in host memory, if it is all on array pages now.
         const bool onArrays =
             m_inlineBus && !block.guestOpcodes.empty() &&
@@ -652,10 +654,88 @@ private:
         return offset;
     }
 
+    // ---- Constant addresses (design/sh2-jit-m2d.md, B2) ----
+    //
+    // A memory op whose address operand is an Op::Const in this block (PC-relative loads, literal
+    // addresses) has its partition and page known at compile time. What can change on that page
+    // before the code runs: its array pointer and writable flag (a remap: MapArray, MapNormal,
+    // Unmap) and its cycle fields (SetAccessCycles, also called when the bus timing option is
+    // switched, and cleared to 1 by every remap). So:
+    //   - a Load/Store on a page that holds an array now compares the page entry's array (and, for
+    //     a store, writable) with the compile-time values; equal: it accesses the compile-time host
+    //     address directly; different: it falls back to the dynamic path, which looks the page up;
+    //   - access cycles take the partition's cost at compile time (1 or 4), and read a bus page's
+    //     cycle field from the compile-time entry at run time, so they are always current;
+    //   - the bus-wait test reads the entry's array field, as the dynamic path does.
+    // The page entries are the bus's own table, whose address is fixed for the bus's lifetime, as in
+    // EmitPageCheck.
+    struct ConstPage {
+        const uint8_t *entry;
+        const uint8_t *array;
+        bool writable;
+        uint32_t offset; // of the size-aligned address inside the page
+    };
+
+    bool ConstAddress(ValueId id, uint32_t &address) const {
+        if (id == kNoValue || !m_isConst[id]) {
+            return false;
+        }
+        address = m_constValue[id];
+        return true;
+    }
+
+    // The page of a constant address in a bus partition (0b000/0b001/0b101) that holds an array now.
+    bool ResolveConstPage(const Inst &in, ConstPage &page) const {
+        uint32_t address = 0;
+        if (!m_inlineBus || !ConstAddress(in.a, address) || ((kBusPartitions >> (address >> 29)) & 1u) == 0) {
+            return false;
+        }
+        const uint32_t aligned = address & ~(in.size - 1u);
+        page.entry = brimir::jit::PageEntry(m_bus, aligned);
+        std::memcpy(&page.array, page.entry + m_bus.arrayOffset, sizeof(page.array));
+        if (page.array == nullptr) {
+            return false;
+        }
+        std::memcpy(&page.writable, page.entry + m_bus.arrayWritableOffset, sizeof(page.writable));
+        page.offset = aligned & ((1u << m_bus.pageShift) - 1);
+        return true;
+    }
+
+    // Jumps to `fallback` unless the page entry's array still equals the compile-time array; returns
+    // the compile-time array in a register and the entry's address in `entry`.
+    x86::Gp ConstPageCheck(const ConstPage &page, const Label &fallback, x86::Gp &entry) {
+        entry = m_cc.new_gp64();
+        const x86::Gp array = m_cc.new_gp64();
+        m_cc.mov(entry, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(page.entry)));
+        m_cc.mov(array, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(page.array)));
+        m_cc.cmp(x86::qword_ptr(entry, static_cast<int32_t>(m_bus.arrayOffset)), array);
+        m_cc.jne(fallback);
+        return array;
+    }
+
     void LowerLoad(const Inst &in) {
         const x86::Gp d = Def(in.dst);
         const Label slow = m_cc.new_label();
         const Label done = m_cc.new_label();
+        if (ConstPage page{}; ResolveConstPage(in, page)) {
+            const Label dynamic = m_cc.new_label();
+            x86::Gp entry;
+            const x86::Gp array = ConstPageCheck(page, dynamic, entry);
+            const auto offset = static_cast<int32_t>(page.offset);
+            switch (in.size) {
+            case 1: m_cc.movzx(d, x86::byte_ptr(array, offset)); break;
+            case 2:
+                m_cc.movzx(d, x86::word_ptr(array, offset));
+                m_cc.rol(d.r16(), 8);
+                break;
+            default:
+                m_cc.mov(d, x86::dword_ptr(array, offset));
+                m_cc.bswap(d);
+                break;
+            }
+            m_cc.jmp(done);
+            m_cc.bind(dynamic);
+        }
         if (m_inlineBus) {
             const x86::Gp &address = Use(in.a);
             JumpUnlessPartition(address, kBusPartitions, slow);
@@ -715,6 +795,41 @@ private:
     void LowerStore(const Inst &in) {
         const Label slow = m_cc.new_label();
         const Label done = m_cc.new_label();
+        if (ConstPage page{}; ResolveConstPage(in, page)) {
+            const Label dynamic = m_cc.new_label();
+            x86::Gp entry;
+            const x86::Gp array = ConstPageCheck(page, dynamic, entry);
+            // Bus::Write: an array page that is not writable drops the write.
+            m_cc.cmp(x86::byte_ptr(entry, static_cast<int32_t>(m_bus.arrayWritableOffset)), 0);
+            if (page.writable) {
+                m_cc.je(dynamic);
+                const auto offset = static_cast<int32_t>(page.offset);
+                if (m_trackDirty && m_ranges.Overlaps(page.array + page.offset, in.size)) {
+                    m_cc.mov(x86::byte_ptr(m_frame, kFrameCodeDirty), 1);
+                }
+                switch (in.size) {
+                case 1: m_cc.mov(x86::byte_ptr(array, offset), Use(in.b).r8()); break;
+                case 2: {
+                    x86::Gp t = m_cc.new_gp32();
+                    m_cc.mov(t, Use(in.b));
+                    m_cc.rol(t.r16(), 8);
+                    m_cc.mov(x86::word_ptr(array, offset), t.r16());
+                    break;
+                }
+                default: {
+                    x86::Gp t = m_cc.new_gp32();
+                    m_cc.mov(t, Use(in.b));
+                    m_cc.bswap(t);
+                    m_cc.mov(x86::dword_ptr(array, offset), t);
+                    break;
+                }
+                }
+            } else {
+                m_cc.jne(dynamic); // became writable: the dynamic path stores
+            }
+            m_cc.jmp(done);
+            m_cc.bind(dynamic);
+        }
         if (m_inlineBus) {
             const x86::Gp &address = Use(in.a);
             JumpUnlessPartition(address, kBusPartitions, slow);
@@ -1003,6 +1118,25 @@ private:
             m_cc.add(m_cycles, c);
             return;
         }
+        const uint32_t field =
+            in.flag ? m_bus.writeCyclesOffset[SizeIndex(in.size)] : m_bus.readCyclesOffset[SizeIndex(in.size)];
+        if (uint32_t constAddress = 0; ConstAddress(in.a, constAddress)) {
+            // The partition is known: 0b001/0b101 take the page's cycle field (read now, it can
+            // change at run time), 0b111 is 4, the others 1.
+            switch (constAddress >> 29) {
+            case 0b001:
+            case 0b101: {
+                const x86::Gp entry = m_cc.new_gp64();
+                m_cc.mov(entry,
+                         static_cast<uint64_t>(reinterpret_cast<uintptr_t>(brimir::jit::PageEntry(m_bus, constAddress))));
+                m_cc.add(m_cycles, x86::qword_ptr(entry, static_cast<int32_t>(field)));
+                break;
+            }
+            case 0b111: m_cc.add(m_cycles, 4); break;
+            default: m_cc.add(m_cycles, 1); break;
+            }
+            return;
+        }
         // SH2::AccessCycles<T, write, emulateCache = false>, no call.
         const x86::Gp &address = Use(in.a);
         const Label notBus = m_cc.new_label();
@@ -1016,8 +1150,6 @@ private:
         m_cc.bt(mask, part);
         m_cc.jnc(notBus);
         const x86::Gp entry = PageEntry(address);
-        const uint32_t field =
-            in.flag ? m_bus.writeCyclesOffset[SizeIndex(in.size)] : m_bus.readCyclesOffset[SizeIndex(in.size)];
         m_cc.add(m_cycles, x86::qword_ptr(entry, static_cast<int32_t>(field)));
         m_cc.jmp(done);
         m_cc.bind(notBus);
@@ -1035,7 +1167,14 @@ private:
         const Label cont = m_cc.new_label();
         if (m_inlineBus) {
             // SH2Bus::IsBusWait is false on array pages (any partition).
-            const x86::Gp entry = PageEntry(Use(in.a));
+            x86::Gp entry;
+            if (uint32_t constAddress = 0; ConstAddress(in.a, constAddress)) {
+                entry = m_cc.new_gp64();
+                m_cc.mov(entry,
+                         static_cast<uint64_t>(reinterpret_cast<uintptr_t>(brimir::jit::PageEntry(m_bus, constAddress))));
+            } else {
+                entry = PageEntry(Use(in.a));
+            }
             m_cc.cmp(x86::qword_ptr(entry, static_cast<int32_t>(m_bus.arrayOffset)), 0);
             m_cc.jne(cont);
         }
@@ -1130,7 +1269,11 @@ private:
 
     void Lower(const Inst &in) {
         switch (in.op) {
-        case Op::Const: m_cc.mov(Def(in.dst), Imm32(in.imm)); break;
+        case Op::Const:
+            m_cc.mov(Def(in.dst), Imm32(in.imm));
+            m_isConst[in.dst] = true;
+            m_constValue[in.dst] = in.imm;
+            break;
         // R0-R15 and SR go through the register cache; the IR value is the slot's register.
         case Op::GetReg: m_values[in.dst] = CachedGet(in.imm); break;
         case Op::SetReg: CachedSet(in.imm, Use(in.a)); break;
@@ -1366,6 +1509,8 @@ private:
     bool m_inlineBus; // inline RAM/ROM accesses and access cycles (CanInlineBus)
     const X64LinkSlot *m_links; // the backend's link table (nullptr: never chain)
     std::vector<x86::Gp> m_values; // one 32-bit virtual register per IR value
+    std::vector<bool> m_isConst;   // the value is defined by Op::Const (constant addresses)
+    std::vector<uint32_t> m_constValue;
     std::vector<BoundaryStub> m_stubs;
     std::vector<SlowRun> m_slowRuns;          // guarded runs' out-of-line copies (EmitSlowRuns)
     bool m_guardPassed = false;               // lowering a guarded run's inline copy

@@ -2508,3 +2508,233 @@ TEST_CASE("x64 inline Div1 in a guarded run", "[jit][x64]") {
         }
     }
 }
+
+// ---- Constant addresses (2D B2): the block's page is resolved at compile time ----
+
+namespace {
+
+enum class ConstKind { Load, LoadFetch, Store, CyclesRead, CyclesWrite, BusWaitRead, BusWaitWrite, Count };
+
+// A block with one access at the constant `address`, between instructions that must not be disturbed.
+Block MakeConstAccessBlock(ConstKind kind, uint32_t address, uint8_t size) {
+    Block block;
+    block.startPC = kCode;
+    block.guestInstrCount = 1;
+    Builder b(block);
+    b.SetReg(1, b.Const(0x1111));
+    b.AddCycles(2);
+    b.SyncCycles();
+    const ValueId addr = b.Const(address);
+    switch (kind) {
+    case ConstKind::Load: b.SetReg(2, b.Load(addr, size, false)); break;
+    case ConstKind::LoadFetch: b.SetReg(2, b.Load(addr, size, true)); break;
+    case ConstKind::Store: b.Store(addr, size, b.Const(0xA1B2C3D4u ^ address)); break;
+    case ConstKind::CyclesRead: b.AddAccessCycles(addr, size, false); break;
+    case ConstKind::CyclesWrite: b.AddAccessCycles(addr, size, true); break;
+    case ConstKind::BusWaitRead: b.ExitIfBusWait(addr, size, false, kCode, 0); break;
+    case ConstKind::BusWaitWrite: b.ExitIfBusWait(addr, size, true, kCode, 0); break;
+    case ConstKind::Count: break;
+    }
+    b.SetReg(3, b.Const(0x3333));
+    b.AddCycles(1);
+    b.Exit(kCode + 2, 1);
+    REQUIRE(brimir::jit::VerifyBlock(block).empty());
+    return block;
+}
+
+// Maps the rig's MMIO handlers on [start, end] (a RAM page turned into a handler page).
+void MapMmioHandlers(Rig &rig, uint32_t start, uint32_t end) {
+    rig.bus.MapNormal(
+        start, end, &rig.mmio,
+        [](uint32_t address, void *ctx) -> uint8_t {
+            auto &m = *static_cast<sh2test::Mmio *>(ctx);
+            const uint8_t value = m.data[address & 0xFFFF];
+            m.log.push_back({'R', 1, address, value});
+            return value;
+        },
+        [](uint32_t address, void *ctx) -> uint16_t {
+            auto &m = *static_cast<sh2test::Mmio *>(ctx);
+            const uint16_t value = static_cast<uint16_t>((m.data[address & 0xFFFE] << 8) | m.data[(address & 0xFFFE) + 1]);
+            m.log.push_back({'R', 2, address, value});
+            return value;
+        },
+        [](uint32_t address, void *ctx) -> uint32_t {
+            auto &m = *static_cast<sh2test::Mmio *>(ctx);
+            const uint8_t *p = &m.data[address & 0xFFFC];
+            const uint32_t value = (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) | p[3];
+            m.log.push_back({'R', 4, address, value});
+            return value;
+        },
+        [](uint32_t address, uint8_t value, void *ctx) {
+            auto &m = *static_cast<sh2test::Mmio *>(ctx);
+            m.data[address & 0xFFFF] = value;
+            m.log.push_back({'W', 1, address, value});
+        },
+        [](uint32_t address, uint16_t value, void *ctx) {
+            auto &m = *static_cast<sh2test::Mmio *>(ctx);
+            m.data[address & 0xFFFE] = static_cast<uint8_t>(value >> 8);
+            m.data[(address & 0xFFFE) + 1] = static_cast<uint8_t>(value);
+            m.log.push_back({'W', 2, address, value});
+        },
+        [](uint32_t address, uint32_t value, void *ctx) {
+            auto &m = *static_cast<sh2test::Mmio *>(ctx);
+            uint8_t *p = &m.data[address & 0xFFFC];
+            p[0] = static_cast<uint8_t>(value >> 24);
+            p[1] = static_cast<uint8_t>(value >> 16);
+            p[2] = static_cast<uint8_t>(value >> 8);
+            p[3] = static_cast<uint8_t>(value);
+            m.log.push_back({'W', 4, address, value});
+        },
+        [](uint32_t address, uint32_t size, bool, void *ctx) -> bool {
+            auto &m = *static_cast<sh2test::Mmio *>(ctx);
+            m.log.push_back({'B', static_cast<uint8_t>(size), address, 0});
+            return false;
+        });
+}
+
+} // namespace
+
+TEST_CASE("x64 constant-address fast path matches the dynamic path", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    auto irRig = std::make_unique<Rig>();
+    auto x64Rig = std::make_unique<Rig>();
+    auto irRom = std::make_unique<sh2test::FastRom>();
+    auto x64Rom = std::make_unique<sh2test::FastRom>();
+    sh2test::MapFastPathTestPages(*irRig, *irRom);
+    sh2test::MapFastPathTestPages(*x64Rig, *x64Rom);
+    const sh2test::FastRom romBefore = *irRom;
+    for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+        for (uint32_t i = 0; i < 0x40; ++i) {
+            rig->Write32(sh2test::kFastRamOffset - 0x80 + i * 4, 0x01020304u * (i + 1) ^ 0xA5C3E1F7u);
+        }
+        for (uint32_t i = 0; i < 0x100; ++i) {
+            rig->mmio.data[(sh2test::kFastMmioOffset + i - 0x80) & 0xFFFF] = static_cast<uint8_t>(i * 13 + 7);
+        }
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+
+    uint32_t runs = 0;
+    for (const uint32_t address : sh2test::FastPathTestAddresses()) {
+        for (const uint8_t size : {uint8_t{1}, uint8_t{2}, uint8_t{4}}) {
+            for (int k = 0; k < static_cast<int>(ConstKind::Count); ++k) {
+                const Block block = MakeConstAccessBlock(static_cast<ConstKind>(k), address, size);
+                for (const uint32_t busWaitEvery : {0u, 1u}) {
+                    INFO("address 0x" << std::hex << address << std::dec << " size " << int{size} << " kind " << k
+                                      << " busWaitEvery " << busWaitEvery);
+                    auto state = irRig->BaseState(kCode);
+                    state.R[2] = 0xDEADBEEF;
+                    for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+                        rig->Load(state);
+                        rig->mmio.busWaitEvery = busWaitEvery;
+                        rig->mmio.busWaitQueries = 0;
+                        rig->mmio.log.clear();
+                    }
+                    ymir::sh2::SH2JitContext x64Ctx = x64Rig->sh2->GetJitContext();
+                    NativeCode code;
+                    REQUIRE(backend->Compile(block, x64Ctx, code));
+                    const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext());
+                    const ExitInfo x64 = backend->Run(code, x64Ctx, kNoCycleTarget);
+                    RequireSameOutcome(ir, x64, *irRig, *x64Rig, true);
+                    REQUIRE(*irRom == romBefore);
+                    REQUIRE(*x64Rom == romBefore);
+                    if (++runs % 512 == 0) {
+                        backend->Reset();
+                    }
+                }
+            }
+        }
+    }
+    CHECK(runs == 128u * 3u * 7u * 2u);
+}
+
+// Compiled against one mapping, run against another: the compile-time page must not be used.
+TEST_CASE("x64 constant-address access follows a page remapped after compile", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    enum class Remap { None, RamToRom, RamToRam, RamToMmio, RamToUnmapped, CyclesChanged, RomToRam, RamReadOnly, RomWritable, Count };
+    constexpr uint32_t kPageStart = 0x06000000; // the 64 KiB page of kFastRamOffset
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    uint32_t runs = 0;
+    // Partition 0b000 (cached) and the cache-through mirrors of the page.
+    for (const uint32_t partition : {0u, 1u, 5u}) {
+        for (int r = 0; r < static_cast<int>(Remap::Count); ++r) {
+            const auto remap = static_cast<Remap>(r);
+            for (const uint8_t size : {uint8_t{1}, uint8_t{2}, uint8_t{4}}) {
+                for (int k = 0; k < static_cast<int>(ConstKind::Count); ++k) {
+                    const auto kind = static_cast<ConstKind>(k);
+                    // RomToRam compiles against the ROM page (a read-only array) at 0x4000000.
+                    const uint32_t address =
+                        (partition << 29) | (remap == Remap::RomToRam || remap == Remap::RomWritable ? sh2test::kFastRomOffset : sh2test::kFastRamOffset);
+                    const Block block = MakeConstAccessBlock(kind, address, size);
+                    INFO("partition " << partition << " remap " << r << " size " << int{size} << " kind " << k);
+
+                    auto irRig = std::make_unique<Rig>();
+                    auto x64Rig = std::make_unique<Rig>();
+                    auto irRom = std::make_unique<sh2test::FastRom>();
+                    auto x64Rom = std::make_unique<sh2test::FastRom>();
+                    sh2test::MapFastPathTestPages(*irRig, *irRom);
+                    sh2test::MapFastPathTestPages(*x64Rig, *x64Rom);
+                    auto irOther = std::make_unique<std::array<uint8_t, 0x10000>>();
+                    auto x64Other = std::make_unique<std::array<uint8_t, 0x10000>>();
+                    for (size_t i = 0; i < irOther->size(); ++i) {
+                        (*irOther)[i] = (*x64Other)[i] = static_cast<uint8_t>(i * 91 + 3);
+                    }
+                    for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+                        for (uint32_t i = 0; i < 0x40; ++i) {
+                            rig->Write32(sh2test::kFastRamOffset - 0x80 + i * 4, 0x01020304u * (i + 1) ^ 0xA5C3E1F7u);
+                        }
+                        for (uint32_t i = 0; i < 0x100; ++i) {
+                            rig->mmio.data[(sh2test::kFastRamOffset + i - 0x80) & 0xFFFF] = static_cast<uint8_t>(i * 13 + 7);
+                            rig->mmio.data[(sh2test::kFastRomOffset + i - 0x80) & 0xFFFF] = static_cast<uint8_t>(i * 13 + 7);
+                        }
+                    }
+                    ymir::sh2::SH2JitContext x64Ctx = x64Rig->sh2->GetJitContext();
+                    NativeCode code;
+                    REQUIRE(backend->Compile(block, x64Ctx, code));
+
+                    const auto apply = [&](Rig &rig, std::array<uint8_t, 0x10000> &other, sh2test::FastRom &rom) {
+                        switch (remap) {
+                        case Remap::None: break;
+                        case Remap::RamToRom: rig.bus.MapArray(kPageStart, kPageStart + 0xFFFF, rom, false); break;
+                        case Remap::RamToRam: rig.bus.MapArray(kPageStart, kPageStart + 0xFFFF, other, true); break;
+                        case Remap::RamToMmio: MapMmioHandlers(rig, kPageStart, kPageStart + 0xFFFF); break;
+                        case Remap::RamToUnmapped: rig.bus.Unmap(kPageStart, kPageStart + 0xFFFF); break;
+                        case Remap::CyclesChanged:
+                            rig.bus.SetAccessCycles(kPageStart, kPageStart + 0xFFFF, 11, 12, 13, 14, 15, 16);
+                            break;
+                        case Remap::RomToRam: rig.bus.MapArray(0x4000000, 0x400FFFF, other, true); break;
+                        // The same array, only writable changes.
+                        case Remap::RamReadOnly: rig.bus.MapArray(kPageStart, kPageStart + 0xFFFF, *rig.ram, false); break;
+                        case Remap::RomWritable: rig.bus.MapArray(0x4000000, 0x400FFFF, rom, true); break;
+                        case Remap::Count: break;
+                        }
+                    };
+                    apply(*irRig, *irOther, *irRom);
+                    apply(*x64Rig, *x64Other, *x64Rom);
+
+                    auto state = irRig->BaseState(kCode);
+                    state.R[2] = 0xDEADBEEF;
+                    for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+                        rig->Load(state);
+                        rig->mmio.busWaitEvery = 0;
+                        rig->mmio.log.clear();
+                    }
+                    const ExitInfo ir = brimir::jit::RunBlock(block, irRig->sh2->GetJitContext());
+                    const ExitInfo x64 = backend->Run(code, x64Ctx, kNoCycleTarget);
+                    RequireSameOutcome(ir, x64, *irRig, *x64Rig, true);
+                    REQUIRE(*irOther == *x64Other);
+                    REQUIRE(*irRom == *x64Rom);
+                    if (++runs % 256 == 0) {
+                        backend->Reset();
+                    }
+                }
+            }
+        }
+    }
+    CHECK(runs == 3u * static_cast<uint32_t>(Remap::Count) * 3u * 7u);
+}
