@@ -549,9 +549,56 @@ Measured at the end of each milestone 2D task (`design/plans/2026-10-15-sh2-jit-
 | 5: compile-time page resolution (B2) | Street Fighter Zero 3 | 6.316 (6.316 / 6.350 / 6.101) | 6.506 (6.506 / 6.587 / 6.420) | 0.971 | 32.2 | 14.3 | 0 / 0 |
 | 5: compile-time page resolution (B2) | Burning Rangers | 8.793 (8.793 / 8.802 / 8.750) | 8.832 (8.832 / 8.788 / 8.894) | 0.996 | 16.7 | 17.1 | 0 / 0 |
 | 5: compile-time page resolution (B2) | Virtua Fighter 2 | 6.279 (6.417 / 6.279 / 6.277) | 5.015 (5.015 / 4.976 / 5.047) | 1.252 | 10.8 | 12.8 | 0 / 0 |
+| 6: native compile threshold 16 (B5) | Panzer Dragoon II Zwei | 6.982 (6.982 / 7.046 / 6.856) | 6.389 (6.466 / 6.389 / 6.233) | 1.093 | 14.1 | 19.4 | 0 / 0 |
+| 6: native compile threshold 16 (B5) | Street Fighter Zero 3 | 6.595 (6.595 / 6.776 / 6.105) | 6.526 (7.089 / 6.526 / 6.364) | 1.011 | 27.8 | 15.2 | 0 / 0 |
+| 6: native compile threshold 16 (B5) | Burning Rangers | 8.600 (8.609 / 8.600 / 8.575) | 8.734 (8.734 / 8.772 / 8.663) | 0.985 | 16.9 | 16.3 | 0 / 0 |
+| 6: native compile threshold 16 (B5) | Virtua Fighter 2 | 6.261 (6.261 / 6.269 / 6.248) | 4.957 (5.026 / 4.957 / 4.854) | 1.263 | 10.9 | 12.5 | 0 / 0 |
 
 Task 2 notes (2026-10-15, interpreter and x64 back to back, no IR runs): every ratio rose by 0.02-0.04 and every x64 median fell by 0.6-1.4% (PD2 4.369 to 4.307, SFZ3 4.924 to 4.880, BR 6.422 to 6.353, VF2 3.525 to 3.493), about the size of the run-to-run spread within a session (x64 up to 0.03 ms; the interpreter up to 0.16 ms on SFZ3), so the gain is small. `nativeBlocksRun` matches the baseline (same code measured). Rule 5 guards only the checks before a block's first Load or Store (after one, every known refill may call back and the next check is a full test, rule 2), which limits it. Cost, BIOS lockstep 1200 (x64, master): 2923 native bytes per block against 2825 with rule 5 disabled (+3.5%), native compile 529.8 ms against 448.7 ms (+18%, each run once).
 
 Task 3 notes (2026-10-15, interpreter and x64 back to back, no IR runs): Burning Rangers, the title with 44.8M `Div1` trampoline calls per 1,800 frames, fell from 6.353 to 6.217 ms (-2.1%; its three runs span 0.019 ms; ratio 1.020 to 1.038). Virtua Fighter 2 fell from 3.493 to 3.453 (-1.1%) and Street Fighter Zero 3 (8.2M calls) is unchanged within spread (4.880 to 4.875). Panzer Dragoon II Zwei read 4.307 to 4.370 (+1.5%) with its three runs spanning 0.098 ms (4.272-4.379) against 0.015 ms in Task 2; it runs `Div1` only 0.5M times per 1,800 frames, so this is session noise, not the change. `nativeBlocksRun` matches the baseline. Cost, BIOS lockstep 1200 (x64, master): 2983 native bytes per block against 2923 (+2.1%). The step is branch-free (`LowerDiv1`, about 40 instructions) and needs no SR store, call or reload around it.
 
 Task 5 notes (2026-10-15): the machine was about 40% slower than in Tasks 1-4 for this session (the interpreter reads PD2 6.836 ms against 4.9-5.0 before; background load, not the change), so the Task 5 rows are not comparable in absolute terms with the earlier rows; the interpreter and x64 columns of one row are back to back. To isolate the change, x64 was also run from the Task 4 build (`base`) and the Task 5 build (`new`) interleaved, three runs per title in that session (SH2 total, ms, median with the three runs): PD2 6.334 (6.325-6.366) to 6.344 (6.334-6.381), SFZ3 6.953 (6.941-7.017) to 6.816 (6.801-6.885, -2.0%), BR 9.058 (9.037-9.312) to 9.050 (9.010-9.138), VF2 5.138 (5.087-5.212) to 5.083 (5.067-5.092, -1.1%). The gain is small: only SFZ3 moves beyond the run-to-run spread, PD2 and BR are unchanged. Native code is smaller (`nativeBytesPerBlock` master / slave: PD2 3223 / 1504 to 3205 / 1499, SFZ3 2985 / 5019 to 2964 / 5017, BR 3016 / 1965 to 3000 / 1932, VF2 2681 / 2835 to 2661 / 2803), BIOS lockstep 1200 reads 3041 bytes per block. A literal-pool load or store at a constant address keeps its page's array check (one compare and branch per access) but no longer computes the page index, tests the partition or reads the array pointer, and its access cycles cost one add of the page's cycle field (partition 0b001/0b101) or an immediate.
+
+## 2D B5
+
+Native compile threshold (`kNativeCompileThreshold`, the run on which a block is compiled natively), measured at 8 (the 2C value), 16 and 32 with three temporary builds of `build-bench` (same options, only the constant changed; the executables were copied aside and run interleaved in one session, 2026-10-15). Panzer Dragoon II Zwei (US BIOS) and Street Fighter Zero 3 (JP BIOS): `--warmup 2400 --frames 1800`, x64, three rounds; each round ran one interpreter run, then N = 8, 16, 32 for each title (SFZ3 first). Burning Rangers (US): one `--warmup 2400 --frames 33600` x64 run per value (rounds 1, 2, 3 respectively, after that round's short runs) and one interpreter run (round 1). Scratch system dir as in the method above. All 28 runs exited 0 and every x64 run reported `compileFallbacks 0` on both CPUs.
+
+**Load.** Checked before and between batches: CPU load 7-10%; the heaviest processes were the usual desktop applications (Spotify, qBittorrent, Slack, OneDrive idle). No other heavy process. The session was still slow compared with the 2D baseline (interpreter SFZ3 6.1-6.8 ms against 4.55; PD2 6.9-7.0 against 4.9) and drifted downwards within it: every value's SFZ3 total fell from round 1 to round 3 (about 7.0, 6.6, 6.35), so only the interleaved comparison within a round is meaningful.
+
+SH2 total ms/frame (median of three, runs in parentheses) and max frame ms (three runs; the median run's in bold):
+
+| Title | Value | SH2 total ms | mean | max frame ms | master native compiles since boot | native compiles in window |
+|---|---|---|---|---|---|---|
+| Street Fighter Zero 3 | interpreter | 6.595 (6.595 / 6.776 / 6.105) | 6.492 | 13.6 / 15.2 / 12.8 | - | - |
+| | N = 8 | 6.581 (7.066 / 6.581 / 6.323) | 6.657 | 31.9 / **30.9** / 31.5 | 19,434 | 7,183 |
+| | N = 16 | **6.526** (7.089 / 6.526 / 6.364) | 6.660 | 31.0 / **27.8** / 25.8 | 16,807 | 6,333 |
+| | N = 32 | 6.675 (6.863 / 6.675 / 6.389) | 6.642 | 43.3 / **33.7** / 39.0 | 13,671 | 5,155 |
+| Panzer Dragoon II Zwei | interpreter | 6.982 (6.982 / 7.046 / 6.856) | 6.961 | 11.6 / 19.4 / 11.3 | - | - |
+| | N = 8 | **6.332** (6.587 / 6.332 / 6.288) | 6.402 | 15.5 / **11.9** / 11.7 | 10,671 | 598 |
+| | N = 16 | 6.389 (6.466 / 6.389 / 6.233) | 6.363 | 14.7 / **14.1** / 11.2 | 9,144 | 660 |
+| | N = 32 | 6.426 (6.427 / 6.426 / 6.293) | 6.382 | 12.9 / **13.8** / 11.7 | 7,824 | 583 |
+
+Burning Rangers, `--frames 33600`, one run each (x64 runs in rounds 1, 2, 3 for N = 8, 16, 32; the interpreter in round 1):
+
+| Value | SH2 total ms | avg frame ms | p95 | p99 | max frame ms | compile time in window (both CPUs) | master native compiles since boot | code-cap flushes since boot (master / slave) | wall time |
+|---|---|---|---|---|---|---|---|---|---|
+| interpreter | 8.280 | 12.619 | 15.7 | 18.0 | 20.7 | - | - | - | 451 s |
+| N = 8 | 14.398 | 19.202 | 58.4 | 100.3 | 203.2 | 196.2 s (5.84 ms/frame) | 315,957 | 11 / 10 | 675 s |
+| N = 16 | 11.178 | 16.039 | 35.1 | 54.4 | 211.6 | 86.2 s (2.57 ms/frame) | 127,856 | 4 / 3 | 568 s |
+| N = 32 | 9.232 | 13.977 | 24.8 | 33.1 | 79.6 | 34.8 s (1.03 ms/frame) | 36,478 | 0 / 0 | 498 s |
+
+### Decision (the 2C rule)
+
+1. Average SH-2 time within 2% of the best, per title, on the medians of the table: SFZ3 best is N = 16 (6.526); N = 8 is +0.8%, N = 32 +2.3% (outside). PD2 best is N = 8 (6.332); N = 16 is +0.9%, N = 32 +1.5%. On the means of the three runs all three values are within 0.3% (SFZ3) and 0.6% (PD2) of the best, so N = 32 is eligible by that reading; the choice below is the same either way. SFZ3's total drifted by 7-10% over the three rounds of every value, so the totals do not separate the values.
+2. Best SFZ3 max frame among the eligible values: N = 16 (31.0 / 27.8 / 25.8 ms, median run 27.8) against N = 8 (31.9 / 30.9 / 31.5) and N = 32 (43.3 / 33.7 / 39.0). Round by round N = 16 is at or below N = 8 (31.0 vs 31.9, 27.8 vs 30.9, 25.8 vs 31.5).
+3. Tie-breaker (Burning Rangers long-run max frame) is not needed. For the record: N = 16 against N = 8 is 211.6 vs 203.2 ms (same, a single run), with a lower SH2 total (11.178 vs 14.398).
+
+**Chosen value: 16.** (Was 8.)
+
+### Notes
+
+- Panzer Dragoon II Zwei is unaffected by N (totals within 1.5%, max frame within run-to-run noise: it has no compile bursts in its window, 187 builds). It compiles 14% fewer blocks natively at 16 than at 8 (9,144 vs 10,671 since boot).
+- N = 32 on SFZ3 reaches the IR cap: more blocks stay IR-only (the window builds 15,793 blocks against 10,686 at 8 and 16, as evicted IR-only blocks are rebuilt) and the master's IR-only instructions hit `kMaxCachedInsts` once (`irEvictions 1`, 14,470 blocks evicted; its slowest frame, 43.3 ms in frame 2479, is that eviction plus 472 builds). That, not the compile time, is why N = 32's SFZ3 max frame is the worst.
+- Burning Rangers is dominated by code that changes constantly (about 884k master and 1.1M slave invalidations in 36,000 frames at every N, so about 25-31 invalidations per frame per CPU): every rewrite sends the PC back to IR and a new threshold count. The threshold directly sets how many of those rewrites reach a native compile (master 316k, 128k, 36k native compiles for N = 8, 16, 32) and so the compile time per frame (5.8, 2.6, 1.0 ms), the code-cap flushes (21, 7, 0 over both CPUs) and the compile bursts (slowest frames 203 / 212 / 80 ms; the interpreter's max is 20.7). N = 32 would roughly match the interpreter on SH2 total there (9.2 vs 8.3 ms) but is ruled out by SFZ3 (worse max frame, the IR-cap eviction). No value gets this title near the spike condition of the design (section 3: x64 max within 10% of the interpreter's max); a lower per-rewrite cost needs per-PC damping (design A3) or a cheaper compile path rather than a different global N.
+- Task 6 row of the "2D progress" table is measured with N = 16 (the interpreter and N = 16 runs of this session; Burning Rangers and Virtua Fighter 2 in a following batch of the same session, interpreter and x64 back to back, three rounds). The session is about 30-40% slower than the Task 1-4 rows, so only the ratios are comparable: they are within noise of Task 5's (PD2 1.082 to 1.093, SFZ3 0.971 to 1.011, BR 0.996 to 0.985, VF2 1.252 to 1.263).

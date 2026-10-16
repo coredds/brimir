@@ -29,9 +29,10 @@ constexpr size_t kMaxNativeCodeBytes = size_t{128} << 20;
 
 // A block is built as IR and run with RunBlock first; its Nth run (counting the one right after it
 // was built) compiles it natively and runs the native code. 1: compile on the first run. Chosen
-// from 1, 2, 4 and 8 on Street Fighter Zero 3 and Panzer Dragoon II Zwei (best max frame within 2%
-// of the best average SH-2 time; design/sh2-x64-performance.md, 2C progress, Task 5).
-constexpr uint32_t kNativeCompileThreshold = 8;
+// from 1, 2, 4 and 8 (2C) and again from 8, 16 and 32 (2D) on Street Fighter Zero 3 and Panzer
+// Dragoon II Zwei (best SFZ3 max frame within 2% of the best average SH-2 time;
+// design/sh2-x64-performance.md, 2C progress Task 5 and 2D B5).
+constexpr uint32_t kNativeCompileThreshold = 16;
 
 // Entries in the recent-lookup table, indexed by (pc >> 1) & (kRecentSlots - 1).
 constexpr size_t kRecentSlots = 4096;
