@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact (plan 2B); optimized in plan 2C to about the interpreter's speed (interpreter / x64 SH-2 time 0.91–1.25 on six games), so the 2x target is still missed and the JIT stays off by default (see [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2C results")
+**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact (plan 2B); optimized in plan 2C to about the interpreter's speed (interpreter / x64 SH-2 time 0.91-1.25 on six games); milestone 2D track B (per-instruction cost) raised that to 0.97-1.31, still below the 1.5 default-on bar, and a long Burning Rangers session runs at 0.74 of the interpreter's SH-2 speed, so the JIT stays off by default and track A (long sessions) is next (see [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2D track B results", and [sh2-jit-m2d.md](sh2-jit-m2d.md))
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
