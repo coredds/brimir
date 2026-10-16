@@ -80,7 +80,7 @@ without returning to the executor; `nativeBlocksRun / (nativeBlocksRun -
 chainedBlocks)` is the average chain length). A `cache` line per CPU adds the
 block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
 (blocks compiled natively: with a native backend a block runs on the IR
-interpreter until its 8th run, `kNativeCompileThreshold`), `compileMs` (host
+interpreter until its 16th run, `kNativeCompileThreshold`), `compileMs` (host
 time building blocks and compiling them natively), `nativeBytesPerBlock`,
 `invalidations`, `cachedInsts` (IR instructions of IR-only blocks, against the
 IR cap), `irEvictions` (times the IR cap evicted the IR-only blocks, and how
