@@ -150,6 +150,11 @@ public:
         return m_selfValidating;
     }
 
+    // The emitted code must not be used (a guarded run's copies disagreed on the cache state).
+    bool Failed() const {
+        return m_failed;
+    }
+
     void Emit() {
         FuncNode *func = m_cc.add_func(FuncSignature::build<const void *, X64Frame *>());
         m_frame = m_cc.new_gp_ptr("frame");
@@ -429,7 +434,12 @@ private:
             for (uint32_t slot = 0; slot < kSlots; ++slot) {
                 const CachedSlot &have = m_cache[slot];
                 const CachedSlot &want = run.exitCache[slot];
-                assert(have.valid == want.valid && have.dirty == want.dirty && "guarded copies disagree");
+                if (have.valid != want.valid || have.dirty != want.dirty) {
+                    // Unreachable by construction; in release the block must not be emitted (it
+                    // would write registers wrongly), so EmitBlock fails and the IR backend runs it.
+                    m_failed = true;
+                    return;
+                }
                 if (want.valid && have.value.id() != want.value.id()) {
                     m_cc.mov(want.value, have.value);
                 }
@@ -806,6 +816,7 @@ private:
                 const auto offset = static_cast<int32_t>(page.offset);
                 if (m_trackDirty && m_ranges.Overlaps(page.array + page.offset, in.size)) {
                     m_cc.mov(x86::byte_ptr(m_frame, kFrameCodeDirty), 1);
+                    m_mayBeDirty = true;
                 }
                 switch (in.size) {
                 case 1: m_cc.mov(x86::byte_ptr(array, offset), Use(in.b).r8()); break;
@@ -1515,6 +1526,7 @@ private:
     std::vector<SlowRun> m_slowRuns;          // guarded runs' out-of-line copies (EmitSlowRuns)
     bool m_guardPassed = false;               // lowering a guarded run's inline copy
     bool m_guardFailed = false;               // lowering a guarded run's out-of-line copy
+    bool m_failed = false;                    // guarded copies disagreed: EmitBlock returns false
     std::array<CachedSlot, kSlots> m_cache{}; // R0-R15, SR (register cache rules above)
     x86::Gp m_frame;
     x86::Gp m_regs;   // ctx->R
@@ -1612,6 +1624,9 @@ bool EmitBlock(x86::Compiler &cc, const Block &block, const ymir::sh2::SH2JitCon
     }
     Emitter emitter(cc, block, off, ctx.bus, links);
     emitter.Emit();
+    if (emitter.Failed()) {
+        return false;
+    }
     selfValidating = emitter.SelfValidating();
     return true;
 }
