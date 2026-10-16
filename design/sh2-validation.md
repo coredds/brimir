@@ -243,7 +243,7 @@ The counts equal the 2C IR table. The same seven runs on the x64 backend with 1,
 
 ### Tests
 
-`build\bin\brimir_tests.exe "[jit]"` on the x64 backend and with `BRIMIR_JIT_BACKEND=ir`: all passed (161 test cases, 1,688,176 assertions each). `ctest --test-dir build` (the x64 suite and the `brimir_tests_jit_ir` run): 100% passed. CI on the validated commit (GitHub Actions run 38852417861: 	est-windows, 	est-linux-x64 and uild-macos-arm64) is green.
+`build\bin\brimir_tests.exe "[jit]"` on the x64 backend and with `BRIMIR_JIT_BACKEND=ir`: all passed (161 test cases, 1,688,176 assertions each). `ctest --test-dir build` (the x64 suite and the `brimir_tests_jit_ir` run): 100% passed. CI on the validated commit (GitHub Actions run 38852417861: `test-windows`, `test-linux-x64` and `build-macos-arm64`) is green.
 
 ### ARM check (Raspberry Pi 3, aarch64 Linux)
 
