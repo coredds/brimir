@@ -35,6 +35,7 @@ public:
                  const bool *abortRequested = nullptr, bool allowChain = false) override;
     void Publish(uint32_t pc, const NativeCode &code) override;
     void Unpublish(uint32_t pc) override;
+    void Release(uint32_t pc, const NativeCode &code) override;
     void Reset() override;
     size_t CodeBytes() const override {
         return m_codeBytes;

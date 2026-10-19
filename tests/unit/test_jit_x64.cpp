@@ -277,23 +277,83 @@ TEST_CASE("x64 backend: peak and stale native bytes are counted", "[jit][x64]") 
 
     // One opcode changes. This block validates itself in its prologue, so Get does not look at its
     // guest code; the executor drops it when the prologue reports stale (done here by hand). It is
-    // compiled again, and the old code stays allocated until a flush, so the backend holds both.
+    // compiled again, and the old code is freed at once, so the backend holds only the new block.
     jit->WriteCode(kCode, {kAdd1_R3, kMov_R3_R4, 0x4401 /* shlr R4 */, static_cast<uint16_t>(kSleep)});
     const brimir::jit::CachedBlock *old = cache.Find(kCode);
     REQUIRE(old != nullptr);
     REQUIRE(old->code.selfValidating);
+    CHECK(old->code.bytes == firstBytes);
     cache.Invalidate(kCode);
-    REQUIRE(cache.Get(ctx, kCode).code.entry != nullptr);
+    CHECK(backend->CodeBytes() == 0u);
+    const brimir::jit::CachedBlock &rebuilt = cache.Get(ctx, kCode);
+    REQUIRE(rebuilt.code.entry != nullptr);
     CHECK(cache.Invalidations() == 1u);
     CHECK(cache.StaleNativeBytes() == firstBytes);
-    CHECK(backend->CodeBytes() > firstBytes);
-    CHECK(cache.PeakNativeCodeBytes() == backend->CodeBytes());
+    CHECK(cache.NativeBytesReleased() == firstBytes);
+    CHECK(backend->CodeBytes() == rebuilt.code.bytes);
+    CHECK(cache.PeakNativeCodeBytes() == std::max<size_t>(firstBytes, rebuilt.code.bytes));
 
     const size_t peak = cache.PeakNativeCodeBytes();
     cache.Flush();
     CHECK(backend->CodeBytes() == 0u);
     CHECK(cache.PeakNativeCodeBytes() == peak);
     CHECK(cache.StaleNativeBytes() == firstBytes);
+}
+
+// Dropped blocks give their code back at once, so rewriting one block over and over never fills the
+// code cap (without it, every rewrite adds a block's code until the next flush).
+TEST_CASE("x64 backend: invalidated blocks free their code", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kRewrites = 500;
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), 4096, sh2test::kNativeOnFirstRun};
+
+    auto ref = std::make_unique<Rig>();
+    auto jit = std::make_unique<Rig>();
+    auto &ctx = jit->sh2->GetJitContext();
+    for (uint32_t i = 0; i < kRewrites; ++i) {
+        INFO("rewrite " << i);
+        const auto imm = static_cast<uint16_t>(0x7300 | (1 + i % 2)); // add #1,R3 / add #2,R3
+        const std::vector<uint16_t> program{imm, kMov_R3_R4, kShll_R4, static_cast<uint16_t>(kSleep)};
+        ref->WriteCode(kCode, program);
+        jit->WriteCode(kCode, program);
+        auto state = ref->BaseState(kCode);
+        state.R[3] = 0x1234 + i;
+        ref->Load(state);
+        jit->Load(state);
+
+        const brimir::jit::CachedBlock *entry = &cache.Get(ctx, kCode);
+        REQUIRE(entry->code.entry != nullptr);
+        CHECK(backend->CodeBytes() == entry->code.bytes);
+        ExitInfo info = backend->Run(entry->code, ctx);
+        if (i > 0) {
+            // The old block validates itself in its prologue, so Get returned it: it reports stale
+            // and is dropped, as Executor::StepImpl does.
+            REQUIRE(info.stale);
+            cache.Invalidate(kCode);
+            entry = &cache.Get(ctx, kCode);
+            REQUIRE(entry->code.entry != nullptr);
+            CHECK(backend->CodeBytes() == entry->code.bytes);
+            info = backend->Run(entry->code, ctx);
+        }
+        REQUIRE_FALSE(info.stale);
+        REQUIRE(info.retired == 3); // SLEEP ends the block without retiring
+        uint64_t refCycles = 0;
+        for (uint32_t n = 0; n < info.retired; ++n) {
+            refCycles += ref->sh2->Step<false, false>();
+        }
+        CHECK(info.cycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit);
+        INFO(diff);
+        REQUIRE(diff.empty());
+    }
+    CHECK(cache.FlushesCodeCap() == 0u);
+    CHECK(cache.Invalidations() == kRewrites - 1);
+    CHECK(cache.StaleNativeBytes() > 0u);
+    CHECK(cache.NativeBytesReleased() == cache.StaleNativeBytes());
 }
 
 // With tiered compilation the cap is checked before each native compile, which happens on a
@@ -2085,6 +2145,78 @@ TEST_CASE("Stale block inside a chain", "[jit][x64]") {
     CHECK(stats.staleEntries == 1u);
     CHECK(p.exec.Cache().Invalidations() == 1u);
     CHECK(p.ref->State().R[4] > r4AtChange + 2u); // B now adds 2 per pass
+}
+
+// A and B branch to each other and are linked. B's second opcode changes while the CPU is at A: the
+// chain from A reaches B, B reports stale there and is dropped, and its code is freed. Its link slot
+// is cleared first (Release asserts that), so the next chain from A reaches the rebuilt B and never
+// the freed code.
+TEST_CASE("x64 backend: a block dropped inside a chain is not chained to again", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint16_t kAdd2_R4 = 0x7402; // add #2,R4
+    const uint32_t b = kCode + 0x20;
+    ChainPair p;
+    // A: add #1,R3 ; bra B ; nop      B: add #1,R4 ; add #1,R4 ; bra A ; nop
+    p.WriteCode(kCode, {kAdd1_R3, Bra(kCode + 2, b), kNop});
+    p.WriteCode(b, {kAdd1_R4, kAdd1_R4, Bra(b + 4, kCode), kNop});
+    auto state = p.ref->BaseState(kCode);
+    state.R[3] = 0;
+    state.R[4] = 0;
+    p.Start(state);
+
+    // Both native and published once the chain has run from A to B.
+    for (int i = 0; i < 20; ++i) {
+        p.Advance(13);
+    }
+    const auto at = [&](uint32_t pc) {
+        const auto *block = p.exec.Cache().Find(pc);
+        REQUIRE(block != nullptr);
+        CHECK(block->code.entry != nullptr);
+        CHECK(block->code.selfValidating);
+    };
+    at(kCode);
+    at(b);
+    REQUIRE(p.exec.GetStats().chainedBlocks >= 1u);
+    REQUIRE(p.exec.Cache().Invalidations() == 0u);
+    REQUIRE(p.exec.GetStats().staleEntries == 0u);
+
+    // Advance until the CPU is at A (not in a delay slot).
+    const auto advanceToA = [&] {
+        for (int i = 0; i < 64; ++i) {
+            const auto st = p.ref->State();
+            if (st.PC == kCode && !st.delaySlot) {
+                return;
+            }
+            p.Advance(1);
+        }
+        FAIL("the CPU never got back to A");
+    };
+
+    // Change B's second opcode while the CPU is at A.
+    advanceToA();
+    p.WriteCode(b + 2, {kAdd2_R4});
+
+    const uint64_t chainedBefore = p.exec.GetStats().chainedBlocks;
+    p.Advance(61); // from A: B is stale in the chain, dropped and rebuilt
+    CHECK(p.exec.GetStats().staleEntries == 1u);
+    CHECK(p.exec.Cache().Invalidations() == 1u);
+    CHECK(p.exec.GetStats().chainedBlocks > chainedBefore);
+    CHECK(p.exec.Cache().NativeBytesReleased() == p.exec.Cache().StaleNativeBytes());
+    CHECK(p.exec.Cache().NativeBytesReleased() > 0u);
+    at(b);
+
+    // Chains from A now reach the rebuilt B.
+    advanceToA();
+    const uint64_t chainedAfterRebuild = p.exec.GetStats().chainedBlocks;
+    const uint32_t r4 = p.ref->State().R[4];
+    p.Advance(61);
+    p.Advance(61);
+    CHECK(p.exec.GetStats().staleEntries == 1u); // the rebuilt B is not stale
+    CHECK(p.exec.Cache().Invalidations() == 1u);
+    CHECK(p.exec.GetStats().chainedBlocks > chainedAfterRebuild);
+    CHECK(p.ref->State().R[4] > r4 + 2u);
 }
 
 namespace {

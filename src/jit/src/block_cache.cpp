@@ -36,15 +36,20 @@ bool BlockCache::Validate(const CachedBlock &entry, uint32_t pc, ymir::sh2::SH2J
 }
 
 void BlockCache::Invalidate(BlockMap::iterator it) {
-    // Its native code (if any) stays allocated until the next Flush.
+    // Order matters: no link slot or recent slot may point to the code once it is freed.
     RecentSlot &slot = SlotFor(it->first);
     if (slot.entry == it->second.get()) {
         slot = RecentSlot{};
     }
-    if (it->second->code.selfValidating) {
+    const NativeCode &code = it->second->code;
+    if (code.selfValidating) {
         m_native->Unpublish(it->first);
     }
-    m_staleNativeBytes += it->second->nativeBytes;
+    if (code.entry != nullptr) {
+        m_native->Release(it->first, code);
+        m_staleNativeBytes += code.bytes;
+        m_releasedNativeBytes += code.bytes;
+    }
     ++m_invalidations;
     m_totalInsts -= it->second->block.code.size();
     m_blocks.erase(it);
@@ -134,8 +139,7 @@ const CachedBlock &BlockCache::CompileNative(CachedBlock &entry, ymir::sh2::SH2J
         return entry;
     }
     ++m_nativeCompiles;
-    entry.nativeBytes = static_cast<uint32_t>(m_native->CodeBytes() - bytesBefore);
-    m_nativeBytes += entry.nativeBytes;
+    m_nativeBytes += entry.code.bytes;
     // The native code never needs the IR again (see CachedBlock): free it and stop counting it.
     m_totalInsts -= entry.block.code.size();
     std::vector<Inst>().swap(entry.block.code);

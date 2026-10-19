@@ -186,6 +186,7 @@ X64Backend::~X64Backend() = default;
 
 bool X64Backend::Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) {
     out.entry = nullptr;
+    out.bytes = 0;
     if (!CanEmitBlock(block)) {
         return false; // cheap rejection before any asmjit work
     }
@@ -209,7 +210,8 @@ bool X64Backend::Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx
     if (m_runtime->add(&fn, &code) != asmjit::Error::kOk || fn == nullptr) {
         return false;
     }
-    m_codeBytes += code.code_size();
+    out.bytes = static_cast<uint32_t>(code.code_size());
+    m_codeBytes += out.bytes;
     out.entry = reinterpret_cast<const void *>(fn);
     out.selfValidating = selfValidating;
     return true;
@@ -252,6 +254,13 @@ void X64Backend::Unpublish(uint32_t pc) {
     if (slot.pc == pc) {
         slot = X64LinkSlot{};
     }
+}
+
+void X64Backend::Release(uint32_t pc, const NativeCode &code) {
+    assert(code.entry != nullptr && m_links[LinkIndex(pc)].entry != code.entry && "released code is still published");
+    assert(m_codeBytes >= code.bytes);
+    m_runtime->release(reinterpret_cast<X64BlockFn>(const_cast<void *>(code.entry)));
+    m_codeBytes -= code.bytes;
 }
 
 void X64Backend::Reset() {
