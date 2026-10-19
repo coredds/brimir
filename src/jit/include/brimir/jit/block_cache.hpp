@@ -46,6 +46,8 @@ struct CachedBlock {
     NativeCode code;
     // Runs left until the native compile; 0: none pending (native, compile failed, no backend).
     uint32_t runsUntilNative = 0;
+    // Generated code this block added to the backend (0 while IR-only).
+    uint32_t nativeBytes = 0;
 };
 
 class BlockCache {
@@ -109,6 +111,15 @@ public:
     }
     uint64_t NativeBytesCompiled() const {
         return m_nativeBytes;
+    }
+    // The most generated code the backend held after any native compile since construction (flushes
+    // do not lower it; 0 without a native backend), and the generated code of native blocks dropped
+    // by Invalidate (bytes since construction; it stays allocated until the next Flush).
+    size_t PeakNativeCodeBytes() const {
+        return m_peakNativeBytes;
+    }
+    uint64_t StaleNativeBytes() const {
+        return m_staleNativeBytes;
     }
     // Host time spent building blocks (front end, OptimizeBlock, VerifyBlock) and compiling them
     // natively (INativeBackend::Compile, failed attempts included), in nanoseconds.
@@ -193,6 +204,8 @@ private:
     uint64_t m_compileFallbacks = 0;
     uint64_t m_nativeCompiles = 0;
     uint64_t m_nativeBytes = 0;
+    size_t m_peakNativeBytes = 0;
+    uint64_t m_staleNativeBytes = 0;
     uint64_t m_buildNs = 0;
     uint64_t m_nativeNs = 0;
     uint64_t m_irEvictions = 0;

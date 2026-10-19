@@ -254,6 +254,48 @@ TEST_CASE("x64 backend: the native code cap flushes the cache", "[jit][x64]") {
     CHECK(cache.CachedInsts() == 0u); // every cached block is native
 }
 
+TEST_CASE("x64 backend: peak and stale native bytes are counted", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, sh2test::kNativeOnFirstRun};
+    CHECK(cache.PeakNativeCodeBytes() == 0u);
+    CHECK(cache.StaleNativeBytes() == 0u);
+
+    auto jit = std::make_unique<Rig>();
+    auto &ctx = jit->sh2->GetJitContext();
+    jit->WriteCode(kCode, {kAdd1_R3, kMov_R3_R4, kShll_R4, static_cast<uint16_t>(kSleep)});
+    jit->Load(jit->BaseState(kCode));
+
+    REQUIRE(cache.Get(ctx, kCode).code.entry != nullptr);
+    const size_t firstBytes = backend->CodeBytes();
+    REQUIRE(firstBytes > 0u);
+    CHECK(cache.PeakNativeCodeBytes() == firstBytes);
+    CHECK(cache.StaleNativeBytes() == 0u);
+
+    // One opcode changes. This block validates itself in its prologue, so Get does not look at its
+    // guest code; the executor drops it when the prologue reports stale (done here by hand). It is
+    // compiled again, and the old code stays allocated until a flush, so the backend holds both.
+    jit->WriteCode(kCode, {kAdd1_R3, kMov_R3_R4, 0x4401 /* shlr R4 */, static_cast<uint16_t>(kSleep)});
+    const brimir::jit::CachedBlock *old = cache.Find(kCode);
+    REQUIRE(old != nullptr);
+    REQUIRE(old->code.selfValidating);
+    cache.Invalidate(kCode);
+    REQUIRE(cache.Get(ctx, kCode).code.entry != nullptr);
+    CHECK(cache.Invalidations() == 1u);
+    CHECK(cache.StaleNativeBytes() == firstBytes);
+    CHECK(backend->CodeBytes() > firstBytes);
+    CHECK(cache.PeakNativeCodeBytes() == backend->CodeBytes());
+
+    const size_t peak = cache.PeakNativeCodeBytes();
+    cache.Flush();
+    CHECK(backend->CodeBytes() == 0u);
+    CHECK(cache.PeakNativeCodeBytes() == peak);
+    CHECK(cache.StaleNativeBytes() == firstBytes);
+}
+
 // With tiered compilation the cap is checked before each native compile, which happens on a
 // block's second run here. Reaching it there flushes the cache, including the block being
 // compiled, which is rebuilt from scratch and compiled.

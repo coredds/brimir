@@ -4,6 +4,7 @@
 #include <brimir/jit/frontend.hpp>
 #include <brimir/jit/ir_opt.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -43,6 +44,7 @@ void BlockCache::Invalidate(BlockMap::iterator it) {
     if (it->second->code.selfValidating) {
         m_native->Unpublish(it->first);
     }
+    m_staleNativeBytes += it->second->nativeBytes;
     ++m_invalidations;
     m_totalInsts -= it->second->block.code.size();
     m_blocks.erase(it);
@@ -125,13 +127,15 @@ const CachedBlock &BlockCache::CompileNative(CachedBlock &entry, ymir::sh2::SH2J
     const auto t0 = Clock::now();
     const bool ok = m_native->Compile(entry.block, ctx, entry.code);
     m_nativeNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+    m_peakNativeBytes = std::max(m_peakNativeBytes, m_native->CodeBytes());
     if (!ok) {
         entry.code = NativeCode{}; // stays IR-only and runs with RunBlock; never retried
         ++m_compileFallbacks;
         return entry;
     }
     ++m_nativeCompiles;
-    m_nativeBytes += m_native->CodeBytes() - bytesBefore;
+    entry.nativeBytes = static_cast<uint32_t>(m_native->CodeBytes() - bytesBefore);
+    m_nativeBytes += entry.nativeBytes;
     // The native code never needs the IR again (see CachedBlock): free it and stop counting it.
     m_totalInsts -= entry.block.code.size();
     std::vector<Inst>().swap(entry.block.code);

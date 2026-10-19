@@ -371,13 +371,15 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
             const auto& cache = exec->Cache();
             const uint64_t native = cache.NativeCompiles();
             std::printf("cache %-7s: compiles %llu  nativeCompiles %llu  compileMs %.1f (build %.1f  native %.1f)  "
-                        "nativeBytesPerBlock %.0f  invalidations %llu  cachedInsts %zu  irEvictions %llu (blocks %llu)  "
-                        "flushes codeCap %llu  requested %llu\n",
+                        "nativeBytesPerBlock %.0f  peakNativeMB %.1f  staleNativeMB %.1f  invalidations %llu  "
+                        "cachedInsts %zu  irEvictions %llu (blocks %llu)  flushes codeCap %llu  requested %llu\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(cache.Compiles()),
                         static_cast<unsigned long long>(native),
                         (cache.BuildNs() + cache.NativeCompileNs()) / 1e6, cache.BuildNs() / 1e6,
                         cache.NativeCompileNs() / 1e6,
                         native > 0 ? static_cast<double>(cache.NativeBytesCompiled()) / static_cast<double>(native) : 0.0,
+                        static_cast<double>(cache.PeakNativeCodeBytes()) / (1024.0 * 1024.0),
+                        static_cast<double>(cache.StaleNativeBytes()) / (1024.0 * 1024.0),
                         static_cast<unsigned long long>(cache.Invalidations()),
                         cache.CachedInsts(), static_cast<unsigned long long>(cache.IrEvictions()),
                         static_cast<unsigned long long>(cache.IrEvictedBlocks()),
@@ -549,13 +551,18 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     if (args.sh2Jit) {
         PrintJitStats(core); // totals since initialization (warmup included)
         const CompileCounters& w = before;
+        const auto peakMB = [&core](bool master) {
+            const brimir::jit::Executor* exec = core.GetSH2JitExecutor(master);
+            return exec != nullptr ? static_cast<double>(exec->Cache().PeakNativeCodeBytes()) / (1024.0 * 1024.0) : 0.0;
+        };
         std::printf("jit window   : compiles %llu  nativeCompiles %llu  compileMs %.1f  flushes %llu  irEvictions %llu  "
-                    "framesCompiling %lld\n",
+                    "peakNativeMB master %.1f slave %.1f  framesCompiling %lld\n",
                     static_cast<unsigned long long>(w.compiles - windowStart.compiles),
                     static_cast<unsigned long long>(w.nativeCompiles - windowStart.nativeCompiles),
                     (w.compileNs - windowStart.compileNs) / 1e6,
                     static_cast<unsigned long long>(w.flushes - windowStart.flushes),
-                    static_cast<unsigned long long>(w.irEvictions - windowStart.irEvictions),
+                    static_cast<unsigned long long>(w.irEvictions - windowStart.irEvictions), peakMB(true),
+                    peakMB(false),
                     static_cast<long long>(std::count_if(frameCompiles.begin(), frameCompiles.end(),
                                                          [](const CompileCounters& c) { return c.compiles > 0; })));
         std::vector<size_t> order(frameMs.size());

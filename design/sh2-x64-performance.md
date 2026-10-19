@@ -723,3 +723,44 @@ Not met: conditions 1, 2 and 3. The JIT stays off by default; the README and the
 
 - Speed: the executor must still shrink by 25% (PD2), 33% (BR) and 41% (SFZ3) for 1.5x. Track B's per-instruction changes gave 3-6% in total, so a further 25-41% is unlikely to come from more of the same; Street Fighter Zero 3's executor-only ratio is 0.96 (about 1.14 without its compiling). The remaining executor time is generated code and the dispatch between blocks (per-block `Get`/`Step`, trampolines), which these items did not target; a profile of generated code per block (not done here) should come before more per-instruction work, and the design's 1.5 bar may need a different lever (shared code outside the executor is 0.6 ms/frame, track C).
 - Long sessions (track A, the next item): Burning Rangers' 183k native compiles per window and the 75-114 ms compile bursts in its slowest frames are the first target (A1 reuse of returning code, A2 individual eviction, A3 damping), with the long run (`--warmup 2400 --frames 33600`) as the main measurement; Street Fighter Zero 3's 6,333 compiles in its window (about 1.1 s, the source of its 23-24 ms frames) are the second.
+
+## 2D track A baseline
+
+**Date**: 2026-10-19
+**Machine and build**: as in the 2D baseline above (AMD Ryzen 7 5700G, Ninja, Release, `BRIMIR_LTO=ON`, `Brimir_ENABLE_IPO=ON`, MSVC 19.44), `build-instr` for the returning-code check, `build-bench` (rebuilt from the clean sources afterwards) for everything else.
+
+New counters (`BlockCache::PeakNativeCodeBytes`, `BlockCache::StaleNativeBytes`; `brimir_bench` prints `peakNativeMB` and `staleNativeMB` per CPU on the `cache` line and `peakNativeMB` per CPU on the `jit window` line). Peak is the most native code the backend held after any native compile since the cache was created (flushes do not lower it); stale is the native code of blocks dropped by `Invalidate`, which stays allocated until the next flush. Both count since initialization, warmup included.
+
+### Returning-code check
+
+A temporary instrumented `brimir_bench` (a separate build directory, `build-instr`, same options as `build-bench`; the patch is not committed, and `build-bench` was rebuilt from the clean sources afterwards). `BlockCache::Invalidate` records a 64-bit hash of a dropped native block's `guestOpcodes` per PC (at most 4 per PC, oldest replaced; cleared on a flush, as a pool would be when the code is reset); `Build` counts a build as a potential reuse when its PC and opcode hash match a recorded one (and consumes that record). Whether the code pages would still match is not checked, so the count is an upper bound for a pool without a bound on its size. One x64 run each, default settings, scratch system dir as in the method above, `--warmup 2400 --frames 33600` (Burning Rangers, US BIOS) and `--warmup 2400 --frames 1800` (Street Fighter Zero 3, JP BIOS). Both exited 0; the window's `compiles`, `nativeCompiles` and `flushes` equal the uninstrumented track B runs above (Burning Rangers 2,119,633 / 183,302 / 10; Street Fighter Zero 3 10,686 / 6,333 / 0), so the instrumentation did not change what the cache does.
+
+| Window | CPU | Invalidations | Builds | Native compiles | Potential reuses | Share of native compiles |
+|---|---|---|---|---|---|---|
+| Burning Rangers, frames 2,400-36,000 | master | 883,698 | 998,190 | 118,067 | 43,375 | 36.7% |
+| | slave | 1,107,082 | 1,121,443 | 65,235 | 51,690 | 79.2% |
+| | **both** | 1,990,780 | 2,119,633 | 183,302 | **95,065** | **51.9%** |
+| Street Fighter Zero 3, frames 2,400-4,200 | master | 292 | 10,686 | 6,333 | 0 | 0% |
+| | slave | 0 | 0 | 0 | 0 | |
+
+Burning Rangers: about half of the native compiles in the window (95,065 of 183,302) rebuild code that was dropped earlier with the same opcodes at the same PC, so A1 clears the 10% bar (design section 7) by a wide margin; on the slave it is four in five. Street Fighter Zero 3 has nothing to reuse (its master drops 292 blocks in the window; its 6,333 compiles are first compiles), so A1 does not help it, and its compile bursts are for A3 or the compile threshold.
+
+### Native code held
+
+| Run | CPU | peakNativeMB | staleNativeMB (since init) | Code-cap flushes (since init) |
+|---|---|---|---|---|
+| Burning Rangers (to frame 36,000) | master | 128.0 | 337.8 | 4 |
+| | slave | 128.0 | 411.2 | 3 |
+| Street Fighter Zero 3 (to frame 4,200) | master | 48.1 | 1.1 | 0 |
+| | slave | 2.0 | 0.0 | 0 |
+
+Both Burning Rangers CPUs run into the 128 MB cap, and 337.8 MB (master) and 411.2 MB (slave) of the native code they generated since start-up was stale by the time of the end of the run: 2.6 to 3.2 times the cap, which A2 (free a dropped block's code at once) would return to the allocator instead of holding it until a flush. The window's `flushes` (10) also counts flushes the core requests.
+
+Timing of the instrumented runs is not comparable with the uninstrumented ones (Burning Rangers: SH2 total 8.598 ms/frame, average frame 12.584 ms, max 144.4 ms; Street Fighter Zero 3: SH2 total 5.015 ms/frame, max 25.3 ms); only the counters are used.
+
+## 2D track A progress
+
+Measured at the end of each track A task (`design/plans/2026-10-19-sh2-jit-m2d-track-a.md`) on the machine and build configuration above. Burning Rangers (US BIOS): `--warmup 2400 --frames 33600`, one x64 run, plus one interpreter run per session. Street Fighter Zero 3 (JP BIOS) and Panzer Dragoon II Zwei (US BIOS): `--warmup 2400 --frames 1800`, interpreter and x64 back to back, three rounds (medians, as in "2D progress"). Max frame is the highest of the interpreter runs in the session; native compiles, compile ms, flushes and peak native code are the x64 run's `jit window` values (flushes: master / slave from the `cache` line; peak native MB: master / slave).
+
+| Task | Title | Interpreter SH2 total ms | x64 SH2 total ms | Ratio (interp / x64) | x64 avg ms | x64 p99 ms | x64 max frame ms | Interpreter max frame ms | Native compiles in window | Compile ms in window | Code-cap flushes (master / slave) | Peak native MB (master / slave) | Retired reuses |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
