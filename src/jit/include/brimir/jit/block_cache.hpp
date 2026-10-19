@@ -11,8 +11,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace brimir::jit {
 
@@ -37,6 +39,14 @@ constexpr uint32_t kNativeCompileThreshold = 16;
 // Entries in the recent-lookup table, indexed by (pc >> 1) & (kRecentSlots - 1).
 constexpr size_t kRecentSlots = 4096;
 
+// Retired blocks (design/sh2-jit-m2d.md, A1): a self-validating native block dropped because its
+// guest code changed keeps its native code, unpublished, in a pool, and is taken back when the same
+// opcodes return at its PC on the same pages. Native code held by retired blocks per CPU (it counts
+// toward kMaxNativeCodeBytes), and retired blocks kept per PC; past either, the least recently
+// retired blocks are released.
+constexpr size_t kMaxRetiredCodeBytes = size_t{32} << 20;
+constexpr uint32_t kMaxRetiredPerPc = 4;
+
 // A cached block. IR-only (code.entry == nullptr): block holds its IR and runs with RunBlock. Once
 // natively compiled, block keeps only startPC, guestOpcodes, guestInstrCount (and the flags);
 // block.code is freed and never needed again: a block whose native code is lost (Flush, Reset) is
@@ -46,6 +56,10 @@ struct CachedBlock {
     NativeCode code;
     // Runs left until the native compile; 0: none pending (native, compile failed, no backend).
     uint32_t runsUntilNative = 0;
+    // Self-validating native blocks: the page-table arrays of the pages holding startPC and the last
+    // word of guestOpcodes at compile time (the pages the prologue checks). A retired block is
+    // reused only while both are unchanged.
+    std::array<const uint8_t *, 2> codePages{};
 };
 
 class BlockCache {
@@ -54,27 +68,31 @@ public:
     // Not owned; it must outlive the cache. maxNativeCodeBytes: flush limit for the backend's code
     // (tests pass a small value). nativeCompileThreshold: see kNativeCompileThreshold (tests pass
     // 1 to get native code on the first run; 0 is treated as 1). maxCachedInsts: the IR cap (tests
-    // pass a small value).
+    // pass a small value). maxRetiredCodeBytes: see kMaxRetiredCodeBytes (tests pass small values;
+    // 0 disables the pool, so every dropped block's code is released at once).
     explicit BlockCache(INativeBackend *native = nullptr, size_t maxNativeCodeBytes = kMaxNativeCodeBytes,
                         uint32_t nativeCompileThreshold = kNativeCompileThreshold,
-                        size_t maxCachedInsts = kMaxCachedInsts)
+                        size_t maxCachedInsts = kMaxCachedInsts, size_t maxRetiredCodeBytes = kMaxRetiredCodeBytes)
         : m_native(native)
         , m_maxNativeCodeBytes(maxNativeCodeBytes)
         , m_maxCachedInsts(maxCachedInsts)
+        , m_maxRetiredCodeBytes(maxRetiredCodeBytes)
         , m_nativeCompileThreshold(nativeCompileThreshold == 0 ? 1 : nativeCompileThreshold) {}
 
-    // Returns the block for pc, building it on a miss or when its guest code changed, and compiling
-    // it natively on its kNativeCompileThreshold-th run. A native block with code.selfValidating is
-    // returned without checking its guest code (its prologue does, see ExitInfo::stale) and is
-    // published to the backend's link table; IR-only blocks are never published. Every call is
-    // counted as a run of the returned block.
+    // Returns the block for pc, building it on a miss or when its guest code changed (or taking a
+    // retired block back, see kMaxRetiredCodeBytes), and compiling it natively on its
+    // kNativeCompileThreshold-th run. A native block with code.selfValidating is returned without
+    // checking its guest code (its prologue does, see ExitInfo::stale) and is published to the
+    // backend's link table; IR-only blocks are never published. Every call is counted as a run of
+    // the returned block.
     const CachedBlock &Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc);
 
-    // Drops every block and, with a native backend, all of its generated code.
+    // Drops every block (retired ones included) and, with a native backend, all of its generated code.
     void Flush();
 
-    // Drops the block for pc, if cached (a stale native block), unpublishes it and frees its native
-    // code. Never called while generated code runs.
+    // Drops the block for pc, if cached (a stale native block), and unpublishes it. A self-validating
+    // native block is retired; any other native block's code is freed. Never called while generated
+    // code runs.
     void Invalidate(uint32_t pc);
 
     // The cached block for pc, or nullptr; no validation, no compile (tests and diagnostics).
@@ -112,16 +130,29 @@ public:
     }
     // The most generated code the backend held after any native compile since construction (flushes
     // do not lower it; 0 without a native backend), and the generated code of native blocks dropped
-    // by Invalidate (bytes since construction).
+    // by Invalidate, retired or freed (bytes since construction, counted when dropped).
     size_t PeakNativeCodeBytes() const {
         return m_peakNativeBytes;
     }
     uint64_t StaleNativeBytes() const {
         return m_staleNativeBytes;
     }
-    // Generated code freed by Invalidate (bytes since construction; equals StaleNativeBytes()).
+    // Generated code freed one block at a time (bytes since construction, counted when freed): by
+    // Invalidate, and for retired blocks when the pool evicts them or the code cap empties it. Code
+    // freed by a flush is not counted.
     uint64_t NativeBytesReleased() const {
         return m_releasedNativeBytes;
+    }
+    // Retired blocks taken back instead of rebuilt, retired blocks released by the pool's bounds
+    // (kMaxRetiredPerPc, maxRetiredCodeBytes), and the native code the pool holds now.
+    uint64_t RetiredReuses() const {
+        return m_retiredReuses;
+    }
+    uint64_t RetiredEvictions() const {
+        return m_retiredEvictions;
+    }
+    size_t RetiredCodeBytes() const {
+        return m_retiredBytes;
     }
     // Host time spent building blocks (front end, OptimizeBlock, VerifyBlock) and compiling them
     // natively (INativeBackend::Compile, failed attempts included), in nanoseconds.
@@ -158,7 +189,17 @@ private:
         CachedBlock *entry = nullptr;
     };
 
+    // A retired block: native, self-validating, unpublished, in no recent slot.
+    struct RetiredBlock {
+        uint32_t pc = 0;
+        std::unique_ptr<CachedBlock> entry;
+    };
+    using RetiredList = std::list<RetiredBlock>;
+
     static bool IsCurrent(const Block &block, ymir::sh2::SH2JitContext &ctx);
+
+    // The page arrays a self-validating block's prologue checks (see CachedBlock::codePages).
+    static std::array<const uint8_t *, 2> CodePages(const Block &block, const ymir::sh2::SH2JitContext &ctx);
 
     // IsCurrent, except for self-validating native blocks; publishes those.
     bool Validate(const CachedBlock &entry, uint32_t pc, ymir::sh2::SH2JitContext &ctx);
@@ -167,8 +208,31 @@ private:
         return m_recent[(pc >> 1) & (kRecentSlots - 1)];
     }
 
-    // Drops a block whose guest code changed (and its recent slot).
+    // Drops a block whose guest code changed (and its recent slot), retiring it if it is
+    // self-validating and the pool is enabled.
     void Invalidate(BlockMap::iterator it);
+
+    // Moves a dropped block into the pool, then releases the least recently retired blocks past
+    // kMaxRetiredPerPc at pc and past m_maxRetiredCodeBytes in total.
+    void Retire(uint32_t pc, std::unique_ptr<CachedBlock> entry);
+
+    // Takes a retired block for pc whose guest code and code pages are current back into the map and
+    // the recent slot and publishes it; nullptr if there is none.
+    CachedBlock *Reuse(ymir::sh2::SH2JitContext &ctx, uint32_t pc);
+
+    // Removes a retired block from the pool (its entry must have been taken or released).
+    void RemoveRetired(RetiredList::iterator it);
+
+    // Frees a retired block's code and removes it from the pool.
+    void ReleaseRetired(RetiredList::iterator it);
+
+    // Frees every retired block's code (at the code cap, before flushing).
+    void ReleaseAllRetired();
+
+    // Whether the backend's code is at the native code cap.
+    bool AtCodeCap() const {
+        return m_native->CodeBytes() >= m_maxNativeCodeBytes && m_native->CodeBytes() > 0;
+    }
 
     // Drops every block (Flush without counting it as requested).
     void FlushAll();
@@ -185,21 +249,27 @@ private:
         return entry;
     }
 
-    // Builds the IR block for pc and caches it (first evicting the IR-only blocks at the IR cap, and
-    // flushing everything at the native code cap if it compiles now); compiles it natively now if
-    // compileNow or the threshold is 1.
+    // Takes a retired block for pc back if one is current (Reuse). Otherwise builds the IR block for
+    // pc and caches it (first evicting the IR-only blocks at the IR cap, and at the native code cap,
+    // if it compiles now, releasing the pool and then, if still at the cap, flushing everything);
+    // compiles it natively now if compileNow or the threshold is 1.
     const CachedBlock &Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool compileNow);
 
-    // Compiles entry natively and frees its IR. At the native code cap it flushes the cache
-    // (entry included) and rebuilds and compiles pc from scratch. On failure entry stays IR-only.
+    // Compiles entry natively and frees its IR. At the native code cap it releases the pool (entry
+    // is in the map, never in the pool); if still at the cap it flushes the cache (entry included)
+    // and rebuilds and compiles pc from scratch. On failure entry stays IR-only.
     const CachedBlock &CompileNative(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc);
 
     INativeBackend *m_native;
     size_t m_maxNativeCodeBytes;
     size_t m_maxCachedInsts;
+    size_t m_maxRetiredCodeBytes;
     uint32_t m_nativeCompileThreshold;
     BlockMap m_blocks;
     std::array<RecentSlot, kRecentSlots> m_recent{};
+    // The pool, least recently retired first, and its blocks by PC (also oldest first).
+    RetiredList m_retired;
+    std::unordered_map<uint32_t, std::vector<RetiredList::iterator>> m_retiredByPc;
     size_t m_totalInsts = 0;
     uint64_t m_compiles = 0;
     uint64_t m_invalidations = 0;
@@ -209,6 +279,9 @@ private:
     size_t m_peakNativeBytes = 0;
     uint64_t m_staleNativeBytes = 0;
     uint64_t m_releasedNativeBytes = 0;
+    uint64_t m_retiredReuses = 0;
+    uint64_t m_retiredEvictions = 0;
+    size_t m_retiredBytes = 0;
     uint64_t m_buildNs = 0;
     uint64_t m_nativeNs = 0;
     uint64_t m_irEvictions = 0;

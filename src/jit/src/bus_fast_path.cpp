@@ -29,6 +29,10 @@ const uint8_t *PageEntry(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address
     return bus.pages + static_cast<size_t>(index) * bus.pageStride;
 }
 
+const uint8_t *PageArrayAt(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address) {
+    return PageArray(PageEntry(bus, address), bus);
+}
+
 uint8_t *FastArrayPointer(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address, uint32_t size, bool &writable) {
     if (!IsBusPartition(address)) {
         return nullptr;

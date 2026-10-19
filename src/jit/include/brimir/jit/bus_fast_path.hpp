@@ -18,6 +18,10 @@ namespace brimir::jit {
 // The page entry for a bus address: pages + ((address & addressMask) >> pageShift) * pageStride.
 const uint8_t *PageEntry(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address);
 
+// The array of PageEntry(bus, address) (what a self-validating block's prologue compares), or
+// nullptr for a handler or unmapped page.
+const uint8_t *PageArrayAt(const ymir::sh2::SH2JitBusLayout &bus, uint32_t address);
+
 // Partition 0b000/0b001/0b101 data access to an array page: returns the byte pointer for the
 // size-aligned address and sets writable; nullptr when the access must take the callback (writable
 // is then left untouched).

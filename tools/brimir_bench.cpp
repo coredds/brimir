@@ -372,7 +372,8 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
             const uint64_t native = cache.NativeCompiles();
             std::printf("cache %-7s: compiles %llu  nativeCompiles %llu  compileMs %.1f (build %.1f  native %.1f)  "
                         "nativeBytesPerBlock %.0f  peakNativeMB %.1f  staleNativeMB %.1f  invalidations %llu  "
-                        "cachedInsts %zu  irEvictions %llu (blocks %llu)  flushes codeCap %llu  requested %llu\n",
+                        "cachedInsts %zu  irEvictions %llu (blocks %llu)  flushes codeCap %llu  requested %llu  "
+                        "retiredReuses %llu  retiredEvictions %llu  retiredMB %.1f\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(cache.Compiles()),
                         static_cast<unsigned long long>(native),
                         (cache.BuildNs() + cache.NativeCompileNs()) / 1e6, cache.BuildNs() / 1e6,
@@ -384,7 +385,10 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
                         cache.CachedInsts(), static_cast<unsigned long long>(cache.IrEvictions()),
                         static_cast<unsigned long long>(cache.IrEvictedBlocks()),
                         static_cast<unsigned long long>(cache.FlushesCodeCap()),
-                        static_cast<unsigned long long>(cache.FlushesRequested()));
+                        static_cast<unsigned long long>(cache.FlushesRequested()),
+                        static_cast<unsigned long long>(cache.RetiredReuses()),
+                        static_cast<unsigned long long>(cache.RetiredEvictions()),
+                        static_cast<double>(cache.RetiredCodeBytes()) / (1024.0 * 1024.0));
         }
     }
 }
@@ -396,6 +400,7 @@ struct CompileCounters {
     uint64_t compileNs = 0;
     uint64_t flushes = 0;
     uint64_t irEvictions = 0;
+    uint64_t reuses = 0;
 };
 
 CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
@@ -408,6 +413,7 @@ CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
             c.compileNs += cache.BuildNs() + cache.NativeCompileNs();
             c.flushes += cache.FlushesCodeCap() + cache.FlushesRequested();
             c.irEvictions += cache.IrEvictions();
+            c.reuses += cache.RetiredReuses();
         }
     }
     return c;
@@ -556,12 +562,13 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             return exec != nullptr ? static_cast<double>(exec->Cache().PeakNativeCodeBytes()) / (1024.0 * 1024.0) : 0.0;
         };
         std::printf("jit window   : compiles %llu  nativeCompiles %llu  compileMs %.1f  flushes %llu  irEvictions %llu  "
-                    "peakNativeMB master %.1f slave %.1f  framesCompiling %lld\n",
+                    "reuses %llu  peakNativeMB master %.1f slave %.1f  framesCompiling %lld\n",
                     static_cast<unsigned long long>(w.compiles - windowStart.compiles),
                     static_cast<unsigned long long>(w.nativeCompiles - windowStart.nativeCompiles),
                     (w.compileNs - windowStart.compileNs) / 1e6,
                     static_cast<unsigned long long>(w.flushes - windowStart.flushes),
-                    static_cast<unsigned long long>(w.irEvictions - windowStart.irEvictions), peakMB(true),
+                    static_cast<unsigned long long>(w.irEvictions - windowStart.irEvictions),
+                    static_cast<unsigned long long>(w.reuses - windowStart.reuses), peakMB(true),
                     peakMB(false),
                     static_cast<long long>(std::count_if(frameCompiles.begin(), frameCompiles.end(),
                                                          [](const CompileCounters& c) { return c.compiles > 0; })));

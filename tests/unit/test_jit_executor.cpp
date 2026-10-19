@@ -403,6 +403,36 @@ TEST_CASE("Executor: the IR backend keeps every block on IR", "[jit][executor][t
     CHECK(exec.Cache().CachedInsts() == entry->block.code.size());
 }
 
+// Without a native backend nothing has native code to keep: a block whose code changed is dropped
+// and every rewrite is a new build, even when earlier code comes back.
+TEST_CASE("Executor: the IR backend never retires blocks", "[jit][executor]") {
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{brimir::jit::BackendKind::Ir, sh2test::kNativeOnFirstRun};
+    auto &ctx = rig->sh2->GetJitContext();
+    rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
+    auto state = rig->BaseState(kCode);
+    state.R[3] = 0;
+    rig->Load(state);
+    REQUIRE(exec.Step(ctx).retired == 2);
+    REQUIRE(exec.Cache().Compiles() == 1u);
+
+    uint32_t r3 = 2;
+    for (uint32_t i = 1; i <= 4; ++i) {
+        INFO("rewrite " << i);
+        const bool q = (i % 2) != 0;
+        rig->WriteCode(kCode, {q ? kAdd16_R3 : kAdd1_R3, kAdd1_R3, kSleep});
+        rig->Load(rig->BaseState(kCode));
+        REQUIRE(exec.Step(ctx).retired == 2);
+        r3 += (q ? 16u : 1u) + 1u;
+        CHECK(rig->State().R[3] == r3);
+        CHECK(exec.Cache().Compiles() == 1u + i);
+        CHECK(exec.Cache().Invalidations() == i);
+    }
+    CHECK(exec.Cache().RetiredReuses() == 0u);
+    CHECK(exec.Cache().RetiredCodeBytes() == 0u);
+    CHECK(exec.Cache().RetiredEvictions() == 0u);
+}
+
 // The IR-instruction budget counts IR-only blocks only. A native block whose code changed is
 // dropped and rebuilt from scratch as an IR-only block (it never needs its freed IR), and a
 // flush drops native blocks the same way.
