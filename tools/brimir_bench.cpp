@@ -408,7 +408,7 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
                         "cachedInsts %zu  irEvictions %llu (blocks %llu)  flushes codeCap %llu  requested %llu  "
                         "retiredReuses %llu  retiredEvictions %llu  retiredMB %.1f  dampedBuilds %llu  "
                         "asyncCompiles %llu  asyncDropped %llu  pendingCompiles %zu  irReuses %llu  "
-                        "retiredIrInsts %zu\n",
+                        "retiredIrInsts %zu  irPoolReleases %llu\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(cache.Compiles()),
                         static_cast<unsigned long long>(native),
                         (cache.BuildNs() + cache.NativeCompileNs()) / 1e6, cache.BuildNs() / 1e6,
@@ -427,7 +427,8 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
                         static_cast<unsigned long long>(cache.DampedBuilds()),
                         static_cast<unsigned long long>(cache.AsyncCompiles()),
                         static_cast<unsigned long long>(cache.AsyncDropped()), cache.PendingCompiles(),
-                        static_cast<unsigned long long>(cache.RetiredIrReuses()), cache.RetiredIrInsts());
+                        static_cast<unsigned long long>(cache.RetiredIrReuses()), cache.RetiredIrInsts(),
+                        static_cast<unsigned long long>(cache.RetiredIrReleases()));
         }
     }
 }
@@ -443,6 +444,7 @@ struct CompileCounters {
     uint64_t asyncCompiles = 0;
     uint64_t asyncDropped = 0;
     uint64_t irReuses = 0;
+    uint64_t irPoolReleases = 0;
 };
 
 CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
@@ -459,6 +461,7 @@ CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
             c.asyncCompiles += cache.AsyncCompiles();
             c.asyncDropped += cache.AsyncDropped();
             c.irReuses += cache.RetiredIrReuses();
+            c.irPoolReleases += cache.RetiredIrReleases();
         }
     }
     return c;
@@ -648,7 +651,7 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         };
         std::printf("jit window   : compiles %llu  nativeCompiles %llu  compileMs %.1f  flushes %llu  irEvictions %llu  "
                     "reuses %llu  peakNativeMB master %.1f slave %.1f  framesCompiling %lld  "
-                    "workerMs %.3f/frame  async %llu  dropped %llu  irReuses %llu\n",
+                    "workerMs %.3f/frame  async %llu  dropped %llu  irReuses %llu  irPoolReleases %llu\n",
                     static_cast<unsigned long long>(w.compiles - windowStart.compiles),
                     static_cast<unsigned long long>(w.nativeCompiles - windowStart.nativeCompiles),
                     (w.compileNs - windowStart.compileNs) / 1e6,
@@ -661,7 +664,8 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                     static_cast<double>(workerBusyNs() - workerBusyStart) / 1e6 / static_cast<double>(args.frames),
                     static_cast<unsigned long long>(w.asyncCompiles - windowStart.asyncCompiles),
                     static_cast<unsigned long long>(w.asyncDropped - windowStart.asyncDropped),
-                    static_cast<unsigned long long>(w.irReuses - windowStart.irReuses));
+                    static_cast<unsigned long long>(w.irReuses - windowStart.irReuses),
+                    static_cast<unsigned long long>(w.irPoolReleases - windowStart.irPoolReleases));
         std::vector<size_t> order(frameMs.size());
         for (size_t i = 0; i < order.size(); ++i) {
             order[i] = i;

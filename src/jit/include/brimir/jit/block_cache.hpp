@@ -22,7 +22,8 @@
 namespace brimir::jit {
 
 // IR instructions of IR-only blocks kept (~20 MB of IR). Natively compiled blocks drop their IR and
-// do not count. Reaching it evicts every IR-only block; native blocks stay.
+// do not count. Reaching it releases the IR pool (below) and, if still at the cap, evicts every
+// IR-only block; native blocks stay.
 constexpr size_t kMaxCachedInsts = size_t{1} << 20;
 
 // Native code held before the cache is flushed (checked before each native compile). Sized so that
@@ -53,7 +54,7 @@ constexpr uint32_t kMaxRetiredPerPc = 4;
 // The IR pool (design/sh2-jit-m2e.md, track E): an IR-only block dropped because its guest code
 // changed is kept, at most kMaxRetiredPerPc per PC (the oldest goes first), and taken back instead
 // of running the front end again when BuildBlock would give the same block. Its IR keeps counting
-// toward the IR cap, and reaching the cap empties the pool.
+// toward the IR cap, and reaching the cap empties the pool first.
 
 // Damping (design/sh2-jit-m2d.md, A3): every time a block at a PC is dropped because its guest code
 // changed, the native compile threshold for the next build at that PC doubles, up to
@@ -206,6 +207,11 @@ public:
     size_t RetiredIrInsts() const {
         return m_retiredIrInsts;
     }
+    // Times the IR cap released the IR pool (counted apart from IrEvictions: the cap evicts the live
+    // IR-only blocks only if it is still reached once the pool is empty).
+    uint64_t RetiredIrReleases() const {
+        return m_retiredIrReleases;
+    }
     // Builds that waited for more than the global threshold because their PC had gone stale before.
     uint64_t DampedBuilds() const {
         return m_dampedBuilds;
@@ -342,8 +348,9 @@ private:
     }
 
     // Takes a retired block for pc back if one is current (Reuse), else a retired IR block that
-    // SameBuild accepts (ReuseIr). Otherwise builds the IR block for pc and caches it (first evicting
-    // the IR-only blocks at the IR cap, and at the native code cap, if it compiles now, releasing the
+    // SameBuild accepts (ReuseIr). Otherwise builds the IR block for pc and caches it (first, at the
+    // IR cap, releasing the IR pool and then, if still at the cap, evicting the IR-only blocks; and
+    // at the native code cap, if it compiles now, releasing the
     // pool and then, if still at the cap, flushing everything). Then, as Started: compiles it natively
     // now if compileNow or the threshold is 1.
     const CachedBlock &Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool compileNow);
@@ -407,6 +414,7 @@ private:
     size_t m_retiredBytes = 0;
     uint64_t m_retiredIrReuses = 0;
     size_t m_retiredIrInsts = 0;
+    uint64_t m_retiredIrReleases = 0;
     uint64_t m_dampedBuilds = 0;
     uint64_t m_buildNs = 0;
     uint64_t m_nativeNs = 0;

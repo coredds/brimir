@@ -1036,6 +1036,11 @@ Measured at the end of each 2E task (`design/plans/2026-10-20-sh2-jit-m2e.md`) o
 | 2E E | worker | Sega Rally Championship (US), frames 2,400-4,200, round 2 | 5.060 | 5.071 | 0.998 | 8.188 | 11.116 | 14.1 | 0 | 1 / 17.5 | 0.101 | 1056 | 54.5 | 0 / 0 | 0 |
 | 2E E | worker | Sega Rally Championship (US), frames 2,400-4,200, round 3 | 5.282 | 5.567 | 0.949 | 8.774 | 14.016 | 21.0 | 1 | 1 / 17.5 | 0.108 | 1056 | 58.8 | 0 / 0 | 0 |
 | 2E E | worker | Burning Rangers (US), frames 2,400-36,000 | 6.135 | 6.161 | 0.996 | 10.215 | 17.500 | 48.9 | 628 | 9 / 18.7 | 0.381 | 28063 | 5,824.0 | 0 / 0 | 887,487 |
+| 2E E (R4) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 5.048 | 4.999 | 1.010 | 10.001 | 12.745 | 15.8 | 0 | 0 / 12.7 | 0.604 | 6333 | 301.8 | 0 / 0 | 0 |
+| 2E E (R4) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 5.083 | 4.930 | 1.031 | 9.990 | 15.885 | 27.0 | 16 | 0 / 12.7 | 0.692 | 6333 | 320.9 | 0 / 0 | 0 |
+| 2E E (R4) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.757 | 4.394 | 1.083 | 9.305 | 10.928 | 14.2 | 0 | 0 / 12.7 | 0.539 | 6333 | 243.3 | 0 / 0 | 0 |
+| 2E E (R4) | worker | Burning Rangers (US), frames 2,400-36,000, run 1 | 6.589 | 6.894 | 0.956 | 10.921 | 20.456 | 54.3 | 1900 | 40 / 21.5 | 0.418 | 27657 | 6,421.1 | 0 / 0 | 877,188 |
+| 2E E (R4) | worker | Burning Rangers (US), frames 2,400-36,000, run 2 | 6.294 | 6.452 | 0.976 | 10.320 | 18.913 | 48.6 | 1186 | 30 / 30.7 | 0.396 | 27618 | 6,087.6 | 0 / 0 | 880,785 |
 
 ### Task 4: the worker on by default (2E D)
 
@@ -1076,4 +1081,20 @@ Median SH-2 totals (ratios from the medians of the three rounds):
 - **Street Fighter Zero 3: worse, partly because of this task.** Its IR pool is never reused (0 reuses), but it counts toward the IR cap as specified, and the master's IR was already near the cap (1,014,557 of 1,048,576 instructions after Task 4's run, no eviction). Now the cap is reached once in the window (13,553 IR-only blocks evicted), so the window has 15,347 front-end builds against 10,686, its emulation-thread compile time rises from 251 to 350 ms (part of it the slower machine), and the worst frame rises from 14.6 to 23.3-25.8 ms with 2 frames over 16.7 ms per round. The ratio falls from 1.042 to 1.001; the slower session explains part of that, the extra builds the rest.
 - **Panzer Dragoon II Zwei and Sega Rally** build and reuse nothing in the window (187 and 502 builds, 0 reuses; the same counts as Task 4), so their changes are the slower session. Rally's three rounds spread from 5.071 to 5.575 ms.
 
-**Verdict for the task:** IR reuse removes most of Burning Rangers' front-end work and two thirds of its stutter frames, but not the startup burst behind its worst frame. Counting the pool toward the IR cap costs Street Fighter Zero 3 one IR eviction in its window. A pool bound of its own (or emptying only the pool when the cap is reached, before evicting live IR-only blocks) would avoid that. This needs a decision: it changes the specified cap rule.
+**Verdict for the task:** IR reuse removes most of Burning Rangers' front-end work and two thirds of its stutter frames, but not the startup burst behind its worst frame. Counting the pool toward the IR cap costs Street Fighter Zero 3 one IR eviction in its window. A pool bound of its own (or emptying only the pool when the cap is reached, before evicting live IR-only blocks) would avoid that. Ruling R4 chose the latter (below).
+
+### Task 5 (R4): the IR cap releases the pool before evicting live blocks
+
+Code: the R4 commit on top of `12ac9ab`. At the IR cap the cache now releases the whole IR pool first (`irPoolReleases`), and evicts the live IR-only blocks only if it is still at the cap (`irEvictions`), the order the native code cap uses with the retired native pool. The retired IR keeps counting toward the cap. Same protocol, in a new session: Street Fighter Zero 3 three rounds (interpreter and x64 back to back), Burning Rangers long twice (interpreter and x64 each). Rows "2E E (R4)" in the table. The load reading after each SFZ3 run was 5-27%. The first Burning Rangers pair ran during a noisier period (its interpreter run has 40 frames over 16.7 ms).
+
+| Title | Interpreter | x64 | Ratio | Worst frame, x64 / interpreter | Frames over 16.7 ms, x64 / interpreter | Front-end builds in window | IR evictions / pool releases in window | IR reuses |
+|---|---|---|---|---|---|---|---|---|
+| Street Fighter Zero 3, round medians | 5.048 | 4.930 | 1.024 | 15.8, 27.0, 14.2 / 12.7 | 0, 16, 0 / 0 | 10,686 (as Task 4) | 0 / 1 | 0 |
+| Burning Rangers long, run 1 | 6.589 | 6.894 | 0.956 | 54.3 / 21.5 | 1,900 / 40 | 323,360 | 1 / 526 | 877,188 |
+| Burning Rangers long, run 2 | 6.294 | 6.452 | 0.976 | 48.6 / 30.7 | 1,186 / 30 | 324,460 | 1 / 536 | 880,785 |
+| Burning Rangers long, pre-R4 build (`12ac9ab`), same session | 6.294 (run 2) | 6.377 | 0.987 | 50.0 | 981 | 321,246 | 1 / - | 895,596 |
+
+- **Street Fighter Zero 3 is restored.** The cap now only releases the pool (once in the window), no live IR-only block is evicted, and the window's front-end builds are exactly Task 4's 10,686 (native compiles 6,333, also as Task 4). Rounds 1 and 3 have worst frames of 15.8 and 14.2 ms and no frame over 16.7 ms. Round 2's 16 frames over 16.7 ms (worst 27.0 ms) have the same compile work as the other rounds (its slowest frame, 2,481, built 70 blocks in 3.2 ms), so they are host stalls, not compiles. Median ratio 1.024 (Task 4: 1.042, pre-R4: 1.001).
+- **Burning Rangers.** The work counters are within 1-2% of the pre-R4 build (front-end builds 323-324 K against 321 K in the same session, emulation-thread compile ms 6,088-6,421 against 6,059). Releasing the pool instead of evicting everything means the cap is reached often (526-536 times in the window, against 1 eviction), each time freeing the pool on the emulation thread, outside `compileMs`. The frames over 16.7 ms are 1,186 (quieter run) against 981 for the pre-R4 build in the same session. The 628 of the Task 5 session is not reproducible today: this session is noisier (the interpreter has 30-40 frames over 16.7 ms against 9). Ratio 0.976 against 0.987 for the pre-R4 build, within run-to-run spread.
+
+**Verdict for R4:** it removes the Street Fighter Zero 3 regression completely (same builds and compiles as before Task 5) and costs Burning Rangers little, within the spread of this session. The many pool releases at the cap are one candidate for the small remaining difference.

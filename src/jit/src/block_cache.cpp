@@ -266,6 +266,11 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
     if (CachedBlock *reused = ReuseIr(ctx, pc); reused != nullptr) {
         return Started(*reused, ctx, pc, native); // its IR is already counted
     }
+    if (m_totalInsts >= m_maxCachedInsts && m_retiredIrInsts > 0) {
+        // The pool goes first, as at the native code cap.
+        ++m_retiredIrReleases;
+        ClearRetiredIr();
+    }
     if (m_totalInsts >= m_maxCachedInsts) {
         EvictIrOnly();
     }

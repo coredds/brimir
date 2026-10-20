@@ -477,7 +477,7 @@ TEST_CASE("Executor: the IR backend keeps every block on IR", "[jit][executor][t
 
 // Without a native backend nothing has native code to keep: the native pool stays empty. A block
 // whose code changed goes to the IR pool instead, so code that comes back is not built again.
-TEST_CASE("Executor: the IR backend never retires blocks", "[jit][executor]") {
+TEST_CASE("Executor: the IR backend has no native pool and reuses dropped IR blocks", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
     brimir::jit::Executor exec{brimir::jit::BackendKind::Ir, sh2test::kNativeOnFirstRun};
     auto &ctx = rig->sh2->GetJitContext();
@@ -959,17 +959,39 @@ TEST_CASE("Block cache: retired IR blocks count toward the IR cap", "[jit][execu
     CHECK(cache.CachedInsts() == pInsts + qInsts);
     CHECK(cache.IrEvictions() == 0u);
 
-    // At the cap: the next build evicts the IR-only blocks and empties the pool.
+    // At the cap: the next build first releases the pool, which is enough here, so the live IR-only
+    // blocks stay.
     const size_t otherInsts = cache.Get(ctx, kOther).block.code.size();
-    CHECK(cache.IrEvictions() == 1u);
+    REQUIRE(otherInsts < pInsts);
+    CHECK(cache.RetiredIrReleases() == 1u);
+    CHECK(cache.IrEvictions() == 0u);
     CHECK(cache.RetiredIrInsts() == 0u);
-    CHECK(cache.CachedInsts() == otherInsts);
-    CHECK(cache.Find(kCode) == nullptr);
+    CHECK(cache.CachedInsts() == qInsts + otherInsts);
+    REQUIRE(cache.Find(kCode) != nullptr);
+    CHECK(cache.Find(kCode)->block.guestOpcodes.front() == kAdd16_R3);
+    CHECK(cache.Find(kOther) != nullptr);
 
     rig->WriteCode(kCode, kIrP);
     cache.Get(ctx, kCode); // P is gone from the pool: rebuilt
     CHECK(cache.RetiredIrReuses() == 0u);
     CHECK(cache.Compiles() == 4u);
+    CHECK(cache.IrEvictions() == 0u);
+
+    // Live IR alone at the cap (the pool is empty): the live IR-only blocks are evicted as before.
+    constexpr uint32_t kOther2 = kCode + 0x200;
+    IrCache live{kind, pInsts + qInsts};
+    rig->WriteCode(kCode, kIrP);
+    rig->WriteCode(kOther2, kIrQ);
+    live.cache.Get(ctx, kCode);
+    live.cache.Get(ctx, kOther2);
+    REQUIRE(live.cache.CachedInsts() >= pInsts + qInsts);
+    REQUIRE(live.cache.RetiredIrInsts() == 0u);
+    CHECK(live.cache.Get(ctx, kOther).block.code.size() == otherInsts);
+    CHECK(live.cache.IrEvictions() == 1u);
+    CHECK(live.cache.RetiredIrReleases() == 0u);
+    CHECK(live.cache.CachedInsts() == otherInsts);
+    CHECK(live.cache.Find(kCode) == nullptr);
+    CHECK(live.cache.Find(kOther2) == nullptr);
 }
 
 TEST_CASE("Block cache: the IR pool is bounded per PC", "[jit][executor][tier]") {
