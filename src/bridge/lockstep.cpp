@@ -443,6 +443,16 @@ void SyncBackupMemory(const ymir::bup::IBackupMemory &src, ymir::bup::IBackupMem
 
 } // namespace
 
+bool LoadLockstepState(CoreWrapper &a, CoreWrapper &b, const ymir::savestate::SaveState &state) {
+    ymir::Saturn *sa = a.GetSaturn();
+    ymir::Saturn *sb = b.GetSaturn();
+    if (sa == nullptr || sb == nullptr) {
+        return false;
+    }
+    // skipROMChecks: both cores run the same IPL/CD block ROM by construction.
+    return sb->LoadState(state, true) && sa->LoadState(state, true);
+}
+
 bool SyncLockstepCores(CoreWrapper &src, CoreWrapper &dst) {
     ymir::Saturn *ss = src.GetSaturn();
     ymir::Saturn *sd = dst.GetSaturn();
@@ -452,8 +462,7 @@ bool SyncLockstepCores(CoreWrapper &src, CoreWrapper &dst) {
     auto state = std::make_unique<ymir::savestate::SaveState>();
     ClearSaveState(*state);
     ss->SaveState(*state);
-    // skipROMChecks: both cores run the same IPL/CD block ROM by construction.
-    if (!sd->LoadState(*state, true) || !ss->LoadState(*state, true)) {
+    if (!LoadLockstepState(src, dst, *state)) {
         return false;
     }
 

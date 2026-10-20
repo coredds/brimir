@@ -161,7 +161,17 @@ full state (`brimir::SyncLockstepCores`: save state plus backup RAM), because
 some upstream Ymir fields are never initialized and two fresh cores can
 otherwise differ in heap garbage that the comparison sees (see
 `design/sh2-jit.md` section 7.2). A failed synchronization exits with code 2.
-Progress is printed every 600 frames:
+
+`--lockstep-reload K` (only with `--lockstep`) tests state loads: after every K
+compared frames the run saves the interpreter core's state, runs and compares
+K / 2 more frames, then loads the saved state into both cores
+(`brimir::LoadLockstepState`) and continues; the cores are compared right after
+the load too. Replayed frames count toward N. The JIT core keeps its compiled
+code across the load, so this checks that cached blocks never run against
+memory they were not compiled for.
+
+Progress is printed every 600 frames (with `--lockstep-reload`, after every
+reload cycle):
 
 ```
 lockstep: 600/36000 frames identical

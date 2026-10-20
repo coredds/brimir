@@ -5,8 +5,13 @@
 #include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
+#include <brimir/jit/backend.hpp>
+#include <brimir/jit/block_cache.hpp>
 #include <brimir/jit/executor.hpp>
+#include <brimir/jit/interp_backend.hpp>
 
+#include <algorithm>
+#include <bit>
 #include <memory>
 #include <vector>
 
@@ -279,6 +284,71 @@ TEST_CASE("Executor: the recent table never returns a stale block", "[jit][execu
     CHECK(exec.Cache().Size() == 2);
 }
 
+// A state load no longer flushes the block cache, so code that changed under a cached block (as
+// when a state saved earlier is loaded into a core whose memory has moved on) must be caught by the
+// checks every block goes through: the fetch-buffer gate at PC & 2, then the block's own validation.
+TEST_CASE("Executor: code changed by a state load is not run from the cache", "[jit][executor]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    const bool native = kind != brimir::jit::BackendKind::Ir;
+    auto ref = std::make_unique<Rig>();
+    auto jit = std::make_unique<Rig>();
+    brimir::jit::Executor exec{kind, sh2test::kNativeOnFirstRun};
+    auto &ctx = jit->sh2->GetJitContext();
+
+    const auto step = [&] {
+        const auto info = exec.Step(ctx);
+        uint64_t refCycles = 0;
+        for (uint32_t i = 0; i < info.retired; ++i) {
+            refCycles += ref->sh2->Step<false, false>();
+        }
+        CHECK(info.cycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit);
+        INFO(diff);
+        CHECK(diff.empty());
+        return info;
+    };
+    const auto load = [&](const ymir::savestate::SH2SaveState &state) {
+        ref->Load(state);
+        jit->Load(state);
+    };
+
+    // P: three add #1,R3 ; Q: three add #16,R3 at the same place.
+    const std::vector<uint16_t> p = {kAdd1_R3, kAdd1_R3, kAdd1_R3, kSleep};
+    const std::vector<uint16_t> q = {kAdd16_R3, kAdd16_R3, kAdd16_R3, kSleep};
+    ref->WriteCode(kCode, p);
+    jit->WriteCode(kCode, p);
+    auto state = ref->BaseState(kCode);
+    state.R[3] = 0;
+    load(state);
+    REQUIRE(step().retired == 3);
+    CHECK(jit->State().R[3] == 3u);
+    CHECK(exec.Cache().Size() == 1);
+    CHECK(exec.GetStats().nativeBlocksRun == (native ? 1u : 0u));
+
+    // The code changes; the loaded state still holds P's second word in its fetch buffer and
+    // resumes at PC & 2, where the interpreter runs the buffered opcode, not memory's.
+    ref->WriteCode(kCode, q);
+    jit->WriteCode(kCode, q);
+    state = ref->BaseState(kCode + 2);
+    state.fetchedOpcodes = (uint32_t{kAdd1_R3} << 16) | kAdd1_R3;
+    load(state);
+    REQUIRE(step().retired == 1);
+    CHECK(exec.GetStats().interpreted == 1);
+    CHECK(jit->State().R[3] == 4u);
+    CHECK(exec.Cache().Invalidations() == 0);
+
+    // Resuming at the block start must not run the cached P.
+    load(ref->BaseState(kCode));
+    REQUIRE(step().retired == 3);
+    CHECK(jit->State().R[3] == 4u + 3u * 16u);
+    CHECK(jit->State().PC == kCode + 6);
+    CHECK(exec.Cache().Invalidations() == 1);
+    CHECK(exec.Cache().Compiles() == 2);
+    CHECK(exec.GetStats().staleEntries == (native ? 1u : 0u));
+    CHECK(exec.Cache().Size() == 1);
+}
+
 TEST_CASE("Executor: flush outside a block clears the cache immediately", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
     brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
@@ -403,6 +473,36 @@ TEST_CASE("Executor: the IR backend keeps every block on IR", "[jit][executor][t
     CHECK(exec.Cache().CachedInsts() == entry->block.code.size());
 }
 
+// Without a native backend nothing has native code to keep: a block whose code changed is dropped
+// and every rewrite is a new build, even when earlier code comes back.
+TEST_CASE("Executor: the IR backend never retires blocks", "[jit][executor]") {
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{brimir::jit::BackendKind::Ir, sh2test::kNativeOnFirstRun};
+    auto &ctx = rig->sh2->GetJitContext();
+    rig->WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep});
+    auto state = rig->BaseState(kCode);
+    state.R[3] = 0;
+    rig->Load(state);
+    REQUIRE(exec.Step(ctx).retired == 2);
+    REQUIRE(exec.Cache().Compiles() == 1u);
+
+    uint32_t r3 = 2;
+    for (uint32_t i = 1; i <= 4; ++i) {
+        INFO("rewrite " << i);
+        const bool q = (i % 2) != 0;
+        rig->WriteCode(kCode, {q ? kAdd16_R3 : kAdd1_R3, kAdd1_R3, kSleep});
+        rig->Load(rig->BaseState(kCode));
+        REQUIRE(exec.Step(ctx).retired == 2);
+        r3 += (q ? 16u : 1u) + 1u;
+        CHECK(rig->State().R[3] == r3);
+        CHECK(exec.Cache().Compiles() == 1u + i);
+        CHECK(exec.Cache().Invalidations() == i);
+    }
+    CHECK(exec.Cache().RetiredReuses() == 0u);
+    CHECK(exec.Cache().RetiredCodeBytes() == 0u);
+    CHECK(exec.Cache().RetiredEvictions() == 0u);
+}
+
 // The IR-instruction budget counts IR-only blocks only. A native block whose code changed is
 // dropped and rebuilt from scratch as an IR-only block (it never needs its freed IR), and a
 // flush drops native blocks the same way.
@@ -467,4 +567,162 @@ TEST_CASE("Executor: kMaxCachedInsts accounting ignores native blocks", "[jit][e
     CHECK(cache.CachedInsts() == cache.Find(kHot)->block.code.size());
     CHECK(cache.IrEvictions() == 0u);
     CHECK(cache.FlushesCodeCap() == 0u);
+}
+
+namespace {
+
+// Runs the block at kCode on the rig as Executor::StepImpl does (a native block that reports stale
+// is dropped and the PC looked up again) and returns whether the block that ran was native.
+bool StepNative(brimir::jit::BlockCache &cache, brimir::jit::INativeBackend &backend, Rig &rig) {
+    rig.Load(rig.BaseState(kCode));
+    auto &ctx = rig.sh2->GetJitContext();
+    const auto run = [&](const brimir::jit::CachedBlock &entry) {
+        return entry.code.entry != nullptr ? backend.Run(entry.code, ctx) : brimir::jit::RunBlock(entry.block, ctx);
+    };
+    const brimir::jit::CachedBlock *entry = &cache.Get(ctx, kCode);
+    brimir::jit::ExitInfo info = run(*entry);
+    if (info.stale) {
+        cache.Invalidate(kCode);
+        entry = &cache.Get(ctx, kCode);
+        info = run(*entry);
+        REQUIRE_FALSE(info.stale);
+    }
+    REQUIRE(info.retired == 2);
+    return entry->code.entry != nullptr;
+}
+
+// add #imm,R3 ; add #1,R3 ; sleep: a different program for every imm (1-127).
+void WriteProgram(Rig &rig, uint32_t imm) {
+    rig.WriteCode(kCode, {static_cast<uint16_t>(0x7300 | (imm & 0x7F)), kAdd1_R3, kSleep});
+}
+
+// Steps until the block runs natively, from the first run after a (re)build, and returns how many
+// runs were on IR. Then requires that the next run is native too.
+uint32_t IrRunsUntilNative(brimir::jit::BlockCache &cache, brimir::jit::INativeBackend &backend, Rig &rig) {
+    uint32_t irRuns = 0;
+    while (!StepNative(cache, backend, rig)) {
+        ++irRuns;
+        REQUIRE(irRuns < 1000);
+    }
+    CHECK(StepNative(cache, backend, rig));
+    return irRuns;
+}
+
+} // namespace
+
+// A native block that reports stale is rebuilt on IR; the more often a PC has gone stale, the more
+// IR runs the rebuilt block gets before its native compile (threshold << min(stale count, shift)).
+TEST_CASE("Block cache: a PC that keeps going stale waits longer for native code", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, 2, brimir::jit::kMaxCachedInsts, 0, 2};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 5; ++k) {
+        INFO("stale rewrites " << k);
+        WriteProgram(*rig, 1 + k);
+        CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << std::min(k, 2u)) - 1);
+        CHECK(cache.DampedBuilds() == k);
+        CHECK(cache.Invalidations() == k);
+    }
+}
+
+// A PC's stale count never decays by itself, but the wait it causes is bounded: unchanged code gets
+// native code after at most threshold << shift runs. A flush forgets the counts.
+TEST_CASE("Block cache: a damped PC still reaches native code", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, 2, brimir::jit::kMaxCachedInsts, 0, 2};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 10; ++k) {
+        WriteProgram(*rig, 1 + k);
+        REQUIRE(StepNative(cache, *backend, *rig) == false);
+        uint32_t irRuns = 0;
+        while (!StepNative(cache, *backend, *rig)) {
+            REQUIRE(++irRuns < 1000);
+        }
+    }
+    REQUIRE(cache.Invalidations() == 10u);
+
+    // Unchanged code from here on: one more rewrite, then no stale report.
+    WriteProgram(*rig, 100);
+    CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << 2) - 1);
+    CHECK(cache.Invalidations() == 11u);
+
+    cache.Flush();
+    CHECK(IrRunsUntilNative(cache, *backend, *rig) == 1u);
+    // Counting restarts after the flush.
+    WriteProgram(*rig, 101);
+    CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << 1) - 1);
+}
+
+// threshold << shift must not overflow uint32 whatever the constructor arguments: with threshold 16
+// a shift of 28 or more used to give 0 (runsUntilNative = UINT32_MAX, never native) and 32 or more
+// is undefined. The wait only grows with the stale count and stays finite and non-zero.
+TEST_CASE("Block cache: an oversized damping shift is clamped", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    constexpr uint32_t kThreshold = 16;
+    constexpr uint32_t kMaxShift = 32 - std::bit_width(kThreshold); // largest shift that fits uint32
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, kThreshold,
+                                  brimir::jit::kMaxCachedInsts, 0, 40};
+    auto rig = std::make_unique<Rig>();
+    rig->Load(rig->BaseState(kCode));
+    WriteProgram(*rig, 1);
+    auto &ctx = rig->sh2->GetJitContext();
+    uint32_t previous = 0;
+    for (uint32_t k = 0; k < 40; ++k) {
+        INFO("stale drops " << k);
+        const brimir::jit::CachedBlock &entry = cache.Get(ctx, kCode);
+        const uint32_t expected = (kThreshold << std::min(k, kMaxShift)) - 1;
+        REQUIRE(entry.runsUntilNative == expected);
+        REQUIRE(entry.runsUntilNative >= previous);
+        previous = entry.runsUntilNative;
+        cache.Invalidate(kCode);
+    }
+    CHECK(cache.Invalidations() == 40u);
+}
+
+TEST_CASE("Block cache: damping off keeps the global threshold", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, 2, brimir::jit::kMaxCachedInsts, 0, 0};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 5; ++k) {
+        INFO("stale rewrites " << k);
+        WriteProgram(*rig, 1 + k);
+        CHECK(IrRunsUntilNative(cache, *backend, *rig) == 1u);
+    }
+    CHECK(cache.Invalidations() == 5u);
+    CHECK(cache.DampedBuilds() == 0u);
+}
+
+// Threshold 1 means native on the first run, always (tests and diagnostics): never damped.
+TEST_CASE("Block cache: threshold 1 is never damped", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, sh2test::kNativeOnFirstRun,
+                                  brimir::jit::kMaxCachedInsts, 0, 4};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 6; ++k) {
+        INFO("stale rewrites " << k);
+        WriteProgram(*rig, 1 + k);
+        CHECK(IrRunsUntilNative(cache, *backend, *rig) == 0u);
+    }
+    CHECK(cache.Invalidations() == 6u);
+    CHECK(cache.DampedBuilds() == 0u);
 }

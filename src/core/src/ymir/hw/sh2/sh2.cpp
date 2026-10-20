@@ -660,10 +660,9 @@ void SH2::LoadState(const savestate::SH2SaveState &state) {
 
     m_intrFlags.pending = !m_delaySlot && INTC.pending.level > SR.ILevel;
 
-    // Brimir: compiled code is invalid after loading a state
-    if (m_jitExecutor != nullptr) {
-        m_jitExecutor->Flush();
-    }
+    // Brimir: the JIT's compiled code is not flushed here. Every cached block is checked against
+    // current memory before it runs (design/sh2-jit-m2d.md, A4), and the executor interprets at
+    // pending interrupts, delay slots and a fetch buffer that differs from memory at PC & 2.
 }
 
 void SH2::PostLoadState(const savestate::SH2SaveState &state) {

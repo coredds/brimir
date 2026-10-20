@@ -55,7 +55,7 @@ TEST_CASE("Frames run with the SH-2 JIT enabled", "[jit][integration]") {
     REQUIRE(master->GetStats().blocksRun + master->GetStats().interpreted > 0);
 }
 
-TEST_CASE("Save state round trip with the SH-2 JIT flushes the block caches", "[jit][integration]") {
+TEST_CASE("Save state round trip with the SH-2 JIT keeps the block caches", "[jit][integration]") {
     CoreWrapper core;
     core.SetSH2JitBackend(sh2test::TestBackend());
     core.SetSH2JitEnabled(true);
@@ -65,9 +65,18 @@ TEST_CASE("Save state round trip with the SH-2 JIT flushes the block caches", "[
     }
     std::vector<uint8_t> state(core.GetStateSize());
     REQUIRE(core.SaveState(state.data(), state.size()));
+    const auto* master = core.GetSH2JitExecutor(true);
+    const auto* slave = core.GetSH2JitExecutor(false);
+    const size_t masterSize = master->Cache().Size();
+    const size_t slaveSize = slave->Cache().Size();
+    const uint64_t masterFlushes = master->Cache().FlushesRequested();
+    const uint64_t slaveFlushes = slave->Cache().FlushesRequested();
+    REQUIRE(masterSize > 0);
     REQUIRE(core.LoadState(state.data(), state.size()));
-    REQUIRE(core.GetSH2JitExecutor(true)->Cache().Size() == 0);
-    REQUIRE(core.GetSH2JitExecutor(false)->Cache().Size() == 0);
+    REQUIRE(master->Cache().Size() == masterSize);
+    REQUIRE(slave->Cache().Size() == slaveSize);
+    REQUIRE(master->Cache().FlushesRequested() == masterFlushes);
+    REQUIRE(slave->Cache().FlushesRequested() == slaveFlushes);
     core.RunFrame();
     REQUIRE(core.GetLastError().empty());
 }

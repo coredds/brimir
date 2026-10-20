@@ -7,6 +7,10 @@
 
 #include <string>
 
+namespace ymir::savestate {
+struct SaveState;
+}
+
 namespace brimir {
 
 enum class SH2DiffScope {
@@ -30,7 +34,7 @@ void PrepareLockstepCore(CoreWrapper &core);
 // up (Initialize, PrepareLockstepCore, content/BIOS loading, any test workload installation) and
 // before the first lockstep frame. Saves src's full Saturn state (heap-allocated, zero-filled first
 // so padding is deterministic) and loads it into dst and back into src (so both cores go through the
-// same LoadState side effects; SH2::LoadState also flushes each core's SH-2 JIT). The internal and
+// same LoadState side effects; SH2::LoadState does not flush the SH-2 JIT's block caches). The internal and
 // cartridge backup RAM images are outside the save state; bytes that differ are copied from src to
 // dst when both images exist with the same size.
 //
@@ -42,6 +46,12 @@ void PrepareLockstepCore(CoreWrapper &core);
 //
 // Returns false if either core is not initialized or a LoadState fails.
 bool SyncLockstepCores(CoreWrapper &src, CoreWrapper &dst);
+
+// Loads one save state into both cores; the order does not matter. The backup RAM
+// images are outside the save state and are left as they are: lockstep keeps them identical. A JIT
+// core keeps its compiled blocks across the load; they are checked against memory before they run.
+// Returns false if either core is not initialized or a LoadState fails.
+bool LoadLockstepState(CoreWrapper &a, CoreWrapper &b, const ymir::savestate::SaveState &state);
 
 // Compares the emulated state of two cores after the same frames, in this order: both SH-2s (CPU
 // and on-chip peripherals, field by field), the slave SH-2 enable flag, low and high work RAM, the

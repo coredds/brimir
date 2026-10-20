@@ -27,6 +27,7 @@ struct NativeCode {
     // The code checks at entry that its guest code is unchanged (reporting ExitInfo::stale), so the
     // block cache does not check it, and it may be published to the backend's link table.
     bool selfValidating = false;
+    uint32_t bytes = 0; // size of the generated code (set by Compile; counted in CodeBytes)
 };
 
 class INativeBackend {
@@ -52,6 +53,10 @@ public:
     // removes the block published for pc. Publish without selfValidating is ignored.
     virtual void Publish(uint32_t pc, const NativeCode &code) = 0;
     virtual void Unpublish(uint32_t pc) = 0;
+    // Frees the code of one block compiled for pc and subtracts code.bytes from CodeBytes(). The
+    // caller has already unpublished pc (the link table must never point to freed code), and no
+    // generated code runs.
+    virtual void Release(uint32_t pc, const NativeCode &code) = 0;
     // Frees all generated code and empties the link table. Never called while generated code runs.
     virtual void Reset() = 0;
     virtual size_t CodeBytes() const = 0; // bytes of generated code currently held

@@ -259,3 +259,94 @@ Measured separately in `design/sh2-x64-performance.md` ("Milestone 2D track B re
 
 - No JIT bugs were found; no fixes were needed.
 - Burning Rangers still reloads its code throughout the attract sequence; the threshold of 16 halves its native compiles and code-cap flushes against 2C, but it still reaches the native-code cap (a performance issue, not a correctness one: its lockstep run is identical).
+
+## Milestone 2D, track A, A4 (no flush on state load)
+
+**Date**: 2026-10-19
+**Code**: `SH2::LoadState` no longer flushes the executor (`SetJitExecutor` and `SH2::Reset` still do); `brimir::LoadLockstepState` and `brimir_bench --lockstep N --lockstep-reload K` (after every K compared frames: save the interpreter core's state, run and compare K / 2 more frames, load the saved state into both cores, compare, continue; replayed frames count toward N).
+**Machine and build**: Windows x64 as above (`build-bench`, Release, LTO/IPO, MSVC).
+
+Why the flush can go (the audit): a block depends only on its `startPC`, its `guestOpcodes`, and for self-validating x64 blocks the array pointers of its code pages ("What native code depends on" in the track A plan). Every cached block is checked against current memory before it runs: IR-only and non-self-validating native blocks by `BlockCache::Get`, self-validating x64 blocks by their prologue (code page arrays and code bytes; a block that reports stale is dropped and rebuilt), blocks taken back from the retired pool by `Build` (opcodes and code-page arrays). A state load changes registers, `m_wbReg`, the delay slot flag, the pending interrupt, the fetch buffer and memory. Registers and `m_wbReg` are read by the block at run time (the write-back folding treats `m_wbReg` as unknown at entry); the executor interprets at a pending interrupt or delay slot, and at PC & 2 when the loaded fetch buffer's low half differs from memory; at an even PC the interpreter refills the buffer from memory, as the block does. The JIT only runs with cache emulation off, so the cache arrays a load replaces are not read by blocks. No state was found that a block depends on and no check covers, so the flush was not needed for exactness.
+
+### Lockstep across state loads (3,600 frames, `--lockstep-reload 300`, all seven, both backends)
+
+`brimir_bench --bios <bios> [--game <game> --system-dir <scratch dir>] --lockstep 3600 --lockstep-reload 300 --jit-backend x64|ir` (scratch system dir as in the milestone 1 method; four runs at a time, so wall times are longer than a run on its own). That is 8 reload cycles of 450 frames (300 compared, 150 more, then the load of the state saved 150 frames before), 7 loads per run, every one followed by a core comparison. All 14 runs ended with `lockstep: OK, 3600 frames identical` and exit 0, with no bench error output (only the cores' own log lines). `compileFallbacks` is 0 on both CPUs in every run. `flushes codeCap` is 0 in every run; the `requested` flushes (attaching the executor and CPU resets, none from the loads) are in the table.
+
+| Title | BIOS | x64 wall time | x64 master staleEntries | x64 requested flushes master / slave | IR wall time |
+|---|---|---|---|---|---|
+| BIOS menu (no disc) | US | 1:25 | 0 | 1 / 1 | 1:42 |
+| Virtua Fighter 2 (Japan) (Rev B) | JP | 2:36 | 151 | 1 / 3 | 3:03 |
+| Panzer Dragoon II Zwei (USA) | US | 1:27 | 55 | 1 / 3 | 1:59 |
+| Sega Rally Championship (USA) | US | 1:58 | 418 | 2 / 4 | 2:21 |
+| Burning Rangers (USA) | US | 2:09 | 42 | 2 / 4 | 2:40 |
+| Guardian Heroes (USA) | US | 1:43 | 209 | 2 / 5 | 2:02 |
+| Street Fighter Zero 3 (Japan) | JP | 1:36 | 358 | 2 / 10 | 2:02 |
+
+### Tests
+
+New and changed `[jit]` tests: `Attaching and Reset flush the executor; LoadState does not` (flush counts 1, 2, 2, 2), `Save state round trip with the SH-2 JIT keeps the block caches` (cache sizes and `FlushesRequested()` unchanged by the load), `Executor: code changed by a state load is not run from the cache` (both backends: the fetch-buffer gate interprets at PC & 2, then the changed code runs, from a rebuilt block), `Lockstep: JIT core matches interpreter across state loads` (the interrupt-driven synthetic workload, a load every 20 frames of the state saved 10 frames earlier; identical throughout, no flush from the loads).
+
+## Milestone 2D, track A
+
+**Date**: 2026-10-19/20
+**Commit**: e8adf69 (the validated code: the head of `feature/sh2-jit-2d-a` before the commit that adds this section; no code changed after A4, so the 3,600-frame reload runs of "Milestone 2D, track A, A4" above count as part of this validation)
+**Machine and build**: Windows x64 as above (`build-bench`, Ninja, Release, LTO/IPO, MSVC); Raspberry Pi 3 for the ARM check (aarch64 Linux, gcc 14.2, Release, `BRIMIR_LTO=ON` for `build/bench`, tests without LTO). Same BIOS files, scratch system dir and commands as the milestone 1 method.
+
+Plan 2D track A (`design/plans/2026-10-19-sh2-jit-m2d-track-a.md`) changes `BlockCache` and the native backend (free a dropped block's native code at once, `INativeBackend::Release`; a bounded pool of retired self-validating native blocks that `Build` takes back when the opcodes and code pages match; per-PC damping of native compiles, left off at `kMaxStaleDampShift` = 0), `SH2::LoadState` (no executor flush) and `brimir_bench` (`--lockstep-reload`, counters). Both backends were validated.
+
+### Lockstep, x64 backend (36,000 frames, all seven)
+
+`brimir_bench --bios <bios> [--game <game> --system-dir <scratch dir>] --lockstep 36000 --jit-backend x64`, four runs at a time (so the wall times are longer than a run on its own; scripts and raw outputs in `%TEMP%\opencode\t6`). All seven runs ended with `lockstep: OK, 36000 frames identical` and exit 0 on the first attempt. `compileFallbacks` is 0 on both CPUs and `flushes codeCap` is 0 on both CPUs in every run.
+
+| Title | BIOS | Result | jit master blocksRun / interpreted | jit slave blocksRun / interpreted | nativeBlocksRun (master / slave) | IR-cap evictions (blocks), master / slave | Peak native code MB, master / slave | Retired reuses, master / slave | Wall time |
+|---|---|---|---|---|---|---|---|---|---|
+| BIOS menu (no disc) | US | OK, identical (exit 0) | 2,952,071,540 / 894,693 | 0 / 0 | 2,952,031,902 / 0 | 0 / 0 | 6.9 / 0.0 | 0 / 0 | 14:00 |
+| Virtua Fighter 2 (Japan) (Rev B) | JP | OK, identical (exit 0) | 2,417,548,180 / 30,837,846 | 4,074,892,394 / 7,440,566 | 2,416,826,691 / 4,074,757,260 | 4 (58,511) / 0 | 84.6 / 29.8 | 0 / 0 | 35:15 |
+| Panzer Dragoon II Zwei (USA) | US | OK, identical (exit 0) | 3,266,028,823 / 73,852,344 | 2,069,237,372 / 5,586,014 | 3,265,359,374 / 2,069,193,889 | 3 (36,979) / 0 | 105.7 / 10.1 | 13 / 0 | 25:37 |
+| Sega Rally Championship (USA) | US | OK, identical (exit 0) | 2,983,278,830 / 19,740,973 | 1,582,039,497 / 1,104,116,598 | 2,983,055,617 / 1,581,994,368 | 0 / 0 | 34.7 / 6.5 | 0 / 0 | 18:34 |
+| Burning Rangers (USA) | US | OK, identical (exit 0) | 2,348,616,009 / 33,446,500 | 2,232,901,296 / 102,482,762 | 2,346,916,542 / 2,231,230,737 | 1 (16,843) / 0 | 74.0 / 6.6 | 460,161 / 425,716 | 24:20 |
+| Guardian Heroes (USA) | US | OK, identical (exit 0) | 2,493,469,510 / 11,301,264 | 2,102,857,379 / 1,170,391 | 2,493,052,636 / 2,102,665,641 | 1 (14,669) / 0 | 59.2 / 16.6 | 1,045 / 0 | 15:54 |
+| Street Fighter Zero 3 (Japan) | JP | OK, identical (exit 0) | 2,233,386,250 / 43,262,494 | 1,923,173,206 / 123,208 | 2,232,601,551 / 1,923,155,134 | 6 (86,164) / 0 | 80.7 / 2.0 | 96 / 0 | 22:10 |
+
+- `blocksRun` and `interpreted` are identical to the track B table (and the 2C table) on both CPUs for all seven runs: none of the track A changes alters which instructions are compiled or where blocks stop. `nativeBlocksRun` equals track B's within 0.001% on six titles (a reused block is native from its first run, so a few runs that were IR runs before the threshold are native now) and is 0.14% higher on Burning Rangers (the master 2,346,916,542 against 2,343,703,249), where 885,877 blocks came back from the retired pool.
+- **No title reached the 128 MB native-code cap**: the code-cap flushes are 0 on both CPUs on all seven (track B: Burning Rangers 4 master / 3 slave); the highest peak is Panzer Dragoon II Zwei's master with 105.7 MB (it drops little code: 1,028 invalidations in 36,000 frames, so the peak is its live code), then Virtua Fighter 2 (84.6 MB) and Street Fighter Zero 3 (80.7 MB). Burning Rangers peaks at 74.0 / 6.6 MB (track B: 128 / 128) although 3,046.8 MB (master) and 2,607.1 MB (slave) of native code were generated for blocks that went stale.
+- IR-cap evictions equal track B's on Virtua Fighter 2 (4), Panzer Dragoon II Zwei (3) and Street Fighter Zero 3 (6; 86,164 blocks against 86,170) and Guardian Heroes (1; 14,669 against 14,674); Burning Rangers has one now (track B: 0) because a native flush no longer empties its IR-only blocks, so they reach the cap (16,843 blocks evicted, once, between frames 15,000 and 16,800).
+
+### Lockstep, IR backend (1,800 frames)
+
+`brimir_bench ... --lockstep 1800 --jit-backend ir`, four runs at a time. All seven runs ended with `lockstep: OK, 1800 frames identical` and exit 0; `compileFallbacks` 0.
+
+| Title | jit master blocksRun / interpreted | jit slave blocksRun / interpreted | IR-cap evictions (master) | Wall time |
+|---|---|---|---|---|
+| BIOS menu (no disc) | 147,582,397 / 119,591 | 0 / 0 | 0 | 0:48 |
+| Virtua Fighter 2 (Japan) (Rev B) | 121,164,082 / 970,802 | 139,022,597 / 130,532 | 1 | 1:40 |
+| Panzer Dragoon II Zwei (USA) | 139,379,992 / 2,554,481 | 64,432,951 / 43,524 | 1 | 1:00 |
+| Sega Rally Championship (USA) | 119,482,068 / 1,311,301 | 49,740,102 / 35,054,995 | 1 | 1:06 |
+| Burning Rangers (USA) | 128,046,327 / 772,328 | 68,833,193 / 3,504,627 | 1 | 1:21 |
+| Guardian Heroes (USA) | 116,053,331 / 713,444 | 66,995,037 / 18,947 | 1 | 1:01 |
+| Street Fighter Zero 3 (Japan) | 103,429,336 / 1,846,153 | 57,967,706 / 30,735 | 1 | 1:01 |
+
+The counts equal the track B IR table.
+
+### Lockstep across state loads
+
+The 14 runs of `--lockstep 3600 --lockstep-reload 300` on x64 and IR (all seven titles; table in "Milestone 2D, track A, A4" above) were made on this code: all `lockstep: OK, 3600 frames identical`, exit 0, `compileFallbacks 0`, `flushes codeCap 0`.
+
+### Tests
+
+`build\bin\brimir_tests.exe "[jit]"` on the x64 backend and with `BRIMIR_JIT_BACKEND=ir`: all passed (175 test cases, 1,693,782 assertions each). `ctest --test-dir build` (the x64 suite and the `brimir_tests_jit_ir` run): 100% passed. CI on the validated commit (GitHub Actions run 39365640161: `test-windows`, `test-linux-x64` and `build-macos-arm64`): green (`test-windows` 5m28s, `test-linux-x64` 6m02s, `build-macos-arm64` 2m35s).
+
+### ARM check (Raspberry Pi 3, aarch64 Linux)
+
+Source: this commit (`git archive`) unpacked beside the earlier tree in `/mnt/data/src/brimir` and synchronized with `rsync -c --delete` (so only changed files were rebuilt; that sync also deleted the untracked BIOS files in `tests/fixtures`, which were restored from the development PC before the tests were built); `build/bench` (Release, `BRIMIR_LTO=ON`) and `build/tests` (Release, no LTO) rebuilt with `ninja -j2` (9 and 13 minutes), never concurrently with a run. `tools/bench/run_lockstep.sh 1800 ir` (`--no-cd-preload`, as the script does): all seven runs `lockstep: OK, 1800 frames identical`, exit 0, `compileFallbacks 0` (wall time 365 s BIOS menu, 687 s Virtua Fighter 2, 493 s Panzer Dragoon II Zwei, 503 s Sega Rally, 612 s Burning Rangers, 489 s Guardian Heroes, 501 s Street Fighter Zero 3). The counts equal the Windows IR runs (Virtua Fighter 2 differs by 207 / 454 `blocksRun` and 30 / 513 `interpreted` on master / slave, its known run-to-run variation).
+
+`ctest` on the Pi (`brimir_tests`, 572 s): 100% passed. `brimir_tests "[jit]"`: 175 test cases, 123 passed and 52 skipped, 481,824 assertions all passed; all 52 skips have the message `no x64 backend` (checked with `-s`). `vcgencmd get_throttled` read `0x20000` at the end (bit 17: the ARM frequency has been capped at some point since boot, as after the track B builds; no under-voltage, no current throttling), and `uptime` showed 4 days 2 h without a reboot.
+
+### Performance
+
+Measured separately in `design/sh2-x64-performance.md` ("Milestone 2D track A results"): interpreter SH-2 total / x64 SH-2 total is 0.94-1.27 on the six titles, below the 1.5 bar; the long Burning Rangers run is at 0.882; the JIT stays off by default.
+
+### Findings
+
+- No JIT bugs were found; no fixes were needed.
+- Burning Rangers' long run no longer reaches the native-code cap (peak 74.0 / 6.6 MB), and no title does in 36,000 frames; its state is unchanged by the removal of `LoadState`'s flush in lockstep across loads.

@@ -9,6 +9,8 @@
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
 
+#include <ymir/savestate/savestate.hpp>
+
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -372,6 +374,44 @@ TEST_CASE("Lockstep: interrupt-driven synthetic workload, JIT vs interpreter", "
     CHECK(ref->GetSaturn()->mem.WRAMHigh[0x20003] != 0); // destination area written
     const auto &stats = jit->GetSH2JitExecutor(true)->GetStats();
     CHECK(stats.blocksRun > 4800000u);
+}
+
+// A state load does not flush the JIT's block caches: every block is checked against current memory
+// before it runs. Loading a state saved 10 frames earlier rewinds the cores under their cached
+// blocks (interrupt state, registers, timers, the fetch buffer), and they must stay identical.
+TEST_CASE("Lockstep: JIT core matches interpreter across state loads", "[lockstep][jit]") {
+    auto jit = MakeLockstepCore(true);
+    auto ref = MakeLockstepCore(false);
+    InstallFrtWorkload(*jit);
+    InstallFrtWorkload(*ref);
+    REQUIRE(brimir::SyncLockstepCores(*ref, *jit));
+
+    const uint64_t masterFlushes = jit->GetSH2JitExecutor(true)->Cache().FlushesRequested();
+    const uint64_t slaveFlushes = jit->GetSH2JitExecutor(false)->Cache().FlushesRequested();
+    std::unique_ptr<ymir::savestate::SaveState> saved;
+    int loads = 0;
+    for (int frame = 1; frame <= 240; ++frame) {
+        const auto result = brimir::RunLockstep(*jit, *ref, 1);
+        INFO("frame " << frame << ": " << result.divergence);
+        REQUIRE(result.divergence.empty());
+        if (frame % 20 == 10) {
+            saved = std::make_unique<ymir::savestate::SaveState>();
+            ref->GetSaturn()->SaveState(*saved);
+        } else if (frame % 20 == 0) {
+            REQUIRE(saved != nullptr);
+            REQUIRE(brimir::LoadLockstepState(*jit, *ref, *saved));
+            ++loads;
+            const std::string diff = brimir::CompareCores(*jit, *ref);
+            INFO("after the load at frame " << frame << ": " << diff);
+            REQUIRE(diff.empty());
+        }
+    }
+    CHECK(loads == 12);
+
+    CHECK(jit->GetSH2JitExecutor(true)->Cache().FlushesRequested() == masterFlushes);
+    CHECK(jit->GetSH2JitExecutor(false)->Cache().FlushesRequested() == slaveFlushes);
+    CHECK(ref->GetSaturn()->masterSH2.GetProbe().R(10) > 13000u);
+    CHECK(jit->GetSH2JitExecutor(true)->GetStats().blocksRun > 4800000u);
 }
 
 TEST_CASE("Lockstep control: synthetic workload on two interpreter cores", "[lockstep]") {
