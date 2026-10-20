@@ -23,7 +23,8 @@ namespace brimir::jit {
 
 // IR instructions of IR-only blocks kept (~20 MB of IR). Natively compiled blocks drop their IR and
 // do not count. Reaching it releases the oldest blocks of the IR pool (below) and, if the IR is
-// still at the cap with the pool empty, evicts every IR-only block; native blocks stay.
+// still at 7/8 of the cap or more with the pool empty, evicts every IR-only block; native blocks
+// stay.
 constexpr size_t kMaxCachedInsts = size_t{1} << 20;
 
 // Native code held before the cache is flushed (checked before each native compile). Sized so that
@@ -56,7 +57,7 @@ constexpr uint32_t kMaxRetiredPerPc = 4;
 // of running the front end again when BuildBlock would give the same block. Its IR keeps counting
 // toward the IR cap. At the cap, the least recently retired IR blocks (across PCs) are released
 // until the IR is below kIrReleaseTargetEighths / 8 of the cap, so that the next builds do not reach it again
-// at once; only if the whole pool is not enough are the live IR-only blocks evicted.
+// at once; if the whole pool is not enough for that, the live IR-only blocks are evicted too.
 constexpr size_t kIrReleaseTargetEighths = 7;
 
 // Damping (design/sh2-jit-m2d.md, A3): every time a block at a PC is dropped because its guest code
@@ -211,7 +212,7 @@ public:
         return m_retiredIrInsts;
     }
     // Times the IR cap released retired IR blocks (counted apart from IrEvictions: the cap evicts the
-    // live IR-only blocks only if it is still reached once the pool is empty), and the host time
+    // live IR-only blocks only if the IR is still at 7/8 of it once the pool is empty), and the host time
     // those releases took on the calling thread (nanoseconds; not part of BuildNs).
     uint64_t RetiredIrReleases() const {
         return m_retiredIrReleases;
@@ -365,7 +366,7 @@ private:
 
     // Takes a retired block for pc back if one is current (Reuse), else a retired IR block that
     // SameBuild accepts (ReuseIr). Otherwise builds the IR block for pc and caches it (first, at the
-    // IR cap, releasing the oldest IR pool blocks and then, if still at the cap, evicting the
+    // IR cap, releasing the oldest IR pool blocks and then, if still at 7/8 of it, evicting the
     // IR-only blocks; and
     // at the native code cap, if it compiles now, releasing the
     // pool and then, if still at the cap, flushing everything). Then, as Started: compiles it natively

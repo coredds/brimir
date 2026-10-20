@@ -89,7 +89,7 @@ taken back from the IR pool when the same code returned, instead of being
 built again; `retiredIrInsts` is the IR the pool holds, counted in
 `cachedInsts`; `irPoolReleases` counts the times the IR cap released the
 oldest pool blocks, down to 7/8 of the cap, which it does before evicting live
-IR-only blocks, with the emulation-thread time those releases took; it is not
+IR-only blocks (evicted only when the whole pool cannot get there), with the emulation-thread time those releases took; it is not
 part of `compileMs`), and flushes by trigger (`codeCap`: native code cap, `requested`:
 CPU reset, state load, ...). Every 1800 measured frames a `jit progress` line
 per CPU shows the cache occupancy. After the

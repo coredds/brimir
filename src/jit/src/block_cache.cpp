@@ -290,13 +290,17 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
     if (CachedBlock *reused = ReuseIr(ctx, pc); reused != nullptr) {
         return Started(*reused, ctx, pc, native); // its IR is already counted
     }
-    if (m_totalInsts >= m_maxCachedInsts && !m_retiredIr.empty()) {
-        // The pool goes first, as at the native code cap, oldest first and down to well below the
-        // cap, so that the next builds do not come back here at once.
-        ReleaseOldestRetiredIr(m_maxCachedInsts - m_maxCachedInsts / 8 * (8 - kIrReleaseTargetEighths));
-    }
     if (m_totalInsts >= m_maxCachedInsts) {
-        EvictIrOnly();
+        // The pool goes first, as at the native code cap, oldest first and down to well below the
+        // cap, so that the next builds do not come back here at once. If the whole pool is not
+        // enough for that, the live IR-only blocks go too.
+        const size_t below = m_maxCachedInsts - m_maxCachedInsts / 8 * (8 - kIrReleaseTargetEighths);
+        if (!m_retiredIr.empty()) {
+            ReleaseOldestRetiredIr(below);
+        }
+        if (m_totalInsts >= below) {
+            EvictIrOnly(); // only with the pool empty: the release stops below `below` otherwise
+        }
     }
     if (native && AtCodeCap()) {
         // Checked before building when this block is compiled at once, so it is built only once.

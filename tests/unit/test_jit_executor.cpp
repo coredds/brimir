@@ -1048,6 +1048,76 @@ TEST_CASE("Block cache: retired IR blocks count toward the IR cap", "[jit][execu
     CHECK(live.cache.Find(kOther2) == nullptr);
 }
 
+// When the whole pool cannot bring the IR below 7/8 of the cap (the live IR alone is above it), the
+// live IR-only blocks are evicted too, once, so the next builds do not reach the cap at once.
+TEST_CASE("Block cache: live IR above 7/8 of the IR cap is evicted after the pool", "[jit][executor][tier]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    constexpr uint32_t kSmall = kCode + 0x200; // X (small, retired), then Y (live)
+    constexpr uint32_t kTrigger = kCode + 0x100;
+    const auto livePc = [](uint32_t i) { return kCode + 0x300 + 0x10 * i; };
+    constexpr uint32_t kLive = 6;
+    const std::vector<uint16_t> x = {kAdd1_R3, kSleep};
+    const std::vector<uint16_t> y = {kAdd16_R3, kAdd1_R3, kSleep};
+    const std::vector<uint16_t> trigger = {kAdd16_R3, kSleep};
+    auto rig = std::make_unique<Rig>();
+    auto &ctx = rig->sh2->GetJitContext();
+    for (uint32_t i = 0; i < kLive; ++i) {
+        rig->WriteCode(livePc(i), {static_cast<uint16_t>(0x7300 | (i + 1)), kAdd1_R3, kSleep});
+    }
+    rig->WriteCode(kTrigger, trigger);
+
+    // The IR of the setup, from a cache without a small cap.
+    size_t total = 0;
+    size_t xInsts = 0;
+    {
+        IrCache probe{kind, brimir::jit::kMaxCachedInsts};
+        rig->WriteCode(kSmall, x);
+        xInsts = probe.cache.Get(ctx, kSmall).block.code.size();
+        rig->WriteCode(kSmall, y);
+        probe.cache.Get(ctx, kSmall);
+        for (uint32_t i = 0; i < kLive; ++i) {
+            probe.cache.Get(ctx, livePc(i));
+        }
+        total = probe.cache.CachedInsts();
+    }
+    const size_t cap = total;
+    const size_t below = cap - cap / 8;
+    REQUIRE(total - xInsts >= below); // the pool alone cannot get below 7/8
+
+    IrCache c{kind, cap};
+    auto &cache = c.cache;
+    rig->WriteCode(kSmall, x);
+    cache.Get(ctx, kSmall);
+    rig->WriteCode(kSmall, y);
+    cache.Get(ctx, kSmall); // X retired
+    for (uint32_t i = 0; i < kLive; ++i) {
+        cache.Get(ctx, livePc(i));
+    }
+    REQUIRE(cache.CachedInsts() == cap);
+    REQUIRE(cache.RetiredIrInsts() == xInsts);
+
+    const size_t triggerInsts = cache.Get(ctx, kTrigger).block.code.size();
+    CHECK(cache.RetiredIrReleases() == 1u);
+    CHECK(cache.IrEvictions() == 1u);
+    CHECK(cache.RetiredIrInsts() == 0u);
+    CHECK(cache.CachedInsts() == triggerInsts);
+    CHECK(cache.Find(kSmall) == nullptr);
+    CHECK(cache.Find(livePc(0)) == nullptr);
+    CHECK(cache.Compiles() == 2u + kLive + 1u);
+
+    // The next builds (the live blocks again, and a new retired block) stay far from the cap.
+    for (uint32_t i = 0; i < kLive; ++i) {
+        cache.Get(ctx, livePc(i));
+    }
+    rig->WriteCode(kTrigger, {kAdd1_R3, kSleep});
+    cache.Get(ctx, kTrigger);
+    CHECK(cache.RetiredIrInsts() == triggerInsts);
+    CHECK(cache.RetiredIrReleases() == 1u);
+    CHECK(cache.IrEvictions() == 1u);
+    CHECK(cache.Compiles() == 2u + kLive + 1u + kLive + 1u);
+}
+
 TEST_CASE("Block cache: the IR pool is bounded per PC", "[jit][executor][tier]") {
     const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
     INFO("backend " << brimir::jit::BackendName(kind));
