@@ -334,7 +334,7 @@ The 14 runs of `--lockstep 3600 --lockstep-reload 300` on x64 and IR (all seven 
 
 ### Tests
 
-`build\bin\brimir_tests.exe "[jit]"` on the x64 backend and with `BRIMIR_JIT_BACKEND=ir`: all passed (175 test cases, 1,693,782 assertions each). `ctest --test-dir build` (the x64 suite and the `brimir_tests_jit_ir` run): 100% passed. CI on the validated commit (GitHub Actions run 39365640161: `test-windows`, `test-linux-x64` and `build-macos-arm64`): is green (	est-windows 5m28s, 	est-linux-x64 6m02s, uild-macos-arm64 2m35s).
+`build\bin\brimir_tests.exe "[jit]"` on the x64 backend and with `BRIMIR_JIT_BACKEND=ir`: all passed (175 test cases, 1,693,782 assertions each). `ctest --test-dir build` (the x64 suite and the `brimir_tests_jit_ir` run): 100% passed. CI on the validated commit (GitHub Actions run 39365640161: `test-windows`, `test-linux-x64` and `build-macos-arm64`): green (`test-windows` 5m28s, `test-linux-x64` 6m02s, `build-macos-arm64` 2m35s).
 
 ### ARM check (Raspberry Pi 3, aarch64 Linux)
 
