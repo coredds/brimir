@@ -1,0 +1,13 @@
+# ThreadSanitizer suppressions for the CI job test-linux-tsan.
+#
+# Upstream Ymir's threaded VDP renderers race with the emulation thread (VDP register and state
+# structures read and written without synchronization, e.g. VDP2State::UpdateEnabledBGs against
+# SoftwareVDPRenderer::VDP2RenderThread, found with TSan in milestone 2E). They are not part of
+# the JIT and the vendored core is not ours to fix here. Every test that initializes a CoreWrapper
+# starts those threads, so without these the run is dominated by them.
+#
+# The JIT's own threading (CompileWorker, PreparedCompile::Finalize, BlockCache) is not covered:
+# none of its frames matches a pattern below, and a race between the worker and the emulation
+# thread has no VDP frame in either stack.
+race:ymir::vdp::
+race:moodycamel::

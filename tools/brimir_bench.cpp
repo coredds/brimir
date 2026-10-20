@@ -6,6 +6,7 @@
 // share of time spent in each SH-2. See tools/README.md for usage.
 
 #include <brimir/core_wrapper.hpp>
+#include <brimir/jit/compile_worker.hpp>
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
 
@@ -43,6 +44,7 @@ struct Args {
     int frames = 1800;
     int warmup = 120;
     bool sh2Jit = false;
+    bool jitSyncCompile = false; // --jit-sync-compile: the JIT core compiles without a worker thread
     bool cdPreload = true;     // the core's default (brimir_cd_preload enabled)
     bool backendGiven = false; // --jit-backend given explicitly
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
@@ -55,11 +57,11 @@ enum class ParseResult { Ok, Help, Error };
 void PrintUsage(std::FILE* out) {
     std::fputs(
         "Usage: brimir_bench --bios <file> [--game <cue|chd|ccd|mds|iso|m3u>] [--system-dir <dir>]\n"
-        "                    [--state <file>] [--frames N] [--warmup N] [--sh2-jit [--jit-backend ir|x64]]\n"
+        "                    [--state <file>] [--frames N] [--warmup N] [--sh2-jit [--jit-backend ir|x64] [--jit-sync-compile]]\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
-        "                    [--sh2-jit [--jit-backend ir|x64]] --dump-at N --dump-state <file>\n"
+        "                    [--sh2-jit [--jit-backend ir|x64] [--jit-sync-compile]] --dump-at N --dump-state <file>\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
-        "                    --lockstep N [--lockstep-reload K] [--jit-backend ir|x64]\n"
+        "                    --lockstep N [--lockstep-reload K] [--jit-backend ir|x64] [--jit-sync-compile]\n"
         "       (all forms also accept --no-cd-preload)\n"
         "       brimir_bench --help\n"
         "\n"
@@ -86,7 +88,10 @@ void PrintUsage(std::FILE* out) {
         "  --jit-backend code backend of the JIT: ir (IR interpreter) or x64 (native, x86-64 builds).\n"
         "                Default: x64 when built, else ir. Needs --sh2-jit or --lockstep (applies\n"
         "                to the JIT core).\n"
-        "  --lockstep    run N frames on a JIT core and an interpreter core side by side and require\n"
+        "  --jit-sync-compile\n"
+        "                compile native code on the emulation thread, as with the brimir_sh2_jit_compile_thread\n"
+        "                core option OFF (default: on a worker thread when the CPU has 4+ threads and the\n"
+        "                backend is x64). Needs --sh2-jit or --lockstep (applies to the JIT core).\n"        "  --lockstep    run N frames on a JIT core and an interpreter core side by side and require\n"
         "                identical state after every frame (exit 3 on divergence). Cannot be combined\n"
         "                with --sh2-jit, --frames, --warmup or --dump-at.\n"
         "  --lockstep-reload K\n"
@@ -122,6 +127,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
         const std::string opt = argv[i];
         if (opt == "--sh2-jit") { // options without a value
             args.sh2Jit = true;
+            continue;
+        }
+        if (opt == "--jit-sync-compile") {
+            args.jitSyncCompile = true;
             continue;
         }
         if (opt == "--no-cd-preload") {
@@ -209,6 +218,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     }
     if (args.backendGiven && !args.sh2Jit && args.lockstep < 0) {
         std::fprintf(stderr, "--jit-backend needs --sh2-jit or --lockstep\n");
+        return ParseResult::Error;
+    }
+    if (args.jitSyncCompile && !args.sh2Jit && args.lockstep < 0) {
+        std::fprintf(stderr, "--jit-sync-compile needs --sh2-jit or --lockstep\n");
         return ParseResult::Error;
     }
     return ParseResult::Ok;
@@ -334,6 +347,7 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
                 const std::filesystem::path& systemDir, bool sh2Jit, bool lockstepCore) {
     if (sh2Jit) {
         core.SetSH2JitBackend(args.backend);
+        core.SetSH2JitCompileThread(!args.jitSyncCompile);
     }
     core.SetSH2JitEnabled(sh2Jit);
     if (!core.Initialize()) {
@@ -373,6 +387,7 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
 // Prints the JIT backend and both executors' counters (totals since the JIT was enabled).
 void PrintJitStats(const brimir::CoreWrapper& core) {
     std::printf("SH2 JIT backend: %s\n", brimir::jit::BackendName(core.GetSH2JitBackend()));
+    std::printf("SH2 JIT compile : %s\n", core.GetSH2JitCompileWorker() != nullptr ? "worker thread" : "emulation thread");
     for (const bool master : {true, false}) {
         const brimir::jit::Executor* exec = core.GetSH2JitExecutor(master);
         if (exec != nullptr) {
@@ -390,7 +405,8 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
             std::printf("cache %-7s: compiles %llu  nativeCompiles %llu  compileMs %.1f (build %.1f  native %.1f)  "
                         "nativeBytesPerBlock %.0f  peakNativeMB %.1f  staleNativeMB %.1f  invalidations %llu  "
                         "cachedInsts %zu  irEvictions %llu (blocks %llu)  flushes codeCap %llu  requested %llu  "
-                        "retiredReuses %llu  retiredEvictions %llu  retiredMB %.1f  dampedBuilds %llu\n",
+                        "retiredReuses %llu  retiredEvictions %llu  retiredMB %.1f  dampedBuilds %llu  "
+                        "asyncCompiles %llu  asyncDropped %llu  pendingCompiles %zu\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(cache.Compiles()),
                         static_cast<unsigned long long>(native),
                         (cache.BuildNs() + cache.NativeCompileNs()) / 1e6, cache.BuildNs() / 1e6,
@@ -406,7 +422,9 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
                         static_cast<unsigned long long>(cache.RetiredReuses()),
                         static_cast<unsigned long long>(cache.RetiredEvictions()),
                         static_cast<double>(cache.RetiredCodeBytes()) / (1024.0 * 1024.0),
-                        static_cast<unsigned long long>(cache.DampedBuilds()));
+                        static_cast<unsigned long long>(cache.DampedBuilds()),
+                        static_cast<unsigned long long>(cache.AsyncCompiles()),
+                        static_cast<unsigned long long>(cache.AsyncDropped()), cache.PendingCompiles());
         }
     }
 }
@@ -419,6 +437,8 @@ struct CompileCounters {
     uint64_t flushes = 0;
     uint64_t irEvictions = 0;
     uint64_t reuses = 0;
+    uint64_t asyncCompiles = 0;
+    uint64_t asyncDropped = 0;
 };
 
 CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
@@ -432,6 +452,8 @@ CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
             c.flushes += cache.FlushesCodeCap() + cache.FlushesRequested();
             c.irEvictions += cache.IrEvictions();
             c.reuses += cache.RetiredReuses();
+            c.asyncCompiles += cache.AsyncCompiles();
+            c.asyncDropped += cache.AsyncDropped();
         }
     }
     return c;
@@ -551,6 +573,11 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     std::vector<CompileCounters> frameCompiles;
     frameCompiles.reserve(static_cast<size_t>(args.frames));
     const CompileCounters windowStart = ReadCompileCounters(core);
+    const auto workerBusyNs = [&core] {
+        const brimir::jit::CompileWorker* worker = core.GetSH2JitCompileWorker();
+        return worker != nullptr ? worker->BusyNs() : uint64_t{0};
+    };
+    const uint64_t workerBusyStart = workerBusyNs();
     CompileCounters before = windowStart;
     for (int i = 0; i < args.frames; ++i) {
         const auto start = std::chrono::steady_clock::now();
@@ -595,9 +622,12 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     if (!args.game.empty()) {
         std::printf("cd preload   : %s\n", args.cdPreload ? "on" : "off");
     }
-    std::printf("ms/frame     : avg %.3f  p50 %.3f  p95 %.3f  p99 %.3f  max %.3f\n", avg,
+    // Frames over one 60 Hz frame time (16.7 ms): the stutter count.
+    const long long over167 = static_cast<long long>(
+        std::count_if(frameMs.begin(), frameMs.end(), [](double ms) { return ms > 16.7; }));
+    std::printf("ms/frame     : avg %.3f  p50 %.3f  p95 %.3f  p99 %.3f  max %.3f  over16.7 %lld\n", avg,
                 Percentile(frameMs, 0.50), Percentile(frameMs, 0.95), Percentile(frameMs, 0.99),
-                *std::max_element(frameMs.begin(), frameMs.end()));
+                *std::max_element(frameMs.begin(), frameMs.end()), over167);
     std::printf("fps (host)   : %.1f\n", avg > 0.0 ? 1000.0 / avg : 0.0);
     std::printf("Ymir_RunFrame: %.3f ms/frame\n", ymirMs);
     std::printf("SH2 master   : %.3f ms/frame (%.1f%% of Ymir_RunFrame)\n", masterMs, share(masterMs));
@@ -612,7 +642,8 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             return exec != nullptr ? static_cast<double>(exec->Cache().PeakNativeCodeBytes()) / (1024.0 * 1024.0) : 0.0;
         };
         std::printf("jit window   : compiles %llu  nativeCompiles %llu  compileMs %.1f  flushes %llu  irEvictions %llu  "
-                    "reuses %llu  peakNativeMB master %.1f slave %.1f  framesCompiling %lld\n",
+                    "reuses %llu  peakNativeMB master %.1f slave %.1f  framesCompiling %lld  "
+                    "workerMs %.3f/frame  async %llu  dropped %llu\n",
                     static_cast<unsigned long long>(w.compiles - windowStart.compiles),
                     static_cast<unsigned long long>(w.nativeCompiles - windowStart.nativeCompiles),
                     (w.compileNs - windowStart.compileNs) / 1e6,
@@ -621,7 +652,10 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                     static_cast<unsigned long long>(w.reuses - windowStart.reuses), peakMB(true),
                     peakMB(false),
                     static_cast<long long>(std::count_if(frameCompiles.begin(), frameCompiles.end(),
-                                                         [](const CompileCounters& c) { return c.compiles > 0; })));
+                                                         [](const CompileCounters& c) { return c.compiles > 0; })),
+                    static_cast<double>(workerBusyNs() - workerBusyStart) / 1e6 / static_cast<double>(args.frames),
+                    static_cast<unsigned long long>(w.asyncCompiles - windowStart.asyncCompiles),
+                    static_cast<unsigned long long>(w.asyncDropped - windowStart.asyncDropped));
         std::vector<size_t> order(frameMs.size());
         for (size_t i = 0; i < order.size(); ++i) {
             order[i] = i;

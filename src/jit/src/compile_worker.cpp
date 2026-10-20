@@ -6,6 +6,14 @@
 
 namespace brimir::jit {
 
+bool CompileThreadSupported() {
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+    return std::thread::hardware_concurrency() >= 4;
+#else
+    return false;
+#endif
+}
+
 CompileWorker::CompileWorker() {
     m_thread = std::thread([this] { Run(); });
 }

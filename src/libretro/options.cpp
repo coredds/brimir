@@ -282,6 +282,22 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "disabled"
     },
     {
+        "brimir_sh2_jit_compile_thread",
+        "SH-2 JIT Compile Thread (Experimental)",
+        nullptr,
+        "Compile new SH-2 JIT code on one extra thread when the CPU has at least 4 threads, so the "
+        "game does not stutter while new code is compiled. OFF compiles on the emulation thread. "
+        "Only used by the x86-64 JIT, and only while SH-2 JIT is ON.",
+        nullptr,
+        "system",
+        {
+            { "auto", "Auto" },
+            { "disabled", "OFF" },
+            { nullptr, nullptr }
+        },
+        "auto"
+    },
+    {
         "brimir_profiling",
         "Performance Profiling",
         nullptr,

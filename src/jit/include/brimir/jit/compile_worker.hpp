@@ -33,6 +33,12 @@
 
 namespace brimir::jit {
 
+// Whether this build and machine should compile on a worker thread: an x86-64 build (the only one
+// with a native backend, see IsBackendAvailable) on a CPU with at least 4 hardware threads, so the
+// worker does not compete with the emulation thread and the threaded VDP. False on every other
+// architecture.
+bool CompileThreadSupported();
+
 struct CompileJob {
     const void *owner;
     uint64_t ticket;
