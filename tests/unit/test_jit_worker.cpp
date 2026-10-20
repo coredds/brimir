@@ -2,9 +2,14 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_test_backend.hpp"
+#include "sh2_test_rig.hpp"
 
+#include <brimir/jit/block_cache.hpp>
 #include <brimir/jit/compile_worker.hpp>
+#include <brimir/jit/executor.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -12,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -376,4 +382,453 @@ TEST_CASE("Worker: BusyNs counts time spent in Finalize", "[jit][worker]") {
     latch->Open();
     REQUIRE(WaitUntil([&] { return worker.HasResults(&owner); }));
     CHECK(worker.BusyNs() >= 10'000'000);
+}
+
+// --- Background compiles in the block cache ---------------------------------------------------
+
+namespace {
+
+using sh2test::Rig;
+
+constexpr uint32_t kCode = 0x06001000;
+constexpr uint32_t kThreshold = 2;
+constexpr uint16_t kSleepOp = static_cast<uint16_t>(sh2test::kSleep);
+
+uint16_t AddI(uint32_t n, uint32_t imm) {
+    return static_cast<uint16_t>(0x7000 | (n << 8) | (imm & 0xFF));
+}
+uint16_t MovLL(uint32_t n, uint32_t m) {
+    return static_cast<uint16_t>(0x6002 | (n << 8) | (m << 4));
+}
+
+// Two 3-instruction blocks at the same PC (SLEEP ends them).
+const std::vector<uint16_t> kProgramP{AddI(3, 1), AddI(3, 2), AddI(3, 3), kSleepOp};
+const std::vector<uint16_t> kProgramQ{AddI(3, 5), AddI(4, 1), AddI(3, 7), kSleepOp};
+
+bool WaitForResults(CompileWorker &worker, const void *owner) {
+    return WaitUntil([&] { return worker.Pending(owner) == 0 && worker.HasResults(owner); },
+                     std::chrono::milliseconds(5000));
+}
+
+// Keeps the worker busy with another owner's job until opened (at the latest when destroyed, so a
+// failed REQUIRE never leaves the worker's destructor waiting): the cache's jobs queue behind it.
+// Declare it after the worker.
+struct WorkerBlocker {
+    std::shared_ptr<Latch> latch = std::make_shared<Latch>();
+    int owner = 0;
+
+    explicit WorkerBlocker(CompileWorker &worker) {
+        worker.Submit(Job(&owner, 0, true, latch));
+    }
+    ~WorkerBlocker() {
+        latch->Open();
+    }
+    bool Entered() {
+        return WaitUntil([&] { return latch->entered.load(); });
+    }
+    void Open() {
+        latch->Open();
+    }
+};
+
+struct LatchOpener {
+    std::shared_ptr<Latch> latch;
+    ~LatchOpener() {
+        latch->Open();
+    }
+};
+
+// An x64 executor with a worker and threshold 2 next to a reference interpreter rig.
+struct AsyncPair {
+    std::unique_ptr<Rig> ref = std::make_unique<Rig>();
+    std::unique_ptr<Rig> jit = std::make_unique<Rig>();
+    Executor exec;
+
+    explicit AsyncPair(CompileWorker &worker)
+        : exec{BackendKind::X64, kThreshold, &worker} {}
+
+    const void *Owner() const {
+        return &exec.Cache();
+    }
+    const BlockCache &Cache() const {
+        return exec.Cache();
+    }
+    const CachedBlock *Entry(uint32_t pc = kCode) const {
+        return exec.Cache().Find(pc);
+    }
+    void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
+        ref->WriteCode(address, words);
+        jit->WriteCode(address, words);
+    }
+    void Write32(uint32_t address, uint32_t value) {
+        ref->Write32(address, value);
+        jit->Write32(address, value);
+    }
+    void Load(const ymir::savestate::SH2SaveState &state) {
+        ref->Load(state);
+        jit->Load(state);
+    }
+
+    // One executor step on the JIT rig and the same instructions on the reference rig; they must match.
+    ExitInfo Step() {
+        const ExitInfo info = exec.Step(jit->sh2->GetJitContext());
+        uint64_t refCycles = 0;
+        for (uint32_t i = 0; i < info.retired; ++i) {
+            refCycles += ref->sh2->Step<false, false>();
+        }
+        if (info.busWait) {
+            refCycles += ref->sh2->Step<false, false>();
+        }
+        CHECK(info.cycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit);
+        INFO(diff);
+        CHECK(diff.empty());
+        return info;
+    }
+    // Step from pc (the registers are kept).
+    ExitInfo StepAt(uint32_t pc) {
+        Load(ref->BaseState(pc));
+        return Step();
+    }
+};
+
+// Wraps the x64 backend; its prepared compiles block in Finalize until the latch opens.
+class LatchedBackend final : public INativeBackend {
+public:
+    static inline std::atomic<int> live{0}; // its prepared compiles alive
+
+    explicit LatchedBackend(std::shared_ptr<Latch> latch)
+        : m_inner(MakeNativeBackend(BackendKind::X64))
+        , m_latch(std::move(latch)) {}
+
+    BackendKind Kind() const override {
+        return m_inner->Kind();
+    }
+    std::unique_ptr<PreparedCompile> Prepare(const Block &block, const ymir::sh2::SH2JitContext &ctx) override {
+        auto inner = m_inner->Prepare(block, ctx);
+        if (inner == nullptr) {
+            return nullptr;
+        }
+        return std::make_unique<Latched>(std::move(inner), m_latch);
+    }
+    bool Commit(PreparedCompile &prepared, NativeCode &out) override {
+        return m_inner->Commit(*static_cast<Latched &>(prepared).inner, out);
+    }
+    ExitInfo Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target, const bool *abortRequested,
+                 bool allowChain) override {
+        return m_inner->Run(code, ctx, target, abortRequested, allowChain);
+    }
+    void Publish(uint32_t pc, const NativeCode &code) override {
+        m_inner->Publish(pc, code);
+    }
+    void Unpublish(uint32_t pc) override {
+        m_inner->Unpublish(pc);
+    }
+    void Release(uint32_t pc, const NativeCode &code) override {
+        m_inner->Release(pc, code);
+    }
+    void Reset() override {
+        m_inner->Reset();
+    }
+    size_t CodeBytes() const override {
+        return m_inner->CodeBytes();
+    }
+
+private:
+    struct Latched final : PreparedCompile {
+        Latched(std::unique_ptr<PreparedCompile> p, std::shared_ptr<Latch> l)
+            : inner(std::move(p))
+            , latch(std::move(l)) {
+            ++live;
+        }
+        ~Latched() override {
+            --live;
+        }
+        bool Finalize() noexcept override {
+            latch->Wait();
+            return inner->Finalize();
+        }
+        std::unique_ptr<PreparedCompile> inner;
+        std::shared_ptr<Latch> latch;
+    };
+
+    std::unique_ptr<INativeBackend> m_inner;
+    std::shared_ptr<Latch> m_latch;
+};
+
+} // namespace
+
+TEST_CASE("Background compile: the block runs on IR until its native code is installed", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    CompileWorker worker;
+    AsyncPair p{worker};
+    p.WriteCode(kCode, kProgramP);
+
+    REQUIRE(p.StepAt(kCode).retired == 3); // built, runs on IR
+    REQUIRE(p.Entry() != nullptr);
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Cache().PendingCompiles() == 0);
+
+    REQUIRE(p.StepAt(kCode).retired == 3); // the threshold run submits and still runs on IR
+    CHECK(p.Cache().PendingCompiles() == 1);
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Entry()->pendingTicket != 0);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 0);
+
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3); // installed at the start of Get, runs native
+    CHECK(p.Entry()->code.entry != nullptr);
+    CHECK(p.Entry()->pendingTicket == 0);
+    CHECK(p.Entry()->block.code.empty());
+    CHECK(p.exec.GetStats().nativeBlocksRun == 1);
+    CHECK(p.Cache().AsyncCompiles() == 1);
+    CHECK(p.Cache().AsyncDropped() == 0);
+    CHECK(p.Cache().NativeCompiles() == 1);
+    CHECK(p.Cache().CompileFallbacks() == 0);
+    CHECK(p.Cache().PendingCompiles() == 0);
+    CHECK(p.Cache().CachedInsts() == 0);
+    CHECK(p.Cache().NativeCompileNs() > 0);
+
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 2);
+    CHECK(p.Cache().Compiles() == 1);
+}
+
+TEST_CASE("Background compile: a result from before a flush is dropped", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    CompileWorker worker;
+    AsyncPair p{worker};
+    p.WriteCode(kCode, kProgramP);
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    REQUIRE(p.StepAt(kCode).retired == 3); // submits
+    REQUIRE(p.Cache().PendingCompiles() == 1);
+    const uint64_t oldTicket = p.Entry()->pendingTicket;
+
+    p.exec.Flush();
+    CHECK(p.Cache().PendingCompiles() == 0);
+    CHECK(p.Cache().AsyncDropped() == 1);
+    CHECK(worker.Pending(p.Owner()) == 0);
+    CHECK_FALSE(worker.HasResults(p.Owner()));
+
+    REQUIRE(p.StepAt(kCode).retired == 3); // rebuilt at the same PC
+    CHECK(p.Cache().Compiles() == 2);
+    REQUIRE(p.Entry() != nullptr);
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Entry()->pendingTicket == 0);
+    REQUIRE(WaitUntil([&] { return worker.Pending(p.Owner()) == 0; }));
+
+    REQUIRE(p.StepAt(kCode).retired == 3); // nothing of the old generation is installed
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Cache().AsyncCompiles() == 0);
+    CHECK(p.Cache().AsyncDropped() == 1);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 0);
+    CHECK(p.Entry()->pendingTicket != 0); // its own compile (threshold run)
+    CHECK(p.Entry()->pendingTicket != oldTicket);
+
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    CHECK(p.Entry()->code.entry != nullptr);
+    CHECK(p.Cache().AsyncCompiles() == 1);
+    CHECK(p.Cache().AsyncDropped() == 1);
+}
+
+TEST_CASE("Background compile: a result for a dropped block is not installed into its successor", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    CompileWorker worker;
+    WorkerBlocker blocker{worker};
+    REQUIRE(blocker.Entered());
+    AsyncPair p{worker};
+    p.WriteCode(kCode, kProgramP);
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    REQUIRE(p.StepAt(kCode).retired == 3); // submits P; queued behind the blocker
+    REQUIRE(p.Cache().PendingCompiles() == 1);
+    const uint64_t ticketP = p.Entry()->pendingTicket;
+    CHECK(worker.Pending(p.Owner()) == 1);
+
+    p.WriteCode(kCode, kProgramQ);
+    REQUIRE(p.StepAt(kCode).retired == 3); // P is dropped, Q built at the same PC
+    CHECK(p.Cache().Invalidations() == 1);
+    CHECK(p.Cache().Compiles() == 2);
+    REQUIRE(p.Entry() != nullptr);
+    CHECK(p.Entry()->block.guestOpcodes.front() == kProgramQ.front());
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Entry()->pendingTicket == 0);
+
+    blocker.Open();
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3); // P's result arrives and is dropped
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Cache().AsyncDropped() == 1);
+    CHECK(p.Cache().AsyncCompiles() == 0);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 0);
+    CHECK(p.Entry()->pendingTicket != 0); // Q's threshold run submitted Q
+    CHECK(p.Entry()->pendingTicket != ticketP);
+
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3); // Q's native code runs Q
+    CHECK(p.Entry()->code.entry != nullptr);
+    CHECK(p.Cache().AsyncCompiles() == 1);
+    CHECK(p.Cache().AsyncDropped() == 1);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 1);
+    CHECK(p.exec.GetStats().staleEntries == 0);
+}
+
+TEST_CASE("Background compile: a page remapped before the commit is caught at entry", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    constexpr uint32_t kData = 0x06002000; // same 64 KiB page as the code
+    CompileWorker worker;
+    // Declared before the rigs: their buses point at these pages until the rigs are gone.
+    std::array<std::unique_ptr<std::array<uint8_t, 0x10000>>, 2> pages;
+    AsyncPair p{worker};
+    // add #1,R3 ; mov.l @R9,R2 ; add #1,R3 ; sleep
+    p.WriteCode(kCode, {AddI(3, 1), MovLL(2, 9), AddI(3, 1), kSleepOp});
+    p.Write32(kData, 0x11111111);
+    auto state = p.ref->BaseState(kCode);
+    state.R[3] = 0;
+    state.R[9] = kData;
+    p.Load(state);
+    REQUIRE(p.Step().retired == 3);
+    REQUIRE(p.StepAt(kCode).retired == 3); // Prepare sees the RAM arrays
+    REQUIRE(p.Cache().PendingCompiles() == 1);
+
+    // Remap bus 0x6000000-0x600FFFF (SH-2 0x06000000) on both rigs to a copy with new data.
+    Rig *rigs[2] = {p.ref.get(), p.jit.get()};
+    for (int i = 0; i < 2; ++i) {
+        pages[i] = std::make_unique<std::array<uint8_t, 0x10000>>();
+        std::copy_n(rigs[i]->ram->begin(), 0x10000, pages[i]->begin());
+        std::fill_n(pages[i]->begin() + 0x2000, 4, uint8_t{0x22}); // kData: 0x22222222
+        rigs[i]->bus.MapArray(0x6000000, 0x600FFFF, *pages[i], true);
+    }
+
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3); // committed, stale at entry, rebuilt and run on IR
+    CHECK(p.jit->State().R[2] == 0x22222222u);
+    CHECK(p.Cache().AsyncCompiles() == 1);
+    CHECK(p.exec.GetStats().staleEntries == 1);
+    CHECK(p.Cache().Invalidations() == 1);
+    CHECK(p.Cache().Compiles() == 2);
+    CHECK(p.Cache().RetiredReuses() == 0);
+    REQUIRE(p.Entry() != nullptr);
+    CHECK(p.Entry()->code.entry == nullptr);
+
+    REQUIRE(p.StepAt(kCode).retired == 3); // the new block's threshold run
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    CHECK(p.Entry()->code.entry != nullptr);
+    CHECK(p.Cache().AsyncCompiles() == 2);
+    CHECK(p.exec.GetStats().staleEntries == 1);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 1);
+}
+
+TEST_CASE("Background compile: destroying an executor with a compile in flight", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    REQUIRE(LatchedBackend::live == 0);
+    CompileWorker worker;
+    auto latch = std::make_shared<Latch>();
+    Rig rig;
+    rig.WriteCode(kCode, kProgramP);
+    rig.Load(rig.BaseState(kCode));
+    // What an executor holds, destroyed in its order (the cache, then the backend).
+    auto backend = std::make_unique<LatchedBackend>(latch);
+    auto cache = std::make_unique<BlockCache>(backend.get(), kMaxNativeCodeBytes, kThreshold, kMaxCachedInsts,
+                                              kMaxRetiredCodeBytes, kMaxStaleDampShift, &worker);
+    const LatchOpener opener{latch}; // destroyed before the cache, so a failed REQUIRE cannot hang
+    const void *owner = cache.get();
+    auto &ctx = rig.sh2->GetJitContext();
+    cache->Get(ctx, kCode);
+    cache->Get(ctx, kCode); // the threshold run submits
+    REQUIRE(cache->PendingCompiles() == 1);
+    REQUIRE(WaitUntil([&] { return latch->entered.load(); })); // its Finalize is running
+
+    // The other CPU's job, queued behind it.
+    AsyncPair other{worker};
+    other.WriteCode(kCode, kProgramP);
+    REQUIRE(other.StepAt(kCode).retired == 3);
+    REQUIRE(other.StepAt(kCode).retired == 3);
+    REQUIRE(worker.Pending(other.Owner()) == 1);
+
+    std::atomic<bool> destroying{false};
+    std::atomic<bool> destroyed{false};
+    std::thread destroyer([&] {
+        destroying = true;
+        cache.reset();
+        backend.reset();
+        destroyed = true;
+    });
+    // Only CHECKs until the join: the thread must be joined.
+    CHECK(WaitUntil([&] { return destroying.load(); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK_FALSE(destroyed.load()); // waits for its job in flight
+    latch->Open();
+    destroyer.join();
+
+    CHECK(destroyed.load());
+    CHECK(worker.Pending(owner) == 0);
+    CHECK_FALSE(worker.HasResults(owner));
+    CHECK(LatchedBackend::live == 0);
+
+    REQUIRE(WaitForResults(worker, other.Owner()));
+    REQUIRE(other.StepAt(kCode).retired == 3);
+    CHECK(other.Entry()->code.entry != nullptr);
+    CHECK(other.Cache().AsyncCompiles() == 1);
+    CHECK(other.Cache().AsyncDropped() == 0);
+}
+
+TEST_CASE("Background compile: the pending bound defers compiles", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    CompileWorker worker;
+    WorkerBlocker blocker{worker};
+    REQUIRE(blocker.Entered());
+    AsyncPair p{worker};
+    // kMaxPendingCompiles + 1 one-instruction blocks: add #1,R3 ; sleep
+    std::vector<uint16_t> code;
+    for (size_t i = 0; i <= kMaxPendingCompiles; i++) {
+        code.push_back(AddI(3, 1));
+        code.push_back(kSleepOp);
+    }
+    p.WriteCode(kCode, code);
+    const auto pcOf = [](size_t i) { return kCode + static_cast<uint32_t>(4 * i); };
+    for (size_t i = 0; i < kMaxPendingCompiles; i++) {
+        REQUIRE(p.StepAt(pcOf(i)).retired == 1);
+        REQUIRE(p.StepAt(pcOf(i)).retired == 1);
+    }
+    CHECK(p.Cache().PendingCompiles() == kMaxPendingCompiles);
+    CHECK(worker.Pending(p.Owner()) == kMaxPendingCompiles);
+
+    const uint32_t last = pcOf(kMaxPendingCompiles);
+    REQUIRE(p.StepAt(last).retired == 1);
+    REQUIRE(p.StepAt(last).retired == 1); // its threshold run: deferred
+    CHECK(p.Cache().PendingCompiles() == kMaxPendingCompiles);
+    CHECK(worker.Pending(p.Owner()) == kMaxPendingCompiles);
+    const CachedBlock *deferred = p.Entry(last);
+    REQUIRE(deferred != nullptr);
+    CHECK(deferred->code.entry == nullptr);
+    CHECK(deferred->pendingTicket == 0);
+    CHECK(deferred->runsUntilNative == p.Cache().NativeCompileThreshold());
+    CHECK(p.Cache().CompileFallbacks() == 0);
+
+    // Once the queue has drained, it compiles a threshold's runs later.
+    blocker.Open();
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(last).retired == 1); // installs the others
+    CHECK(p.Cache().AsyncCompiles() == kMaxPendingCompiles);
+    CHECK(p.Cache().PendingCompiles() == 0);
+    REQUIRE(p.StepAt(last).retired == 1); // submits
+    CHECK(p.Cache().PendingCompiles() == 1);
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(last).retired == 1);
+    CHECK(p.Entry(last)->code.entry != nullptr);
+    CHECK(p.Cache().AsyncCompiles() == kMaxPendingCompiles + 1);
 }

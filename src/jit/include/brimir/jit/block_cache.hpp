@@ -3,6 +3,7 @@
 // Per-CPU cache of compiled blocks keyed by the full guest PC (see design/sh2-jit.md section 6).
 
 #include <brimir/jit/backend.hpp>
+#include <brimir/jit/compile_worker.hpp>
 #include <brimir/jit/ir.hpp>
 
 #include <ymir/hw/sh2/sh2_jit_iface.hpp>
@@ -58,6 +59,11 @@ constexpr uint32_t kMaxRetiredPerPc = 4;
 // of the best SH-2 total on both short titles (design/sh2-x64-performance.md, 2D A3).
 constexpr uint32_t kMaxStaleDampShift = 0;
 
+// Background compiles (design/sh2-jit-m2e.md): native compiles submitted to the CompileWorker and
+// not yet taken back, per cache. A threshold run at the bound does not submit; it retries a
+// threshold's runs later.
+constexpr size_t kMaxPendingCompiles = 512;
+
 // A cached block. IR-only (code.entry == nullptr): block holds its IR and runs with RunBlock. Once
 // natively compiled, block keeps only startPC, guestOpcodes, guestInstrCount (and the flags);
 // block.code is freed and never needed again: a block whose native code is lost (Flush, Reset) is
@@ -69,8 +75,13 @@ struct CachedBlock {
     uint32_t runsUntilNative = 0;
     // Self-validating native blocks: the page-table arrays of the pages holding startPC and the last
     // word of guestOpcodes at compile time (the pages the prologue checks). A retired block is
-    // reused only while both are unchanged.
+    // reused only while both are unchanged. With a worker, recorded at Prepare (what the emitter
+    // saw), never at the commit.
     std::array<const uint8_t *, 2> codePages{};
+    // The ticket of the background compile submitted for this IR-only entry; 0: none pending.
+    // Its result is installed only into the entry still holding its ticket, so clearing it is
+    // enough to have the result dropped.
+    uint64_t pendingTicket = 0;
 };
 
 class BlockCache {
@@ -82,12 +93,16 @@ public:
     // pass a small value). maxRetiredCodeBytes: see kMaxRetiredCodeBytes (tests pass small values;
     // 0 disables the pool, so every dropped block's code is released at once). maxStaleDampShift: see
     // kMaxStaleDampShift (0: no damping; clamped so that threshold << shift fits uint32, i.e. to
-    // 32 - bit_width(threshold)).
+    // 32 - bit_width(threshold)). worker: finalizes native compiles in the background, or nullptr
+    // to compile synchronously; not owned, it must outlive the cache. With a worker, a threshold run
+    // above 1 runs Prepare and submits the compile (the block keeps running on IR), and the result
+    // is committed at the start of a later Get; threshold 1 and compiles at once stay synchronous.
     explicit BlockCache(INativeBackend *native = nullptr, size_t maxNativeCodeBytes = kMaxNativeCodeBytes,
                         uint32_t nativeCompileThreshold = kNativeCompileThreshold,
                         size_t maxCachedInsts = kMaxCachedInsts, size_t maxRetiredCodeBytes = kMaxRetiredCodeBytes,
-                        uint32_t maxStaleDampShift = kMaxStaleDampShift)
+                        uint32_t maxStaleDampShift = kMaxStaleDampShift, CompileWorker *worker = nullptr)
         : m_native(native)
+        , m_worker(native != nullptr ? worker : nullptr)
         , m_maxNativeCodeBytes(maxNativeCodeBytes)
         , m_maxCachedInsts(maxCachedInsts)
         , m_maxRetiredCodeBytes(maxRetiredCodeBytes)
@@ -95,15 +110,22 @@ public:
               maxStaleDampShift, 32u - static_cast<uint32_t>(std::bit_width(nativeCompileThreshold == 0 ? 1u : nativeCompileThreshold))))
         , m_nativeCompileThreshold(nativeCompileThreshold == 0 ? 1 : nativeCompileThreshold) {}
 
+    // Cancels the cache's background compiles (waiting for the one in flight).
+    ~BlockCache();
+
+    BlockCache(const BlockCache &) = delete;
+    BlockCache &operator=(const BlockCache &) = delete;
+
     // Returns the block for pc, building it on a miss or when its guest code changed (or taking a
     // retired block back, see kMaxRetiredCodeBytes), and compiling it natively on its
     // kNativeCompileThreshold-th run. A native block with code.selfValidating is returned without
     // checking its guest code (its prologue does, see ExitInfo::stale) and is published to the
     // backend's link table; IR-only blocks are never published. Every call is counted as a run of
-    // the returned block.
+    // the returned block. With a worker it first installs the finished background compiles.
     const CachedBlock &Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc);
 
-    // Drops every block (retired ones included) and, with a native backend, all of its generated code.
+    // Drops every block (retired ones included) and, with a native backend, all of its generated
+    // code; cancels the background compiles.
     void Flush();
 
     // Drops the block for pc, if cached (a stale native block), and unpublishes it. A self-validating
@@ -175,12 +197,27 @@ public:
         return m_dampedBuilds;
     }
     // Host time spent building blocks (front end, OptimizeBlock, VerifyBlock) and compiling them
-    // natively (INativeBackend::Compile, failed attempts included), in nanoseconds.
+    // natively on the calling (emulation) thread, failed attempts included, in nanoseconds: the
+    // synchronous INativeBackend::Compile, or Prepare and Commit of background compiles (the
+    // worker's Finalize is CompileWorker::BusyNs).
     uint64_t BuildNs() const {
         return m_buildNs;
     }
     uint64_t NativeCompileNs() const {
         return m_nativeNs;
+    }
+    // Background compiles committed (also counted in NativeCompiles), and those discarded without a
+    // commit: their result arrived for an entry that no longer waits for it (dropped, rebuilt), or
+    // a flush cancelled them. Finalize and Commit failures count as CompileFallbacks instead.
+    // PendingCompiles: submitted and not yet taken back.
+    uint64_t AsyncCompiles() const {
+        return m_asyncCompiles;
+    }
+    uint64_t AsyncDropped() const {
+        return m_asyncDropped;
+    }
+    size_t PendingCompiles() const {
+        return m_pendingPcs.size();
     }
     // Times the IR cap was reached, and the IR-only blocks evicted then (native blocks are kept).
     uint64_t IrEvictions() const {
@@ -257,14 +294,16 @@ private:
     // Drops every block (Flush without counting it as requested).
     void FlushAll();
 
-    // Drops every IR-only block (and its recent slot) at the IR cap; native blocks, their code and
-    // link slots stay. Only called from Get, never while a block runs.
+    // Drops every IR-only block (and its recent slot) at the IR cap, pending ones included (their
+    // results are dropped when they arrive); native blocks, their code and link slots stay. Only
+    // called from Get, never while a block runs.
     void EvictIrOnly();
 
-    // A validated hit: counts the run and compiles the block natively on its threshold run.
+    // A validated hit: counts the run and compiles the block natively on its threshold run (in the
+    // background with a worker).
     const CachedBlock &Hit(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         if (entry.runsUntilNative != 0 && --entry.runsUntilNative == 0) {
-            return CompileNative(entry, ctx, pc);
+            return m_worker != nullptr ? SubmitNative(entry, ctx, pc) : CompileNative(entry, ctx, pc);
         }
         return entry;
     }
@@ -280,7 +319,18 @@ private:
     // and rebuilds and compiles pc from scratch. On failure entry stays IR-only.
     const CachedBlock &CompileNative(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc);
 
+    // CompileNative's code cap handling, then (below kMaxPendingCompiles) Prepare, recording
+    // codePages, and Submit; entry stays IR-only. At the bound, entry waits another threshold.
+    const CachedBlock &SubmitNative(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc);
+
+    // Takes the worker's results and commits each one whose entry still waits for it.
+    void InstallResults();
+
+    // After a successful compile: counts it, frees entry's IR and publishes self-validating code.
+    void Installed(CachedBlock &entry, uint32_t pc);
+
     INativeBackend *m_native;
+    CompileWorker *m_worker; // nullptr: synchronous compiles (always without a native backend)
     size_t m_maxNativeCodeBytes;
     size_t m_maxCachedInsts;
     size_t m_maxRetiredCodeBytes;
@@ -294,6 +344,15 @@ private:
     RetiredList m_retired;
     std::unordered_map<uint32_t, std::vector<RetiredList::iterator>> m_retiredByPc;
     size_t m_totalInsts = 0;
+    // Background compiles not yet taken back: ticket -> PC. Tickets increase and are never reused;
+    // a flush (which cancels every pending one) starts a generation at m_nextTicket, so a ticket
+    // below m_generationStart belongs to an older generation.
+    std::unordered_map<uint64_t, uint32_t> m_pendingPcs;
+    uint64_t m_nextTicket = 1;
+    uint64_t m_generationStart = 1;
+    std::vector<CompileResult> m_results; // InstallResults' buffer
+    uint64_t m_asyncCompiles = 0;
+    uint64_t m_asyncDropped = 0;
     uint64_t m_compiles = 0;
     uint64_t m_invalidations = 0;
     uint64_t m_compileFallbacks = 0;

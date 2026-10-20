@@ -159,7 +159,18 @@ void BlockCache::Invalidate(uint32_t pc) {
     }
 }
 
+BlockCache::~BlockCache() {
+    if (m_worker != nullptr) {
+        // No result may be delivered to a destroyed cache, and no job of it may outlive the backend.
+        m_worker->Cancel(this);
+    }
+}
+
 const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
+    // No block runs here, so committing and publishing code is safe.
+    if (m_worker != nullptr && m_worker->HasResults(this)) {
+        InstallResults();
+    }
     RecentSlot &slot = SlotFor(pc);
     if (slot.entry != nullptr && slot.pc == pc && Validate(*slot.entry, pc, ctx)) {
         return Hit(*slot.entry, ctx, pc);
@@ -254,16 +265,105 @@ const CachedBlock &BlockCache::CompileNative(CachedBlock &entry, ymir::sh2::SH2J
         ++m_compileFallbacks;
         return entry;
     }
+    if (entry.code.selfValidating) {
+        entry.codePages = CodePages(entry.block, ctx);
+    }
+    Installed(entry, pc);
+    return entry;
+}
+
+void BlockCache::Installed(CachedBlock &entry, uint32_t pc) {
     ++m_nativeCompiles;
     m_nativeBytes += entry.code.bytes;
     // The native code never needs the IR again (see CachedBlock): free it and stop counting it.
     m_totalInsts -= entry.block.code.size();
     std::vector<Inst>().swap(entry.block.code);
     if (entry.code.selfValidating) {
-        entry.codePages = CodePages(entry.block, ctx);
         m_native->Publish(pc, entry.code);
     }
+}
+
+const CachedBlock &BlockCache::SubmitNative(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
+    assert(m_native != nullptr && m_worker != nullptr && entry.code.entry == nullptr && !entry.block.code.empty());
+    assert(entry.pendingTicket == 0 && "a pending entry has no runs left until native");
+    entry.runsUntilNative = 0;
+    // The code cap as in CompileNative (code still being finalized is not counted yet).
+    if (AtCodeCap()) {
+        ReleaseAllRetired();
+    }
+    if (AtCodeCap()) {
+        ++m_flushesCodeCap;
+        FlushAll();
+        return Build(ctx, pc, true);
+    }
+    if (m_pendingPcs.size() >= kMaxPendingCompiles) {
+        entry.runsUntilNative = m_nativeCompileThreshold; // retry later
+        return entry;
+    }
+
+    const auto t0 = Clock::now();
+    std::unique_ptr<PreparedCompile> prepared = m_native->Prepare(entry.block, ctx);
+    m_nativeNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+    if (prepared == nullptr) {
+        ++m_compileFallbacks; // stays IR-only and runs with RunBlock; never retried
+        return entry;
+    }
+    // The pages the prologue will compare are the ones the emitter saw now; the commit must not
+    // recompute them (a page remapped meanwhile makes the block stale at its first entry).
+    if (ctx.bus.pages != nullptr) {
+        entry.codePages = CodePages(entry.block, ctx);
+    }
+    const uint64_t ticket = m_nextTicket++;
+    entry.pendingTicket = ticket;
+    m_pendingPcs.emplace(ticket, pc);
+    m_worker->Submit(CompileJob{this, ticket, std::move(prepared)});
     return entry;
+}
+
+void BlockCache::InstallResults() {
+    m_worker->TakeResults(this, m_results);
+    for (CompileResult &result : m_results) {
+        const auto pending = m_pendingPcs.find(result.ticket);
+        assert(pending != m_pendingPcs.end() && "a flush cancels every pending compile");
+        if (pending == m_pendingPcs.end()) {
+            continue;
+        }
+        const uint32_t pc = pending->second;
+        m_pendingPcs.erase(pending);
+        // Only the entry holding this ticket waits for it: not a block dropped meanwhile, nor one
+        // rebuilt at the same PC (it has no ticket or another one).
+        CachedBlock *entry = nullptr;
+        if (result.ticket >= m_generationStart) {
+            if (const auto it = m_blocks.find(pc);
+                it != m_blocks.end() && it->second->pendingTicket == result.ticket && it->second->code.entry == nullptr) {
+                entry = it->second.get();
+            }
+        }
+        if (entry == nullptr) {
+            ++m_asyncDropped;
+            continue;
+        }
+        entry->pendingTicket = 0;
+        if (!result.ok) {
+            ++m_compileFallbacks; // stays IR-only and runs with RunBlock; never retried
+            continue;
+        }
+        const auto t0 = Clock::now();
+        const bool ok = m_native->Commit(*result.prepared, entry->code);
+        m_nativeNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+        m_peakNativeBytes = std::max(m_peakNativeBytes, m_native->CodeBytes());
+        if (!ok) {
+            entry->code = NativeCode{};
+            ++m_compileFallbacks;
+            continue;
+        }
+        if (!entry->code.selfValidating) {
+            entry->codePages = {}; // only self-validating blocks use them, as without a worker
+        }
+        ++m_asyncCompiles;
+        Installed(*entry, pc);
+    }
+    m_results.clear(); // frees the prepared compiles
 }
 
 void BlockCache::EvictIrOnly() {
@@ -292,6 +392,14 @@ void BlockCache::Flush() {
 }
 
 void BlockCache::FlushAll() {
+    if (m_worker != nullptr) {
+        // A new generation: nothing submitted before can be committed after (Cancel also drops
+        // every result and waits for the job in flight, before the backend frees its code).
+        m_worker->Cancel(this);
+        m_asyncDropped += m_pendingPcs.size();
+        m_pendingPcs.clear();
+        m_generationStart = m_nextTicket;
+    }
     m_recent.fill(RecentSlot{});
     m_blocks.clear();
     m_retired.clear(); // the backend reset frees their code
