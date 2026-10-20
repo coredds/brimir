@@ -57,6 +57,7 @@ add_executable(brimir_tests
     unit/jit_random_ir.cpp
     unit/jit_fuzz_programs.cpp
     unit/test_jit_x64.cpp
+    unit/test_jit_worker.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
