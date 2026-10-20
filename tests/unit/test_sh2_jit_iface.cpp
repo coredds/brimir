@@ -217,7 +217,12 @@ TEST_CASE("onChipRead equals the interpreter's on-chip data read", "[jit][sh2]")
     ctxA.write(ctxA.sh2, 0xFFFFFE80, 2, 0xA518); // WTCSR: WDT timer enable
     ctxA.write(ctxA.sh2, 0xFFFFFF00, 4, 0x1234); // DVSR
     ctxA.write(ctxA.sh2, 0xFFFFFF04, 4, 0x00ABCDEF); // DVDNTL
-    const auto base = a->BaseState(kCode);
+    auto base = a->BaseState(kCode);
+    // The setup writes ran outside any instruction, at cycle 0, but FRT and WDT writes sync their
+    // timer to 4 cycles later (AdvanceFRT/AdvanceWDT<true>), so a read at cycle 0 would move the
+    // timers backwards (asserted in AdvanceTo). Sync them to cycle 0.
+    base.frt.cycleCount = 0;
+    base.wdt.cycleCount = 0;
     a->Load(base);
 
     std::vector<uint32_t> addresses;
