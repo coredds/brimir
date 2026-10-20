@@ -7,7 +7,9 @@
 
 #include <ymir/hw/sh2/sh2_jit_iface.hpp>
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -79,7 +81,8 @@ public:
     // 1 to get native code on the first run; 0 is treated as 1). maxCachedInsts: the IR cap (tests
     // pass a small value). maxRetiredCodeBytes: see kMaxRetiredCodeBytes (tests pass small values;
     // 0 disables the pool, so every dropped block's code is released at once). maxStaleDampShift: see
-    // kMaxStaleDampShift (0: no damping).
+    // kMaxStaleDampShift (0: no damping; clamped so that threshold << shift fits uint32, i.e. to
+    // 32 - bit_width(threshold)).
     explicit BlockCache(INativeBackend *native = nullptr, size_t maxNativeCodeBytes = kMaxNativeCodeBytes,
                         uint32_t nativeCompileThreshold = kNativeCompileThreshold,
                         size_t maxCachedInsts = kMaxCachedInsts, size_t maxRetiredCodeBytes = kMaxRetiredCodeBytes,
@@ -88,7 +91,8 @@ public:
         , m_maxNativeCodeBytes(maxNativeCodeBytes)
         , m_maxCachedInsts(maxCachedInsts)
         , m_maxRetiredCodeBytes(maxRetiredCodeBytes)
-        , m_maxStaleDampShift(maxStaleDampShift)
+        , m_maxStaleDampShift(std::min<uint32_t>(
+              maxStaleDampShift, 32u - static_cast<uint32_t>(std::bit_width(nativeCompileThreshold == 0 ? 1u : nativeCompileThreshold))))
         , m_nativeCompileThreshold(nativeCompileThreshold == 0 ? 1 : nativeCompileThreshold) {}
 
     // Returns the block for pc, building it on a miss or when its guest code changed (or taking a

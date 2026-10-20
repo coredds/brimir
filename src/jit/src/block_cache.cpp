@@ -82,12 +82,16 @@ void BlockCache::Invalidate(BlockMap::iterator it) {
 
 void BlockCache::Retire(uint32_t pc, std::unique_ptr<CachedBlock> entry) {
     m_retiredBytes += entry->code.bytes;
-    std::vector<RetiredList::iterator> &atPc = m_retiredByPc[pc];
-    atPc.push_back(m_retired.insert(m_retired.end(), RetiredBlock{pc, std::move(entry)}));
-    if (atPc.size() > kMaxRetiredPerPc) {
-        ++m_retiredEvictions;
-        ReleaseRetired(atPc.front()); // atPc keeps kMaxRetiredPerPc blocks
+    {
+        std::vector<RetiredList::iterator> &atPc = m_retiredByPc[pc];
+        atPc.push_back(m_retired.insert(m_retired.end(), RetiredBlock{pc, std::move(entry)}));
+        if (atPc.size() > kMaxRetiredPerPc) {
+            ++m_retiredEvictions;
+            ReleaseRetired(atPc.front()); // atPc keeps kMaxRetiredPerPc blocks
+        }
     }
+    // atPc is out of scope here on purpose: this loop can erase its map entry (the oldest block may
+    // be the last one at this pc), which would leave a reference into m_retiredByPc dangling.
     while (m_retiredBytes > m_maxRetiredCodeBytes) {
         ++m_retiredEvictions;
         ReleaseRetired(m_retired.begin());
@@ -111,7 +115,8 @@ CachedBlock *BlockCache::Reuse(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         RemoveRetired(it);
         ++m_retiredReuses;
         CachedBlock *ref = entry.get();
-        m_blocks.emplace(pc, std::move(entry));
+        [[maybe_unused]] const bool inserted = m_blocks.emplace(pc, std::move(entry)).second;
+        assert(inserted && "Reuse is only called on a miss, so pc has no cached block");
         SlotFor(pc) = RecentSlot{pc, ref};
         m_native->Publish(pc, ref->code);
         return ref;

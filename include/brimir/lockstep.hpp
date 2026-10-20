@@ -47,7 +47,7 @@ void PrepareLockstepCore(CoreWrapper &core);
 // Returns false if either core is not initialized or a LoadState fails.
 bool SyncLockstepCores(CoreWrapper &src, CoreWrapper &dst);
 
-// Loads one save state into both cores (b first, then a, as SyncLockstepCores does). The backup RAM
+// Loads one save state into both cores; the order does not matter. The backup RAM
 // images are outside the save state and are left as they are: lockstep keeps them identical. A JIT
 // core keeps its compiled blocks across the load; they are checked against memory before they run.
 // Returns false if either core is not initialized or a LoadState fails.

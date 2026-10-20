@@ -11,6 +11,7 @@
 #include <brimir/jit/interp_backend.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <memory>
 #include <vector>
 
@@ -623,7 +624,7 @@ TEST_CASE("Block cache: a PC that keeps going stale waits longer for native code
         INFO("stale rewrites " << k);
         WriteProgram(*rig, 1 + k);
         CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << std::min(k, 2u)) - 1);
-        CHECK(cache.DampedBuilds() == (k == 0 ? 0u : k));
+        CHECK(cache.DampedBuilds() == k);
         CHECK(cache.Invalidations() == k);
     }
 }
@@ -641,7 +642,9 @@ TEST_CASE("Block cache: a damped PC still reaches native code", "[jit][executor]
     for (uint32_t k = 0; k <= 10; ++k) {
         WriteProgram(*rig, 1 + k);
         REQUIRE(StepNative(cache, *backend, *rig) == false);
+        uint32_t irRuns = 0;
         while (!StepNative(cache, *backend, *rig)) {
+            REQUIRE(++irRuns < 1000);
         }
     }
     REQUIRE(cache.Invalidations() == 10u);
@@ -656,6 +659,36 @@ TEST_CASE("Block cache: a damped PC still reaches native code", "[jit][executor]
     // Counting restarts after the flush.
     WriteProgram(*rig, 101);
     CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << 1) - 1);
+}
+
+// threshold << shift must not overflow uint32 whatever the constructor arguments: with threshold 16
+// a shift of 28 or more used to give 0 (runsUntilNative = UINT32_MAX, never native) and 32 or more
+// is undefined. The wait only grows with the stale count and stays finite and non-zero.
+TEST_CASE("Block cache: an oversized damping shift is clamped", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    constexpr uint32_t kThreshold = 16;
+    constexpr uint32_t kMaxShift = 32 - std::bit_width(kThreshold); // largest shift that fits uint32
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, kThreshold,
+                                  brimir::jit::kMaxCachedInsts, 0, 40};
+    auto rig = std::make_unique<Rig>();
+    rig->Load(rig->BaseState(kCode));
+    WriteProgram(*rig, 1);
+    auto &ctx = rig->sh2->GetJitContext();
+    uint32_t previous = 0;
+    for (uint32_t k = 0; k < 40; ++k) {
+        INFO("stale drops " << k);
+        const brimir::jit::CachedBlock &entry = cache.Get(ctx, kCode);
+        const uint32_t expected = (kThreshold << std::min(k, kMaxShift)) - 1;
+        REQUIRE(entry.runsUntilNative == expected);
+        REQUIRE(entry.runsUntilNative >= previous);
+        previous = entry.runsUntilNative;
+        cache.Invalidate(kCode);
+    }
+    CHECK(cache.Invalidations() == 40u);
 }
 
 TEST_CASE("Block cache: damping off keeps the global threshold", "[jit][executor][tier]") {
