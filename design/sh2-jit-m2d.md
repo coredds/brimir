@@ -34,6 +34,8 @@ Where things stand after milestone 2C (same-session ratios, interpreter SH-2 tim
 
 ## 3. Default-on bar
 
+> **Replaced (2026-10-20)** by [sh2-jit-m2e.md](sh2-jit-m2e.md) section 3. The user's target was always the one in `sh2-jit.md` ("Target (2026-10-15)"): faster than the interpreter on every title, smooth, and fully compatible. The 1.5 ratio below was never set by the user. The 2D reports measured against it; read their verdicts with that in mind.
+
 The JIT becomes the default on x86-64 when all of these hold, measured on the development PC in one session:
 
 1. **Speed:** interpreter SH-2 total / x64 SH-2 total **≥ 1.5** on each of the six titles (median of three runs per mode, the 2C method).
