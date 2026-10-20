@@ -9,6 +9,7 @@
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
 
+#include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
 #include <ymir/util/date_time.hpp>
 
@@ -22,6 +23,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <memory>
 #include <random>
 #include <string>
 #include <system_error>
@@ -37,6 +39,7 @@ struct Args {
     std::string systemDir;
     int dumpAt = -1;
     int lockstep = -1;
+    int lockstepReload = 0; // --lockstep-reload K (0 = off)
     int frames = 1800;
     int warmup = 120;
     bool sh2Jit = false;
@@ -56,7 +59,7 @@ void PrintUsage(std::FILE* out) {
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
         "                    [--sh2-jit [--jit-backend ir|x64]] --dump-at N --dump-state <file>\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
-        "                    --lockstep N [--jit-backend ir|x64]\n"
+        "                    --lockstep N [--lockstep-reload K] [--jit-backend ir|x64]\n"
         "       (all forms also accept --no-cd-preload)\n"
         "       brimir_bench --help\n"
         "\n"
@@ -86,6 +89,11 @@ void PrintUsage(std::FILE* out) {
         "  --lockstep    run N frames on a JIT core and an interpreter core side by side and require\n"
         "                identical state after every frame (exit 3 on divergence). Cannot be combined\n"
         "                with --sh2-jit, --frames, --warmup or --dump-at.\n"
+        "  --lockstep-reload K\n"
+        "                with --lockstep: after every K compared frames, save the interpreter core's\n"
+        "                state, run and compare K / 2 more frames, then load the saved state into both\n"
+        "                cores and continue (the JIT keeps its compiled code across the load). Replayed\n"
+        "                frames count toward N.\n"
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -151,6 +159,11 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
                 std::fprintf(stderr, "Invalid --lockstep value: %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--lockstep-reload") {
+            if (!ParseInt(value, args.lockstepReload) || args.lockstepReload == 0) {
+                std::fprintf(stderr, "Invalid --lockstep-reload value: %s\n", value);
+                return ParseResult::Error;
+            }
         } else if (opt == "--jit-backend") {
             args.backendGiven = true;
             if (!brimir::jit::ParseBackend(value, args.backend)) {
@@ -188,6 +201,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     // options would otherwise be silently ignored.
     if (args.lockstep >= 0 && (args.sh2Jit || args.framesGiven || args.warmupGiven)) {
         std::fprintf(stderr, "--lockstep cannot be combined with --sh2-jit, --frames or --warmup\n");
+        return ParseResult::Error;
+    }
+    if (args.lockstepReload > 0 && args.lockstep < 0) {
+        std::fprintf(stderr, "--lockstep-reload needs --lockstep\n");
         return ParseResult::Error;
     }
     if (args.backendGiven && !args.sh2Jit && args.lockstep < 0) {
@@ -448,14 +465,46 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             return 2;
         }
         constexpr int kChunk = 600;
+        const int reload = args.lockstepReload;
         int done = 0;
-        while (done < args.lockstep) {
-            const int frames = std::min(kChunk, args.lockstep - done);
+        int sinceLoad = 0;
+        const auto runFrames = [&](int frames) {
             const auto result = brimir::RunLockstep(jitCore, refCore, frames);
             done += result.framesRun;
+            sinceLoad += result.framesRun;
             if (!result.divergence.empty()) {
                 std::printf("lockstep divergence at frame %d: %s\n", done - 1, result.divergence.c_str());
+                return false;
+            }
+            return true;
+        };
+        while (done < args.lockstep) {
+            int frames = std::min(kChunk, args.lockstep - done);
+            if (reload > 0) {
+                frames = std::min(frames, reload - sinceLoad);
+            }
+            if (!runFrames(frames)) {
                 return 3;
+            }
+            if (reload > 0 && sinceLoad == reload && done < args.lockstep) {
+                // Rewind both cores by K / 2 frames. The JIT core keeps its compiled blocks, which must
+                // be checked against the loaded state's memory before they run.
+                auto state = std::make_unique<ymir::savestate::SaveState>();
+                refCore.GetSaturn()->SaveState(*state);
+                if (!runFrames(std::min(reload / 2, args.lockstep - done))) {
+                    return 3;
+                }
+                if (done < args.lockstep) {
+                    if (!brimir::LoadLockstepState(jitCore, refCore, *state)) {
+                        std::fprintf(stderr, "Failed to load the lockstep state\n");
+                        return 2;
+                    }
+                    if (const std::string diff = brimir::CompareCores(jitCore, refCore); !diff.empty()) {
+                        std::printf("lockstep divergence after the state load at frame %d: %s\n", done, diff.c_str());
+                        return 3;
+                    }
+                }
+                sinceLoad = 0;
             }
             std::printf("lockstep: %d/%d frames identical\n", done, args.lockstep);
             std::fflush(stdout);

@@ -259,3 +259,29 @@ Measured separately in `design/sh2-x64-performance.md` ("Milestone 2D track B re
 
 - No JIT bugs were found; no fixes were needed.
 - Burning Rangers still reloads its code throughout the attract sequence; the threshold of 16 halves its native compiles and code-cap flushes against 2C, but it still reaches the native-code cap (a performance issue, not a correctness one: its lockstep run is identical).
+
+## Milestone 2D, track A, A4 (no flush on state load)
+
+**Date**: 2026-10-19
+**Code**: `SH2::LoadState` no longer flushes the executor (`SetJitExecutor` and `SH2::Reset` still do); `brimir::LoadLockstepState` and `brimir_bench --lockstep N --lockstep-reload K` (after every K compared frames: save the interpreter core's state, run and compare K / 2 more frames, load the saved state into both cores, compare, continue; replayed frames count toward N).
+**Machine and build**: Windows x64 as above (`build-bench`, Release, LTO/IPO, MSVC).
+
+Why the flush can go (the audit): a block depends only on its `startPC`, its `guestOpcodes`, and for self-validating x64 blocks the array pointers of its code pages ("What native code depends on" in the track A plan). Every cached block is checked against current memory before it runs: IR-only and non-self-validating native blocks by `BlockCache::Get`, self-validating x64 blocks by their prologue (code page arrays and code bytes; a block that reports stale is dropped and rebuilt), blocks taken back from the retired pool by `Build` (opcodes and code-page arrays). A state load changes registers, `m_wbReg`, the delay slot flag, the pending interrupt, the fetch buffer and memory. Registers and `m_wbReg` are read by the block at run time (the write-back folding treats `m_wbReg` as unknown at entry); the executor interprets at a pending interrupt or delay slot, and at PC & 2 when the loaded fetch buffer's low half differs from memory; at an even PC the interpreter refills the buffer from memory, as the block does. The JIT only runs with cache emulation off, so the cache arrays a load replaces are not read by blocks. No state was found that a block depends on and no check covers, so the flush was not needed for exactness.
+
+### Lockstep across state loads (3,600 frames, `--lockstep-reload 300`, all seven, both backends)
+
+`brimir_bench --bios <bios> [--game <game> --system-dir <scratch dir>] --lockstep 3600 --lockstep-reload 300 --jit-backend x64|ir` (scratch system dir as in the milestone 1 method; four runs at a time, so wall times are longer than a run on its own). That is 8 reload cycles of 450 frames (300 compared, 150 more, then the load of the state saved 150 frames before), 7 loads per run, every one followed by a core comparison. All 14 runs ended with `lockstep: OK, 3600 frames identical` and exit 0, with no bench error output (only the cores' own log lines). `compileFallbacks` is 0 on both CPUs in every run. `flushes codeCap` is 0 in every run; the `requested` flushes (attaching the executor and CPU resets, none from the loads) are in the table.
+
+| Title | BIOS | x64 wall time | x64 master staleEntries | x64 requested flushes master / slave | IR wall time |
+|---|---|---|---|---|---|
+| BIOS menu (no disc) | US | 1:25 | 0 | 1 / 1 | 1:42 |
+| Virtua Fighter 2 (Japan) (Rev B) | JP | 2:36 | 151 | 1 / 3 | 3:03 |
+| Panzer Dragoon II Zwei (USA) | US | 1:27 | 55 | 1 / 3 | 1:59 |
+| Sega Rally Championship (USA) | US | 1:58 | 418 | 2 / 4 | 2:21 |
+| Burning Rangers (USA) | US | 2:09 | 42 | 2 / 4 | 2:40 |
+| Guardian Heroes (USA) | US | 1:43 | 209 | 2 / 5 | 2:02 |
+| Street Fighter Zero 3 (Japan) | JP | 1:36 | 358 | 2 / 10 | 2:02 |
+
+### Tests
+
+New and changed `[jit]` tests: `Attaching and Reset flush the executor; LoadState does not` (flush counts 1, 2, 2, 2), `Save state round trip with the SH-2 JIT keeps the block caches` (cache sizes and `FlushesRequested()` unchanged by the load), `Executor: code changed by a state load is not run from the cache` (both backends: the fetch-buffer gate interprets at PC & 2, then the changed code runs, from a rebuilt block), `Lockstep: JIT core matches interpreter across state loads` (the interrupt-driven synthetic workload, a load every 20 frames of the state saved 10 frames earlier; identical throughout, no flush from the loads).

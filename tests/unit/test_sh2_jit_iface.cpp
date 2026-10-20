@@ -74,7 +74,7 @@ TEST_CASE("Advance with cache emulation ignores the executor", "[jit][sh2]") {
     REQUIRE(exec.runCalls == 0);
 }
 
-TEST_CASE("Attaching, Reset and LoadState flush the executor", "[jit][sh2]") {
+TEST_CASE("Attaching and Reset flush the executor; LoadState does not", "[jit][sh2]") {
     auto rig = std::make_unique<Rig>();
     DelegatingExecutor exec;
     rig->sh2->SetJitExecutor(&exec);
@@ -82,10 +82,10 @@ TEST_CASE("Attaching, Reset and LoadState flush the executor", "[jit][sh2]") {
     rig->sh2->Reset(true);
     REQUIRE(exec.flushes == 2);
     rig->Load(rig->BaseState(kCode));
-    REQUIRE(exec.flushes == 3);
+    REQUIRE(exec.flushes == 2);
     rig->sh2->SetJitExecutor(nullptr);
     rig->sh2->Reset(true);
-    REQUIRE(exec.flushes == 3);
+    REQUIRE(exec.flushes == 2);
 }
 
 TEST_CASE("JIT context callbacks mirror interpreter memory semantics", "[jit][sh2]") {

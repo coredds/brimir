@@ -185,8 +185,8 @@ public:
     uint64_t IrEvictedBlocks() const {
         return m_irEvictedBlocks;
     }
-    // Flushes by trigger: the native code cap, and Flush() calls (Executor::Flush: CPU reset, state
-    // load, ...).
+    // Flushes by trigger: the native code cap, and Flush() calls (Executor::Flush: attaching the
+    // executor and CPU reset; a state load does not flush, see SH2::LoadState).
     uint64_t FlushesCodeCap() const {
         return m_flushesCodeCap;
     }

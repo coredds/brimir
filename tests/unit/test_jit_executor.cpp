@@ -283,6 +283,71 @@ TEST_CASE("Executor: the recent table never returns a stale block", "[jit][execu
     CHECK(exec.Cache().Size() == 2);
 }
 
+// A state load no longer flushes the block cache, so code that changed under a cached block (as
+// when a state saved earlier is loaded into a core whose memory has moved on) must be caught by the
+// checks every block goes through: the fetch-buffer gate at PC & 2, then the block's own validation.
+TEST_CASE("Executor: code changed by a state load is not run from the cache", "[jit][executor]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    const bool native = kind != brimir::jit::BackendKind::Ir;
+    auto ref = std::make_unique<Rig>();
+    auto jit = std::make_unique<Rig>();
+    brimir::jit::Executor exec{kind, sh2test::kNativeOnFirstRun};
+    auto &ctx = jit->sh2->GetJitContext();
+
+    const auto step = [&] {
+        const auto info = exec.Step(ctx);
+        uint64_t refCycles = 0;
+        for (uint32_t i = 0; i < info.retired; ++i) {
+            refCycles += ref->sh2->Step<false, false>();
+        }
+        CHECK(info.cycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit);
+        INFO(diff);
+        CHECK(diff.empty());
+        return info;
+    };
+    const auto load = [&](const ymir::savestate::SH2SaveState &state) {
+        ref->Load(state);
+        jit->Load(state);
+    };
+
+    // P: three add #1,R3 ; Q: three add #16,R3 at the same place.
+    const std::vector<uint16_t> p = {kAdd1_R3, kAdd1_R3, kAdd1_R3, kSleep};
+    const std::vector<uint16_t> q = {kAdd16_R3, kAdd16_R3, kAdd16_R3, kSleep};
+    ref->WriteCode(kCode, p);
+    jit->WriteCode(kCode, p);
+    auto state = ref->BaseState(kCode);
+    state.R[3] = 0;
+    load(state);
+    REQUIRE(step().retired == 3);
+    CHECK(jit->State().R[3] == 3u);
+    CHECK(exec.Cache().Size() == 1);
+    CHECK(exec.GetStats().nativeBlocksRun == (native ? 1u : 0u));
+
+    // The code changes; the loaded state still holds P's second word in its fetch buffer and
+    // resumes at PC & 2, where the interpreter runs the buffered opcode, not memory's.
+    ref->WriteCode(kCode, q);
+    jit->WriteCode(kCode, q);
+    state = ref->BaseState(kCode + 2);
+    state.fetchedOpcodes = (uint32_t{kAdd1_R3} << 16) | kAdd1_R3;
+    load(state);
+    REQUIRE(step().retired == 1);
+    CHECK(exec.GetStats().interpreted == 1);
+    CHECK(jit->State().R[3] == 4u);
+    CHECK(exec.Cache().Invalidations() == 0);
+
+    // Resuming at the block start must not run the cached P.
+    load(ref->BaseState(kCode));
+    REQUIRE(step().retired == 3);
+    CHECK(jit->State().R[3] == 4u + 3u * 16u);
+    CHECK(jit->State().PC == kCode + 6);
+    CHECK(exec.Cache().Invalidations() == 1);
+    CHECK(exec.Cache().Compiles() == 2);
+    CHECK(exec.GetStats().staleEntries == (native ? 1u : 0u));
+    CHECK(exec.Cache().Size() == 1);
+}
+
 TEST_CASE("Executor: flush outside a block clears the cache immediately", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
     brimir::jit::Executor exec{sh2test::TestBackend(), sh2test::kNativeOnFirstRun};
