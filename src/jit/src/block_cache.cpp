@@ -144,32 +144,55 @@ void BlockCache::RetireIr(uint32_t pc, std::unique_ptr<CachedBlock> entry) {
     entry->runsUntilNative = 0;
     entry->codePages = {};
     m_retiredIrInsts += entry->block.code.size();
-    std::vector<std::unique_ptr<CachedBlock>> &atPc = m_retiredIr[pc];
-    atPc.push_back(std::move(entry));
+    std::vector<RetiredList::iterator> &atPc = m_retiredIrByPc[pc];
+    atPc.push_back(m_retiredIr.insert(m_retiredIr.end(), RetiredBlock{pc, std::move(entry)}));
     if (atPc.size() > kMaxRetiredPerPc) {
-        const size_t insts = atPc.front()->block.code.size();
+        const RetiredList::iterator oldest = atPc.front(); // atPc keeps kMaxRetiredPerPc blocks
+        const size_t insts = oldest->entry->block.code.size();
         m_retiredIrInsts -= insts;
         m_totalInsts -= insts;
-        atPc.erase(atPc.begin());
+        RemoveRetiredIr(oldest);
     }
 }
 
+void BlockCache::RemoveRetiredIr(RetiredList::iterator it) {
+    const auto byPc = m_retiredIrByPc.find(it->pc);
+    assert(byPc != m_retiredIrByPc.end());
+    std::vector<RetiredList::iterator> &atPc = byPc->second;
+    atPc.erase(std::find(atPc.begin(), atPc.end(), it));
+    if (atPc.empty()) {
+        m_retiredIrByPc.erase(byPc);
+    }
+    m_retiredIr.erase(it);
+}
+
+void BlockCache::ReleaseOldestRetiredIr(size_t below) {
+    const auto t0 = Clock::now();
+    ++m_retiredIrReleases;
+    while (m_totalInsts >= below && !m_retiredIr.empty()) {
+        const RetiredList::iterator oldest = m_retiredIr.begin();
+        const size_t insts = oldest->entry->block.code.size();
+        m_retiredIrInsts -= insts;
+        m_totalInsts -= insts;
+        RemoveRetiredIr(oldest);
+    }
+    m_retiredIrReleaseNs +=
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+}
+
 CachedBlock *BlockCache::ReuseIr(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
-    const auto byPc = m_retiredIr.find(pc);
-    if (byPc == m_retiredIr.end()) {
+    const auto byPc = m_retiredIrByPc.find(pc);
+    if (byPc == m_retiredIrByPc.end()) {
         return nullptr;
     }
-    std::vector<std::unique_ptr<CachedBlock>> &atPc = byPc->second;
-    for (auto r = atPc.rbegin(); r != atPc.rend(); ++r) {
-        if (!SameBuild((*r)->block, ctx)) {
+    for (auto r = byPc->second.rbegin(); r != byPc->second.rend(); ++r) {
+        const RetiredList::iterator it = *r;
+        if (!SameBuild(it->entry->block, ctx)) {
             continue;
         }
-        std::unique_ptr<CachedBlock> entry = std::move(*r);
-        atPc.erase(std::next(r).base());
-        if (atPc.empty()) {
-            m_retiredIr.erase(byPc);
-        }
+        std::unique_ptr<CachedBlock> entry = std::move(it->entry);
         m_retiredIrInsts -= entry->block.code.size();
+        RemoveRetiredIr(it); // invalidates r and byPc; the loop ends here
         ++m_retiredIrReuses;
 #ifndef NDEBUG
         {
@@ -195,6 +218,7 @@ void BlockCache::ClearRetiredIr() {
     m_totalInsts -= m_retiredIrInsts;
     m_retiredIrInsts = 0;
     m_retiredIr.clear();
+    m_retiredIrByPc.clear();
 }
 
 void BlockCache::RemoveRetired(RetiredList::iterator it) {
@@ -266,10 +290,10 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
     if (CachedBlock *reused = ReuseIr(ctx, pc); reused != nullptr) {
         return Started(*reused, ctx, pc, native); // its IR is already counted
     }
-    if (m_totalInsts >= m_maxCachedInsts && m_retiredIrInsts > 0) {
-        // The pool goes first, as at the native code cap.
-        ++m_retiredIrReleases;
-        ClearRetiredIr();
+    if (m_totalInsts >= m_maxCachedInsts && !m_retiredIr.empty()) {
+        // The pool goes first, as at the native code cap, oldest first and down to well below the
+        // cap, so that the next builds do not come back here at once.
+        ReleaseOldestRetiredIr(m_maxCachedInsts - m_maxCachedInsts / 8 * (8 - kIrReleaseTargetEighths));
     }
     if (m_totalInsts >= m_maxCachedInsts) {
         EvictIrOnly();
@@ -492,6 +516,7 @@ void BlockCache::FlushAll() {
     m_retiredByPc.clear();
     m_retiredBytes = 0;
     m_retiredIr.clear();
+    m_retiredIrByPc.clear();
     m_retiredIrInsts = 0;
     m_staleCounts.clear();
     m_totalInsts = 0;

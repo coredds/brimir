@@ -1041,6 +1041,13 @@ Measured at the end of each 2E task (`design/plans/2026-10-20-sh2-jit-m2e.md`) o
 | 2E E (R4) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.757 | 4.394 | 1.083 | 9.305 | 10.928 | 14.2 | 0 | 0 / 12.7 | 0.539 | 6333 | 243.3 | 0 / 0 | 0 |
 | 2E E (R4) | worker | Burning Rangers (US), frames 2,400-36,000, run 1 | 6.589 | 6.894 | 0.956 | 10.921 | 20.456 | 54.3 | 1900 | 40 / 21.5 | 0.418 | 27657 | 6,421.1 | 0 / 0 | 877,188 |
 | 2E E (R4) | worker | Burning Rangers (US), frames 2,400-36,000, run 2 | 6.294 | 6.452 | 0.976 | 10.320 | 18.913 | 48.6 | 1186 | 30 / 30.7 | 0.396 | 27618 | 6,087.6 | 0 / 0 | 880,785 |
+| 2E E (R6) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 4.743 | 4.623 | 1.026 | 9.531 | 11.805 | 14.9 | 0 | 0 / 13.0 | 0.555 | 6333 | 263.5 | 0 / 0 | 0 |
+| 2E E (R6) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 4.754 | 4.898 | 0.971 | 9.834 | 12.674 | 15.8 | 0 | 0 / 13.0 | 0.575 | 6333 | 280.0 | 0 / 0 | 0 |
+| 2E E (R6) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.901 | 4.952 | 0.990 | 9.883 | 14.193 | 20.3 | 3 | 0 / 13.0 | 0.577 | 6333 | 282.4 | 0 / 0 | 0 |
+| 2E E (R6) | worker | Burning Rangers (US), frames 2,400-36,000, pair 1 | 6.090 | 6.521 | 0.934 | 10.422 | 19.019 | 55.6 | 1221 | 11 / 20.5 | 0.380 | 27631 | 6,003.4 | 0 / 0 | 879,102 |
+| 2E E (R6) | worker, pre-R4 build (12ac9ab) | Burning Rangers (US), frames 2,400-36,000, pair 1 | 6.090 | 6.380 | 0.955 | 10.293 | 18.669 | 48.2 | 990 | 11 / 20.5 | 0.407 | 28066 | 6,141.2 | 0 / 0 | 894,608 |
+| 2E E (R6) | worker | Burning Rangers (US), frames 2,400-36,000, pair 2 | 6.090 | 6.434 | 0.947 | 10.278 | 18.472 | 51.0 | 1079 | 11 / 20.5 | 0.383 | 27612 | 6,101.7 | 0 / 0 | 883,623 |
+| 2E E (R6) | worker, pre-R4 build (12ac9ab) | Burning Rangers (US), frames 2,400-36,000, pair 2 | 6.090 | 6.185 | 0.985 | 10.029 | 17.833 | 53.3 | 773 | 11 / 20.5 | 0.401 | 28064 | 5,898.7 | 0 / 0 | 891,780 |
 
 ### Task 4: the worker on by default (2E D)
 
@@ -1098,3 +1105,21 @@ Code: the R4 commit on top of `12ac9ab`. At the IR cap the cache now releases th
 - **Burning Rangers.** The work counters are within 1-2% of the pre-R4 build (front-end builds 323-324 K against 321 K in the same session, emulation-thread compile ms 6,088-6,421 against 6,059). Releasing the pool instead of evicting everything means the cap is reached often (526-536 times in the window, against 1 eviction), each time freeing the pool on the emulation thread, outside `compileMs`. The frames over 16.7 ms are 1,186 (quieter run) against 981 for the pre-R4 build in the same session. The 628 of the Task 5 session is not reproducible today: this session is noisier (the interpreter has 30-40 frames over 16.7 ms against 9). Ratio 0.976 against 0.987 for the pre-R4 build, within run-to-run spread.
 
 **Verdict for R4:** it removes the Street Fighter Zero 3 regression completely (same builds and compiles as before Task 5) and costs Burning Rangers little, within the spread of this session. The many pool releases at the cap are one candidate for the small remaining difference.
+
+### Task 5 (R6): the IR cap releases the oldest retired IR blocks
+
+Code: the R6 commit on top of `c56db0f`. At the IR cap the cache releases the least recently retired IR blocks (across PCs) until the IR is below 7/8 of the cap, and evicts the live IR-only blocks only if it is still at the cap with the pool empty. The releases are timed (`irPoolReleaseMs`, not part of `compileMs`). One session: Burning Rangers long with this build and with the pre-R4 build (`12ac9ab`, built aside) interleaved (R6, pre-R4, interpreter, R6, pre-R4), then Street Fighter Zero 3 three rounds (interpreter, then x64). All runs exit 0, `compileFallbacks 0`. The sampler read 34% on average (9-68%, 65 samples). Rows "2E E (R6)" in the table.
+
+| Run | Interpreter | x64 | Ratio | Worst frame, x64 / interpreter | Frames over 16.7 ms, x64 / interpreter | Front-end builds in window | Pool releases in window (ms) | IR reuses |
+|---|---|---|---|---|---|---|---|---|
+| Street Fighter Zero 3, rounds 1 / 2 / 3 | 4.743 / 4.754 / 4.901 | 4.623 / 4.898 / 4.952 | 1.026 / 0.971 / 0.990 (median 0.971) | 14.9 / 15.8 / 20.3, interpreter 13.0 | 0 / 0 / 3, interpreter 0 | 10,686 (as Task 4) | 1 (0.3) | 0 |
+| Burning Rangers long, R6, pair 1 | 6.090 | 6.521 | 0.934 | 55.6 / 20.5 | 1,221 / 11 | 324,587 | 535 (5.7) | 879,102 |
+| Burning Rangers long, pre-R4, pair 1 | 6.090 | 6.380 | 0.955 | 48.2 / 20.5 | 990 / 11 | 321,300 | - | 894,608 |
+| Burning Rangers long, R6, pair 2 | 6.090 | 6.434 | 0.947 | 51.0 / 20.5 | 1,079 / 11 | 328,796 | 560 (4.5) | 883,623 |
+| Burning Rangers long, pre-R4, pair 2 | 6.090 | 6.185 | 0.985 | 53.3 / 20.5 | 773 / 11 | 316,524 | - | 891,780 |
+
+- **The releases cost nothing measurable** (4.5-5.7 ms in a 33,600-frame window). They still happen 535-560 times, because in Burning Rangers the live IR alone stays above 7/8 of the cap: each release empties the pool without getting below 7/8, so R6 behaves like R4 there.
+- **Burning Rangers: the pre-R4 rule is slightly better in both interleaved pairs.** R6 has 2-4% more front-end builds (324,587-328,796 against 316,524-321,300), 1-2% fewer IR reuses, and 1,079-1,221 frames over 16.7 ms against 773-990; the SH-2 total is 2-4% higher (ratio 0.934-0.947 against 0.955-0.985). With the old rule, the one eviction of the live IR-only blocks (once in the window) leaves room for a large pool afterwards. With R4/R6 the live IR is never evicted, so the pool stays small (it is emptied at every cap hit) and reuses less.
+- **Street Fighter Zero 3** keeps Task 4's work exactly (10,686 builds, 6,333 native compiles, no IR eviction, one 0.3 ms release). Its ratio (median 0.971, rounds 0.971-1.026) and round 3's 3 frames over 16.7 ms are this session's noise: the compile work is identical in every round.
+
+**Verdict for R6:** the release is cheap and does what it should when the pool is large enough (Street Fighter Zero 3, and the cap test). In Burning Rangers the live IR alone fills more than 7/8 of the cap, so no release can get below the target, and keeping the live IR costs it a little against the pre-R4 rule. A variant would evict the live IR-only blocks as well when releasing the whole pool still leaves the IR at or above 7/8 of the cap (rather than at or above the cap); that would be the old behaviour for Burning Rangers and R6's for Street Fighter Zero 3.

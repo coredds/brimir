@@ -977,8 +977,62 @@ TEST_CASE("Block cache: retired IR blocks count toward the IR cap", "[jit][execu
     CHECK(cache.Compiles() == 4u);
     CHECK(cache.IrEvictions() == 0u);
 
-    // Live IR alone at the cap (the pool is empty): the live IR-only blocks are evicted as before.
+    // A pool holding more than an eighth of the cap: only the oldest retired blocks (across PCs) are
+    // released, until the IR is below 7/8 of the cap; the newer ones stay reusable.
     constexpr uint32_t kOther2 = kCode + 0x200;
+    const auto program = [](uint32_t imm) {
+        return std::vector<uint16_t>{static_cast<uint16_t>(0x7300 | imm), kAdd1_R3, kSleep};
+    };
+    size_t xInsts = 0, yInsts = 0, aInsts = 0, bInsts = 0;
+    {
+        IrCache probe{kind, brimir::jit::kMaxCachedInsts};
+        rig->WriteCode(kOther2, program(10));
+        xInsts = probe.cache.Get(ctx, kOther2).block.code.size();
+        rig->WriteCode(kOther2, program(11));
+        yInsts = probe.cache.Get(ctx, kOther2).block.code.size();
+        rig->WriteCode(kCode, program(12));
+        aInsts = probe.cache.Get(ctx, kCode).block.code.size();
+        rig->WriteCode(kCode, program(13));
+        bInsts = probe.cache.Get(ctx, kCode).block.code.size();
+    }
+    const size_t oldCap = xInsts + yInsts + aInsts + bInsts;
+    const size_t below = oldCap - oldCap / 8;
+    // Releasing X alone must be enough, and A must be needed to stay out of the cap check below.
+    REQUIRE(yInsts + aInsts + bInsts < below);
+    REQUIRE(otherInsts < xInsts);
+    IrCache older{kind, oldCap};
+    rig->WriteCode(kOther2, program(10));
+    older.cache.Get(ctx, kOther2); // X
+    rig->WriteCode(kOther2, program(11));
+    older.cache.Get(ctx, kOther2); // X retired (the oldest), Y live
+    rig->WriteCode(kCode, program(12));
+    older.cache.Get(ctx, kCode); // A
+    rig->WriteCode(kCode, program(13));
+    older.cache.Get(ctx, kCode); // A retired, B live
+    REQUIRE(older.cache.CachedInsts() == oldCap);
+    REQUIRE(older.cache.RetiredIrInsts() == xInsts + aInsts);
+    REQUIRE(older.cache.RetiredIrInsts() > oldCap / 8);
+    older.cache.Get(ctx, kOther); // at the cap: releases X only
+    CHECK(older.cache.RetiredIrReleases() == 1u);
+    CHECK(older.cache.IrEvictions() == 0u);
+    CHECK(older.cache.RetiredIrInsts() == aInsts);
+    CHECK(older.cache.CachedInsts() - otherInsts < below);
+    CHECK(older.cache.CachedInsts() == yInsts + aInsts + bInsts + otherInsts);
+    REQUIRE(older.cache.Find(kOther2) != nullptr); // Y
+    REQUIRE(older.cache.Find(kCode) != nullptr);   // B
+    CHECK(older.cache.Compiles() == 5u);
+    rig->WriteCode(kCode, program(12));
+    older.cache.Get(ctx, kCode); // A comes back from the pool
+    CHECK(older.cache.RetiredIrReuses() == 1u);
+    CHECK(older.cache.Compiles() == 5u);
+    rig->WriteCode(kOther2, program(10));
+    older.cache.Get(ctx, kOther2); // X was released: rebuilt
+    CHECK(older.cache.RetiredIrReuses() == 1u);
+    CHECK(older.cache.Compiles() == 6u);
+    CHECK(older.cache.RetiredIrReleases() == 1u); // below the cap again, no second release
+    CHECK(older.cache.IrEvictions() == 0u);
+
+    // Live IR alone at the cap (the pool is empty): the live IR-only blocks are evicted as before.
     IrCache live{kind, pInsts + qInsts};
     rig->WriteCode(kCode, kIrP);
     rig->WriteCode(kOther2, kIrQ);
