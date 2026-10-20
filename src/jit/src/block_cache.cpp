@@ -58,6 +58,11 @@ void BlockCache::Invalidate(BlockMap::iterator it) {
         slot = RecentSlot{};
     }
     ++m_invalidations;
+    if (m_maxStaleDampShift > 0) {
+        if (uint8_t &stale = m_staleCounts[pc]; stale < UINT8_MAX) {
+            ++stale;
+        }
+    }
     m_totalInsts -= entry->block.code.size();
     const NativeCode &code = entry->code;
     if (code.selfValidating) {
@@ -206,8 +211,17 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
     if (native) {
         return CompileNative(*ref, ctx, pc);
     }
-    // This run is the first; the threshold run compiles it.
-    ref->runsUntilNative = m_nativeCompileThreshold - 1;
+    // This run is the first; the threshold run compiles it. Threshold 1 is native on the first
+    // run and returned above, so only thresholds above 1 are damped.
+    uint32_t threshold = m_nativeCompileThreshold;
+    if (const auto stale = m_staleCounts.find(pc); stale != m_staleCounts.end()) {
+        const uint32_t shift = std::min<uint32_t>(stale->second, m_maxStaleDampShift);
+        if (shift > 0) {
+            threshold <<= shift;
+            ++m_dampedBuilds;
+        }
+    }
+    ref->runsUntilNative = threshold - 1;
     return *ref;
 }
 
@@ -278,6 +292,7 @@ void BlockCache::FlushAll() {
     m_retired.clear(); // the backend reset frees their code
     m_retiredByPc.clear();
     m_retiredBytes = 0;
+    m_staleCounts.clear();
     m_totalInsts = 0;
     if (m_native != nullptr) {
         m_native->Reset();

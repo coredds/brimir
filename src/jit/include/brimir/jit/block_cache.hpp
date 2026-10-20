@@ -47,6 +47,15 @@ constexpr size_t kRecentSlots = 4096;
 constexpr size_t kMaxRetiredCodeBytes = size_t{32} << 20;
 constexpr uint32_t kMaxRetiredPerPc = 4;
 
+// Damping (design/sh2-jit-m2d.md, A3): every time a block at a PC is dropped because its guest code
+// changed, the native compile threshold for the next build at that PC doubles, up to
+// kNativeCompileThreshold << kMaxStaleDampShift (counts are per PC and cleared by a flush, so the
+// wait is bounded and never permanent). 0 turns damping off. Only applies to thresholds above 1:
+// threshold 1 (tests and diagnostics) means native on the first run, always. Chosen from 0, 2 and 4
+// on Street Fighter Zero 3, Panzer Dragoon II Zwei and Burning Rangers: only 0 (off) stayed within 2%
+// of the best SH-2 total on both short titles (design/sh2-x64-performance.md, 2D A3).
+constexpr uint32_t kMaxStaleDampShift = 0;
+
 // A cached block. IR-only (code.entry == nullptr): block holds its IR and runs with RunBlock. Once
 // natively compiled, block keeps only startPC, guestOpcodes, guestInstrCount (and the flags);
 // block.code is freed and never needed again: a block whose native code is lost (Flush, Reset) is
@@ -69,14 +78,17 @@ public:
     // (tests pass a small value). nativeCompileThreshold: see kNativeCompileThreshold (tests pass
     // 1 to get native code on the first run; 0 is treated as 1). maxCachedInsts: the IR cap (tests
     // pass a small value). maxRetiredCodeBytes: see kMaxRetiredCodeBytes (tests pass small values;
-    // 0 disables the pool, so every dropped block's code is released at once).
+    // 0 disables the pool, so every dropped block's code is released at once). maxStaleDampShift: see
+    // kMaxStaleDampShift (0: no damping).
     explicit BlockCache(INativeBackend *native = nullptr, size_t maxNativeCodeBytes = kMaxNativeCodeBytes,
                         uint32_t nativeCompileThreshold = kNativeCompileThreshold,
-                        size_t maxCachedInsts = kMaxCachedInsts, size_t maxRetiredCodeBytes = kMaxRetiredCodeBytes)
+                        size_t maxCachedInsts = kMaxCachedInsts, size_t maxRetiredCodeBytes = kMaxRetiredCodeBytes,
+                        uint32_t maxStaleDampShift = kMaxStaleDampShift)
         : m_native(native)
         , m_maxNativeCodeBytes(maxNativeCodeBytes)
         , m_maxCachedInsts(maxCachedInsts)
         , m_maxRetiredCodeBytes(maxRetiredCodeBytes)
+        , m_maxStaleDampShift(maxStaleDampShift)
         , m_nativeCompileThreshold(nativeCompileThreshold == 0 ? 1 : nativeCompileThreshold) {}
 
     // Returns the block for pc, building it on a miss or when its guest code changed (or taking a
@@ -153,6 +165,10 @@ public:
     }
     size_t RetiredCodeBytes() const {
         return m_retiredBytes;
+    }
+    // Builds that waited for more than the global threshold because their PC had gone stale before.
+    uint64_t DampedBuilds() const {
+        return m_dampedBuilds;
     }
     // Host time spent building blocks (front end, OptimizeBlock, VerifyBlock) and compiling them
     // natively (INativeBackend::Compile, failed attempts included), in nanoseconds.
@@ -264,8 +280,11 @@ private:
     size_t m_maxNativeCodeBytes;
     size_t m_maxCachedInsts;
     size_t m_maxRetiredCodeBytes;
+    uint32_t m_maxStaleDampShift;
     uint32_t m_nativeCompileThreshold;
     BlockMap m_blocks;
+    // Times a block at each PC was dropped as stale (saturating at 255); cleared by a flush.
+    std::unordered_map<uint32_t, uint8_t> m_staleCounts;
     std::array<RecentSlot, kRecentSlots> m_recent{};
     // The pool, least recently retired first, and its blocks by PC (also oldest first).
     RetiredList m_retired;
@@ -282,6 +301,7 @@ private:
     uint64_t m_retiredReuses = 0;
     uint64_t m_retiredEvictions = 0;
     size_t m_retiredBytes = 0;
+    uint64_t m_dampedBuilds = 0;
     uint64_t m_buildNs = 0;
     uint64_t m_nativeNs = 0;
     uint64_t m_irEvictions = 0;

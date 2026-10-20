@@ -373,7 +373,7 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
             std::printf("cache %-7s: compiles %llu  nativeCompiles %llu  compileMs %.1f (build %.1f  native %.1f)  "
                         "nativeBytesPerBlock %.0f  peakNativeMB %.1f  staleNativeMB %.1f  invalidations %llu  "
                         "cachedInsts %zu  irEvictions %llu (blocks %llu)  flushes codeCap %llu  requested %llu  "
-                        "retiredReuses %llu  retiredEvictions %llu  retiredMB %.1f\n",
+                        "retiredReuses %llu  retiredEvictions %llu  retiredMB %.1f  dampedBuilds %llu\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(cache.Compiles()),
                         static_cast<unsigned long long>(native),
                         (cache.BuildNs() + cache.NativeCompileNs()) / 1e6, cache.BuildNs() / 1e6,
@@ -388,7 +388,8 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
                         static_cast<unsigned long long>(cache.FlushesRequested()),
                         static_cast<unsigned long long>(cache.RetiredReuses()),
                         static_cast<unsigned long long>(cache.RetiredEvictions()),
-                        static_cast<double>(cache.RetiredCodeBytes()) / (1024.0 * 1024.0));
+                        static_cast<double>(cache.RetiredCodeBytes()) / (1024.0 * 1024.0),
+                        static_cast<unsigned long long>(cache.DampedBuilds()));
         }
     }
 }

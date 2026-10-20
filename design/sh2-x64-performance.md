@@ -770,7 +770,55 @@ Measured at the end of each track A task (`design/plans/2026-10-19-sh2-jit-m2d-t
 | A1 (reuse returning code) | Burning Rangers (US), frames 2,400-36,000 | 6.285 | 6.652 | 0.94 | 10.508 | 24.234 | 92.4 | 28.7 | 42,871 | 23,798 | 0 / 0 | 74.0 / 6.6 | 885,877 |
 | A1 (reuse returning code) | Street Fighter Zero 3 (JP), frames 2,400-4,200 | 4.505 | 4.712 | 0.96 | 9.706 | 15.278 | 22.9 | 12.8 | 6,333 | 1,142 | 0 / 0 | 48.1 / 2.0 | 0 |
 | A1 (reuse returning code) | Panzer Dragoon II Zwei (US), frames 2,400-4,200 | 4.909 | 4.285 | 1.15 | 6.013 | 8.172 | 8.8 | 16.8 | 660 | 119 | 0 / 0 | 28.3 / 0.0 | 0 |
+| A3 (damping, shift 0 = off, committed) | Burning Rangers (US), frames 2,400-36,000 | 6.118 | 6.540 | 0.94 | 10.378 | 23.864 | 89.3 | 23.4 | 42,871 | 23,663 | 0 / 0 | 74.0 / 6.6 | 885,877 |
+| A3 (damping, shift 0 = off, committed) | Street Fighter Zero 3 (JP), frames 2,400-4,200 | 4.743 | 4.824 | 0.98 | 9.675 | 15.137 | 23.1 | 14.2 | 6,333 | 1,178 | 0 / 0 | 48.1 / 2.0 | 0 |
+| A3 (damping, shift 0 = off, committed) | Panzer Dragoon II Zwei (US), frames 2,400-4,200 | 5.091 | 4.222 | 1.21 | 5.980 | 8.059 | 9.1 | 11.9 | 660 | 119 | 0 / 0 | 28.3 / 0.0 | 0 |
+| A3 (damping, shift 2, measured) | Burning Rangers (US), frames 2,400-36,000 | 6.118 | 6.402 | 0.96 | 10.248 | 21.324 | 85.3 | 23.4 | 27,051 | 18,314 | 0 / 0 | 74.0 / 6.5 | 513,991 |
+| A3 (damping, shift 2, measured) | Street Fighter Zero 3 (JP), frames 2,400-4,200 | 4.743 | 4.888 | 0.97 | 9.823 | 15.305 | 22.3 | 14.2 | 5,794 | 1,170 | 0 / 0 | 46.5 / 2.0 | 0 |
+| A3 (damping, shift 2, measured) | Panzer Dragoon II Zwei (US), frames 2,400-4,200 | 5.091 | 4.240 | 1.20 | 6.003 | 8.098 | 8.9 | 11.9 | 660 | 124 | 0 / 0 | 28.2 / 0.0 | 0 |
+| A3 (damping, shift 4, measured) | Burning Rangers (US), frames 2,400-36,000 | 6.118 | 6.571 | 0.93 | 10.468 | 22.576 | 86.5 | 23.4 | 26,972 | 20,853 | 0 / 0 | 74.0 / 6.4 | 161,606 |
+| A3 (damping, shift 4, measured) | Street Fighter Zero 3 (JP), frames 2,400-4,200 | 4.743 | 4.731 | 1.00 | 9.585 | 15.378 | 21.9 | 14.2 | 5,794 | 1,136 | 0 / 0 | 46.5 / 2.0 | 0 |
+| A3 (damping, shift 4, measured) | Panzer Dragoon II Zwei (US), frames 2,400-4,200 | 5.091 | 4.350 | 1.17 | 6.085 | 8.105 | 9.4 | 11.9 | 660 | 120 | 0 / 0 | 28.2 / 0.0 | 0 |
 
 A2 (task 2): `Invalidate` unpublishes a dropped native block and frees its code at once (`INativeBackend::Release`). Burning Rangers ran with **no code-cap flushes** (track B: 4 master / 3 slave; the `flushes 3` on the `jit window` line are core-requested flushes) and a peak of 70.5 MB (master) and 6.4 MB (slave), against the 128 MB cap (track B peak: 128 / 128). Stale native code over the run is still 339.3 MB (master) and 411.2 MB (slave) in total, but it no longer accumulates. Native compiles in the window fell from 183,302 (track B) to 123,260 because a flush no longer throws away blocks that are still valid, compile time from 71.7 s to 63.9 s, and the worst frame from 130.4 to 91.5 ms. The SH-2 total ratio stays at 0.74 (track B: 0.744; x64 SH-2 total 8.033 against 7.975 ms/frame, within run-to-run spread): A2's gain on this run is memory, compile work and the worst frame, not SH-2 time. Street Fighter Zero 3 and Panzer Dragoon II Zwei are in line with the 2D track B results (medians of three rounds; interpreter max frame is the highest of the three rounds).
 
 A1 (task 3): `Invalidate` retires a dropped self-validating native block (unpublished, code kept) into a per-CPU pool (at most `kMaxRetiredPerPc` = 4 per PC, `kMaxRetiredCodeBytes` = 32 MB in total, oldest released first); `Build` takes one back, without a front-end build or a native compile, when its `guestOpcodes` equal memory and its two code pages still have the arrays it was compiled on (`CachedBlock::codePages`, what the prologue checks). Burning Rangers: **885,877 retired reuses** in the window (master 460,161, slave 425,716 since start-up), against Task 1's 95,065 potential reuses; the counts differ because a reused block is native at once, so its next drop is retired again, while in Task 1 a rebuilt block spent 16 runs on IR and an IR-only drop left nothing to reuse. Native compiles in the window fell from 123,260 (A2) to 42,871, compile time from 63.9 s to 23.8 s, the x64 SH-2 total from 8.033 to 6.652 ms/frame and p99 from 43.6 to 24.2 ms; the ratio went from 0.74 to 0.94 (this session's interpreter run: 6.285 ms/frame, against 5.953 in the A2 session). No code-cap flushes; peak native code 74.0 / 6.6 MB (the pool held 3.4 MB on the master at the end). Pool evictions (15,861 over the run, 7,523 master and 8,338 slave, both bounds together) are under 2% of the about 902,643 retirements (the stale entries, each of which drops one native block), so the 64 MB variant was not measured. Street Fighter Zero 3 and Panzer Dragoon II Zwei have nothing to reuse (0 reuses) and stay in line with A2 (medians of three rounds).
+
+A3 (task 4): rows above are from the 2D A3 session (next section); the shift 0 rows are the committed configuration. Interpreter columns are the session's (the Burning Rangers run is one; Street Fighter Zero 3 and Panzer Dragoon II Zwei use the median of the three interpreter runs and their highest max frame).
+
+## 2D A3
+
+Damping: `BlockCache` counts, per PC, how often a block there was dropped because its guest code changed (`Invalidate`, saturating at 255; `FlushAll` clears the counts). `Build` then waits `kNativeCompileThreshold << min(count, kMaxStaleDampShift)` runs for a native compile instead of `kNativeCompileThreshold` (16), so a PC that keeps being rewritten compiles natively less often; code that then stays unchanged still gets native code after at most `16 << shift` runs. A block taken back from the retired pool (A1) is native at once and ignores the count, and threshold 1 (`kNativeOnFirstRun`: tests, diagnostics) is never damped. `DampedBuilds()` counts the builds whose threshold was raised.
+
+Method: the B5 method (three temporary `build-bench` builds with `kMaxStaleDampShift` = 0, 2 and 4, executables copied aside and run interleaved in one session, 2026-10-19). Street Fighter Zero 3 (JP BIOS) and Panzer Dragoon II Zwei (US BIOS): `--warmup 2400 --frames 1800`, x64, three rounds; each round ran one interpreter run, then the three values (SFZ3 first, then PD2), the order of the values rotating between rounds (0, 2, 4 / 2, 4, 0 / 4, 0, 2). Burning Rangers (US): `--warmup 2400 --frames 33600`, one interpreter run (round 1) and one x64 run per value, after the short runs of rounds 1, 2 and 3 (shift 0, 2, 4 respectively). Scratch system dir as in the method above. All 28 runs exited 0; machine load before and between runs 4-26% (desktop applications only).
+
+SH2 total ms/frame, x64 (median of three, the runs in order of the rounds in parentheses):
+
+| Title | Interpreter | shift 0 (off) | shift 2 | shift 4 |
+|---|---|---|---|---|
+| Street Fighter Zero 3 | 4.743 (4.743 / 4.702 / 4.804) | 4.824 (4.893 / 4.824 / 4.807) | 4.888 (4.857 / 4.899 / 4.888) | **4.731** (4.896 / 4.725 / 4.731) |
+| Panzer Dragoon II Zwei | 5.091 (5.037 / 5.116 / 5.091) | **4.222** (4.359 / 4.221 / 4.222) | 4.240 (4.304 / 4.210 / 4.240) | 4.350 (4.548 / 4.234 / 4.350) |
+
+Burning Rangers, one run each (the interpreter: SH2 total 6.118, average 9.383, p99 13.2, max frame 23.4 ms):
+
+| Value | SH2 total ms | avg frame ms | p99 | max frame ms | native compiles in window | front-end builds in window | compile ms in window | retired reuses | damped builds (master / slave) |
+|---|---|---|---|---|---|---|---|---|---|
+| shift 0 (off) | 6.540 | 10.378 | 23.9 | 89.3 | 42,871 | 1,149,860 | 23,663 | 885,877 | 0 / 0 |
+| shift 2 | 6.402 | 10.248 | 21.3 | 85.3 | 27,051 | 1,523,209 | 18,314 | 513,991 | 685,596 / 792,274 |
+| shift 4 | 6.571 | 10.468 | 22.6 | 86.5 | 26,972 | 1,875,592 | 20,853 | 161,606 | 854,852 / 975,404 |
+
+(Compile ms is front-end builds plus native compiles. All runs: no code-cap flushes, peak native code 74.0 / 6.4-6.6 MB, 884,4xx master and 1,107,130 slave invalidations over the run.)
+
+### Decision (the rule)
+
+1. Among the values whose SFZ3 and PD2 SH2 totals are within 2% of the best (medians): SFZ3 best is shift 4 (4.731): shift 0 is +2.0% (4.824, inside the 2% line at 4.826 by 0.002 ms), shift 2 +3.3% (outside). PD2 best is shift 0 (4.222): shift 2 +0.4%, shift 4 +3.0% (outside). Only **shift 0** is eligible on both titles. On the means of the three runs the answer is the same (SFZ3: 4.841 / 4.881 / 4.784, PD2: 4.267 / 4.251 / 4.377; shift 2 is +2.0% on SFZ3 by a hair and shift 4 +3.0% on PD2).
+2. The tie-breaker is not needed (one eligible value).
+
+**Chosen value: 0 (damping off).** The code stays, behind `kMaxStaleDampShift = 0`.
+
+### Notes
+
+- The short titles do not separate the values: shifts 2 and 4 made identical native compile counts on SFZ3 (5,794, 1,145 damped builds) and PD2 (660), so their 3.3% difference on SFZ3 (4.888 against 4.731) is run-to-run noise, which is as large as the rule's 2% band. The rule's outcome on the SFZ3 column is therefore not a measured cost of damping.
+- Burning Rangers: damping at shift 2 cut native compiles by 37% (42,871 to 27,051), compile time by 23% (23.7 to 18.3 s) and p99 by 11% (23.9 to 21.3 ms); the SH2 total fell 2.1% (6.540 to 6.402), which is inside the run-to-run spread (the same code at shift 0 measured 6.652 in the A1 session and 6.540 here, 1.7% apart), and the max frame 4% (89.3 to 85.3 ms). Shift 4 compiled the same number of blocks as shift 2 but is slower. None of the values is within reach of the interpreter on this title (6.118 ms/frame, max 23.4 ms).
+- The cost of damping is on the other side: a damped block stays on IR for 31 or 63 runs, is never retired, and so cannot be reused. Reuses fell from 885,877 to 513,991 (shift 2) and 161,606 (shift 4), and front-end builds in the window rose from 1.15 M to 1.52 M and 1.88 M, which offsets most of the saved native compile time.
+- Not measured: a damping rule that keeps reuse (counting only drops of blocks that never reached native code, or letting a retired block's reuse restore a lower count).

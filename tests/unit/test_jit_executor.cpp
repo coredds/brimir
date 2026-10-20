@@ -5,8 +5,12 @@
 #include "jit_test_backend.hpp"
 #include "sh2_test_rig.hpp"
 
+#include <brimir/jit/backend.hpp>
+#include <brimir/jit/block_cache.hpp>
 #include <brimir/jit/executor.hpp>
+#include <brimir/jit/interp_backend.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -497,4 +501,130 @@ TEST_CASE("Executor: kMaxCachedInsts accounting ignores native blocks", "[jit][e
     CHECK(cache.CachedInsts() == cache.Find(kHot)->block.code.size());
     CHECK(cache.IrEvictions() == 0u);
     CHECK(cache.FlushesCodeCap() == 0u);
+}
+
+namespace {
+
+// Runs the block at kCode on the rig as Executor::StepImpl does (a native block that reports stale
+// is dropped and the PC looked up again) and returns whether the block that ran was native.
+bool StepNative(brimir::jit::BlockCache &cache, brimir::jit::INativeBackend &backend, Rig &rig) {
+    rig.Load(rig.BaseState(kCode));
+    auto &ctx = rig.sh2->GetJitContext();
+    const auto run = [&](const brimir::jit::CachedBlock &entry) {
+        return entry.code.entry != nullptr ? backend.Run(entry.code, ctx) : brimir::jit::RunBlock(entry.block, ctx);
+    };
+    const brimir::jit::CachedBlock *entry = &cache.Get(ctx, kCode);
+    brimir::jit::ExitInfo info = run(*entry);
+    if (info.stale) {
+        cache.Invalidate(kCode);
+        entry = &cache.Get(ctx, kCode);
+        info = run(*entry);
+        REQUIRE_FALSE(info.stale);
+    }
+    REQUIRE(info.retired == 2);
+    return entry->code.entry != nullptr;
+}
+
+// add #imm,R3 ; add #1,R3 ; sleep: a different program for every imm (1-127).
+void WriteProgram(Rig &rig, uint32_t imm) {
+    rig.WriteCode(kCode, {static_cast<uint16_t>(0x7300 | (imm & 0x7F)), kAdd1_R3, kSleep});
+}
+
+// Steps until the block runs natively, from the first run after a (re)build, and returns how many
+// runs were on IR. Then requires that the next run is native too.
+uint32_t IrRunsUntilNative(brimir::jit::BlockCache &cache, brimir::jit::INativeBackend &backend, Rig &rig) {
+    uint32_t irRuns = 0;
+    while (!StepNative(cache, backend, rig)) {
+        ++irRuns;
+        REQUIRE(irRuns < 1000);
+    }
+    CHECK(StepNative(cache, backend, rig));
+    return irRuns;
+}
+
+} // namespace
+
+// A native block that reports stale is rebuilt on IR; the more often a PC has gone stale, the more
+// IR runs the rebuilt block gets before its native compile (threshold << min(stale count, shift)).
+TEST_CASE("Block cache: a PC that keeps going stale waits longer for native code", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, 2, brimir::jit::kMaxCachedInsts, 0, 2};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 5; ++k) {
+        INFO("stale rewrites " << k);
+        WriteProgram(*rig, 1 + k);
+        CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << std::min(k, 2u)) - 1);
+        CHECK(cache.DampedBuilds() == (k == 0 ? 0u : k));
+        CHECK(cache.Invalidations() == k);
+    }
+}
+
+// A PC's stale count never decays by itself, but the wait it causes is bounded: unchanged code gets
+// native code after at most threshold << shift runs. A flush forgets the counts.
+TEST_CASE("Block cache: a damped PC still reaches native code", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, 2, brimir::jit::kMaxCachedInsts, 0, 2};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 10; ++k) {
+        WriteProgram(*rig, 1 + k);
+        REQUIRE(StepNative(cache, *backend, *rig) == false);
+        while (!StepNative(cache, *backend, *rig)) {
+        }
+    }
+    REQUIRE(cache.Invalidations() == 10u);
+
+    // Unchanged code from here on: one more rewrite, then no stale report.
+    WriteProgram(*rig, 100);
+    CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << 2) - 1);
+    CHECK(cache.Invalidations() == 11u);
+
+    cache.Flush();
+    CHECK(IrRunsUntilNative(cache, *backend, *rig) == 1u);
+    // Counting restarts after the flush.
+    WriteProgram(*rig, 101);
+    CHECK(IrRunsUntilNative(cache, *backend, *rig) == (2u << 1) - 1);
+}
+
+TEST_CASE("Block cache: damping off keeps the global threshold", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, 2, brimir::jit::kMaxCachedInsts, 0, 0};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 5; ++k) {
+        INFO("stale rewrites " << k);
+        WriteProgram(*rig, 1 + k);
+        CHECK(IrRunsUntilNative(cache, *backend, *rig) == 1u);
+    }
+    CHECK(cache.Invalidations() == 5u);
+    CHECK(cache.DampedBuilds() == 0u);
+}
+
+// Threshold 1 means native on the first run, always (tests and diagnostics): never damped.
+TEST_CASE("Block cache: threshold 1 is never damped", "[jit][executor][tier]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const auto backend = brimir::jit::MakeNativeBackend(brimir::jit::BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    brimir::jit::BlockCache cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, sh2test::kNativeOnFirstRun,
+                                  brimir::jit::kMaxCachedInsts, 0, 4};
+    auto rig = std::make_unique<Rig>();
+    for (uint32_t k = 0; k <= 6; ++k) {
+        INFO("stale rewrites " << k);
+        WriteProgram(*rig, 1 + k);
+        CHECK(IrRunsUntilNative(cache, *backend, *rig) == 0u);
+    }
+    CHECK(cache.Invalidations() == 6u);
+    CHECK(cache.DampedBuilds() == 0u);
 }
