@@ -11,8 +11,10 @@
 #include <brimir/jit/interp_backend.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <memory>
+#include <string>
 #include <vector>
 
 using sh2test::kSleep;
@@ -473,8 +475,8 @@ TEST_CASE("Executor: the IR backend keeps every block on IR", "[jit][executor][t
     CHECK(exec.Cache().CachedInsts() == entry->block.code.size());
 }
 
-// Without a native backend nothing has native code to keep: a block whose code changed is dropped
-// and every rewrite is a new build, even when earlier code comes back.
+// Without a native backend nothing has native code to keep: the native pool stays empty. A block
+// whose code changed goes to the IR pool instead, so code that comes back is not built again.
 TEST_CASE("Executor: the IR backend never retires blocks", "[jit][executor]") {
     auto rig = std::make_unique<Rig>();
     brimir::jit::Executor exec{brimir::jit::BackendKind::Ir, sh2test::kNativeOnFirstRun};
@@ -495,7 +497,8 @@ TEST_CASE("Executor: the IR backend never retires blocks", "[jit][executor]") {
         REQUIRE(exec.Step(ctx).retired == 2);
         r3 += (q ? 16u : 1u) + 1u;
         CHECK(rig->State().R[3] == r3);
-        CHECK(exec.Cache().Compiles() == 1u + i);
+        CHECK(exec.Cache().Compiles() == 2u); // the first rewrite builds Q, the others reuse
+        CHECK(exec.Cache().RetiredIrReuses() == i - 1);
         CHECK(exec.Cache().Invalidations() == i);
     }
     CHECK(exec.Cache().RetiredReuses() == 0u);
@@ -725,4 +728,279 @@ TEST_CASE("Block cache: threshold 1 is never damped", "[jit][executor][tier]") {
     }
     CHECK(cache.Invalidations() == 6u);
     CHECK(cache.DampedBuilds() == 0u);
+}
+
+// --- The retired IR pool (design/sh2-jit-m2e.md, track E) ----------------------------------------
+
+namespace {
+
+constexpr uint32_t kIrThreshold = 16; // blocks stay IR-only for these tests
+
+// An executor (threshold 16) next to a reference interpreter rig.
+struct IrPair {
+    std::unique_ptr<Rig> ref = std::make_unique<Rig>();
+    std::unique_ptr<Rig> jit = std::make_unique<Rig>();
+    brimir::jit::Executor exec;
+
+    explicit IrPair(brimir::jit::BackendKind kind)
+        : exec{kind, kIrThreshold} {
+        auto state = ref->BaseState(kCode);
+        state.R[3] = 0;
+        Load(state);
+    }
+    const brimir::jit::BlockCache &Cache() const {
+        return exec.Cache();
+    }
+    void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
+        ref->WriteCode(address, words);
+        jit->WriteCode(address, words);
+    }
+    void Load(const ymir::savestate::SH2SaveState &state) {
+        ref->Load(state);
+        jit->Load(state);
+    }
+    // One executor step from pc (registers kept) and the same instructions on the reference.
+    brimir::jit::ExitInfo StepAt(uint32_t pc) {
+        return StepFrom(ref->BaseState(pc));
+    }
+    brimir::jit::ExitInfo StepFrom(const ymir::savestate::SH2SaveState &state) {
+        Load(state);
+        const auto info = exec.Step(jit->sh2->GetJitContext());
+        uint64_t refCycles = 0;
+        for (uint32_t i = 0; i < info.retired; ++i) {
+            refCycles += ref->sh2->Step<false, false>();
+        }
+        CHECK(info.cycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit);
+        INFO(diff);
+        CHECK(diff.empty());
+        return info;
+    }
+};
+
+const std::vector<uint16_t> kIrP = {kAdd1_R3, kAdd1_R3, kAdd1_R3, kSleep};
+const std::vector<uint16_t> kIrQ = {kAdd16_R3, kAdd16_R3, kAdd16_R3, kSleep};
+
+// A RAM page turned into a handler page over a copy of its bytes (no side effects, peeks included).
+struct HandlerPage {
+    std::array<uint8_t, 0x10000> data{};
+
+    // Maps bus 0x6000000-0x600FFFF (SH-2 0x06000000, kCode's page) of rig to handlers over data.
+    void Map(Rig &rig) {
+        rig.bus.MapBoth(
+            0x6000000, 0x600FFFF, this,
+            [](uint32_t address, void *ctx) -> uint8_t { return static_cast<HandlerPage *>(ctx)->data[address & 0xFFFF]; },
+            [](uint32_t address, void *ctx) -> uint16_t {
+                const auto &d = static_cast<HandlerPage *>(ctx)->data;
+                const uint32_t off = address & 0xFFFE;
+                return static_cast<uint16_t>((d[off] << 8) | d[off + 1]);
+            },
+            [](uint32_t address, void *ctx) -> uint32_t {
+                const auto &d = static_cast<HandlerPage *>(ctx)->data;
+                const uint32_t off = address & 0xFFFC;
+                return (static_cast<uint32_t>(d[off]) << 24) | (static_cast<uint32_t>(d[off + 1]) << 16) |
+                       (static_cast<uint32_t>(d[off + 2]) << 8) | d[off + 3];
+            },
+            [](uint32_t address, uint8_t value, void *ctx) { static_cast<HandlerPage *>(ctx)->data[address & 0xFFFF] = value; },
+            [](uint32_t address, uint16_t value, void *ctx) {
+                auto &d = static_cast<HandlerPage *>(ctx)->data;
+                const uint32_t off = address & 0xFFFE;
+                d[off] = static_cast<uint8_t>(value >> 8);
+                d[off + 1] = static_cast<uint8_t>(value);
+            },
+            [](uint32_t address, uint32_t value, void *ctx) {
+                auto &d = static_cast<HandlerPage *>(ctx)->data;
+                const uint32_t off = address & 0xFFFC;
+                d[off] = static_cast<uint8_t>(value >> 24);
+                d[off + 1] = static_cast<uint8_t>(value >> 16);
+                d[off + 2] = static_cast<uint8_t>(value >> 8);
+                d[off + 3] = static_cast<uint8_t>(value);
+            });
+    }
+    void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
+        for (size_t i = 0; i < words.size(); ++i) {
+            const uint32_t off = (address + static_cast<uint32_t>(i * 2)) & 0xFFFE;
+            data[off] = static_cast<uint8_t>(words[i] >> 8);
+            data[off + 1] = static_cast<uint8_t>(words[i]);
+        }
+    }
+};
+
+// A cache for `kind` (nullptr backend for Ir) with threshold 16 and the given IR cap.
+struct IrCache {
+    std::unique_ptr<brimir::jit::INativeBackend> backend;
+    brimir::jit::BlockCache cache;
+
+    IrCache(brimir::jit::BackendKind kind, size_t maxCachedInsts)
+        : backend(kind == brimir::jit::BackendKind::Ir ? nullptr : brimir::jit::MakeNativeBackend(kind))
+        , cache{backend.get(), brimir::jit::kMaxNativeCodeBytes, kIrThreshold, maxCachedInsts} {}
+};
+
+} // namespace
+
+TEST_CASE("Block cache: a dropped IR block that comes back is reused", "[jit][executor][tier]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    IrPair p{kind};
+    p.WriteCode(kCode, kIrP);
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    const size_t pInsts = p.Cache().Find(kCode)->block.code.size();
+
+    p.WriteCode(kCode, kIrQ);
+    REQUIRE(p.StepAt(kCode).retired == 3); // P dropped and retired, Q built
+    const size_t qInsts = p.Cache().Find(kCode)->block.code.size();
+    CHECK(p.Cache().Compiles() == 2u);
+    CHECK(p.Cache().RetiredIrInsts() == pInsts);
+    CHECK(p.Cache().CachedInsts() == pInsts + qInsts);
+
+    p.WriteCode(kCode, kIrP);
+    REQUIRE(p.StepAt(kCode).retired == 3); // Q retired, P taken back without the front end
+    CHECK(p.Cache().Compiles() == 2u);
+    CHECK(p.Cache().RetiredIrReuses() == 1u);
+    CHECK(p.Cache().Invalidations() == 2u);
+    CHECK(p.Cache().RetiredIrInsts() == qInsts);
+    CHECK(p.Cache().CachedInsts() == pInsts + qInsts);
+    const brimir::jit::CachedBlock *entry = p.Cache().Find(kCode);
+    REQUIRE(entry != nullptr);
+    CHECK(entry->block.guestOpcodes.front() == kAdd1_R3);
+    CHECK(entry->code.entry == nullptr);
+    // Its runs restart as for a fresh build (this run was the first).
+    CHECK(entry->runsUntilNative == (kind == brimir::jit::BackendKind::Ir ? 0u : kIrThreshold - 1));
+    CHECK(p.jit->State().R[3] == 3u + 48u + 3u);
+
+    REQUIRE(p.StepAt(kCode).retired == 3); // a recent-slot hit on the reused block
+    CHECK(p.Cache().Compiles() == 2u);
+    CHECK(p.jit->State().R[3] == 3u + 48u + 6u);
+    CHECK(p.Cache().RetiredReuses() == 0u);
+}
+
+// Review Focus 5: the same bytes at the same address, but no longer on an array page. A fresh build
+// would not fetch from arrays (nor know its refills), so the retired block must not be taken back.
+TEST_CASE("Block cache: an IR block is not reused after its page stops being an array page", "[jit][executor][tier]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    // Declared before the pair: the rigs' buses point at them until the rigs are gone.
+    const auto pages = std::make_unique<std::array<HandlerPage, 2>>();
+    IrPair p{kind};
+    p.WriteCode(kCode, kIrP);
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    REQUIRE(p.Cache().Find(kCode)->block.fetchFromArrays);
+    p.WriteCode(kCode, kIrQ);
+    REQUIRE(p.StepAt(kCode).retired == 3); // P retired
+    REQUIRE(p.Cache().RetiredIrInsts() > 0u);
+
+    Rig *rigs[2] = {p.ref.get(), p.jit.get()};
+    for (int i = 0; i < 2; ++i) {
+        HandlerPage &page = (*pages)[i];
+        std::copy_n(rigs[i]->ram->begin(), 0x10000, page.data.begin());
+        page.WriteCode(kCode, kIrP);
+        page.Map(*rigs[i]);
+    }
+    auto state = p.ref->BaseState(kCode);
+    state.fetchedOpcodes = (uint32_t{kAdd1_R3} << 16) | kAdd1_R3; // what the handler page holds
+    REQUIRE(p.StepFrom(state).retired == 3);
+    CHECK(p.Cache().RetiredIrReuses() == 0u);
+    CHECK(p.Cache().Compiles() == 3u);
+    const brimir::jit::CachedBlock *entry = p.Cache().Find(kCode);
+    REQUIRE(entry != nullptr);
+    CHECK(entry->block.guestOpcodes.front() == kAdd1_R3);
+    CHECK_FALSE(entry->block.fetchFromArrays);
+    CHECK(p.jit->State().R[3] == 3u + 48u + 3u);
+}
+
+// The front end also reads the word that stops a block. Here it was SLEEP and becomes a supported
+// instruction, so the block's own words are unchanged but a fresh build is longer.
+TEST_CASE("Block cache: an IR block is not reused after the word that ended it changed", "[jit][executor][tier]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    IrPair p{kind};
+    p.WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kSleep}); // last instruction at kCode + 2: no tail word
+    REQUIRE(p.StepAt(kCode).retired == 2);
+    REQUIRE(p.Cache().Find(kCode)->block.guestOpcodes.size() == 2u);
+    p.WriteCode(kCode, kIrQ);
+    REQUIRE(p.StepAt(kCode).retired == 3);
+
+    p.WriteCode(kCode, {kAdd1_R3, kAdd1_R3, kAdd16_R3, kSleep});
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    CHECK(p.Cache().RetiredIrReuses() == 0u);
+    CHECK(p.Cache().Compiles() == 3u);
+    CHECK(p.jit->State().R[3] == 2u + 48u + 18u);
+}
+
+TEST_CASE("Block cache: retired IR blocks count toward the IR cap", "[jit][executor][tier]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    constexpr uint32_t kOther = kCode + 0x100;
+    auto rig = std::make_unique<Rig>();
+    auto &ctx = rig->sh2->GetJitContext();
+
+    // The IR sizes of P and Q, from a cache without a small cap.
+    size_t pInsts = 0;
+    size_t qInsts = 0;
+    {
+        IrCache probe{kind, brimir::jit::kMaxCachedInsts};
+        rig->WriteCode(kCode, kIrP);
+        pInsts = probe.cache.Get(ctx, kCode).block.code.size();
+        rig->WriteCode(kCode, kIrQ);
+        qInsts = probe.cache.Get(ctx, kCode).block.code.size();
+    }
+    REQUIRE(pInsts > 0u);
+    REQUIRE(qInsts > 0u);
+
+    IrCache c{kind, pInsts + qInsts};
+    auto &cache = c.cache;
+    rig->WriteCode(kCode, kIrP);
+    rig->WriteCode(kOther, {kAdd1_R3, kSleep});
+    cache.Get(ctx, kCode);
+    CHECK(cache.CachedInsts() == pInsts);
+    rig->WriteCode(kCode, kIrQ);
+    cache.Get(ctx, kCode); // P retired: still counted
+    CHECK(cache.RetiredIrInsts() == pInsts);
+    CHECK(cache.CachedInsts() == pInsts + qInsts);
+    CHECK(cache.IrEvictions() == 0u);
+
+    // At the cap: the next build evicts the IR-only blocks and empties the pool.
+    const size_t otherInsts = cache.Get(ctx, kOther).block.code.size();
+    CHECK(cache.IrEvictions() == 1u);
+    CHECK(cache.RetiredIrInsts() == 0u);
+    CHECK(cache.CachedInsts() == otherInsts);
+    CHECK(cache.Find(kCode) == nullptr);
+
+    rig->WriteCode(kCode, kIrP);
+    cache.Get(ctx, kCode); // P is gone from the pool: rebuilt
+    CHECK(cache.RetiredIrReuses() == 0u);
+    CHECK(cache.Compiles() == 4u);
+}
+
+TEST_CASE("Block cache: the IR pool is bounded per PC", "[jit][executor][tier]") {
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    INFO("backend " << brimir::jit::BackendName(kind));
+    auto rig = std::make_unique<Rig>();
+    auto &ctx = rig->sh2->GetJitContext();
+    IrCache c{kind, brimir::jit::kMaxCachedInsts};
+    auto &cache = c.cache;
+    std::vector<size_t> insts;
+    for (uint32_t k = 1; k <= 6; ++k) {
+        WriteProgram(*rig, k);
+        insts.push_back(cache.Get(ctx, kCode).block.code.size());
+    }
+    CHECK(cache.Compiles() == 6u);
+    CHECK(cache.Invalidations() == 5u);
+    // Programs 2-5 are retired (1, the oldest, was released), 6 is live.
+    size_t retired = 0;
+    for (size_t i = 5 - brimir::jit::kMaxRetiredPerPc; i < 5; ++i) {
+        retired += insts[i];
+    }
+    CHECK(cache.RetiredIrInsts() == retired);
+    CHECK(cache.CachedInsts() == retired + insts[5]);
+
+    // Retiring 6 releases 2: the pool holds 3-6, oldest first.
+    WriteProgram(*rig, 3);
+    cache.Get(ctx, kCode);
+    CHECK(cache.RetiredIrReuses() == 1u);
+    CHECK(cache.Compiles() == 6u);
+    WriteProgram(*rig, 2);
+    cache.Get(ctx, kCode);
+    CHECK(cache.RetiredIrReuses() == 1u);
+    CHECK(cache.Compiles() == 7u);
 }

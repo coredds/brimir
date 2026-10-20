@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -63,14 +64,17 @@ void BlockCache::Invalidate(BlockMap::iterator it) {
             ++stale;
         }
     }
-    m_totalInsts -= entry->block.code.size();
     const NativeCode &code = entry->code;
     if (code.selfValidating) {
         m_native->Unpublish(pc);
     }
     if (code.entry == nullptr) {
+        if (!entry->block.code.empty()) {
+            RetireIr(pc, std::move(entry)); // its IR stays counted
+        }
         return;
     }
+    assert(entry->block.code.empty() && "a native block's IR is freed when it is installed");
     m_staleNativeBytes += code.bytes;
     if (code.selfValidating && m_maxRetiredCodeBytes > 0) {
         Retire(pc, std::move(entry));
@@ -122,6 +126,75 @@ CachedBlock *BlockCache::Reuse(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         return ref;
     }
     return nullptr;
+}
+
+bool BlockCache::SameBuild(const Block &block, ymir::sh2::SH2JitContext &ctx) {
+    bool arrays = ctx.bus.pages != nullptr;
+    for (size_t i = 0; i < block.guestOpcodes.size() && arrays; ++i) {
+        uint16_t opcode = 0;
+        arrays = FastPeek16(ctx.bus, block.startPC + static_cast<uint32_t>(i * 2), opcode);
+    }
+    return arrays == block.fetchFromArrays && IsCurrent(block, ctx) && BlockEndIsCurrent(ctx, block);
+}
+
+void BlockCache::RetireIr(uint32_t pc, std::unique_ptr<CachedBlock> entry) {
+    // As a fresh build: no compile pending (the result for the ticket is dropped when it arrives),
+    // no code pages; Started sets the runs.
+    entry->pendingTicket = 0;
+    entry->runsUntilNative = 0;
+    entry->codePages = {};
+    m_retiredIrInsts += entry->block.code.size();
+    std::vector<std::unique_ptr<CachedBlock>> &atPc = m_retiredIr[pc];
+    atPc.push_back(std::move(entry));
+    if (atPc.size() > kMaxRetiredPerPc) {
+        const size_t insts = atPc.front()->block.code.size();
+        m_retiredIrInsts -= insts;
+        m_totalInsts -= insts;
+        atPc.erase(atPc.begin());
+    }
+}
+
+CachedBlock *BlockCache::ReuseIr(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
+    const auto byPc = m_retiredIr.find(pc);
+    if (byPc == m_retiredIr.end()) {
+        return nullptr;
+    }
+    std::vector<std::unique_ptr<CachedBlock>> &atPc = byPc->second;
+    for (auto r = atPc.rbegin(); r != atPc.rend(); ++r) {
+        if (!SameBuild((*r)->block, ctx)) {
+            continue;
+        }
+        std::unique_ptr<CachedBlock> entry = std::move(*r);
+        atPc.erase(std::next(r).base());
+        if (atPc.empty()) {
+            m_retiredIr.erase(byPc);
+        }
+        m_retiredIrInsts -= entry->block.code.size();
+        ++m_retiredIrReuses;
+#ifndef NDEBUG
+        {
+            Block fresh = BuildBlock(ctx, pc);
+            OptimizeBlock(fresh);
+            const Block &block = entry->block;
+            assert(fresh.guestOpcodes == block.guestOpcodes && fresh.guestInstrCount == block.guestInstrCount &&
+                   fresh.hasTailWord == block.hasTailWord && fresh.fetchFromArrays == block.fetchFromArrays &&
+                   fresh.numValues == block.numValues && PrintBlock(fresh) == PrintBlock(block) &&
+                   "a reused IR block equals a fresh build");
+        }
+#endif
+        CachedBlock *ref = entry.get();
+        [[maybe_unused]] const bool inserted = m_blocks.emplace(pc, std::move(entry)).second;
+        assert(inserted && "ReuseIr is only called on a miss, so pc has no cached block");
+        SlotFor(pc) = RecentSlot{pc, ref};
+        return ref;
+    }
+    return nullptr;
+}
+
+void BlockCache::ClearRetiredIr() {
+    m_totalInsts -= m_retiredIrInsts;
+    m_retiredIrInsts = 0;
+    m_retiredIr.clear();
 }
 
 void BlockCache::RemoveRetired(RetiredList::iterator it) {
@@ -190,6 +263,9 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
         return *reused;
     }
     const bool native = m_native != nullptr && (compileNow || m_nativeCompileThreshold <= 1);
+    if (CachedBlock *reused = ReuseIr(ctx, pc); reused != nullptr) {
+        return Started(*reused, ctx, pc, native); // its IR is already counted
+    }
     if (m_totalInsts >= m_maxCachedInsts) {
         EvictIrOnly();
     }
@@ -221,11 +297,15 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
     CachedBlock *ref = entry.get();
     m_blocks.emplace(pc, std::move(entry));
     SlotFor(pc) = RecentSlot{pc, ref};
-    if (m_native == nullptr || ref->block.guestInstrCount == 0) {
-        return *ref; // RunBlock (or the interpreter) only
+    return Started(*ref, ctx, pc, native);
+}
+
+const CachedBlock &BlockCache::Started(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool native) {
+    if (m_native == nullptr || entry.block.guestInstrCount == 0) {
+        return entry; // RunBlock (or the interpreter) only
     }
     if (native) {
-        return CompileNative(*ref, ctx, pc);
+        return CompileNative(entry, ctx, pc);
     }
     // This run is the first; the threshold run compiles it. Threshold 1 is native on the first
     // run and returned above, so only thresholds above 1 are damped.
@@ -237,8 +317,8 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
             ++m_dampedBuilds;
         }
     }
-    ref->runsUntilNative = threshold - 1;
-    return *ref;
+    entry.runsUntilNative = threshold - 1;
+    return entry;
 }
 
 const CachedBlock &BlockCache::CompileNative(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
@@ -383,6 +463,7 @@ void BlockCache::EvictIrOnly() {
         ++m_irEvictedBlocks;
         it = m_blocks.erase(it);
     }
+    ClearRetiredIr();
     assert(m_totalInsts == 0 && "every counted IR instruction belongs to an IR-only block");
 }
 
@@ -405,6 +486,8 @@ void BlockCache::FlushAll() {
     m_retired.clear(); // the backend reset frees their code
     m_retiredByPc.clear();
     m_retiredBytes = 0;
+    m_retiredIr.clear();
+    m_retiredIrInsts = 0;
     m_staleCounts.clear();
     m_totalInsts = 0;
     if (m_native != nullptr) {

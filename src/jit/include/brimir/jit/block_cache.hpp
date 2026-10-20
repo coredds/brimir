@@ -50,6 +50,11 @@ constexpr size_t kRecentSlots = 4096;
 constexpr size_t kMaxRetiredCodeBytes = size_t{32} << 20;
 constexpr uint32_t kMaxRetiredPerPc = 4;
 
+// The IR pool (design/sh2-jit-m2e.md, track E): an IR-only block dropped because its guest code
+// changed is kept, at most kMaxRetiredPerPc per PC (the oldest goes first), and taken back instead
+// of running the front end again when BuildBlock would give the same block. Its IR keeps counting
+// toward the IR cap, and reaching the cap empties the pool.
+
 // Damping (design/sh2-jit-m2d.md, A3): every time a block at a PC is dropped because its guest code
 // changed, the native compile threshold for the next build at that PC doubles, up to
 // kNativeCompileThreshold << kMaxStaleDampShift (counts are per PC and cleared by a flush, so the
@@ -129,8 +134,8 @@ public:
     void Flush();
 
     // Drops the block for pc, if cached (a stale native block), and unpublishes it. A self-validating
-    // native block is retired; any other native block's code is freed. Never called while generated
-    // code runs.
+    // native block is retired; any other native block's code is freed; an IR-only block goes to the
+    // IR pool. Never called while generated code runs.
     void Invalidate(uint32_t pc);
 
     // The cached block for pc, or nullptr; no validation, no compile (tests and diagnostics).
@@ -142,7 +147,8 @@ public:
     size_t Size() const {
         return m_blocks.size();
     }
-    // IR instructions counted against kMaxCachedInsts (IR-only blocks; tests and diagnostics).
+    // IR instructions counted against kMaxCachedInsts (IR-only blocks, the IR pool's included; tests
+    // and diagnostics).
     size_t CachedInsts() const {
         return m_totalInsts;
     }
@@ -191,6 +197,14 @@ public:
     }
     size_t RetiredCodeBytes() const {
         return m_retiredBytes;
+    }
+    // Retired IR blocks taken back instead of rebuilt, and the IR instructions the IR pool holds now
+    // (included in CachedInsts).
+    uint64_t RetiredIrReuses() const {
+        return m_retiredIrReuses;
+    }
+    size_t RetiredIrInsts() const {
+        return m_retiredIrInsts;
     }
     // Builds that waited for more than the global threshold because their PC had gone stale before.
     uint64_t DampedBuilds() const {
@@ -266,7 +280,8 @@ private:
     }
 
     // Drops a block whose guest code changed (and its recent slot), retiring it if it is
-    // self-validating and the pool is enabled.
+    // self-validating and the pool is enabled, or to the IR pool if it is IR-only with IR. A pending
+    // IR-only block gives up its ticket, so its result is dropped even if the block is taken back.
     void Invalidate(BlockMap::iterator it);
 
     // Moves a dropped block into the pool, then releases the least recently retired blocks past
@@ -276,6 +291,24 @@ private:
     // Takes a retired block for pc whose guest code and code pages are current back into the map and
     // the recent slot and publishes it; nullptr if there is none.
     CachedBlock *Reuse(ymir::sh2::SH2JitContext &ctx, uint32_t pc);
+
+    // Whether BuildBlock(ctx, block.startPC) would give this block again: its guest code is current
+    // (IsCurrent), fetchFromArrays is what FinishBlock would compute now, and the words that stopped
+    // the block still stop it (BlockEndIsCurrent). The front end reads nothing else: the IR, the
+    // known refills and the tail word are a function of the PC, those words and fetchFromArrays,
+    // and OptimizeBlock only reads the block.
+    static bool SameBuild(const Block &block, ymir::sh2::SH2JitContext &ctx);
+
+    // Moves an IR-only block dropped by Invalidate into the IR pool (its IR stays counted), then
+    // drops the oldest IR block at pc past kMaxRetiredPerPc.
+    void RetireIr(uint32_t pc, std::unique_ptr<CachedBlock> entry);
+
+    // Takes a retired IR block for pc that SameBuild accepts back into the map and the recent slot;
+    // nullptr if there is none.
+    CachedBlock *ReuseIr(ymir::sh2::SH2JitContext &ctx, uint32_t pc);
+
+    // Empties the IR pool (at the IR cap and on a flush).
+    void ClearRetiredIr();
 
     // Removes a retired block from the pool (its entry must have been taken or released).
     void RemoveRetired(RetiredList::iterator it);
@@ -295,8 +328,8 @@ private:
     void FlushAll();
 
     // Drops every IR-only block (and its recent slot) at the IR cap, pending ones included (their
-    // results are dropped when they arrive); native blocks, their code and link slots stay. Only
-    // called from Get, never while a block runs.
+    // results are dropped when they arrive), and empties the IR pool; native blocks, their code and
+    // link slots stay. Only called from Get, never while a block runs.
     void EvictIrOnly();
 
     // A validated hit: counts the run and compiles the block natively on its threshold run (in the
@@ -308,11 +341,16 @@ private:
         return entry;
     }
 
-    // Takes a retired block for pc back if one is current (Reuse). Otherwise builds the IR block for
-    // pc and caches it (first evicting the IR-only blocks at the IR cap, and at the native code cap,
-    // if it compiles now, releasing the pool and then, if still at the cap, flushing everything);
-    // compiles it natively now if compileNow or the threshold is 1.
+    // Takes a retired block for pc back if one is current (Reuse), else a retired IR block that
+    // SameBuild accepts (ReuseIr). Otherwise builds the IR block for pc and caches it (first evicting
+    // the IR-only blocks at the IR cap, and at the native code cap, if it compiles now, releasing the
+    // pool and then, if still at the cap, flushing everything). Then, as Started: compiles it natively
+    // now if compileNow or the threshold is 1.
     const CachedBlock &Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool compileNow);
+
+    // A built or reused IR block just cached at pc: compiles it now (native) or sets its runs until
+    // the native compile (damping included).
+    const CachedBlock &Started(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool native);
 
     // Compiles entry natively and frees its IR. At the native code cap it releases the pool (entry
     // is in the map, never in the pool); if still at the cap it flushes the cache (entry included)
@@ -343,6 +381,9 @@ private:
     // The pool, least recently retired first, and its blocks by PC (also oldest first).
     RetiredList m_retired;
     std::unordered_map<uint32_t, std::vector<RetiredList::iterator>> m_retiredByPc;
+    // The IR pool: retired IR-only blocks by PC, oldest first.
+    std::unordered_map<uint32_t, std::vector<std::unique_ptr<CachedBlock>>> m_retiredIr;
+    // IR instructions of IR-only blocks, in the map and in the IR pool.
     size_t m_totalInsts = 0;
     // Background compiles not yet taken back: ticket -> PC. Tickets increase and are never reused;
     // a flush (which cancels every pending one) starts a generation at m_nextTicket, so a ticket
@@ -364,6 +405,8 @@ private:
     uint64_t m_retiredReuses = 0;
     uint64_t m_retiredEvictions = 0;
     size_t m_retiredBytes = 0;
+    uint64_t m_retiredIrReuses = 0;
+    size_t m_retiredIrInsts = 0;
     uint64_t m_dampedBuilds = 0;
     uint64_t m_buildNs = 0;
     uint64_t m_nativeNs = 0;

@@ -1000,31 +1000,42 @@ Not met: conditions 1, 2 and 3. The JIT stays off by default; the README and the
 
 Measured at the end of each 2E task (`design/plans/2026-10-20-sh2-jit-m2e.md`) on the machine and build configuration of the 2D baseline (AMD Ryzen 7 5700G, 16 threads, `build-bench`, Ninja, Release, `BRIMIR_LTO=ON`, `Brimir_ENABLE_IPO=ON`, MSVC). Default settings, scratch system dir per run with `brimir_saturn_rtc_us_eu.smpc` also as `brimir_saturn_rtc_jp.smpc`, executable copied aside before the runs. Burning Rangers (US BIOS): `--warmup 2400 --frames 33600`, one x64 run per compile mode plus one interpreter run. Street Fighter Zero 3 (JP BIOS, 4 MB cart), Panzer Dragoon II Zwei (US) and Sega Rally Championship (US): `--warmup 2400 --frames 1800`, three rounds, each round running the interpreter, x64 with the worker (`--sh2-jit --jit-backend x64`, the default) and x64 without it (`--jit-sync-compile`) back to back. All 30 runs exited 0 and every x64 run reported `compileFallbacks 0` on both CPUs.
 
-**Columns.** "Interp SH2 ms" is the same round's interpreter run (the single Burning Rangers run for the long window); "ratio" is interpreter / x64 SH-2 total of the same round. "Frames over 16.7 ms" counts measured frames whose wall time exceeds 16.7 ms (`over16.7` on the bench's `ms/frame` line); for the interpreter the highest count of the title's runs and its highest max frame. "Worker ms/frame" is the worker's time in `Finalize` over the window divided by the frames. "Emulation-thread compile ms" is `compileMs` of the `jit window` line: front-end builds plus, for background compiles, `Prepare` and `Commit` only, or the whole native compile in synchronous mode. No IR reuse column yet (Task 5).
+**Columns.** "Interp SH2 ms" is the same round's interpreter run (the single Burning Rangers run for the long window); "ratio" is interpreter / x64 SH-2 total of the same round. "Frames over 16.7 ms" counts measured frames whose wall time exceeds 16.7 ms (`over16.7` on the bench's `ms/frame` line); for the interpreter the highest count of the title's runs and its highest max frame. "Worker ms/frame" is the worker's time in `Finalize` over the window divided by the frames. "Emulation-thread compile ms" is `compileMs` of the `jit window` line: front-end builds plus, for background compiles, `Prepare` and `Commit` only, or the whole native compile in synchronous mode. "IR reuses in window" (from Task 5 on) is `irReuses` of the `jit window` line: IR blocks taken back from the IR pool instead of being built again; "-" before Task 5.
 
 **Load.** The development PC read 0-7% before the batch (Spotify, opencode and a terminal the only other processes; no WSL run active). A 30-second sampler of the whole-machine load over the batch reads 28% on average (2-57%, 63 samples), which includes the bench's own threads (threaded VDP, the emulation thread, the compile worker).
-| Task | Compile | Title | Interp SH2 ms | x64 SH2 ms | Ratio | x64 avg ms | x64 p99 ms | x64 max ms | Frames over 16.7 ms (x64) | Interp frames over 16.7 ms (highest) / max ms | Worker ms/frame | Native compiles in window | Emulation-thread compile ms | Code-cap flushes (master / slave) |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2E D | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 4.724 | 4.531 | 1.043 | 9.594 | 11.327 | 14.6 | 0 | 0 / 12.5 | 0.565 | 6333 | 251.6 | 0 / 0 |
-| 2E D | sync | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 4.724 | 4.878 | 0.968 | 9.855 | 15.469 | 24.4 | 15 | 0 / 12.5 | 0.000 | 6333 | 1,198.2 | 0 / 0 |
-| 2E D | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 4.709 | 4.481 | 1.051 | 9.496 | 11.153 | 14.5 | 0 | 0 / 12.5 | 0.558 | 6333 | 249.9 | 0 / 0 |
-| 2E D | sync | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 4.709 | 4.884 | 0.964 | 9.854 | 15.801 | 23.1 | 14 | 0 / 12.5 | 0.000 | 6333 | 1,191.1 | 0 / 0 |
-| 2E D | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.678 | 4.518 | 1.035 | 9.499 | 10.860 | 14.8 | 0 | 0 / 12.5 | 0.552 | 6333 | 253.3 | 0 / 0 |
-| 2E D | sync | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.678 | 4.903 | 0.954 | 9.845 | 15.569 | 24.3 | 15 | 0 / 12.5 | 0.000 | 6333 | 1,233.7 | 0 / 0 |
-| 2E D | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 1 | 5.007 | 4.378 | 1.144 | 6.083 | 8.123 | 9.5 | 0 | 0 / 12.3 | 0.059 | 660 | 28.1 | 0 / 0 |
-| 2E D | sync | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 1 | 5.007 | 4.315 | 1.160 | 6.051 | 8.091 | 9.9 | 0 | 0 / 12.3 | 0.000 | 660 | 119.8 | 0 / 0 |
-| 2E D | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 2 | 4.976 | 4.423 | 1.125 | 6.150 | 8.105 | 11.5 | 0 | 0 / 12.3 | 0.058 | 660 | 28.6 | 0 / 0 |
-| 2E D | sync | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 2 | 4.976 | 4.326 | 1.150 | 6.067 | 8.185 | 10.3 | 0 | 0 / 12.3 | 0.000 | 660 | 124.0 | 0 / 0 |
-| 2E D | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 3 | 5.061 | 4.319 | 1.172 | 6.054 | 8.084 | 9.4 | 0 | 0 / 12.3 | 0.058 | 660 | 27.3 | 0 / 0 |
-| 2E D | sync | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 3 | 5.061 | 4.400 | 1.150 | 6.166 | 8.296 | 9.9 | 0 | 0 / 12.3 | 0.000 | 660 | 126.7 | 0 / 0 |
-| 2E D | worker | Sega Rally Championship (US), frames 2,400-4,200, round 1 | 4.727 | 4.872 | 0.970 | 7.900 | 10.308 | 11.6 | 0 | 0 / 11.1 | 0.095 | 1056 | 46.9 | 0 / 0 |
-| 2E D | sync | Sega Rally Championship (US), frames 2,400-4,200, round 1 | 4.727 | 4.853 | 0.974 | 7.894 | 10.365 | 12.3 | 0 | 0 / 11.1 | 0.000 | 1056 | 197.9 | 0 / 0 |
-| 2E D | worker | Sega Rally Championship (US), frames 2,400-4,200, round 2 | 4.758 | 4.875 | 0.976 | 7.903 | 10.261 | 14.2 | 0 | 0 / 11.1 | 0.095 | 1056 | 45.9 | 0 / 0 |
-| 2E D | sync | Sega Rally Championship (US), frames 2,400-4,200, round 2 | 4.758 | 4.805 | 0.990 | 7.864 | 10.278 | 11.1 | 0 | 0 / 11.1 | 0.000 | 1056 | 194.8 | 0 / 0 |
-| 2E D | worker | Sega Rally Championship (US), frames 2,400-4,200, round 3 | 4.780 | 4.876 | 0.980 | 7.932 | 10.279 | 12.0 | 0 | 0 / 11.1 | 0.095 | 1056 | 45.9 | 0 / 0 |
-| 2E D | sync | Sega Rally Championship (US), frames 2,400-4,200, round 3 | 4.780 | 4.888 | 0.978 | 7.916 | 10.471 | 12.5 | 0 | 0 / 11.1 | 0.000 | 1056 | 199.9 | 0 / 0 |
-| 2E D | worker | Burning Rangers (US), frames 2,400-36,000 | 6.502 | 6.465 | 1.006 | 10.286 | 21.128 | 47.5 | 1797 | 3 / 17.2 | 0.379 | 27735 | 13,919.9 | 0 / 0 |
-| 2E D | sync | Burning Rangers (US), frames 2,400-36,000 | 6.502 | 6.634 | 0.980 | 10.485 | 24.189 | 91.5 | 2472 | 3 / 17.2 | 0.000 | 42871 | 23,674.2 | 0 / 0 |
+
+| Task | Compile | Title | Interp SH2 ms | x64 SH2 ms | Ratio | x64 avg ms | x64 p99 ms | x64 max ms | Frames over 16.7 ms (x64) | Interp frames over 16.7 ms (highest) / max ms | Worker ms/frame | Native compiles in window | Emulation-thread compile ms | Code-cap flushes (master / slave) | IR reuses in window |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2E D | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 4.724 | 4.531 | 1.043 | 9.594 | 11.327 | 14.6 | 0 | 0 / 12.5 | 0.565 | 6333 | 251.6 | 0 / 0 | - |
+| 2E D | sync | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 4.724 | 4.878 | 0.968 | 9.855 | 15.469 | 24.4 | 15 | 0 / 12.5 | 0.000 | 6333 | 1,198.2 | 0 / 0 | - |
+| 2E D | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 4.709 | 4.481 | 1.051 | 9.496 | 11.153 | 14.5 | 0 | 0 / 12.5 | 0.558 | 6333 | 249.9 | 0 / 0 | - |
+| 2E D | sync | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 4.709 | 4.884 | 0.964 | 9.854 | 15.801 | 23.1 | 14 | 0 / 12.5 | 0.000 | 6333 | 1,191.1 | 0 / 0 | - |
+| 2E D | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.678 | 4.518 | 1.035 | 9.499 | 10.860 | 14.8 | 0 | 0 / 12.5 | 0.552 | 6333 | 253.3 | 0 / 0 | - |
+| 2E D | sync | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.678 | 4.903 | 0.954 | 9.845 | 15.569 | 24.3 | 15 | 0 / 12.5 | 0.000 | 6333 | 1,233.7 | 0 / 0 | - |
+| 2E D | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 1 | 5.007 | 4.378 | 1.144 | 6.083 | 8.123 | 9.5 | 0 | 0 / 12.3 | 0.059 | 660 | 28.1 | 0 / 0 | - |
+| 2E D | sync | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 1 | 5.007 | 4.315 | 1.160 | 6.051 | 8.091 | 9.9 | 0 | 0 / 12.3 | 0.000 | 660 | 119.8 | 0 / 0 | - |
+| 2E D | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 2 | 4.976 | 4.423 | 1.125 | 6.150 | 8.105 | 11.5 | 0 | 0 / 12.3 | 0.058 | 660 | 28.6 | 0 / 0 | - |
+| 2E D | sync | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 2 | 4.976 | 4.326 | 1.150 | 6.067 | 8.185 | 10.3 | 0 | 0 / 12.3 | 0.000 | 660 | 124.0 | 0 / 0 | - |
+| 2E D | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 3 | 5.061 | 4.319 | 1.172 | 6.054 | 8.084 | 9.4 | 0 | 0 / 12.3 | 0.058 | 660 | 27.3 | 0 / 0 | - |
+| 2E D | sync | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 3 | 5.061 | 4.400 | 1.150 | 6.166 | 8.296 | 9.9 | 0 | 0 / 12.3 | 0.000 | 660 | 126.7 | 0 / 0 | - |
+| 2E D | worker | Sega Rally Championship (US), frames 2,400-4,200, round 1 | 4.727 | 4.872 | 0.970 | 7.900 | 10.308 | 11.6 | 0 | 0 / 11.1 | 0.095 | 1056 | 46.9 | 0 / 0 | - |
+| 2E D | sync | Sega Rally Championship (US), frames 2,400-4,200, round 1 | 4.727 | 4.853 | 0.974 | 7.894 | 10.365 | 12.3 | 0 | 0 / 11.1 | 0.000 | 1056 | 197.9 | 0 / 0 | - |
+| 2E D | worker | Sega Rally Championship (US), frames 2,400-4,200, round 2 | 4.758 | 4.875 | 0.976 | 7.903 | 10.261 | 14.2 | 0 | 0 / 11.1 | 0.095 | 1056 | 45.9 | 0 / 0 | - |
+| 2E D | sync | Sega Rally Championship (US), frames 2,400-4,200, round 2 | 4.758 | 4.805 | 0.990 | 7.864 | 10.278 | 11.1 | 0 | 0 / 11.1 | 0.000 | 1056 | 194.8 | 0 / 0 | - |
+| 2E D | worker | Sega Rally Championship (US), frames 2,400-4,200, round 3 | 4.780 | 4.876 | 0.980 | 7.932 | 10.279 | 12.0 | 0 | 0 / 11.1 | 0.095 | 1056 | 45.9 | 0 / 0 | - |
+| 2E D | sync | Sega Rally Championship (US), frames 2,400-4,200, round 3 | 4.780 | 4.888 | 0.978 | 7.916 | 10.471 | 12.5 | 0 | 0 / 11.1 | 0.000 | 1056 | 199.9 | 0 / 0 | - |
+| 2E D | worker | Burning Rangers (US), frames 2,400-36,000 | 6.502 | 6.465 | 1.006 | 10.286 | 21.128 | 47.5 | 1797 | 3 / 17.2 | 0.379 | 27735 | 13,919.9 | 0 / 0 | - |
+| 2E D | sync | Burning Rangers (US), frames 2,400-36,000 | 6.502 | 6.634 | 0.980 | 10.485 | 24.189 | 91.5 | 2472 | 3 / 17.2 | 0.000 | 42871 | 23,674.2 | 0 / 0 | - |
+| 2E E | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 5.153 | 5.144 | 1.002 | 10.304 | 13.291 | 23.3 | 2 | 0 / 14.8 | 0.588 | 5842 | 350.4 | 0 / 0 | 0 |
+| 2E E | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 4.940 | 5.071 | 0.974 | 10.074 | 13.043 | 23.6 | 2 | 0 / 14.8 | 0.575 | 5842 | 345.1 | 0 / 0 | 0 |
+| 2E E | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 5.151 | 5.212 | 0.988 | 10.372 | 13.225 | 25.8 | 2 | 0 / 14.8 | 0.581 | 5842 | 355.6 | 0 / 0 | 0 |
+| 2E E | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 1 | 5.517 | 4.899 | 1.126 | 6.809 | 10.941 | 13.1 | 0 | 0 / 12.4 | 0.064 | 660 | 34.3 | 0 / 0 | 0 |
+| 2E E | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 2 | 5.474 | 4.936 | 1.109 | 6.854 | 11.144 | 12.6 | 0 | 0 / 12.4 | 0.064 | 660 | 36.0 | 0 / 0 | 0 |
+| 2E E | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 3 | 5.349 | 4.817 | 1.110 | 6.701 | 10.238 | 12.8 | 0 | 0 / 12.4 | 0.064 | 660 | 34.3 | 0 / 0 | 0 |
+| 2E E | worker | Sega Rally Championship (US), frames 2,400-4,200, round 1 | 5.214 | 5.575 | 0.935 | 8.793 | 13.918 | 16.9 | 1 | 1 / 17.5 | 0.106 | 1056 | 58.8 | 0 / 0 | 0 |
+| 2E E | worker | Sega Rally Championship (US), frames 2,400-4,200, round 2 | 5.060 | 5.071 | 0.998 | 8.188 | 11.116 | 14.1 | 0 | 1 / 17.5 | 0.101 | 1056 | 54.5 | 0 / 0 | 0 |
+| 2E E | worker | Sega Rally Championship (US), frames 2,400-4,200, round 3 | 5.282 | 5.567 | 0.949 | 8.774 | 14.016 | 21.0 | 1 | 1 / 17.5 | 0.108 | 1056 | 58.8 | 0 / 0 | 0 |
+| 2E E | worker | Burning Rangers (US), frames 2,400-36,000 | 6.135 | 6.161 | 0.996 | 10.215 | 17.500 | 48.9 | 628 | 9 / 18.7 | 0.381 | 28063 | 5,824.0 | 0 / 0 | 887,487 |
 
 ### Task 4: the worker on by default (2E D)
 
@@ -1032,7 +1043,7 @@ Code: `8a70410` on top of `803aec3` (the worker in the block cache); the measure
 
 Median SH-2 totals (interpreter / x64 with the worker; ratios from the medians of the three rounds):
 
-| Title | Interpreter | x64, worker | Ratio | x64, synchronous | Ratio | Worst frame, worker / sync / interpreter | Frames over 16.7 ms, worker / sync / interpreter |
+| Title | Interpreter | x64, worker | Ratio | x64, synchronous | Ratio | Worst frame (max across rounds), worker / sync / interpreter | Frames over 16.7 ms, worker / sync / interpreter |
 |---|---|---|---|---|---|---|---|
 | Street Fighter Zero 3 | 4.709 | 4.518 | 1.042 | 4.884 | 0.964 | 14.8 / 24.4 / 12.5 | 0 / 15 / 0 |
 | Panzer Dragoon II Zwei | 5.007 | 4.378 | 1.144 | 4.326 | 1.157 | 11.5 / 10.3 / 12.3 | 0 / 0 / 0 |
@@ -1045,3 +1056,24 @@ Median SH-2 totals (interpreter / x64 with the worker; ratios from the medians o
 - **Cross-session note.** The interpreter's Burning Rangers total in this session is 6.502 ms/frame against 5.905 in the track A session (avg 9.666 against 9.136 ms), while the synchronous x64 total is 6.634 against 6.696: only ratios inside one session are comparable, and track A's 0.882 corresponds to this session's 0.980.
 
 **Verdict for the task:** the worker is what it was built to be (no compile bursts on Street Fighter Zero 3, the long worst frame halved) but it does not remove the stutter or reach 1.0 on every title: Rally is at 0.976, Burning Rangers' long run at 1.006 with 1,797 frames over 16.7 ms against 3, and Street Fighter Zero 3's worst frame is 2.3 ms above the interpreter's. The remaining emulation-thread work in Burning Rangers is the front-end builds, which Task 5 (reuse of decoded blocks) targets.
+
+### Task 5: reuse of dropped IR blocks (2E E)
+
+Code: the Task 5 commit on top of `2d5aae3`; the measured executable is its `build-bench` build (`irReuses` on the `cache` and `jit window` lines). x64 with the worker (the default) and the interpreter only, same protocol as Task 4 otherwise (three rounds of the short titles, one long Burning Rangers run each). All 20 runs exited 0, `compileFallbacks 0` on both CPUs.
+
+**Load.** This session's machine was slower: the 30-second sampler read 34% on average (8-60%, 43 samples) against 28% for Task 4, and the interpreter's medians are 9-10% above Task 4's (Panzer Dragoon II Zwei 5.474 against 5.007, Street Fighter Zero 3 5.151 against 4.709, Rally 5.214 against 4.758; Burning Rangers 6.135 against 6.502 is the exception). Compare ratios within a session only.
+
+Median SH-2 totals (ratios from the medians of the three rounds):
+
+| Title | Interpreter | x64, worker | Ratio | Task 4 ratio | Worst frame (max across rounds), x64 / interpreter | Frames over 16.7 ms (max across rounds), x64 / interpreter | Front-end builds in window | IR reuses in window |
+|---|---|---|---|---|---|---|---|---|
+| Street Fighter Zero 3 | 5.151 | 5.144 | 1.001 | 1.042 | 25.8 / 14.8 | 2 / 0 | 15,340-15,347 (Task 4: 10,686) | 0 |
+| Panzer Dragoon II Zwei | 5.474 | 4.899 | 1.117 | 1.144 | 13.1 / 12.4 | 0 / 0 | 187 | 0 |
+| Sega Rally Championship | 5.214 | 5.567 | 0.937 | 0.976 | 21.0 / 17.5 | 1 / 1 | 502 | 0 |
+| Burning Rangers, long | 6.135 | 6.161 | 0.996 | 1.006 | 48.9 / 18.7 | 628 / 9 | 316,311 (Task 4: 1,203,647) | 887,487 |
+
+- **Burning Rangers, long: the target, clearly improved.** The front-end builds in the window fall by 74% (1,203,647 to 316,311): 887,487 dropped IR blocks came back and were taken from the IR pool. The emulation thread's compile time in the window falls from 13,920 to 5,824 ms, the p99 frame from 21.1 to 17.5 ms and the frames over 16.7 ms from 1,797 to 628 (the interpreter has 9 this session). The worst frame does not move (48.9 against 47.5 ms): the five slowest frames are still the burst of new code at frames 9,264-9,309 (3,610 builds and 524 native compiles in frame 9,264), which no pool can serve. The ratio (0.996 against 1.006) is within run-to-run spread.
+- **Street Fighter Zero 3: worse, partly because of this task.** Its IR pool is never reused (0 reuses), but it counts toward the IR cap as specified, and the master's IR was already near the cap (1,014,557 of 1,048,576 instructions after Task 4's run, no eviction). Now the cap is reached once in the window (13,553 IR-only blocks evicted), so the window has 15,347 front-end builds against 10,686, its emulation-thread compile time rises from 251 to 350 ms (part of it the slower machine), and the worst frame rises from 14.6 to 23.3-25.8 ms with 2 frames over 16.7 ms per round. The ratio falls from 1.042 to 1.001; the slower session explains part of that, the extra builds the rest.
+- **Panzer Dragoon II Zwei and Sega Rally** build and reuse nothing in the window (187 and 502 builds, 0 reuses; the same counts as Task 4), so their changes are the slower session. Rally's three rounds spread from 5.071 to 5.575 ms.
+
+**Verdict for the task:** IR reuse removes most of Burning Rangers' front-end work and two thirds of its stutter frames, but not the startup burst behind its worst frame. Counting the pool toward the IR cap costs Street Fighter Zero 3 one IR eviction in its window. A pool bound of its own (or emptying only the pool when the cap is reached, before evicting live IR-only blocks) would avoid that. This needs a decision: it changes the specified cap rule.

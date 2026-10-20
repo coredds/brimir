@@ -679,6 +679,57 @@ TEST_CASE("Background compile: a result for a dropped block is not installed int
     CHECK(p.exec.GetStats().staleEntries == 0);
 }
 
+// A pending IR block retired to the IR pool gives up its ticket: taken back before its result
+// arrives, it is the same entry object again, but the result is still dropped.
+TEST_CASE("Background compile: a result for a retired IR block is not installed after its reuse", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    CompileWorker worker;
+    WorkerBlocker blocker{worker};
+    REQUIRE(blocker.Entered());
+    AsyncPair p{worker};
+    p.WriteCode(kCode, kProgramP);
+    REQUIRE(p.StepAt(kCode).retired == 3);
+    REQUIRE(p.StepAt(kCode).retired == 3); // submits P; queued behind the blocker
+    REQUIRE(p.Cache().PendingCompiles() == 1);
+    const CachedBlock *entryP = p.Entry();
+    const uint64_t ticketP = entryP->pendingTicket;
+    REQUIRE(ticketP != 0);
+
+    p.WriteCode(kCode, kProgramQ);
+    REQUIRE(p.StepAt(kCode).retired == 3); // P retired to the IR pool, Q built
+    CHECK(p.Cache().RetiredIrInsts() > 0);
+    p.WriteCode(kCode, kProgramP);
+    REQUIRE(p.StepAt(kCode).retired == 3); // Q retired, P taken back before its result
+    CHECK(p.Cache().RetiredIrReuses() == 1);
+    CHECK(p.Cache().Compiles() == 2);
+    REQUIRE(p.Entry() == entryP);
+    CHECK(p.Entry()->pendingTicket == 0);
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Entry()->runsUntilNative == kThreshold - 1);
+
+    blocker.Open();
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3); // P's old result arrives and is dropped
+    CHECK(p.Cache().AsyncDropped() == 1);
+    CHECK(p.Cache().AsyncCompiles() == 0);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 0);
+    REQUIRE(p.Entry() == entryP);
+    CHECK(p.Entry()->code.entry == nullptr);
+    CHECK(p.Entry()->pendingTicket != 0); // this was its threshold run: submitted again
+    CHECK(p.Entry()->pendingTicket != ticketP);
+
+    REQUIRE(WaitForResults(worker, p.Owner()));
+    REQUIRE(p.StepAt(kCode).retired == 3); // compiled again, runs natively
+    CHECK(p.Entry()->code.entry != nullptr);
+    CHECK(p.Cache().AsyncCompiles() == 1);
+    CHECK(p.Cache().AsyncDropped() == 1);
+    CHECK(p.exec.GetStats().nativeBlocksRun == 1);
+    CHECK(p.exec.GetStats().staleEntries == 0);
+    CHECK(p.Cache().Compiles() == 2);
+}
+
 TEST_CASE("Background compile: a page remapped before the commit is caught at entry", "[jit][worker]") {
     if (!IsBackendAvailable(BackendKind::X64)) {
         SKIP("no x64 backend in this build");
