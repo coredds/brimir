@@ -31,7 +31,10 @@ struct NativeCode {
 };
 
 // A native compile between INativeBackend::Prepare and Commit: everything the emitter read from the
-// block and the emulator is already captured in it.
+// block and the emulator is already captured in it. It may be destroyed on any thread: with a
+// CompileWorker, a job cancelled while in flight is destroyed on the worker thread, and the others
+// on the thread calling Cancel, TakeResults or the worker's destructor (see compile_worker.hpp). So
+// the destructor, like Finalize, must touch only the object's own state.
 class PreparedCompile {
 public:
     virtual ~PreparedCompile() = default;

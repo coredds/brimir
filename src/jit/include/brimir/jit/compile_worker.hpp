@@ -12,8 +12,14 @@
 // everything Finalize wrote happens before the owner's reads of it (Commit); likewise everything
 // the owner did to the object before Submit happens before Finalize. HasResults is only a hint:
 // use TakeResults for the data.
+//
+// Which thread destroys a PreparedCompile: a job cancelled while in flight is destroyed on the
+// worker thread (before Cancel returns); every other job or result the worker still holds is
+// destroyed on the thread calling Cancel or the destructor, and taken results by their taker. So a
+// PreparedCompile destructor must touch only the object's own state.
 #include <brimir/jit/backend.hpp>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -21,6 +27,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -54,8 +61,13 @@ public:
     // Appends the owner's finished results to out, in completion order, and forgets them.
     void TakeResults(const void *owner, std::vector<CompileResult> &out);
 
-    // True if the owner has results to take. Takes no lock when no owner has any.
+    // True if the owner has results to take. Takes no lock while at most kCountedOwners owners have
+    // results (production has two, the caches of both CPUs): it reads the owner's count. Beyond
+    // that, the extra owners' results are counted together, and while any are parked, a call for an
+    // owner with no count takes the lock to look.
     bool HasResults(const void *owner) const;
+
+    static constexpr size_t kCountedOwners = 4;
 
     // Drops the owner's queued jobs and undelivered results and returns only after the owner's job
     // in flight, if any, has finished; its result is dropped too. Afterwards nothing of the owner
@@ -76,7 +88,21 @@ private:
         CompileResult result;
     };
 
+    // A parked-result count for one owner. Written only under the mutex (owner, then count when
+    // claimed; count, then owner when released); read without it by HasResults.
+    struct OwnerCount {
+        std::atomic<const void *> owner{nullptr}; // nullptr: free
+        std::atomic<size_t> count{0};
+    };
+
     void Run();
+
+    // Counts one more parked result of owner (mutex held).
+    void CountParkedLocked(const void *owner);
+    // Recomputes every count from m_results after results were removed (mutex held).
+    void RecountLocked();
+    // HasResults from the counts alone; nullopt if only the lock can tell (uncounted results).
+    std::optional<bool> HasResultsUnlocked(const void *owner) const;
 
     mutable std::mutex m_mutex;
     std::condition_variable m_workCv; // a job was queued, or stop
@@ -87,7 +113,9 @@ private:
     bool m_running = false; // a job is in flight
     const void *m_runningOwner = nullptr;
     bool m_runningCancelled = false; // Cancel hit the job in flight: drop its result
-    std::atomic<size_t> m_resultCount{0}; // m_results.size(), written under the mutex
+    std::array<OwnerCount, kCountedOwners> m_counts;
+    // Parked results of owners without an OwnerCount, written under the mutex.
+    std::atomic<size_t> m_uncounted{0};
     std::atomic<uint64_t> m_busyNs{0};
     std::thread m_thread; // last: starts once everything above is constructed
 };

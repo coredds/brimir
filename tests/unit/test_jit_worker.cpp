@@ -5,6 +5,7 @@
 
 #include <brimir/jit/compile_worker.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -148,11 +149,15 @@ TEST_CASE("Worker: Cancel drops queued jobs and waits for the job in flight", "[
         worker.Submit(Job(&ownerA, 3, true, nullptr, &finalizedA));
         CHECK(worker.Pending(&ownerA) == 3);
 
+        std::atomic<bool> cancelling{false};
         std::atomic<bool> cancelled{false};
         std::thread canceller([&] {
+            cancelling = true;
             worker.Cancel(&ownerA);
             cancelled = true;
         });
+        // Once the canceller is about to call Cancel, give it time to block in it.
+        CHECK(WaitUntil([&] { return cancelling.load(); })); // CHECK: the thread must be joined below
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         CHECK_FALSE(cancelled.load());
 
@@ -276,6 +281,86 @@ TEST_CASE("Worker: HasResults reports finished results", "[jit][worker]") {
         out.clear();
         worker.TakeResults(&owner, out);
         CHECK(out.empty());
+    }
+    CHECK(g_live == 0);
+}
+
+TEST_CASE("Worker: HasResults is per owner", "[jit][worker]") {
+    REQUIRE(g_live == 0);
+    {
+        CompileWorker worker;
+        int ownerA = 0, ownerB = 0;
+        worker.Submit(Job(&ownerA, 1));
+        worker.Submit(Job(&ownerA, 2));
+        REQUIRE(WaitUntil([&] { return worker.Pending(&ownerA) == 0; }));
+        CHECK(worker.HasResults(&ownerA));
+        CHECK_FALSE(worker.HasResults(&ownerB)); // A's results are not B's
+        std::vector<CompileResult> out;
+        worker.TakeResults(&ownerB, out);
+        CHECK(out.empty());
+        CHECK(worker.HasResults(&ownerA));
+
+        worker.TakeResults(&ownerA, out);
+        CHECK(out.size() == 2);
+        CHECK_FALSE(worker.HasResults(&ownerA));
+        CHECK_FALSE(worker.HasResults(&ownerB));
+    }
+    CHECK(g_live == 0);
+}
+
+TEST_CASE("Worker: HasResults with more owners than counted ones", "[jit][worker]") {
+    REQUIRE(g_live == 0);
+    {
+        CompileWorker worker;
+        std::array<int, 8> owners{};
+        int none = 0;
+        for (size_t i = 0; i < owners.size(); i++) {
+            for (uint64_t t = 0; t <= i; t++) {
+                worker.Submit(Job(&owners[i], i * 100 + t));
+            }
+        }
+        REQUIRE(WaitUntil([&] {
+            for (const int &o : owners) {
+                if (worker.Pending(&o) != 0) {
+                    return false;
+                }
+            }
+            return true;
+        }));
+        for (const int &o : owners) {
+            CHECK(worker.HasResults(&o));
+        }
+        CHECK_FALSE(worker.HasResults(&none));
+
+        // Taking or cancelling some owners' results leaves the others' reported.
+        for (size_t i = 0; i < owners.size(); i += 2) {
+            std::vector<CompileResult> out;
+            worker.TakeResults(&owners[i], out);
+            CHECK(out.size() == i + 1);
+        }
+        worker.Cancel(&owners[1]);
+        for (size_t i = 0; i < owners.size(); i++) {
+            INFO("owner " << i);
+            CHECK(worker.HasResults(&owners[i]) == (i % 2 == 1 && i != 1));
+        }
+        CHECK_FALSE(worker.HasResults(&none));
+
+        // New results after the counts changed.
+        worker.Submit(Job(&owners[0], 1000));
+        REQUIRE(WaitUntil([&] { return worker.HasResults(&owners[0]); }));
+        for (size_t i = 1; i < owners.size(); i += 2) {
+            std::vector<CompileResult> out;
+            worker.TakeResults(&owners[i], out);
+            CHECK(out.size() == (i == 1 ? 0 : i + 1));
+        }
+        for (size_t i = 1; i < owners.size(); i++) {
+            CHECK_FALSE(worker.HasResults(&owners[i]));
+        }
+        std::vector<CompileResult> out;
+        worker.TakeResults(&owners[0], out);
+        REQUIRE(out.size() == 1);
+        CHECK(out[0].ticket == 1000);
+        CHECK_FALSE(worker.HasResults(&owners[0]));
     }
     CHECK(g_live == 0);
 }
