@@ -28,6 +28,37 @@ public:
     asmjit::Error error = asmjit::Error::kOk;
 };
 
+// One compile between Prepare and Commit. The Compiler points to the CodeHolder and the CodeHolder
+// to the error handler, so the object is neither copied nor moved. The CodeHolder copies the
+// runtime's environment and CPU features, and the emitted nodes hold only values (immediates,
+// labels, trampoline addresses), never pointers into the block or the context, so Finalize touches
+// nothing outside the object.
+class X64PreparedCompile final : public PreparedCompile {
+public:
+    X64PreparedCompile() = default;
+    X64PreparedCompile(const X64PreparedCompile &) = delete;
+    X64PreparedCompile &operator=(const X64PreparedCompile &) = delete;
+
+    bool Init(const asmjit::JitRuntime &runtime) {
+        if (code.init(runtime.environment(), runtime.cpu_features()) != asmjit::Error::kOk) {
+            return false;
+        }
+        code.set_error_handler(&errors);
+        return code.attach(&cc) == asmjit::Error::kOk;
+    }
+
+    bool Finalize() noexcept override {
+        finalized = cc.finalize() == asmjit::Error::kOk && errors.error == asmjit::Error::kOk;
+        return finalized;
+    }
+
+    asmjit::CodeHolder code;
+    ErrorRecorder errors;
+    asmjit::x86::Compiler cc;
+    bool selfValidating = false;
+    bool finalized = false;
+};
+
 const bool kNoAbort = false;
 
 // Stores the exception being handled and stops the block.
@@ -184,36 +215,36 @@ X64Backend::X64Backend()
 
 X64Backend::~X64Backend() = default;
 
-bool X64Backend::Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) {
+std::unique_ptr<PreparedCompile> X64Backend::Prepare(const Block &block, const ymir::sh2::SH2JitContext &ctx) {
+    if (!CanEmitBlock(block)) {
+        return nullptr; // cheap rejection before any asmjit work
+    }
+    auto prepared = std::make_unique<X64PreparedCompile>();
+    if (!prepared->Init(*m_runtime)) {
+        return nullptr;
+    }
+    if (!EmitBlock(prepared->cc, block, ctx, m_links.get(), prepared->selfValidating)) {
+        return nullptr;
+    }
+    return prepared;
+}
+
+bool X64Backend::Commit(PreparedCompile &prepared, NativeCode &out) {
     out.entry = nullptr;
     out.bytes = 0;
-    if (!CanEmitBlock(block)) {
-        return false; // cheap rejection before any asmjit work
-    }
-
-    asmjit::CodeHolder code;
-    if (code.init(m_runtime->environment(), m_runtime->cpu_features()) != asmjit::Error::kOk) {
+    auto &p = static_cast<X64PreparedCompile &>(prepared);
+    assert(p.finalized && "committed a compile that was not finalized");
+    if (!p.finalized) {
         return false;
     }
-    ErrorRecorder errors;
-    code.set_error_handler(&errors);
-    asmjit::x86::Compiler cc(&code);
-    bool selfValidating = false;
-    if (!EmitBlock(cc, block, ctx, m_links.get(), selfValidating)) {
-        return false;
-    }
-    if (cc.finalize() != asmjit::Error::kOk || errors.error != asmjit::Error::kOk) {
-        return false;
-    }
-
     X64BlockFn fn = nullptr;
-    if (m_runtime->add(&fn, &code) != asmjit::Error::kOk || fn == nullptr) {
+    if (m_runtime->add(&fn, &p.code) != asmjit::Error::kOk || fn == nullptr) {
         return false;
     }
-    out.bytes = static_cast<uint32_t>(code.code_size());
+    out.bytes = static_cast<uint32_t>(p.code.code_size());
     m_codeBytes += out.bytes;
     out.entry = reinterpret_cast<const void *>(fn);
-    out.selfValidating = selfValidating;
+    out.selfValidating = p.selfValidating;
     return true;
 }
 

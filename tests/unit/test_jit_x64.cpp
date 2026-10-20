@@ -21,6 +21,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <typeinfo>
 #include <utility>
 #include <vector>
@@ -2167,6 +2168,182 @@ TEST_CASE("x64 reports a remapped code page as stale", "[jit][x64]") {
         CHECK(rig->State().fetchedOpcodes == ((uint32_t{kAdd1_R3} << 16) | kAdd1_R3));
     }
 }
+
+// Prepare runs the emitter on the calling thread, Finalize only touches the prepared object (so it can
+// run on a worker), and Commit adds the code to the backend.
+TEST_CASE("x64 backend: a prepared compile finalized on another thread equals Compile", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    auto irRig = std::make_unique<Rig>();
+    auto x64Rig = std::make_unique<Rig>();
+    const auto direct = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    const auto split = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(direct != nullptr);
+    REQUIRE(split != nullptr);
+    auto &irCtx = irRig->sh2->GetJitContext();
+    auto &x64Ctx = x64Rig->sh2->GetJitContext();
+
+    sh2test::RandomIrOptions memory;
+    memory.calls = true;
+    memory.memory = true;
+    uint32_t selfValidating = 0;
+    for (const sh2test::RandomIrOptions &opt : {sh2test::RandomIrOptions{}, memory}) {
+        for (uint32_t seed = 0; seed < 300; ++seed) {
+            std::mt19937 rng(seed);
+            const Block block = sh2test::RandomBlock(rng, kCode, opt);
+            INFO("seed " << seed << " memory " << opt.memory << "\n" << brimir::jit::PrintBlock(block));
+            REQUIRE(brimir::jit::VerifyBlock(block).empty());
+            const CpuSetup cpu = RandomCpu(*irRig, rng);
+            const uint64_t target = rng() % 2 == 0 ? kNoCycleTarget : cpu.cycles + rng() % 41;
+            const uint32_t busWaitEvery = opt.memory ? static_cast<uint32_t>(rng() % 3 == 0 ? 0 : 2 + rng() % 2) : 0;
+
+            NativeCode whole;
+            REQUIRE(direct->Compile(block, x64Ctx, whole));
+            auto prepared = split->Prepare(block, x64Ctx);
+            REQUIRE(prepared != nullptr);
+            CHECK(split->CodeBytes() == direct->CodeBytes() - whole.bytes); // nothing is added before Commit
+            bool finalized = false;
+            std::thread worker([&] { finalized = prepared->Finalize(); });
+            worker.join();
+            REQUIRE(finalized);
+            NativeCode parts;
+            REQUIRE(split->Commit(*prepared, parts));
+            REQUIRE(parts.entry != nullptr);
+            CHECK(parts.bytes == whole.bytes);
+            CHECK(parts.selfValidating == whole.selfValidating);
+            CHECK(split->CodeBytes() == direct->CodeBytes());
+            selfValidating += parts.selfValidating ? 1 : 0;
+
+            const std::array<std::pair<brimir::jit::INativeBackend *, const NativeCode *>, 2> runs{
+                {{direct.get(), &whole}, {split.get(), &parts}}};
+            for (const auto &[backend, code] : runs) {
+                for (Rig *rig : {irRig.get(), x64Rig.get()}) {
+                    rig->WriteCode(kCode, block.guestOpcodes);
+                    cpu.Apply(*rig);
+                    rig->mmio.busWaitEvery = busWaitEvery;
+                    rig->mmio.busWaitQueries = 0;
+                    rig->mmio.log.clear();
+                }
+                const ExitInfo ir = brimir::jit::RunBlock(block, irCtx, target);
+                const ExitInfo x64 = backend->Run(*code, x64Ctx, target);
+                RequireSameOutcome(ir, x64, *irRig, *x64Rig, true);
+            }
+        }
+        direct->Reset();
+        split->Reset();
+    }
+    CHECK(selfValidating > 0);
+}
+
+TEST_CASE("x64 backend: Finalize does not read the page table", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t start = kCode;
+    auto page = std::make_unique<std::array<uint8_t, 0x10000>>();
+    auto rig = std::make_unique<Rig>();
+    auto ref = std::make_unique<Rig>();
+    const std::vector<uint16_t> program{kAdd1_R3, kAdd1_R3, kAdd1_R3, kAdd1_R3, kAdd1_R3};
+    rig->WriteCode(start, program);
+    ref->WriteCode(start, program);
+    Block block;
+    block.startPC = start;
+    block.guestInstrCount = 4;
+    block.hasTailWord = true;
+    block.fetchFromArrays = true;
+    block.guestOpcodes = program;
+    Builder b(block);
+    b.KnownRefill(start, (uint32_t{kAdd1_R3} << 16) | kAdd1_R3);
+    b.SetReg(3, b.Const(0x77));
+    b.AddCycles(4);
+    b.KnownRefill(start + 4, (uint32_t{kAdd1_R3} << 16) | kAdd1_R3);
+    b.Exit(start + 8, 4);
+    REQUIRE(brimir::jit::VerifyBlock(block).empty());
+
+    auto state = rig->BaseState(start);
+    state.R[3] = 5;
+    state.fetchedOpcodes = 0xCAFEF00D;
+    rig->Load(state);
+    ref->Load(state);
+    auto &ctx = rig->sh2->GetJitContext();
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+
+    auto prepared = backend->Prepare(block, ctx);
+    REQUIRE(prepared != nullptr);
+    // Same bytes, different array, after Prepare and before Finalize.
+    std::copy_n(rig->ram->begin() + (start & 0xF0000u), 0x10000, page->begin());
+    rig->bus.MapArray(start & 0x7FF0000u, (start & 0x7FF0000u) + 0xFFFF, *page, true);
+    bool finalized = false;
+    std::thread worker([&] { finalized = prepared->Finalize(); });
+    worker.join();
+    REQUIRE(finalized);
+    NativeCode code;
+    REQUIRE(backend->Commit(*prepared, code));
+    REQUIRE(code.entry != nullptr);
+    CHECK(code.selfValidating);
+
+    // The block carries the arrays of Prepare time, so it reports stale on its first run.
+    const auto before = rig->State();
+    const ExitInfo info = backend->Run(code, ctx);
+    CHECK(info.stale);
+    CHECK(info.cycles == 0);
+    CHECK(info.retired == 0);
+    CHECK(rig->State().R[3] == before.R[3]);
+    CHECK(rig->State().PC == before.PC);
+    CHECK(rig->State().fetchedOpcodes == 0xCAFEF00Du);
+
+    // Rebuilt against the new mapping, the block runs and matches the interpreter.
+    NativeCode fresh;
+    REQUIRE(backend->Compile(block, ctx, fresh));
+    const ExitInfo ran = backend->Run(fresh, ctx);
+    const ExitInfo expected = brimir::jit::RunBlock(block, ref->sh2->GetJitContext());
+    CHECK_FALSE(ran.stale);
+    CHECK(ran.retired == expected.retired);
+    CHECK(ran.cycles == expected.cycles);
+    const std::string diff = sh2test::DiffRigs(*ref, *rig);
+    INFO(diff);
+    CHECK(diff.empty());
+    CHECK(rig->State().R[3] == 0x77u);
+}
+
+TEST_CASE("x64 backend: Prepare rejects what Compile rejects", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    Block block;
+    block.startPC = kCode;
+    block.guestInstrCount = 1;
+    Builder b(block);
+    b.SetReg(1, b.Add(b.GetReg(1), b.Const(1)));
+    b.AddCycles(1);
+    b.Exit(kCode + 2, 1);
+    const brimir::jit::Op original = block.code.front().op;
+    block.code.front().op = static_cast<brimir::jit::Op>(0xFF); // not an op
+
+    auto rig = std::make_unique<Rig>();
+    auto &ctx = rig->sh2->GetJitContext();
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    CHECK(backend->Prepare(block, ctx) == nullptr);
+    static const int sentinel = 0;
+    NativeCode out;
+    out.entry = &sentinel;
+    out.bytes = 7;
+    CHECK_FALSE(backend->Compile(block, ctx, out));
+    CHECK(out.entry == nullptr);
+    CHECK(out.bytes == 0);
+    CHECK(backend->CodeBytes() == 0);
+
+    // A state field that does not fit rejects it in Prepare too.
+    block.code.front().op = original;
+    auto badCtx = ctx;
+    badCtx.R = nullptr;
+    CHECK(backend->Prepare(block, badCtx) == nullptr);
+    CHECK(backend->CodeBytes() == 0);
+}
+
 // ---- Block chaining (milestone 2C item 2, design/sh2-x64-performance.md) ----
 
 namespace {

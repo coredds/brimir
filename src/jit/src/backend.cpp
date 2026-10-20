@@ -6,6 +6,16 @@
 
 namespace brimir::jit {
 
+bool INativeBackend::Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) {
+    out.entry = nullptr;
+    out.bytes = 0;
+    const std::unique_ptr<PreparedCompile> prepared = Prepare(block, ctx);
+    if (prepared == nullptr || !prepared->Finalize()) {
+        return false;
+    }
+    return Commit(*prepared, out);
+}
+
 bool IsBackendAvailable(BackendKind kind) {
     switch (kind) {
     case BackendKind::Ir:
