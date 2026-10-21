@@ -1572,3 +1572,25 @@ The worker is 1.9% faster than synchronous compiles in SH-2 time (median) and 0.
 - **Whole-frame time.** The JIT adds 0.2-0.46 ms/frame outside the SH-2 total in every title (cause not established), which makes the average frame longer than the interpreter's on Sega Rally, Burning Rangers and Street Fighter Zero 3 even where the SH-2 total is lower or equal. Finding the cause (a cache-pressure experiment, for example a smaller native-code footprint, or a counter-based look at the non-SH-2 part) belongs in the same plan; without it the bar's condition 2 cannot be met on those titles by SH-2 work alone.
 - **Long sessions.** Burning Rangers over 33,600 frames has 571 frames over 16.7 ms, every one with front-end builds and clustered in a few code-load phases, with about 1-5 ms of compile time in most of them against an excess of about 8.8 ms per frame; IR-block reuse removed 73% of the front-end builds (306K against 1.15M) but the bursts of genuinely new code remain. A per-frame look at those frames (IR runs before native code, invalidations, cold caches) is needed before choosing a change; moving front-end builds off the emulation thread is the obvious option but its benefit is unknown.
 - **Recommendation.** Write the Track F plan from the ranked list (items 1 and 2 first, then 3 for Sega Rally, then the polling loop with its own design), and add to it a measurement of the non-SH-2 rise and of the long run's slow frames. The JIT stays off by default until both conditions 1 and 2 hold.
+
+## Track F progress
+
+Method (Track F plan, "Track F progress measurement"): `build-bench`, `--warmup 2400 --frames 1800`, interpreter and x64 with the worker back to back, three rounds; also the x64 executable of the base commit (`7f807b9`, master at the start of track F) in the same rounds, interleaved, so each task is compared with its base in one session. Ratio = interpreter / x64 SH2 total (medians). Resumes are `resumes / runs` (`Executor::Run` calls) of the first x64 run, master / slave. Machine load before the batch 3-13%, 1-11% at each run.
+
+| Task | Title | Interpreter SH2 ms/frame | x64 SH2 ms/frame (base `7f807b9`) | Ratio (base) | Avg frame ms: interpreter / x64 (base) | Frames over 16.7 ms: x64, 3 runs / interpreter max | Resumes / Run calls m / s |
+|---|---|---|---|---|---|---|---|
+| 1 | Panzer Dragoon II Zwei (US) | 4.979 | 4.293 (4.169) | 1.160 (1.194) | 6.442 / 5.981 (5.890) | 0 0 0 / 0 | 32.4% / 30.8% |
+| 1 | Sega Rally Championship (US) | 4.682 | 4.717 (4.670) | 0.993 (1.003) | 7.165 / 7.671 (7.702) | 0 0 0 / 0 | 35.1% / 19.2% |
+| 1 | Street Fighter Zero 3 (JP, 4 MB cart) | 4.614 | 4.269 (4.224) | 1.081 (1.092) | 8.832 / 9.186 (9.229) | 0 0 0 / 0 | 30.6% / 27.1% |
+| 1 | Burning Rangers (US) | 6.479 | 6.200 (6.103) | 1.045 (1.062) | 8.846 / 8.900 (8.744) | 0 0 0 / 0 | 31.0% / 11.2% |
+
+### Task 1: resume a slice without `Get` (2E F1)
+
+**Result: no gain; the x64 SH2 total is 0.05-0.12 ms/frame higher than the base's** in every title (x64 runs: PD2 4.293 / 4.310 / 4.242 against 4.177 / 4.155 / 4.169; Rally 4.735 / 4.686 / 4.717 against 4.666 / 4.748 / 4.670; SFZ3 4.269 / 4.244 / 4.466 against 4.224 / 4.232 / 4.184; BR 6.189 / 6.200 / 6.248 against 6.075 / 6.106 / 6.103). The profile's 0.30-0.65 ms/frame assumed that most slices could resume: 97-100% of chain ends are slice ends, but most of those are boundary exits inside a block (the target falls before the block's last instruction) or interrupt boundaries, which leave no next entry. Only 11-35% of `Executor::Run` calls resume.
+
+Where the time goes (Panzer Dragoon II Zwei, the same session, 2-3 runs of each variant against the base, about ±0.02 ms/frame spread):
+- the first version took the resume on its own path but restructured `StepImpl`'s lookup loop (a `Resume` copy per step, a default-built `ExitInfo` assigned in the loop): +0.30 ms/frame over the base with the resume off by an environment switch, and taking the resume saved 0.07 of it;
+- keeping the original lookup loop and putting the resume in front of it brought that to +0.09-0.11;
+- `ExitInfo` growing from 24 to 32 bytes (`next`) alone: +0.02-0.04; the emitter change alone: none measurable; moving `m_version` / `m_lookups` next to `m_worker` (instead of after the 64 KB recent table): no change.
+
+So the per-step bookkeeping (record, version read, the larger `ExitInfo`) costs about what the skipped `Get` calls save at a 30% resume share. Exact: lockstep BIOS 1,200 frames x64 and IR, Sega Rally and Street Fighter Zero 3 1,800 frames x64: all identical.

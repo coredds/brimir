@@ -21,6 +21,7 @@ Executor::Executor(BackendKind kind, uint32_t nativeCompileThreshold, CompileWor
               kMaxStaleDampShift, worker) {}
 
 uint64 Executor::Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 target) {
+    ++m_stats.runs;
     while (executed < target) {
         // On-chip timers read the running count, exactly as in the interpreter loop. Chained
         // blocks store it themselves between blocks (INativeBackend::Run).
@@ -32,6 +33,7 @@ uint64 Executor::Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 targ
 }
 
 void Executor::Flush() {
+    m_resume = Resume{};
     if (m_inBlock) {
         // Freeing the running block (or its native code) here would be a use-after-free; Step
         // flushes after the block or chain returns.
@@ -54,6 +56,10 @@ ExitInfo Executor::StepImpl(ymir::sh2::SH2JitContext &ctx, uint64 target, bool a
         return info;
     };
 
+    // The resume recorded by the previous step (Run), used at most once.
+    const void *const resumeEntry = m_resume.entry;
+    m_resume.entry = nullptr;
+
     // Interrupt entry and pending delay slots are handled by the interpreter.
     // (A chained block's prologue repeats this check and the next one; see INativeBackend::Run.)
     if (*ctx.delaySlot || (*ctx.intrPending && *ctx.intrAllow)) {
@@ -71,14 +77,46 @@ ExitInfo Executor::StepImpl(ymir::sh2::SH2JitContext &ctx, uint64 target, bool a
     // compiled reports `stale` before doing anything: drop it, recompile and run the new block in
     // this same step. The new block is compiled against the current code, so it cannot be stale
     // again.
-    for (int attempt = 0;; ++attempt) {
+    //
+    // Resume: while the cache version is the one recorded, the entry is still the live native code
+    // of the map's block at pc (BlockCache::Version), exactly what Get would return; it is
+    // self-validating, so its prologue checks the guest code, and a stale report is handled as for
+    // a looked-up block. Waiting worker results must be installed by a Get first.
+    int attempt = 0;
+    if (resumeEntry != nullptr && m_resume.pc == pc && m_resume.version == m_cache.Version() &&
+        !m_cache.HasWaitingResults()) {
+        ++m_stats.resumes;
+        const uint64_t version = m_resume.version;
+        ExitInfo info = RunEntry(NativeCode{resumeEntry, true}, nullptr, ctx, target, allowChain);
+        if (!info.stale) {
+            if (info.next != nullptr) {
+                m_resume = Resume{*ctx.PC, info.next, version};
+            }
+            return info;
+        }
+        ++m_stats.staleEntries;
+        if (info.blocksRun > 0) {
+            m_cache.Invalidate(*ctx.PC);
+            info.stale = false;
+            return info;
+        }
+        m_cache.Invalidate(pc);
+        attempt = 1;
+    }
+    for (;; ++attempt) {
         const CachedBlock &entry = m_cache.Get(ctx, pc);
         m_stats.compileFallbacks = m_cache.CompileFallbacks();
         if (entry.block.guestInstrCount == 0) {
             return interpret();
         }
-        ExitInfo info = RunEntry(entry, ctx, target, allowChain);
+        // The cache cannot change while the block runs (a flush is deferred and bumps the version
+        // after it), so a link-table entry the block reports belongs to this version.
+        const uint64_t version = m_cache.Version();
+        ExitInfo info = RunEntry(entry.code, &entry.block, ctx, target, allowChain);
         if (!info.stale) {
+            if (info.next != nullptr) {
+                m_resume = Resume{*ctx.PC, info.next, version};
+            }
             return info;
         }
         ++m_stats.staleEntries;
@@ -97,8 +135,8 @@ ExitInfo Executor::StepImpl(ymir::sh2::SH2JitContext &ctx, uint64 target, bool a
     }
 }
 
-ExitInfo Executor::RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint64 target,
-                            bool allowChain) {
+ExitInfo Executor::RunEntry(const NativeCode &code, const Block *block, ymir::sh2::SH2JitContext &ctx,
+                            uint64 target, bool allowChain) {
     // Same as InterpretNext on its non-interrupt path.
     *ctx.intrAllow = true;
     // Clears m_inBlock and applies a deferred flush on every exit, including an exception thrown
@@ -120,11 +158,11 @@ ExitInfo Executor::RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &
     m_inBlock = true;
     const BlockScope scope{*this};
     ++m_stats.blocksRun;
-    if (entry.code.entry != nullptr) {
+    if (code.entry != nullptr) {
         // Counted before the run, so a callback exception (rethrown by Run) still counts the first
         // block; then corrected to the chain's count (0 when the first block was stale).
         ++m_stats.nativeBlocksRun;
-        const ExitInfo info = m_native->Run(entry.code, ctx, target, &m_flushPending, allowChain);
+        const ExitInfo info = m_native->Run(code, ctx, target, &m_flushPending, allowChain);
         m_stats.blocksRun = m_stats.blocksRun - 1 + info.blocksRun;
         m_stats.nativeBlocksRun = m_stats.nativeBlocksRun - 1 + info.blocksRun;
         if (info.blocksRun > 1) {
@@ -132,7 +170,8 @@ ExitInfo Executor::RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &
         }
         return info;
     }
-    return RunBlock(entry.block, ctx, target, &m_flushPending);
+    assert(block != nullptr);
+    return RunBlock(*block, ctx, target, &m_flushPending);
 }
 
 } // namespace brimir::jit

@@ -51,6 +51,7 @@ bool BlockCache::Validate(const CachedBlock &entry, uint32_t pc, ymir::sh2::SH2J
 
 void BlockCache::Invalidate(BlockMap::iterator it) {
     // Order matters: no link slot or recent slot may point to the code once it is freed or retired.
+    ++m_version;
     const uint32_t pc = it->first;
     std::unique_ptr<CachedBlock> entry = std::move(it->second);
     m_blocks.erase(it);
@@ -85,6 +86,7 @@ void BlockCache::Invalidate(BlockMap::iterator it) {
 }
 
 void BlockCache::Retire(uint32_t pc, std::unique_ptr<CachedBlock> entry) {
+    ++m_version;
     m_retiredBytes += entry->code.bytes;
     {
         std::vector<RetiredList::iterator> &atPc = m_retiredByPc[pc];
@@ -114,6 +116,7 @@ CachedBlock *BlockCache::Reuse(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         if (candidate.codePages != CodePages(candidate.block, ctx) || !IsCurrent(candidate.block, ctx)) {
             continue;
         }
+        ++m_version;
         std::unique_ptr<CachedBlock> entry = std::move(it->entry);
         m_retiredBytes -= entry->code.bytes;
         RemoveRetired(it);
@@ -140,6 +143,7 @@ bool BlockCache::SameBuild(const Block &block, ymir::sh2::SH2JitContext &ctx) {
 void BlockCache::RetireIr(uint32_t pc, std::unique_ptr<CachedBlock> entry) {
     // As a fresh build: no compile pending (the result for the ticket is dropped when it arrives),
     // no code pages; Started sets the runs.
+    ++m_version;
     entry->pendingTicket = 0;
     entry->runsUntilNative = 0;
     entry->codePages = {};
@@ -168,6 +172,7 @@ void BlockCache::RemoveRetiredIr(RetiredList::iterator it) {
 
 void BlockCache::EvictLeastRecentlyUsedIr() {
     const auto t0 = Clock::now();
+    ++m_version;
     ++m_irEvictions;
     const size_t below = m_maxCachedInsts - m_maxCachedInsts / 8 * (8 - kIrCapTargetEighths);
 
@@ -249,6 +254,7 @@ CachedBlock *BlockCache::ReuseIr(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         if (!SameBuild(it->entry->block, ctx)) {
             continue;
         }
+        ++m_version;
         std::unique_ptr<CachedBlock> entry = std::move(it->entry);
         m_retiredIrInsts -= entry->block.code.size();
         RemoveRetiredIr(it); // invalidates r and byPc; the loop ends here
@@ -285,6 +291,7 @@ void BlockCache::RemoveRetired(RetiredList::iterator it) {
 }
 
 void BlockCache::ReleaseRetired(RetiredList::iterator it) {
+    ++m_version;
     const NativeCode &code = it->entry->code;
     m_native->Release(it->pc, code);
     m_releasedNativeBytes += code.bytes;
@@ -293,6 +300,7 @@ void BlockCache::ReleaseRetired(RetiredList::iterator it) {
 }
 
 void BlockCache::ReleaseAllRetired() {
+    ++m_version;
     for (RetiredBlock &retired : m_retired) {
         m_native->Release(retired.pc, retired.entry->code);
         m_releasedNativeBytes += retired.entry->code.bytes;
@@ -316,9 +324,10 @@ BlockCache::~BlockCache() {
 }
 
 const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
+    ++m_lookups;
     // No block runs here, so committing and publishing code is safe.
     // A result exists only for a pending ticket, so the worker is polled only with compiles pending.
-    if (m_worker != nullptr && !m_pendingPcs.empty() && m_worker->HasResults(this)) {
+    if (HasWaitingResults()) {
         InstallResults();
     }
     RecentSlot &slot = SlotFor(pc);
@@ -371,6 +380,7 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
     m_buildNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
     ++m_compiles;
     m_totalInsts += block.code.size();
+    ++m_version;
     CachedBlock *ref = entry.get();
     m_blocks.emplace(pc, std::move(entry));
     SlotFor(pc) = RecentSlot{pc, ref};
@@ -431,6 +441,7 @@ const CachedBlock &BlockCache::CompileNative(CachedBlock &entry, ymir::sh2::SH2J
 }
 
 void BlockCache::Installed(CachedBlock &entry, uint32_t pc) {
+    ++m_version;
     ++m_nativeCompiles;
     m_nativeBytes += entry.code.bytes;
     // The native code never needs the IR again (see CachedBlock): free it and stop counting it.
@@ -531,6 +542,7 @@ void BlockCache::Flush() {
 }
 
 void BlockCache::FlushAll() {
+    ++m_version;
     if (m_worker != nullptr) {
         // A new generation: nothing submitted before can be committed after (Cancel also drops
         // every result and waits for the job in flight, before the backend frees its code).

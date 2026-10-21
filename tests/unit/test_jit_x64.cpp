@@ -2496,6 +2496,144 @@ TEST_CASE("Chained run equals stepped run", "[jit][x64]") {
     }
 }
 
+// The fuzz programs through SH2::Advance in random slices of 1 to 80 cycles: the interpreter, an
+// x64 executor that chains and resumes slices, and one with chaining off (no resume either, its
+// blocks never chain, so they never report a next entry). Both match the interpreter at every
+// Advance return, and the resuming executor runs exactly the stepped executor's blocks.
+TEST_CASE("Resumed run equals stepped run", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr int kPrograms = 300;
+    constexpr int kAdvances = 60;
+    const uint32_t threshold = GENERATE(sh2test::kNativeOnFirstRun, 3u);
+    INFO("native compile threshold " << threshold);
+    uint64_t totalResumes = 0;
+    uint64_t totalRuns = 0;
+    for (int prog = 0; prog < kPrograms; ++prog) {
+        const uint32_t seed = 0xF0230000u + static_cast<uint32_t>(prog);
+        const sh2test::FuzzProgram fuzz = sh2test::MakeFuzzProgram(seed);
+        INFO("seed 0x" << std::hex << seed);
+        auto ref = std::make_unique<Rig>();
+        auto resumeRig = std::make_unique<Rig>();
+        auto stepRig = std::make_unique<Rig>();
+        brimir::jit::Executor resumeExec{BackendKind::X64, threshold};
+        brimir::jit::Executor stepExec{BackendKind::X64, threshold};
+        stepExec.SetChaining(false);
+        for (Rig *rig : {ref.get(), resumeRig.get(), stepRig.get()}) {
+            rig->mmio.busWaitEvery = fuzz.busWaitEvery;
+            rig->WriteCode(sh2test::kFuzzCode, fuzz.words);
+            rig->Load(fuzz.state);
+        }
+        resumeRig->sh2->SetJitExecutor(&resumeExec);
+        stepRig->sh2->SetJitExecutor(&stepExec);
+
+        std::mt19937 rng(seed ^ 0x5E5Eu);
+        for (int i = 0; i < kAdvances; ++i) {
+            const uint64_t cycles = 1 + rng() % 80;
+            INFO("advance " << std::dec << i << " cycles " << cycles);
+            const uint64 refCycles = ref->sh2->Advance<false, false>(cycles);
+            const uint64 resumeCycles = resumeRig->sh2->Advance<false, false>(cycles);
+            const uint64 stepCycles = stepRig->sh2->Advance<false, false>(cycles);
+            REQUIRE(resumeCycles == refCycles);
+            REQUIRE(stepCycles == refCycles);
+            {
+                const std::string diff = sh2test::DiffRigs(*ref, *resumeRig, true);
+                INFO("resumed: " << diff);
+                REQUIRE(diff.empty());
+            }
+            {
+                const std::string diff = sh2test::DiffRigs(*ref, *stepRig, true);
+                INFO("stepped: " << diff);
+                REQUIRE(diff.empty());
+            }
+            if (ref->State().sleep) {
+                break;
+            }
+        }
+        const auto &resumed = resumeExec.GetStats();
+        const auto &stepped = stepExec.GetStats();
+        REQUIRE(resumed.blocksRun == stepped.blocksRun);
+        REQUIRE(resumed.nativeBlocksRun == stepped.nativeBlocksRun);
+        REQUIRE(resumed.interpreted == stepped.interpreted);
+        REQUIRE(resumed.compileFallbacks == stepped.compileFallbacks);
+        REQUIRE(resumed.staleEntries == 0u);
+        REQUIRE(stepped.staleEntries == 0u);
+        REQUIRE(stepped.resumes == 0u);
+        REQUIRE(resumeExec.Cache().Compiles() == stepExec.Cache().Compiles());
+        REQUIRE(resumeExec.Cache().NativeCompiles() == stepExec.Cache().NativeCompiles());
+        // Each block the stepped executor looks up is entered by a lookup, by chaining or by a resume.
+        REQUIRE(resumeExec.Cache().Lookups() + resumed.chainedBlocks + resumed.resumes == stepExec.Cache().Lookups());
+        totalResumes += resumed.resumes;
+        totalRuns += resumed.runs;
+    }
+    WARN("threshold " << threshold << ": resumes " << totalResumes << " of " << totalRuns << " Run calls");
+    CHECK(totalResumes > 0u);
+}
+
+// A -> B, both compiled and B published. A chain from A that reaches the cycle limit at A's exit
+// reports B's entry in ExitInfo::next; with B unpublished, or on an exit that is not at the limit,
+// next is nullptr.
+TEST_CASE("x64: a chain ending at the cycle limit reports the next entry", "[jit][x64]") {
+    if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const uint32_t b = kCode + 0x20;
+    auto rig = std::make_unique<Rig>();
+    // A: add #1,R3 ; bra B ; nop      B: add #1,R3 ; add #1,R3 ; sleep
+    rig->WriteCode(kCode, {kAdd1_R3, Bra(kCode + 2, b), kNop});
+    rig->WriteCode(b, {kAdd1_R3, kAdd1_R3, static_cast<uint16_t>(kSleep)});
+    auto &ctx = rig->sh2->GetJitContext();
+    const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+    REQUIRE(backend != nullptr);
+    const auto compile = [&](uint32_t pc) {
+        Block block = brimir::jit::BuildBlock(ctx, pc);
+        brimir::jit::OptimizeBlock(block);
+        NativeCode code;
+        REQUIRE(backend->Compile(block, ctx, code));
+        REQUIRE(code.selfValidating);
+        return code;
+    };
+    const NativeCode codeA = compile(kCode);
+    const NativeCode codeB = compile(b);
+    backend->Publish(b, codeB);
+    const auto run = [&](uint64_t target, bool allowChain) {
+        rig->Load(rig->BaseState(kCode));
+        *ctx.cyclesExecuted = 0;
+        return backend->Run(codeA, ctx, target, nullptr, allowChain);
+    };
+
+    const ExitInfo alone = run(kNoCycleTarget, false); // A's cycles
+    REQUIRE(alone.retired == 3);
+    CHECK(alone.next == nullptr);
+    const uint64_t cyclesA = alone.cycles;
+
+    // The limit at A's exit: B's published entry, and nothing of B ran.
+    const ExitInfo atLimit = run(cyclesA, true);
+    CHECK(atLimit.next == codeB.entry);
+    CHECK(atLimit.blocksRun == 1u);
+    CHECK(atLimit.cycles == cyclesA);
+    CHECK_FALSE(atLimit.boundary);
+    CHECK(rig->State().PC == b);
+
+    // Not at the limit: the chain enters B, whose exit (to SLEEP, not linked) reports nothing.
+    const ExitInfo chained = run(kNoCycleTarget, true);
+    CHECK(chained.blocksRun == 2u);
+    CHECK(chained.next == nullptr);
+    // A boundary inside A, and the limit at A's exit without chaining.
+    const ExitInfo boundary = run(1, true);
+    CHECK(boundary.boundary);
+    CHECK(boundary.next == nullptr);
+    CHECK(run(cyclesA, false).next == nullptr);
+
+    // B unpublished: a slot miss at the limit.
+    backend->Unpublish(b);
+    const ExitInfo miss = run(cyclesA, true);
+    CHECK(miss.next == nullptr);
+    CHECK(miss.cycles == cyclesA);
+    CHECK(rig->State().PC == b);
+}
+
 // A store raises the DIVU overflow interrupt at the end of a block (in a delay slot, or as the last
 // instruction of a maximum-length block), so no boundary check inside the block sees it. The block
 // chains to B, whose prologue must return to the executor: the interrupt is taken before B runs,

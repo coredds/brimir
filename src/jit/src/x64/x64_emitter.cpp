@@ -71,6 +71,7 @@ constexpr int32_t kOutBusWait = static_cast<int32_t>(offsetof(X64Frame, out) + o
 constexpr int32_t kOutAborted = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, aborted));
 constexpr int32_t kOutStale = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, stale));
 constexpr int32_t kOutBlocksRun = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, blocksRun));
+constexpr int32_t kOutNext = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, next));
 constexpr int32_t kFrameStop = static_cast<int32_t>(offsetof(X64Frame, stop));
 constexpr int32_t kFrameCodeDirty = static_cast<int32_t>(offsetof(X64Frame, codeDirty));
 constexpr int32_t kFrameAllowChain = static_cast<int32_t>(offsetof(X64Frame, allowChain));
@@ -521,9 +522,7 @@ private:
         m_cc.mov(now, x86::qword_ptr(m_frame, kFrameEntryCycles));
         m_cc.add(now, cycles);
         m_cc.mov(x86::qword_ptr(m_regs, m_off.cyclesExecuted), now);
-        // Run's loop ends once the target is reached.
-        m_cc.cmp(cycles, x86::qword_ptr(m_frame, kFrameLimit));
-        m_cc.jae(m_retNull);
+        // The link slot for PC. A miss returns: out.next stays nullptr (as Run initialized it).
         x86::Gp slot = m_cc.new_gp64();
         if (constPC) {
             m_cc.mov(slot, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&m_links[LinkIndex(pc)])));
@@ -543,8 +542,16 @@ private:
         m_cc.jne(m_retNull);
         x86::Gp entry = m_cc.new_gp_ptr();
         m_cc.mov(entry, x86::qword_ptr(slot, kLinkEntry));
+        // Run's loop ends once the target is reached: the chain returns with the entry in out.next,
+        // where the executor resumes the next slice (Executor::Run).
+        Label atLimit = m_cc.new_label();
+        m_cc.cmp(cycles, x86::qword_ptr(m_frame, kFrameLimit));
+        m_cc.jae(atLimit);
         m_cc.mov(x86::byte_ptr(m_frame, kFrameChained), 1);
         m_cc.ret(entry);
+        m_cc.bind(atLimit);
+        m_cc.mov(x86::qword_ptr(m_frame, kOutNext), entry);
+        m_cc.jmp(m_retNull);
     }
 
     // RunBlock's abort exit: out.aborted = true, out.cycles; PC and out.retired untouched.

@@ -95,9 +95,11 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 //   3. counts the block in out.blocksRun.
 // A static Exit, a taken ExitIf and ExitDynamic then chain when frame->allowChain: after writing PC
 // and out as usual they return nullptr if *abortRequested (a flush requested by a callback that
-// did not stop the block), store *cyclesExecuted = entryCycles + cycles, return nullptr if
-// cycles >= limit, and otherwise return the entry of the link slot whose pc equals PC (nullptr on a
-// miss), setting frame->chained. Boundary, bus-wait, abort and stale exits never chain.
+// did not stop the block), store *cyclesExecuted = entryCycles + cycles, and look up the link slot
+// whose pc equals PC (nullptr on a miss). If cycles >= limit they store that entry in out.next (the
+// executor resumes the next slice there; it stays nullptr on a miss) and return nullptr; otherwise
+// they return the entry, setting frame->chained. Boundary, bus-wait, abort and stale exits never
+// chain and leave out.next nullptr.
 //
 // With ctx.bus describing a page table, Load/Store/AddAccessCycles/ExitIfBusWait take the inline
 // bus fast path (bus_fast_path.hpp) and call their trampolines only for handler or unmapped pages

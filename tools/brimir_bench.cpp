@@ -394,13 +394,15 @@ void PrintJitStats(const brimir::CoreWrapper& core) {
         if (exec != nullptr) {
             const auto& stats = exec->GetStats();
             std::printf("jit %-9s: blocksRun %llu  interpreted %llu  nativeBlocksRun %llu  compileFallbacks %llu  "
-                        "staleEntries %llu  chainedBlocks %llu\n",
+                        "staleEntries %llu  chainedBlocks %llu  resumes %llu  runs %llu\n",
                         master ? "master" : "slave", static_cast<unsigned long long>(stats.blocksRun),
                         static_cast<unsigned long long>(stats.interpreted),
                         static_cast<unsigned long long>(stats.nativeBlocksRun),
                         static_cast<unsigned long long>(stats.compileFallbacks),
                         static_cast<unsigned long long>(stats.staleEntries),
-                        static_cast<unsigned long long>(stats.chainedBlocks));
+                        static_cast<unsigned long long>(stats.chainedBlocks),
+                        static_cast<unsigned long long>(stats.resumes),
+                        static_cast<unsigned long long>(stats.runs));
             const auto& cache = exec->Cache();
             const uint64_t native = cache.NativeCompiles();
             std::printf("cache %-7s: compiles %llu  nativeCompiles %llu  compileMs %.1f (build %.1f  native %.1f)  "

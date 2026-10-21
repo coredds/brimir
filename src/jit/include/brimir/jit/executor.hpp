@@ -29,6 +29,11 @@ public:
         // around first, and count later or never (code changed back, cache flushed).
         uint64_t staleEntries = 0;
         uint64_t chainedBlocks = 0;    // native blocks entered from another block (Run with chaining)
+        // Steps that entered native code through a resume (Run), without a BlockCache::Get; one
+        // whose block then reports stale still counts (its retry calls Get). Their blocks count in
+        // blocksRun and nativeBlocksRun as for any native step.
+        uint64_t resumes = 0;
+        uint64_t runs = 0; // Run calls
     };
 
     // Runs compiled blocks on `kind`; an unavailable kind falls back to BackendKind::Ir. A block runs
@@ -49,6 +54,13 @@ public:
     // Steps until `target`, writing *ctx.cyclesExecuted = executed before each step. With chaining
     // (the default), a native block hands control to the next linked block itself, with the same
     // checks and the same *ctx.cyclesExecuted updates as these steps (INativeBackend::Run).
+    //
+    // Resume: a native step whose chain ended at the cycle limit with a next entry
+    // (ExitInfo::next) records {PC, next, cache Version}. The next step, after Step's gates
+    // (interrupt, delay slot, PC & 2), runs that entry without BlockCache::Get when PC and the
+    // version still match and the cache has no worker results waiting; otherwise, and after any
+    // other step outcome or a Flush, the record is dropped. Only self-validating blocks are
+    // published, so the resumed block still checks its guest code and pages in its prologue.
     uint64 Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 target) override;
 
     // Enables or disables block chaining in Run (tests and diagnostics; Step never chains).
@@ -69,6 +81,10 @@ public:
     const BlockCache &Cache() const {
         return m_cache;
     }
+    // Tests and diagnostics; never while a block runs.
+    BlockCache &MutableCache() {
+        return m_cache;
+    }
     const Stats &GetStats() const {
         return m_stats;
     }
@@ -77,13 +93,23 @@ private:
     // Step; with allowChain, a native block may chain to further blocks (Run).
     ExitInfo StepImpl(ymir::sh2::SH2JitContext &ctx, uint64 target, bool allowChain);
 
-    // Runs a compiled block (native or RunBlock, and a native chain) with the in-block flush deferral.
-    ExitInfo RunEntry(const CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint64 target, bool allowChain);
+    // Runs a compiled block (native `code`, and a native chain, or `block` with RunBlock when
+    // code.entry is nullptr) with the in-block flush deferral.
+    ExitInfo RunEntry(const NativeCode &code, const Block *block, ymir::sh2::SH2JitContext &ctx, uint64 target,
+                      bool allowChain);
+
+    // Where the next step may resume (Run); entry == nullptr: nothing recorded.
+    struct Resume {
+        uint32_t pc = 0;
+        const void *entry = nullptr;
+        uint64_t version = 0;
+    };
 
     BackendKind m_kind;
     std::unique_ptr<INativeBackend> m_native; // nullptr for BackendKind::Ir; declared before m_cache
     BlockCache m_cache;
     Stats m_stats;
+    Resume m_resume;
     bool m_chaining = true;
     bool m_inBlock = false;      // a block (or chain) owned by m_cache is executing
     bool m_flushPending = false; // Flush() was requested in a block; also the block's abort flag

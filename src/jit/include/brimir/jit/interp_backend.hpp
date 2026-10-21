@@ -27,6 +27,11 @@ struct ExitInfo {
     bool stale = false;
     // Native code only: blocks that passed their entry checks and ran (RunBlock leaves it 0).
     uint32_t blocksRun = 0;
+    // Native code only: when the chain ended because its cycles reached the limit at a chainable
+    // exit, the entry of the link slot whose pc equals the new PC (nullptr on a slot miss); nullptr
+    // on every other exit. The executor resumes the next slice there (Executor::Run). RunBlock
+    // never sets it.
+    const void *next = nullptr;
 };
 
 // Executes a verified, non-empty block against the live SH-2 state.
