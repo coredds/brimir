@@ -166,18 +166,78 @@ void BlockCache::RemoveRetiredIr(RetiredList::iterator it) {
     m_retiredIr.erase(it);
 }
 
-void BlockCache::ReleaseOldestRetiredIr(size_t below) {
+void BlockCache::EvictLeastRecentlyUsedIr() {
     const auto t0 = Clock::now();
-    ++m_retiredIrReleases;
-    while (m_totalInsts >= below && !m_retiredIr.empty()) {
-        const RetiredList::iterator oldest = m_retiredIr.begin();
-        const size_t insts = oldest->entry->block.code.size();
-        m_retiredIrInsts -= insts;
-        m_totalInsts -= insts;
-        RemoveRetiredIr(oldest);
+    ++m_irEvictions;
+    const size_t below = m_maxCachedInsts - m_maxCachedInsts / 8 * (8 - kIrCapTargetEighths);
+
+    // Every IR block: the live IR-only ones (interpreter fallbacks without IR included) and the
+    // IR pool's.
+    std::vector<IrVictim> &victims = m_irVictims;
+    victims.clear();
+    for (const auto &[pc, entry] : m_blocks) {
+        if (entry->code.entry == nullptr) {
+            victims.push_back(IrVictim{entry->lastUse, entry->block.code.size(), pc, entry.get(), {}});
+        }
     }
-    m_retiredIrReleaseNs +=
-        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+    for (auto it = m_retiredIr.begin(); it != m_retiredIr.end(); ++it) {
+        victims.push_back(IrVictim{it->entry->lastUse, it->entry->block.code.size(), it->pc, nullptr, it});
+    }
+
+    // The fewest least recently used blocks whose IR brings m_totalInsts below `below`: a weighted
+    // selection by lastUse with nth_element on halving ranges (linear on average, no full sort).
+    // Invariant: [0, lo) are older than [lo, n) and hold `freed` < need instructions; the answer
+    // (the number of blocks to free) is in (lo, hi].
+    const size_t need = m_totalInsts - below + 1;
+    const auto older = [](const IrVictim &a, const IrVictim &b) { return a.lastUse < b.lastUse; };
+    size_t count = victims.size(); // all of them if even that is not enough
+    {
+        size_t total = 0;
+        for (const IrVictim &v : victims) {
+            total += v.insts;
+        }
+        if (total >= need) {
+            size_t lo = 0;
+            size_t hi = victims.size();
+            size_t freed = 0;
+            while (hi - lo > 1) {
+                const size_t mid = lo + (hi - lo) / 2;
+                std::nth_element(victims.begin() + lo, victims.begin() + mid, victims.begin() + hi, older);
+                size_t left = 0;
+                for (size_t i = lo; i < mid; ++i) {
+                    left += victims[i].insts;
+                }
+                if (freed + left >= need) {
+                    hi = mid;
+                } else {
+                    freed += left;
+                    lo = mid;
+                }
+            }
+            count = hi;
+        }
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const IrVictim &v = victims[i];
+        m_totalInsts -= v.insts;
+        if (v.live != nullptr) {
+            // Never published, so no link slot to clear; a pending compile's result is dropped when
+            // it arrives (no entry at pc holds its ticket).
+            RecentSlot &slot = SlotFor(v.pc);
+            if (slot.entry == v.live) {
+                slot = RecentSlot{};
+            }
+            ++m_irEvictedBlocks;
+            m_blocks.erase(v.pc);
+        } else {
+            m_retiredIrInsts -= v.insts;
+            ++m_retiredIrReleases;
+            RemoveRetiredIr(v.retired);
+        }
+    }
+    assert((m_totalInsts < below || count == victims.size()) && "the IR cap frees down to 7/8 of the cap");
+    m_irCapNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
 }
 
 CachedBlock *BlockCache::ReuseIr(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
@@ -212,13 +272,6 @@ CachedBlock *BlockCache::ReuseIr(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
         return ref;
     }
     return nullptr;
-}
-
-void BlockCache::ClearRetiredIr() {
-    m_totalInsts -= m_retiredIrInsts;
-    m_retiredIrInsts = 0;
-    m_retiredIr.clear();
-    m_retiredIrByPc.clear();
 }
 
 void BlockCache::RemoveRetired(RetiredList::iterator it) {
@@ -291,16 +344,7 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
         return Started(*reused, ctx, pc, native); // its IR is already counted
     }
     if (m_totalInsts >= m_maxCachedInsts) {
-        // The pool goes first, as at the native code cap, oldest first and down to well below the
-        // cap, so that the next builds do not come back here at once. If the whole pool is not
-        // enough for that, the live IR-only blocks go too.
-        const size_t below = m_maxCachedInsts - m_maxCachedInsts / 8 * (8 - kIrReleaseTargetEighths);
-        if (!m_retiredIr.empty()) {
-            ReleaseOldestRetiredIr(below);
-        }
-        if (m_totalInsts >= below) {
-            EvictIrOnly(); // only with the pool empty: the release stops below `below` otherwise
-        }
+        EvictLeastRecentlyUsedIr();
     }
     if (native && AtCodeCap()) {
         // Checked before building when this block is compiled at once, so it is built only once.
@@ -334,6 +378,7 @@ const CachedBlock &BlockCache::Build(ymir::sh2::SH2JitContext &ctx, uint32_t pc,
 }
 
 const CachedBlock &BlockCache::Started(CachedBlock &entry, ymir::sh2::SH2JitContext &ctx, uint32_t pc, bool native) {
+    entry.lastUse = ++m_useClock;
     if (m_native == nullptr || entry.block.guestInstrCount == 0) {
         return entry; // RunBlock (or the interpreter) only
     }
@@ -477,27 +522,6 @@ void BlockCache::InstallResults() {
         Installed(*entry, pc);
     }
     m_results.clear(); // frees the prepared compiles
-}
-
-void BlockCache::EvictIrOnly() {
-    ++m_irEvictions;
-    for (auto it = m_blocks.begin(); it != m_blocks.end();) {
-        CachedBlock *entry = it->second.get();
-        if (entry->code.entry != nullptr) {
-            ++it; // native: keeps its code, link slot and recent slot
-            continue;
-        }
-        // IR-only: never published, so no link slot to clear.
-        RecentSlot &slot = SlotFor(it->first);
-        if (slot.entry == entry) {
-            slot = RecentSlot{};
-        }
-        m_totalInsts -= entry->block.code.size();
-        ++m_irEvictedBlocks;
-        it = m_blocks.erase(it);
-    }
-    ClearRetiredIr();
-    assert(m_totalInsts == 0 && "every counted IR instruction belongs to an IR-only block");
 }
 
 void BlockCache::Flush() {

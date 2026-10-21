@@ -1061,6 +1061,19 @@ Measured at the end of each 2E task (`design/plans/2026-10-20-sh2-jit-m2e.md`) o
 | 2E E (R7) | worker, pre-R4 build (12ac9ab) | Burning Rangers (US), frames 2,400-36,000, pair 1 | 5.961 | 6.180 | 0.965 | 9.962 | 17.352 | 47.7 | 558 | 0 / 16.4 | 0.384 | 28063 | 5,822.9 | 0 / 0 | 889,678 |
 | 2E E (R7) | worker | Burning Rangers (US), frames 2,400-36,000, pair 2 | 5.961 | 6.238 | 0.956 | 10.027 | 17.460 | 49.5 | 585 | 0 / 16.4 | 0.376 | 28103 | 5,827.0 | 0 / 0 | 893,737 |
 | 2E E (R7) | worker, pre-R4 build (12ac9ab) | Burning Rangers (US), frames 2,400-36,000, pair 2 | 5.961 | 6.164 | 0.967 | 9.991 | 17.450 | 47.2 | 615 | 0 / 16.4 | 0.389 | 28069 | 5,842.3 | 0 / 0 | 889,024 |
+| 2E E (R8) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 1 | 4.613 | 4.570 | 1.009 | 9.339 | 11.103 | 14.6 | 0 | 0 / 12.2 | 0.547 | 6333 | 260.9 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 2 | 4.727 | 4.721 | 1.001 | 9.617 | 11.441 | 14.7 | 0 | 0 / 12.2 | 0.566 | 6333 | 274.9 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Street Fighter Zero 3 (JP), frames 2,400-4,200, round 3 | 4.647 | 4.672 | 0.995 | 9.645 | 11.380 | 15.2 | 0 | 0 / 12.2 | 0.567 | 6333 | 270.1 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 1 | 5.048 | 4.437 | 1.138 | 6.185 | 8.319 | 9.3 | 0 | 0 / 11.3 | 0.059 | 660 | 28.4 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 2 | 5.013 | 4.488 | 1.117 | 6.227 | 8.427 | 10.9 | 0 | 0 / 11.3 | 0.059 | 660 | 28.8 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Panzer Dragoon II Zwei (US), frames 2,400-4,200, round 3 | 5.004 | 4.605 | 1.087 | 6.407 | 8.604 | 9.4 | 0 | 0 / 11.3 | 0.060 | 660 | 31.3 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Sega Rally Championship (US), frames 2,400-4,200, round 1 | 4.704 | 5.110 | 0.921 | 8.206 | 10.871 | 13.3 | 0 | 0 / 13.1 | 0.100 | 1056 | 48.7 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Sega Rally Championship (US), frames 2,400-4,200, round 2 | 4.708 | 4.991 | 0.943 | 8.093 | 10.473 | 13.4 | 0 | 0 / 13.1 | 0.098 | 1056 | 47.5 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Sega Rally Championship (US), frames 2,400-4,200, round 3 | 4.788 | 4.968 | 0.964 | 8.065 | 10.470 | 12.1 | 0 | 0 / 13.1 | 0.099 | 1056 | 48.8 | 0 / 0 | 0 |
+| 2E E (R8) | worker | Burning Rangers (US), frames 2,400-36,000, pair 1 | 5.975 | 6.298 | 0.949 | 10.120 | 17.618 | 50.0 | 652 | 1 / 16.8 | 0.383 | 28890 | 5,829.6 | 0 / 0 | 889,149 |
+| 2E E (R8) | worker, R7 build (4a35b03) | Burning Rangers (US), frames 2,400-36,000, pair 1 | 5.975 | 6.308 | 0.947 | 10.344 | 17.847 | 46.3 | 827 | 1 / 16.8 | 0.381 | 28101 | 5,860.2 | 0 / 0 | 885,181 |
+| 2E E (R8) | worker | Burning Rangers (US), frames 2,400-36,000, pair 2 | 5.975 | 6.357 | 0.940 | 10.188 | 18.022 | 49.1 | 902 | 1 / 16.8 | 0.392 | 28901 | 5,940.3 | 0 / 0 | 889,022 |
+| 2E E (R8) | worker, R7 build (4a35b03) | Burning Rangers (US), frames 2,400-36,000, pair 2 | 5.975 | 6.246 | 0.957 | 10.023 | 17.471 | 50.0 | 606 | 1 / 16.8 | 0.372 | 28061 | 5,764.0 | 0 / 0 | 877,075 |
 
 ### Task 4: the worker on by default (2E D)
 
@@ -1156,3 +1169,23 @@ Code: the R7 commit on top of `b6f76ed`. At the IR cap the oldest retired IR blo
 - **Panzer Dragoon II Zwei and Sega Rally** do not reach the IR cap (no release, no eviction) and build exactly as in Task 4 (187 and 502). Their ratios (1.140 and 0.965 from the medians) are their usual ones. Panzer Dragoon II Zwei's round 3 x64 run (6.406 ms) is a host outlier: the same executed blocks as round 2 (`blocksRun` identical, no compile work), but the master's SH-2 time is 57% higher.
 
 **Verdict for R7:** Burning Rangers and Street Fighter Zero 3 want opposite things at the cap. Both have live IR between 7/8 of the cap and the cap. Burning Rangers runs better when that live IR is evicted (room for a large pool; R7 and pre-R4). Street Fighter Zero 3 runs better when it is kept (R4/R6: 30% fewer builds, worst frame about 6 ms lower). No eviction threshold between 7/8 and the cap serves both; a larger IR cap (outside this plan's constraint) or a live-IR eviction policy finer than all-or-nothing would.
+
+### Task 5 (R8): the IR cap evicts the least recently used IR blocks
+
+Code: the R8 commit on top of `4a35b03`, replacing the R4/R6/R7 rule. Every IR-only block carries a last-use stamp (a cache-local counter, set whenever `Get` returns it: a hit, a build or a reuse from the IR pool; a retired block keeps its stamp). At the IR cap, IR blocks are freed by stamp, oldest first, live and retired together, until the IR is below 7/8 of the cap. A weighted selection with `std::nth_element` on halving ranges does it in linear time on average. `irEvictions` counts cap events, its `blocks` the live blocks freed, `irPoolFreed` the retired ones; `irCapMs` is the cap events' emulation-thread time. One session (load 5-12% before; sampler 28% on average, 4-79%, 77 samples): Burning Rangers long with this build and the R7 build (`4a35b03`) interleaved, two each, plus one interpreter run; then three rounds of Street Fighter Zero 3, Panzer Dragoon II Zwei and Sega Rally (interpreter, then x64). All runs exit 0, `compileFallbacks 0`. Rows "2E E (R8)" in the table.
+
+| Run | Interpreter | x64 | Ratio | Worst frame, x64 / interpreter | Frames over 16.7 ms, x64 / interpreter | Front-end builds in window | Cap events: live / pool blocks freed (ms) |
+|---|---|---|---|---|---|---|---|
+| Street Fighter Zero 3, rounds 1 / 2 / 3 | 4.613 / 4.727 / 4.647 | 4.570 / 4.721 / 4.672 | 1.009 / 1.001 / 0.995 (medians: 0.995) | 14.6 / 14.7 / 15.2, interpreter 12.2 | 0 / 0 / 0, interpreter 0 | 10,686 (Task 4: 10,686) | 1: 1,045 / 281 (3.0-3.2) |
+| Panzer Dragoon II Zwei, rounds 1 / 2 / 3 | 5.048 / 5.013 / 5.004 | 4.437 / 4.488 / 4.605 | 1.138 / 1.117 / 1.087 (medians: 1.117) | 9.3 / 10.9 / 9.4, interpreter 11.3 | 0, interpreter 0 | 187 | none |
+| Sega Rally Championship, rounds 1 / 2 / 3 | 4.704 / 4.708 / 4.788 | 5.110 / 4.991 / 4.968 | 0.921 / 0.943 / 0.964 (medians: 0.943) | 13.3 / 13.4 / 12.1, interpreter 13.1 | 0, interpreter 0 | 502 | none |
+| Burning Rangers long, R8, pair 1 | 5.975 | 6.298 | 0.949 | 50.0 / 16.8 | 652 / 1 | 305,208 | 1: 853 / 409 (5.0) |
+| Burning Rangers long, R7, pair 1 | 5.975 | 6.308 | 0.947 | 46.3 / 16.8 | 827 / 1 | 315,226 | 1: 15,748 live (all) + pool |
+| Burning Rangers long, R8, pair 2 | 5.975 | 6.357 | 0.940 | 49.1 / 16.8 | 902 / 1 | 306,607 | 1: 853 / 409 (4.2) |
+| Burning Rangers long, R7, pair 2 | 5.975 | 6.246 | 0.957 | 50.0 / 16.8 | 606 / 1 | 315,240 | 1: 15,750 live (all) + pool |
+
+- **Street Fighter Zero 3 is back to Task 4's work and smoothness.** The window's front-end builds and native compiles are exactly Task 4's (10,686 and 6,333 in every round), and no frame is over 16.7 ms, as for the interpreter. The worst frames (14.6-15.2 ms) are as in Task 4 (14.5-14.8). Its one cap event frees 1,045 live IR-only blocks and 281 retired ones (the least recently used 1/8 of the IR) in 3 ms, instead of all 13,550 live blocks.
+- **Burning Rangers: at least as good as R7.** One cap event frees 853 live and 409 retired blocks (5 ms) instead of every live IR-only block. That saves 3% of the front-end builds in the window (305-307 K against 315 K) and gives a few more IR reuses (889 K against 877-885 K). The frames over 16.7 ms are 652 / 902 against 827 / 606 (each build wins one pair); the ratio (0.940-0.949 against 0.947-0.957) and worst frames (49-50 against 46-50 ms) are within run-to-run spread.
+- **Panzer Dragoon II Zwei and Sega Rally** never reach the IR cap; their builds are Task 4's (187 and 502) and their ratios their usual ones (1.117 and 0.943 from the medians; Rally's rounds spread 0.921-0.964).
+
+**Verdict for R8:** the least recently used eviction gives Street Fighter Zero 3 R4/R6's result (no regression from Task 5, no slow frame) and Burning Rangers R7's (or slightly less work), so it serves both. The remaining Burning Rangers stutter is the startup burst of new code at frame 9,264 and the steady stream of genuinely new blocks, not the IR cap.

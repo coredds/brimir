@@ -83,20 +83,20 @@ block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
 interpreter until its 16th run, `kNativeCompileThreshold`), `compileMs` (host
 time building blocks and compiling them natively), `nativeBytesPerBlock`,
 `invalidations`, `cachedInsts` (IR instructions of IR-only blocks, against the
-IR cap), `irEvictions` (times the IR cap evicted the IR-only blocks, and how
-many blocks), `irReuses` (IR blocks dropped because their code changed and
-taken back from the IR pool when the same code returned, instead of being
-built again; `retiredIrInsts` is the IR the pool holds, counted in
-`cachedInsts`; `irPoolReleases` counts the times the IR cap released the
-oldest pool blocks, down to 7/8 of the cap, which it does before evicting live
-IR-only blocks (evicted only when the whole pool cannot get there), with the emulation-thread time those releases took; it is not
-part of `compileMs`), and flushes by trigger (`codeCap`: native code cap, `requested`:
+IR cap), `irEvictions` (times the IR cap was reached, and how many live IR-only
+blocks it evicted; it frees the least recently used IR blocks, live and
+retired together, until the IR is below 7/8 of the cap), `irReuses` (IR blocks
+dropped because their code changed and taken back from the IR pool when the
+same code returned, instead of being built again; `retiredIrInsts` is the IR
+the pool holds, counted in `cachedInsts`; `irPoolFreed` counts the pool blocks
+the IR cap freed, and `irCapMs` the emulation-thread time of the cap events,
+not part of `compileMs`), and flushes by trigger (`codeCap`: native code cap, `requested`:
 CPU reset, state load, ...). Every 1800 measured frames a `jit progress` line
 per CPU shows the cache occupancy. After the
 measured frames, `jit window` sums both CPUs' compile work over the measured
 frames (`compileMs` is emulation-thread time only: with the compile worker, the
 worker's own time is `workerMs` per frame, and `async` and `dropped` count
-the background compiles installed and discarded; `irReuses`, `irPoolReleases` and `irPoolReleaseMs` as above), and five `slow frame` lines list the slowest measured frames (frame
+the background compiles installed and discarded; `irReuses`, `irPoolFreed` and `irCapMs` as above), and five `slow frame` lines list the slowest measured frames (frame
 number counted from startup) with their compile work.
 
 `--jit-backend ir|x64` selects the JIT's code backend (`design/sh2-jit-m2.md`):

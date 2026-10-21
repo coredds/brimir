@@ -749,9 +749,9 @@ TEST_CASE("x64 backend: the native code cap flushes at a tiered compile", "[jit]
     CHECK(cache.CompileFallbacks() == 0);
 }
 
-// Reaching the IR cap evicts only IR-only blocks: native blocks keep their code and keep running
-// natively without a recompile, evicted blocks are rebuilt from scratch on their next run, and
-// the IR accounting covers exactly the IR-only blocks still cached.
+// Reaching the IR cap evicts only IR-only blocks, the least recently used first: native blocks keep
+// their code and keep running natively without a recompile, evicted blocks are rebuilt from scratch
+// on their next run, and the IR accounting covers exactly the IR-only blocks still cached.
 TEST_CASE("x64 backend: the IR cap evicts only IR-only blocks", "[jit][x64][tier]") {
     if (!brimir::jit::IsBackendAvailable(BackendKind::X64)) {
         SKIP("no x64 backend");
@@ -830,11 +830,18 @@ TEST_CASE("x64 backend: the IR cap evicts only IR-only blocks", "[jit][x64][tier
         const brimir::jit::CachedBlock &entry = runAt(kCode + i * kStride);
         CHECK(entry.code.entry == nullptr);
         if (cache.IrEvictions() != evictionsBefore) {
-            // Every earlier cold block is gone; only this one counts.
-            for (uint32_t k = kHot; k < i; ++k) {
+            // The least recently used cold blocks are gone, the most recent ones stay (each cold
+            // block ran once, so use order is build order), and before this build the IR was below
+            // 7/8 of the cap.
+            uint32_t oldestKept = i;
+            while (oldestKept > kHot && cache.Find(kCode + (oldestKept - 1) * kStride) != nullptr) {
+                --oldestKept;
+            }
+            CHECK(oldestKept > kHot);
+            for (uint32_t k = kHot; k < oldestKept; ++k) {
                 CHECK(cache.Find(kCode + k * kStride) == nullptr);
             }
-            CHECK(cache.CachedInsts() == entry.block.code.size());
+            CHECK(cache.CachedInsts() - entry.block.code.size() < cap - cap / 8);
         }
         for (uint32_t h = 0; h < kHot; ++h) {
             const brimir::jit::CachedBlock *hot = cache.Find(kCode + h * kStride);
@@ -844,7 +851,7 @@ TEST_CASE("x64 backend: the IR cap evicts only IR-only blocks", "[jit][x64][tier
         checkAccounting();
     }
     CHECK(cache.IrEvictions() >= 5u);
-    CHECK(cache.IrEvictedBlocks() >= 3 * cache.IrEvictions());
+    CHECK(cache.IrEvictedBlocks() >= cache.IrEvictions()); // every event freed a live block (no pool here)
     CHECK(cache.Size() < kBlocks);
 
     // The native blocks still run natively, with the same code, without a rebuild.
