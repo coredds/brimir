@@ -45,6 +45,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_cd_speed",             "2"        },
         { "brimir_sh2_overclock",        "100"      },
         { "brimir_sh2_jit",              "disabled" },
+        { "brimir_sh2_jit_compile_thread", "auto"   },
         { "brimir_profiling",            "disabled" },
     };
 

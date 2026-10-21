@@ -1180,4 +1180,35 @@ Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t startPC) {
     return block;
 }
 
+// Mirrors the stops of DecodeBlock's loop.
+bool BlockEndIsCurrent(ymir::sh2::SH2JitContext &ctx, const Block &block) {
+    const auto &table = DecodeTable::s_instance;
+    const uint32_t count = block.guestInstrCount;
+    if (count > 0) {
+        // A block ended by a branch stops there whatever follows.
+        const OpcodeType lastOp = table.opcodes[0][block.guestOpcodes[count - 1]];
+        if (lastOp == OpcodeType::BT || lastOp == OpcodeType::BF) {
+            return true;
+        }
+        if (count >= 2 && IsDelayedBranch(table.opcodes[0][block.guestOpcodes[count - 2]])) {
+            return true;
+        }
+    }
+    const uint32_t end = block.startPC + 2u * count;
+    if (count >= kMaxBlockInstructions || !IsCompilableAddress(end)) {
+        return true;
+    }
+    const OpcodeType op = table.opcodes[0][ctx.peekInstruction(ctx.sh2, end)];
+    if (IsDelayedBranch(op)) {
+        if (count + 2 > kMaxBlockInstructions || !IsCompilableAddress(end + 2)) {
+            return true;
+        }
+        return !BaseOp(table.opcodes[1][ctx.peekInstruction(ctx.sh2, end + 2)], true);
+    }
+    if (op == OpcodeType::BT || op == OpcodeType::BF) {
+        return false;
+    }
+    return !BaseOp(op, false);
+}
+
 } // namespace brimir::jit

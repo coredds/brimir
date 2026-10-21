@@ -8,6 +8,7 @@ add_library(brimir-jit STATIC
     src/block_cache.cpp
     src/executor.cpp
     src/backend.cpp
+    src/compile_worker.cpp
     src/bus_fast_path.cpp
 )
 

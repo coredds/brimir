@@ -59,6 +59,42 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # The JIT tests under ThreadSanitizer: the compile worker thread against the emulation thread
+  # (milestone 2E). Upstream's threaded VDP races are suppressed in tests/tsan_suppressions.txt.
+  test-linux-tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      # ThreadSanitizer aborts with "unexpected memory mapping" when the kernel's ASLR entropy is
+      # above what it supports; the runner image's default is.
+      - name: Lower ASLR entropy for ThreadSanitizer
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_FLAGS=-fsanitize=thread \
+            -DCMAKE_C_FLAGS=-fsanitize=thread \
+            -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread \
+            -DBRIMIR_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --target brimir_tests --parallel $(nproc)
+
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1 suppressions=${{ github.workspace }}/tests/tsan_suppressions.txt
+        run: ./build/bin/brimir_tests "[jit]"
+
   build-macos-arm64:
     runs-on: macos-14
     steps:

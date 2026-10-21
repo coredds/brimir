@@ -20,4 +20,10 @@ bool IsCompilableAddress(uint32_t pc);
 // supported and must run on the interpreter.
 Block BuildBlock(ymir::sh2::SH2JitContext &ctx, uint32_t pc);
 
+// Whether BuildBlock(ctx, block.startPC) would still end the block where block ends, given that
+// its guestOpcodes are current. To stop a block, the front end also reads the words after the
+// last instruction (an unsupported instruction, or a delayed branch whose slot is unsupported or
+// does not fit); they are not in guestOpcodes unless one is the tail word.
+bool BlockEndIsCurrent(ymir::sh2::SH2JitContext &ctx, const Block &block);
+
 } // namespace brimir::jit

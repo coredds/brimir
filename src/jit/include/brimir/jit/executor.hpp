@@ -33,8 +33,11 @@ public:
 
     // Runs compiled blocks on `kind`; an unavailable kind falls back to BackendKind::Ir. A block runs
     // with RunBlock until its nativeCompileThreshold-th run, which compiles it natively
-    // (kNativeCompileThreshold; tests pass 1 for native code on the first run).
-    explicit Executor(BackendKind kind = DefaultBackend(), uint32_t nativeCompileThreshold = kNativeCompileThreshold);
+    // (kNativeCompileThreshold; tests pass 1 for native code on the first run). worker: finalizes
+    // the native compiles in the background, or nullptr for synchronous compiles (see BlockCache);
+    // not owned, it must outlive the executor.
+    explicit Executor(BackendKind kind = DefaultBackend(), uint32_t nativeCompileThreshold = kNativeCompileThreshold,
+                      CompileWorker *worker = nullptr);
 
     Executor(const Executor &) = delete;
     Executor &operator=(const Executor &) = delete;

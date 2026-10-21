@@ -268,10 +268,11 @@ static struct retro_core_option_v2_definition option_defs[] = {
         nullptr,
         "Experimental. Run the SH-2 CPUs through the JIT. It compiles all SH-2 instructions except "
         "exception entry/return and SLEEP to native code on x86-64 (through an IR interpreter on "
-        "other CPUs) and is validated to produce exactly the interpreter's results, but it is "
-        "currently no faster than the default interpreter (much slower on non-x86-64 builds and "
-        "in some games over long sessions) and may stutter (frame spikes) while it compiles new "
-        "code. For testing only. Not used while SH-2 cache emulation is active.",
+        "other CPUs) and is validated to produce exactly the interpreter's results. On x86-64 its "
+        "SH-2 time is between about 5% above and 22% below the interpreter's in the games tested, "
+        "and it can still stutter (frame spikes) while a game loads a lot of new code, over long "
+        "sessions; on other CPUs it is much slower than the interpreter. For testing only. Not "
+        "used while SH-2 cache emulation is active.",
         nullptr,
         "system",
         {
@@ -280,6 +281,24 @@ static struct retro_core_option_v2_definition option_defs[] = {
             { nullptr, nullptr }
         },
         "disabled"
+    },
+    {
+        "brimir_sh2_jit_compile_thread",
+        "SH-2 JIT Compile Thread (Experimental)",
+        nullptr,
+        "Compile new SH-2 JIT code on one extra thread when the CPU has at least 4 threads, "
+        "instead of on the emulation thread. This removes most of the stutter caused by "
+        "compiling, but not all: a game that loads a lot of new code at once can still drop "
+        "frames while the JIT decodes it. OFF compiles on the emulation thread. Only used by the "
+        "x86-64 JIT, and only while SH-2 JIT is ON.",
+        nullptr,
+        "system",
+        {
+            { "auto", "Auto" },
+            { "disabled", "OFF" },
+            { nullptr, nullptr }
+        },
+        "auto"
     },
     {
         "brimir_profiling",

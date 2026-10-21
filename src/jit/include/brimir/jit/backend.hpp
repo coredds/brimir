@@ -30,13 +30,39 @@ struct NativeCode {
     uint32_t bytes = 0; // size of the generated code (set by Compile; counted in CodeBytes)
 };
 
+// A native compile between INativeBackend::Prepare and Commit: everything the emitter read from the
+// block and the emulator is already captured in it. It may be destroyed on any thread: with a
+// CompileWorker, a job cancelled while in flight is destroyed on the worker thread, and the others
+// on the thread calling Cancel, TakeResults or the worker's destructor (see compile_worker.hpp). So
+// the destructor, like Finalize, must touch only the object's own state.
+class PreparedCompile {
+public:
+    virtual ~PreparedCompile() = default;
+    // Runs the backend's code generation passes. May run on any thread, but never concurrently with
+    // another call on the same object, and the object must not be used by anyone else meanwhile: it
+    // touches only the object's own state (not the block, the context, guest memory, the bus or
+    // the backend). Returns false if code generation failed.
+    virtual bool Finalize() noexcept = 0;
+};
+
 class INativeBackend {
 public:
     virtual ~INativeBackend() = default;
     virtual BackendKind Kind() const = 0;
-    // Compiles a verified block (guestInstrCount > 0) for the CPU whose state ctx points to.
-    // Returns false, leaving out.entry == nullptr, if this backend cannot compile it.
-    virtual bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) = 0;
+    // A native compile runs in three phases: Prepare, Finalize (PreparedCompile) and Commit.
+    // Prepare and Commit run on the emulation thread, outside any running block.
+    //
+    // Prepare: translates a verified block (guestInstrCount > 0) for the CPU whose state ctx points
+    // to, reading everything it needs from the block and the emulator (including the bus page
+    // table at this moment). Returns nullptr if this backend cannot compile the block.
+    virtual std::unique_ptr<PreparedCompile> Prepare(const Block &block, const ymir::sh2::SH2JitContext &ctx) = 0;
+    // Commit: after a successful Finalize of `prepared` (made by this backend, not committed
+    // before), adds the code to the backend and sets out.entry, out.bytes and out.selfValidating.
+    // Returns false, leaving out.entry == nullptr, on a runtime error.
+    virtual bool Commit(PreparedCompile &prepared, NativeCode &out) = 0;
+    // Prepare, Finalize and Commit in one call, on the calling thread. Returns false, leaving
+    // out.entry == nullptr, if this backend cannot compile the block.
+    bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out);
     // Same contract as RunBlock, for one block. An exception thrown by a context callback is
     // rethrown here after the generated code has returned. `ctx` must be the context `code` was
     // compiled with (same CPU; see NativeCode).

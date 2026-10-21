@@ -83,12 +83,20 @@ block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
 interpreter until its 16th run, `kNativeCompileThreshold`), `compileMs` (host
 time building blocks and compiling them natively), `nativeBytesPerBlock`,
 `invalidations`, `cachedInsts` (IR instructions of IR-only blocks, against the
-IR cap), `irEvictions` (times the IR cap evicted the IR-only blocks, and how
-many blocks), and flushes by trigger (`codeCap`: native code cap, `requested`:
+IR cap), `irEvictions` (times the IR cap was reached, and how many live IR-only
+blocks it evicted; it frees the least recently used IR blocks, live and
+retired together, until the IR is below 7/8 of the cap), `irReuses` (IR blocks
+dropped because their code changed and taken back from the IR pool when the
+same code returned, instead of being built again; `retiredIrInsts` is the IR
+the pool holds, counted in `cachedInsts`; `irPoolFreed` counts the pool blocks
+the IR cap freed, and `irCapMs` the emulation-thread time of the cap events,
+not part of `compileMs`), and flushes by trigger (`codeCap`: native code cap, `requested`:
 CPU reset, state load, ...). Every 1800 measured frames a `jit progress` line
 per CPU shows the cache occupancy. After the
 measured frames, `jit window` sums both CPUs' compile work over the measured
-frames, and five `slow frame` lines list the slowest measured frames (frame
+frames (`compileMs` is emulation-thread time only: with the compile worker, the
+worker's own time is `workerMs` per frame, and `async` and `dropped` count
+the background compiles installed and discarded; `irReuses`, `irPoolFreed` and `irCapMs` as above), and five `slow frame` lines list the slowest measured frames (frame
 number counted from startup) with their compile work.
 
 `--jit-backend ir|x64` selects the JIT's code backend (`design/sh2-jit-m2.md`):
@@ -101,19 +109,30 @@ times: without `--sh2-jit`, with `--sh2-jit --jit-backend ir` and with
 `--sh2-jit --jit-backend x64` (`design/sh2-x64-performance.md` uses the
 scenes, warmup and frame counts of `design/sh2-baseline.md`).
 
+On x86-64 with the `x64` backend and at least 4 hardware threads, the JIT
+compiles native code on one worker thread, like the `brimir_sh2_jit_compile_thread`
+core option set to `auto` (`SH2 JIT compile` shows `worker thread` or
+`emulation thread`). `--jit-sync-compile` turns it off: compiles run on the
+emulation thread, as with the option OFF. It needs `--sh2-jit` or `--lockstep`
+(where it applies to the JIT core), and is the baseline for A/B runs of the
+worker.
+
 Output:
 
 ```
 content      : Game.cue
 frames       : 1800 (warmup 120)
 sh2 jit      : off
-ms/frame     : avg 7.912  p50 7.804  p95 9.120  p99 10.301  max 14.022
+ms/frame     : avg 7.912  p50 7.804  p95 9.120  p99 10.301  max 14.022  over16.7 0
 fps (host)   : 126.4
 Ymir_RunFrame: 7.850 ms/frame
 SH2 master   : 3.120 ms/frame (39.7% of Ymir_RunFrame)
 SH2 slave    : 1.004 ms/frame (12.8% of Ymir_RunFrame)
 SH2 total    : 4.124 ms/frame (52.5% of Ymir_RunFrame)
 ```
+
+`over16.7` counts the measured frames whose wall time exceeds 16.7 ms (one
+60 Hz frame): the stutter count.
 
 SH-2 time is measured inside `SH2::Advance` and includes on-chip peripherals
 (DMA, timers) and bus accesses the CPUs make. VDP rendering runs on worker
@@ -122,10 +141,12 @@ threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
 ### Lockstep validation
 
 ```powershell
-build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000 [--jit-backend ir|x64]
+build\bin\brimir_bench.exe --bios <bios> --game <game> --system-dir <dir> --lockstep 36000 [--jit-backend ir|x64] [--jit-sync-compile]
 ```
 
-`--jit-backend` selects the JIT core's backend (default `x64` when built). The
+`--jit-backend` selects the JIT core's backend (default `x64` when built).
+The JIT core compiles on the worker thread where supported (`asyncCompiles` above 0 on the
+`cache` lines shows it was used); `--jit-sync-compile` runs it without. The
 lockstep summary prints the executor and block-cache counters of both CPUs;
 with `x64`, `compileFallbacks 0` means that every block that reached its native
 compile threshold compiled; `blocksRun - nativeBlocksRun` are the IR runs before
@@ -179,7 +200,9 @@ lockstep: 600/36000 frames identical
 lockstep: OK, 36000 frames identical
 SH2 JIT backend: x64
 jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
-cache master : compiles ...  nativeCompiles ...  compileMs ... (build ...  native ...)  nativeBytesPerBlock ...  invalidations ...  cachedInsts ...  irEvictions ... (blocks ...)  flushes codeCap ...  requested ...
+cache master : compiles ...  nativeCompiles ...  compileMs ... (build ...  native ...)
+               nativeBytesPerBlock ...  invalidations ...  cachedInsts ...
+               irEvictions ... (blocks ...)  flushes codeCap ...  requested ...
 jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
 cache slave  : ...
 ```

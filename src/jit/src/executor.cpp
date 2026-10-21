@@ -14,10 +14,11 @@ BackendKind EffectiveBackend(BackendKind kind) {
 
 } // namespace
 
-Executor::Executor(BackendKind kind, uint32_t nativeCompileThreshold)
+Executor::Executor(BackendKind kind, uint32_t nativeCompileThreshold, CompileWorker *worker)
     : m_kind(EffectiveBackend(kind))
     , m_native(MakeNativeBackend(m_kind))
-    , m_cache(m_native.get(), kMaxNativeCodeBytes, nativeCompileThreshold) {}
+    , m_cache(m_native.get(), kMaxNativeCodeBytes, nativeCompileThreshold, kMaxCachedInsts, kMaxRetiredCodeBytes,
+              kMaxStaleDampShift, worker) {}
 
 uint64 Executor::Run(ymir::sh2::SH2JitContext &ctx, uint64 executed, uint64 target) {
     while (executed < target) {

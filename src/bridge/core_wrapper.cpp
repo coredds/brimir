@@ -3,6 +3,7 @@
 // Licensed under GPL-3.0
 
 #include "brimir/core_wrapper.hpp"
+#include <brimir/jit/compile_worker.hpp>
 #include <brimir/jit/executor.hpp>
 
 #include <ymir/ymir.hpp>
@@ -28,6 +29,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <system_error>
 
 #include <lz4.h>
 #include <algorithm>
@@ -1632,11 +1634,24 @@ void CoreWrapper::SetSH2JitEnabled(bool enable) {
         return; // applied in Initialize()
     }
     if (enable) {
+        if (!m_jitWorker && !m_jitWorkerFailed && m_sh2JitCompileThread && jit::CompileThreadSupported() &&
+            m_sh2JitBackend == jit::BackendKind::X64) {
+            try {
+                m_jitWorker = std::make_unique<jit::CompileWorker>();
+            } catch (const std::system_error& e) {
+                // No thread: compile on the emulation thread, as without the option.
+                m_jitWorkerFailed = true;
+                m_jitWorkerWarning = std::string("SH-2 JIT compile thread could not start (") + e.what() +
+                                     "); compiling on the emulation thread";
+            }
+        }
         if (!m_jitMaster) {
-            m_jitMaster = std::make_unique<jit::Executor>(m_sh2JitBackend);
+            m_jitMaster = std::make_unique<jit::Executor>(m_sh2JitBackend, jit::kNativeCompileThreshold,
+                                                          m_jitWorker.get());
         }
         if (!m_jitSlave) {
-            m_jitSlave = std::make_unique<jit::Executor>(m_sh2JitBackend);
+            m_jitSlave = std::make_unique<jit::Executor>(m_sh2JitBackend, jit::kNativeCompileThreshold,
+                                                         m_jitWorker.get());
         }
         m_saturn->masterSH2.SetJitExecutor(m_jitMaster.get());
         m_saturn->slaveSH2.SetJitExecutor(m_jitSlave.get());
@@ -1654,6 +1669,26 @@ void CoreWrapper::SetSH2JitBackend(jit::BackendKind kind) {
         return;
     }
     m_sh2JitBackend = kind;
+    m_jitWorkerFailed = false;
+    DropSH2JitExecutors();
+    if (m_sh2JitEnabled) {
+        SetSH2JitEnabled(true); // recreates both with the new backend (or waits for Initialize)
+    }
+}
+
+void CoreWrapper::SetSH2JitCompileThread(bool enable) {
+    if (enable == m_sh2JitCompileThread) {
+        return;
+    }
+    m_sh2JitCompileThread = enable;
+    m_jitWorkerFailed = false;
+    DropSH2JitExecutors();
+    if (m_sh2JitEnabled) {
+        SetSH2JitEnabled(true); // recreates both, and the worker if it is wanted
+    }
+}
+
+void CoreWrapper::DropSH2JitExecutors() {
     // Detach before dropping the executors: the CPUs must never point at a freed executor.
     if (m_saturn) {
         m_saturn->masterSH2.SetJitExecutor(nullptr);
@@ -1661,9 +1696,8 @@ void CoreWrapper::SetSH2JitBackend(jit::BackendKind kind) {
     }
     m_jitMaster.reset();
     m_jitSlave.reset();
-    if (m_sh2JitEnabled) {
-        SetSH2JitEnabled(true); // recreates both with the new backend (or waits for Initialize)
-    }
+    // Last: each executor's block cache cancels its queued compiles on the worker when destroyed.
+    m_jitWorker.reset();
 }
 
 void CoreWrapper::SetDeinterlacingMode(const char* mode) {

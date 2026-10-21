@@ -26,9 +26,12 @@ public:
     BackendKind Kind() const override {
         return BackendKind::X64;
     }
-    // Compiles any verified block; fails (the block then runs on RunBlock) only if a state field's
-    // offset from ctx.R does not fit in 32 bits, a state pointer is null, or asmjit fails.
-    bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out) override;
+    // Prepares any verified block; fails (the block then runs on RunBlock) only if a state field's
+    // offset from ctx.R does not fit in 32 bits, a state pointer is null, or asmjit fails. Prepare
+    // emits into an asmjit Compiler that the PreparedCompile owns; Finalize (asmjit's passes and
+    // serialization) touches only that object; Commit adds the code to the runtime.
+    std::unique_ptr<PreparedCompile> Prepare(const Block &block, const ymir::sh2::SH2JitContext &ctx) override;
+    bool Commit(PreparedCompile &prepared, NativeCode &out) override;
     // Runs `code` and, with allowChain, the blocks it chains to (a plain loop over the returned
     // entries: no host frames between blocks).
     ExitInfo Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target = kNoCycleTarget,
