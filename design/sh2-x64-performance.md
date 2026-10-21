@@ -1534,6 +1534,38 @@ Not candidates: master write trampolines (device work the interpreter also pays)
 
 (Gains in ms/frame; ratios use this task's session 1 interpreter totals.) Items 1 and 2 together put every profiled title above 1.0 by a margin larger than the session spread (5% of the SH-2 total is about 0.05-0.07 in ratio), Sega Rally included (1.10-1.16); they say nothing about the long Burning Rangers run's stutter or the whole-frame average, which a code-generation change does not address (see below). The tool, the dumps and the analysis scripts are not committed.
 
+### Native-code peaks against track A (final review)
+
+The 2E lockstep table (`design/sh2-validation.md`) has native-code peaks up to 13 MB above track A's: Panzer Dragoon II Zwei 111.1 against 105.7 MB, Virtua Fighter 2 97.1 against 84.6, Street Fighter Zero 3 90.8 against 80.7. Hypothesis: track A's IR-cap rule freed every IR-only block and so reset its run count, while the least-recently-used rule (R8) keeps most of them, so more blocks reach the native threshold and are compiled.
+
+**Method.** `--lockstep 36000 --jit-backend x64` (the window of the table), default settings, US BIOS for Panzer Dragoon II Zwei and JP BIOS for Virtua Fighter 2, on three executables at once (six runs, all `lockstep: OK, 36000 frames identical`, exit 0, 0 code-cap flushes): track A (`550f982`, pre-2E plus track A, built in a temporary worktree with the `build-bench` options), this branch with the worker, and this branch with `--jit-sync-compile` (to exclude the worker). Master CPU, `cache master` line. Track A's `cache` line has no peak counter, so its peak is the table's value; it is checked below against its own counters. Raw logs: `%TEMP%\opencode\t13\peak-*.log`.
+
+| Counter (master, 36,000 frames) | Panzer Dragoon II Zwei track A | this branch (worker) | this branch (sync) | Virtua Fighter 2 track A | this branch (worker) | this branch (sync) |
+|---|---|---|---|---|---|---|
+| Front-end builds (`compiles`) | 76,211 | 57,671 | 57,663 | 102,771 | 60,900 | 60,892 |
+| IR-cap events (live IR-only blocks freed) | 3 (36,979) | 8 (12,460) | 8 (12,455) | 4 (58,511) | 7 (11,850) | 7 (11,840) |
+| `nativeCompiles` | 32,233 | 33,949 | 33,950 | 29,658 | 34,562 | 34,563 |
+| `nativeBytesPerBlock` | 3,439 | 3,430 | 3,430 | 2,990 | 2,946 | 2,946 |
+| `nativeCompiles` x bytes per block, MiB | 105.7 | 111.0 | 111.0 | 84.6 | 97.1 | 97.1 |
+| Peak native code, MB | 105.7 (table) | 111.1 | 111.1 | 84.6 (table) | 97.1 | 97.1 |
+| Code-cap flushes | 0 | 0 | 0 | 0 | 0 | 0 |
+
+**Conclusion: confirmed.** (1) The peak is the native code compiled: `nativeCompiles` x bytes per block reproduces every peak to 0.1 MB (almost nothing is released in these windows: the retired pools hold 3.1 and 6.7 MB), so a peak can only rise through more native compiles. (2) The branch compiles 1,716 more blocks on Panzer Dragoon II Zwei (+5.3%) and 4,904 more on Virtua Fighter 2 (+16.5%), about 5.6 and 13.8 MB at the branch's block size, against peak differences of 5.4 and 12.5 MB (the average block is 0.3% and 1.5% smaller on the branch). (3) The same runs do 18,540 and 41,871 fewer front-end builds, and free 12,460 and 11,850 IR blocks against track A's 36,979 and 58,511: the blocks that track A threw away and rebuilt with a run count of zero now keep it and cross the threshold. (4) `--jit-sync-compile` gives the same counts (33,950 and 34,563), so the worker is not the cause. The blocks are real hot code, not waste: `blocksRun` and `interpreted` are identical to track A's and `nativeBlocksRun` equals it within 0.02%. No code change.
+
+**Headroom under the 128 MB cap** (`kMaxNativeCodeBytes`, per CPU; the master's peak, the slave's is far smaller): Panzer Dragoon II Zwei 111.1 MB, 16.9 MB (13%) below the cap, the tightest; Virtua Fighter 2 97.1 MB, 30.9 MB (24%); Street Fighter Zero 3 90.8 MB, 37.2 MB (29%; from the 2E lockstep table, not re-run). A session longer than these 36,000-frame windows can reach the cap on Panzer Dragoon II Zwei: it then releases the retired pool and, if that is not enough, flushes everything (`flushes codeCap`), which costs a recompile and is the bounded fallback of track A, not a failure.
+
+### Sega Rally, worker against synchronous compiles, after the poll guard (final review)
+
+`BlockCache::Get` now polls the worker (`HasResults`) only while the cache has compiles pending (`!m_pendingPcs.empty()`); a result can exist only for a pending ticket. One session, executable built from the fix (`build-bench`), `--warmup 2400 --frames 1800`, three rounds interleaved (worker, then `--jit-sync-compile`, each round), machine load 0-15% before each run:
+
+| Sega Rally Championship (US) | worker, 3 runs (median) | `--jit-sync-compile`, 3 runs (median) |
+|---|---|---|
+| SH2 total ms/frame | 4.759 / 4.722 / 4.798 (4.759) | 4.797 / 4.853 / 4.860 (4.853) |
+| ms/frame avg | 7.808 / 7.809 / 7.902 (7.809) | 7.853 / 7.865 / 7.880 (7.865) |
+| max frame ms | 14.0 / 11.2 / 14.3 | 11.7 / 11.7 / 11.0 |
+| frames over 16.7 ms | 0 / 0 / 0 | 0 / 0 / 0 |
+
+The worker is 1.9% faster than synchronous compiles in SH-2 time (median) and 0.7% in average frame time, in every round: the 0.5-1% gap against the worker in the 2E table (4.815 worker against 4.765 synchronous, session 1) is gone, within a spread of 1.6% across the three runs. The earlier code was not re-run in this session, so the comparison with the old gap is across sessions; the worker's max frame is 14 ms in two runs against 11-12 ms synchronously, one burst frame each.
 ### What 2E left
 
 - **Speed.** Five of six titles are faster than the interpreter in SH-2 time (1.008-1.281), Sega Rally is not (0.957). The profile puts 27-37% of the executor in the dispatch between slices (`Get`, entering and leaving the chain), which no earlier track targeted, and one block (the slave's polling loop) at 7-17%. Items 1-2 above are enough on paper to put Sega Rally above 1.0 with margin; they are the first thing for the Track F plan.
