@@ -55,8 +55,8 @@ public:
     // (the default), a native block hands control to the next linked block itself, with the same
     // checks and the same *ctx.cyclesExecuted updates as these steps (INativeBackend::Run).
     //
-    // Resume: a native step whose chain ended at the cycle limit with a next entry
-    // (ExitInfo::next) records {PC, next, cache Version}. The next step, after Step's gates
+    // Resume: a native step whose chain ended at the cycle limit (at a block exit or inside a block)
+    // with a next entry (ExitInfo::next) records {PC, next, cache Version}. The next step, after Step's gates
     // (interrupt, delay slot, PC & 2), runs that entry without BlockCache::Get when PC and the
     // version still match and the cache has no worker results waiting; otherwise, and after any
     // other step outcome or a Flush, the record is dropped. Only self-validating blocks are

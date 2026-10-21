@@ -99,7 +99,9 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 // whose pc equals PC (nullptr on a miss). If cycles >= limit they store that entry in out.next (the
 // executor resumes the next slice there; it stays nullptr on a miss) and return nullptr; otherwise
 // they return the entry, setting frame->chained. Boundary, bus-wait, abort and stale exits never
-// chain and leave out.next nullptr.
+// chain. A boundary exit (cycle limit or interrupt) also stores, when frame->allowChain and no abort
+// is requested, the entry of the link slot whose pc equals the PC it stopped at in out.next
+// (nullptr on a miss), through one shared tail per block; the other exits leave out.next nullptr.
 //
 // With ctx.bus describing a page table, Load/Store/AddAccessCycles/ExitIfBusWait take the inline
 // bus fast path (bus_fast_path.hpp) and call their trampolines only for handler or unmapped pages

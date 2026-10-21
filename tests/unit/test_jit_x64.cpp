@@ -2623,8 +2623,18 @@ TEST_CASE("x64: a chain ending at the cycle limit reports the next entry", "[jit
     // A boundary inside A, and the limit at A's exit without chaining.
     const ExitInfo boundary = run(1, true);
     CHECK(boundary.boundary);
-    CHECK(boundary.next == nullptr);
+    CHECK(boundary.next == nullptr); // no block published at A's second instruction
     CHECK(run(cyclesA, false).next == nullptr);
+    // A block published at the PC a boundary stops at: the boundary exit reports it (not without
+    // chaining).
+    const NativeCode codeMid = compile(kCode + 2);
+    backend->Publish(kCode + 2, codeMid);
+    const ExitInfo mid = run(1, true);
+    CHECK(mid.boundary);
+    CHECK(mid.next == codeMid.entry);
+    CHECK(rig->State().PC == kCode + 2);
+    CHECK(run(1, false).next == nullptr);
+    backend->Unpublish(kCode + 2);
 
     // B unpublished: a slot miss at the limit.
     backend->Unpublish(b);

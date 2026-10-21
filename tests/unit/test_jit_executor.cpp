@@ -1478,3 +1478,44 @@ TEST_CASE("Resume: waiting worker results force a Get", "[jit][executor][resume]
     p.Advance();
     CHECK(p.Resumes() == resumesBefore + 1);
 }
+
+// A loop of one long block ("add #1,R3" x 20 ; bf loop): 40-cycle slices stop inside it. Each stop
+// PC gets its own block (built by the next slice's lookup) and is published, so once every stop
+// phase has a block, the boundary exit reports the entry there and the next slice resumes.
+TEST_CASE("Resume: a slice that stops mid-block resumes there", "[jit][executor][resume]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kLoop = kCode + 0x200;
+    std::vector<uint16_t> loop(20, kAdd1_R3);
+    loop.push_back(Bf(kLoop + 40, kLoop));
+    ResumePair p;
+    p.WriteCode(kLoop, loop);
+    auto state = p.ref->BaseState(kLoop);
+    state.R[3] = 0;
+    p.Load(state);
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kLoop).guestInstrCount == loop.size());
+    for (int i = 0; i < 100; ++i) {
+        INFO("warm-up slice " << i);
+        p.Advance();
+    }
+    const uint64_t resumes = p.Resumes();
+    const uint64_t lookups = p.Lookups();
+    const uint64_t runs = p.exec.GetStats().runs;
+    uint32_t midBlock = 0;
+    for (int i = 0; i < 200; ++i) {
+        INFO("slice " << i);
+        p.Advance();
+        midBlock += p.jit->State().PC != kLoop ? 1u : 0u;
+    }
+    const uint64_t sliceResumes = p.Resumes() - resumes;
+    const uint64_t sliceRuns = p.exec.GetStats().runs - runs;
+    WARN("resumes " << sliceResumes << " of " << sliceRuns << " Run calls, lookups " << p.Lookups() - lookups
+                    << ", slices ending mid-block " << midBlock);
+    REQUIRE(sliceRuns == 200u);
+    CHECK(midBlock > 100u); // 150: the loop's period puts a quarter of the stops at its head
+    CHECK(sliceResumes * 100 > sliceRuns * 80);
+    // Each slice starts with a resume or a lookup, and the chain to the loop's head is linked.
+    CHECK(sliceResumes + (p.Lookups() - lookups) == sliceRuns);
+    CHECK(p.exec.GetStats().staleEntries == 0u);
+}
