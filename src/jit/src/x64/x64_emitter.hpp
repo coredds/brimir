@@ -27,7 +27,10 @@ struct X64Frame {
     uint8_t codeDirty = 0;      // set by generated code: a data access may have written the block's code
     uint8_t allowChain = 0;     // input: chainable exits may enter the next linked block
     uint8_t chained = 0;        // set by generated code: the running block was entered by chaining
-    std::exception_ptr error;   // set by trampolines: the exception a callback threw
+    uint8_t failed = 0;         // set by trampolines: a callback threw; *error holds the exception
+    // Never null: where trampolines store the exception (the backend's, so the frame needs no
+    // exception_ptr construction and destruction, which are library calls on some toolchains).
+    std::exception_ptr *error;
     // Written by generated code. out.cycles counts from the start of the chain: each block starts
     // from it, so the cycle limit and SyncCycles stay relative to limit and entryCycles.
     ExitInfo out;
@@ -54,10 +57,10 @@ constexpr uint32_t LinkIndex(uint32_t pc) {
 
 // Trampolines: the only functions generated code calls (defined in x64_backend.cpp). Each loads
 // its callback from frame->ctx at call time. None lets an exception escape: a callback exception
-// is stored in frame->error, frame->stop is set and the trampoline returns 0. TrRead, TrOnChipRead,
-// TrWrite and TrRefill also set frame->stop when *frame->abortRequested is true after the callback. Generated
+// is stored in *frame->error, frame->failed and frame->stop are set and the trampoline returns 0.
+// TrRead, TrOnChipRead, TrWrite and TrRefill also set frame->stop when *frame->abortRequested is true after the callback. Generated
 // code tests frame->stop after every trampoline except TrMacW/TrMacL, and on stop takes
-// RunBlock's abort exit (out.aborted, out.cycles; PC untouched). Run then rethrows frame->error.
+// RunBlock's abort exit (out.aborted, out.cycles; PC untouched). Run then rethrows *frame->error.
 // bool arguments are passed as uint32_t 0/1.
 uint32_t TrRead(X64Frame *f, uint32_t address, uint32_t size, uint32_t instrFetch) noexcept;
 // TrOnChipRead is TrRead for a data read in partition 0b111 (ctx.onChipRead); it needs ctx.onChipRead.

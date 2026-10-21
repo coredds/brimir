@@ -2,6 +2,7 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_fuzz_programs.hpp"
 #include "jit_test_backend.hpp"
 #include "jit_worker_helpers.hpp"
 #include "sh2_test_rig.hpp"
@@ -16,6 +17,7 @@
 #include <array>
 #include <bit>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -1518,4 +1520,189 @@ TEST_CASE("Resume: a slice that stops mid-block resumes there", "[jit][executor]
     // Each slice starts with a resume or a lookup, and the chain to the loop's head is linked.
     CHECK(sliceResumes + (p.Lookups() - lookups) == sliceRuns);
     CHECK(p.exec.GetStats().staleEntries == 0u);
+}
+
+// --- Chain entry and exit (2E track F, Task 2) -------------------------------------------------
+
+namespace {
+
+struct CallbackError {};
+
+// Armed once: the next MMIO read requests a flush (a watchdog reset) and then throws instead of
+// reading.
+bool g_throwArmed = false;
+uint32_t g_throws = 0;
+
+uint32 FlushThenThrowRead(void *sh2, uint32 address, uint32 size, bool instrFetch) {
+    if (g_throwArmed && !instrFetch && (address & 0x7000000u) == (kData & 0x7000000u)) {
+        g_throwArmed = false;
+        ++g_throws;
+        g_exec->Flush();
+        throw CallbackError{};
+    }
+    return g_origRead(sh2, address, size, instrFetch);
+}
+
+// bra `to`, placed at `from`.
+uint16_t Bra(uint32_t from, uint32_t to) {
+    const int32_t disp = (static_cast<int32_t>(to) - static_cast<int32_t>(from) - 4) / 2;
+    return static_cast<uint16_t>(0xA000 | (static_cast<uint32_t>(disp) & 0xFFFu));
+}
+
+constexpr uint16_t kNop = 0x0009;
+
+// Runs the interpreter on `ref` up to `pc`, then compares it with `jit`.
+void InterpretTo(Rig &ref, uint32_t pc) {
+    auto &ctx = ref.sh2->GetJitContext();
+    for (int i = 0; i < 64 && *ctx.PC != pc; ++i) {
+        ctx.interpretOne(ctx.sh2);
+    }
+    REQUIRE(*ctx.PC == pc);
+}
+
+} // namespace
+
+// Review Focus 4: a read callback inside a running block requests a flush and then throws. The
+// exception reaches the caller, the deferred flush is applied, the executor is no longer "in a
+// block" (a later flush applies at once), and the next step runs normally.
+TEST_CASE("Executor: a throwing callback inside a chain still applies a deferred flush", "[jit][executor]") {
+    // B: mov.l @R1,R2 (MMIO) ; add #1,R3 ; sleep. Chain case (x64): A: add #1,R3 ; bra B ; nop.
+    constexpr uint32_t kA = kCode;
+    constexpr uint32_t kB = kCode + 0x20;
+    constexpr uint32_t kSleepAt = kB + 4;
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    const bool chain = GENERATE(false, true);
+    if (chain && kind != brimir::jit::BackendKind::X64) {
+        SKIP("chaining needs native code");
+    }
+    INFO("backend " << brimir::jit::BackendName(kind) << (chain ? ", chain" : ", single block"));
+    const uint32_t start = chain ? kA : kB;
+
+    auto ref = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{kind, sh2test::kNativeOnFirstRun};
+    auto state = rig->BaseState(start);
+    for (Rig *r : {ref.get(), rig.get()}) {
+        r->WriteCode(kA, {kAdd1_R3, Bra(kA + 2, kB), kNop});
+        r->WriteCode(kB, {kMovL_R1_R2, kAdd1_R3, kSleep});
+        WriteMmio32(*r, kData, 0x12345678);
+        state = r->BaseState(start);
+        state.R[1] = kData;
+        state.R[2] = 0;
+        state.R[3] = 0;
+        r->Load(state);
+    }
+    auto &ctx = rig->sh2->GetJitContext();
+
+    if (chain) {
+        // Compile and publish A and B, then start over.
+        while (*ctx.PC != kSleepAt) {
+            exec.Step(ctx);
+        }
+        REQUIRE(exec.Cache().Size() == 2);
+        rig->Load(state);
+        rig->mmio.log.clear();
+    }
+
+    const auto stats = exec.GetStats();
+    g_exec = &exec;
+    g_origRead = ctx.read;
+    ctx.read = FlushThenThrowRead;
+    g_throwArmed = true;
+    g_throws = 0;
+    bool caught = false;
+    try {
+        if (chain) {
+            exec.Run(ctx, 0, 1000);
+        } else {
+            exec.Step(ctx);
+        }
+    } catch (const CallbackError &) {
+        caught = true;
+    }
+    ctx.read = g_origRead;
+    g_exec = nullptr;
+    g_throwArmed = false;
+    rig->mmio.log.clear(); // the aborted read's bus-wait query (x64)
+
+    REQUIRE(caught);
+    CHECK(g_throws == 1u);
+    CHECK(exec.Cache().Size() == 0); // the deferred flush was applied
+    // The chain ran A and entered B (one step: B was entered by chaining, not by another step).
+    const auto &after = exec.GetStats();
+    const uint64_t native = kind == brimir::jit::BackendKind::X64 ? 1u : 0u;
+    CHECK(after.blocksRun == stats.blocksRun + 1);
+    CHECK(after.nativeBlocksRun == stats.nativeBlocksRun + native);
+    CHECK(after.chainedBlocks == stats.chainedBlocks);
+    CHECK(after.interpreted == stats.interpreted);
+    CHECK(after.staleEntries == stats.staleEntries);
+    CHECK(after.resumes == stats.resumes);
+    CHECK(after.runs == stats.runs + (chain ? 1u : 0u));
+    CHECK(rig->State().PC == kB);
+    CHECK(rig->State().R[3] == (chain ? 1u : 0u));
+    CHECK(rig->State().R[2] == 0u);
+
+    // No longer in a block: a flush applies at once.
+    exec.MutableCache().Get(ctx, kB);
+    REQUIRE(exec.Cache().Size() == 1);
+    exec.Flush();
+    CHECK(exec.Cache().Size() == 0);
+
+    // The next step runs B normally; the result equals the interpreter's.
+    const auto next = exec.Step(ctx);
+    CHECK_FALSE(next.aborted);
+    CHECK(next.retired == 2);
+    CHECK(rig->State().PC == kSleepAt);
+    CHECK(rig->State().R[2] == 0x12345678u);
+    CHECK(rig->State().R[3] == (chain ? 2u : 1u));
+    CHECK(exec.Cache().Size() == 1);
+    InterpretTo(*ref, kSleepAt);
+    const std::string diff = sh2test::DiffRigs(*ref, *rig);
+    INFO(diff);
+    CHECK(diff.empty());
+}
+
+// Pins the executor's Stats over one deterministic run, recorded from the build before the
+// lean chain entry (8f96e75): two fuzz programs that replace each other at the same address
+// every 200 slices and whenever one reaches its SLEEP (so cached blocks go stale), 2,000 random
+// slices of 1-80 cycles
+// through SH2::Advance, tiered compilation (threshold 3), chaining and resumes.
+TEST_CASE("Executor: stats over a fuzz program are unchanged by the lean entry path", "[jit][executor]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const sh2test::FuzzProgram programs[2] = {sh2test::MakeFuzzProgram(0xF0250001u),
+                                              sh2test::MakeFuzzProgram(0xF0250002u)};
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{brimir::jit::BackendKind::X64, 3};
+    int current = 0;
+    const auto load = [&] {
+        rig->mmio.busWaitEvery = programs[current].busWaitEvery;
+        rig->WriteCode(sh2test::kFuzzCode, programs[current].words);
+        rig->Load(programs[current].state);
+    };
+    load();
+    rig->sh2->SetJitExecutor(&exec);
+    std::mt19937 rng(0x2E2F2u);
+    uint32_t restarts = 0;
+    for (int i = 0; i < 2000; ++i) {
+        rig->sh2->Advance<false, false>(1 + rng() % 80);
+        if (rig->State().sleep || i % 200 == 199) {
+            current ^= 1;
+            ++restarts;
+            load();
+        }
+    }
+    const auto &s = exec.GetStats();
+    WARN("restarts " << restarts << " blocksRun " << s.blocksRun << " nativeBlocksRun " << s.nativeBlocksRun
+                     << " chainedBlocks " << s.chainedBlocks << " interpreted " << s.interpreted << " staleEntries "
+                     << s.staleEntries << " resumes " << s.resumes << " runs " << s.runs);
+    CHECK(restarts == 19u);
+    CHECK(s.blocksRun == 7314u);
+    CHECK(s.nativeBlocksRun == 7251u);
+    CHECK(s.chainedBlocks == 3752u);
+    CHECK(s.interpreted == 49u);
+    CHECK(s.staleEntries == 22u);
+    CHECK(s.resumes == 1438u);
+    CHECK(s.runs == 2000u);
 }

@@ -49,6 +49,8 @@ private:
     // Link table (x64_emitter.hpp); its address is embedded in generated code, so it never moves.
     std::unique_ptr<X64LinkSlot[]> m_links;
     size_t m_codeBytes = 0;
+    // The exception a callback threw during Run (X64Frame::error); empty outside a failing Run.
+    std::exception_ptr m_error;
 };
 
 } // namespace brimir::jit

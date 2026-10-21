@@ -1583,6 +1583,12 @@ Method (Track F plan, "Track F progress measurement"): `build-bench`, `--warmup 
 | 1 | Sega Rally Championship (US) | 4.682 | 4.576 (4.715) | **1.023** (0.993) | 7.229 / 7.584 (7.734) | 0 0 0 / 0 | 95.1% / 65.4% |
 | 1 | Street Fighter Zero 3 (JP, 4 MB cart) | 4.584 | 4.204 (4.284) | 1.090 (1.070) | 8.913 / 9.121 (9.305) | 0 0 0 / 0 | 93.7% / 99.7% |
 | 1 | Burning Rangers (US) | 6.361 | 5.985 (6.130) | 1.063 (1.038) | 8.732 / 8.664 (8.778) | 0 0 0 / 0 | 92.3% / 77.7% |
+| 2 | Panzer Dragoon II Zwei (US) | 4.911 | 4.112 (Task 1: 4.199) | 1.194 (1.170) | 6.372 / 5.892 (5.889) | 0 0 0 / 0 | 88.4% / 99.6% |
+| 2 | Sega Rally Championship (US) | 4.730 | 4.474 (Task 1: 4.564) | **1.057** (1.036) | 7.198 / 7.563 (7.597) | 0 0 0 / 0 | 95.1% / 65.4% |
+| 2 | Street Fighter Zero 3 (JP, 4 MB cart) | 4.505 | 4.006 (Task 1: 4.128) | 1.125 (1.091) | 8.993 / 9.178 (9.159) | 0 0 0 / 0 | 93.7% / 99.7% |
+| 2 | Burning Rangers (US) | 6.362 | 5.841 (Task 1: 5.951) | 1.089 (1.069) | 8.727 / 8.467 (8.635) | 0 0 0 / 0 | 92.2% / 77.7% |
+
+From Task 2 on, the value in parentheses is the previous task's executable (Task 1, `8f96e75`), run interleaved in the same rounds (interpreter, previous task, this task), not `7f807b9`.
 
 ### Task 1: resume a slice without `Get` (2E F1)
 
@@ -1594,3 +1600,17 @@ A slice that ends at the cycle limit records the link-table entry for the PC it 
 Against the base in the same session (3 rounds; PD2 6 rounds, as its first three overlapped): Sega Rally 4.572-4.598 against 4.709-4.726, **now faster than the interpreter (1.023)**; Burning Rangers 5.916-5.999 against 6.123-6.151; Street Fighter Zero 3 4.162-4.213 against 4.273-4.303; all three beyond the run-to-run spread. Panzer Dragoon II Zwei 4.201-4.291 (median 4.237) against 4.189-4.288 (median 4.205): within the spread. Average frame time is lower than the base's on Rally (-0.15 ms), SFZ3 (-0.18) and BR (-0.11), equal on PD2. The profile's 0.30-0.65 ms/frame estimate is reached only in part (0.08-0.15 ms/frame on the three titles that gain).
 
 Code size: `nativeBytesPerBlock` +83-90 bytes per block against the base (master PD2 3,241 -> 3,324, Rally 2,876 -> 2,960, SFZ3 3,000 -> 3,083, BR 3,025 -> 3,109; slave +82-90; +1.7-5.7%): the shared boundary tail and the limit store in each chainable exit. Exact: lockstep BIOS 1,200 frames x64 and IR, Sega Rally, Street Fighter Zero 3 and Burning Rangers 1,800 frames x64: all identical, `compileFallbacks 0`.
+### Task 2: leaner chain entry and exit (2E F2)
+
+The profile's 20-22 ns per chain (`RunEntry` + `StepImpl` tail + `X64Backend::Run`) named five costs. Each change was measured on its own against the previous kept step's executable, Panzer Dragoon II Zwei and Sega Rally, three interleaved rounds, `--warmup 2400 --frames 1800` (x64 SH2 ms/frame per round):
+
+| Step | Change | PD2: previous / this | Rally: previous / this | Kept |
+|---|---|---|---|---|
+| c1 | `X64Frame` holds no `std::exception_ptr`: trampolines store the exception in the backend's and set a `failed` byte. With MSVC, an `exception_ptr`'s constructor, destructor and `operator bool` are calls into the C++ runtime DLL, three per chain | 4.198 4.231 4.178 / 4.130 4.154 4.137 | 4.535 4.542 4.557 / 4.543 4.511 4.628 | yes (PD2 -0.06; Rally unchanged) |
+| c2 | No virtual call: the executor calls `RunX64` (`x64_factory.hpp`, asmjit-free), which calls the `final` `X64Backend::Run` directly; `INativeBackend::Run` stays for every other caller | 4.126 4.148 4.148 / 4.084 4.070 4.076 | 4.509 4.503 4.540 / 4.576 4.436 4.440 | yes (PD2 -0.07; Rally median -0.07) |
+| c3 | `RunEntry` without the `BlockScope` guard (try/catch and an explicit end), counters added once after the run | 4.047 4.084 4.033 / 4.056 4.050 4.015 | 4.428 4.463 4.459 / 4.451 4.441 4.463 | no (within spread) |
+| c4 | The frame kept in the backend and initialised once; `Run` writes only the inputs and resets the outputs | 4.043 4.060 4.053 / 4.111 4.074 4.115 | 4.467 4.479 4.436 / 4.541 4.529 4.516 | no (+0.05-0.07: slower) |
+
+The `ExitInfo` copy (32 bytes, two stores) was not changed. The guard object and the counters cost nothing measurable (x64 table-based unwinding makes the guard free on the normal path). Keeping the frame in the backend was slower, probably because generated code then addresses heap memory instead of the hot stack frame. The cost was in the runtime-library calls and the indirect call.
+
+Progress (table above, all four titles, 3 rounds against Task 1's executable): x64 is 0.09-0.12 ms/frame faster on every title (PD2 4.112 against 4.199, Rally 4.474 / 4.564, SFZ3 4.006 / 4.128, BR 5.841 / 5.951). The run ranges do not overlap on PD2, SFZ3 and BR. On Rally they overlap by one round: this task's round 1, 4.600, against Task 1's 4.547-4.656, while each round pair improves. The profile's 0.22-0.39 ms/frame is reached in part. Sega Rally's ratio is now 1.057. `nativeBytesPerBlock` is unchanged within block-mix noise (master PD2 3,324, Rally 2,960, SFZ3 3,082, BR 3,109). The emitter is unchanged; only the frame offset of `out` moved. `Stats` are unchanged. A pinning test (`Executor: stats over a fuzz program are unchanged by the lean entry path`) holds the values recorded before the change. BIOS lockstep 1,200 frames x64 with `--jit-sync-compile` gives identical counters for both executables. Exact: lockstep BIOS 1,200 frames x64 and IR identical.

@@ -2,6 +2,10 @@
 
 #include <brimir/jit/bus_fast_path.hpp>
 
+#if BRIMIR_JIT_HAS_X64
+#include "x64/x64_factory.hpp"
+#endif
+
 #include <cassert>
 
 namespace brimir::jit {
@@ -162,7 +166,12 @@ ExitInfo Executor::RunEntry(const NativeCode &code, const Block *block, ymir::sh
         // Counted before the run, so a callback exception (rethrown by Run) still counts the first
         // block; then corrected to the chain's count (0 when the first block was stale).
         ++m_stats.nativeBlocksRun;
+#if BRIMIR_JIT_HAS_X64
+        // The only native backend: call its Run directly.
+        const ExitInfo info = RunX64(*m_native, code, ctx, target, &m_flushPending, allowChain);
+#else
         const ExitInfo info = m_native->Run(code, ctx, target, &m_flushPending, allowChain);
+#endif
         m_stats.blocksRun = m_stats.blocksRun - 1 + info.blocksRun;
         m_stats.nativeBlocksRun = m_stats.nativeBlocksRun - 1 + info.blocksRun;
         if (info.blocksRun > 1) {

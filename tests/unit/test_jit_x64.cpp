@@ -1748,6 +1748,47 @@ TEST_CASE("x64 propagates callback exceptions", "[jit][x64]") {
         CHECK(x64Rig->State().PC == kCode + 6);
         CHECK(x64Exec.GetStats().nativeBlocksRun == 2);
     }
+
+    SECTION("Run after a rethrown exception starts afresh on the same backend") {
+        // add #1,R3 ; mov.l @R1,R2 ; add #1,R3 ; sleep
+        constexpr uint16_t kMovL_R1_R2 = 0x6212;
+        auto rig = std::make_unique<Rig>();
+        rig->WriteCode(kCode, {kAdd1_R3, kMovL_R1_R2, kAdd1_R3, static_cast<uint16_t>(kSleep)});
+        auto state = rig->BaseState(kCode);
+        state.R[1] = kMmio;
+        state.R[2] = 0;
+        state.R[3] = 0;
+        rig->Load(state);
+        auto &ctx = rig->sh2->GetJitContext();
+        Block block = brimir::jit::BuildBlock(ctx, kCode);
+        brimir::jit::OptimizeBlock(block);
+        const auto backend = brimir::jit::MakeNativeBackend(BackendKind::X64);
+        REQUIRE(backend != nullptr);
+        NativeCode code;
+        REQUIRE(backend->Compile(block, ctx, code));
+
+        g_origRead = ctx.read;
+        ctx.read = ThrowingRead;
+        *ctx.cyclesExecuted = 0;
+        CHECK_THROWS_AS(backend->Run(code, ctx), std::runtime_error);
+        ctx.read = g_origRead;
+        CHECK(rig->State().PC == kCode);
+
+        // The same backend, the callback no longer throws: a normal exit, nothing rethrown.
+        for (int i = 0; i < 2; ++i) {
+            INFO("run " << i);
+            rig->Load(state);
+            *ctx.cyclesExecuted = 0;
+            const ExitInfo info = backend->Run(code, ctx);
+            CHECK_FALSE(info.aborted);
+            CHECK_FALSE(info.stale);
+            CHECK(info.retired == 3);
+            CHECK(info.blocksRun == 1u);
+            CHECK(info.next == nullptr);
+            CHECK(rig->State().R[3] == 2u);
+            CHECK(rig->State().PC == kCode + 6);
+        }
+    }
 }
 
 TEST_CASE("x64 inline memory matches IR", "[jit][x64]") {

@@ -63,7 +63,8 @@ const bool kNoAbort = false;
 
 // Stores the exception being handled and stops the block.
 void Fail(X64Frame *f) noexcept {
-    f->error = std::current_exception();
+    *f->error = std::current_exception();
+    f->failed = 1;
     f->stop = 1;
 }
 
@@ -256,6 +257,7 @@ ExitInfo X64Backend::Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, 
     frame.limit = target >= frame.entryCycles ? target - frame.entryCycles : 0;
     frame.abortRequested = abortRequested != nullptr ? abortRequested : &kNoAbort;
     frame.allowChain = allowChain ? 1 : 0;
+    frame.error = &m_error;
 
     // Each block returns the next block's entry (chaining) or nullptr. A block that stops (abort,
     // exception, stale entry, boundary, bus wait) always returns nullptr, so no generated code runs
@@ -265,8 +267,10 @@ ExitInfo X64Backend::Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, 
         next = reinterpret_cast<X64BlockFn>(const_cast<void *>(next))(&frame);
     } while (next != nullptr);
 
-    if (frame.error) {
-        std::rethrow_exception(frame.error);
+    if (frame.failed) {
+        std::exception_ptr error = std::move(m_error);
+        m_error = nullptr;
+        std::rethrow_exception(error);
     }
     // A block can end normally with an abort requested: callbacks other than read/write/refill
     // (endDelaySlot's own refill, setSR, ...) do not stop it, as in RunBlock. The chain then ended
@@ -305,6 +309,12 @@ void X64Backend::Reset() {
 
 std::unique_ptr<INativeBackend> MakeX64Backend() {
     return std::make_unique<X64Backend>();
+}
+
+ExitInfo RunX64(INativeBackend &backend, const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target,
+                const bool *abortRequested, bool allowChain) {
+    assert(backend.Kind() == BackendKind::X64);
+    return static_cast<X64Backend &>(backend).X64Backend::Run(code, ctx, target, abortRequested, allowChain);
 }
 
 } // namespace brimir::jit
