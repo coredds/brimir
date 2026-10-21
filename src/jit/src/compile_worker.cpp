@@ -1,7 +1,9 @@
 #include <brimir/jit/compile_worker.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <system_error>
 #include <utility>
 
 namespace brimir::jit {
@@ -14,7 +16,18 @@ bool CompileThreadSupported() {
 #endif
 }
 
+namespace {
+std::atomic<bool> g_failStart{false};
+} // namespace
+
+void SetCompileWorkerStartFailureForTesting(bool fail) {
+    g_failStart.store(fail, std::memory_order_relaxed);
+}
+
 CompileWorker::CompileWorker() {
+    if (g_failStart.load(std::memory_order_relaxed)) {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    }
     m_thread = std::thread([this] { Run(); });
 }
 

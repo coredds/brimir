@@ -171,12 +171,11 @@ void BlockCache::EvictLeastRecentlyUsedIr() {
     ++m_irEvictions;
     const size_t below = m_maxCachedInsts - m_maxCachedInsts / 8 * (8 - kIrCapTargetEighths);
 
-    // Every IR block: the live IR-only ones (interpreter fallbacks without IR included) and the
-    // IR pool's.
+    // Every IR block: the live IR-only ones and the IR pool's.
     std::vector<IrVictim> &victims = m_irVictims;
     victims.clear();
     for (const auto &[pc, entry] : m_blocks) {
-        if (entry->code.entry == nullptr) {
+        if (entry->code.entry == nullptr && !entry->block.code.empty()) { // an interpreter fallback frees nothing
             victims.push_back(IrVictim{entry->lastUse, entry->block.code.size(), pc, entry.get(), {}});
         }
     }
@@ -318,7 +317,8 @@ BlockCache::~BlockCache() {
 
 const CachedBlock &BlockCache::Get(ymir::sh2::SH2JitContext &ctx, uint32_t pc) {
     // No block runs here, so committing and publishing code is safe.
-    if (m_worker != nullptr && m_worker->HasResults(this)) {
+    // A result exists only for a pending ticket, so the worker is polled only with compiles pending.
+    if (m_worker != nullptr && !m_pendingPcs.empty() && m_worker->HasResults(this)) {
         InstallResults();
     }
     RecentSlot &slot = SlotFor(pc);
@@ -484,6 +484,7 @@ void BlockCache::InstallResults() {
         const auto pending = m_pendingPcs.find(result.ticket);
         assert(pending != m_pendingPcs.end() && "a flush cancels every pending compile");
         if (pending == m_pendingPcs.end()) {
+            ++m_asyncDropped; // an invariant violation: visible in the bench
             continue;
         }
         const uint32_t pc = pending->second;

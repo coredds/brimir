@@ -11,6 +11,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "audio_ring_buffer.hpp"
@@ -256,6 +257,11 @@ public:
     /// @brief The compile worker shared by both executors, or nullptr if there is none.
     jit::CompileWorker* GetSH2JitCompileWorker() const { return m_jitWorker.get(); }
 
+    /// @brief Takes the warning left when the compile worker's thread could not start (the JIT then
+    /// compiles on the emulation thread), or an empty string if there is none. Each failure is
+    /// reported once.
+    std::string TakeSH2JitWorkerWarning() { return std::exchange(m_jitWorkerWarning, std::string{}); }
+
     /// @brief The JIT executor of the master or slave SH-2, or nullptr if the JIT was never enabled.
     const jit::Executor* GetSH2JitExecutor(bool master) const {
         return master ? m_jitMaster.get() : m_jitSlave.get();
@@ -400,6 +406,10 @@ private:
     // Declared before the executors so it is destroyed after them: their block caches cancel
     // their jobs on it when they are destroyed.
     std::unique_ptr<jit::CompileWorker> m_jitWorker;
+    // The worker's thread could not start: compiles stay synchronous until the option or the
+    // backend changes. The message waits for the frontend to take and log it.
+    bool m_jitWorkerFailed = false;
+    std::string m_jitWorkerWarning;
     std::unique_ptr<jit::Executor> m_jitMaster;
     std::unique_ptr<jit::Executor> m_jitSlave;
 

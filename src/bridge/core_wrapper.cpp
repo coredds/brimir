@@ -29,6 +29,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <system_error>
 
 #include <lz4.h>
 #include <algorithm>
@@ -1633,9 +1634,16 @@ void CoreWrapper::SetSH2JitEnabled(bool enable) {
         return; // applied in Initialize()
     }
     if (enable) {
-        if (!m_jitWorker && m_sh2JitCompileThread && jit::CompileThreadSupported() &&
+        if (!m_jitWorker && !m_jitWorkerFailed && m_sh2JitCompileThread && jit::CompileThreadSupported() &&
             m_sh2JitBackend == jit::BackendKind::X64) {
-            m_jitWorker = std::make_unique<jit::CompileWorker>();
+            try {
+                m_jitWorker = std::make_unique<jit::CompileWorker>();
+            } catch (const std::system_error& e) {
+                // No thread: compile on the emulation thread, as without the option.
+                m_jitWorkerFailed = true;
+                m_jitWorkerWarning = std::string("SH-2 JIT compile thread could not start (") + e.what() +
+                                     "); compiling on the emulation thread";
+            }
         }
         if (!m_jitMaster) {
             m_jitMaster = std::make_unique<jit::Executor>(m_sh2JitBackend, jit::kNativeCompileThreshold,
@@ -1661,6 +1669,7 @@ void CoreWrapper::SetSH2JitBackend(jit::BackendKind kind) {
         return;
     }
     m_sh2JitBackend = kind;
+    m_jitWorkerFailed = false;
     DropSH2JitExecutors();
     if (m_sh2JitEnabled) {
         SetSH2JitEnabled(true); // recreates both with the new backend (or waits for Initialize)
@@ -1672,6 +1681,7 @@ void CoreWrapper::SetSH2JitCompileThread(bool enable) {
         return;
     }
     m_sh2JitCompileThread = enable;
+    m_jitWorkerFailed = false;
     DropSH2JitExecutors();
     if (m_sh2JitEnabled) {
         SetSH2JitEnabled(true); // recreates both, and the worker if it is wanted

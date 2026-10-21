@@ -8,6 +8,7 @@
 #include <brimir/jit/block_cache.hpp>
 #include <brimir/jit/compile_worker.hpp>
 #include <brimir/jit/executor.hpp>
+#include <brimir/jit/interp_backend.hpp>
 
 #include <algorithm>
 #include <array>
@@ -882,4 +883,96 @@ TEST_CASE("Background compile: the pending bound defers compiles", "[jit][worker
     REQUIRE(p.StepAt(last).retired == 1);
     CHECK(p.Entry(last)->code.entry != nullptr);
     CHECK(p.Cache().AsyncCompiles() == kMaxPendingCompiles + 1);
+}
+
+TEST_CASE("Background compile: a pending IR block freed by the IR cap never gets its result installed", "[jit][worker]") {
+    if (!IsBackendAvailable(BackendKind::X64)) {
+        SKIP("no x64 backend in this build");
+    }
+    constexpr uint32_t kOther = kCode + 0x100;
+    // P: four independent adds (no folding); Q: one add, smaller than P.
+    const std::vector<uint16_t> programP{AddI(3, 1), AddI(4, 2), AddI(5, 3), AddI(6, 4), kSleepOp};
+    const std::vector<uint16_t> programQ{AddI(7, 1), kSleepOp};
+
+    CompileWorker worker;
+    WorkerBlocker blocker{worker};
+    REQUIRE(blocker.Entered());
+    const auto refRig = std::make_unique<Rig>(); // a Rig is too big for the stack
+    const auto jitRig = std::make_unique<Rig>();
+    Rig &ref = *refRig;
+    Rig &jit = *jitRig;
+    for (Rig *rig : {&ref, &jit}) {
+        rig->WriteCode(kCode, programP);
+        rig->WriteCode(kOther, programQ);
+    }
+    auto &ctx = jit.sh2->GetJitContext();
+
+    // P alone fills the IR cap.
+    size_t pInsts = 0;
+    size_t qInsts = 0;
+    {
+        BlockCache probe;
+        pInsts = probe.Get(ctx, kCode).block.code.size();
+        qInsts = probe.Get(ctx, kOther).block.code.size();
+    }
+    REQUIRE(pInsts > 0);
+    REQUIRE(qInsts > 0);
+    REQUIRE(qInsts < pInsts - pInsts / 8);
+
+    const auto backend = MakeNativeBackend(BackendKind::X64);
+    BlockCache cache{backend.get(), kMaxNativeCodeBytes, kThreshold, pInsts, kMaxRetiredCodeBytes, kMaxStaleDampShift,
+                     &worker};
+    const void *owner = &cache;
+
+    // One block through the cache (native or RunBlock) against the interpreter on the reference rig.
+    const auto runAt = [&](uint32_t pc, uint32_t retired) -> const CachedBlock & {
+        ref.Load(ref.BaseState(pc));
+        jit.Load(jit.BaseState(pc));
+        const CachedBlock &entry = cache.Get(ctx, pc);
+        const ExitInfo info = entry.code.entry != nullptr ? backend->Run(entry.code, ctx) : RunBlock(entry.block, ctx);
+        CHECK(info.retired == retired);
+        uint64_t refCycles = 0;
+        for (uint32_t i = 0; i < info.retired; ++i) {
+            refCycles += ref.sh2->Step<false, false>();
+        }
+        CHECK(info.cycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(ref, jit);
+        INFO(diff);
+        CHECK(diff.empty());
+        return entry;
+    };
+
+    runAt(kCode, 4);
+    runAt(kCode, 4); // the threshold run submits P; queued behind the blocker
+    REQUIRE(cache.PendingCompiles() == 1);
+    REQUIRE(cache.Find(kCode) != nullptr);
+    CHECK(cache.Find(kCode)->pendingTicket != 0);
+    CHECK(cache.CachedInsts() == pInsts);
+
+    runAt(kOther, 1); // at the cap: P, live, IR-only and pending, is the least recently used and is freed
+    CHECK(cache.IrEvictions() == 1);
+    CHECK(cache.IrEvictedBlocks() == 1);
+    CHECK(cache.Find(kCode) == nullptr);
+    CHECK(cache.CachedInsts() == qInsts);
+    CHECK(cache.PendingCompiles() == 1); // its ticket still waits for the result
+
+    blocker.Open();
+    REQUIRE(WaitForResults(worker, owner));
+    runAt(kCode, 4); // the result arrives and is dropped; P is rebuilt
+    CHECK(cache.AsyncDropped() == 1);
+    CHECK(cache.AsyncCompiles() == 0);
+    CHECK(cache.PendingCompiles() == 0);
+    CHECK(cache.NativeCompiles() == 0);
+    REQUIRE(cache.Find(kCode) != nullptr);
+    CHECK(cache.Find(kCode)->code.entry == nullptr);
+    CHECK(cache.Find(kCode)->pendingTicket == 0);
+
+    runAt(kCode, 4); // its own threshold run submits again
+    CHECK(cache.PendingCompiles() == 1);
+    REQUIRE(WaitForResults(worker, owner));
+    const CachedBlock &native = runAt(kCode, 4); // installed and run natively
+    CHECK(native.code.entry != nullptr);
+    CHECK(cache.AsyncCompiles() == 1);
+    CHECK(cache.AsyncDropped() == 1);
+    CHECK(cache.PendingCompiles() == 0);
 }

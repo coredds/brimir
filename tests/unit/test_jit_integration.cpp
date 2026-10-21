@@ -185,3 +185,48 @@ TEST_CASE("Core unload with compiles in flight", "[jit][integration][worker]") {
         // `core` is destroyed here with its worker possibly mid-compile.
     }
 }
+
+TEST_CASE("The JIT falls back to synchronous compiles if the compile thread cannot start", "[jit][integration][worker]") {
+    // Fails the worker's construction for the whole case, as when the OS cannot create the thread.
+    struct FailStart {
+        FailStart() { brimir::jit::SetCompileWorkerStartFailureForTesting(true); }
+        ~FailStart() { brimir::jit::SetCompileWorkerStartFailureForTesting(false); }
+    } failStart;
+
+    CoreWrapper core;
+    core.SetSH2JitCompileThread(true);
+    if (brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        core.SetSH2JitBackend(brimir::jit::BackendKind::X64);
+    }
+    core.SetSH2JitEnabled(true);
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPL(HotLoopIpl()));
+    core.Reset();
+    RunFrames(core, 60);
+
+    REQUIRE(core.GetSH2JitCompileWorker() == nullptr);
+    const auto *master = core.GetSH2JitExecutor(true);
+    REQUIRE(master != nullptr);
+    REQUIRE(master->GetStats().blocksRun > 0);
+    REQUIRE(master->Cache().AsyncCompiles() == 0);
+    if (WorkerExpected(core, true)) {
+        // The failure was reached, reported once, and the loop was compiled on the emulation thread.
+        REQUIRE_FALSE(core.TakeSH2JitWorkerWarning().empty());
+        REQUIRE(core.TakeSH2JitWorkerWarning().empty());
+        REQUIRE(master->Cache().NativeCompiles() > 0);
+    }
+
+    // Enabling again does not retry the thread, and nothing is reported twice.
+    core.SetSH2JitEnabled(false);
+    core.SetSH2JitEnabled(true);
+    REQUIRE(core.GetSH2JitCompileWorker() == nullptr);
+    REQUIRE(core.TakeSH2JitWorkerWarning().empty());
+    RunFrames(core, 5);
+
+    // Once the thread can start again, changing the option brings the worker back.
+    brimir::jit::SetCompileWorkerStartFailureForTesting(false);
+    core.SetSH2JitCompileThread(false);
+    core.SetSH2JitCompileThread(true);
+    REQUIRE((core.GetSH2JitCompileWorker() != nullptr) == WorkerExpected(core, true));
+    RunFrames(core, 5);
+}

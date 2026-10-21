@@ -39,6 +39,10 @@ namespace brimir::jit {
 // architecture.
 bool CompileThreadSupported();
 
+// Tests only: while set, constructing a CompileWorker throws std::system_error, as when the OS
+// cannot create the thread.
+void SetCompileWorkerStartFailureForTesting(bool fail);
+
 struct CompileJob {
     const void *owner;
     uint64_t ticket;
