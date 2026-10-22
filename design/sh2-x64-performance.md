@@ -1591,7 +1591,9 @@ Method (Track F plan, "Track F progress measurement"): `build-bench`, `--warmup 
 | 3 | Sega Rally Championship (US) | 4.610 | 4.460 (Task 2: 4.464) | **1.034** (1.033) | 7.137 / 7.545 (7.539) | 0 0 0 / 0 | 95.1% / 65.4% |
 | 3 | Street Fighter Zero 3 (JP, 4 MB cart) | 4.524 | 3.967 (Task 2: 3.979) | 1.140 (1.137) | 8.967 / 9.154 (9.155) | 0 0 0 / 0 | 93.8% / 99.7% |
 | 3 | Burning Rangers (US) | 6.255 | 5.836 (Task 2: 5.834) | 1.072 (1.072) | 8.597 / 8.452 (8.449) | 0 0 0 / 0 | 92.2% / 77.7% |
+
 From Task 2 on, the value in parentheses is the previous task's executable (Task 1, `8f96e75`), run interleaved in the same rounds (interpreter, previous task, this task), not `7f807b9`.
+
 For Task 3 the parenthesised base is Task 2's executable (`3594712`), interleaved in the same rounds. Task 3 is the `RTE` experiment: **dropped, not part of the branch**.
 
 **Task 3: compile `RTE` (2E F3), measured and dropped.** `RTE` was a delayed branch in the front end (the two stack reads, the SR write through a new `WriteSR` IR op, `R15 += 8`; interrupt entry stayed interpreted).
