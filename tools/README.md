@@ -77,8 +77,13 @@ native backend could not compile; they run on the IR interpreter) and
 page changed since they were compiled; each is recompiled and run) and
 `chainedBlocks` (native blocks entered directly from the previous block,
 without returning to the executor; `nativeBlocksRun / (nativeBlocksRun -
-chainedBlocks)` is the average chain length). A `cache` line per CPU adds the
-block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
+chainedBlocks)` is the average chain length), `resumes` (steps that entered
+native code at the PC where the previous slice stopped, without a cache
+lookup: the slice ended at a block end or in the middle of a block, at the
+cycle limit or for an interrupt; the interrupt, delay-slot and fetch-buffer
+gates of a step apply first, so a pending interrupt is still interpreted) and
+`runs` (scheduler slices, `Executor::Run` calls; `resumes / runs` is the share
+of slices resumed). A `cache` line per CPU adds the block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
 (blocks compiled natively: with a native backend a block runs on the IR
 interpreter until its 16th run, `kNativeCompileThreshold`), `compileMs` (host
 time building blocks and compiling them natively), `nativeBytesPerBlock`,
@@ -137,6 +142,10 @@ SH2 total    : 4.124 ms/frame (52.5% of Ymir_RunFrame)
 SH-2 time is measured inside `SH2::Advance` and includes on-chip peripherals
 (DMA, timers) and bus accesses the CPUs make. VDP rendering runs on worker
 threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
+With threaded VDP the emulation thread also waits at the end of each frame for
+the VDP2 thread, so the frame time can hide a change in SH-2 time.
+`--no-threaded-vdp` renders VDP1 and VDP2 on the emulation thread instead (the
+report prints `threaded VDP : on|off`); `--lockstep` always runs unthreaded.
 
 ### Lockstep validation
 
@@ -199,11 +208,11 @@ lockstep: 600/36000 frames identical
 ...
 lockstep: OK, 36000 frames identical
 SH2 JIT backend: x64
-jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
+jit master   : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...  resumes ...  runs ...
 cache master : compiles ...  nativeCompiles ...  compileMs ... (build ...  native ...)
                nativeBytesPerBlock ...  invalidations ...  cachedInsts ...
                irEvictions ... (blocks ...)  flushes codeCap ...  requested ...
-jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...
+jit slave    : blocksRun ...  interpreted ...  nativeBlocksRun ...  compileFallbacks ...  staleEntries ...  chainedBlocks ...  resumes ...  runs ...
 cache slave  : ...
 ```
 

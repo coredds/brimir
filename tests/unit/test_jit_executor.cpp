@@ -2,11 +2,14 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "jit_fuzz_programs.hpp"
 #include "jit_test_backend.hpp"
+#include "jit_worker_helpers.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/backend.hpp>
 #include <brimir/jit/block_cache.hpp>
+#include <brimir/jit/compile_worker.hpp>
 #include <brimir/jit/executor.hpp>
 #include <brimir/jit/interp_backend.hpp>
 
@@ -14,6 +17,7 @@
 #include <array>
 #include <bit>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -1190,4 +1194,519 @@ TEST_CASE("Block cache: the IR pool is bounded per PC", "[jit][executor][tier]")
     cache.Get(ctx, kCode);
     CHECK(cache.RetiredIrReuses() == 1u);
     CHECK(cache.Compiles() == 7u);
+}
+
+// --- Resuming a slice without a cache lookup (2E track F, Task 1) ------------------------------
+
+namespace {
+
+constexpr uint16_t kAdd1_R4 = 0x7401; // add #1,R4
+constexpr uint16_t kAdd1_R5 = 0x7501; // add #1,R5
+constexpr uint16_t kAdd2_R3 = 0x7302; // add #2,R3
+
+// bf `to`, placed at `from` (taken while T = 0).
+uint16_t Bf(uint32_t from, uint32_t to) {
+    const int32_t disp = (static_cast<int32_t>(to) - static_cast<int32_t>(from) - 4) / 2;
+    return static_cast<uint16_t>(0x8B00 | (static_cast<uint32_t>(disp) & 0xFFu));
+}
+
+// Three chained blocks on odd halves (PC & 2), each "add #1,Rn ; bf next" with T = 0 throughout:
+// A -> B -> C -> A. Every block takes the same cycles, so the 40-cycle slices end at block exits.
+constexpr uint32_t kResumeA = kCode + 0x02;
+constexpr uint32_t kResumeB = kCode + 0x22;
+constexpr uint32_t kResumeC = kCode + 0x42;
+constexpr uint64_t kSlice = 40;
+
+// An interpreter rig and an x64 rig driven through SH2::Advance (so each Advance is one
+// Executor::Run slice); after every Advance the two must match.
+struct ResumePair {
+    std::unique_ptr<Rig> ref = std::make_unique<Rig>();
+    std::unique_ptr<Rig> jit = std::make_unique<Rig>();
+    brimir::jit::Executor exec;
+
+    explicit ResumePair(uint32_t threshold = sh2test::kNativeOnFirstRun, brimir::jit::CompileWorker *worker = nullptr)
+        : exec{brimir::jit::BackendKind::X64, threshold, worker} {
+        WriteCode(kResumeA, {kAdd1_R3, Bf(kResumeA + 2, kResumeB)});
+        WriteCode(kResumeB, {kAdd1_R4, Bf(kResumeB + 2, kResumeC)});
+        WriteCode(kResumeC, {kAdd1_R5, Bf(kResumeC + 2, kResumeA)});
+        auto state = ref->BaseState(kResumeA);
+        state.R[3] = 0;
+        state.R[4] = 0;
+        state.R[5] = 0;
+        Load(state);
+        jit->sh2->SetJitExecutor(&exec);
+    }
+    void WriteCode(uint32_t address, const std::vector<uint16_t> &words) {
+        ref->WriteCode(address, words);
+        jit->WriteCode(address, words);
+    }
+    void Load(const ymir::savestate::SH2SaveState &state) {
+        ref->Load(state);
+        jit->Load(state);
+    }
+    void Advance(uint64_t cycles = kSlice) {
+        const uint64 refCycles = ref->sh2->Advance<false, false>(cycles);
+        const uint64 jitCycles = jit->sh2->Advance<false, false>(cycles);
+        REQUIRE(jitCycles == refCycles);
+        const std::string diff = sh2test::DiffRigs(*ref, *jit, true);
+        INFO(diff);
+        REQUIRE(diff.empty());
+    }
+    uint64_t Resumes() const {
+        return exec.GetStats().resumes;
+    }
+    uint64_t Lookups() const {
+        return exec.Cache().Lookups();
+    }
+};
+
+} // namespace
+
+TEST_CASE("Resume: consecutive slices skip Get", "[jit][executor][resume]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    ResumePair p;
+    for (int i = 0; i < 4; ++i) {
+        p.Advance(); // builds and links the three blocks
+    }
+    const uint64_t resumes = p.Resumes();
+    const uint64_t lookups = p.Lookups();
+    for (int i = 0; i < 200; ++i) {
+        INFO("slice " << i);
+        p.Advance();
+    }
+    WARN("resumes " << p.Resumes() - resumes << " lookups " << p.Lookups() - lookups << " of 200 slices");
+    CHECK(p.Resumes() - resumes > 150u);
+    CHECK(p.Lookups() - lookups < 50u);
+    CHECK(p.exec.GetStats().staleEntries == 0u);
+    CHECK(p.exec.GetStats().chainedBlocks > 0u);
+}
+
+TEST_CASE("Resume: dropped after a cache change", "[jit][executor][resume]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    enum class Change { None, Invalidate, Flush, Rewrite, Remap };
+    const Change change = GENERATE(Change::None, Change::Invalidate, Change::Flush, Change::Rewrite, Change::Remap);
+    INFO("change " << static_cast<int>(change));
+    ResumePair p;
+    using Page = std::array<uint8_t, 0x10000>;
+    auto pagesStorage = std::make_unique<std::array<std::array<Page, 2>, 2>>(); // [rig][copy]
+    auto &pages = *pagesStorage;
+    for (int round = 0; round < 3; ++round) {
+        INFO("round " << round);
+        for (int i = 0; i < 8; ++i) {
+            p.Advance();
+        }
+        // The last slice resumed and ended at a block exit: the next one would resume.
+        const uint64_t resumes = p.Resumes();
+        const uint64_t lookups = p.Lookups();
+        const uint64_t stale = p.exec.GetStats().staleEntries;
+        p.Advance();
+        REQUIRE(p.Resumes() == resumes + 1);
+        REQUIRE(p.Lookups() == lookups);
+
+        const uint32_t pc = p.jit->State().PC;
+        REQUIRE((pc == kResumeA || pc == kResumeB || pc == kResumeC));
+        switch (change) {
+        case Change::None: break;
+        case Change::Invalidate: p.exec.MutableCache().Invalidate(pc); break;
+        case Change::Flush: p.exec.Flush(); break;
+        case Change::Rewrite:
+            // The recorded block's first instruction, on both rigs (another CPU writing the code).
+            p.WriteCode(pc, {p.ref->Read16(pc) == kAdd2_R3 ? kAdd1_R3 : kAdd2_R3});
+            break;
+        case Change::Remap: {
+            // Same bytes on another array: each rig's code page moves to a fresh copy of itself.
+            const uint32_t base = pc & 0x7FF0000u;
+            for (size_t r = 0; r < 2; ++r) {
+                Rig &rig = r == 0 ? *p.ref : *p.jit;
+                Page &next = pages[r][round % 2];
+                if (round == 0) {
+                    std::copy_n(rig.ram->begin() + (base & 0xF0000u), next.size(), next.begin());
+                } else {
+                    next = pages[r][(round + 1) % 2];
+                }
+                rig.bus.MapArray(base, base + 0xFFFF, next, true);
+            }
+            break;
+        }
+        }
+        const uint64_t resumesBefore = p.Resumes();
+        const uint64_t lookupsBefore = p.Lookups();
+        const uint64_t staleBefore = p.exec.GetStats().staleEntries;
+        p.Advance(); // matches the interpreter in every case
+        const bool resumed = p.Resumes() > resumesBefore;
+        switch (change) {
+        case Change::None:
+            CHECK(resumed);
+            CHECK(p.Lookups() == lookupsBefore);
+            CHECK(p.exec.GetStats().staleEntries == stale);
+            break;
+        case Change::Invalidate:
+        case Change::Flush:
+            CHECK_FALSE(resumed);
+            CHECK(p.Lookups() >= lookupsBefore + 1);
+            break;
+        case Change::Rewrite:
+        case Change::Remap:
+            // Either not resumed, or the resumed block's prologue reported stale.
+            CHECK((!resumed || p.exec.GetStats().staleEntries >= staleBefore + 1));
+            break;
+        }
+    }
+}
+
+TEST_CASE("Resume: Step gates still apply", "[jit][executor][resume]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    enum class Gate { Interrupt, DelaySlot, FetchBuffer };
+    const Gate gate = GENERATE(Gate::Interrupt, Gate::DelaySlot, Gate::FetchBuffer);
+    INFO("gate " << static_cast<int>(gate));
+    constexpr uint32_t kVbr = 0x06008000;
+    constexpr uint32_t kVector = 0x50;
+    constexpr uint32_t kHandler = 0x06009000;
+    constexpr uint32_t kStack = 0x0600F000;
+    constexpr uint32_t kSlotTarget = 0x06002000;
+    ResumePair p;
+    p.WriteCode(kHandler, {kSleep});
+    p.WriteCode(kSlotTarget, {kAdd1_R5, kSleep});
+    for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+        rig->Write32(kVbr + kVector * 4, kHandler);
+    }
+    auto state = p.ref->State();
+    state.SR = 0xE0; // T = 0; mask 14 lets the level-15 DIVU interrupt through
+    state.VBR = kVbr;
+    state.R[15] = kStack;
+    p.Load(state);
+    for (int i = 0; i < 8; ++i) {
+        p.Advance();
+    }
+    const uint64_t resumes = p.Resumes();
+    p.Advance();
+    REQUIRE(p.Resumes() == resumes + 1); // the next slice would resume
+
+    const uint64_t interpreted = p.exec.GetStats().interpreted;
+    switch (gate) {
+    case Gate::Interrupt:
+        // DIVU overflow (DVSR = 0), level 15: pending and allowed before the next slice.
+        for (Rig *rig : {p.ref.get(), p.jit.get()}) {
+            auto &ctx = rig->sh2->GetJitContext();
+            ctx.write(ctx.sh2, 0xFFFFFF08, 4, 0x2);     // DVCR.OVFIE = 1
+            ctx.write(ctx.sh2, 0xFFFFFF0C, 4, kVector); // VCRDIV
+            ctx.write(ctx.sh2, 0xFFFFFEE2, 1, 0xF0);    // IPRA: DIVU level 15
+            ctx.write(ctx.sh2, 0xFFFFFF00, 4, 0);       // DVSR = 0
+            ctx.write(ctx.sh2, 0xFFFFFF04, 4, 1234);    // DVDNT: divides by 0
+        }
+        REQUIRE(*p.jit->sh2->GetJitContext().intrPending);
+        break;
+    case Gate::DelaySlot: {
+        // The instruction at PC runs as a delay slot of a branch to kSlotTarget.
+        auto s = p.ref->State();
+        s.delaySlot = true;
+        s.delaySlotTarget = kSlotTarget;
+        p.Load(s);
+        break;
+    }
+    case Gate::FetchBuffer: {
+        // The fetch buffer's low half (the opcode run at PC & 2) differs from memory.
+        auto s = p.ref->State();
+        REQUIRE((s.PC & 2u) != 0);
+        s.fetchedOpcodes = (s.fetchedOpcodes & 0xFFFF0000u) | kAdd2_R3;
+        p.Load(s);
+        break;
+    }
+    }
+    const uint64_t resumesBefore = p.Resumes();
+    p.Advance();
+    CHECK(p.Resumes() == resumesBefore);
+    CHECK(p.exec.GetStats().interpreted > interpreted);
+    for (int i = 0; i < 4; ++i) {
+        p.Advance();
+    }
+}
+
+TEST_CASE("Resume: waiting worker results force a Get", "[jit][executor][resume][worker]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kOther = 0x06003000;
+    brimir::jit::CompileWorker worker;
+    ResumePair p{2, &worker};
+    p.WriteCode(kOther, {kAdd1_R5, kAdd1_R5, kSleep});
+    const void *owner = &p.exec.Cache();
+    const auto native = [&](uint32_t pc) {
+        const auto *entry = p.exec.Cache().Find(pc);
+        return entry != nullptr && entry->code.entry != nullptr;
+    };
+    // Compile the loop's three blocks in the background.
+    for (int i = 0; i < 40 && !(native(kResumeA) && native(kResumeB) && native(kResumeC)); ++i) {
+        p.Advance();
+        REQUIRE(sh2test::WaitUntil([&] { return worker.Pending(owner) == 0; }));
+    }
+    REQUIRE((native(kResumeA) && native(kResumeB) && native(kResumeC)));
+    const auto loop = p.ref->State();
+
+    // Park a result for another block: two runs of it submit its compile, queued behind the blocker.
+    sh2test::WorkerBlocker blocker{worker};
+    REQUIRE(blocker.Entered());
+    for (int i = 0; i < 2; ++i) {
+        auto s = p.ref->BaseState(kOther);
+        s.SR = loop.SR;
+        p.Load(s);
+        p.Advance();
+    }
+    REQUIRE(p.exec.Cache().PendingCompiles() == 1);
+    p.Load(loop);
+    for (int i = 0; i < 4; ++i) {
+        p.Advance();
+    }
+    const uint64_t resumes = p.Resumes();
+    p.Advance();
+    REQUIRE(p.Resumes() == resumes + 1); // the next slice would resume
+
+    blocker.Open();
+    REQUIRE(sh2test::WaitForResults(worker, owner));
+    const uint64_t async = p.exec.Cache().AsyncCompiles();
+    const uint64_t lookups = p.Lookups();
+    const uint64_t resumesBefore = p.Resumes();
+    p.Advance();
+    CHECK(p.Resumes() == resumesBefore);
+    CHECK(p.Lookups() >= lookups + 1);
+    CHECK(p.exec.Cache().AsyncCompiles() == async + 1);
+    CHECK(native(kOther));
+    p.Advance();
+    CHECK(p.Resumes() == resumesBefore + 1);
+}
+
+// A loop of one long block ("add #1,R3" x 20 ; bf loop): 40-cycle slices stop inside it. Each stop
+// PC gets its own block (built by the next slice's lookup) and is published, so once every stop
+// phase has a block, the boundary exit reports the entry there and the next slice resumes.
+TEST_CASE("Resume: a slice that stops mid-block resumes there", "[jit][executor][resume]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    constexpr uint32_t kLoop = kCode + 0x200;
+    std::vector<uint16_t> loop(20, kAdd1_R3);
+    loop.push_back(Bf(kLoop + 40, kLoop));
+    ResumePair p;
+    p.WriteCode(kLoop, loop);
+    auto state = p.ref->BaseState(kLoop);
+    state.R[3] = 0;
+    p.Load(state);
+    REQUIRE(brimir::jit::BuildBlock(p.jit->sh2->GetJitContext(), kLoop).guestInstrCount == loop.size());
+    for (int i = 0; i < 100; ++i) {
+        INFO("warm-up slice " << i);
+        p.Advance();
+    }
+    const uint64_t resumes = p.Resumes();
+    const uint64_t lookups = p.Lookups();
+    const uint64_t runs = p.exec.GetStats().runs;
+    uint32_t midBlock = 0;
+    for (int i = 0; i < 200; ++i) {
+        INFO("slice " << i);
+        p.Advance();
+        midBlock += p.jit->State().PC != kLoop ? 1u : 0u;
+    }
+    const uint64_t sliceResumes = p.Resumes() - resumes;
+    const uint64_t sliceRuns = p.exec.GetStats().runs - runs;
+    WARN("resumes " << sliceResumes << " of " << sliceRuns << " Run calls, lookups " << p.Lookups() - lookups
+                    << ", slices ending mid-block " << midBlock);
+    REQUIRE(sliceRuns == 200u);
+    CHECK(midBlock > 100u); // 150: the loop's period puts a quarter of the stops at its head
+    CHECK(sliceResumes * 100 > sliceRuns * 80);
+    // Each slice starts with a resume or a lookup, and the chain to the loop's head is linked.
+    CHECK(sliceResumes + (p.Lookups() - lookups) == sliceRuns);
+    CHECK(p.exec.GetStats().staleEntries == 0u);
+}
+
+// --- Chain entry and exit (2E track F, Task 2) -------------------------------------------------
+
+namespace {
+
+struct CallbackError {};
+
+// Armed once: the next MMIO read requests a flush (a watchdog reset) and then throws instead of
+// reading.
+bool g_throwArmed = false;
+uint32_t g_throws = 0;
+
+uint32 FlushThenThrowRead(void *sh2, uint32 address, uint32 size, bool instrFetch) {
+    if (g_throwArmed && !instrFetch && (address & 0x7000000u) == (kData & 0x7000000u)) {
+        g_throwArmed = false;
+        ++g_throws;
+        g_exec->Flush();
+        throw CallbackError{};
+    }
+    return g_origRead(sh2, address, size, instrFetch);
+}
+
+// bra `to`, placed at `from`.
+uint16_t Bra(uint32_t from, uint32_t to) {
+    const int32_t disp = (static_cast<int32_t>(to) - static_cast<int32_t>(from) - 4) / 2;
+    return static_cast<uint16_t>(0xA000 | (static_cast<uint32_t>(disp) & 0xFFFu));
+}
+
+constexpr uint16_t kNop = 0x0009;
+
+// Runs the interpreter on `ref` up to `pc`, then compares it with `jit`.
+void InterpretTo(Rig &ref, uint32_t pc) {
+    auto &ctx = ref.sh2->GetJitContext();
+    for (int i = 0; i < 64 && *ctx.PC != pc; ++i) {
+        ctx.interpretOne(ctx.sh2);
+    }
+    REQUIRE(*ctx.PC == pc);
+}
+
+} // namespace
+
+// Review Focus 4: a read callback inside a running block requests a flush and then throws. The
+// exception reaches the caller, the deferred flush is applied, the executor is no longer "in a
+// block" (a later flush applies at once), and the next step runs normally.
+TEST_CASE("Executor: a throwing callback inside a chain still applies a deferred flush", "[jit][executor]") {
+    // B: mov.l @R1,R2 (MMIO) ; add #1,R3 ; sleep. Chain case (x64): A: add #1,R3 ; bra B ; nop.
+    constexpr uint32_t kA = kCode;
+    constexpr uint32_t kB = kCode + 0x20;
+    constexpr uint32_t kSleepAt = kB + 4;
+    const auto kind = GENERATE(from_range(sh2test::AvailableBackends()));
+    const bool chain = GENERATE(false, true);
+    if (chain && kind != brimir::jit::BackendKind::X64) {
+        SKIP("chaining needs native code");
+    }
+    INFO("backend " << brimir::jit::BackendName(kind) << (chain ? ", chain" : ", single block"));
+    const uint32_t start = chain ? kA : kB;
+
+    auto ref = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{kind, sh2test::kNativeOnFirstRun};
+    auto state = rig->BaseState(start);
+    for (Rig *r : {ref.get(), rig.get()}) {
+        r->WriteCode(kA, {kAdd1_R3, Bra(kA + 2, kB), kNop});
+        r->WriteCode(kB, {kMovL_R1_R2, kAdd1_R3, kSleep});
+        WriteMmio32(*r, kData, 0x12345678);
+        state = r->BaseState(start);
+        state.R[1] = kData;
+        state.R[2] = 0;
+        state.R[3] = 0;
+        r->Load(state);
+    }
+    auto &ctx = rig->sh2->GetJitContext();
+
+    if (chain) {
+        // Compile and publish A and B, then start over.
+        while (*ctx.PC != kSleepAt) {
+            exec.Step(ctx);
+        }
+        REQUIRE(exec.Cache().Size() == 2);
+        rig->Load(state);
+        rig->mmio.log.clear();
+    }
+
+    const auto stats = exec.GetStats();
+    g_exec = &exec;
+    g_origRead = ctx.read;
+    ctx.read = FlushThenThrowRead;
+    g_throwArmed = true;
+    g_throws = 0;
+    bool caught = false;
+    try {
+        if (chain) {
+            exec.Run(ctx, 0, 1000);
+        } else {
+            exec.Step(ctx);
+        }
+    } catch (const CallbackError &) {
+        caught = true;
+    }
+    ctx.read = g_origRead;
+    g_exec = nullptr;
+    g_throwArmed = false;
+    rig->mmio.log.clear(); // the aborted read's bus-wait query (x64)
+
+    REQUIRE(caught);
+    CHECK(g_throws == 1u);
+    CHECK(exec.Cache().Size() == 0); // the deferred flush was applied
+    // The chain ran A and entered B (one step: B was entered by chaining, not by another step).
+    const auto &after = exec.GetStats();
+    const uint64_t native = kind == brimir::jit::BackendKind::X64 ? 1u : 0u;
+    CHECK(after.blocksRun == stats.blocksRun + 1);
+    CHECK(after.nativeBlocksRun == stats.nativeBlocksRun + native);
+    CHECK(after.chainedBlocks == stats.chainedBlocks);
+    CHECK(after.interpreted == stats.interpreted);
+    CHECK(after.staleEntries == stats.staleEntries);
+    CHECK(after.resumes == stats.resumes);
+    CHECK(after.runs == stats.runs + (chain ? 1u : 0u));
+    CHECK(rig->State().PC == kB);
+    CHECK(rig->State().R[3] == (chain ? 1u : 0u));
+    CHECK(rig->State().R[2] == 0u);
+
+    // No longer in a block: a flush applies at once.
+    exec.MutableCache().Get(ctx, kB);
+    REQUIRE(exec.Cache().Size() == 1);
+    exec.Flush();
+    CHECK(exec.Cache().Size() == 0);
+
+    // The next step runs B normally; the result equals the interpreter's.
+    const auto next = exec.Step(ctx);
+    CHECK_FALSE(next.aborted);
+    CHECK(next.retired == 2);
+    CHECK(rig->State().PC == kSleepAt);
+    CHECK(rig->State().R[2] == 0x12345678u);
+    CHECK(rig->State().R[3] == (chain ? 2u : 1u));
+    CHECK(exec.Cache().Size() == 1);
+    InterpretTo(*ref, kSleepAt);
+    const std::string diff = sh2test::DiffRigs(*ref, *rig);
+    INFO(diff);
+    CHECK(diff.empty());
+}
+
+// Pins the executor's Stats over one deterministic run, recorded from the build before the
+// lean chain entry (8f96e75): two fuzz programs that replace each other at the same address
+// every 200 slices and whenever one reaches its SLEEP (so cached blocks go stale), 2,000 random
+// slices of 1-80 cycles
+// through SH2::Advance, tiered compilation (threshold 3), chaining and resumes.
+// The totals pin one deterministic run so the lean entry path could be checked against the old
+// one. Any legitimate change to the front end, the optimizer, the thresholds, the chaining policy
+// or the fuzz generator changes them: once the change is understood, re-pin them from the WARN
+// output.
+TEST_CASE("Executor: stats over a fuzz program are unchanged by the lean entry path", "[jit][executor]") {
+    if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
+        SKIP("no x64 backend");
+    }
+    const sh2test::FuzzProgram programs[2] = {sh2test::MakeFuzzProgram(0xF0250001u),
+                                              sh2test::MakeFuzzProgram(0xF0250002u)};
+    auto rig = std::make_unique<Rig>();
+    brimir::jit::Executor exec{brimir::jit::BackendKind::X64, 3};
+    int current = 0;
+    const auto load = [&] {
+        rig->mmio.busWaitEvery = programs[current].busWaitEvery;
+        rig->WriteCode(sh2test::kFuzzCode, programs[current].words);
+        rig->Load(programs[current].state);
+    };
+    load();
+    rig->sh2->SetJitExecutor(&exec);
+    std::mt19937 rng(0x2E2F2u);
+    uint32_t restarts = 0;
+    for (int i = 0; i < 2000; ++i) {
+        rig->sh2->Advance<false, false>(1 + rng() % 80);
+        if (rig->State().sleep || i % 200 == 199) {
+            current ^= 1;
+            ++restarts;
+            load();
+        }
+    }
+    const auto &s = exec.GetStats();
+    WARN("restarts " << restarts << " blocksRun " << s.blocksRun << " nativeBlocksRun " << s.nativeBlocksRun
+                     << " chainedBlocks " << s.chainedBlocks << " interpreted " << s.interpreted << " staleEntries "
+                     << s.staleEntries << " resumes " << s.resumes << " runs " << s.runs);
+    CHECK(restarts == 19u);
+    CHECK(s.blocksRun == 7314u);
+    CHECK(s.nativeBlocksRun == 7251u);
+    CHECK(s.chainedBlocks == 3752u);
+    CHECK(s.interpreted == 49u);
+    CHECK(s.staleEntries == 22u);
+    CHECK(s.resumes == 1438u);
+    CHECK(s.runs == 2000u);
 }

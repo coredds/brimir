@@ -156,6 +156,22 @@ public:
     size_t Size() const {
         return m_blocks.size();
     }
+    // Incremented by every operation that adds, removes, retires, reuses or installs an entry,
+    // publishes or unpublishes a link slot (except Get re-publishing a block's own slot), releases
+    // native code, evicts IR or flushes. While it is unchanged, a link-table entry read for a PC is
+    // still the live native code of the map's block at that PC (Executor::Run's resume relies on it).
+    uint64_t Version() const {
+        return m_version;
+    }
+    // Get calls (tests and diagnostics).
+    uint64_t Lookups() const {
+        return m_lookups;
+    }
+    // Whether the worker has finished background compiles waiting for this cache, which the next
+    // Get installs.
+    bool HasWaitingResults() const {
+        return m_worker != nullptr && !m_pendingPcs.empty() && m_worker->HasResults(this);
+    }
     // IR instructions counted against kMaxCachedInsts (IR-only blocks, the IR pool's included; tests
     // and diagnostics).
     size_t CachedInsts() const {
@@ -400,6 +416,10 @@ private:
 
     INativeBackend *m_native;
     CompileWorker *m_worker; // nullptr: synchronous compiles (always without a native backend)
+    // Read on every executor step and Get: kept on the line of m_native and m_worker, not after
+    // the recent table.
+    uint64_t m_version = 0;
+    uint64_t m_lookups = 0;
     size_t m_maxNativeCodeBytes;
     size_t m_maxCachedInsts;
     size_t m_maxRetiredCodeBytes;

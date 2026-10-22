@@ -27,7 +27,10 @@ struct X64Frame {
     uint8_t codeDirty = 0;      // set by generated code: a data access may have written the block's code
     uint8_t allowChain = 0;     // input: chainable exits may enter the next linked block
     uint8_t chained = 0;        // set by generated code: the running block was entered by chaining
-    std::exception_ptr error;   // set by trampolines: the exception a callback threw
+    uint8_t failed = 0;         // set by trampolines: a callback threw; *error holds the exception
+    // Never null: where trampolines store the exception (the backend's, so the frame needs no
+    // exception_ptr construction and destruction, which are library calls on some toolchains).
+    std::exception_ptr *error;
     // Written by generated code. out.cycles counts from the start of the chain: each block starts
     // from it, so the cycle limit and SyncCycles stay relative to limit and entryCycles.
     ExitInfo out;
@@ -54,10 +57,10 @@ constexpr uint32_t LinkIndex(uint32_t pc) {
 
 // Trampolines: the only functions generated code calls (defined in x64_backend.cpp). Each loads
 // its callback from frame->ctx at call time. None lets an exception escape: a callback exception
-// is stored in frame->error, frame->stop is set and the trampoline returns 0. TrRead, TrOnChipRead,
-// TrWrite and TrRefill also set frame->stop when *frame->abortRequested is true after the callback. Generated
-// code tests frame->stop after every trampoline except TrMacW/TrMacL, and on stop takes
-// RunBlock's abort exit (out.aborted, out.cycles; PC untouched). Run then rethrows frame->error.
+// is stored in *frame->error, frame->failed and frame->stop are set and the trampoline returns 0.
+// TrRead, TrOnChipRead, TrWrite and TrRefill also set frame->stop when *frame->abortRequested is true
+// after the callback. Generated code tests frame->stop after every trampoline except TrMacW/TrMacL, and on stop takes
+// RunBlock's abort exit (out.aborted, out.cycles; PC untouched). Run then rethrows *frame->error.
 // bool arguments are passed as uint32_t 0/1.
 uint32_t TrRead(X64Frame *f, uint32_t address, uint32_t size, uint32_t instrFetch) noexcept;
 // TrOnChipRead is TrRead for a data read in partition 0b111 (ctx.onChipRead); it needs ctx.onChipRead.
@@ -95,9 +98,13 @@ void TrChainedInDelaySlot(X64Frame *f) noexcept;
 //   3. counts the block in out.blocksRun.
 // A static Exit, a taken ExitIf and ExitDynamic then chain when frame->allowChain: after writing PC
 // and out as usual they return nullptr if *abortRequested (a flush requested by a callback that
-// did not stop the block), store *cyclesExecuted = entryCycles + cycles, return nullptr if
-// cycles >= limit, and otherwise return the entry of the link slot whose pc equals PC (nullptr on a
-// miss), setting frame->chained. Boundary, bus-wait, abort and stale exits never chain.
+// did not stop the block), store *cyclesExecuted = entryCycles + cycles, and look up the link slot
+// whose pc equals PC (nullptr on a miss). If cycles >= limit they store that entry in out.next (the
+// executor resumes the next slice there; it stays nullptr on a miss) and return nullptr; otherwise
+// they return the entry, setting frame->chained. Boundary, bus-wait, abort and stale exits never
+// chain. A boundary exit (cycle limit or interrupt) also stores, when frame->allowChain and no abort
+// is requested, the entry of the link slot whose pc equals the PC it stopped at in out.next
+// (nullptr on a miss), through one shared tail per block; the other exits leave out.next nullptr.
 //
 // With ctx.bus describing a page table, Load/Store/AddAccessCycles/ExitIfBusWait take the inline
 // bus fast path (bus_fast_path.hpp) and call their trampolines only for handler or unmapped pages

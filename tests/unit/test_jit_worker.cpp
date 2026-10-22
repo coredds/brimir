@@ -3,6 +3,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "jit_test_backend.hpp"
+#include "jit_worker_helpers.hpp"
 #include "sh2_test_rig.hpp"
 
 #include <brimir/jit/block_cache.hpp>
@@ -24,82 +25,13 @@
 
 using namespace brimir::jit;
 
-namespace {
-
-// Blocks Finalize until opened. Only the main test thread makes Catch2 assertions.
-struct Latch {
-    std::mutex m;
-    std::condition_variable cv;
-    bool open = false;
-    std::atomic<bool> entered{false};
-
-    void Open() {
-        {
-            std::lock_guard lock{m};
-            open = true;
-        }
-        cv.notify_all();
-    }
-    void Wait() {
-        entered = true;
-        std::unique_lock lock{m};
-        cv.wait(lock, [&] { return open; });
-    }
-};
-
-std::atomic<int> g_live{0};
-
-class TestCompile final : public PreparedCompile {
-public:
-    TestCompile(bool result, std::shared_ptr<Latch> latch = nullptr, std::atomic<int> *finalized = nullptr)
-        : m_result(result)
-        , m_latch(std::move(latch))
-        , m_finalized(finalized) {
-        ++g_live;
-    }
-    ~TestCompile() override {
-        --g_live;
-    }
-
-    bool Finalize() noexcept override {
-        m_thread = std::this_thread::get_id();
-        if (m_latch) {
-            m_latch->Wait();
-        }
-        if (m_finalized) {
-            ++*m_finalized;
-        }
-        m_done = true;
-        return m_result;
-    }
-
-    std::thread::id m_thread{};
-    bool m_done = false;
-
-private:
-    bool m_result;
-    std::shared_ptr<Latch> m_latch;
-    std::atomic<int> *m_finalized;
-};
-
-template <typename Pred>
-bool WaitUntil(Pred pred, std::chrono::milliseconds limit = std::chrono::milliseconds(10000)) {
-    const auto end = std::chrono::steady_clock::now() + limit;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() > end) {
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return true;
-}
-
-CompileJob Job(const void *owner, uint64_t ticket, bool result = true, std::shared_ptr<Latch> latch = nullptr,
-               std::atomic<int> *finalized = nullptr) {
-    return CompileJob{owner, ticket, std::make_unique<TestCompile>(result, std::move(latch), finalized)};
-}
-
-} // namespace
+using sh2test::g_live;
+using sh2test::Job;
+using sh2test::Latch;
+using sh2test::TestCompile;
+using sh2test::WaitForResults;
+using sh2test::WaitUntil;
+using sh2test::WorkerBlocker;
 
 TEST_CASE("Worker: finalizes on another thread and returns results to their owner", "[jit][worker]") {
     REQUIRE(g_live == 0);
@@ -405,32 +337,6 @@ uint16_t MovLL(uint32_t n, uint32_t m) {
 // Two 3-instruction blocks at the same PC (SLEEP ends them).
 const std::vector<uint16_t> kProgramP{AddI(3, 1), AddI(3, 2), AddI(3, 3), kSleepOp};
 const std::vector<uint16_t> kProgramQ{AddI(3, 5), AddI(4, 1), AddI(3, 7), kSleepOp};
-
-bool WaitForResults(CompileWorker &worker, const void *owner) {
-    return WaitUntil([&] { return worker.Pending(owner) == 0 && worker.HasResults(owner); },
-                     std::chrono::milliseconds(5000));
-}
-
-// Keeps the worker busy with another owner's job until opened (at the latest when destroyed, so a
-// failed REQUIRE never leaves the worker's destructor waiting): the cache's jobs queue behind it.
-// Declare it after the worker.
-struct WorkerBlocker {
-    std::shared_ptr<Latch> latch = std::make_shared<Latch>();
-    int owner = 0;
-
-    explicit WorkerBlocker(CompileWorker &worker) {
-        worker.Submit(Job(&owner, 0, true, latch));
-    }
-    ~WorkerBlocker() {
-        latch->Open();
-    }
-    bool Entered() {
-        return WaitUntil([&] { return latch->entered.load(); });
-    }
-    void Open() {
-        latch->Open();
-    }
-};
 
 struct LatchOpener {
     std::shared_ptr<Latch> latch;

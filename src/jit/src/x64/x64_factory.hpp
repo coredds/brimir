@@ -11,4 +11,9 @@ namespace brimir::jit {
 
 std::unique_ptr<INativeBackend> MakeX64Backend();
 
+// INativeBackend::Run on a backend made by MakeX64Backend, without the virtual call (the executor's
+// per-chain entry).
+ExitInfo RunX64(INativeBackend &backend, const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target,
+                const bool *abortRequested, bool allowChain);
+
 } // namespace brimir::jit

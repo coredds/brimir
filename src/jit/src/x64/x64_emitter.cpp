@@ -71,6 +71,7 @@ constexpr int32_t kOutBusWait = static_cast<int32_t>(offsetof(X64Frame, out) + o
 constexpr int32_t kOutAborted = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, aborted));
 constexpr int32_t kOutStale = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, stale));
 constexpr int32_t kOutBlocksRun = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, blocksRun));
+constexpr int32_t kOutNext = static_cast<int32_t>(offsetof(X64Frame, out) + offsetof(ExitInfo, next));
 constexpr int32_t kFrameStop = static_cast<int32_t>(offsetof(X64Frame, stop));
 constexpr int32_t kFrameCodeDirty = static_cast<int32_t>(offsetof(X64Frame, codeDirty));
 constexpr int32_t kFrameAllowChain = static_cast<int32_t>(offsetof(X64Frame, allowChain));
@@ -194,11 +195,17 @@ public:
         // Out-of-line copies of guarded runs (their guard failed), then the boundary exits, after
         // the block's final exit.
         EmitSlowRuns();
+        const Label boundaryTail = m_cc.new_label();
+        const bool useTail = m_links != nullptr && !m_stubs.empty();
         for (const BoundaryStub &stub : m_stubs) {
             m_cc.bind(stub.label);
             StoreDirty(stub.dirty);
             WriteExit(true, stub.pc, stub.retired, m_cycles, true);
-            m_cc.jmp(m_retNull);
+            m_cc.jmp(useTail ? boundaryTail : m_retNull);
+        }
+        if (useTail) {
+            m_cc.bind(boundaryTail);
+            BoundaryTail();
         }
         // Stale entry: out.stale only (nothing else was written).
         if (m_selfValidating || m_known) {
@@ -498,6 +505,46 @@ private:
         m_cc.mov(x86::qword_ptr(m_frame, kOutCycles), cycles);
     }
 
+    // The entry of the link slot for PC (`pc` when constPC, else read back from the state). A miss
+    // returns nullptr to X64Backend::Run (out.next stays nullptr, as Run initialized it).
+    x86::Gp LinkEntryOrReturn(bool constPC, uint32_t pc) {
+        x86::Gp slot = m_cc.new_gp64();
+        if (constPC) {
+            m_cc.mov(slot, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&m_links[LinkIndex(pc)])));
+            m_cc.cmp(x86::dword_ptr(slot, kLinkPc), Imm32(pc));
+        } else {
+            x86::Gp next = m_cc.new_gp32();
+            x86::Gp index = m_cc.new_gp64();
+            m_cc.mov(next, State32(m_off.PC));
+            m_cc.mov(index.r32(), next); // zero-extends
+            m_cc.shr(index.r32(), 1);
+            m_cc.and_(index.r32(), Imm32(kLinkSlots - 1));
+            m_cc.shl(index, 4); // sizeof(X64LinkSlot)
+            m_cc.mov(slot, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_links)));
+            m_cc.add(slot, index);
+            m_cc.cmp(x86::dword_ptr(slot, kLinkPc), next);
+        }
+        m_cc.jne(m_retNull);
+        x86::Gp entry = m_cc.new_gp_ptr();
+        m_cc.mov(entry, x86::qword_ptr(slot, kLinkEntry));
+        return entry;
+    }
+
+    // The boundary stubs' shared tail, after their WriteExit (PC is in the state): with chaining
+    // allowed and no flush requested, out.next = the link-slot entry for PC (the executor resumes
+    // the next slice there; after an interrupt stop its gates interpret first), then return.
+    void BoundaryTail() {
+        m_cc.cmp(x86::byte_ptr(m_frame, kFrameAllowChain), 0);
+        m_cc.je(m_retNull);
+        x86::Gp abortFlag = m_cc.new_gp_ptr();
+        m_cc.mov(abortFlag, x86::qword_ptr(m_frame, kFrameAbortRequested));
+        m_cc.cmp(x86::byte_ptr(abortFlag), 0);
+        m_cc.jne(m_retNull);
+        const x86::Gp entry = LinkEntryOrReturn(false, 0);
+        m_cc.mov(x86::qword_ptr(m_frame, kOutNext), entry);
+        m_cc.jmp(m_retNull);
+    }
+
     // After WriteExit of a chainable exit: what Executor::Run does before its next Step, then the
     // link-table lookup for PC (`pc` when constPC, else read back from the state).
     void ChainExit(bool constPC, uint32_t pc, const x86::Gp &cycles) {
@@ -521,30 +568,17 @@ private:
         m_cc.mov(now, x86::qword_ptr(m_frame, kFrameEntryCycles));
         m_cc.add(now, cycles);
         m_cc.mov(x86::qword_ptr(m_regs, m_off.cyclesExecuted), now);
-        // Run's loop ends once the target is reached.
+        const x86::Gp entry = LinkEntryOrReturn(constPC, pc);
+        // Run's loop ends once the target is reached: the chain returns with the entry in out.next,
+        // where the executor resumes the next slice (Executor::Run).
+        Label atLimit = m_cc.new_label();
         m_cc.cmp(cycles, x86::qword_ptr(m_frame, kFrameLimit));
-        m_cc.jae(m_retNull);
-        x86::Gp slot = m_cc.new_gp64();
-        if (constPC) {
-            m_cc.mov(slot, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&m_links[LinkIndex(pc)])));
-            m_cc.cmp(x86::dword_ptr(slot, kLinkPc), Imm32(pc));
-        } else {
-            x86::Gp next = m_cc.new_gp32();
-            x86::Gp index = m_cc.new_gp64();
-            m_cc.mov(next, State32(m_off.PC));
-            m_cc.mov(index.r32(), next); // zero-extends
-            m_cc.shr(index.r32(), 1);
-            m_cc.and_(index.r32(), Imm32(kLinkSlots - 1));
-            m_cc.shl(index, 4); // sizeof(X64LinkSlot)
-            m_cc.mov(slot, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_links)));
-            m_cc.add(slot, index);
-            m_cc.cmp(x86::dword_ptr(slot, kLinkPc), next);
-        }
-        m_cc.jne(m_retNull);
-        x86::Gp entry = m_cc.new_gp_ptr();
-        m_cc.mov(entry, x86::qword_ptr(slot, kLinkEntry));
+        m_cc.jae(atLimit);
         m_cc.mov(x86::byte_ptr(m_frame, kFrameChained), 1);
         m_cc.ret(entry);
+        m_cc.bind(atLimit);
+        m_cc.mov(x86::qword_ptr(m_frame, kOutNext), entry);
+        m_cc.jmp(m_retNull);
     }
 
     // RunBlock's abort exit: out.aborted = true, out.cycles; PC and out.retired untouched.
