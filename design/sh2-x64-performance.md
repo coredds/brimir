@@ -1672,3 +1672,111 @@ This has two consequences for the bar's condition 2 (average frame no longer tha
 **Candidate fix.** No small, evident fix on the JIT side.
 - *Off the JIT path:* the fix is VDP2 rendering speed or parallelism, which would turn the hidden saving into frame time: up to the 0.40 / 0.17 ms/frame of added waiting on these titles, and more on PD2, where the VDP2 thread now bounds the frame.
 - *JIT side:* speed in the part of the frame before the VDP2 thread falls behind (on Rally, the early active display) is what could pay off in whole-frame time, not speed after it. The measurements do not say whether the early delay is SH-2 time or the 5-7% slower non-SH-2 components; that needs a per-component split by scanline range first. The remaining 0.10-0.19 ms/frame has no single target.
+
+## Track F: long-run slow frames
+
+The question from "What 2E left": Burning Rangers over `--warmup 2400 --frames 33600` had 571 frames over 16.7 ms against 1 for the interpreter, all with front-end builds, with only 1-5 ms of compile time in most of them against about 8.8 ms of excess. Measured on `49cdfc2` (after Tasks 1-2), x64 with the worker against the interpreter, one run per mode and variant.
+
+**Machine state.** This session's machine ran 30-40% slower than in every earlier session, with either executable. The same long run with the interpreter takes 12.276 ms/frame (SH2 7.980) against 9.380 (5.954) in the 2E record. A 1,800-frame Burning Rangers control with the interpreter gives 12.5-12.9 ms/frame (SH2 8.7-9.0), with Task 4's executable as with this one, against 8.597 (6.255) in the Task 3 rows above. The PC had rebooted 11 minutes before the first run. A kernel thread used one logical CPU at 100% until about 55 minutes after the reboot; the control stayed slow after it stopped, and also with the process kept off that core. The cause was not established; the memory reports 2400 MT/s, and its earlier speed is not known. So the absolute numbers below are not comparable with earlier sections. Every comparison is made within the session: x64 against the interpreter at the same frame index (the runs are deterministic; per-frame CD-block event time correlates 0.996 at offset 0 and about 0 at offsets 1-60). As the 16.7 ms line no longer separates the same frames, the counts are also given at **21.9 ms**, which is 16.7 scaled by the interpreter's average frame (12.276 / 9.380).
+
+### Re-measure (uninstrumented `build-bench`)
+
+| Burning Rangers, frames 2,400-36,000 | ms/frame avg | p95 | p99 | max | over 16.7 ms | over 21.9 ms | SH2 total | interpreter / x64 |
+|---|---|---|---|---|---|---|---|---|
+| interpreter | 12.276 | 15.190 | 17.459 | 32.8 | 709 | 0 | 7.980 | - |
+| x64, worker | 12.998 | 19.307 | 23.017 | 73.2 | 3,856 | 616 | 8.129 | 0.982 |
+
+The over-21.9 counts are from the instrumented run of each mode (first build, below), whose SH2 totals are within 0.5% of these runs' and whose `blocksRun` and `interpreted` counts are identical. **At the scaled threshold the stutter is unchanged by Tasks 1-2: 616 frames against 0** (2E: 571 against 1). Window counters (x64): 312,072 front-end builds, 897,456 IR reuses, 817,664 native reuses, 28,751 native compiles, of which 20,353 were dropped on arrival, 7.8 s (0.232 ms/frame) of compile time on the emulation thread, worker 0.649 ms/frame, 8,296 frames compiling, 3 flushes (the slave's SSHON resets), 1 IR-cap event (4.3 ms). Of the 616 frames, 615 contain front-end builds and 612 have invalidations. They fall in the same code-load phases as in 2E: 375 in frames 9,000-16,199 and 231 in 23,400-28,799, the first at frame 5,751. The five slowest frames are 9,264 (3,610 builds), 9,273, 7,014, 9,270 and 9,267.
+
+### Method
+
+A temporary build (`build-instr`, not committed, reverted) kept Task 4's timers: the emulation thread's four waits on the render threads, and per scheduler event type. It added per-frame deltas:
+- executor: rdtsc around each step, each `BlockCache::Get`, each IR run (split by the block's state: compile pending on the worker, runs left before the threshold, other), each interpreter fallback, and each invalidation after a stale report; IR runs, with their instructions;
+- cache: the time from submit to install of each worker compile, the largest pending count, and `InstallResults`;
+- interpreter mode: a count of the instructions run.
+
+The same frame executes the same instructions in both modes. The interpreter's instruction count for a frame, minus the x64 run's IR and fallback instructions, therefore gives the instructions run as native code, and their cost in the interpreter at that frame's interpreter ns/instr. Native time is the step time minus `Get`, IR runs, fallbacks and stale invalidations; it includes chaining, resumes and block prologues.
+
+The step timer adds 0.84 ms/frame to the x64 SH2 total (34,000 steps per frame in every frame). It cancels out when slow and normal frames are compared. The x64 timings come from that build (second build); the interpreter timings come from the first build, without the instruction counter. Normal frames are, for each slow frame, the nearest frame not over the line, so they come from the same phases. The x64 timer overhead makes the absolute excess in the breakdown about 0.8 ms high in every column.
+
+### Breakdown (ms per frame unless a count)
+
+| | over 16.7 ms (4,707) | their normal frames | over 21.9 ms (862) | their normal frames |
+|---|---|---|---|---|
+| Frame, x64 / interpreter (same frame) | 19.88 / 14.34 | 12.39 / 11.63 | 24.54 / 14.50 | 14.33 / 12.52 |
+| **Excess** | **5.53** | 0.76 | **10.04** | 1.82 |
+| SH-2 total, x64 / interpreter | 14.23 / 9.71 | 7.47 / 7.09 | 19.36 / 10.75 | 9.79 / 8.43 |
+| Waits for the render threads, x64 / interpreter | 1.08 / 0.99 | 1.21 / 1.13 | 0.11 / 0.14 | 0.45 / 0.49 |
+| Other emulation-thread work, x64 / interpreter | 4.56 / 3.64 | 3.71 / 3.40 | 5.07 / 3.61 | 4.10 / 3.60 |
+| Front-end builds (count) / their time | 50.0 / 0.85 | 4.2 / 0.07 | 114.4 / 1.90 | 6.9 / 0.10 |
+| Prepare + Commit (emulation thread) | 0.46 | 0.05 | 1.16 | 0.15 |
+| Rest of `Get` (lookup, validation, reuse, invalidation, install) | 0.86 | 0.22 | 1.44 | 0.41 |
+| IR runs (count) / time | 637 / 0.55 | 51 / 0.05 | 1,526 / 1.22 | 101 / 0.10 |
+| of which compile pending on the worker | 0.03 | 0.00 | 0.10 | 0.01 |
+| Interpreter fallbacks (count) / time | 2,816 / 0.12 | 3,485 / 0.09 | 2,416 / 0.13 | 3,097 / 0.10 |
+| Invalidations after a stale report | 0.06 | 0.01 | 0.11 | 0.01 |
+| Native code (rest of the steps) | 10.36 | 6.06 | 12.38 | 7.99 |
+| Native / interpreter ns per instruction | 17.3 / 15.9 (1.09) | 12.1 / 14.1 (0.86) | 19.8 / 16.5 (1.20) | 14.4 / 15.0 (0.96) |
+| IR ns per instruction | 52.5 | 66.9 | 52.1 | 71.0 |
+| Invalidations / stale entries | 326 / 133 | 26 / 11 | 667 / 266 | 32 / 11 |
+| Native reuses / IR reuses | 133 / 148 | 12 / 11 | 263 / 307 | 14 / 15 |
+| Installs / dropped on arrival | 3.9 / 3.6 | 0.8 / 0.3 | 9.2 / 9.4 | 3.0 / 0.6 |
+| Pending at the frame's end / most pending | 1.5 / 4.0 | 0.9 / 1.6 | 6.5 / 11.4 | 4.7 / 6.8 |
+| Worker busy | 3.55 | 0.38 | 8.93 | 1.05 |
+| Instructions (thousands) / native blocks run / chained | 612 / 122k / 91k | 503 / 140k / 109k | 653 / 114k / 83k | 561 / 133k / 102k |
+
+### Where the excess goes
+
+Growth of the excess from normal to slow frames (slow minus normal). IR runs, fallbacks and native code are counted net of the interpreter's cost for the same instructions:
+
+| Part | over 16.7 ms: +4.78 | over 21.9 ms: +8.23 |
+|---|---|---|
+| Native code slower than usual against the interpreter | +1.84 (38%) | +2.43 (30%) |
+| Front-end builds | +0.78 (16%) | +1.79 (22%) |
+| Prepare + Commit on the emulation thread | +0.40 (8%) | +1.01 (12%) |
+| Rest of `Get` | +0.63 (13%) | +1.02 (12%) |
+| IR runs before the native code arrives (net) | +0.34 (7%) | +0.76 (9%) |
+| of which waiting for the worker | +0.03 | +0.09 |
+| Stale invalidations, fallbacks, `Advance` outside the steps | +0.15 (3%) | +0.23 (3%) |
+| Other emulation-thread work (VDP phase events without the waits, SCSP) | +0.61 (13%) | +0.96 (12%) |
+| Waiting for the render threads | +0.01 | +0.02 |
+
+- **The compile side on the emulation thread** is the largest group: 1.8 ms (38%) over 16.7 ms and 3.8 ms (46%) over 21.9 ms. That covers the front end, Prepare/Commit and the rest of `Get`. Compile time as the bench counts it (builds plus Prepare/Commit) is 1.3-3.1 ms of it. Each build costs 17 us and each Prepare/Commit 55-60 us. Only about 16% of builds are ever submitted for a native compile (window: 49,100 submissions against 312,072 builds), and 41% of the submissions are dropped on arrival, because the code was rewritten before the result came back.
+- **Native code runs slower per instruction in these frames**: 1.09-1.20 times the interpreter's cost, against 0.86-0.96 in the frames around them, while the interpreter's cost per instruction rises only 10-13%. This is the largest single part. It rises with the number of builds in the frame: the native / interpreter ratio is 0.88 with no builds, 0.93 with 1-9, 1.05 with 10-49, 1.07 with 50-99 and 1.14 with 100 or more. Over the same buckets, the other emulation-thread work rises from +0.35 to +1.24 ms against the interpreter. In the 54 frames with 50 or more invalidations and no builds, the ratio stays at 0.88. *Inferred, not shown* (no hardware counters): the front-end and asmjit work on the emulation thread displaces the caches and branch predictors that the native code and the other components use; the code-load phases' instruction mix may add to it.
+- **IR runs**: 52-71 ns per instruction against 15-16 for the interpreter, so 3.3-4.7 times slower. Almost all are runs before the threshold (0.52 of 0.55 ms; 1.12 of 1.22); runs waiting for the worker are 0.03-0.10 ms.
+- **The worker** is not the bottleneck in these frames: the most compiles pending in a frame averages 4-11, and the worker is busy 3.6-8.9 ms per frame. Install latency averages 10-21 ms, which costs only the 0.03-0.10 ms of IR runs above. The exception is the burst frames: frame 9,264 has 3,610 builds, 43.7 ms of `Get` (21.1 ms of builds and 15.9 ms of Prepare/Commit) and 8.9 ms of IR runs waiting for the worker, and frame 9,270 has up to 455 pending, with installs 62 ms after submission.
+- **Outside the SH-2s**: 0.6-1.0 ms of real extra work. The waits for the VDP2 thread do not grow (+0.01-0.02): in these frames the emulation thread is too slow to wait.
+
+### Experiment: a lower native threshold (`kNativeCompileThreshold` 16 -> 4, every block)
+
+Same instrumented executable, same run:
+- SH2 total 9.990 against 8.957 ms/frame;
+- frames over 16.7 ms 6,755 against 4,707, worst frame 118.4 against 74.6 ms;
+- Prepare/Commit time on the emulation thread 24.9 s against 3.2 s;
+- native compiles dropped on arrival 299,874 against 20,614.
+
+This is the expected sign. A block before the threshold costs at most 15 IR runs of about 0.6 us more than interpreting them (about 9 us), against 55-60 us of Prepare/Commit per submission, and with 4, 90% of the submissions were dropped on arrival (299,874 of 332,420, against 42% with 16): the code was rewritten before they came back. Only the global threshold was tried, not a threshold for returning code alone. That variant would presumably lose as well (inferred, not run), since the code that returns here is the code being rewritten (native and IR reuses rise with the invalidations, table above).
+
+### Options, ranked (estimated from the breakdown; not implemented)
+
+Savings per frame are subtracted from each slow frame's time, using the first instrumented x64 run (616 frames over 21.9 ms, 4,670 over 16.7). Interpreting a cold instruction is counted at 15.9 ns, the interpreter loop's cost. The executor's one-instruction fallback costs 26-52 ns per instruction, because it repeats the step gates and the lookup; an interpreted cold path must run whole blocks, otherwise it costs what IR costs.
+
+| Option | Mean saving, frames over 16.7 ms | Share of their excess | Frames over 16.7 / over 21.9 ms after it |
+|---|---|---|---|
+| (now) | - | - | 4,670 / 616 |
+| 1. Front end and Prepare off the emulation thread, cold code interpreted until the native code arrives | 1.61 ms | 33% | 3,698 / 37 |
+| 2. Front end off the emulation thread (Prepare stays), cold code interpreted meanwhile | 1.19 ms | 24% | 4,005 / 144 |
+| 3. Interpret cold code and build a block only at its threshold run (84% of builds avoided, from the window's submission share) | 1.06 ms | 22% | 4,087 / 169 |
+| 4. Interpret cold code instead of running it as IR, building as now | 0.39 ms | 8% | 4,450 / 393 |
+| 5. A cheaper `Get` on the reuse and invalidation paths (bound: its growth) | up to 0.63 ms (1.02 over 21.9 ms) | up to 13% | not estimated |
+| 6. More workers | 0.02 ms | 0% | 4,663 / 610 (the burst frames: up to 6 ms of the worst frame) |
+| 7. A lower threshold | negative (measured above) | - | 6,755 over 16.7 |
+
+Options 1 and 2 cross the 2E thread boundary: only `Finalize` runs on the worker today, and `Prepare` and the front end read guest memory and the page table on the emulation thread. They need a design for a consistent snapshot of the guest code, and for what runs until the result is back. Option 3 stays on the emulation thread, but needs a run counter per cold PC and an interpreted path that runs whole blocks cheaply. If the native slowdown and the extra non-SH-2 work (2.4-3.4 ms, 41-51% of the growth) are cache displacement by the compile work (inferred), options 1-3 would also recover part of them; their numbers above do not include that.
+
+**Conclusion.** The long run's slow frames are code-load phases, in which the guest rewrites and reloads code (on average 300-700 invalidations per frame, against about 30 in the frames around them). The excess over the interpreter is not compile time alone. Most of the named part is the emulation thread doing JIT work for code that mostly never becomes native. The growth of the excess over the frames around them breaks down as:
+- builds, Prepare/Commit and `Get` work: 38-46%;
+- native code at 1.09-1.20 times the interpreter's cost per instruction instead of 0.86-0.96, and the other components 0.6-1 ms slower, in the same frames (inferred cache displacement): 41-51%;
+- IR runs before the threshold: 7-9%.
+
+The worker and the render threads are not the bottleneck. The obvious next step is to keep cold code off the JIT's slow paths: interpret it, and build or compile only what reaches the threshold, ideally away from the emulation thread (options 1-3).
