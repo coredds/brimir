@@ -1,6 +1,6 @@
 # SH-2 JIT Compiler — Design
 
-**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact (plan 2B); optimized in plan 2C to about the interpreter's speed (interpreter / x64 SH-2 time 0.91-1.25 on six games); milestone 2D (track B per-instruction cost, track A long sessions) took a long Burning Rangers session from 0.55 to 0.88 of the interpreter's SH-2 speed; milestone 2E moved native compiles to a worker thread and reused dropped decoded blocks, which put Street Fighter Zero 3's compile bursts behind it and the long Burning Rangers run at 0.97. A per-block profile of the generated code then ranked the next changes (dispatch between slices, 27-37% of the executor, first), and milestone 2E track F did the first two: slices resume without a block cache lookup and chain entry and exit are leaner (compiling `RTE` was tried and dropped, with no gain). Interpreter / x64 SH-2 time is now 1.06-1.39 on the six titles (above 1.0 on all, Sega Rally 1.057 from 0.957) and 1.05 on the long Burning Rangers run. The default-on bar of [sh2-jit-m2e.md](sh2-jit-m2e.md) section 3 (faster than the interpreter on every title, without extra stutter) is still not met, by its smoothness condition: the long Burning Rangers run has 358 frames over 16.7 ms (interpreter: 0), and with threaded VDP, the default, the average frame is longer than the interpreter's on Sega Rally, Street Fighter Zero 3 and the long run, which track F traced mostly to the emulation thread waiting for the VDP2 render thread (measured on Sega Rally and Panzer Dragoon II Zwei; with threaded VDP off the average frame is shorter on every title). The JIT stays off by default; see [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2E results", "2E generated-code profile" and "Track F results"
+**Status**: Milestone 2 in progress: full instruction coverage done (plan 2A); x64 backend done and exact (plan 2B); optimized in plan 2C to about the interpreter's speed (interpreter / x64 SH-2 time 0.91-1.25 on six games); milestone 2D (track B per-instruction cost, track A long sessions) took a long Burning Rangers session from 0.55 to 0.88 of the interpreter's SH-2 speed; milestone 2E moved native compiles to a worker thread and reused dropped decoded blocks, which put Street Fighter Zero 3's compile bursts behind it and the long Burning Rangers run at 0.97. A per-block profile of the generated code then ranked the next changes (dispatch between slices, 27-37% of the executor, first), and milestone 2E track F did the first two: slices resume without a block cache lookup and chain entry and exit are leaner (compiling `RTE` was tried and dropped, with no gain). Interpreter / x64 SH-2 time is now 1.06-1.39 on the six titles (above 1.0 on all, Sega Rally 1.057 from 0.957) and 1.05 on the long Burning Rangers run. The default-on bar of [sh2-jit-m2e.md](sh2-jit-m2e.md) section 3 (faster than the interpreter on every title, without extra stutter) is still not met, by its smoothness condition: the long Burning Rangers run has 358 frames over 16.7 ms (interpreter: 0), and with threaded VDP, the default, the average frame is longer than the interpreter's on Sega Rally, Street Fighter Zero 3 and the long run, which track F traced mostly to the emulation thread waiting for the VDP2 render thread (measured on Sega Rally and Panzer Dragoon II Zwei; with threaded VDP off the average frame is shorter on every title). The JIT stays off by default and is kept as an experimental, opt-in core option (user decision, 2026-10-22); see [sh2-x64-performance.md](sh2-x64-performance.md), "Milestone 2E results", "2E generated-code profile" and "Track F results". **Next session: start at section 10, "Where to pick up (handoff, 2026-10-22)".**
 **Date**: 2026-09-30
 **Scope of this document**: overall architecture for all milestones, detailed scope for milestone 1
 
@@ -312,6 +312,64 @@ ARM devices: the lowest is a Raspberry Pi 3 (4x Cortex-A53, in-order, 1.2 GHz, 9
 Measured on that device (2026-10-15): IR lockstep identical on the BIOS menu and six games (1,800 frames) and the test suite passes on ARM64; the IR backend takes about 3x the interpreter's SH-2 time; `perf` puts about 60% of the emulation thread in interpreter dispatch, instruction fetch through the bus and per-instruction bookkeeping. Low-spec items found there, for the shared work (step 2 above):
 - `brimir_cd_preload` (enabled by default) holds the whole CHD in RAM, 366–489 MB per game; a default that depends on available memory, or off on ARM, is to be decided. The CHD reader's unbounded hunk cache is fixed (CHANGELOG).
 - The software VDP2 render thread spins in its event queue's semaphore (`MAX_SEMA_SPINS = 20000`), about one core busy-waiting (20.9% of all samples). Harmless on four cores, but on two-core devices it would compete with emulation and JIT compiles.
+
+### Where to pick up (handoff, 2026-10-22)
+
+**Policy (user, 2026-10-22): the JIT stays an experimental, opt-in core option.**
+- `brimir_sh2_jit` ("SH-2 JIT (Experimental)") defaults to OFF.
+- `brimir_sh2_jit_compile_thread` defaults to Auto. It creates its thread only while the JIT is on, on x86-64, with at least 4 host threads.
+- Do not switch either default, or add an `auto` value to `brimir_sh2_jit`, unless the user asks. The rollout steps in [sh2-jit-m2e.md](sh2-jit-m2e.md) section 8 are on hold.
+
+**State at master `60ef2e3`** (2D track A, 2E with track F merged). Numbers are interpreter / x64 SH-2 time, from "Track F results" in [sh2-x64-performance.md](sh2-x64-performance.md):
+
+| Title | Ratio |
+|---|---|
+| Virtua Fighter 2 | 1.394 |
+| Guardian Heroes | 1.227 |
+| Panzer Dragoon II Zwei | 1.225 |
+| Street Fighter Zero 3 | 1.156 |
+| Burning Rangers | 1.099 |
+| Sega Rally Championship | 1.057 |
+| Burning Rangers, frames 2,400-36,000 | 1.052 |
+
+Against the 2E bar (section 3 of [sh2-jit-m2e.md](sh2-jit-m2e.md)):
+
+| Condition | Result |
+|---|---|
+| Exactness | Holds: 35 lockstep runs on x64 and IR, with and without the worker, across state reloads, plus Raspberry Pi 3 IR lockstep. |
+| Memory | Holds: peak 79.4 / 6.8 MB on the long run, no code-cap flushes. |
+| Speed | Holds on every title. |
+| Smoothness | Fails. The long Burning Rangers run has 358 frames over 16.7 ms against the interpreter's 0, in bursts of new code. With threaded VDP (the default) the average frame is 3-6% longer than the interpreter's on Sega Rally, Street Fighter Zero 3 and the long run. |
+
+The longer average frame is mostly the emulation thread waiting for the VDP2 render thread ("Track F: the non-SH-2 rise"). With threaded VDP off (bench `--no-threaded-vdp`), the JIT's average frame is shorter than the interpreter's on every title.
+
+**Open decisions for the user:**
+1. Should the bar's average-frame rule be judged with threaded VDP off? I proposed it in track F; it is not decided.
+2. Whether a default-on rollout is wanted at all, given the policy above.
+
+**Next technical steps**, ranked:
+1. **Re-measure the long-run slow frames on a healthy machine.** The "Track F: long-run slow frames" section was measured with memory at 2400 MT/s, about 30-40% slow, so its split is indicative only.
+2. **Move the front end and `Prepare` off the emulation thread, and interpret cold code in the meantime.** Estimated at about a third of the slow frames' excess. It needs a design change: today the worker runs only `Finalize`, and the front end reads guest memory and the page table.
+3. **Interpret cold code until its threshold**, and build a block only then.
+4. **Fast-forward the slave's polling loop** (7-17% of the executor). This needs its own design with an exactness argument.
+5. **`RTE`.** It was compiled, measured with no gain, and dropped. The code is on the local branch `archive/sh2-jit-rte`, which is not pushed. Revisit only together with compiling interrupt entry.
+6. **Milestone 3, the ARM64 backend.** The compile thread's core gate for ARM64 is to be decided there, and may require more cores.
+
+**Before any measurement:**
+- Check that the machine is healthy. The development PC has two mixed 2x8 GB kits that must run at DDR4-3200 (manual 3200 MT/s, 1.35 V, 16-20-20-38, FCLK 1600). `Get-CimInstance Win32_PhysicalMemory` must show `ConfiguredClockSpeed 3200`. A BIOS reset drops it to 2400.
+- Run one Panzer Dragoon II Zwei interpreter run (`--warmup 2400 --frames 1800`). Its SH-2 total should be about 4.9-5.0 ms/frame.
+- Compare only within one session.
+
+**How the work was run:**
+- Plans are in `design/plans/`. Per-plan ledgers, task reports and raw measurement data are in `.superpowers/sdd/<plan>/`, which is git-ignored and kept locally.
+- Long benchmark and lockstep batches must run as background processes, each writing a log and a `.done` marker. The harness interrupts long foreground runs.
+- MSVC builds go through `$env:TEMP\opencode\msvc.ps1`. The asserts-on build is `build-dbg`, which passes unfiltered. The WSL ThreadSanitizer build matches the `test-linux-tsan` CI job.
+- Never stage `ROADMAP.md`, which has unrelated uncommitted edits.
+
+**Small leftovers:**
+- A few long source lines: the `brimir_sh2_jit` description in `src/libretro/options.cpp`, `src/jit/src/x64/x64_emitter.hpp` and `tools/README.md`.
+- The stats-pinning test "Executor: stats over a fuzz program are unchanged by the lean entry path" must be re-pinned, from its WARN output, after any legitimate front-end, optimizer or chaining change.
+- The compile-thread option text says frames drop "while the JIT decodes"; that is a simplification of builds plus `Prepare`.
 
 ### Milestone 3 — ARM64 backend (separate spec)
 
