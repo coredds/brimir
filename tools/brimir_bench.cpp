@@ -46,6 +46,7 @@ struct Args {
     bool sh2Jit = false;
     bool jitSyncCompile = false; // --jit-sync-compile: the JIT core compiles without a worker thread
     bool cdPreload = true;     // the core's default (brimir_cd_preload enabled)
+    bool threadedVdp = true;   // the core's default; --no-threaded-vdp renders VDP1/VDP2 on the emulation thread
     bool backendGiven = false; // --jit-backend given explicitly
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
     bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
@@ -62,7 +63,7 @@ void PrintUsage(std::FILE* out) {
         "                    [--sh2-jit [--jit-backend ir|x64] [--jit-sync-compile]] --dump-at N --dump-state <file>\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
         "                    --lockstep N [--lockstep-reload K] [--jit-backend ir|x64] [--jit-sync-compile]\n"
-        "       (all forms also accept --no-cd-preload)\n"
+        "       (all forms also accept --no-cd-preload and --no-threaded-vdp)\n"
         "       brimir_bench --help\n"
         "\n"
         "  --bios        Saturn BIOS image (required)\n"
@@ -85,6 +86,11 @@ void PrintUsage(std::FILE* out) {
         "                (the brimir_cd_preload core option, enabled by default). Preloading\n"
         "                holds the whole image in memory per core: use this for --lockstep\n"
         "                on hosts with little RAM.\n"
+        "  --no-threaded-vdp\n"
+        "                render VDP1 and VDP2 on the emulation thread instead of their own threads (the\n"
+        "                brimir core's default is threaded). With threaded VDP the emulation thread\n"
+        "                waits for the VDP2 thread at the end of the frame, which hides SH-2 gains\n"
+        "                from the frame time. --lockstep always runs unthreaded.\n"
         "  --jit-backend code backend of the JIT: ir (IR interpreter) or x64 (native, x86-64 builds).\n"
         "                Default: x64 when built, else ir. Needs --sh2-jit or --lockstep (applies\n"
         "                to the JIT core).\n"
@@ -136,6 +142,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
         }
         if (opt == "--no-cd-preload") {
             args.cdPreload = false;
+            continue;
+        }
+        if (opt == "--no-threaded-vdp") {
+            args.threadedVdp = false;
             continue;
         }
         if (i + 1 >= argc) {
@@ -381,6 +391,9 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
     // After loading: LoadGame turns threaded VDP rendering back on.
     if (lockstepCore) {
         brimir::PrepareLockstepCore(core);
+    } else if (!args.threadedVdp) {
+        core.SetThreadedVDP1(false);
+        core.SetThreadedVDP2(false);
     }
     return 0;
 }
@@ -634,6 +647,7 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     if (!args.game.empty()) {
         std::printf("cd preload   : %s\n", args.cdPreload ? "on" : "off");
     }
+    std::printf("threaded VDP : %s\n", args.threadedVdp ? "on" : "off");
     // Frames over one 60 Hz frame time (16.7 ms): the stutter count.
     const long long over167 = static_cast<long long>(
         std::count_if(frameMs.begin(), frameMs.end(), [](double ms) { return ms > 16.7; }));

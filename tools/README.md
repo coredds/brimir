@@ -78,8 +78,10 @@ page changed since they were compiled; each is recompiled and run) and
 `chainedBlocks` (native blocks entered directly from the previous block,
 without returning to the executor; `nativeBlocksRun / (nativeBlocksRun -
 chainedBlocks)` is the average chain length), `resumes` (steps that entered
-native code where the previous slice's chain stopped at the cycle limit,
-without a cache lookup) and `runs` (scheduler slices, `Executor::Run` calls;
+native code at the PC where the previous slice stopped, without a cache
+lookup: the slice ended at a block end or in the middle of a block, at the
+cycle limit or for an interrupt; the interrupt, delay-slot and fetch-buffer
+gates of a step apply first, so a pending interrupt is still interpreted) and `runs` (scheduler slices, `Executor::Run` calls;
 `resumes / runs` is the share of slices resumed). A `cache` line per CPU adds the
 block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
 (blocks compiled natively: with a native backend a block runs on the IR
@@ -140,6 +142,10 @@ SH2 total    : 4.124 ms/frame (52.5% of Ymir_RunFrame)
 SH-2 time is measured inside `SH2::Advance` and includes on-chip peripherals
 (DMA, timers) and bus accesses the CPUs make. VDP rendering runs on worker
 threads by default, so `Ymir_RunFrame` is the emulation thread's time only.
+With threaded VDP the emulation thread also waits at the end of each frame for
+the VDP2 thread, so the frame time can hide a change in SH-2 time.
+`--no-threaded-vdp` renders VDP1 and VDP2 on the emulation thread instead (the
+report prints `threaded VDP : on|off`); `--lockstep` always runs unthreaded.
 
 ### Lockstep validation
 
