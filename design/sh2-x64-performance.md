@@ -1587,8 +1587,17 @@ Method (Track F plan, "Track F progress measurement"): `build-bench`, `--warmup 
 | 2 | Sega Rally Championship (US) | 4.730 | 4.474 (Task 1: 4.564) | **1.057** (1.036) | 7.198 / 7.563 (7.597) | 0 0 0 / 0 | 95.1% / 65.4% |
 | 2 | Street Fighter Zero 3 (JP, 4 MB cart) | 4.505 | 4.006 (Task 1: 4.128) | 1.125 (1.091) | 8.993 / 9.178 (9.159) | 0 0 0 / 0 | 93.7% / 99.7% |
 | 2 | Burning Rangers (US) | 6.362 | 5.841 (Task 1: 5.951) | 1.089 (1.069) | 8.727 / 8.467 (8.635) | 0 0 0 / 0 | 92.2% / 77.7% |
-
+| 3 | Panzer Dragoon II Zwei (US) | 4.888 | 4.039 (Task 2: 4.068) | 1.210 (1.202) | 6.351 / 5.794 (5.821) | 0 0 0 / 0 | 88.4% / 99.6% |
+| 3 | Sega Rally Championship (US) | 4.610 | 4.460 (Task 2: 4.464) | **1.034** (1.033) | 7.137 / 7.545 (7.539) | 0 0 0 / 0 | 95.1% / 65.4% |
+| 3 | Street Fighter Zero 3 (JP, 4 MB cart) | 4.524 | 3.967 (Task 2: 3.979) | 1.140 (1.137) | 8.967 / 9.154 (9.155) | 0 0 0 / 0 | 93.8% / 99.7% |
+| 3 | Burning Rangers (US) | 6.255 | 5.836 (Task 2: 5.834) | 1.072 (1.072) | 8.597 / 8.452 (8.449) | 0 0 0 / 0 | 92.2% / 77.7% |
 From Task 2 on, the value in parentheses is the previous task's executable (Task 1, `8f96e75`), run interleaved in the same rounds (interpreter, previous task, this task), not `7f807b9`.
+For Task 3 the parenthesised base is Task 2's executable (`3594712`), interleaved in the same rounds. Task 3 is the `RTE` experiment: **dropped, not part of the branch**.
+
+**Task 3: compile `RTE` (2E F3), measured and dropped.** `RTE` was a delayed branch in the front end (the two stack reads, the SR write through a new `WriteSR` IR op, `R15 += 8`; interrupt entry stayed interpreted).
+- **Result.** Exact: lockstep BIOS 1,200 frames and the six titles at 1,800 frames, x64 and IR, all identical, `compileFallbacks 0`; `[jit]` on both backends, the `build-dbg` suite and WSL TSan passed. Sega Rally's slave interpreter fallbacks (bench `interpreted`, cumulative over 4,200 frames) fell from 110,244,782 to 42,281,374 (-62%), with 36.42M more `blocksRun`. SH-2 time did not improve beyond run-to-run spread on any title (rows above; Sega Rally 4.460 against 4.464 ms/frame; the profile's 0.15-0.28 ms/frame was not reached).
+- **Likely reason** (inferred from the counters, not profiled). The added block runs are almost never chained into (`chainedBlocks` +0.1%), so each `RTE` block follows an interpreted interrupt entry and pays a lookup and a chain entry (the profile's 20-22 ns, items 1-2), about what the two interpreted instructions cost.
+- **Decision.** Dropped. The code is kept on the local branch `archive/sh2-jit-rte` (`bb0ce10`, not pushed). Worth revisiting only together with compiling interrupt entry (or handing entry straight to the handler block).
 
 ### Task 1: resume a slice without `Get` (2E F1)
 
