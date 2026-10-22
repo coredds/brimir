@@ -65,14 +65,17 @@ public:
     bool Compile(const Block &block, const ymir::sh2::SH2JitContext &ctx, NativeCode &out);
     // Same contract as RunBlock, for one block. An exception thrown by a context callback is
     // rethrown here after the generated code has returned. `ctx` must be the context `code` was
-    // compiled with (same CPU; see NativeCode).
+    // compiled with (same CPU; see NativeCode). Run is not reentrant and not thread-safe: one Run
+    // at a time per backend (the backend holds the exception while the generated code unwinds).
     //
     // With allowChain, a block that leaves through a static Exit, a taken ExitIf or ExitDynamic
     // does what Executor::Run does between steps instead of returning: it stores
     // *ctx.cyclesExecuted = entry + cycles so far, stops if they reached `target`, and otherwise
     // enters the block published for the new PC, if any. That block first makes Executor::Step's
     // checks (pending interrupt, PC & 2 fetch buffer) and returns if one fails; the executor then
-    // continues with a normal step. The result covers the whole chain (see ExitInfo).
+    // continues with a normal step. The result covers the whole chain (see ExitInfo). When a chain
+    // or block stops (cycle limit or boundary), the entry linked for the new PC is stored in
+    // out.next (see ExitInfo::next).
     virtual ExitInfo Run(const NativeCode &code, ymir::sh2::SH2JitContext &ctx, uint64_t target = kNoCycleTarget,
                          const bool *abortRequested = nullptr, bool allowChain = false) = 0;
     // Link table: makes `code` (selfValidating, compiled for pc) the block chained to at pc, or

@@ -49,7 +49,8 @@ private:
     // Link table (x64_emitter.hpp); its address is embedded in generated code, so it never moves.
     std::unique_ptr<X64LinkSlot[]> m_links;
     size_t m_codeBytes = 0;
-    // The exception a callback threw during Run (X64Frame::error); empty outside a failing Run.
+    // The exception a callback threw during Run (X64Frame::error); empty outside a failing Run. It
+    // is held here, so Run is not reentrant and not thread-safe: one Run at a time per backend.
     std::exception_ptr m_error;
 };
 

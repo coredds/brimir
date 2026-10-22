@@ -1667,6 +1667,10 @@ TEST_CASE("Executor: a throwing callback inside a chain still applies a deferred
 // every 200 slices and whenever one reaches its SLEEP (so cached blocks go stale), 2,000 random
 // slices of 1-80 cycles
 // through SH2::Advance, tiered compilation (threshold 3), chaining and resumes.
+// The totals pin one deterministic run so the lean entry path could be checked against the old
+// one. Any legitimate change to the front end, the optimizer, the thresholds, the chaining policy
+// or the fuzz generator changes them: once the change is understood, re-pin them from the WARN
+// output.
 TEST_CASE("Executor: stats over a fuzz program are unchanged by the lean entry path", "[jit][executor]") {
     if (!brimir::jit::IsBackendAvailable(brimir::jit::BackendKind::X64)) {
         SKIP("no x64 backend");

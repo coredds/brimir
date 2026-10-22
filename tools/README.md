@@ -81,9 +81,9 @@ chainedBlocks)` is the average chain length), `resumes` (steps that entered
 native code at the PC where the previous slice stopped, without a cache
 lookup: the slice ended at a block end or in the middle of a block, at the
 cycle limit or for an interrupt; the interrupt, delay-slot and fetch-buffer
-gates of a step apply first, so a pending interrupt is still interpreted) and `runs` (scheduler slices, `Executor::Run` calls;
-`resumes / runs` is the share of slices resumed). A `cache` line per CPU adds the
-block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
+gates of a step apply first, so a pending interrupt is still interpreted) and
+`runs` (scheduler slices, `Executor::Run` calls; `resumes / runs` is the share
+of slices resumed). A `cache` line per CPU adds the block cache's totals: `compiles` (blocks built as IR), `nativeCompiles`
 (blocks compiled natively: with a native backend a block runs on the IR
 interpreter until its 16th run, `kNativeCompileThreshold`), `compileMs` (host
 time building blocks and compiling them natively), `nativeBytesPerBlock`,

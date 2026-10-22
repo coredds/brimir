@@ -31,7 +31,8 @@ public:
         uint64_t chainedBlocks = 0;    // native blocks entered from another block (Run with chaining)
         // Steps that entered native code through a resume (Run), without a BlockCache::Get; one
         // whose block then reports stale still counts (its retry calls Get). Their blocks count in
-        // blocksRun and nativeBlocksRun as for any native step.
+        // blocksRun and nativeBlocksRun as for any native step. The record is left by Run and
+        // consumed by the next Step or Run.
         uint64_t resumes = 0;
         uint64_t runs = 0; // Run calls
     };

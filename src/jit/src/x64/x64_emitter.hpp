@@ -58,8 +58,8 @@ constexpr uint32_t LinkIndex(uint32_t pc) {
 // Trampolines: the only functions generated code calls (defined in x64_backend.cpp). Each loads
 // its callback from frame->ctx at call time. None lets an exception escape: a callback exception
 // is stored in *frame->error, frame->failed and frame->stop are set and the trampoline returns 0.
-// TrRead, TrOnChipRead, TrWrite and TrRefill also set frame->stop when *frame->abortRequested is true after the callback. Generated
-// code tests frame->stop after every trampoline except TrMacW/TrMacL, and on stop takes
+// TrRead, TrOnChipRead, TrWrite and TrRefill also set frame->stop when *frame->abortRequested is true
+// after the callback. Generated code tests frame->stop after every trampoline except TrMacW/TrMacL, and on stop takes
 // RunBlock's abort exit (out.aborted, out.cycles; PC untouched). Run then rethrows *frame->error.
 // bool arguments are passed as uint32_t 0/1.
 uint32_t TrRead(X64Frame *f, uint32_t address, uint32_t size, uint32_t instrFetch) noexcept;
