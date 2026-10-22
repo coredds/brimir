@@ -1269,7 +1269,7 @@ The BIOS menu is not one of the six titles. Against track A (a different session
 | Guardian Heroes (US) | 1.138 | 1.172 / 1.125 / 1.135 | 3.912 | 0.291 | 1.157 | 0/0 | 0.061 | 667 | 27.3 | 667/0 | 0 | 0/0 | 0 |
 | Street Fighter Zero 3 (JP, 4 MB cart) | 1.033 | 1.023 / 1.027 / 1.047 | 3.763 | 0.275 | 0.945 | 0/0 | 0.538 | 6333 | 243.4 | 6333/0 | 0 | 0/0 | 0 |
 
-The worker's CPU time is 0.056-0.092 ms/frame on five of the six titles and 0.538 ms/frame on Street Fighter Zero 3 (6,333 native compiles, 243 ms of Prepare and Commit on the emulation thread against 1,191-1,234 ms synchronously in task 4); the long Burning Rangers run uses 0.380 ms/frame (28,895 native compiles, 19,204 of them dropped on arrival because their block had been invalidated meanwhile).
+The worker's CPU time is 0.056-0.092 ms/frame on five of the six titles and 0.538 ms/frame on Street Fighter Zero 3 (6,333 native compiles, 243 ms of Prepare and Commit on the emulation thread against 1,191-1,234 ms synchronously in task 4); the long Burning Rangers run uses 0.380 ms/frame (28,895 native compiles submitted: 9,691 installed and 19,204 dropped on arrival because their block had been invalidated meanwhile).
 
 ### Second session (titles within 0.02 of 1.0, and the two others at or near it)
 
@@ -1327,7 +1327,7 @@ Session 2 (the three titles above): Sega Rally 7.130 -> 7.771 ms (+9.0%), Burnin
 | Long run, window counters | x64 worker | x64 sync | track A (e8adf69, sync) |
 |---|---|---|---|
 | Front-end builds | 306,207 | 305,401 | 1,149,860 |
-| Native compiles in the window | 28,895 (of which dropped on arrival 19,204) | 44,193 | 42,871 |
+| Native compiles in the window | 28,895 submitted (9,691 installed + 19,204 dropped on arrival) | 44,193 | 42,871 |
 | Compile time on the emulation thread | 5.7 s (0.170 ms/frame) | 16.7 s (0.497 ms/frame) | 24.0 s (0.714 ms/frame) |
 | Worker CPU time | 0.380 ms/frame | - | - |
 | Frames with compiling | 8,295 | 8,294 | 9,642 |
@@ -1798,3 +1798,204 @@ Options 1 and 2 cross the 2E thread boundary: only `Finalize` runs on the worker
 The worker and the render threads are not the bottleneck. The obvious next step is to keep cold code off the JIT's slow paths: interpret it, and build or compile only what reaches the threshold, ideally away from the emulation thread (options 1-3).
 
 **Caveat: machine state.** All of this was measured on a machine that took 31-50% more time per frame than in earlier sessions, for a reason not found (see "Machine state"; its memory ran at 2400 MT/s). If memory or cache latency is what changed, the native-slowdown share and the other-components share, which are the cache-displacement part, may be overstated against a healthy machine, and the compile-side shares may shift too. Re-measure on a healthy machine before relying on the split or on the option ranking.
+
+## Track F results
+
+**Date**: 2026-10-22
+**Commit**: 628fa69 (`feat(bench): --no-threaded-vdp`; the head of `feature/sh2-jit-2e-f` before the commit that adds this section. The only source change since task 2 (`3594712`, the last commit that changed the JIT; the commits between are docs) is the bench option. Tasks 1 and 2 are the resume and lean-entry changes; task 3 was dropped). The measured executable (`build-bench`, Ninja, Release, LTO/IPO, MSVC) was copied aside before the runs.
+**Machine**: AMD Ryzen 7 5700G (8 cores / 16 threads), Windows, the 2C method. Memory: all four DIMMs run at 3200 MT/s (`Get-CimInstance Win32_PhysicalMemory`: `ConfiguredClockSpeed` 3200 on all four), after the BIOS memory configuration was fixed; the task 5 session ran at 2400 MT/s and 30-40% slow. **Machine check before any timed run:** CPU load 8-13%, and Panzer Dragoon II Zwei in the interpreter (`--warmup 2400 --frames 1800`) read 4.966 ms/frame of SH-2 total against 4.885 in the 2E record (+1.7%, under the 8% limit), so the machine is back to its earlier speed.
+
+**Verdict: the default-on bar (`sh2-jit-m2e.md` section 3) is not met. Condition 2 fails as the design states it; conditions 1, 3 and 4 hold.**
+
+- **Faster (1): holds.** Interpreter / x64 SH-2 total is above 1.0 on all six titles (1.057 to 1.394; Sega Rally, the lowest, 1.057, and 1.088 in a second session) and on the long Burning Rangers run (1.052). No title is within 0.02 of 1.0, so the second-session rule did not apply. The 2E failures are gone: Sega Rally 0.957 -> 1.057, Burning Rangers 1.008 -> 1.099, the long run 0.969 -> 1.052.
+- **Smooth (2): fails (a), the design as written (threaded VDP on).** Frames over 16.7 ms: the 1,800-frame windows pass (0 against 0 on all seven), but the long Burning Rangers run has **358 against 0** for the interpreter. Average frame: x64 is above the interpreter's on **Sega Rally (7.697 against 7.296 ms, +5.5%; session 2 +2.8%)**, **Street Fighter Zero 3 (+2.9%; session 2 +2.4%)** and **the long run (9.720 against 9.353, +3.9%)**. Burning Rangers' window passes now (0.965; session 2 0.958).
+- **Smooth (2), (b): threaded VDP off, same session, interpreter and x64.** The average-frame part holds on all seven windows (x64 / interpreter 0.870 to 0.980, in both sessions) and on the long run (15.831 against 16.059 ms, 0.986). The frames-over-16.7 ms part stays as the design states it (threaded VDP on) and fails on the long run in (a). Task 4 found that most of the JIT's extra non-SH-2 time is the emulation thread waiting for the VDP2 render thread; (b) removes that wait.
+- **Exact (3): holds.** Lockstep is identical for 36,000 frames on x64 (BIOS menu and six titles, with the worker), 1,800 frames on IR, 3,600 frames with `--lockstep-reload 300` on both backends and 1,800 frames on x64 with `--jit-sync-compile`: 35 runs, all exit 0 with `compileFallbacks 0`, `blocksRun` and `interpreted` equal to 2E's on both CPUs (`design/sh2-validation.md`, "Milestone 2E, track F"). `[jit]` (216 cases), the whole suite (343 cases) and `ctest` pass on Windows x64; the Raspberry Pi 3's IR lockstep (7 of 7), its `[jit]` tests and `ctest` pass; CI of `628fa69` (run 39803140783): green: test-windows 6m19s, test-linux-x64 12m44s, test-linux-tsan 16m32s, build-macos-arm64 2m10s (its first attempt was cancelled after 15 minutes in the runner queue and re-run).
+- **Memory (4): holds.** The long run has 0 code-cap flushes on both CPUs and a native-code peak of 79.4 / 6.8 MB (master / slave), under 128 MB; the 36,000-frame lockstep runs peak at 113.8 MB (Panzer Dragoon II Zwei, master), 99.7 (Virtua Fighter 2) and 93.5 (Street Fighter Zero 3), all under 128 MB with 0 flushes.
+
+**Step 4 of the plan, the rollout, did not run.** It needs all four conditions with (a), the design as written (controller ruling R4); the bar holds only with threaded VDP off for the average-frame part, and the frames-over part fails either way. The JIT stays off by default, and `brimir_sh2_jit` has no `auto` value.
+
+### Method
+
+The 2C method, as in 2E: `--warmup 2400 --frames 1800` for the games and `--warmup 300 --frames 1800` for the BIOS menu, default settings, a scratch system dir with `brimir_saturn_rtc_us_eu.smpc` also as `brimir_saturn_rtc_jp.smpc`, three rounds, each round running every title in the interpreter, `--sh2-jit --jit-backend ir` and `--sh2-jit --jit-backend x64` (worker) back to back (63 runs), plus one round of `--jit-backend x64 --jit-sync-compile` (7 runs, reference), and the long Burning Rangers run (`--warmup 2400 --frames 33600`, US BIOS) in the interpreter, x64 with the worker and x64 synchronous (one run each). Then, in the same session, the same table runs for the interpreter and x64 only with **`--no-threaded-vdp`** (VDP1 and VDP2 rendered on the emulation thread; 42 runs, a new bench option) and the long run in the interpreter and x64 with it (2 runs): condition 2's average-frame part (b). A second session (after the first, same executable, the three titles whose average frame was in question: Sega Rally, Burning Rangers, Street Fighter Zero 3) ran the interpreter and x64, three rounds, with threaded VDP (a) and without (b): 36 runs. All 153 timed runs of the batches exited 0 (and the step 0 check) and every x64 run reports `compileFallbacks 0` on both CPUs. The table shows the run with the median SH2 total per mode and the three runs' SH2 totals, max frame times and frames over 16.7 ms. Scripts and raw outputs: `.superpowers/sdd/2026-10-21-sh2-jit-m2e-track-f/task-6-data/` (`s1` session 1 (a), `s1/nv` session 1 (b), `s2`, `s2/nv`, lockstep `ls`, `measure.ps1`, `measure-long.ps1`, `gen*.ps1`); the table scripts are those of 2E (`parse.ps1`, `cond2.ps1`) with the same medians.
+
+**Load.** The development PC read 8-13% CPU load before the batch; nothing but the usual desktop applications (Spotify, opencode, a terminal) and the measurement ran, and no lockstep run or build was active. The Raspberry Pi work ran on the Pi during session 1; the only local parts were a `git archive`, an `scp` and an `rsync` at the start of that batch and some `ssh` polling, and a few table scripts ran during it. A 30-second sampler of the whole-machine load reads the benchmark's own threads too (threaded VDP, emulation thread, compile worker): session 1 35.7% on average (2-99%, 229 samples), session 2 18.5% (5-48%, 53 samples); the load at the end of each of the session 1 table runs (`Win32_Processor.LoadPercentage`) is 0-88% (average 12%). The interpreter totals of this session are 1.6-6.7% above 2E's session and the x64 totals 3.9-6.9% below, so ratios are compared only with this session's own runs.
+
+### Results (session 1, threaded VDP on, (a))
+
+| Title | Mode | ms/frame avg | p95 | max | SH2 master ms (%) | SH2 slave ms (%) | SH2 total ms (%) | SH2 total, 3 runs | max frame ms, 3 runs | frames over 16.7 ms, 3 runs |
+|---|---|---|---|---|---|---|---|---|---|---|
+| BIOS menu (US) | interpreter | 8.044 | 8.527 | 9.4 | 1.753 (21.8%) | 0.000 (0.0%) | 1.753 (21.8%) | 1.753 / 1.733 / 1.781 | 9.4 / 9.3 / 9.6 | 0 / 0 / 0 |
+|  | IR | 8.608 | 9.025 | 11.0 | 6.176 (71.8%) | 0.000 (0.0%) | 6.176 (71.8%) | 6.176 / 6.158 / 6.341 | 11.0 / 10.8 / 11.0 | 0 / 0 / 0 |
+|  | x64 (worker) | 7.906 | 8.403 | 9.0 | 1.162 (14.7%) | 0.000 (0.0%) | 1.162 (14.7%) | 1.108 / 1.183 / 1.162 | 9.2 / 9.6 / 9.0 | 0 / 0 / 0 |
+|  | x64 (sync compile) | 7.881 | 8.613 | 10.2 | 1.273 (16.2%) | 0.000 (0.0%) | 1.273 (16.2%) | 1.273 | 10.2 | 0 |
+| Virtua Fighter 2 (JP) | interpreter | 6.360 | 7.707 | 9.8 | 2.874 (45.2%) | 1.687 (26.5%) | 4.561 (71.7%) | 4.521 / 4.561 / 4.663 | 10.0 / 9.8 / 10.4 | 0 / 0 / 0 |
+|  | IR | 19.382 | 23.745 | 27.9 | 10.156 (52.4%) | 7.279 (37.6%) | 17.435 (90.0%) | 17.435 / 17.433 / 17.597 | 27.9 / 24.7 / 28.1 | 1404 / 1358 / 1434 |
+|  | x64 (worker) | 5.706 | 6.415 | 8.7 | 2.181 (38.2%) | 1.092 (19.1%) | 3.273 (57.4%) | 3.273 / 3.211 / 3.384 | 8.7 / 8.6 / 9.8 | 0 / 0 / 0 |
+|  | x64 (sync compile) | 5.742 | 6.579 | 8.9 | 2.266 (39.5%) | 1.092 (19.0%) | 3.358 (58.5%) | 3.358 | 8.9 | 0 |
+| Panzer Dragoon II Zwei (US) | interpreter | 6.459 | 7.592 | 10.7 | 3.214 (49.8%) | 1.762 (27.3%) | 4.975 (77.0%) | 4.975 / 5.385 / 4.973 | 10.7 / 10.6 / 8.2 | 0 / 0 / 0 |
+|  | IR | 17.637 | 19.539 | 20.9 | 10.417 (59.1%) | 5.276 (29.9%) | 15.694 (89.0%) | 15.694 / 15.936 / 15.683 | 20.9 / 22.9 / 25.1 | 1106 / 1199 / 1120 |
+|  | x64 (worker) | 5.835 | 7.223 | 8.2 | 2.692 (46.1%) | 1.370 (23.5%) | 4.062 (69.6%) | 4.044 / 4.062 / 4.162 | 8.2 / 8.2 / 8.6 | 0 / 0 / 0 |
+|  | x64 (sync compile) | 6.022 | 7.518 | 9.0 | 2.823 (46.9%) | 1.409 (23.4%) | 4.231 (70.3%) | 4.231 | 9.0 | 0 |
+| Sega Rally Championship (US) | interpreter | 7.296 | 8.597 | 10.1 | 2.686 (36.8%) | 2.111 (28.9%) | 4.797 (65.8%) | 4.782 / 4.871 / 4.797 | 12.3 / 11.7 / 10.1 | 0 / 0 / 0 |
+|  | IR | 18.098 | 26.213 | 31.8 | 9.444 (52.2%) | 6.588 (36.4%) | 16.032 (88.6%) | 15.955 / 16.032 / 16.058 | 28.2 / 31.8 / 28.8 | 900 / 901 / 902 |
+|  | x64 (worker) | 7.697 | 9.356 | 13.0 | 2.327 (30.2%) | 2.211 (28.7%) | 4.538 (59.0%) | 4.554 / 4.538 / 4.461 | 11.6 / 13.0 / 9.8 | 0 / 0 / 0 |
+|  | x64 (sync compile) | 7.791 | 9.673 | 11.7 | 2.406 (30.9%) | 2.266 (29.1%) | 4.672 (60.0%) | 4.672 | 11.7 | 0 |
+| Burning Rangers (US) | interpreter | 8.956 | 10.100 | 12.5 | 4.420 (49.4%) | 2.143 (23.9%) | 6.563 (73.3%) | 6.527 / 6.594 / 6.563 | 11.3 / 12.7 / 12.5 | 0 / 0 / 0 |
+|  | IR | 23.689 | 25.037 | 28.2 | 14.049 (59.3%) | 6.898 (29.1%) | 20.948 (88.4%) | 21.043 / 20.899 / 20.948 | 28.2 / 30.8 / 28.2 | 1800 / 1800 / 1800 |
+|  | x64 (worker) | 8.645 | 10.376 | 11.6 | 4.256 (49.2%) | 1.718 (19.9%) | 5.974 (69.1%) | 6.005 / 5.974 / 5.849 | 15.9 / 11.6 / 13.0 | 0 / 0 / 0 |
+|  | x64 (sync compile) | 8.701 | 10.495 | 12.4 | 4.299 (49.4%) | 1.719 (19.8%) | 6.018 (69.2%) | 6.018 | 12.4 | 0 |
+| Guardian Heroes (US) | interpreter | 6.211 | 7.150 | 8.7 | 2.505 (40.3%) | 1.547 (24.9%) | 4.053 (65.3%) | 4.023 / 4.138 / 4.053 | 9.7 / 9.6 / 8.7 | 0 / 0 / 0 |
+|  | IR | 15.701 | 19.369 | 21.2 | 8.370 (53.3%) | 4.930 (31.4%) | 13.299 (84.7%) | 13.299 / 13.384 / 13.299 | 23.7 / 21.4 / 21.2 | 371 / 375 / 370 |
+|  | x64 (worker) | 6.096 | 6.777 | 8.1 | 1.927 (31.6%) | 1.376 (22.6%) | 3.303 (54.2%) | 3.309 / 3.303 / 3.199 | 8.5 / 8.1 / 7.8 | 0 / 0 / 0 |
+|  | x64 (sync compile) | 6.150 | 6.995 | 8.9 | 2.003 (32.6%) | 1.402 (22.8%) | 3.405 (55.4%) | 3.405 | 8.9 | 0 |
+| Street Fighter Zero 3 (JP, 4 MB cart) | interpreter | 9.034 | 9.748 | 11.1 | 2.801 (31.0%) | 1.972 (21.8%) | 4.773 (52.8%) | 4.683 / 4.838 / 4.773 | 11.2 / 11.2 / 11.1 | 0 / 0 / 0 |
+|  | IR | 18.279 | 21.849 | 25.8 | 10.181 (55.7%) | 6.008 (32.9%) | 16.189 (88.6%) | 16.511 / 16.189 / 15.791 | 25.3 / 25.8 / 23.6 | 1690 / 1499 / 1257 |
+|  | x64 (worker) | 9.296 | 10.210 | 14.4 | 2.756 (29.7%) | 1.374 (14.8%) | 4.130 (44.4%) | 4.137 / 4.130 / 4.105 | 15.5 / 14.4 / 13.9 | 0 / 0 / 0 |
+|  | x64 (sync compile) | 9.770 | 11.692 | 24.0 | 3.356 (34.4%) | 1.379 (14.1%) | 4.735 (48.5%) | 4.735 | 24.0 | 19 |
+
+### Ratios (SH2 total, median runs) and 2E
+
+| Title | interpreter / x64 (Track F) | 2E | change | x64 SH2 total Track F / 2E | change | interpreter SH2 total Track F / 2E | change |
+|---|---|---|---|---|---|---|---|
+| BIOS menu (reference) | **1.509** | 1.359 | +0.150 | 1.162 / 1.209 | -3.9% | 1.753 / 1.643 | +6.7% |
+| Virtua Fighter 2 | **1.394** | 1.281 | +0.113 | 3.273 / 3.445 | -5.0% | 4.561 / 4.413 | +3.4% |
+| Panzer Dragoon II Zwei | **1.225** | 1.120 | +0.105 | 4.062 / 4.361 | -6.9% | 4.975 / 4.885 | +1.8% |
+| Sega Rally Championship | **1.057** | 0.957 | +0.100 | 4.538 / 4.815 | -5.8% | 4.797 / 4.607 | +4.1% |
+| Burning Rangers | **1.099** | 1.008 | +0.090 | 5.974 / 6.245 | -4.3% | 6.563 / 6.298 | +4.2% |
+| Guardian Heroes | **1.227** | 1.138 | +0.089 | 3.303 / 3.506 | -5.8% | 4.053 / 3.989 | +1.6% |
+| Street Fighter Zero 3 | **1.156** | 1.033 | +0.123 | 4.130 / 4.371 | -5.5% | 4.773 / 4.515 | +5.7% |
+
+The BIOS menu is not one of the six titles. The ratios are 0.089-0.150 higher than in the 2E session: the x64 SH-2 totals are 3.9-6.9% lower (tasks 1 and 2: resuming slices and leaner chain entry and exit), and the interpreters' are 1.6-6.7% higher in this session, so some of the difference is the session. The same-session measurements of the tasks are in "Track F progress" (Sega Rally 0.993 -> 1.057 from the base to task 2 in sessions of their own; Burning Rangers 1.038 -> 1.089; task 3 was dropped).
+
+### Compile work, the worker and resumes (session 1, median x64 run)
+
+| Title | interpreter / x64 (worker) | per-round ratios (interp r / x64 r) | IR / x64 | interpreter / IR | interpreter / x64 (sync) | x64 fallbacks m/s | worker ms/frame (med run) | native compiles in window (med run) | emulation-thread compile ms | async / dropped | flushes in window | code-cap flushes m/s (since start) | IR reuses |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BIOS menu (US) | 1.509 | 1.582 / 1.465 / 1.533 | 5.315 | 0.284 | 1.377 | 0/0 | 0.079 | 473 | 32.7 | 473/0 | 0 | 0/0 | 0 |
+| Virtua Fighter 2 (JP) | 1.394 | 1.381 / 1.420 / 1.378 | 5.327 | 0.262 | 1.358 | 0/0 | 0.085 | 959 | 35.8 | 959/0 | 0 | 0/0 | 0 |
+| Panzer Dragoon II Zwei (US) | 1.225 | 1.230 / 1.326 / 1.195 | 3.864 | 0.317 | 1.176 | 0/0 | 0.058 | 660 | 26.4 | 660/0 | 0 | 0/0 | 0 |
+| Sega Rally Championship (US) | 1.057 | 1.050 / 1.073 / 1.075 | 3.533 | 0.299 | 1.027 | 0/0 | 0.102 | 1056 | 44.3 | 1056/0 | 0 | 0/0 | 0 |
+| Burning Rangers (US) | 1.099 | 1.087 / 1.104 / 1.122 | 3.507 | 0.313 | 1.091 | 0/0 | 0.074 | 821 | 34.8 | 821/0 | 0 | 0/0 | 0 |
+| Guardian Heroes (US) | 1.227 | 1.216 / 1.253 / 1.267 | 4.026 | 0.305 | 1.190 | 0/0 | 0.066 | 667 | 29.3 | 667/0 | 0 | 0/0 | 0 |
+| Street Fighter Zero 3 (JP, 4 MB cart) | 1.156 | 1.132 / 1.171 / 1.163 | 3.920 | 0.295 | 1.008 | 0/0 | 0.596 | 6333 | 253.3 | 6333/0 | 0 | 0/0 | 0 |
+
+Resumes (`resumes / runs`, the share of `Executor::Run` calls that entered native code without `BlockCache::Get`) and chaining, median x64 run:
+
+| Title | Resumes / Run calls, master | slave | chained blocks / native blocks run, master |
+|---|---|---|---|
+| BIOS menu (reference) | 99.4% | - | 82.2% |
+| Virtua Fighter 2 | 91.5% | 99.1% | 77.0% |
+| Panzer Dragoon II Zwei | 88.4% | 99.6% | 81.8% |
+| Sega Rally Championship | 95.1% | 65.4% | 80.6% |
+| Burning Rangers | 92.2% | 77.7% | 76.9% |
+| Guardian Heroes | 96.5% | 99.7% | 78.4% |
+| Street Fighter Zero 3 | 93.7% | 99.7% | 74.8% |
+
+The worker's CPU time is 0.058-0.102 ms/frame on the BIOS menu and five of the six titles and 0.596 ms/frame on Street Fighter Zero 3; the long run uses 0.404 ms/frame (28,801 native compiles submitted).
+
+### Second session (Sega Rally, Burning Rangers, Street Fighter Zero 3)
+
+Run after the first session's batches, the same executable, interpreter and x64 (worker), three rounds each (36 runs, all exit 0, load 2-21% at the end of each run, sampler average 18.5%).
+
+| Title | Mode | ms/frame avg | p95 | max | SH2 master ms (%) | SH2 slave ms (%) | SH2 total ms (%) | SH2 total, 3 runs | max frame ms, 3 runs | frames over 16.7 ms, 3 runs |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Sega Rally Championship (US) | interpreter | 7.340 | 8.686 | 10.6 | 2.711 (36.9%) | 2.122 (28.9%) | 4.833 (65.9%) | 4.768 / 4.833 / 4.852 | 10.0 / 10.6 / 9.8 | 0 / 0 / 0 |
+|  | x64 (worker) | 7.546 | 9.114 | 10.8 | 2.270 (30.1%) | 2.174 (28.8%) | 4.444 (58.9%) | 4.419 / 4.536 / 4.444 | 10.1 / 10.5 / 10.8 | 0 / 0 / 0 |
+| Burning Rangers (US) | interpreter | 9.057 | 10.260 | 15.5 | 4.473 (49.4%) | 2.166 (23.9%) | 6.639 (73.3%) | 6.625 / 6.639 / 6.660 | 11.2 / 15.5 / 13.1 | 0 / 0 / 0 |
+|  | x64 (worker) | 8.675 | 10.435 | 13.2 | 4.275 (49.3%) | 1.722 (19.8%) | 5.997 (69.1%) | 5.997 / 6.044 / 5.976 | 13.2 / 13.2 / 16.0 | 0 / 0 / 0 |
+| Street Fighter Zero 3 (JP, 4 MB cart) | interpreter | 9.082 | 9.847 | 12.0 | 2.847 (31.3%) | 2.005 (22.1%) | 4.852 (53.4%) | 4.852 / 4.856 / 4.848 | 12.0 / 11.3 / 12.1 | 0 / 0 / 0 |
+|  | x64 (worker) | 9.301 | 10.213 | 14.9 | 2.795 (30.1%) | 1.365 (14.7%) | 4.160 (44.7%) | 4.121 / 4.185 / 4.160 | 14.7 / 14.2 / 14.9 | 0 / 0 / 0 |
+
+| Title | interpreter / x64 (worker) | per-round ratios (interp r / x64 r) | IR / x64 | interpreter / IR | interpreter / x64 (sync) | x64 fallbacks m/s | worker ms/frame (med run) | native compiles in window (med run) | emulation-thread compile ms | async / dropped | flushes in window | code-cap flushes m/s (since start) | IR reuses |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Sega Rally Championship (US) | 1.088 | 1.079 / 1.065 / 1.092 | - | - | - | 0/0 | 0.096 | 1056 | 42.8 | 1056/0 | 0 | 0/0 | 0 |
+| Burning Rangers (US) | 1.107 | 1.105 / 1.098 / 1.114 | - | - | - | 0/0 | 0.074 | 821 | 34.6 | 821/0 | 0 | 0/0 | 0 |
+| Street Fighter Zero 3 (JP, 4 MB cart) | 1.166 | 1.177 / 1.160 / 1.165 | - | - | - | 0/0 | 0.583 | 6333 | 255.8 | 6333/0 | 0 | 0/0 | 0 |
+
+| Title | session 1 | session 2 |
+|---|---|---|
+| Sega Rally Championship | 1.057 (rounds 1.050 / 1.073 / 1.075) | 1.088 (1.079 / 1.065 / 1.092) |
+| Burning Rangers | 1.099 (1.087 / 1.104 / 1.122) | 1.107 (1.105 / 1.098 / 1.114) |
+| Street Fighter Zero 3 | 1.156 (1.132 / 1.171 / 1.163) | 1.166 (1.177 / 1.160 / 1.165) |
+
+### Condition 2: frames over 16.7 ms and average frame time, (a) and (b)
+
+**Frames over 16.7 ms** (threaded VDP on, as the design states): the x64 count in each run must be at most the highest count of the interpreter's three runs.
+
+| Title | interpreter: frames over 16.7 ms (3 runs), highest | x64 (3 runs) | rule |
+|---|---|---|---|
+| BIOS menu (reference) | 0 / 0 / 0, 0 | 0 / 0 / 0 | pass |
+| Virtua Fighter 2 | 0 / 0 / 0, 0 | 0 / 0 / 0 | pass |
+| Panzer Dragoon II Zwei | 0 / 0 / 0, 0 | 0 / 0 / 0 | pass |
+| Sega Rally Championship | 0 / 0 / 0, 0 | 0 / 0 / 0 | pass |
+| Burning Rangers | 0 / 0 / 0, 0 | 0 / 0 / 0 | pass |
+| Guardian Heroes | 0 / 0 / 0, 0 | 0 / 0 / 0 | pass |
+| Street Fighter Zero 3 | 0 / 0 / 0, 0 | 0 / 0 / 0 | pass |
+
+Session 2 (the three titles above): 0 / 0 / 0 on both sides on all three. The long run is in its own table below (358 against 0).
+
+**Average frame time** (median run by SH-2 total; the rule is x64 at most the interpreter's). (a) is the design as written, threaded VDP on; (b) is the same measurement with `--no-threaded-vdp`, interpreter and x64 in the same session. Session 2 cells show interpreter -> x64 (ratio).
+
+| Title | (a) interpreter avg frame ms (median run) | (a) x64 | (a) x64 / interp | (a) session 2 | (b) interpreter avg frame ms | (b) x64 | (b) x64 / interp | (b) session 2 | (b) SH2 total interp / x64 |
+|---|---|---|---|---|---|---|---|---|---|
+| BIOS menu (reference) | 8.044 | 7.906 | 0.983 | - | 10.116 | 9.405 | 0.930 | - | 1.702 |
+| Virtua Fighter 2 | 6.360 | 5.706 | 0.897 | - | 10.644 | 9.257 | 0.870 | - | 1.457 |
+| Panzer Dragoon II Zwei | 6.459 | 5.835 | 0.903 | - | 10.275 | 9.269 | 0.902 | - | 1.277 |
+| Sega Rally Championship | 7.296 | 7.697 | **1.055** | 7.340 -> 7.546 (1.028) | 14.303 | 13.977 | 0.977 | 14.399 -> 14.112 (0.980) | 1.113 |
+| Burning Rangers | 8.956 | 8.645 | 0.965 | 9.057 -> 8.675 (0.958) | 12.067 | 11.528 | 0.955 | 12.125 -> 11.628 (0.959) | 1.137 |
+| Guardian Heroes | 6.211 | 6.096 | 0.981 | - | 11.785 | 11.070 | 0.939 | - | 1.301 |
+| Street Fighter Zero 3 | 9.034 | 9.296 | **1.029** | 9.082 -> 9.301 (1.024) | 15.010 | 14.326 | 0.954 | 15.096 -> 14.386 (0.953) | 1.218 |
+
+In (a) the average frame fails on Sega Rally (+5.5%, +2.8%) and Street Fighter Zero 3 (+2.9%, +2.4%) in both sessions; Burning Rangers fails in 2E (+2.9%) and passes in both sessions here (0.965, 0.958), with the SH-2 gain now larger (1.099, 1.107). In (b) the rule holds on every title in both sessions (0.870-0.980), and the x64 frame is shorter than the interpreter's by roughly the SH-2 gain: Sega Rally 14.303 -> 13.977 ms against 4.823 -> 4.335 of SH-2 total. The part of `Ymir_RunFrame` that is not SH-2 time changes by -0.02 to +0.22 ms/frame with x64 in (b) (Sega Rally 9.48 -> 9.64, Burning Rangers 5.73 -> 5.95, Guardian Heroes 7.75 -> 7.96, Street Fighter Zero 3 10.14 -> 10.32; the first session's median runs), the order of the real extra work Task 4 found (0.04-0.16 ms/frame there). In (a) it grows by 0.28-0.91 ms/frame (Sega Rally 2.50 -> 3.16, Burning Rangers 2.39 -> 2.67, Street Fighter Zero 3 4.26 -> 5.17; 2E: 0.2-0.46). That is consistent with Task 4's finding that the emulation thread waits for the VDP2 thread (about two thirds of the rise on Sega Rally and Panzer Dragoon II Zwei), which absorbs the SH-2 saving; this session did not instrument the waits.
+
+The frame time with threaded VDP off is much longer for the same SH-2 time (the rendering is on the emulation thread), so the number of frames over 16.7 ms is not meaningful there (Sega Rally 699-767 of 1,800 in both modes) and is not part of (b).
+
+### Long run: Burning Rangers, frames 2,400-36,000
+
+`--warmup 2400 --frames 33600`, one run per mode, default settings ((a): threaded VDP on), interpreter, x64 (worker) and x64 (`--jit-sync-compile`), then the interpreter and x64 with `--no-threaded-vdp` ((b)), after the table runs of the session. All five exited 0.
+
+| Burning Rangers, frames 2,400-36,000 | ms/frame avg | p95 | p99 | max | frames over 16.7 ms | SH2 total ms/frame | interpreter / x64 |
+|---|---|---|---|---|---|---|---|
+| interpreter | 9.353 | 11.547 | 13.015 | 15.8 | 0 | 6.142 | - |
+| x64, compile worker (default) | 9.720 | 14.362 | 16.825 | 48.3 | 358 | 5.839 | 1.052 |
+| x64, `--jit-sync-compile` | 10.003 | 16.116 | 21.643 | 96.5 | 1398 | 6.145 | 1.000 |
+| (b) interpreter, threaded VDP off | 16.059 | 24.547 | 26.928 | 33.2 | 12507 | 6.004 | - |
+| (b) x64, compile worker, threaded VDP off | 15.831 | 25.524 | 29.193 | 57.5 | 13458 | 5.541 | 1.084 |
+
+| Long run, window counters | x64 worker | x64 sync | 2E (5f2df05, worker) |
+|---|---|---|---|
+| Front-end builds | 312,675 | 305,401 | 306,207 |
+| Native compiles in the window | 28,801 submitted (9,044 installed + 19,757 dropped on arrival) | 44,193 | 28,895 submitted (9,691 installed + 19,204 dropped) |
+| Compile time on the emulation thread | 5.8 s (0.173 ms/frame) | 17.4 s (0.519 ms/frame) | 5.7 s (0.170 ms/frame) |
+| Worker CPU time | 0.404 ms/frame | - | 0.380 ms/frame |
+| Frames with compiling | 8,298 | 8,294 | 8,295 |
+| Code-cap flushes (master / slave, since start) | 0 / 0 | 0 / 0 | 0 / 0 |
+| compileFallbacks (master / slave) | 0 / 0 | 0 / 0 | 0 / 0 |
+| Peak native code, master / slave | 79.4 / 6.8 MB | 79.5 / 6.8 MB | 76.9 / 6.5 MB |
+| Retired native reuses | 818,703 | 885,900 | 832,749 |
+| IR block reuses | 895,814 | 835,891 | 888,236 |
+| IR-cap events (window) / IR cap time | 1 / 3.7 ms (409 retired IR blocks freed) | 1 / 3.9 ms | 1 / 4.5 ms (409) |
+| Worst frame | 48.3 ms | 96.5 ms | 48.3 ms |
+
+The machine ran at its normal speed in this session (interpreter long run 9.353 ms/frame, 6.142 SH-2, against 9.380 / 5.954 in the 2E session and 12.276 / 7.980 in the slow task 5 session). With the worker the long run now has 358 frames over 16.7 ms against 571 in the 2E session (0 against 1 for the interpreter), the worst frame is the 9,264 burst of new code (48.3 ms, 3,610 front-end builds, 24.6 ms of compiling in it), as in 2E, task 5 and the earlier tracks; the five slowest frames are all in that burst (9,264, 9,270, 9,267, 9,279, 9,309; 48.3, 35.2, 32.0, 31.2 and 30.7 ms, with 12-25 ms of compiling each). With threaded VDP off the non-SH-2 part of the long run's frame is 10.054 ms with the interpreter and 10.289 with x64 (+0.235; the average-frame rule's (b) result is 15.831 against 16.059 ms); with threaded VDP on it is 3.210 and 3.879 (+0.669). The task 5 analysis (what the slow frames' excess is made of, and the ranking of options) was done on the slow machine; this count says only that the slow frames did not go away on a healthy one (358 against 0).
+
+### Default-on bar (design section 3), condition by condition
+
+1. **Faster: holds.** Medians of three, session 1: Virtua Fighter 2 1.394, Panzer Dragoon II Zwei 1.225, Guardian Heroes 1.227, Street Fighter Zero 3 1.156 (session 2 1.166), Burning Rangers 1.099 (1.107), Sega Rally 1.057 (1.088); every round of every title is above 1.0 (lowest: Sega Rally round 1, 1.050). The long Burning Rangers run: 1.052. No title is within 0.02 of 1.0. The smallest margin is Sega Rally's 0.057 (the long run's is 0.052).
+2. **Smooth: fails as the design states it (a); (b) is reported beside it.**
+   - Frames over 16.7 ms (threaded VDP on): at most the interpreter's highest count in all seven 1,800-frame windows (0 against 0), in both sessions; **fails on the long Burning Rangers run: 358 against 0**.
+   - Average frame (a): **fails on Sega Rally** (7.697 against 7.296 ms, session 2 7.546 against 7.340), **Street Fighter Zero 3** (9.296 against 9.034, session 2 9.301 against 9.082) **and the long run** (9.720 against 9.353); holds on the BIOS menu, Virtua Fighter 2, Panzer Dragoon II Zwei, Burning Rangers and Guardian Heroes.
+   - Average frame (b), threaded VDP off: **holds on all seven windows** in both sessions (x64 / interpreter 0.870-0.980) **and on the long run** (15.831 against 16.059 ms).
+3. **Exact: holds.** All 35 lockstep runs (details in the verdict above and in `design/sh2-validation.md`) are identical with `compileFallbacks 0`; the tests and the Pi pass; CI of the measured code: green: test-windows 6m19s, test-linux-x64 12m44s, test-linux-tsan 16m32s, build-macos-arm64 2m10s (its first attempt was cancelled after 15 minutes in the runner queue and re-run).
+4. **Memory: holds.** Long Burning Rangers run: 0 code-cap flushes on both CPUs, peak native code 79.4 / 6.8 MB (master / slave; 76.9 / 6.5 in 2E, +3.3% on the master; task 1's resume tail adds 83-90 bytes per block, +1.7-5.7%), retired pool 3.5 MB at the end. The 36,000-frame lockstep runs peak at 113.8 MB (Panzer Dragoon II Zwei, master), 99.7 (Virtua Fighter 2) and 93.5 (Street Fighter Zero 3): 14.2 MB of headroom under the cap at the tightest, 0 flushes.
+
+Not met: condition 2 (a). The JIT stays off by default; the option text and README, corrected in 2E, still state what is measured.
+
+### What is left
+
+- **The average frame, condition 2 (a).** Task 4's finding stands: with threaded VDP the frame lasts until the VDP2 render thread has rendered the last line, and the SH-2 time the JIT saves cannot shorten it once that thread is behind. On this machine it fails on Sega Rally (+5.5% / +2.8%), Street Fighter Zero 3 and the long run, and holds on the others. Two ways out, neither on the JIT side: speed up or parallelise VDP2 rendering (up to 0.40 / 0.17 ms/frame of waiting on Sega Rally / Panzer Dragoon II Zwei), or change the bar to measure the average frame with threaded VDP off, where it holds on every title. The second is the user's decision: the rule is "my call" in the design, written before the cause was known. This measurement shows what the verdict would be (condition 2 holds with threaded VDP off in the average frame; the frames-over part of it fails in the long run either way).
+- **The long run's slow frames, condition 2 (frames over 16.7 ms).** 358 against 0 on a healthy machine. Task 5's ranked options (front end and Prepare off the emulation thread with cold code interpreted; front end only; interpret cold code until its threshold) are the candidates; their estimates were made on the slow machine and should be re-measured on this one before any is chosen. The slow frames are bursts of new code, with 1-5 ms of compile time in most of them against an excess of about 8.8 ms.
+- **Speed.** Condition 1 holds with 0.052 or more to spare. The profile's remaining items (the slave's on-chip-register polling loop, 7-17% of the executor; generated-code shape; `RTE` with interrupt entry together, see Task 3) are optional after this.
+
+
