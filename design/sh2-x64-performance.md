@@ -1625,3 +1625,50 @@ The profile's 20-22 ns per chain (`RunEntry` + `StepImpl` tail + `X64Backend::Ru
 The `ExitInfo` copy (32 bytes, two stores) was not changed. The guard object and the counters cost nothing measurable (x64 table-based unwinding makes the guard free on the normal path). Keeping the frame in the backend was slower, probably because generated code then addresses heap memory instead of the hot stack frame. The cost was in the runtime-library calls and the indirect call.
 
 Progress (table above, all four titles, 3 rounds against Task 1's executable): x64 is 0.09-0.12 ms/frame faster on every title (PD2 4.112 against 4.199, Rally 4.474 / 4.564, SFZ3 4.006 / 4.128, BR 5.841 / 5.951). The run ranges do not overlap on PD2, SFZ3 and BR. On Rally they overlap by one round: this task's round 1, 4.600, against Task 1's 4.547-4.656, while each round pair improves. The profile's 0.22-0.39 ms/frame is reached in part. Sega Rally's ratio is now 1.057. `nativeBytesPerBlock` is unchanged within block-mix noise (master PD2 3,324, Rally 2,960, SFZ3 3,082, BR 3,109). The emitter is unchanged; only the frame offset of `out` moved. `Stats` are unchanged. A pinning test (`Executor: stats over a fuzz program are unchanged by the lean entry path`) holds the values recorded before the change. BIOS lockstep 1,200 frames x64 with `--jit-sync-compile` gives identical counters for both executables. Exact: lockstep BIOS 1,200 frames x64 and IR identical.
+
+## Track F: the non-SH-2 rise
+
+The question from "What 2E left": with the JIT, `Ymir_RunFrame` minus the SH2 total is larger than with the interpreter on every title. Measured on `fbe20e1` (after Tasks 1-2), Sega Rally and Panzer Dragoon II Zwei (US), `--warmup 2400 --frames 1800`, interpreter and x64 with the worker, three interleaved rounds per variant, four sessions. The rise is now **+0.58 ms/frame on Sega Rally** (2.514 -> 3.090, second session 2.495 -> 3.089) and **+0.27 on PD2** (1.496 -> 1.768; 1.480 -> 1.745), uninstrumented `build-bench`.
+
+**Method.** A temporary build (`build-instr`, not committed, reverted) added time-stamp-counter timers to `Saturn::Run`, per scheduler event type, around the emulation thread's four waits on the render threads (`VDP1EraseFramebuffer`, `VDP1SwapFramebuffer` (two), `VDP2EndFrame`), and the render threads' busy time. A later build also split `Saturn::Run` by vertical phase and recorded, per scanline, when the emulation thread enqueues the line and when the VDP2 thread finishes it. The x64 runs' since-start `blocksRun` / `interpreted` (both CPUs) and window builds / native compiles equal the uninstrumented runs' in every session. The timers add 0.06-0.08 ms/frame to the non-SH-2 part on both modes, and the rise under them equals the uninstrumented one (Rally +0.586, PD2 +0.267).
+
+### Split (session 1, instrumented medians, ms/frame)
+
+| Part of `Ymir_RunFrame` outside the SH2 total | Rally interp | Rally x64 | Rally rise | PD2 interp | PD2 x64 | PD2 rise |
+|---|---|---|---|---|---|---|
+| Waiting for the render threads (of which `VDP2EndFrame`) | 0.902 (0.876) | 1.302 (1.272) | **+0.400** | 0.084 (0.009) | 0.249 (0.167) | **+0.165** |
+| VDP phase events, without the waits | 0.073 | 0.154 | +0.081 | 0.060 | 0.101 | +0.041 |
+| SCSP sample events (M68K + SCSP) | 1.062 | 1.124 | +0.062 | 0.805 | 0.851 | +0.046 |
+| SH-2/SCU loop outside the SH-2 timers (`SCU.Advance`, loop) | 0.323 | 0.347 | +0.024 | 0.317 | 0.333 | +0.016 |
+| `VDP.Advance`, CD block, SMPC, scheduler and `Run` overhead (timers included), outside `Saturn::Run` | 0.216 | 0.228 | +0.012 | 0.316 | 0.311 | -0.005 |
+| **Total** | 2.574 | 3.160 | **+0.586** | 1.577 | 1.844 | **+0.267** |
+
+Two thirds of the rise (68% Rally, 62% PD2) is the emulation thread waiting at the end of the frame for the VDP2 render thread. The rest, 0.10-0.18 ms/frame, is real extra work on the emulation thread, spread over every other component: VDP phase handling +0.04-0.08, M68K/SCSP +0.05-0.06 (+5-6%), SCU and the loop +0.02.
+
+### Experiments (one variable each)
+
+- **Threaded VDP off** (VDP1/VDP2 rendering on the emulation thread; sessions 1 and 2). No waits remain. The rise falls to Rally +0.160 / +0.129 and PD2 +0.100 / +0.039, and the average frame is shorter with x64 on both titles (Rally 14.042 -> 13.943, PD2 10.026 -> 9.187). VDP rendering itself runs about 1% slower after JIT code (Rally VDP phase events 5.868 -> 5.935, PD2 3.870 -> 3.922; session 2 3.896 -> 3.887).
+- **Render-thread speed** (session 2). The render threads are not slowed by the JIT. VDP2 thread busy time is Rally 6.098 -> 6.046 ms/frame and PD2 4.147 -> 4.051; VDP1 thread 2.263 -> 2.306 and 0.136 -> 0.140. On Sega Rally the VDP2 thread is busy 6.1 of the 7.2-7.6 ms frame.
+- **Where in the frame** (session 3: `Saturn::Run` by phase; session 4: per-line timeline):
+  - *Sega Rally.* The emulation thread enqueues lines 16-112 0.12-0.34 ms later with x64 than with the interpreter: the JIT is slower early in the active display. It catches up by line 208 (-0.03) and reaches `VDP2EndFrame` at the same time (6.649 against 6.655 ms after the frame start). But the VDP2 thread is behind from the first lines on (its lag grows from 0.04 to 1.2-1.6 ms), so the delay at lines 48-96 carries to the last line. Lines 96-223 render at the same rate (28.1 against 27.7 us per line), and the last line finishes 0.416 ms later. The emulation thread waits for exactly that: it leaves `VDP2EndFrame` at 7.421 against 7.839. (Means of three runs. x64 round 3 was disturbed, with 17 frames over 16.7 ms. Without it, the pattern is the same per run: line 64 is enqueued at 2.76-2.82 against 2.46-2.52 ms, the emulation thread arrives at 6.46-6.64 against 6.59-6.70, and it leaves at 7.65-7.80 against 7.33-7.55.)
+  - *PD2.* The interpreter's emulation thread is slower than the VDP2 thread (lag a constant 0.03 ms). With x64 it enqueues the last line 0.93 ms earlier and becomes faster than the VDP2 thread, so the lag grows to 0.44 ms. The wait at `VDP2EndFrame` grows from 0.01 to 0.11 ms and the other components take about 0.09 ms more, so the frame is 0.75 ms shorter against an SH-2 saving of 0.94. The VDP2 thread now bounds PD2's frame too, so further SH-2 savings late in its active display will not shorten the frame.
+  - *By phase* (session 3). In the active display x64 saves 0.19 (Rally) and 0.95 (PD2) ms/frame of SH-2 loop time. In the rest of the frame (bottom border, blanking, top border) it spends 0.07 / 0.03 more. That non-active time, waits excluded, grows by 0.08 / 0.05.
+- **Smaller native-code footprint** (`kNativeCompileThreshold` 16 -> 1000, session 1). Peak native code fell from 29.4 to 9.1 MB (Rally master) and from 29.0 to 9.6 MB (PD2), and SH-2 time rose by 0.31 / 0.15. The non-wait part of the rise is unchanged: Rally VDP phase 0.154 -> 0.163, SCSP 1.124 -> 1.125; PD2 likewise. Only the wait shrank (-0.09 / -0.04), because the emulation thread is slower. The size of the generated code is not the cause.
+- **No SMT sharing** (process affinity one logical CPU per core, session 1). The rise is unchanged (Rally +0.556, PD2 +0.258; waits +0.387 / +0.169).
+- **Accounting boundary.** All of the JIT's emulation-thread work runs inside `SH2::Advance`'s host timer: `Executor::Run`, the worker's install in `Get`, and the stale checks (prologues, `IsCurrent`). Nothing hooks bus writes outside it. Time inside the SH-2/SCU loop but outside the timers grows by only 0.016-0.024 ms/frame, which includes the calls into `Advance`. No meaningful part of the JIT's work is booked outside the SH-2 total.
+- **Not run.** WSL `perf stat` cache-miss counters: no `perf` in the WSL install.
+
+### Conclusion
+
+The rise is mostly not work outside the SH-2s. It is the emulation thread waiting for the VDP2 render thread, which bounds the frame. With threaded VDP, the frame lasts roughly until the VDP2 thread has rendered the last line, and on these titles the VDP2 thread falls behind the emulation thread for most of the active display (always on Sega Rally, with x64 on PD2). SH-2 time saved after the VDP2 thread falls behind cannot shorten the frame: it turns into waiting at `VDP2EndFrame`. SH-2 time lost before that point delays every later line.
+- On Sega Rally the JIT is slower than the interpreter in the first half of the active display and faster later. So the frame is 0.42 ms longer, although the emulation thread reaches the end of the frame at the same time.
+- On PD2, 0.10-0.17 ms/frame of the 0.9 ms/frame saved is absorbed this way (the wait's rise in the four sessions).
+- The remainder, 0.10-0.18 ms/frame (0.04-0.16 with threaded VDP off), is real: the emulation thread's other components run slower after JIT code, spread thinly: M68K/SCSP +6%, the SCU and loop +5-7%, VDP rendering (threads off) about +1%, and the small VDP phase handling 0.04-0.08 ms/frame more. It does not depend on the amount of generated code or on SMT sharing. Shared L1/L2 and branch-predictor state on the emulation thread is the likely cause; without hardware counters this is not shown.
+
+This has two consequences for the bar's condition 2 (average frame no longer than the interpreter's):
+- The average frame rewards SH-2 savings only up to the VDP2 thread's rate, and only where they fall before the VDP2 thread falls behind.
+- On Sega Rally, condition 2 needs x64 to be faster in the first half of the active display, not only on average; the SH2 total does not show this.
+
+**Candidate fix.** No small, evident fix on the JIT side.
+- *Off the JIT path:* the fix is VDP2 rendering speed or parallelism, which would turn the hidden saving into frame time: up to the 0.40 / 0.17 ms/frame of added waiting on these titles, and more on PD2, where the VDP2 thread now bounds the frame.
+- *JIT side:* the work that pays off in whole-frame time is SH-2 speed in the part of the frame before the VDP2 thread falls behind (on Rally, the early active display), not the polling loops that run after it. The remaining 0.10-0.18 ms/frame has no single target.
