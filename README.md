@@ -200,6 +200,8 @@ brimir/
     bridge/           CoreWrapper -- interface between emulator and frontends
     libretro/         Libretro API implementation and core options
     jit/              SH-2 JIT library (experimental)
+    gpu/              Vulkan GPU renderer (BRIMIR_VULKAN; shaders in gpu/shaders, regenerated with
+                      cmake -P tools/shaders/build_shaders.cmake)
   include/         Public headers (libretro.h, CoreWrapper)
   resources/info/  Libretro core info file
   vendor/          Vendored dependencies
@@ -221,6 +223,9 @@ All dependencies are vendored in the `vendor/` directory:
 - **dr_libs** -- MP3 decoding (dr_mp3) for CUE audio tracks
 - **stb** -- Ogg Vorbis decoding (stb_vorbis) for CUE audio tracks
 - **asmjit** -- x86-64 code generation for the SH-2 JIT (zlib license; x86-64 builds only)
+- **volk** -- Vulkan function loader for the GPU renderer (MIT; `BRIMIR_VULKAN` builds only)
+- **Vulkan-Headers** -- Khronos Vulkan C headers (Apache-2.0 or MIT; `BRIMIR_VULKAN` builds only)
+- **libretro_vulkan.h** -- libretro Vulkan interface header from libretro-common, in `include/` (MIT)
 
 Upstream test suites, benchmarks and examples are not vendored.
 

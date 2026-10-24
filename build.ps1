@@ -107,9 +107,10 @@ if ($Reconfigure -or -not (Test-Path "build/CMakeCache.txt")) {
     # GPU (Vulkan) rendering
     if ($GPU) {
         Write-Host "  GPU Rendering: ENABLED (Vulkan)" -ForegroundColor Cyan
-        $cmakeArgs += @("-DBRIMIR_GPU_VULKAN=ON")
+        $cmakeArgs += @("-DBRIMIR_VULKAN=ON")
     } else {
         Write-Host "  GPU Rendering: Disabled (use default or remove -NoGPU to enable)" -ForegroundColor DarkGray
+        $cmakeArgs += @("-DBRIMIR_VULKAN=OFF")
     }
     
     & cmake @cmakeArgs

@@ -63,7 +63,9 @@ if [ "$RECONFIGURE" = true ] || [ ! -f "build/CMakeCache.txt" ]; then
     CMAKE_ARGS="-B build -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE"
 
     if [ "$GPU" = true ]; then
-        CMAKE_ARGS="$CMAKE_ARGS -DBRIMIR_GPU_VULKAN=ON"
+        CMAKE_ARGS="$CMAKE_ARGS -DBRIMIR_VULKAN=ON"
+    else
+        CMAKE_ARGS="$CMAKE_ARGS -DBRIMIR_VULKAN=OFF"
     fi
 
     cmake $CMAKE_ARGS

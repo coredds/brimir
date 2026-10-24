@@ -28,6 +28,21 @@ option(Brimir_DISABLE_FORCE_INLINE "Disable force-inline macros" OFF)
 option(Brimir_ENABLE_IPO "Enable IPO/LTO for brimir-core" ${BRIMIR_LTO})
 option(BRIMIR_JIT_X64 "Build the SH-2 JIT x64 native backend (asmjit; x86-64 targets only)" ON)
 
+# Vulkan GPU renderer (src/gpu). Default ON on the desktop release targets: Windows x64, Linux x64/arm64, macOS arm64.
+set(brimir_vulkan_default OFF)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|x64)$")
+        set(brimir_vulkan_default ON)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|aarch64|arm64)$")
+        set(brimir_vulkan_default ON)
+    elseif(APPLE AND ("arm64" IN_LIST CMAKE_OSX_ARCHITECTURES
+                      OR (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")))
+        set(brimir_vulkan_default ON)
+    endif()
+endif()
+option(BRIMIR_VULKAN "Build the Vulkan GPU renderer (vendored headers and volk; no Vulkan SDK needed)"
+       ${brimir_vulkan_default})
+
 # Use fmt as header-only to avoid DLL dependency
 add_compile_definitions(FMT_HEADER_ONLY=1)
 
@@ -140,6 +155,11 @@ endif()
 # SH-2 JIT library (design/sh2-jit.md)
 add_subdirectory(src/jit)
 
+# Vulkan GPU renderer library (brimir-gpu); consumers get BRIMIR_VULKAN=1 through it.
+if(BRIMIR_VULKAN)
+    add_subdirectory(src/gpu)
+endif()
+
 # Bridge layer - adapts core to libretro
 add_subdirectory(src/bridge)
 
@@ -196,7 +216,7 @@ if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
         # Final consumers must also link IPO objects (notably MSVC /GL objects).
         list(APPEND brimir_ipo_targets brimir_libretro brimir_tests)
         if(BRIMIR_LTO)
-            list(APPEND brimir_ipo_targets brimir_bridge brimir_libretro_api)
+            list(APPEND brimir_ipo_targets brimir_bridge brimir_libretro_api brimir-gpu)
         endif()
         if(Brimir_ENABLE_IPO)
             list(APPEND brimir_ipo_targets brimir-core brimir-jit brimir_bench)
@@ -206,7 +226,7 @@ if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
     endif()
 endif()
 
-foreach(target IN ITEMS brimir-core brimir-jit brimir_bridge brimir_libretro_api brimir_libretro brimir_tests brimir_bench)
+foreach(target IN ITEMS brimir-core brimir-jit brimir-gpu brimir_bridge brimir_libretro_api brimir_libretro brimir_tests brimir_bench)
     if(TARGET ${target})
         set(enable_ipo FALSE)
         if(target IN_LIST brimir_ipo_targets)
@@ -247,4 +267,5 @@ message(STATUS "  AVX2: ${Brimir_AVX2}")
 message(STATUS "  Extra inlining: ${Brimir_EXTRA_INLINING}")
 message(STATUS "  Disable force inline: ${Brimir_DISABLE_FORCE_INLINE}")
 message(STATUS "  SH-2 JIT x64 backend: ${BRIMIR_JIT_X64_EFFECTIVE}")
+message(STATUS "  Vulkan GPU renderer: ${BRIMIR_VULKAN}")
 message(STATUS "")

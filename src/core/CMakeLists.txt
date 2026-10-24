@@ -165,24 +165,6 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "aa
     target_compile_options(brimir-core PRIVATE -Wno-error=attributes)
 endif()
 
-## GPU rendering support (optional)
-option(BRIMIR_GPU_VULKAN "Enable Vulkan GPU renderer" OFF)
-
-if(BRIMIR_GPU_VULKAN)
-    find_package(Vulkan)
-
-    if(Vulkan_FOUND)
-        message(STATUS "Vulkan SDK found - GPU rendering enabled")
-        target_compile_definitions(brimir-core PUBLIC BRIMIR_GPU_VULKAN_ENABLED)
-        target_link_libraries(brimir-core PUBLIC Vulkan::Vulkan)
-    else()
-        message(WARNING "Vulkan SDK not found - GPU rendering will be disabled")
-        message(WARNING "Install Vulkan SDK from https://vulkan.lunarg.com/")
-    endif()
-else()
-    message(STATUS "GPU rendering disabled (use -DBRIMIR_GPU_VULKAN=ON to enable)")
-endif()
-
 if (MSVC)
     vs_set_filters(TARGET brimir-core)
     set_target_properties(brimir-core PROPERTIES FOLDER "Brimir")

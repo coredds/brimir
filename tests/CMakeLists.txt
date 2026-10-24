@@ -72,6 +72,14 @@ target_link_libraries(brimir_tests PRIVATE
     brimir-core
 )
 
+# Vulkan GPU renderer (src/gpu)
+if(BRIMIR_VULKAN)
+    target_sources(brimir_tests PRIVATE
+        unit/test_gpu_build.cpp
+    )
+    target_link_libraries(brimir_tests PRIVATE brimir-gpu)
+endif()
+
 target_include_directories(brimir_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/libretro
