@@ -213,10 +213,9 @@ void VDP::MapMemory(sys::SH2Bus &bus) {
     // VDP2 registers
     bus.MapNormal(
         0x5F8'0000, 0x5FB'FFFF, this,
-        [](uint32 address, void * /*ctx*/) -> uint8 {
-            address &= 0x1FF;
-            devlog::debug<grp::vdp1_regs>("Illegal 8-bit VDP2 register read from {:05X}", address);
-            return 0;
+        [](uint32 address, void *ctx) -> uint8 {
+            const uint16 value = cast(ctx).VDP2ReadReg<true>(address & ~1u);
+            return value >> ((~address & 1u) * 8u);
         },
         [](uint32 address, void *ctx) -> uint16 { return cast(ctx).VDP2ReadReg<false>(address); },
         [](uint32 address, void *ctx) -> uint32 {
@@ -224,9 +223,12 @@ void VDP::MapMemory(sys::SH2Bus &bus) {
             value |= cast(ctx).VDP2ReadReg<false>(address + 2) << 0u;
             return value;
         },
-        [](uint32 address, uint8 value, void * /*ctx*/) {
-            address &= 0x1FF;
-            devlog::debug<grp::vdp1_regs>("Illegal 8-bit VDP2 register write to {:05X} = {:02X}", address, value);
+        [](uint32 address, uint8 value, void *ctx) {
+            uint16 currValue = cast(ctx).VDP2ReadReg<true>(address & ~1u);
+            const uint16 shift = (~address & 1u) * 8u;
+            const uint16 mask = ~(0xFF << shift);
+            currValue = (currValue & mask) | (value << shift);
+            cast(ctx).VDP2WriteReg<true>(address & ~1u, currValue);
         },
         [](uint32 address, uint16 value, void *ctx) { cast(ctx).VDP2WriteReg<false>(address, value); },
         [](uint32 address, uint32 value, void *ctx) {
@@ -237,8 +239,8 @@ void VDP::MapMemory(sys::SH2Bus &bus) {
     bus.MapSideEffectFree(
         0x5F8'0000, 0x5FB'FFFF, this,
         [](uint32 address, void *ctx) -> uint8 {
-            const uint16 value = cast(ctx).VDP2ReadReg<true>(address & ~1);
-            return value >> ((~address & 1) * 8u);
+            const uint16 value = cast(ctx).VDP2ReadReg<true>(address & ~1u);
+            return value >> ((~address & 1u) * 8u);
         },
         [](uint32 address, void *ctx) -> uint16 { return cast(ctx).VDP2ReadReg<true>(address); },
         [](uint32 address, void *ctx) -> uint32 {
@@ -247,11 +249,11 @@ void VDP::MapMemory(sys::SH2Bus &bus) {
             return value;
         },
         [](uint32 address, uint8 value, void *ctx) {
-            uint16 currValue = cast(ctx).VDP2ReadReg<true>(address & ~1);
+            uint16 currValue = cast(ctx).VDP2ReadReg<true>(address & ~1u);
             const uint16 shift = (~address & 1) * 8u;
             const uint16 mask = ~(0xFF << shift);
             currValue = (currValue & mask) | (value << shift);
-            cast(ctx).VDP2WriteReg<true>(address & ~1, currValue);
+            cast(ctx).VDP2WriteReg<true>(address & ~1u, currValue);
         },
         [](uint32 address, uint16 value, void *ctx) { cast(ctx).VDP2WriteReg<true>(address, value); },
         [](uint32 address, uint32 value, void *ctx) {

@@ -47,6 +47,7 @@ void Slot::Reset() {
     lfoStepInterval = s_lfoStepTbl[0];
     ampLFOSens = 0;
     ampLFOWaveform = Waveform::Saw;
+    pitchLFOSens = 0;
     pitchLFOWaveform = Waveform::Saw;
 
     inputMixingLevel = 0;

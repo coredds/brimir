@@ -505,10 +505,26 @@ FORCE_INLINE void SMPC::WriteCOMREG(uint8 value) {
             // TODO: these should take ~100ms (about 2.8 million SH-2 cycles) to complete
             // Doing a shorter delay here to make it snappier
             m_scheduler.ScheduleFromNow(m_commandEvent, 200000);
+        } else if (COMREG == Command::INTBACK) {
+            m_scheduler.ScheduleFromNow(m_commandEvent, 1000);
         } else {
             // TODO: CDON and CDOFF execute in 40 microseconds; all other commands take 30 microseconds to complete
-            // HACK: delay for longer to allow Quake (EU) to boot
-            m_scheduler.ScheduleFromNow(m_commandEvent, 240);
+            // These games don't like long delays (240 is too long):
+            // - Destruction Derby (Europe)
+            // - Fighting Vipers (Japan)
+            // - Fist (Japan)
+            // - Idol Mahjong - Final Romance R (Japan)
+            // - Idol Mahjong - Final Romance R (Japan) (Kisekae Disc Kanzenban)
+            // - Idol Mahjong - Final Romance R (Japan) (Kisekae Disc)
+            // These games don't like short delays (120 is too short):
+            // - Fighters Megamix (Japan)
+            // - Fighters Megamix (USA)
+            // - Fighting Vipers (Japan) (Demo)
+            // - Jissen! Pachi-Slot Hisshou-hou! 4 (Japan)
+            // - Virtua Cop (Europe)
+            // - Virtua Cop 2 (Europe)
+            // - Quake (Europe)
+            m_scheduler.ScheduleFromNow(m_commandEvent, 200);
         }
     }
 }
@@ -793,8 +809,8 @@ void SMPC::WriteINTBACKStatusReport() {
     SR.PDL = 1;                   // fixed 1 for status report
     SR.NPE = m_getPeripheralData; // 0=no peripheral data, 1=has peripheral data
     SR.RESB = m_resetState;       // reset button state (0=off, 1=on)
-    SR.P1MDn = m_port1mode;
-    SR.P2MDn = m_port2mode;
+    SR.P1MDn = 0b11;              // unused, but hardware returns 11
+    SR.P2MDn = 0b11;              // unused, but hardware returns 11
 
     OREG[0] = (m_STE << 7) | (m_resetDisable << 6);
 

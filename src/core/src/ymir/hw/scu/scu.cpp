@@ -884,6 +884,10 @@ void SCU::RunDMA(uint64 cycles) {
             // Only +2 increments produce useful write patterns. You *might* find other increments useful if they-re
             // word-aligned but not longword-aligned (write address & 3 == 2) -- at least those follow the proper
             // increment intervals. Every other increment is pretty much useless in practice.
+            //
+            // GunBlaze-S initiates a gigantic DMA transfer:
+            //   0x6095728 (+4) -> 0x5C20620 (+2), 0x100000 bytes
+            // Writes from SCU DMA to VDP1 registers seem to be ignored here.
 
             currDstAddr &= ~1u;
 
@@ -894,7 +898,9 @@ void SCU::RunDMA(uint64 cycles) {
                     return;
                 }
                 const uint8 value = read8();
-                m_bus.Write<uint8>(addr, value);
+                if (!util::AddressInRange<0x5D00000, 0x5D7FFFF>(addr)) {
+                    m_bus.Write<uint8>(addr, value);
+                }
 
                 currDstOffset += 1;
                 ch.currXferCount -= 1;
@@ -926,7 +932,9 @@ void SCU::RunDMA(uint64 cycles) {
                 }
 
                 const uint16 value = read16();
-                m_bus.Write<uint16>(addr, value);
+                if (!util::AddressInRange<0x5D00000, 0x5D7FFFF>(addr)) {
+                    m_bus.Write<uint16>(addr, value);
+                }
 
                 currDstOffset += 2;
                 ch.currXferCount -= 2;
@@ -956,11 +964,15 @@ void SCU::RunDMA(uint64 cycles) {
                 }
 
                 const uint32 value1 = read16();
-                m_bus.Write<uint16>(addr1, value1);
+                if (!util::AddressInRange<0x5D00000, 0x5D7FFFF>(addr1)) {
+                    m_bus.Write<uint16>(addr1, value1);
+                }
                 devlog::trace<grp::dma>("SCU DMA{}: 16-bit write to {:08X} -> {:04X}", level, addr1, value1);
 
                 const uint32 value2 = read16();
-                m_bus.Write<uint16>(addr2, value2);
+                if (!util::AddressInRange<0x5D00000, 0x5D7FFFF>(addr2)) {
+                    m_bus.Write<uint16>(addr2, value2);
+                }
                 devlog::trace<grp::dma>("SCU DMA{}: 16-bit write to {:08X} -> {:04X}", level, addr2, value2);
 
                 currDstAddr += ch.currDstAddrInc;
@@ -987,7 +999,9 @@ void SCU::RunDMA(uint64 cycles) {
                     return;
                 }
                 const uint16 value = read16();
-                m_bus.Write<uint16>(addr, value);
+                if (!util::AddressInRange<0x5D00000, 0x5D7FFFF>(addr)) {
+                    m_bus.Write<uint16>(addr, value);
+                }
 
                 currDstOffset += 2;
                 ch.currXferCount -= 2;
@@ -1014,7 +1028,9 @@ void SCU::RunDMA(uint64 cycles) {
                 }
 
                 const uint8 value = read8();
-                m_bus.Write<uint8>(addr, value);
+                if (!util::AddressInRange<0x5D00000, 0x5D7FFFF>(addr)) {
+                    m_bus.Write<uint8>(addr, value);
+                }
 
                 currDstOffset += 1;
                 ch.currXferCount -= 1;

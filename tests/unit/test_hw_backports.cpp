@@ -1,5 +1,6 @@
 #include "catch_amalgamated.hpp"
 
+#include <ymir/hw/scsp/scsp_slot.hpp>
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
@@ -14,6 +15,7 @@ namespace {
 using namespace ymir;
 
 constexpr uint32 kSMPCCOMREG = 0x010'001F;
+constexpr uint32 kSMPCSF = 0x010'0063;
 constexpr uint32 kVDP1PTMR = 0x5D0'0004;
 constexpr uint32 kVDP1COPR = 0x5D0'0014;
 
@@ -351,4 +353,102 @@ TEST_CASE("VDP2 EXTEN read latches HCNT when external latch is disabled", "[vdp]
         (void)regs.ReadEXTEN<true>();
         CHECK(regs.HCNT == 0);
     }
+}
+
+TEST_CASE("SMPC INTBACK status report sets the reserved port mode bits", "[smpc][backport]") {
+    // Ymir b3e6fc64: the unused port mode bits in the INTBACK status report read back as 11 on hardware.
+    auto saturn = std::make_unique<Saturn>();
+    saturn->mainBus.Write<uint8>(0x010'0001, 0x01); // IREG0: status report
+    saturn->mainBus.Write<uint8>(0x010'0003, 0x00); // IREG1: no peripheral data
+    saturn->mainBus.Write<uint8>(0x010'0005, 0xF0); // IREG2
+
+    RunSMPCCommand(*saturn, 0x10); // INTBACK
+
+    CHECK((saturn->mainBus.Peek<uint8>(0x010'0061) & 0x0F) == 0x0F);
+}
+
+namespace {
+
+uint64 CyclesUntilSFClears(Saturn &saturn, uint8 command) {
+    saturn.mainBus.Write<uint8>(kSMPCSF, 1);
+    saturn.mainBus.Write<uint8>(kSMPCCOMREG, command);
+    uint64 cycles = 0;
+    while ((saturn.mainBus.Peek<uint8>(kSMPCSF) & 1) != 0 && cycles < 1'000'000) {
+        cycles += saturn.StepMasterSH2();
+    }
+    return cycles;
+}
+
+} // namespace
+
+TEST_CASE("SMPC INTBACK takes longer than other commands", "[smpc][backport]") {
+    // Ymir 775ba762, 839aef3b: INTBACK needs a longer delay than other commands (Assault Rigs), which in turn need
+    // neither too short nor too long a delay (Fighters Megamix, Virtua Cop, Quake, Destruction Derby, etc.)
+    auto saturn = std::make_unique<Saturn>();
+    const uint64 resenab = CyclesUntilSFClears(*saturn, 0x19);
+    saturn = std::make_unique<Saturn>();
+    const uint64 intback = CyclesUntilSFClears(*saturn, 0x10);
+
+    CAPTURE(resenab, intback);
+    CHECK(intback > 3 * resenab);
+}
+
+TEST_CASE("SCU DMA ignores writes to VDP1 registers", "[scu][vdp][backport]") {
+    // Ymir d400f3d2: GunBlaze-S DMAs a huge block over the VDP1 register area, which hardware ignores.
+    constexpr uint32 kSCU = 0x5FE'0000;
+    constexpr uint32 kSrc = 0x0601'0000;
+
+    auto runDMA = [&](Saturn &saturn, uint32 dst) {
+        saturn.mainBus.Write<uint16>(kSrc, 0x1234);
+        saturn.mainBus.Write<uint32>(kSCU + 0x00, kSrc);
+        saturn.mainBus.Write<uint32>(kSCU + 0x04, dst);
+        saturn.mainBus.Write<uint32>(kSCU + 0x08, 2);
+        saturn.mainBus.Write<uint32>(kSCU + 0x0C, 0x101);
+        saturn.mainBus.Write<uint32>(kSCU + 0x14, 7);
+        saturn.mainBus.Write<uint32>(kSCU + 0x10, 0x101);
+        uint64 cycles = 0;
+        while (cycles < 2000) {
+            cycles += saturn.StepMasterSH2();
+        }
+    };
+
+    SECTION("VDP1 registers are not written") {
+        auto saturn = std::make_unique<Saturn>();
+        runDMA(*saturn, 0x5D0'0006); // EWDR
+        CHECK(saturn->VDP.GetProbe().GetVDP1Regs().eraseWriteValue != 0x1234);
+    }
+
+    SECTION("VDP1 VRAM is written") {
+        auto saturn = std::make_unique<Saturn>();
+        runDMA(*saturn, 0x5C0'0000);
+        CHECK(saturn->mainBus.Peek<uint16>(0x5C0'0000) == 0x1234);
+    }
+}
+
+TEST_CASE("VDP2 registers accept 8-bit reads and writes", "[vdp][vdp2][backport]") {
+    // Ymir acde106c, d57f1260
+    auto saturn = std::make_unique<Saturn>();
+    auto &bus = saturn->mainBus;
+    constexpr uint32 kRAMCTL = 0x5F8'000E;
+
+    bus.Write<uint16>(kRAMCTL, 0x130F);
+    const uint16 v = bus.Read<uint16>(kRAMCTL);
+    REQUIRE((v >> 8) != 0);
+    REQUIRE((v & 0xFF) != 0);
+
+    CHECK(bus.Read<uint8>(kRAMCTL + 0) == (v >> 8));
+    CHECK(bus.Read<uint8>(kRAMCTL + 1) == (v & 0xFF));
+
+    bus.Write<uint8>(kRAMCTL + 1, 0x00);
+    const uint16 w = bus.Read<uint16>(kRAMCTL);
+    CHECK((w >> 8) == (v >> 8));
+    CHECK((w & 0xFF) == 0);
+}
+
+TEST_CASE("SCSP slot reset clears pitch LFO sensitivity", "[scsp][backport]") {
+    // Ymir a1442182
+    scsp::Slot slot;
+    slot.pitchLFOSens = 5;
+    slot.Reset();
+    CHECK(slot.pitchLFOSens == 0);
 }
