@@ -47,18 +47,25 @@ public:
             // Zero-fill pregap area
             const uintmax_t pregapCount = std::min(m_pregap - offset, size);
             std::fill_n(output.begin(), pregapCount, 0);
-            size -= pregapCount;
             count += pregapCount;
         }
-        const uintmax_t fileSize = std::min(size, m_fileSize);
-        count += m_fileContent->Read(offset + m_offset - m_pregap, fileSize, output.subspan(count));
-        size -= fileSize;
-        if (size > 0 && m_postgap > 0) {
+        if (count < size) {
+            // Read file contents
+            const uintmax_t fileOffset = offset + count - m_pregap;
+            if (fileOffset < m_fileSize) {
+                const uintmax_t fileCount = std::min(size - count, m_fileSize - fileOffset);
+                const uintmax_t readCount =
+                    m_fileContent->Read(m_offset + fileOffset, fileCount, output.subspan(count, fileCount));
+                count += readCount;
+                if (readCount < fileCount) {
+                    return count;
+                }
+            }
+        }
+        if (count < size) {
             // Zero-fill postgap area
-            size = std::min(size, m_postgap);
-            auto postgapArea = output.subspan(count);
-            std::fill(postgapArea.begin(), postgapArea.end(), 0);
-            count += postgapArea.size();
+            std::fill_n(output.begin() + count, size - count, 0);
+            count = size;
         }
         return count;
     }

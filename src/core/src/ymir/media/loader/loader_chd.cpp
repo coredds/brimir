@@ -6,7 +6,6 @@
 
 #include <ymir/core/types.hpp>
 
-#include <ymir/util/arith_ops.hpp>
 #include <ymir/util/scope_guard.hpp>
 
 #include <fmt/format.h>
@@ -338,75 +337,33 @@ bool Load(std::filesystem::path chdPath, Disc &disc, bool preloadToRAM, CbLoader
                 errorMsg(fmt::format("CHD: Unknown track type {}\n", type));
                 return false;
             }
-            uintmax_t subviewOffset = byteOffset;
-            if (track.controlADR == 0x01) {
-                // Add pregap on audio tracks
-                subviewOffset += pregap * track.unitSize;
-            } else if (track.hasHeader) {
-                const bool hasSync = track.hasSyncBytes;
+            // A PGTYPE starting with 'V' means the pregap is stored in the file at the start of the track and is
+            // included in FRAMES. Otherwise the pregap is not in the file, so it's generated as zeros, like the
+            // postgap, which is never stored in the file.
+            const bool pregapInFile = pgtype.starts_with('V');
+            const uint32 virtualPregap = pregapInFile ? 0 : pregap;
+            const uint32 trackFrames = virtualPregap + frames + postgap;
 
-                // Find start of next sector (if we have the header) and adjust offset accordingly
-                uintmax_t offset = 0;
-                while (true) {
-                    // If we have sync bytes, check them, otherwise assume good
-                    bool validSync = false;
-                    if (hasSync) {
-                        static constexpr std::array<uint8, 12> kSyncBytes = {
-                            0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
-                        };
-                        std::array<uint8, 12> syncBuf{};
-                        if (binaryReader->Read(byteOffset + offset, syncBuf.size(), syncBuf) != syncBuf.size()) {
-                            errorMsg(fmt::format("CHD: Track {} truncated", track.index));
-                            return false;
-                        }
-                        validSync = syncBuf == kSyncBytes;
-                    } else {
-                        validSync = true;
-                    }
-
-                    // If the sync bytes are valid, we have a data sector.
-                    // Check if the header contains the expected MM:SS:FF values.
-                    if (validSync) {
-                        const uintmax_t headerOffset = hasSync ? 0xC : 0x0;
-                        std::array<uint8, 3> headerBuf{};
-                        if (binaryReader->Read(byteOffset + offset + headerOffset, headerBuf.size(), headerBuf) !=
-                            headerBuf.size()) {
-                            errorMsg(fmt::format("CHD: Track {} truncated", track.index));
-                            return false;
-                        }
-
-                        if (headerBuf[0] == util::to_bcd(frameAddress / 75 / 60) &&
-                            headerBuf[1] == util::to_bcd((frameAddress / 75) % 60) &&
-                            headerBuf[2] == util::to_bcd(frameAddress % 75)) {
-                            // Found the matching sector
-                            break;
-                        }
-                    }
-
-                    // Current sector does not match, go forward
-                    offset += track.unitSize;
-                    if (byteOffset + offset >= binaryReader->Size()) {
-                        errorMsg(fmt::format("CHD: Could not find starting sector for track {}", track.index));
-                        return false;
-                    }
-                }
-
-                byteOffset += offset;
-                subviewOffset += offset;
-            }
             track.binaryReader =
-                std::make_unique<SharedSubviewBinaryReader>(binaryReader, subviewOffset, frames * track.unitSize);
+                std::make_unique<SharedSubviewBinaryReader>(binaryReader, byteOffset, frames * track.unitSize,
+                                                            virtualPregap * track.unitSize, postgap * track.unitSize);
             track.startFrameAddress = frameAddress;
-            track.endFrameAddress = frameAddress + frames - 1;
-            track.index01FrameAddress = frameAddress;
+            track.endFrameAddress = frameAddress + trackFrames - 1;
+            track.index01FrameAddress = frameAddress + pregap;
             track.interleavedSubchannel = false;
-            track.indices.emplace_back(); // Insert dummy index 00
-            auto &index = track.indices.emplace_back();
-            index.startFrameAddress = track.startFrameAddress;
-            index.endFrameAddress = track.endFrameAddress;
-            frameAddress += frames;
-            byteOffset += frames * track.unitSize;
+            auto &index00 = track.indices.emplace_back();
+            if (pregap > 0) {
+                index00.startFrameAddress = track.startFrameAddress;
+                index00.endFrameAddress = track.index01FrameAddress - 1;
+            }
+            auto &index01 = track.indices.emplace_back();
+            index01.startFrameAddress = track.index01FrameAddress;
+            index01.endFrameAddress = track.endFrameAddress;
+            frameAddress += trackFrames;
 
+            // Tracks are padded to a multiple of 4 frames in the file (CD_TRACK_PADDING in libchdr's cdrom.h)
+            const uintmax_t paddedFrames = (frames + 3) / 4 * 4;
+            byteOffset += paddedFrames * track.unitSize;
             if (!foundTrack) {
                 foundTrack = true;
                 session.firstTrackIndex = tracknum - 1;
@@ -432,7 +389,8 @@ bool Load(std::filesystem::path chdPath, Disc &disc, bool preloadToRAM, CbLoader
     // Read Saturn disc header
     if (session.numTracks > 0) {
         std::array<uint8, 2048> headerData{};
-        if (!session.tracks[session.firstTrackIndex].ReadSectorUserData(150, headerData)) {
+        const auto &firstTrack = session.tracks[session.firstTrackIndex];
+        if (!firstTrack.ReadSectorUserData(firstTrack.index01FrameAddress, headerData)) {
             errorMsg(fmt::format("CHD: Could not read Saturn disc header"));
             return false;
         }

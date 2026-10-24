@@ -1,5 +1,8 @@
 #include <catch_amalgamated.hpp>
 
+#include <ymir/media/binary_reader/binary_reader_composite.hpp>
+#include <ymir/media/binary_reader/binary_reader_mem.hpp>
+#include <ymir/media/binary_reader/binary_reader_subview.hpp>
 #include <ymir/media/disc.hpp>
 #include <ymir/media/loader/chd_hunk_cache.hpp>
 #include <ymir/media/loader/loader.hpp>
@@ -17,6 +20,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <span>
 #include <string>
@@ -473,4 +477,43 @@ TEST_CASE("CHD hunk cache evicts the least recently used hunk", "[media][loader]
     REQUIRE(filled.empty());
     REQUIRE(HoldsPattern(get(2), 2));
     REQUIRE(filled == std::vector<uintmax_t>{2});
+}
+
+namespace {
+
+std::shared_ptr<ymir::media::IBinaryReader> MakeMemoryReader(std::vector<uint8_t> data) {
+    return std::make_shared<ymir::media::MemoryBinaryReader>(std::move(data));
+}
+
+} // namespace
+
+// Ymir 64192c4f: a read that starts in the pregap must continue into the file contents.
+TEST_CASE("Subview reads across the pregap into the file", "[media][reader]") {
+    const auto base = MakeMemoryReader({1, 2, 3, 4, 5, 6, 7, 8});
+    const ymir::media::SharedSubviewBinaryReader view{base, 0, 8, 4, 4};
+
+    std::array<uint8_t, 8> out{};
+    REQUIRE(view.Read(2, 8, out) == 8);
+    REQUIRE(out == std::array<uint8_t, 8>{0, 0, 1, 2, 3, 4, 5, 6});
+}
+
+// Ymir 64192c4f: a read that starts in the file must continue into the postgap.
+TEST_CASE("Subview reads across the file into the postgap", "[media][reader]") {
+    const auto base = MakeMemoryReader({1, 2, 3, 4, 5, 6, 7, 8});
+    const ymir::media::SharedSubviewBinaryReader view{base, 0, 8, 4, 4};
+
+    std::array<uint8_t, 6> out{};
+    REQUIRE(view.Read(10, 6, out) == 6);
+    REQUIRE(out == std::array<uint8_t, 6>{7, 8, 0, 0, 0, 0});
+}
+
+// Ymir e5e5ae3f: a read that spans two readers must be joined, not cut at the first reader.
+TEST_CASE("Composite reader joins a read that spans two readers", "[media][reader]") {
+    ymir::media::CompositeBinaryReader composite{};
+    composite.Append(MakeMemoryReader({1, 2, 3, 4}));
+    composite.Append(MakeMemoryReader({5, 6, 7, 8}));
+
+    std::array<uint8_t, 4> out{};
+    REQUIRE(composite.Read(2, 4, out) == 4);
+    REQUIRE(out == std::array<uint8_t, 4>{3, 4, 5, 6});
 }

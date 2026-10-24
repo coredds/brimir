@@ -41,8 +41,17 @@ public:
         }
 
         // Adjust to local offset and read
-        const uintmax_t localOffset = offset - it->second.base;
-        return it->second.reader->Read(localOffset, size, output);
+        uintmax_t localOffset = offset - it->second.base;
+        uintmax_t total = 0;
+        while (total < size && it != m_readers.end()) {
+            total += it->second.reader->Read(localOffset, size - total, output.subspan(total));
+            if (total >= size) {
+                break;
+            }
+            ++it;
+            localOffset = 0;
+        }
+        return total;
     }
 
 private:
