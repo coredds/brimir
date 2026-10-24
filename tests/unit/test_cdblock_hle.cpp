@@ -4,6 +4,7 @@
 
 #include <ymir/media/binary_reader/binary_reader_mem.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -87,6 +88,19 @@ struct CDBlockFixture {
                 static_cast<uint16>((mode << 8) | 0x80 | (length >> 16)), static_cast<uint16>(length));
     }
 };
+
+// Appends a buffer to the given partition through the save state: partition buffers are stored first, in order.
+void AddBuffer(CDBlockFixture &cd, uint8 partition, uint16 size, uint8 mode, bool form2) {
+    auto it = std::find_if(cd.state.buffers.begin(), cd.state.buffers.end(),
+                           [](const auto &buffer) { return buffer.partitionIndex == 0xFF; });
+    REQUIRE(it != cd.state.buffers.end());
+    it->data.fill(0);
+    it->partitionIndex = partition;
+    it->size = size;
+    it->data[0xF] = mode;
+    it->data[0x12] = form2 ? 0x20 : 0;
+    cd.block.LoadState(cd.state);
+}
 
 } // namespace
 
@@ -231,4 +245,68 @@ TEST_CASE("HLE disc playback does not use the shared scratch buffer", "[cdblock-
         CHECK(std::all_of(buffer.data.begin(), buffer.data.end(), [](uint8 b) { return b == 0xC3; }));
     }
     CHECK(scratchBuffers > 0);
+}
+
+TEST_CASE("HLE 32-bit read from 0x5890000 pulls one transfer word", "[cdblock-hle][backport]") {
+    // Ymir 838b7d3e: a 32-bit read from 0x5890000 triggers the FIFO once; 0x5818000 keeps reading two words.
+    const auto makeFixture = [] {
+        auto cd = std::make_unique<CDBlockFixture>();
+        auto &toc = cd->disc.sessions.back().toc;
+        for (uint32 i = 0; i < toc.size(); ++i) {
+            toc[i] = 0x41000096u + i * 0x00010203u;
+        }
+        cd->Command(0x0200);
+        return cd;
+    };
+    auto reference = makeFixture();
+    const std::array<uint16, 3> words{reference->bus.Read<uint16>(0x5818000), reference->bus.Read<uint16>(0x5818000),
+                                      reference->bus.Read<uint16>(0x5818000)};
+    REQUIRE(words[0] != words[1]);
+
+    auto single = makeFixture();
+    CHECK(single->bus.Read<uint32>(0x5890000) == words[0]);
+    CHECK(single->bus.Read<uint16>(0x5818000) == words[1]);
+
+    auto dual = makeFixture();
+    CHECK(dual->bus.Read<uint32>(0x5818000) == ((uint32{words[0]} << 16u) | words[1]));
+}
+
+TEST_CASE("HLE Calculate Actual Size waits when the range exceeds the partition", "[cdblock-hle][backport]") {
+    // Ymir 1eacc2b8: ranges outside the partition report the wait flag instead of Reject and do not raise ESEL.
+    for (const uint16 offset : {0x0000, 0xFFFF}) {
+        CAPTURE(offset);
+        auto cd = std::make_unique<CDBlockFixture>();
+        const auto response = cd->Command(0x5200, offset, 0x0000, 0x0001);
+        CHECK((response[0] >> 8) == (cd->state.status.statusCode | kStatusFlagWait));
+        CHECK((response[0] >> 8) != kStatusReject);
+        CHECK((cd->state.HIRQ & kHIRQ_ESEL) == 0);
+    }
+}
+
+TEST_CASE("HLE Calculate Actual Size honours the get sector length", "[cdblock-hle][backport]") {
+    // Ymir 87897f8f: sizes are clamped to the get length, with Mode 2 Form 2 sectors extended to 2324 bytes.
+    auto cd = std::make_unique<CDBlockFixture>();
+    cd->state.getSectorLength = 2048;
+    cd->block.LoadState(cd->state);
+    AddBuffer(*cd, 0, 2324, 2, true);
+    AddBuffer(*cd, 0, 2352, 1, false);
+
+    cd->Command(0x5200, 0, 0, 2);
+    const auto size = cd->Command(0x5300);
+    CHECK((((size[0] & 0xFFu) << 16u) | size[1]) == (2324u + 2048u) / 2u);
+    CHECK((cd->state.HIRQ & kHIRQ_ESEL) == 0);
+}
+
+TEST_CASE("HLE Calculate Actual Size with 0xFFFF offset and count uses the last sector",
+          "[cdblock-hle][backport]") {
+    // Ymir 2798c50c: offset 0xFFFF selects the last sector and count 0xFFFF extends to the end of the partition.
+    auto cd = std::make_unique<CDBlockFixture>();
+    cd->state.getSectorLength = 2048;
+    cd->block.LoadState(cd->state);
+    AddBuffer(*cd, 0, 2324, 2, true);
+    AddBuffer(*cd, 0, 2352, 1, false);
+
+    cd->Command(0x5200, 0xFFFF, 0, 0xFFFF);
+    const auto size = cd->Command(0x5300);
+    CHECK((((size[0] & 0xFFu) << 16u) | size[1]) == 1024u);
 }

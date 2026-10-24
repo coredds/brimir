@@ -183,6 +183,12 @@ void CDBlock::MapMemory(sys::SH2Bus &bus) {
             // Bus wait handler
             [](uint32, uint32, bool, void *) -> bool { return false; });
 
+        if (address & 0x8'0000) {
+            // 32-bit reads from 589'0000 trigger the FIFO once
+            bus.MapNormal(address, address + 0xFFF, this,
+                          [](uint32 address, void *ctx) -> uint32 { return cast(ctx).ReadReg<uint32>(address); });
+        }
+
         bus.MapSideEffectFree(
             address, address + 0xFFF, this,
             [](uint32 address, void *ctx) -> uint8 { return cast(ctx).PeekReg<uint8>(address); },
@@ -1492,7 +1498,7 @@ void CDBlock::ReadSector() {
 
         // Extend total transfer length if the current sector length was extended
         if (extendLength) {
-            m_xferLength += m_xferGetLength - m_getSectorLength;
+            m_xferLength += (m_xferGetLength - m_getSectorLength) / sizeof(uint16);
         }
 
         devlog::trace<grp::xfer>("Starting transfer: partition {}, buffer {}, frame address {:06X} -> {} bytes",
@@ -2653,33 +2659,30 @@ void CDBlock::CmdCalculateActualSize() {
     // sector offset
     // partition number   <blank>
     // sector number
-    const uint16 sectorOffset = m_CR[1];
+    uint16 sectorOffset = m_CR[1];
     const uint8 partitionNumber = bit::extract<8, 15>(m_CR[2]);
-    const uint16 sectorNumber = m_CR[3];
+    uint16 sectorNumber = m_CR[3];
 
     bool reject = false;
+    bool wait = false;
     if (partitionNumber > kNumPartitions) [[unlikely]] {
         reject = true;
     } else {
         const uint8 bufferCount = m_partitionManager.GetBufferCount(partitionNumber);
-        if (sectorOffset != 0xFFFF && sectorOffset >= bufferCount) [[unlikely]] {
-            reject = true;
+        if (sectorOffset == 0xFFFF) {
+            sectorOffset = bufferCount - 1u;
+        }
+        if (sectorNumber == 0xFFFF) {
+            sectorNumber = bufferCount - sectorOffset;
+        }
+        if (sectorOffset >= bufferCount || sectorNumber == 0 || sectorOffset + sectorNumber > bufferCount) {
+            wait = true;
         } else {
-            uint16 startSector;
-            uint16 endSector;
-            if (sectorOffset == 0xFFFF) {
-                startSector = bufferCount - 1;
-                if (sectorNumber < bufferCount) {
-                    endSector = startSector - sectorNumber + 1;
-                } else {
-                    endSector = 0;
-                }
-            } else {
-                startSector = sectorOffset;
-                endSector = std::min<uint16>(startSector + sectorNumber - 1, bufferCount - 1);
-            }
+            const uint16 startSector = sectorOffset;
+            const uint16 endSector = sectorOffset + sectorNumber - 1u;
             m_calculatedPartitionSize =
-                m_partitionManager.CalculateSize(partitionNumber, startSector, endSector) / sizeof(uint16);
+                m_partitionManager.CalculateSize(partitionNumber, startSector, endSector, m_getSectorLength) /
+                sizeof(uint16);
             devlog::trace<grp::base>("Actual size of partition {} from sector {} to {} = {} words", partitionNumber,
                                      startSector, endSector, m_calculatedPartitionSize);
         }
@@ -2688,11 +2691,17 @@ void CDBlock::CmdCalculateActualSize() {
     // Output structure: standard CD status data
     if (reject) [[unlikely]] {
         ReportCDStatus(kStatusReject);
+    } else if (wait) [[unlikely]] {
+        ReportCDStatus(GetStatusCode() | kStatusFlagWait);
     } else {
         ReportCDStatus();
     }
 
-    SetInterrupt(kHIRQ_CMOK | kHIRQ_ESEL);
+    uint16 hirq = kHIRQ_CMOK;
+    if (!reject && !wait) {
+        hirq |= kHIRQ_ESEL;
+    }
+    SetInterrupt(hirq);
 }
 
 void CDBlock::CmdGetActualSize() {
@@ -2714,7 +2723,7 @@ void CDBlock::CmdGetActualSize() {
     m_RR[2] = 0x0000;
     m_RR[3] = 0x0000;
 
-    SetInterrupt(kHIRQ_CMOK | kHIRQ_ESEL);
+    SetInterrupt(kHIRQ_CMOK);
 }
 
 void CDBlock::CmdGetSectorInfo() {
