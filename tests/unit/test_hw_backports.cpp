@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -432,6 +433,126 @@ TEST_CASE("VDP2 stops updating the back screen once DISP is cleared mid-frame", 
     CHECK(fx.capture.At(0, 0) == RGB555to888(colors[0]));
     CHECK(fx.capture.At(0, 1) == RGB555to888(colors[0]));
     CHECK(fx.capture.At(0, 2) == RGB555to888(colors[0]));
+}
+
+namespace {
+
+// The threaded VDP2 equivalence tests loop because the races they cover are timing-dependent.
+constexpr int kThreadedEquivalenceIterations = 50;
+
+// Builds a VDP state with setup(state), renders a frame with script(state, renderer) with or without the threaded VDP2
+// renderer, and returns the captured pixels.
+std::vector<uint32> RenderScript(bool threaded, auto setup, auto script) {
+    auto state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    FrameCapture capture;
+
+    setup(*state);
+    renderer->PostLoadStateSync();
+    renderer->EnableThreadedVDP2(threaded);
+    capture.Bind(*renderer);
+    script(*state, *renderer);
+    renderer->EnableThreadedVDP2(false);
+
+    return {capture.pixels.begin(), capture.pixels.begin() + capture.width * 4};
+}
+
+// Renders the script with the threaded VDP2 renderer repeatedly and counts the frames that differ from expected.
+int CountThreadedMismatches(auto setup, auto script, const std::vector<uint32> &expected) {
+    int mismatches = 0;
+    for (int i = 0; i < kThreadedEquivalenceIterations; ++i) {
+        if (RenderScript(true, setup, script) != expected) {
+            ++mismatches;
+        }
+    }
+    return mismatches;
+}
+
+// Single-color back screen.
+void SetupBackScreen(vdp::VDPState &state) {
+    auto &regs = state.regs2;
+    regs.WriteTVMD(0x8000); // DISP on, 320 pixels wide
+    regs.LatchTVMD();
+    regs.WriteBGON(0);
+    state.mem2.WriteVRAM<uint16>(0x100, 0x7C1F);
+    regs.WriteBKTAU(0x0000); // single color
+    regs.WriteBKTAL(0x0080); // 0x100
+}
+
+// Sprite layer (type 0, all priorities 7, palette data) over a display framebuffer filled with distinct 16-bit words
+// and a CRAM filled with distinct colors.
+void SetupSpriteLayer(vdp::VDPState &state) {
+    auto &regs = state.regs2;
+    regs.WriteTVMD(0x8000); // DISP on, 320 pixels wide
+    regs.LatchTVMD();
+    regs.WriteBGON(0);
+    regs.WriteSPCTL(0x0000);
+    regs.WritePRISA(0x0707);
+    regs.WritePRISB(0x0707);
+    regs.WritePRISC(0x0707);
+    regs.WritePRISD(0x0707);
+    for (uint32 i = 0; i < 1024; ++i) {
+        state.mem2.WriteCRAM<uint16>(i * sizeof(uint16), static_cast<uint16>(i * 31 + 1) & 0x7FFF);
+    }
+    auto &fb = state.spriteFB[state.displayFB];
+    for (uint32 i = 0; i < fb.size() / sizeof(uint16); ++i) {
+        util::WriteBE<uint16>(&fb[i * sizeof(uint16)], static_cast<uint16>(0x400 | (i & 0x3FF)));
+    }
+}
+
+} // namespace
+
+TEST_CASE("Threaded VDP2 applies a resolution change after earlier lines", "[vdp][vdp2][threaded][backport]") {
+    // Ymir 5fab3c3d: the resolution change must reach the VDP2 render thread in order with the lines it renders,
+    // instead of changing the renderer's resolution from the emulator thread while earlier lines are still pending.
+    auto script = [](vdp::VDPState &, vdp::SoftwareVDPRenderer &renderer) {
+        renderer.VDP2SetResolution(320, 224, false);
+        renderer.VDP2BeginFrame();
+        renderer.VDP2RenderLine(0);
+        renderer.VDP2SetResolution(640, 224, false);
+        renderer.VDP2RenderLine(1);
+        renderer.VDP2EndFrame();
+    };
+
+    const auto expected = RenderScript(false, SetupBackScreen, script);
+    REQUIRE(expected.size() == 640 * 4);
+    CHECK(CountThreadedMismatches(SetupBackScreen, script, expected) == 0);
+}
+
+TEST_CASE("Threaded VDP2 sees VDP1 TVMR changes in order", "[vdp][vdp2][threaded][backport]") {
+    // Ymir 23b3dedd: the VDP2 render thread read TVMR from the VDP1 registers as they were at render time instead of
+    // when the line was queued. Fixes a single-frame glitch in Virtua Fighter 2 after selecting characters.
+    constexpr uint32 kWidth = 320;
+
+    auto renderTwoLines = [](uint16 tvmr0, uint16 tvmr1) {
+        return [=](vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer) {
+            state.regs1.WriteTVMR(tvmr0);
+            renderer.VDP1WriteReg(0x00, tvmr0);
+            renderer.VDP2SetResolution(kWidth, 224, false);
+            renderer.VDP2BeginFrame();
+            renderer.VDP2RenderLine(0);
+            state.regs1.WriteTVMR(tvmr1);
+            renderer.VDP1WriteReg(0x00, tvmr1);
+            renderer.VDP2RenderLine(1);
+            renderer.VDP2EndFrame();
+        };
+    };
+    auto line = [&](const std::vector<uint32> &pixels, uint32 y) {
+        return std::vector<uint32>(pixels.begin() + y * kWidth, pixels.begin() + (y + 1) * kWidth);
+    };
+
+    const auto readout16 = RenderScript(false, SetupSpriteLayer, renderTwoLines(0, 0));
+    const auto readout8 = RenderScript(false, SetupSpriteLayer, renderTwoLines(1, 1));
+    const auto script = renderTwoLines(0, 1);
+    const auto expected = RenderScript(false, SetupSpriteLayer, script);
+    REQUIRE(expected.size() == kWidth * 4);
+    REQUIRE(line(readout16, 1) != line(readout8, 1));
+    CHECK(line(expected, 0) == line(readout16, 0));
+    CHECK(line(expected, 1) == line(readout8, 1));
+
+    CHECK(CountThreadedMismatches(SetupSpriteLayer, script, expected) == 0);
 }
 
 TEST_CASE("VDP2 EXTEN read latches HCNT when external latch is disabled", "[vdp][vdp2][hcnt][backport]") {

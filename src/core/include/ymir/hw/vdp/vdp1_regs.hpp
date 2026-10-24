@@ -14,16 +14,87 @@ namespace ymir::vdp {
 
 inline constexpr uint32 kVDP1NoReturn = ~0u;
 
+struct VDP1RegTVMR {
+    VDP1RegTVMR() {
+        Reset();
+    }
+
+    void Reset() {
+        vblankErase = false;
+        hdtvEnable = false;
+        fbRotEnable = false;
+        pixel8Bits = false;
+
+        Update();
+    }
+
+    void Update() {
+        static constexpr uint32 kSizesH[] = {512, 1024, 512, 512, 512, 512, 512, 512};
+        static constexpr uint32 kSizesV[] = {256, 256, 256, 512, 512, 512, 512, 512};
+        static constexpr uint32 kEraseShifts[] = {9, 9, 9, 8, 9, 8, 9, 8};
+        const uint8 tvm = (hdtvEnable << 2) | (fbRotEnable << 1) | (pixel8Bits << 0);
+        fbSizeH = kSizesH[tvm];
+        fbSizeV = kSizesV[tvm];
+        eraseOffsetShift = kEraseShifts[tvm];
+        // Examples of games using each mode:
+        // TVM = 0   Panzer Dragoon
+        // TVM = 1   Resident Evil (options menu)
+        // TVM = 2   Highway 2000 (in-game)
+        // TVM = 3   Grandia (battle)
+        // TVM = 4   (none so far)
+        // TVM = 5-7 (hopefully none, as these are supposedly "illegal")
+    }
+
+    [[nodiscard]] FORCE_INLINE uint16 Read() const {
+        uint16 value = 0;
+        bit::deposit_into<3>(value, vblankErase);
+        bit::deposit_into<2>(value, hdtvEnable);
+        bit::deposit_into<1>(value, fbRotEnable);
+        bit::deposit_into<0>(value, pixel8Bits);
+        return value;
+    }
+
+    FORCE_INLINE void Write(uint16 value) {
+        vblankErase = bit::test<3>(value);
+        hdtvEnable = bit::test<2>(value);
+        fbRotEnable = bit::test<1>(value);
+        pixel8Bits = bit::test<0>(value);
+        Update();
+    }
+
+    // Erase the framebuffer on VBlank.
+    // Derived from TVMR.VBE
+    bool vblankErase;
+
+    // HDTV mode enable.
+    // Derived from TVMR.TVM bit 2
+    bool hdtvEnable;
+
+    // Frame buffer rotation enable.
+    // Derived from TVMR.TVM bit 1
+    bool fbRotEnable;
+
+    // Pixel data width - 8 bits (true) or 16 bits (false)
+    // Derived from TVMR.TVM bit 0
+    bool pixel8Bits;
+
+    // Frame buffer dimensions.
+    // Derived from TVMR.TVM
+    uint32 fbSizeH;
+    uint32 fbSizeV;
+
+    // Shift applied to the Y coordinate for the framebuffer erase process.
+    // Derived from TVMR.TVM
+    uint32 eraseOffsetShift;
+};
+
 struct VDP1Regs {
     VDP1Regs() {
         Reset(true);
     }
 
     void Reset(bool hard) {
-        vblankErase = false;
-        hdtvEnable = false;
-        fbRotEnable = false;
-        pixel8Bits = false;
+        tvmr.Reset();
 
         fbSwapTrigger = false;
         fbSwapMode = false;
@@ -44,8 +115,6 @@ struct VDP1Regs {
         returnAddress = kVDP1NoReturn;
 
         fbParamsChanged = false;
-
-        UpdateTVMR();
     }
 
     template <bool peek>
@@ -95,30 +164,8 @@ struct VDP1Regs {
         }
     }
 
-    // Erase the framebuffer on VBlank.
-    // Derived from TVMR.VBE
-    bool vblankErase;
-
-    // HDTV mode enable.
-    // Derived from TVMR.TVM bit 2
-    bool hdtvEnable;
-
-    // Frame buffer rotation enable.
-    // Derived from TVMR.TVM bit 1
-    bool fbRotEnable;
-
-    // Pixel data width - 8 bits (true) or 16 bits (false)
-    // Derived from TVMR.TVM bit 0
-    bool pixel8Bits;
-
-    // Frame buffer dimensions.
-    // Derived from TVMR.TVM
-    uint32 fbSizeH;
-    uint32 fbSizeV;
-
-    // Shift applied to the Y coordinate for the framebuffer erase process.
-    // Derived from TVMR.TVM
-    uint32 eraseOffsetShift;
+    // TVMR register.
+    VDP1RegTVMR tvmr;
 
     // Frame buffer swap trigger: enabled (true) or disabled (false).
     // Exact behavior depends on TVMR.VBE, FBCR.FCM and FBCR.FCT.
@@ -191,20 +238,7 @@ struct VDP1Regs {
     }
 
     void UpdateTVMR() {
-        static constexpr uint32 kSizesH[] = {512, 1024, 512, 512, 512, 512, 512, 512};
-        static constexpr uint32 kSizesV[] = {256, 256, 256, 512, 512, 512, 512, 512};
-        static constexpr uint32 kEraseShifts[] = {9, 9, 9, 8, 9, 8, 9, 8};
-        const uint8 tvm = (hdtvEnable << 2) | (fbRotEnable << 1) | (pixel8Bits << 0);
-        fbSizeH = kSizesH[tvm];
-        fbSizeV = kSizesV[tvm];
-        eraseOffsetShift = kEraseShifts[tvm];
-        // Examples of games using each mode:
-        // TVM = 0   Panzer Dragoon
-        // TVM = 1   Resident Evil (options menu)
-        // TVM = 2   Highway 2000 (in-game)
-        // TVM = 3   Grandia (battle)
-        // TVM = 4   (none so far)
-        // TVM = 5-7 (hopefully none, as these are supposedly "illegal")
+        tvmr.Update();
     }
 
     // 100000   TVMR  TV Mode Selection
@@ -232,20 +266,11 @@ struct VDP1Regs {
     //     100   HDTV           512x256
 
     [[nodiscard]] FORCE_INLINE uint16 ReadTVMR() const {
-        uint16 value = 0;
-        bit::deposit_into<3>(value, vblankErase);
-        bit::deposit_into<2>(value, hdtvEnable);
-        bit::deposit_into<1>(value, fbRotEnable);
-        bit::deposit_into<0>(value, pixel8Bits);
-        return value;
+        return tvmr.Read();
     }
 
     FORCE_INLINE void WriteTVMR(uint16 value) {
-        vblankErase = bit::test<3>(value);
-        hdtvEnable = bit::test<2>(value);
-        fbRotEnable = bit::test<1>(value);
-        pixel8Bits = bit::test<0>(value);
-        UpdateTVMR();
+        tvmr.Write(value);
     }
 
     // -------------------------------------------------------------------------
@@ -445,10 +470,10 @@ struct VDP1Regs {
 
     [[nodiscard]] FORCE_INLINE uint16 ReadMODR() const {
         uint16 value = 0;
-        bit::deposit_into<0>(value, pixel8Bits);
-        bit::deposit_into<1>(value, fbRotEnable);
-        bit::deposit_into<2>(value, hdtvEnable);
-        bit::deposit_into<3>(value, vblankErase);
+        bit::deposit_into<0>(value, tvmr.pixel8Bits);
+        bit::deposit_into<1>(value, tvmr.fbRotEnable);
+        bit::deposit_into<2>(value, tvmr.hdtvEnable);
+        bit::deposit_into<3>(value, tvmr.vblankErase);
         bit::deposit_into<4>(value, fbSwapMode);
         bit::deposit_into<5>(value, dblInterlaceDrawLine);
         bit::deposit_into<6>(value, dblInterlaceEnable);
@@ -458,10 +483,11 @@ struct VDP1Regs {
     }
 
     FORCE_INLINE void WriteMODR(uint16 value) {
-        pixel8Bits = bit::test<0>(value);
-        fbRotEnable = bit::test<1>(value);
-        hdtvEnable = bit::test<2>(value);
-        vblankErase = bit::test<3>(value);
+        // NOTE: poke-only
+        tvmr.pixel8Bits = bit::test<0>(value);
+        tvmr.fbRotEnable = bit::test<1>(value);
+        tvmr.hdtvEnable = bit::test<2>(value);
+        tvmr.vblankErase = bit::test<3>(value);
         fbSwapMode = bit::test<4>(value);
         dblInterlaceDrawLine = bit::test<5>(value);
         dblInterlaceEnable = bit::test<6>(value);

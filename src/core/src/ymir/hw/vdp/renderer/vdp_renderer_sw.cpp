@@ -371,6 +371,11 @@ void SoftwareVDPRenderer::VDP1WriteReg(uint32 address, uint16 value) {
     if (m_threadedVDP1Rendering) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::RegWrite(address, value));
     }
+    if (m_threadedVDP2Rendering) {
+        if (address == 0) {
+            m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::VDP1WriteTVMR(value));
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -496,6 +501,14 @@ void SoftwareVDPRenderer::VDP1EndFrame() {
 // -----------------------------------------------------------------------------
 
 void SoftwareVDPRenderer::VDP2SetResolution(uint32 h, uint32 v, bool exclusive) {
+    if (m_threadedVDP2Rendering) {
+        m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::VDP2UpdateResolution(h, v, exclusive));
+    } else {
+        VDP2UpdateResolution(h, v, exclusive);
+    }
+}
+
+void SoftwareVDPRenderer::VDP2UpdateResolution(uint32 h, uint32 v, bool exclusive) {
     m_HRes = h;
     m_VRes = v;
     m_exclusiveMonitor = exclusive;
@@ -701,7 +714,12 @@ void SoftwareVDPRenderer::VDP2RenderThread() {
                 rctx.displayFB ^= 1;
                 rctx.framebufferSwapSignal.Set();
                 break;
+            case EvtType::VDP1WriteTVMR: rctx.tvmr.Write(event.writeTVMR.value); break;
 
+            case EvtType::VDP2UpdateResolution:
+                VDP2UpdateResolution(event.updateResolution.h, event.updateResolution.v,
+                                     event.updateResolution.exclusive);
+                break;
             case EvtType::VDP2BeginFrame: VDP2InitFrame(); break;
             case EvtType::VDP2UpdateEnabledBGs: VDP2UpdateEnabledBGs(); break;
             case EvtType::VDP2DrawLine: //
@@ -794,6 +812,7 @@ void SoftwareVDPRenderer::VDP2RenderThread() {
             case EvtType::PostLoadStateSync:
                 rctx.vdp2.regs = m_state.regs2;
                 rctx.vdp2.mem = m_state.mem2;
+                rctx.tvmr = m_state.regs1.tvmr;
                 rctx.postLoadSyncSignal.Set();
                 VDP2UpdateEnabledBGs();
                 for (uint32 addr = 0; addr < rctx.vdp2.mem.CRAM.size(); addr += sizeof(uint16)) {
@@ -935,7 +954,8 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
 
     devlog::trace<grp::swvdp1>("Erasing framebuffer {} - {}x{} to {}x{} -> {:04X}  {}x{}  {}-bit", m_state.displayFB,
                                regs1.eraseX1Latch, regs1.eraseY1Latch, regs1.eraseX3Latch, regs1.eraseY3Latch,
-                               regs1.eraseWriteValueLatch, regs1.fbSizeH, regs1.fbSizeV, (regs1.pixel8Bits ? 8 : 16));
+                               regs1.eraseWriteValueLatch, regs1.tvmr.fbSizeH, regs1.tvmr.fbSizeV,
+                               (regs1.tvmr.pixel8Bits ? 8 : 16));
 
     const uint8 fbIndex = VDP1GetDisplayFBIndex();
     auto &fb = VDP1GetRendererFB(false, fbIndex);
@@ -943,7 +963,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
     [[maybe_unused]] auto &meshFB = m_meshFB[0][fbIndex];
     [[maybe_unused]] auto &altMeshFB = m_meshFB[1][fbIndex];
 
-    const uint32 fbOffsetShift = regs1.eraseOffsetShift;
+    const uint32 fbOffsetShift = regs1.tvmr.eraseOffsetShift;
 
     const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
 
@@ -1112,8 +1132,8 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
 
     // TODO: pixelParams.mode.preClippingDisable
 
-    uint32 fbOffset = y * regs1.fbSizeH + x;
-    if (!regs1.pixel8Bits) {
+    uint32 fbOffset = y * regs1.tvmr.fbSizeH + x;
+    if (!regs1.tvmr.pixel8Bits) {
         fbOffset *= sizeof(uint16);
     }
     fbOffset &= 0x3FFFF;
@@ -1126,7 +1146,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
         return true;
     }
 
-    if (regs1.pixel8Bits) {
+    if (regs1.tvmr.pixel8Bits) {
         // TODO: what happens if pixelParams.mode.colorCalcBits/gouraudEnable != 0?
         if (transparentMeshes && pixelParams.mode.meshEnable) {
             m_meshFB[altFB][fbIndex][fbOffset] = pixelParams.color;
@@ -2035,6 +2055,14 @@ FORCE_INLINE const VDP2Regs &SoftwareVDPRenderer::VDP2GetRegs() const {
     }
 }
 
+const VDP1RegTVMR &SoftwareVDPRenderer::VDP2GetVDP1TVMR() const {
+    if (m_threadedVDP2Rendering) {
+        return m_vdp2RenderingContext.tvmr;
+    } else {
+        return m_state.regs1.tvmr;
+    }
+}
+
 FORCE_INLINE std::array<uint8, kVDP2VRAMSize> &SoftwareVDPRenderer::VDP2GetVRAM() {
     if (m_threadedVDP2Rendering) {
         return m_vdp2RenderingContext.vdp2.mem.VRAM;
@@ -2119,8 +2147,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2UpdateLineScreenScroll(uint32 y, cons
 }
 
 FORCE_INLINE void SoftwareVDPRenderer::VDP2CalcRotationParameterTables(uint32 y, VDP2Regs &regs2) {
-    VDP1Regs &regs1 = VDP1GetRegs();
-
+    const VDP1RegTVMR &tvmr = VDP2GetVDP1TVMR();
     const uint32 baseAddress = regs2.commonRotParams.baseAddress & 0xFFF7C; // mask bit 6 (shifted left by 1)
     const bool readAll = y == 0;
     const auto &vram2 = VDP2GetVRAM();
@@ -2307,7 +2334,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2CalcRotationParameterTables(uint32 y,
         }
 
         // Precompute whole line of sprite coordinates
-        if (regs1.fbRotEnable && i == 0) {
+        if (tvmr.fbRotEnable && i == 0) {
             // Current sprite coordinates (13.10)
             sint32 sprX = t.Xst + y * t.deltaXst;
             sint32 sprY = t.Yst + y * t.deltaYst;
@@ -2545,7 +2572,7 @@ template <bool deinterlace, bool transparentMeshes>
 void SoftwareVDPRenderer::VDP2DrawLine(uint32 y, bool altField) {
     devlog::trace<grp::swvdp2_verbose>("Drawing line {} {} field", y, (altField ? "alt" : "main"));
 
-    const VDP1Regs &regs1 = VDP1GetRegs();
+    const VDP1RegTVMR &tvmr = VDP2GetVDP1TVMR();
     const VDP2Regs &regs2 = VDP2GetRegs();
 
     using FnDrawLayer = void (SoftwareVDPRenderer::*)(uint32, const VDP2Regs &);
@@ -2571,7 +2598,7 @@ void SoftwareVDPRenderer::VDP2DrawLine(uint32 y, bool altField) {
     }();
 
     const uint32 colorMode = regs2.vramControl.colorRAMMode;
-    const bool rotate = regs1.fbRotEnable;
+    const bool rotate = tvmr.fbRotEnable;
     const bool interlaced = regs2.TVMD.IsInterlaced();
 
     // Calculate window for sprite layer
@@ -2642,14 +2669,13 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawLineColorAndBackScreens(uint32 y,
 
 template <uint32 colorMode, bool rotate, bool altField, bool transparentMeshes>
 NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs &regs2) {
-    const VDP1Regs &regs1 = VDP1GetRegs();
-
     // VDP1 scaling:
     // 2x horz resolution: VDP1 TVM=000 and VDP2 HRESO=01x
     // 1/2x horz readout:  VDP1 TVM=001 and VDP2 HRESO=00x
+    const VDP1RegTVMR &tvmr = VDP2GetVDP1TVMR();
     const bool exclMon = (regs2.TVMD.HRESOn & 0b100) != 0;
-    const bool doubleResH = !regs1.hdtvEnable && !rotate && !regs1.pixel8Bits && (regs2.TVMD.HRESOn & 0b110) == 0b010;
-    const bool halfResH = !regs1.hdtvEnable && !rotate && regs1.pixel8Bits && (regs2.TVMD.HRESOn & 0b110) == 0b000;
+    const bool doubleResH = !tvmr.hdtvEnable && !tvmr.pixel8Bits && (regs2.TVMD.HRESOn & 0b110) == 0b010;
+    const bool halfResH = !tvmr.hdtvEnable && tvmr.pixel8Bits && (regs2.TVMD.HRESOn & 0b110) == 0b000;
     const uint32 xOutputShift = doubleResH || exclMon ? 1 : 0;
     const uint32 xReadoutShift = halfResH ? 1 : 0;
     const uint32 maxX = m_HRes >> xOutputShift;
@@ -2674,7 +2700,7 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs
         if constexpr (rotate) {
             const auto &rotParamOut = m_rotParamLineOutputs[0];
             const auto &coord = rotParamOut.spriteCoords[x];
-            if (coord.x() < 0 || coord.x() >= regs1.fbSizeH || coord.y() < 0 || coord.y() >= regs1.fbSizeV) {
+            if (coord.x() < 0 || coord.x() >= tvmr.fbSizeH || coord.y() < 0 || coord.y() >= tvmr.fbSizeV) {
                 layerOut.pixels.priority[xx] = 0;
                 layerAttrs.shadowOrWindow[xx] = false;
                 layerAttrs.specialType[xx] = SpriteData::Special::Transparent;
@@ -2693,19 +2719,20 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs
                 }
                 continue;
             }
-            spriteFBOffset = coord.x() + coord.y() * regs1.fbSizeH;
+            spriteFBOffset = coord.x() + coord.y() * tvmr.fbSizeH;
         } else {
-            spriteFBOffset = (x << xReadoutShift) + y * regs1.fbSizeH;
+            spriteFBOffset = (x << xReadoutShift) + y * tvmr.fbSizeH;
         }
 
-        VDP2DrawSpritePixel<colorMode, altField, transparentMeshes, false>(xx, regs2, params, spriteFB, spriteFBOffset);
+        VDP2DrawSpritePixel<colorMode, altField, transparentMeshes, false>(xx, regs2, tvmr, params, spriteFB,
+                                                                           spriteFBOffset);
         if (doubleResH) {
             layerOut.pixels.CopyPixel(xx, xx + 1);
             layerAttrs.CopyAttrs(xx, xx + 1);
         }
 
         if constexpr (transparentMeshes) {
-            VDP2DrawSpritePixel<colorMode, altField, transparentMeshes, true>(xx, regs2, params, meshFB,
+            VDP2DrawSpritePixel<colorMode, altField, transparentMeshes, true>(xx, regs2, tvmr, params, meshFB,
                                                                               spriteFBOffset);
             if (doubleResH) {
                 meshLayerOut.pixels.CopyPixel(xx, xx + 1);
@@ -2716,8 +2743,9 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs
 }
 
 template <uint32 colorMode, bool altField, bool transparentMeshes, bool applyMesh>
-FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawSpritePixel(uint32 x, const VDP2Regs &regs2, const SpriteParams &params,
-                                                           const SpriteFB &spriteFB, uint32 spriteFBOffset) {
+FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawSpritePixel(uint32 x, const VDP2Regs &regs2, const VDP1RegTVMR &tvmr,
+                                                           const SpriteParams &params, const SpriteFB &spriteFB,
+                                                           uint32 spriteFBOffset) {
     // This implies that if transparentMeshes is false, applyMesh will be always false
     static_assert(transparentMeshes || !applyMesh, "applyMesh cannot be set when transparentMeshes is disabled");
 
@@ -2776,7 +2804,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawSpritePixel(uint32 x, const VDP2R
     }
 
     // Palette data
-    const SpriteData spriteData = VDP2FetchSpriteData<applyMesh>(regs2, spriteFB, spriteFBOffset);
+    const SpriteData spriteData = VDP2FetchSpriteData<applyMesh>(regs2, tvmr, spriteFB, spriteFBOffset);
 
     // Handle sprite window
     if (params.useSpriteWindow && params.spriteWindowEnabled &&
@@ -2868,7 +2896,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawNormalBG(const VDP2Regs &regs2, u
 
     LayerOutput &layerOut = m_layerOutputs[altField][bgIndex + 2];
     VRAMFetcher &vramFetcher = m_vramFetchers[altField][bgIndex];
-    auto windowState = std::span<const bool>{m_bgWindows[altField][bgIndex + 1]}.first(m_HRes);
+    auto windowState = std::span<const bool>{m_bgWindows[altField][bgIndex + 1]};
 
     const uint32 cf = static_cast<uint32>(bgParams.colorFormat);
     if (bgParams.bitmap) {
@@ -2945,7 +2973,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawRotationBG(const VDP2Regs &regs2,
     const BGParams &bgParams = regs2.bgParams[bgIndex];
     LayerOutput &layerOut = m_layerOutputs[altField][bgIndex + 1];
     VRAMFetcher &vramFetcher = m_vramFetchers[altField][bgIndex + 4];
-    auto windowState = std::span<const bool>{m_bgWindows[altField][bgIndex]}.first(m_HRes);
+    auto windowState = std::span<const bool>{m_bgWindows[altField][bgIndex]};
 
     const uint32 cf = static_cast<uint32>(bgParams.colorFormat);
     if (bgParams.bitmap) {
@@ -5483,10 +5511,8 @@ FORCE_INLINE static SpriteData::Special GetSpecialPattern(uint16 rawData) {
 }
 
 template <bool applyMesh>
-FLATTEN FORCE_INLINE SpriteData SoftwareVDPRenderer::VDP2FetchSpriteData(const VDP2Regs &regs2, const SpriteFB &fb,
-                                                                         uint32 fbOffset) {
-    const VDP1Regs &regs1 = m_state.regs1;
-
+FLATTEN FORCE_INLINE SpriteData SoftwareVDPRenderer::VDP2FetchSpriteData(const VDP2Regs &regs2, const VDP1RegTVMR &tvmr,
+                                                                         const SpriteFB &fb, uint32 fbOffset) {
     // Adjust offset based on VDP1 data size.
     // The majority of games actually set the sprite readout size to match the VDP1 sprite data size, but there's
     // *always* an exception...
@@ -5494,7 +5520,7 @@ FLATTEN FORCE_INLINE SpriteData SoftwareVDPRenderer::VDP2FetchSpriteData(const V
     // 16-bit VDP1 data vs. 8-bit readout: I Love Donald Duck
     const uint8 type = regs2.spriteParams.type;
     uint16 rawData;
-    if (regs1.pixel8Bits) {
+    if (tvmr.pixel8Bits) {
         rawData = fb[fbOffset & 0x3FFFF];
         if (type < 8 && (!applyMesh || rawData != 0)) {
             rawData |= 0xFF00;

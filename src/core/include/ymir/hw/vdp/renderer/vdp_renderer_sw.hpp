@@ -144,6 +144,7 @@ public:
     void VDP1EndFrame() override;
 
     void VDP2SetResolution(uint32 h, uint32 v, bool exclusive) override;
+    void VDP2UpdateResolution(uint32 h, uint32 v, bool exclusive);
     void VDP2SetField(bool odd) override;
     void VDP2LatchTVMD() override;
     void VDP2BeginFrame() override;
@@ -381,7 +382,9 @@ private:
             VDP2LatchTVMD,
             VDP1EraseFramebuffer,
             VDP1SwapFramebuffer,
+            VDP1WriteTVMR,
 
+            VDP2UpdateResolution,
             VDP2BeginFrame,
             VDP2UpdateEnabledBGs,
             VDP2DrawLine,
@@ -402,16 +405,22 @@ private:
         Type type;
         union {
             struct {
+                uint16 value;
+            } writeTVMR;
+
+            struct {
+                uint32 h;
+                uint32 v;
+                bool exclusive;
+            } updateResolution;
+
+            struct {
                 uint32 vcnt;
             } drawLine;
 
             struct {
                 bool odd;
             } oddField;
-
-            /*struct {
-                uint64 steps;
-            } vdp1ProcessCommands;*/
 
             struct {
                 uint32 address;
@@ -437,6 +446,14 @@ private:
 
         static VDP2RenderEvent VDP1SwapFramebuffer() {
             return {Type::VDP1SwapFramebuffer};
+        }
+
+        static VDP2RenderEvent VDP1WriteTVMR(uint16 value) {
+            return {Type::VDP1WriteTVMR, {.writeTVMR = {.value = value}}};
+        }
+
+        static VDP2RenderEvent VDP2UpdateResolution(uint32 h, uint32 v, bool exclusive) {
+            return {Type::VDP2UpdateResolution, {.updateResolution = {.h = h, .v = v, .exclusive = exclusive}}};
         }
 
         static VDP2RenderEvent VDP2BeginFrame() {
@@ -537,15 +554,19 @@ private:
 
         uint8 displayFB;
 
+        VDP1RegTVMR tvmr;
+
         void Reset() {
             vdp2.regs.Reset();
             vdp2.mem.Reset();
             vdp2.CRAMCache.fill({.u32 = 0});
             displayFB = 0;
+            tvmr.Reset();
         }
 
         void EnqueueEvent(VDP2RenderEvent &&event) {
             switch (event.type) {
+            case VDP2RenderEvent::Type::VDP1WriteTVMR:
             case VDP2RenderEvent::Type::VDP2VRAMWriteByte:
             case VDP2RenderEvent::Type::VDP2VRAMWriteWord:
             case VDP2RenderEvent::Type::VDP2CRAMWriteByte:
@@ -947,6 +968,9 @@ private:
     // Retrieves the current set of VDP2 registers.
     const VDP2Regs &VDP2GetRegs() const;
 
+    // Retrieves the current VDP1 TVMR register for use in the VDP2 renderer.
+    const VDP1RegTVMR &VDP2GetVDP1TVMR() const;
+
     // Retrieves the current VDP2 VRAM array.
     std::array<uint8, kVDP2VRAMSize> &VDP2GetVRAM();
 
@@ -1059,7 +1083,8 @@ private:
     // Draws a pixel on the sprite layer of the current VDP2 scanline.
     //
     // x is the X coordinate of the pixel to draw.
-    // regs2 is a reference to the set of VDP2 registers to use
+    // regs2 is a reference to the set of VDP2 registers to use.
+    // tvmr is a reference to the VDP1 TVMR register to use.
     // params contains the sprite layer's parameters.
     // spriteFB is a reference to the sprite framebuffer to read from.
     // spriteFBOffset is the offset into the buffer of the pixel to read.
@@ -1070,8 +1095,8 @@ private:
     // applyMesh determines if the pixel to be applied is a transparent mesh pixel (true) or a regular sprite layer
     // pixel (false).
     template <uint32 colorMode, bool altField, bool transparentMeshes, bool applyMesh>
-    void VDP2DrawSpritePixel(uint32 x, const VDP2Regs &regs2, const SpriteParams &params, const SpriteFB &spriteFB,
-                             uint32 spriteFBOffset);
+    void VDP2DrawSpritePixel(uint32 x, const VDP2Regs &regs2, const VDP1RegTVMR &tvmr, const SpriteParams &params,
+                             const SpriteFB &spriteFB, uint32 spriteFBOffset);
 
     // Draws the current VDP2 scanline of the specified normal background layer.
     //
@@ -1320,14 +1345,16 @@ private:
 
     // Fetches sprite data based on the current sprite mode.
     //
-    // regs2 is a reference to the set of VDP2 registers to use
+    // regs2 is a reference to the set of VDP2 registers to use.
+    // tvmr is a reference to the VDP1 TVMR register to use.
     // fb is the VDP1 framebuffer to read sprite data from.
     // fbOffset is the offset into the framebuffer (in bytes) where the sprite data is located.
     //
     // applyMesh determines if the pixel to be fetched is a transparent mesh pixel (true) or a regular sprite layer
     // pixel (false).
     template <bool applyMesh>
-    SpriteData VDP2FetchSpriteData(const VDP2Regs &regs2, const SpriteFB &fb, uint32 fbOffset);
+    SpriteData VDP2FetchSpriteData(const VDP2Regs &regs2, const VDP1RegTVMR &tvmr, const SpriteFB &fb,
+                                   uint32 fbOffset);
 
     // Retrieves the Y display coordinate based on the current interlace mode.
     //
