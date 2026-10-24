@@ -30,7 +30,31 @@ tests/
     ├── test_cd_operations.cpp       # CD tray state and save state restore
     ├── test_system_integration.cpp  # Config persistence across reset, save state round trips
     ├── test_bios.cpp                # IPL loading edge cases and LoadIPLFromFile
-    └── test_bios_integration.cpp    # Real BIOS boot / save state tests (skip without BIOS)
+    ├── test_bios_integration.cpp    # Real BIOS boot / save state tests (skip without BIOS)
+    ├── test_dev_log.cpp             # devlog robustness (never throws)
+    │
+    │   SH-2 fork and JIT ([jit]):
+    ├── test_sh2_jit_iface.cpp       # SH-2 fork hooks: executor attach, flushes, JIT context callbacks
+    ├── test_sh2_state_diff.cpp      # SH-2 state diff and test-rig bus log
+    ├── test_jit_ir.cpp              # IR builder, verifier, printer
+    ├── test_jit_ir_opt.cpp          # IR timing-bookkeeping pass (OptimizeBlock)
+    ├── test_jit_helpers.cpp         # shared helpers against the interpreter's instructions
+    ├── test_jit_diff.cpp            # JIT vs interpreter, per instruction and random programs
+    ├── test_jit_opcodes.cpp         # table-driven JIT vs interpreter tests (jit_opcode_specs)
+    ├── test_jit_backend.cpp         # IR interpreter and native backends
+    ├── test_jit_x64.cpp             # x64 backend: native code, chaining, caps, reuse, resume
+    ├── test_jit_executor.cpp        # executor and block cache: flushes, tiers, reuse, IR cap, resume
+    ├── test_jit_worker.cpp          # compile worker and background compiles
+    ├── test_jit_integration.cpp     # JIT through CoreWrapper (options, save states, unload)
+    ├── test_jit_lockstep.cpp        # whole-system lockstep: JIT core vs interpreter core
+    │
+    │   Shared test helpers:
+    ├── sh2_test_rig.*               # isolated SH-2 on a synthetic bus
+    ├── jit_test_backend.*           # backend selection (BRIMIR_JIT_BACKEND)
+    ├── jit_opcode_specs.*           # table of compiled opcodes
+    ├── jit_fuzz_programs.*          # random SH-2 programs
+    ├── jit_random_ir.*              # random verified IR blocks
+    └── jit_worker_helpers.hpp       # latches and blockers for compile-worker tests
 ```
 
 ## Building and running
@@ -48,7 +72,13 @@ ctest --test-dir build --output-on-failure
 ./build/bin/brimir_tests "~[integration]"    # exclude a tag
 ./build/bin/brimir_tests --list-tests
 ./build/bin/brimir_tests --list-tags
+
+# SH-2 JIT tests on each backend (x64 only exists in x86-64 builds)
+./build/bin/brimir_tests "[jit]"                          # default backend
+BRIMIR_JIT_BACKEND=ir ./build/bin/brimir_tests "[jit]"    # IR interpreter backend
 ```
+
+Build with asserts on (a Debug or RelWithDebInfo build without `NDEBUG`) to exercise the JIT's internal checks; the whole suite passes there. CI also runs `[jit]` under ThreadSanitizer (see the `test-linux-tsan` job in `.github/workflows/ci.yml` and `tests/tsan_suppressions.txt`).
 
 ## BIOS fixtures
 

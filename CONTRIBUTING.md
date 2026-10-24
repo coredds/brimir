@@ -47,7 +47,7 @@ We are committed to providing a welcoming and inclusive environment for all cont
 Before contributing, ensure you have:
 
 1. **Development Environment:**
-   - C++20-capable compiler (release CI uses MSVC 2022+, GCC 14 and Apple Clang)
+   - C++20-capable compiler (release CI uses MSVC 2022+, GCC 14 and Apple Clang on macOS 15; macOS builds target macOS 14 and later)
    - CMake 3.28 or later
    - Ninja (recommended)
    - Git
@@ -353,7 +353,9 @@ ctest --test-dir build --output-on-failure
 ./build/bin/brimir_tests "[core]"
 ```
 
-BIOS integration tests run only when a BIOS image is present in `tests/fixtures/`; they are skipped otherwise. Never commit BIOS or ROM images. CI runs the suite on every push and pull request.
+BIOS integration tests run only when a BIOS image is present in `tests/fixtures/`; they are skipped otherwise. Never commit BIOS or ROM images. CI runs the suite on every push and pull request (Windows x64, Linux x64, macOS ARM64), plus the `[jit]` tests under ThreadSanitizer on Linux x64.
+
+SH-2 JIT changes must keep the JIT identical to the interpreter. Run the `[jit]` tests on both backends (`BRIMIR_JIT_BACKEND=ir` and the default) and, for changes to the executor or a backend, lockstep against real content with `brimir_bench --lockstep N` (see `tools/README.md` and `design/sh2-validation.md`). The JIT's design, state and next steps are in `design/sh2-jit.md`.
 
 ### Writing Tests
 

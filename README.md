@@ -93,12 +93,12 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
 - **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
-- **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter. The x64 backend's SH-2 time is between about 5% and 28% below the interpreter's across six games, and its native compiles run on an extra thread where the CPU has at least 4 threads (core option "SH-2 JIT Compile Thread (Experimental)"); the IR interpreter backend is about 3x slower than the interpreter (see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)). It can still stutter while a game loads a lot of new code: Burning Rangers over a long session has SH-2 time about 5% below the interpreter's, but 358 of 33,600 frames take over 16.7 ms (the interpreter: none; the worst 48 ms), and with threaded VDP, the default, the average frame of Sega Rally, Street Fighter Zero 3 and that session is 2-6% longer than the interpreter's. It uses up to 128 MB of native code per SH-2 CPU, allocated on demand. It is not used while SH-2 cache emulation is active. Optimizations are planned (see [design/sh2-jit.md](design/sh2-jit.md) and [ROADMAP.md](ROADMAP.md)).
+- **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter. The x64 backend's SH-2 time is between about 5% and 28% below the interpreter's across six games, and its native compiles run on an extra thread where the CPU has at least 4 threads (core option "SH-2 JIT Compile Thread (Experimental)"); the IR interpreter backend is about 3x slower than the interpreter (see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)). It can still stutter while a game loads a lot of new code: Burning Rangers over a long session has SH-2 time about 5% below the interpreter's, but 358 of 33,600 frames take over 16.7 ms (the interpreter: none; the worst 48 ms), and with threaded VDP, the default, the average frame of Sega Rally, Street Fighter Zero 3 and that session is 2-6% longer than the interpreter's. It uses up to 128 MB of native code per SH-2 CPU, allocated on demand. It is not used while SH-2 cache emulation is active. It stays an experimental, opt-in option for testing; the current state and the next steps are in [design/sh2-jit.md](design/sh2-jit.md) ("Where to pick up").
 
 ## Build Requirements
 
 - Release targets: Windows x64, Linux x64/ARM64, and macOS ARM64
-- C++20 compiler: release CI uses MSVC 2022+, GCC 14, or Apple Clang on macOS 14
+- C++20 compiler: release CI uses MSVC 2022+, GCC 14, or Apple Clang on macOS 15 (macOS builds target macOS 14 and later)
 - CMake 3.28+
 
 ## Building
@@ -139,11 +139,11 @@ ctest --test-dir build --output-on-failure
 ./build/bin/brimir_tests "[core]"
 ```
 
-The suite covers core options, the `CoreWrapper` bridge (save states, SRAM persistence, rotation, overscan, audio), the media loader (CUE/CCD, multi-file, MP3/OGG tracks), Ymir hardware-layer backports, VDP color calculation, CD block HLE and the game database.
+The suite covers core options, the `CoreWrapper` bridge (save states, SRAM persistence, rotation, overscan, audio), the media loader (CUE/CCD, multi-file, MP3/OGG tracks), Ymir hardware-layer backports, VDP color calculation, CD block HLE and the game database. It also covers the SH-2 JIT (tag `[jit]`): differential tests that compare every compiled instruction and random programs against the interpreter, backend-against-backend tests, the block cache and compile worker, and whole-system lockstep of a JIT core against an interpreter core. The executor-level JIT tests run on the backend named by `BRIMIR_JIT_BACKEND` (`ir` or `x64`; default: the build's native backend).
 
 A few integration tests boot a real Saturn BIOS. They run only when a BIOS image is placed in `tests/fixtures/` (e.g. `sega_101.bin`) and are skipped otherwise. BIOS images are copyrighted and ignored by git — never commit them.
 
-Continuous integration (`.github/workflows/ci.yml`) builds the core and runs the test suite on Windows x64, Linux x64 and macOS ARM64 for every push to `master` and every pull request. Tagged releases are built by `.github/workflows/release.yml`.
+Continuous integration (`.github/workflows/ci.yml`) builds the core and runs the test suite on Windows x64, Linux x64 and macOS ARM64 for every push to any branch and every pull request, and runs the JIT tests under ThreadSanitizer on Linux x64. Tagged releases are built by `.github/workflows/release.yml`.
 
 ## Installation
 
@@ -175,6 +175,7 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | System | Auto-Detect Region from Disc | On/Off |
 | System | SH-2 CPU Overclock | 100% (Stock), 125%, 150%, 175%, 200%, 250%, 300% |
 | System | SH-2 JIT (Experimental) | On/Off (default Off; for testing) |
+| System | SH-2 JIT Compile Thread (Experimental) | Auto/Off (default Auto; only used while the JIT is on, on x86-64 with at least 4 CPU threads) |
 | System | Performance Profiling | On/Off |
 | Video | Deinterlacing | On/Off |
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
