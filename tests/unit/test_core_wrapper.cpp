@@ -4,6 +4,7 @@
 
 #include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
+#include <lz4.h>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -524,4 +525,38 @@ TEST_CASE("Save state writes 16-byte header", "[core][savestate][unit]") {
     REQUIRE(uncompSize == sizeof(ymir::savestate::SaveState));
     REQUIRE(compressedSize > 0);
     REQUIRE(compressedSize < stateSize - 16);
+}
+
+TEST_CASE("Save state from before the CD block busy delay and read FIFO is rejected",
+          "[core][savestate][unit][regression]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    // sizeof(SaveState) was 6315744 (MSVC x64) until the CD block read FIFO (Ymir a8856768) added
+    // 16 bytes; the busy delay and the SCSP one-shot flag fit in existing padding. Hard-coded because
+    // the old layout no longer exists to measure.
+    constexpr uint32_t kOldUncompressedSize = 6315744;
+    REQUIRE(kOldUncompressedSize != sizeof(ymir::savestate::SaveState));
+
+    // A state saved by the previous build: valid BRI2 header and a valid LZ4 payload of the old size.
+    std::vector<char> raw(kOldUncompressedSize, 0);
+    std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(raw.size())));
+    const int compressed = LZ4_compress_default(raw.data(), reinterpret_cast<char*>(buf.data() + 16),
+                                                static_cast<int>(raw.size()),
+                                                static_cast<int>(buf.size() - 16));
+    REQUIRE(compressed > 0);
+    const uint32_t magic = 0x32524942; // "BRI2" in LE
+    const uint32_t version = 2;
+    const uint32_t uncompressedSize = kOldUncompressedSize;
+    const uint32_t compressedSize = static_cast<uint32_t>(compressed);
+    std::memcpy(buf.data(), &magic, 4);
+    std::memcpy(buf.data() + 4, &version, 4);
+    std::memcpy(buf.data() + 8, &uncompressedSize, 4);
+    std::memcpy(buf.data() + 12, &compressedSize, 4);
+
+    REQUIRE_FALSE(core.LoadState(buf.data(), 16 + static_cast<size_t>(compressed)));
+
+    // The core is unharmed and still runs.
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
 }
