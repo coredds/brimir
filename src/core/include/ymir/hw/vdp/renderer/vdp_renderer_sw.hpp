@@ -216,6 +216,10 @@ private:
         Type type;
         union {
             struct {
+                bool hard;
+            } reset;
+
+            struct {
                 uint64 cycles;
             } erase;
 
@@ -230,8 +234,8 @@ private:
             } write;
         };
 
-        static VDP1RenderEvent Reset() {
-            return {Type::Reset};
+        static VDP1RenderEvent Reset(bool hard) {
+            return {Type::Reset, {.reset = {.hard = hard}}};
         }
 
         static VDP1RenderEvent EraseFramebuffer(uint64 cycles) {
@@ -324,11 +328,13 @@ private:
             alignas(16) std::array<SpriteFB, 2> spriteFB;
         } vdp1;
 
-        void Reset() {
-            vdp1.regs.Reset();
-            vdp1.mem.Reset();
-            vdp1.spriteFB[0].fill(0);
-            vdp1.spriteFB[1].fill(0);
+        void Reset(bool hard) {
+            vdp1.regs.Reset(true);
+            if (hard) {
+                vdp1.mem.Reset();
+                vdp1.spriteFB[0].fill(0);
+                vdp1.spriteFB[1].fill(0);
+            }
         }
 
         void EnqueueEvent(VDP1RenderEvent &&event) {

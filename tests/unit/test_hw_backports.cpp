@@ -216,6 +216,107 @@ TEST_CASE("Threaded VDP1 keeps CPU framebuffer writes made after the draw ends",
 
 namespace {
 
+struct ThreadedVDP1EraseFixture {
+    static constexpr uint32 kTVMR = 0x00;
+    static constexpr uint32 kEWDR = 0x06;
+    static constexpr uint32 kEWLR = 0x08;
+    static constexpr uint32 kEWRR = 0x0A;
+
+    std::unique_ptr<vdp::VDPState> state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    std::unique_ptr<vdp::SoftwareVDPRenderer> renderer;
+
+    ThreadedVDP1EraseFixture() {
+        renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+        renderer->EnableThreadedVDP1(true);
+    }
+
+    ~ThreadedVDP1EraseFixture() {
+        renderer->EnableThreadedVDP1(false);
+    }
+
+    // Sets pixel 0 of the display framebuffer in both the render thread and the main state.
+    void FillDisplayFBPixel0(uint16 value) {
+        state->displayFB = 1; // CPU writes go to the draw framebuffer, which is FB 0 while FB 1 is displayed
+        renderer->VDP1WriteFB(0, value);
+        renderer->PreSaveStateSync();
+        state->displayFB = 0;
+    }
+
+    // Erase window covering X = 0..7 on row y
+    void WriteEraseWindow(uint16 y) {
+        renderer->VDP1WriteReg(kEWLR, y);
+        renderer->VDP1WriteReg(kEWRR, (1 << 9) | y);
+    }
+
+    // Latches the render thread's erase parameters and erases the display framebuffer.
+    void SwapAndErase() {
+        renderer->VDP1SwapFramebuffer();
+        renderer->VDP1EraseFramebuffer(0);
+        renderer->PreSaveStateSync();
+    }
+
+    uint16 ReadDisplayFB(uint32 address) const {
+        return util::ReadBE<uint16>(&state->spriteFB[state->displayFB][address]);
+    }
+};
+
+} // namespace
+
+TEST_CASE("Threaded VDP1 erases with the render thread's latched parameters", "[vdp][vdp1][threaded][backport]") {
+    // Ymir ce270c04: the render thread must latch its own erase parameters on SwapBuffers and erase using its own
+    // register state, not the main state's (which is only updated by the emulator thread).
+    ThreadedVDP1EraseFixture f;
+
+    f.FillDisplayFBPixel0(0xFFFF);
+    f.renderer->VDP1WriteReg(ThreadedVDP1EraseFixture::kEWDR, 0x1234);
+    f.WriteEraseWindow(0);
+
+    auto &regs1 = f.state->regs1;
+    regs1.eraseWriteValueLatch = 0x5555;
+    regs1.eraseX1Latch = 0;
+    regs1.eraseY1Latch = 0;
+    regs1.eraseX3Latch = 8;
+    regs1.eraseY3Latch = 1;
+
+    f.SwapAndErase();
+    CHECK(f.ReadDisplayFB(0) == 0x1234);
+}
+
+TEST_CASE("Threaded VDP1 reset clears the render thread's registers", "[vdp][vdp1][threaded][backport]") {
+    // Ymir 44bd8ea4: SoftwareVDPRenderer::Reset must reset the render thread's register copy too. The erase row offset
+    // depends on TVMR, which is reset (the erase parameters themselves are not touched by VDP1Regs::Reset).
+    ThreadedVDP1EraseFixture f;
+
+    // TVM=3 (8-bit rotation mode) erases rows at 256-pixel strides instead of 512
+    f.renderer->VDP1WriteReg(ThreadedVDP1EraseFixture::kTVMR, 0x0003);
+    f.renderer->Reset(true);
+    f.renderer->VDP1WriteReg(ThreadedVDP1EraseFixture::kEWDR, 0x1234);
+    f.WriteEraseWindow(1);
+
+    f.SwapAndErase();
+    CHECK(f.ReadDisplayFB(512 * sizeof(uint16)) == 0x1234); // row 1 with the default 512-pixel stride
+    CHECK(f.ReadDisplayFB(256 * sizeof(uint16)) == 0x0000);
+}
+
+TEST_CASE("VDP soft reset keeps the VDP1 command address", "[vdp][vdp1][backport]") {
+    // Ymir 44bd8ea4: only a hard reset clears the VDP1 command addresses.
+    auto state = std::make_unique<vdp::VDPState>();
+
+    state->regs1.currCommandAddress = 0x100;
+    state->regs1.prevCommandAddress = 0x80;
+    state->Reset(false);
+    CHECK(state->regs1.currCommandAddress == 0x100);
+    CHECK(state->regs1.prevCommandAddress == 0x80);
+
+    state->Reset(true);
+    CHECK(state->regs1.currCommandAddress == 0);
+    CHECK(state->regs1.prevCommandAddress == 0);
+}
+
+namespace {
+
 struct FrameCapture {
     std::array<uint32, vdp::kMaxResH * 4> pixels{};
     uint32 width = 0;

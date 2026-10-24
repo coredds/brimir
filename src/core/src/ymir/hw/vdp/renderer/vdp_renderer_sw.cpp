@@ -97,6 +97,9 @@ void SoftwareVDPRenderer::Reset(bool hard) {
         m_CRAMCache.fill({});
     }
 
+    if (m_threadedVDP1Rendering) {
+        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::Reset(hard));
+    }
     if (m_threadedVDP2Rendering) {
         m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::Reset());
     } else {
@@ -603,7 +606,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             const auto &event = events[i];
             using EvtType = VDP1RenderEvent::Type;
             switch (event.type) {
-            case EvtType::Reset: rctx.Reset(); break;
+            case EvtType::Reset: rctx.Reset(event.reset.hard); break;
 
             case EvtType::EraseFramebuffer: {
                 if (event.erase.cycles == 0) {
@@ -618,6 +621,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             case EvtType::SwapBuffers: {
                 const auto fbIndex = VDP1GetDrawFBIndex();
                 m_state.spriteFB[fbIndex] = rctx.vdp1.spriteFB[fbIndex];
+                rctx.vdp1.regs.LatchEraseParameters();
                 rctx.swapBuffersSignal.Set();
                 break;
             }
@@ -890,11 +894,19 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2UpdateCRAMCache(uint32 address) {
 // VDP1
 
 FORCE_INLINE VDP1Regs &SoftwareVDPRenderer::VDP1GetRegs() {
-    return m_state.regs1;
+    if (m_threadedVDP1Rendering) {
+        return m_vdp1RenderingContext.vdp1.regs;
+    } else {
+        return m_state.regs1;
+    }
 }
 
 FORCE_INLINE const VDP1Regs &SoftwareVDPRenderer::VDP1GetRegs() const {
-    return m_state.regs1;
+    if (m_threadedVDP1Rendering) {
+        return m_vdp1RenderingContext.vdp1.regs;
+    } else {
+        return m_state.regs1;
+    }
 }
 
 FORCE_INLINE uint8 SoftwareVDPRenderer::VDP1GetDisplayFBIndex() const {
@@ -5473,7 +5485,7 @@ FORCE_INLINE static SpriteData::Special GetSpecialPattern(uint16 rawData) {
 template <bool applyMesh>
 FLATTEN FORCE_INLINE SpriteData SoftwareVDPRenderer::VDP2FetchSpriteData(const VDP2Regs &regs2, const SpriteFB &fb,
                                                                          uint32 fbOffset) {
-    const VDP1Regs &regs1 = VDP1GetRegs();
+    const VDP1Regs &regs1 = m_state.regs1;
 
     // Adjust offset based on VDP1 data size.
     // The majority of games actually set the sprite readout size to match the VDP1 sprite data size, but there's

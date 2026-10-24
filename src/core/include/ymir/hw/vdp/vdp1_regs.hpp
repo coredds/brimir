@@ -16,10 +16,10 @@ inline constexpr uint32 kVDP1NoReturn = ~0u;
 
 struct VDP1Regs {
     VDP1Regs() {
-        Reset();
+        Reset(true);
     }
 
-    void Reset() {
+    void Reset(bool hard) {
         vblankErase = false;
         hdtvEnable = false;
         fbRotEnable = false;
@@ -36,8 +36,10 @@ struct VDP1Regs {
         currFrameEnded = false;
         prevFrameEnded = false;
 
-        currCommandAddress = 0;
-        prevCommandAddress = 0;
+        if (hard) {
+            currCommandAddress = 0;
+            prevCommandAddress = 0;
+        }
 
         returnAddress = kVDP1NoReturn;
 
