@@ -109,7 +109,10 @@ jobs:
           path: artifact/
 
   build-macos-arm64:
-    runs-on: macos-14
+    # macos-14 is retired on 2026-11-02 (deprecated since 2026-07-06, with brownouts that
+    # leave jobs queued or failing). The core keeps targeting macOS 14, as releases did when
+    # they were built on macos-14, so users on macOS 14 can still load it.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -121,6 +124,7 @@ jobs:
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DBRIMIR_LTO=ON
 
       - name: Build
