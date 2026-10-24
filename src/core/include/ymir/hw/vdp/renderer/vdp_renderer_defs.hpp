@@ -37,6 +37,7 @@ inline constexpr VDPRendererType kRendererTypes[] = {
 
 class NullVDPRenderer;
 class SoftwareVDPRenderer;
+class HardwareVDPRendererBase;
 
 namespace detail {
 
