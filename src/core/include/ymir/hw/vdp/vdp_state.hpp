@@ -120,6 +120,12 @@ struct VDP2Memory {
         return kVDP2CRAMAddressMapping[regs.vramControl.colorRAMMode >> 1][address];
     }
 
+    template <mem_primitive T>
+    FORCE_INLINE uint32 UnmapCRAMAddress(uint32 address) const {
+        address &= 0xFFF & ~(sizeof(T) - 1);
+        return kVDP2CRAMAddressReverseMapping[regs.vramControl.colorRAMMode >> 1][address];
+    }
+
     template <mem_primitive T, typename TMemFn = decltype(NoopMemFn<T>)>
     FORCE_INLINE T ReadCRAM(uint32 address, TMemFn &&memFn = NoopMemFn) const {
         if constexpr (std::is_same_v<T, uint32>) {

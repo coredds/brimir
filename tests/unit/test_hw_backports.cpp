@@ -831,3 +831,25 @@ TEST_CASE("SCSP one-shot PCM suppression flag survives save states", "[scsp][sav
     saturn->SaveState(*state2);
     CHECK(state2->scsp.suppressSlotEnd);
 }
+
+TEST_CASE("VDP2 CRAM address unmapping inverts the mapping", "[vdp][vdp2][cram][backport]") {
+    // Ymir ebc7da8d replaces its commented-out static_assert with this round trip.
+    vdp::VDP2Regs regs;
+    vdp::VDP2Memory mem{regs};
+
+    for (uint8 mode = 0; mode < 4; mode++) {
+        regs.vramControl.colorRAMMode = mode;
+        CAPTURE(mode);
+
+        for (uint32 addr = 0; addr <= 0xFFF; addr++) {
+            CAPTURE(addr);
+            CHECK(mem.UnmapCRAMAddress<uint8>(mem.MapCRAMAddress<uint8>(addr)) == addr);
+            CHECK(mem.MapCRAMAddress<uint8>(mem.UnmapCRAMAddress<uint8>(addr)) == addr);
+        }
+        for (uint32 addr = 0; addr <= 0xFFF; addr += 2) {
+            CAPTURE(addr);
+            CHECK(mem.UnmapCRAMAddress<uint16>(mem.MapCRAMAddress<uint16>(addr)) == addr);
+            CHECK(mem.MapCRAMAddress<uint16>(mem.UnmapCRAMAddress<uint16>(addr)) == addr);
+        }
+    }
+}
