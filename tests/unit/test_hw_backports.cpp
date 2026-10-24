@@ -1,6 +1,7 @@
 #include "catch_amalgamated.hpp"
 
 #include <ymir/hw/scsp/scsp_slot.hpp>
+#include <ymir/hw/vdp/renderer/common/vdp1_steppers.hpp>
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
@@ -850,6 +851,276 @@ TEST_CASE("VDP2 CRAM address unmapping inverts the mapping", "[vdp][vdp2][cram][
             CAPTURE(addr);
             CHECK(mem.UnmapCRAMAddress<uint16>(mem.MapCRAMAddress<uint16>(addr)) == addr);
             CHECK(mem.MapCRAMAddress<uint16>(mem.UnmapCRAMAddress<uint16>(addr)) == addr);
+        }
+    }
+}
+
+namespace {
+
+constexpr uint16 kFBCR_EOS = 1u << 4;
+
+// Drives single VDP1 commands through the unthreaded software renderer and reads back the draw framebuffer.
+struct VDP1StepperFixture {
+    static constexpr uint32 kCommandAddr = 0x100;
+    static constexpr uint32 kGouraudTableAddr = 0x800; // CMDGRDA = 0x100 (address / 8)
+    static constexpr uint32 kTextureAddr = 0x2000;     // CMDSRCA = 0x400 (address / 8)
+
+    std::unique_ptr<vdp::VDPState> state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    std::unique_ptr<vdp::SoftwareVDPRenderer> renderer;
+
+    VDP1StepperFixture() {
+        renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+        state->regs2.WriteTVMD(0x8000); // DISP on, 320x224
+        state->regs2.LatchTVMD();
+        state->state1.sysClipH = 319;
+        state->state1.sysClipV = 255;
+        state->state2.layerEnabled[0] = true;
+    }
+
+    void Write16(uint32 offset, uint16 value) {
+        state->mem1.WriteVRAM<uint16>(kCommandAddr + offset, value);
+    }
+
+    void Draw(uint16 control) {
+        renderer->PostLoadStateSync();
+        renderer->VDP1BeginFrame();
+        renderer->VDP1ExecuteCommand(kCommandAddr, vdp::VDP1Command::Control{.u16 = control});
+        renderer->VDP1EndFrame();
+    }
+
+    uint16 ReadPixel(uint32 x, uint32 y) const {
+        const auto &fb = state->spriteFB[state->displayFB ^ 1];
+        return util::ReadBE<uint16>(&fb[(y * 512 + x) * sizeof(uint16)]);
+    }
+
+    // Draw Line (x0, y0) -> (x1, y1) with Gouraud shading from table entry A to table entry B
+    void DrawGouraudLine(sint32 x0, sint32 y0, sint32 x1, sint32 y1, uint16 gouraudA, uint16 gouraudB) {
+        Write16(0x04, 0x0004);                                  // CMDPMOD: Gouraud shading enable
+        Write16(0x06, 0x8000 | (16u << 10) | (16u << 5) | 16u); // CMDCOLR: mid-grey, opaque (Gouraud offset 0)
+        Write16(0x0C, x0);
+        Write16(0x0E, y0);
+        Write16(0x10, x1);
+        Write16(0x12, y1);
+        Write16(0x1C, kGouraudTableAddr / 8);
+        state->mem1.WriteVRAM<uint16>(kGouraudTableAddr + 0, gouraudA);
+        state->mem1.WriteVRAM<uint16>(kGouraudTableAddr + 2, gouraudB);
+        state->mem1.WriteVRAM<uint16>(kGouraudTableAddr + 4, gouraudA);
+        state->mem1.WriteVRAM<uint16>(kGouraudTableAddr + 6, gouraudB);
+        Draw(0x0006);
+    }
+
+    // Draws a one-pixel-high distorted sprite spanning x = 0..width-1 on row y, textured with a 16x1 RGB texture whose
+    // texel i is 0x8000 | i
+    void DrawTexturedSpan(uint32 width, uint16 pmod, uint32 y) {
+        for (uint32 i = 0; i < 16; ++i) {
+            state->mem1.WriteVRAM<uint16>(kTextureAddr + i * sizeof(uint16), 0x8000 | i);
+        }
+        Write16(0x04, pmod);
+        Write16(0x06, 0x0000);           // CMDCOLR (unused in RGB mode)
+        Write16(0x08, kTextureAddr / 8); // CMDSRCA
+        Write16(0x0A, 0x0201);           // CMDSIZE: 16x1
+        Write16(0x0C, 0);                // A
+        Write16(0x0E, y);
+        Write16(0x10, width - 1); // B
+        Write16(0x12, y);
+        Write16(0x14, width - 1); // C
+        Write16(0x16, y);
+        Write16(0x18, 0); // D
+        Write16(0x1A, y);
+        Draw(0x0002);
+    }
+
+    std::vector<uint16> ReadRow(uint32 y, uint32 count) const {
+        std::vector<uint16> row;
+        for (uint32 x = 0; x < count; ++x) {
+            row.push_back(ReadPixel(x, y));
+        }
+        return row;
+    }
+
+    // Returns the single plotted pixel of every column x = 0..count-1 within rows [y0, y1]
+    std::vector<uint16> ReadColumns(uint32 count, uint32 y0, uint32 y1) const {
+        std::vector<uint16> out;
+        for (uint32 x = 0; x < count; ++x) {
+            uint32 plotted = 0;
+            uint16 value = 0;
+            for (uint32 y = y0; y <= y1; ++y) {
+                if (const uint16 px = ReadPixel(x, y); px != 0) {
+                    ++plotted;
+                    value = px;
+                }
+            }
+            CAPTURE(x, plotted);
+            REQUIRE(plotted == 1);
+            out.push_back(value);
+        }
+        return out;
+    }
+};
+
+// CMDPMOD for a 16 bpp RGB texture with transparent pixels and end codes disabled, optionally with high-speed shrink
+constexpr uint16 kRGBTexturePMOD = 0x0028 | 0x0040 | 0x0080;
+constexpr uint16 kHighSpeedShrink = 0x1000;
+
+constexpr uint16 Gray555(uint32 v) {
+    return static_cast<uint16>(0x8000u | (v << 10) | (v << 5) | v);
+}
+
+} // namespace
+
+TEST_CASE("VDP1 Gouraud line spans the major axis", "[vdp][vdp1][steppers]") {
+    // Ymir a5482816: LineStepper::Length() became DMajor() (and Length() now means dmaj+1). The Gouraud stepper must
+    // still be set up with dmaj+1 pixels so the last pixel reaches the end colour exactly.
+    SECTION("a ramp with one value per pixel hits both end colours") {
+        // dmaj = 31 gives 32 pixels for 32 Gouraud values (0..31), so pixel x carries value x in every channel
+        VDP1StepperFixture f;
+        f.DrawGouraudLine(0, 40, 31, 43, 0x0000, 0x7FFF);
+
+        const auto line = f.ReadColumns(32, 40, 43);
+        CHECK(line.front() == Gray555(0));
+        CHECK(line.back() == Gray555(31));
+        for (uint32 x = 0; x < 32; ++x) {
+            CAPTURE(x);
+            CHECK(line[x] == Gray555(x));
+        }
+    }
+
+    SECTION("a steep ramp over a short line matches the golden") {
+        // 0..31 over 11 pixels (dmaj = 10): the stepper skips values, so the first pixel is already 1 and the last
+        // is 30. Golden captured by running this test on the pre-sync code (LineStepper::Length() == dmaj).
+        VDP1StepperFixture f;
+        f.DrawGouraudLine(0, 40, 10, 43, 0x0000, 0x7FFF);
+
+        const auto line = f.ReadColumns(11, 40, 43);
+        constexpr std::array<uint16, 11> kGolden{0x8421, 0x9084, 0x9CE7, 0xA94A, 0xB5AD, 0xC210,
+                                                 0xCA52, 0xD6B5, 0xE318, 0xEF7B, 0xFBDE};
+        CHECK(std::equal(line.begin(), line.end(), kGolden.begin(), kGolden.end()));
+    }
+}
+
+TEST_CASE("VDP1 high-speed shrink threshold uses the major axis", "[vdp][vdp1][steppers]") {
+    // Ymir a5482816: the check is `DMajor() < charSizeH - 1`. With the new Length() (dmaj+1) it would switch off for
+    // a 15 pixel wide span of a 16 pixel texture.
+    SECTION("15 pixels wide with EOS = 0 samples even texels") {
+        VDP1StepperFixture f;
+        f.state->regs1.WriteFBCR(0x0000);
+        f.DrawTexturedSpan(15, kRGBTexturePMOD | kHighSpeedShrink, 50);
+        const auto row = f.ReadRow(50, 16);
+        CHECK(f.ReadPixel(15, 50) == 0);
+        // Captured by running this test on the pre-sync code.
+        constexpr std::array<uint16, 15> kGolden{0x8000, 0x8000, 0x8002, 0x8002, 0x8004, 0x8004, 0x8006, 0x8006,
+                                                 0x8008, 0x8008, 0x800A, 0x800A, 0x800C, 0x800C, 0x800E};
+        CHECK(std::equal(row.begin(), row.begin() + 15, kGolden.begin(), kGolden.end()));
+        for (uint32 x = 0; x < 15; ++x) {
+            CAPTURE(x);
+            CHECK((row[x] & 0x8000) != 0);
+            CHECK((row[x] & 1) == 0);
+        }
+    }
+
+    SECTION("15 pixels wide with EOS = 1 samples odd texels") {
+        VDP1StepperFixture f;
+        f.state->regs1.WriteFBCR(kFBCR_EOS);
+        f.DrawTexturedSpan(15, kRGBTexturePMOD | kHighSpeedShrink, 50);
+        const auto row = f.ReadRow(50, 16);
+        CHECK(f.ReadPixel(15, 50) == 0);
+        constexpr std::array<uint16, 15> kGolden{0x8001, 0x8001, 0x8003, 0x8003, 0x8005, 0x8005, 0x8007, 0x8007,
+                                                 0x8009, 0x8009, 0x800B, 0x800B, 0x800D, 0x800D, 0x800F};
+        CHECK(std::equal(row.begin(), row.begin() + 15, kGolden.begin(), kGolden.end()));
+        for (uint32 x = 0; x < 15; ++x) {
+            CAPTURE(x);
+            CHECK((row[x] & 0x8000) != 0);
+            CHECK((row[x] & 1) == 1);
+        }
+    }
+
+    SECTION("16 pixels wide keeps every texel in order") {
+        for (uint16 eos : {uint16{0}, kFBCR_EOS}) {
+            CAPTURE(eos);
+            VDP1StepperFixture f;
+            f.state->regs1.WriteFBCR(eos);
+            f.DrawTexturedSpan(16, kRGBTexturePMOD | kHighSpeedShrink, 50);
+            const auto row = f.ReadRow(50, 17);
+            for (uint32 x = 0; x < 16; ++x) {
+                CAPTURE(x);
+                CHECK(row[x] == (0x8000 | x));
+            }
+            CHECK(row[16] == 0);
+        }
+    }
+}
+
+TEST_CASE("VDP1 textured line U-stepping", "[vdp][vdp1][steppers]") {
+    // Ymir a5482816: the U stepper is set up with DMajor() + 1 pixels. 16 texels squeezed into 8 pixels, no
+    // high-speed shrink.
+    VDP1StepperFixture f;
+    f.DrawTexturedSpan(8, kRGBTexturePMOD, 50);
+    const auto row = f.ReadRow(50, 9);
+    CHECK(row[8] == 0);
+
+    // Captured by running this test on the pre-sync code.
+    constexpr std::array<uint16, 8> kGolden{0x8001, 0x8003, 0x8005, 0x8007, 0x8009, 0x800B, 0x800D, 0x800F};
+    CHECK(std::equal(row.begin(), row.begin() + 8, kGolden.begin(), kGolden.end()));
+}
+
+namespace {
+
+// Walks a LineStepper the way the renderer does and returns every visited coordinate
+template <typename Stepper>
+std::vector<std::pair<sint32, sint32>> WalkLine(Stepper &line) {
+    std::vector<std::pair<sint32, sint32>> coords;
+    for (line.Step(); line.CanStep(); line.Step()) {
+        coords.emplace_back(line.X(), line.Y());
+    }
+    return coords;
+}
+
+} // namespace
+
+TEST_CASE("VDP1 LineStepper reports the major axis delta and the step count", "[vdp][vdp1][steppers]") {
+    // Ymir a5482816: Length() used to return the major axis delta; it is now DMajor() and Length() is dmaj + 1.
+    vdp::LineStepper l{{0, 0}, {10, 3}};
+    CHECK(l.DMajor() == 10);
+    CHECK(l.Length() == 11);
+
+    const auto coords = WalkLine(l);
+    REQUIRE(coords.size() == 11);
+    CHECK(coords.front().first == 0);
+    CHECK(coords.back() == std::pair<sint32, sint32>{10, 3});
+}
+
+TEST_CASE("VDP1 LineStepper clipped away entirely has no steps", "[vdp][vdp1][steppers]") {
+    // Ymir a5482816: SystemClip() updates Length() while DMajor() keeps describing the unclipped line.
+    vdp::LineStepper l{{400, 0}, {500, 10}};
+    REQUIRE(l.DMajor() == 100);
+    REQUIRE(l.Length() == 101);
+
+    l.SystemClip(319, 255);
+    CHECK(l.DMajor() == 100);
+    CHECK(l.Length() == 0);
+    CHECK(WalkLine(l).empty());
+}
+
+TEST_CASE("VDP1 LineStepper precision parameter keeps in-range lines unchanged", "[vdp][vdp1][steppers]") {
+    // Ymir c6bfbb18: the stepper precision is a template parameter that defaults to the hardware's 13 bits.
+    static_assert(vdp::LineStepper<>::kCoordMask == 0x7FF);
+    static_assert(vdp::LineStepper<13>::kCoordMask == 0x7FF);
+    static_assert(vdp::LineStepper<16>::kCoordMask == 0x3FFF);
+
+    const std::pair<vdp::CoordS32, vdp::CoordS32> lines[] = {
+        {{0, 0}, {10, 3}},   {{10, 3}, {0, 0}},     {{0, 0}, {3, 10}},   {{5, 40}, {300, 200}},
+        {{319, 0}, {0, 223}}, {{7, 7}, {7, 7}},      {{0, 40}, {31, 43}}, {{100, 100}, {20, 90}},
+    };
+    for (const auto &[a, b] : lines) {
+        for (bool antiAlias : {false, true}) {
+            CAPTURE(a.x(), a.y(), b.x(), b.y(), antiAlias);
+            vdp::LineStepper<> reference{a, b, antiAlias};
+            vdp::LineStepper<16> wide{a, b, antiAlias};
+            CHECK(wide.DMajor() == reference.DMajor());
+            CHECK(wide.Length() == reference.Length());
+            CHECK(WalkLine(wide) == WalkLine(reference));
         }
     }
 }

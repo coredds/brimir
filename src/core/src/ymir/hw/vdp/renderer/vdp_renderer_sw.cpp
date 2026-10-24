@@ -1241,7 +1241,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotLine(CoordS32 coord1, CoordS32 co
         .color = lineParams.color,
     };
     if (pixelParams.mode.gouraudEnable) {
-        pixelParams.gouraud.Setup(line.Length() + 1, lineParams.gouraudLeft, lineParams.gouraudRight);
+        pixelParams.gouraud.Setup(line.DMajor() + 1, lineParams.gouraudLeft, lineParams.gouraudRight);
         pixelParams.gouraud.Skip(skipSteps);
     }
 
@@ -1300,7 +1300,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, Coo
     if (mode.gouraudEnable) {
         assert(lineParams.gouraudLeft != nullptr);
         assert(lineParams.gouraudRight != nullptr);
-        pixelParams.gouraud.Setup(line.Length() + 1, lineParams.gouraudLeft->Value(), lineParams.gouraudRight->Value());
+        pixelParams.gouraud.Setup(line.DMajor() + 1, lineParams.gouraudLeft->Value(), lineParams.gouraudRight->Value());
         pixelParams.gouraud.Skip(skipSteps);
     }
 
@@ -1309,10 +1309,10 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, Coo
     if (control.flipH) {
         std::swap(uStart, uEnd);
     }
-    const bool useHighSpeedShrink = mode.highSpeedShrink && line.Length() < charSizeH - 1;
+    const bool useHighSpeedShrink = mode.highSpeedShrink && line.DMajor() < charSizeH - 1;
 
     TextureStepper uStepper;
-    uStepper.Setup(line.Length() + 1, uStart, uEnd, useHighSpeedShrink, regs1.evenOddCoordSelect);
+    uStepper.Setup(line.DMajor() + 1, uStart, uEnd, useHighSpeedShrink, regs1.evenOddCoordSelect);
     uStepper.SkipPixels(skipSteps);
 
     uint16 color = 0;
