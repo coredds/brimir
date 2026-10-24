@@ -6,7 +6,7 @@ A Sega Saturn emulation core for libretro, built on the [Ymir](https://github.co
 
 Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accurate hardware layer. It provides accurate emulation with optimized software rendering and full VDP1/VDP2 support.
 
-**Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-09-24 and Brimir-specific optimizations.
+**Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-10-16 and Brimir-specific optimizations.
 
 ## What's New in v0.5.5
 
@@ -48,7 +48,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, based on the 2026-06-23 sync with selected upstream fixes through 2026-09-24
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, based on the 2026-06-23 sync with selected upstream fixes through 2026-10-16
 - Accurate SH-2 dual-CPU emulation with WB/EX stall timing, 32-bit instruction fetch, and inlined opcode decode
 - Full VDP1 sprite engine and VDP2 scroll plane graphics with COPR register fix
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation and volume control
