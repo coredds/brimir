@@ -1,8 +1,7 @@
 # Brimir Roadmap
 
-**Date**: 2026-07-17
-**Status**: Active — Ymir hardware layer synced verbatim to upstream HEAD (2026-06-23), plus targeted fixes backported through 2026-07-17
-**Last Updated**: 2026-07-17 — v0.4.6 prepared, SMPC per-region persistence, region-free IPL DB, SH2/VDP2 optimizations, and additional media/input fixes backported from upstream Ymir
+**Status**: Active — Ymir hardware layer synced verbatim to upstream HEAD (2026-06-23), plus targeted fixes backported through 2026-09-24
+**Last Updated**: 2026-10-23 — v0.5.5 hotfix released; SH-2 JIT (experimental, opt-in) faster than the interpreter in SH-2 time on every measured title; macOS CI moved to `macos-15`
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes).
 
@@ -22,14 +21,14 @@ Feature categories below are tagged:
 These are the biggest wins with the lowest implementation cost. All leverage Ymir's existing public API.
 
 ### 1. Cheat System  🚧
-**Layer**: Bridge | **Effort**: ~500 LOC | **Target**: v0.5.0 | **Status**: Stubs only — `retro_cheat_set`/`retro_cheat_reset` wired, `.info` flag set, no AR/GS parser yet
+**Layer**: Bridge | **Effort**: ~500 LOC | **Target**: v0.5.0 | **Status**: Stubs only — `retro_cheat_set`/`retro_cheat_reset` wired, `.info` flag off until implemented, no AR/GS parser yet
 
 Ymir exposes `saturn.mainBus.Poke<T>(addr, val)` for side-effect-free memory writes, plus public memory arrays (`WRAMLow`, `WRAMHigh`). Action Replay / GameShark / RAM watch / cheat search engine all possible.
 
 - New file: `src/bridge/cheat_manager.cpp`
 - Wires `retro_cheat_set` / `retro_cheat_reset` (currently stubs)
 - Supports: RAM watch, hex search, cheat file import (.cht/.json)
-- Flip `.info`: `cheats = "true"`
+- Flip `.info`: `cheats = "true"` once codes are actually applied
 
 ### 2. All Controller Types
 **Layer**: Bridge | **Effort**: ~350 LOC | **Target**: v0.5.0
@@ -161,16 +160,33 @@ These require substantial Ymir hardware-layer changes. Propose to Ymir upstream;
 ### 19. Hardware Renderer + Internal Resolution Scaling
 **Layer**: Upstream (new `IVDPRenderer` implementation) | **Target**: Post-JIT
 
-Ymir had a Vulkan renderer in v0.2.x, removed in v0.3.0. Code preserved in `backup_brimir_hw/`. Needs re-implementation as `VulkanVDPRenderer` / `OpenGLVDPRenderer` / `D3DVDPRenderer` implementing `IVDPRenderer` interface.
+Ymir had a Vulkan renderer in v0.2.x, removed in v0.3.0. Needs re-implementation as `VulkanVDPRenderer` / `OpenGLVDPRenderer` / `D3DVDPRenderer` implementing `IVDPRenderer` interface.
+
+Upstream Ymir now has an experimental compute-only Direct3D 12 renderer, which is the current reference design for a Vulkan port (evaluated 2026-09-24). Adopting it requires a full hardware-layer re-sync and must fit libretro's hardware-render constraints; revisit once it matures upstream.
 
 Brimir would expose: renderer selection, 2x–8x internal resolution, texture filtering, upscaling filters.
 
 ### 20. JIT Compiler (SH-2)
 **Layer**: Upstream/Bridge (depends on architecture) | **Target**: 2026–2027
 
-1100+ test cases designed, x64/ARM64 backends stubbed, Phase 0 test infrastructure built. This is the single biggest performance feature — enables full-speed Saturn on low-end hardware, runahead, and rewind.
+This is the single biggest performance feature — enables full-speed Saturn on low-end hardware, runahead, and rewind.
 
-See `src/jit/STATUS.md` and `docs/JIT_*` for implementation details.
+**Status (2026-10-23)**: Experimental, opt-in core option: "SH-2 JIT (Experimental)", `brimir_sh2_jit`, off by default. That is the intended state for now. The design is [design/sh2-jit.md](design/sh2-jit.md): portable IR, an x86-64 native backend (asmjit) and an IR-interpreter backend elsewhere, and interpreter-identical results at every instruction boundary. The SH-2 is forked in place, the one exception to the verbatim-upstream rule, logged in `src/core/BRIMIR_FORK.md`.
+
+Done (milestones 1, 2A-2E):
+- full instruction coverage except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes;
+- an x64 backend with block chaining, a register cache and tiered compiles;
+- long-session code reuse and per-block release, and no flush on state loads (run-ahead and rewind keep their code);
+- native compiles on a background thread (`brimir_sh2_jit_compile_thread`, x86-64 with 4+ threads);
+- cheaper dispatch between scheduler slices.
+
+On x86-64 the JIT's SH-2 time is 5-28% below the interpreter's on six reference games, and about 5% below over a long Burning Rangers session. Lockstep against the interpreter stays identical (BIOS menu and six games, 36,000 frames each). See [design/sh2-x64-performance.md](design/sh2-x64-performance.md) and [design/sh2-validation.md](design/sh2-validation.md).
+
+Not default-on yet:
+- a long Burning Rangers session still stutters while it loads a lot of new code (358 of 33,600 frames over 16.7 ms; the interpreter has none);
+- with threaded VDP (the default), the average frame is 2-6% longer than the interpreter's on some games, mostly time the emulation thread spends waiting for the VDP2 render thread.
+
+Next steps, including moving block decoding off the emulation thread and milestone 3 (ARM64 backend), are listed in [design/sh2-jit.md](design/sh2-jit.md), "Where to pick up". The 2025 scaffolding was removed on 2026-09-30 and remains in git history (last present in commit `36c4c27`).
 
 ### 21. Widescreen Hacks
 **Layer**: Upstream | **Target**: Post-JIT
@@ -224,7 +240,8 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requi
 | **v0.5.2** ✅ | Ymir hardware-layer backports: VDP2 color gradation, BIN/CUE loader sanity checks, VDP renderer switch crash fix |
 | **v0.5.3** ✅ | Hardware fixes (Dragon Force II, HLE CD seek/sub-Q, ARM64/SSE2 blending), SSE2 on Windows x64, profiler and LTO fixes |
 | **v0.5.4** ✅ | Ymir hardware-layer backports: SMPC SSHON, VDP1 COPR, threaded VDP1 FBRAM write-back, VDP2 mid-frame changes, VCNT save-state restore |
-| **v0.5.5** | Internal cheat database, extended compatibility testing |
+| **v0.5.5** ✅ | Hotfix: no crash on Quick Menu > Close Content on Windows (#7) |
+| **v0.5.6** | Internal cheat database, extended compatibility testing |
 | **v0.6.0** | CPU overclocking (hybrid — needs Ymir config), VDP2 debug overlay exposure |
 | **v0.7.0+** | JIT compiler (Phase 2), hardware renderer review |
 | **v1.0.0** | JIT stable, 85%+ compatibility, RetroArch core inclusion |
@@ -235,7 +252,7 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requi
 
 | Feature | Brimir (current) | Flycast | Beetle PSX | DuckStation | PCSX2 | Target Brimir |
 |---|---|---|---|---|---|---|
-| JIT/Dynarec | None | SH-4 | MIPS | MIPS | EE/VU | v0.7.0+ |
+| JIT/Dynarec | SH-2, experimental (x86-64 native, opt-in) | SH-4 | MIPS | MIPS | EE/VU | v0.7.0+ |
 | Hardware renderer | SW only | Vulkan/OGL | Vulkan/OGL | Vulkan/OGL/D3D | Vulkan/OGL/D3D | Post-JIT |
 | Cheats | Stub | Yes | Yes | Yes | Yes | v0.5.0 |
 | RetroAchievements | Planned | Yes | Yes | No | Yes | v0.5.0 |
@@ -259,5 +276,3 @@ This roadmap replaces the previous Phase 1–4 plan (Phase 1: Ymir sync, Phase 2
 - Prioritizes features by user impact and implementation feasibility
 - Clearly tags each feature by where it must be implemented (Bridge / Hybrid / Upstream)
 - Is informed by a gap analysis against 7 mature RetroArch cores
-
-Historical planning documents under `docs/JIT_*`, `docs/PHASE*`, `docs/SESSION_*` remain for reference but are superseded by this roadmap.
