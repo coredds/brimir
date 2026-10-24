@@ -35,20 +35,29 @@ Everything else under `src/core/` stays verbatim upstream.
 ## Permanent software-renderer changes (keep on every sync)
 
 Brimir-local changes in the software renderer (`src/core/{include,src}/ymir/hw/vdp/`) that upstream
-Ymir `8cdf0a53` does not have. A sync of these files must keep them (checked present on 2026-10-24,
-after GPU stage 0). Hand-port upstream changes around them; do not copy the files wholesale.
+Ymir `8cdf0a53` does not have (checked against `8cdf0a53` on 2026-10-24, after GPU stage 0). A sync of these
+files must keep them. Hand-port upstream changes around them; do not copy the files wholesale.
 
 | Change | Where | Notes |
 |---|---|---|
-| SSE2/NEON color gradation fix (Brimir `a974ad6`) | `vdp_renderer_sw.cpp`, `Color888GradationMasked` (and `Color888AverageMasked`) | The SSE2 blend selects `mask ? blend2 : color2` (`_mm_and_si128(mask_x4, blend2_x4)`; upstream ANDs `color2_x4`) and uses `_mm_set1_epi8(-2)`; the NEON `vbslq_u32(mask_x4, blend2_x4, color2_x4)` has the same operand order. Upstream `8cdf0a53` still has the old operands. |
+| SSE2/NEON color gradation fix (Brimir `a974ad6`) | `vdp_renderer_sw.cpp`, `Color888GradationMasked`, plus `_mm_set1_epi8(-2)` in `Color888AverageMasked` | The SSE2 blend selects `mask ? blend2 : color2` (`_mm_and_si128(mask_x4, blend2_x4)`; upstream ANDs `color2_x4`) and uses `_mm_set1_epi8(-2)` (a974ad6 changed only the `0xFE` constant to `-2` in `Color888AverageMasked`, which is not an operand-order fix); the NEON `vbslq_u32(mask_x4, blend2_x4, color2_x4)` has the same operand order. Upstream `8cdf0a53` still has the old operands. |
 | `#if defined(__SSE2__) \|\| defined(_M_X64)` guards | `vdp_renderer_sw.cpp`, every SSE2 block under `#if defined(_M_X64) \|\| defined(__x86_64__)` | MSVC x64 does not define `__SSE2__`, so upstream's guard skips the SSE2 path there. Upstream still uses `#if defined(__SSE2__)`. |
 | `Color888OpaqueAlpha` | `vdp_renderer_sw.cpp` (definition, and the call on `framebufferOutput` after composition) | Vectorised alpha-opaque pass (AVX2/SSE2/NEON) over the line; upstream has no such function. |
 | Fetcher reset optimisation (`3f8753c`) | `vdp_renderer_sw.cpp`, `VDP2PrepareLine`, the `m_vramFetchers` reset at its end ("The alt-field fetcher bank is only used while deinterlacing; skip the reset otherwise.") | Skips resetting the unused alt-field VRAM fetcher bank when not deinterlacing. |
 | NEON `vreinterpretq_*` casts | `vdp_renderer_sw.cpp`, the NEON blocks of the `Color888*Masked` helpers | GCC 14 and Apple Clang reject upstream's implicit `uint32x4_t`/`uint8x16_t` conversions; still needed at `8cdf0a53` (upstream has no `vreinterpretq` in this file). See `docs/YMIR_SYNC_PATCHES.md` (not tracked). |
-| `VDP1BeginFrame` fix and `VDP1RenderEvent::BeginFrame` | `vdp_renderer_sw.hpp`, `vdp_renderer_sw.cpp` | Row under "Brimir-side fixes of upstream bugs" below. |
-| `LatchEraseParameters` placement (Ymir `ce270c04`) | `vdp_renderer_sw.cpp` (VDP1 render thread's `SwapBuffers` case: `rctx.vdp1.regs.LatchEraseParameters();`), `vdp.cpp` (`VDP::VDP1SwapFramebuffer`: `m_state.regs1.LatchEraseParameters()`), `vdp1_regs.hpp` | Same text as upstream `8cdf0a53`; listed because the VDP1 erase tests depend on the latch happening at the swap, in order with the queued commands, so the render thread erases with its own latched parameters. Do not move it. |
-| VDP1 `tvmr` parameters | `vdp_renderer_sw.hpp`, `vdp_renderer_sw.cpp`: `VDP2RenderingContext::tvmr`, the `VDP1WriteTVMR` event, and the `const VDP1RegTVMR &tvmr` parameters of `VDP2DrawSpritePixel`/`VDP2FetchSpriteData` (and `regs1.tvmr.*` in `VDP1DoEraseFramebuffer`) | From Ymir `23b3dedd` as ported in Brimir, which upstream `8cdf0a53` has since reshaped (it reads `fbSizeH` and friends from the VDP1 registers). Keep Brimir's shape; the sprite layer and erase tests exercise it. |
-| `FBRAMWriteByte` write-back comment | `vdp_renderer_sw.cpp`, `case EvtType::FBRAMWriteByte` ("Also write back to the main state, ...") | Comment only; the code is upstream's. The render thread also writes the byte or word into `m_state.mem1.FBRAM`, since an earlier SwapBuffers/EndDraw copy processed after the CPU write may have overwritten it there. Kept through the FBRAM rename (Ymir `2220b167`). |
+| `VDP1BeginFrame` fix and `VDP1RenderEvent::BeginFrame` | `vdp_renderer_sw.hpp`, `vdp_renderer_sw.cpp` | Row in the "Brimir-side fixes of upstream bugs" table below (and the matching bullet in "Fork scope" above). |
+
+Upstream code that Brimir regression tests pin (identical to Ymir `8cdf0a53`, so not Brimir-local;
+keep it on sync, and if a sync would change it, check the named tests first):
+
+- `LatchEraseParameters` (Ymir `ce270c04`): the VDP1 render thread's `SwapBuffers` case calls
+  `rctx.vdp1.regs.LatchEraseParameters();` (`vdp_renderer_sw.cpp`) and `VDP::VDP1SwapFramebuffer` calls
+  `m_state.regs1.LatchEraseParameters()` (`vdp.cpp`). The latch must happen at the swap, in order with the
+  queued commands, so the render thread erases with its own latched parameters. Test: `Threaded VDP1 erases
+  with the render thread's latched parameters`.
+- `FBRAMWriteByte`/`FBRAMWriteWord` in the VDP1 render thread also write into `m_state.mem1.FBRAM`. The code
+  is upstream's; the explanatory comment ("Also write back to the main state, ...", on the Byte case) is
+  Brimir's own text.
 
 ## Rules
 
