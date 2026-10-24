@@ -592,6 +592,33 @@ TEST_CASE("Save state from before the CD block busy delay and read FIFO is rejec
     REQUIRE(core.GetFramebuffer() != nullptr);
 }
 
+TEST_CASE("Save state in the pre-versioned BRIM format is rejected", "[core][savestate][unit][regression]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    // BRIM ([magic][uncompSize][LZ4]) predates the version word, and the layout has changed since, so a
+    // matching size proves nothing about the content. Use a real current-layout payload: without the
+    // rejection it would load.
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> saved(stateSize);
+    REQUIRE(core.SaveState(saved.data(), stateSize));
+    uint32_t savedCompressedSize = 0;
+    std::memcpy(&savedCompressedSize, saved.data() + 12, 4);
+
+    std::vector<uint8_t> buf(8 + static_cast<size_t>(savedCompressedSize));
+    const uint32_t magic = 0x4D495242; // "BRIM" in LE
+    const uint32_t uncompressedSize = static_cast<uint32_t>(sizeof(ymir::savestate::SaveState));
+    std::memcpy(buf.data(), &magic, 4);
+    std::memcpy(buf.data() + 4, &uncompressedSize, 4);
+    std::memcpy(buf.data() + 8, saved.data() + 16, savedCompressedSize);
+
+    REQUIRE_FALSE(core.LoadState(buf.data(), buf.size()));
+
+    // The core is unharmed and still runs.
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
+}
+
 TEST_CASE("Save state with out-of-range read FIFO cursors is rejected",
           "[core][savestate][unit][regression]") {
     CoreWrapper core;

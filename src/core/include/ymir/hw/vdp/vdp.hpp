@@ -149,16 +149,20 @@ public:
     }
 
     // Brimir: creates a renderer outside src/core. Receives the VDP state and the debug/access-pattern configs the
-    // built-in renderers get.
+    // built-in renderers get. Runs after the old renderer has been drained (`PreSaveStateSync()`), so it may read the
+    // state. Derived or bulk state uploads belong in the renderer's `PostLoadStateSync()` (called on install and after
+    // every state load), not in its constructor. Built-in renderers' constructors must not read the state either:
+    // `UseRenderer<T>` constructs the renderer before draining the old one.
     using ExternalRendererFactory = std::function<std::unique_ptr<IVDPRenderer>(
         VDPState &state, config::VDP2DebugRender &vdp2DebugRenderOptions,
         const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig)>;
 
     /// @brief Brimir: switches to a renderer created outside src/core by `factory`.
-    /// Call on the emulator thread, between frames.
+    /// Call on the emulator thread, between frames. The current renderer is drained (`PreSaveStateSync()`) before
+    /// `factory` is called.
     /// @param[in] factory creates the renderer
-    /// @return a pointer to the installed renderer, or `nullptr` (current renderer kept) if the factory returned
-    /// `nullptr` or an invalid renderer
+    /// @return a pointer to the installed renderer, or `nullptr` (current renderer kept) if `factory` is empty or
+    /// returned `nullptr` or an invalid renderer
     IVDPRenderer *UseExternalRenderer(const ExternalRendererFactory &factory);
 
     /// @brief Retrieves the enhancements configured for this VDP instance.

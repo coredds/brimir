@@ -7,6 +7,7 @@
 #include <ymir/sys/saturn.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <ostream>
@@ -342,6 +343,39 @@ TEST_CASE("External renderer install failure keeps the current renderer", "[vdp]
         CHECK(installed == nullptr);
     }
 
+    CHECK(saturn->VDP.GetRendererAs<vdp::VDPRendererType::Software>() == software);
+}
+
+TEST_CASE("External renderer factory runs after the old renderer is drained", "[vdp][renderer][brimir]") {
+    // With threaded VDP1 the old renderer's render thread may still be writing VDPState (FBRAM) until
+    // PreSaveStateSync() returns, so a factory that reads the state must run after it.
+    auto saturn = std::make_unique<Saturn>();
+    auto *first = InstallRecorder(*saturn);
+    const std::vector<Call> *firstCalls = &first->calls; // the first renderer is destroyed by the second install
+
+    bool factoryRan = false;
+    bool drainedBeforeFactory = false;
+    auto *installed = saturn->VDP.UseExternalRenderer(
+        [&](vdp::VDPState &state, vdp::config::VDP2DebugRender &,
+            const vdp::config::VDP2AccessPatternsConfig &) -> std::unique_ptr<vdp::IVDPRenderer> {
+            factoryRan = true;
+            drainedBeforeFactory = !firstCalls->empty() && firstCalls->back().name == "PreSaveStateSync";
+            return std::make_unique<RecordingRenderer>(state);
+        });
+
+    REQUIRE(installed != nullptr);
+    CHECK(factoryRan);
+    CHECK(drainedBeforeFactory);
+}
+
+TEST_CASE("External renderer install with an empty factory keeps the current renderer", "[vdp][renderer][brimir]") {
+    auto saturn = std::make_unique<Saturn>();
+    auto *software = saturn->VDP.GetRendererAs<vdp::VDPRendererType::Software>();
+    REQUIRE(software != nullptr);
+
+    CHECK(saturn->VDP.UseExternalRenderer(std::function<std::unique_ptr<vdp::IVDPRenderer>(
+              vdp::VDPState &, vdp::config::VDP2DebugRender &, const vdp::config::VDP2AccessPatternsConfig &)>{}) ==
+          nullptr);
     CHECK(saturn->VDP.GetRendererAs<vdp::VDPRendererType::Software>() == software);
 }
 

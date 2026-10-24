@@ -1223,29 +1223,11 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             return m_saturn->LoadState(*state, true);
         }
 
-        // Old Brimir compressed format: [magic:4][uncompSize:4] followed by LZ4 data
+        // Old Brimir format ("BRIM": [magic:4][uncompSize:4] + LZ4 data, no version word) predates the
+        // versioned header and the SaveState layout has changed since, so a size match proves nothing:
+        // reject it rather than misread it.
         if (magic == kLegacyStateMagic) {
-            uint32_t uncompSize = 0;
-            std::memcpy(&uncompSize, in + 4, 4);
-            if (uncompSize != sizeof(ymir::savestate::SaveState)) {
-                return false;
-            }
-
-            auto state = std::make_unique<ymir::savestate::SaveState>();
-            int compressedSize = static_cast<int>(size - 8);
-            int result = LZ4_decompress_safe(
-                reinterpret_cast<const char*>(in + 8),
-                reinterpret_cast<char*>(state.get()),
-                compressedSize,
-                static_cast<int>(uncompSize)
-            );
-            if (result != static_cast<int>(uncompSize)) {
-                return false;
-            }
-            if (!HasValidCDBlockCursors(*state)) {
-                return false;
-            }
-            return m_saturn->LoadState(*state, true);
+            return false;
         }
 
         // Unknown magic: this buffer is not a Brimir state. It may be an

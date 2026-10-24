@@ -55,7 +55,8 @@ enum class ConsoleRegion {
 /// @brief Wraps the Ymir Saturn emulator for use with libretro
 class CoreWrapper {
 public:
-    /// @brief Version word in the BRI2 save-state header; states of any other version are rejected
+    /// @brief Version word in the BRI2 save-state header; states of any other version are rejected, as are
+    /// the older unversioned "BRIM" states
     static constexpr uint32_t kSaveStateVersion = 3;
 
     CoreWrapper();

@@ -45,6 +45,9 @@ IVDPRenderer *VDP::UseExternalRenderer(const ExternalRendererFactory &factory) {
     if (!factory) {
         return nullptr;
     }
+    // Brimir: drain the old renderer first. A threaded VDP1 render thread may still be writing m_state (FBRAM),
+    // which the factory is free to read.
+    m_renderer->PreSaveStateSync();
     return InstallRenderer(factory(m_state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig));
 }
 
