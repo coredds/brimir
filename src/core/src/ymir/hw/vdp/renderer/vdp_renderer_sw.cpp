@@ -477,10 +477,18 @@ void SoftwareVDPRenderer::VDP1SwapFramebuffer() {
 }
 
 void SoftwareVDPRenderer::VDP1BeginFrame() {
-    const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-    m_VDP1doubleV =
+    // Brimir: this runs on the emulator thread, so read the emulator thread's registers rather than the render threads'
+    // copies, and hand the result to the VDP1 render thread in order with the frame's commands instead of changing it
+    // while the previous frame's commands may still be drawing. Upstream reads VDP1GetRegs()/VDP2GetRegs() here.
+    const VDP1Regs &regs1 = m_state.regs1;
+    const VDP2Regs &regs2 = m_state.regs2;
+    const uint16 doubleV =
         m_enhancements.deinterlace && regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity && !regs1.dblInterlaceEnable;
+    if (m_threadedVDP1Rendering) {
+        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::BeginFrame(doubleV));
+    } else {
+        m_VDP1doubleV = doubleV;
+    }
 }
 
 void SoftwareVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Control control) {
@@ -638,6 +646,7 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                 rctx.swapBuffersSignal.Set();
                 break;
             }
+            case EvtType::BeginFrame: m_VDP1doubleV = event.beginFrame.doubleV; break;
             case EvtType::EndDraw: {
                 const auto fbIndex = VDP1GetDrawFBIndex();
                 m_state.spriteFB[fbIndex] = rctx.vdp1.spriteFB[fbIndex];

@@ -283,6 +283,22 @@ TEST_CASE("HLE Calculate Actual Size waits when the range exceeds the partition"
     }
 }
 
+TEST_CASE("HLE partition commands reject partition numbers past the last partition", "[cdblock-hle][brimir]") {
+    // Brimir fix (upstream Ymir checks `> kNumPartitions`): partition kNumPartitions does not exist, so Calculate
+    // Actual Size and Get Sector Info must reject it instead of indexing past the partition table.
+    for (const uint8 partition : {static_cast<uint8>(kNumPartitions), static_cast<uint8>(0xFF)}) {
+        CAPTURE(partition);
+        auto cd = std::make_unique<CDBlockFixture>();
+        const uint16 partitionParam = static_cast<uint16>(partition << 8u);
+
+        const auto calcSize = cd->Command(0x5200, 0x0000, partitionParam, 0x0001);
+        CHECK((calcSize[0] >> 8) == kStatusReject);
+
+        const auto sectorInfo = cd->Command(0x5400, 0x0000, partitionParam);
+        CHECK((sectorInfo[0] >> 8) == kStatusReject);
+    }
+}
+
 TEST_CASE("HLE Calculate Actual Size honours the get sector length", "[cdblock-hle][backport]") {
     // Ymir 87897f8f: sizes are clamped to the get length, with Mode 2 Form 2 sectors extended to 2324 bytes.
     auto cd = std::make_unique<CDBlockFixture>();

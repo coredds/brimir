@@ -2709,7 +2709,8 @@ void CDBlock::CmdCalculateActualSize() {
 
     bool reject = false;
     bool wait = false;
-    if (partitionNumber > kNumPartitions) [[unlikely]] {
+    // Brimir: `>=` (upstream has `>`, which lets partition kNumPartitions index past the partition table)
+    if (partitionNumber >= kNumPartitions) [[unlikely]] {
         reject = true;
     } else {
         const uint8 bufferCount = m_partitionManager.GetBufferCount(partitionNumber);
@@ -2782,7 +2783,8 @@ void CDBlock::CmdGetSectorInfo() {
     const uint8 partitionNumber = bit::extract<8, 15>(m_CR[2]);
 
     bool reject = false;
-    if (partitionNumber > kNumPartitions) [[unlikely]] {
+    // Brimir: `>=` (upstream has `>`, which lets partition kNumPartitions index past the partition table)
+    if (partitionNumber >= kNumPartitions) [[unlikely]] {
         reject = true;
     } else {
         const Buffer *buffer = m_partitionManager.GetTail(partitionNumber, sectorNumber);

@@ -2,8 +2,10 @@
 
 The Ymir hardware layer under `src/core/` is a verbatim copy of upstream
 [Ymir](https://github.com/StrikerX3/ymir), with these exceptions: the SH-2 CPU is
-Brimir-owned so the SH-2 JIT (see `design/sh2-jit.md`) can hook into it, and the
-CHD reader's hunk cache is bounded for low-memory hosts.
+Brimir-owned so the SH-2 JIT (see `design/sh2-jit.md`) can hook into it, the
+CHD reader's hunk cache is bounded for low-memory hosts, and a few upstream bugs
+are fixed on Brimir's side only (listed under "Brimir-side fixes of upstream bugs").
+Ymir is used as a reference; these fixes are kept here and not reported upstream.
 
 ## Fork scope
 
@@ -13,6 +15,12 @@ CHD reader's hunk cache is bounded for low-memory hosts.
   (`Bus::PageTableLayout`, `Bus::GetPageTableLayout`) for the SH-2 JIT.
 - The CHD reader's hunk cache: `src/core/src/ymir/media/loader/loader_chd.cpp`
   (`CHDBinaryReader`) and the new `src/core/include/ymir/media/loader/chd_hunk_cache.hpp`.
+- Brimir-side fixes of upstream bugs, marked `// Brimir:` in place:
+  - `src/core/src/ymir/hw/cdblock/cdblock.cpp`: partition number range checks in
+    `CmdCalculateActualSize` and `CmdGetSectorInfo`.
+  - `src/core/include/ymir/hw/vdp/renderer/vdp_renderer_sw.hpp` and
+    `src/core/src/ymir/hw/vdp/renderer/vdp_renderer_sw.cpp`: `VDP1BeginFrame` and the
+    `VDP1RenderEvent::BeginFrame` event.
 
 Everything else under `src/core/` stays verbatim upstream.
 
@@ -20,6 +28,9 @@ Everything else under `src/core/` stays verbatim upstream.
 
 - Keep Brimir changes minimal and mark each one with a `// Brimir:` comment.
 - Log every Brimir change and every upstream SH-2 port in the tables below.
+- On an upstream sync of a file with a Brimir-side fix, keep the fix (search for
+  `// Brimir:`) unless upstream has fixed the same bug, then drop the marker and
+  the row's "kept" note.
 - On an upstream Ymir sync, do not copy the fork-scope files wholesale. Review
   upstream SH-2 commits since the last port and apply them by hand.
 - After porting an upstream change that touches an SH-2 instruction handler,
@@ -44,6 +55,17 @@ Everything else under `src/core/` stays verbatim upstream.
 | 2026-10-15 | `sh2_jit_iface.hpp`, `sh2.hpp`, `sh2.cpp` | Direct on-chip register reads for the x64 JIT (2D B4): `SH2JitContext::onChipRead` → `SH2::JitOnChipRead`, the partition `0b111` data-read branch of `SH2::MemRead<T, false, false, false>` (misaligned masking, `OnChipRegRead<T, false>`, `OpenBusSeqRead<T>`, unhandled-I/O-area zero) without the partition switch; `OnChipRegRead*` are unchanged. On an upstream sync of `MemRead`, check that the `0b111` case and `JitOnChipRead` still match. |
 | 2026-10-19 | `sh2.cpp` | No JIT flush in `SH2::LoadState` (2D A4): compiled code survives a state load. Every cached block is checked against current memory before it runs: IR-only and non-self-validating native blocks by `BlockCache::Get`, self-validating x64 blocks by their prologue (code page arrays and code bytes), reused retired blocks by the reuse check; the executor interprets at a pending interrupt, in a delay slot, and at PC & 2 when the loaded fetch buffer differs from memory. `SetJitExecutor` and `SH2::Reset` still flush. Validated by lockstep runs across state loads (`brimir_bench --lockstep N --lockstep-reload K`). On an upstream sync of `LoadState`, check that it still writes no state the blocks depend on without a check (`design/sh2-jit-m2d.md`, A4). |
 | 2026-10-23 | `media/loader/loader_chd.cpp` | Upstream CHD read fixes ported (Ymir `64192c4f`): `PGTYPE` starting with `V` means the pregap is stored in the file, otherwise it is generated as zeros (like the postgap) by `SharedSubviewBinaryReader`; `index01FrameAddress = frameAddress + pregap`, real index 00/01 entries, tracks padded to 4 frames in the file, Saturn header read at the first track's index 01 instead of the track-start sector scan and fixed frame 150. `HunkCache` and `CHDBinaryReader` kept as is. On an upstream sync of `loader_chd.cpp`, keep `HunkCache` and check that the track layout still matches. |
+
+## Brimir-side fixes of upstream bugs
+
+Bugs found in upstream Ymir code (checked against Ymir `8cdf0a53`, 2026-10-18) and fixed only here.
+Related, outside `src/core/`: `CoreWrapper::LoadState` (`src/bridge/core_wrapper.cpp`) rejects save states
+whose CD block read FIFO cursors are out of range, which upstream's `CDBlock::ValidateState` does not check.
+
+| Date | Files | Bug | Fix | Test |
+|---|---|---|---|---|
+| 2026-10-24 | `hw/cdblock/cdblock.cpp` | `CmdCalculateActualSize` and `CmdGetSectorInfo` reject partition numbers with `> kNumPartitions`, so partition `kNumPartitions` (24, which does not exist) reaches `PartitionManager::GetBufferCount`/`GetTail` and reads past the partition table. Guest-triggerable; Calculate Actual Size returned a status computed from that memory. | `>=`, so partition 24 is rejected like any other invalid partition. | `HLE partition commands reject partition numbers past the last partition` (`[cdblock-hle][brimir]`) |
+| 2026-10-24 | `hw/vdp/renderer/vdp_renderer_sw.hpp`, `vdp_renderer_sw.cpp` | `VDP1BeginFrame` runs on the emulator thread. With threaded VDP1 it read the VDP1 render thread's register copy (`VDP1GetRegs()`, since Ymir `ce270c04`) and, with threaded VDP2, the VDP2 render thread's copy, both of which can lag behind the emulator thread's writes. It then wrote `m_VDP1doubleV`, the deinterlace enhancement's vertical doubling flag, while the VDP1 render thread could still be drawing the previous frame's queued commands. A frame could be drawn with the previous frame's FBCR.DIE value, or its commands with the next frame's doubling. Only affects the deinterlace enhancement in double-density interlace modes. | `VDP1BeginFrame` reads `m_state.regs1`/`m_state.regs2` (the emulator thread's registers) and, with threaded VDP1, sends the flag in a new `VDP1RenderEvent::BeginFrame` event that the render thread applies in order with the commands (unthreaded: set directly, as before). | `Threaded VDP1 applies the double-density setting of each frame in order` (`[vdp][vdp1][threaded][brimir]`); failed 50/50 iterations before the fix. |
 
 ## Upstream SH-2 ports
 

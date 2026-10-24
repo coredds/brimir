@@ -199,6 +199,7 @@ private:
 
             EraseFramebuffer,
             SwapBuffers,
+            BeginFrame, // Brimir: carries the frame's vertical doubling flag to the render thread
             EndDraw,
             Command,
 
@@ -225,6 +226,10 @@ private:
             } erase;
 
             struct {
+                uint16 doubleV;
+            } beginFrame;
+
+            struct {
                 uint32 address;
                 VDP1Command::Control control;
             } command;
@@ -245,6 +250,10 @@ private:
 
         static VDP1RenderEvent SwapBuffers() {
             return {Type::SwapBuffers};
+        }
+
+        static VDP1RenderEvent BeginFrame(uint16 doubleV) {
+            return {Type::BeginFrame, {.beginFrame = {.doubleV = doubleV}}};
         }
 
         static VDP1RenderEvent EndDraw() {

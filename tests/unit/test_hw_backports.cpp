@@ -318,6 +318,82 @@ TEST_CASE("VDP soft reset keeps the VDP1 command address", "[vdp][vdp1][backport
 
 namespace {
 
+constexpr uint32 kVDP1FBCR = 0x02;
+constexpr uint16 kFBCR_DIE = 1u << 3;
+constexpr uint32 kFBRowBytes = 512 * sizeof(uint16);
+
+// Writes a VDP1 Draw Line command from (0, y) to (7, y) at the given VRAM address.
+void WriteDrawLineCommand(vdp::VDPState &state, uint32 address, uint16 y, uint16 color) {
+    state.mem1.WriteVRAM<uint16>(address + 0x00, 0x0006); // CMDCTRL: draw line, end of table not set
+    state.mem1.WriteVRAM<uint16>(address + 0x04, 0x0000); // CMDPMOD
+    state.mem1.WriteVRAM<uint16>(address + 0x06, color);  // CMDCOLR
+    state.mem1.WriteVRAM<uint16>(address + 0x0C, 0);      // XA
+    state.mem1.WriteVRAM<uint16>(address + 0x0E, y);      // YA
+    state.mem1.WriteVRAM<uint16>(address + 0x10, 7);      // XB
+    state.mem1.WriteVRAM<uint16>(address + 0x12, y);      // YB
+}
+
+// Draws two VDP1 frames in double-density interlace with the deinterlace enhancement: the first with FBCR.DIE set
+// (no vertical doubling), the second with it cleared (vertical doubling), and returns the draw framebuffer.
+std::vector<uint8> DrawDoubleDensityFrames(bool threaded) {
+    auto state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    renderer->ConfigureEnhancements({.deinterlace = true});
+
+    state->regs2.WriteTVMD(0x80C0); // DISP on, double-density interlace
+    state->regs2.LatchTVMD();
+    state->state1.sysClipH = 319;
+    state->state1.sysClipV = 255;
+    state->state2.layerEnabled[0] = true;
+    state->regs1.WriteFBCR(kFBCR_DIE);
+    WriteDrawLineCommand(*state, 0x100, 40, 0x83E0);
+    WriteDrawLineCommand(*state, 0x200, 60, 0xFC00);
+
+    renderer->EnableThreadedVDP1(threaded);
+    renderer->PostLoadStateSync();
+
+    const vdp::VDP1Command::Control drawLine{.u16 = 0x0006};
+    renderer->VDP1BeginFrame();
+    renderer->VDP1ExecuteCommand(0x100, drawLine);
+    renderer->VDP1EndFrame();
+
+    state->regs1.WriteFBCR(0x0000);
+    renderer->VDP1WriteReg(kVDP1FBCR, 0x0000);
+    renderer->VDP1BeginFrame();
+    renderer->VDP1ExecuteCommand(0x200, drawLine);
+    renderer->VDP1EndFrame();
+    renderer->PreSaveStateSync();
+
+    const auto &fb = state->spriteFB[state->displayFB ^ 1];
+    std::vector<uint8> out(fb.begin(), fb.end());
+    renderer->EnableThreadedVDP1(false);
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Threaded VDP1 applies the double-density setting of each frame in order", "[vdp][vdp1][threaded][brimir]") {
+    // Brimir fix (same in upstream Ymir): VDP1BeginFrame ran on the emulator thread but read the VDP1 render thread's
+    // register copy, and wrote the vertical doubling flag while the render thread could still be drawing the previous
+    // frame's commands. Each frame must use the FBCR.DIE value written before it began.
+    const auto expected = DrawDoubleDensityFrames(false);
+    // Frame 1: no doubling, line Y=40 lands on framebuffer row 20. Frame 2: doubled to Y=120, row 60.
+    REQUIRE(util::ReadBE<uint16>(&expected[20 * kFBRowBytes]) == 0x83E0);
+    REQUIRE(util::ReadBE<uint16>(&expected[60 * kFBRowBytes]) == 0xFC00);
+
+    int mismatches = 0;
+    for (int i = 0; i < 50; ++i) {
+        if (DrawDoubleDensityFrames(true) != expected) {
+            ++mismatches;
+        }
+    }
+    CHECK(mismatches == 0);
+}
+
+namespace {
+
 struct FrameCapture {
     std::array<uint32, vdp::kMaxResH * 4> pixels{};
     uint32 width = 0;
