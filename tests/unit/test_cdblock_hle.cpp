@@ -2,7 +2,10 @@
 
 #include <ymir/hw/cdblock/cdblock.hpp>
 
+#include <ymir/media/binary_reader/binary_reader_mem.hpp>
+
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -18,7 +21,8 @@ struct CDBlockFixture {
     CDBlock block{scheduler, disc, fs, config};
     savestate::CDBlockSaveState state{};
 
-    explicit CDBlockFixture(uint32 firstTrackIndex = 0) {
+    // runDriveEvents keeps the drive state event scheduled so sectors are actually read during Advance.
+    explicit CDBlockFixture(uint32 firstTrackIndex = 0, bool runDriveEvents = false) {
         // A preceding session ensures commands keep using the last session's track table.
         disc.sessions.resize(2);
         auto &session = disc.sessions.back();
@@ -40,8 +44,10 @@ struct CDBlockFixture {
             track.indices = {{starts[i], index01[i] - 1}, {index01[i], ends[i]}};
         }
         block.MapMemory(bus);
-        // Only command events run: these tests do not read sectors or emulate seek delays.
-        scheduler.Reset();
+        // By default only command events run: these tests do not read sectors or emulate seek delays.
+        if (!runDriveEvents) {
+            scheduler.Reset();
+        }
         block.SaveState(state);
         state.readSpeed = 2;
         block.LoadState(state);
@@ -186,4 +192,43 @@ TEST_CASE("HLE subcode Q counts down to INDEX 01 then counts up in BCD", "[cdblo
         CHECK(q[8] == bcd(c.fad / 75 % 60));
         CHECK(q[9] == bcd(c.fad % 75));
     }
+}
+
+TEST_CASE("HLE Play with FAD start and zero end plays to the end of the disc", "[cdblock-hle][backport]") {
+    // Ymir f3eb28ff: an end parameter of zero is not a track/FAD type mismatch, it means "to the end of the disc".
+    auto cd = std::make_unique<CDBlockFixture>();
+    cd->Seek(800);
+    cd->Command(0x1080, 225, 0x0000, 0x0000);
+    CHECK(cd->state.status.statusCode == kStatusCodeSeek);
+    CHECK(cd->state.playEndPos == 9999);
+    CHECK(cd->state.playStartPos == 225);
+}
+
+TEST_CASE("HLE disc playback does not use the shared scratch buffer", "[cdblock-hle][backport]") {
+    // Ymir 9da025da: disc playback reads into a dedicated buffer instead of scratch buffer 0.
+    auto cd = std::make_unique<CDBlockFixture>(0, true);
+    cd->disc.sessions.back().tracks[1].binaryReader =
+        std::make_unique<media::MemoryBinaryReader>(std::vector<uint8>((1200 - 600) * 2352, 0x5A));
+
+    for (auto &buffer : cd->state.buffers) {
+        buffer.data.fill(0xC3);
+    }
+    cd->block.LoadState(cd->state);
+
+    cd->Play(600, 100, 0);
+    // The drive event is already scheduled one idle period ahead; the seek then takes kSeekTicks - 1 playing ticks
+    // before the first sector is read.
+    cd->scheduler.Advance(kDriveCyclesNotPlaying + kDriveCyclesPlaying1x * 6);
+    cd->block.SaveState(cd->state);
+
+    CHECK(cd->state.status.frameAddress > 600);
+    uint32 scratchBuffers = 0;
+    for (const auto &buffer : cd->state.buffers) {
+        if (buffer.partitionIndex != 255) {
+            continue;
+        }
+        ++scratchBuffers;
+        CHECK(std::all_of(buffer.data.begin(), buffer.data.end(), [](uint8 b) { return b == 0xC3; }));
+    }
+    CHECK(scratchBuffers > 0);
 }

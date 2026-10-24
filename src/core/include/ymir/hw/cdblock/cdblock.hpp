@@ -310,6 +310,7 @@ private:
     std::array<Filter, kNumFilters> m_filters;
 
     std::array<Buffer, kNumBuffers + 1> m_scratchBuffers;
+    Buffer m_playBuffer;
     uint32 m_scratchBufferPutIndex;
 
     uint8 m_cdDeviceConnection;
