@@ -321,8 +321,8 @@ void VDP::DumpVDP2CRAM(std::ostream &out) const {
 }
 
 void VDP::DumpVDP1Framebuffers(std::ostream &out) const {
-    const uint8 dispFB = m_state.displayFB;
-    const uint8 drawFB = dispFB ^ 1;
+    const uint8 dispFB = m_state.fbIndex.display;
+    const uint8 drawFB = m_state.fbIndex.draw;
     out.write((const char *)m_state.mem1.FBRAM[drawFB].data(), m_state.mem1.FBRAM[drawFB].size());
     out.write((const char *)m_state.mem1.FBRAM[dispFB].data(), m_state.mem1.FBRAM[dispFB].size());
     m_renderer->DumpExtraVDP1Framebuffers(out);
@@ -481,8 +481,6 @@ void VDP::SaveState(savestate::VDPSaveState &state) const {
     state.vdp1State.doVBlankErase = m_VDP1CtlState.doVBlankErase;
     state.vdp1State.spilloverCycles = m_VDP1CtlState.spilloverCycles;
     state.vdp1State.timingPenalty = m_VDP1TimingPenaltyCycles;
-
-    state.renderer.displayFB = m_state.displayFB;
 }
 
 bool VDP::ValidateState(const savestate::VDPSaveState &state) const {
@@ -506,8 +504,6 @@ void VDP::LoadState(const savestate::VDPSaveState &state) {
     m_VDP1CtlState.doVBlankErase = state.vdp1State.doVBlankErase;
     m_VDP1CtlState.spilloverCycles = state.vdp1State.spilloverCycles;
     m_VDP1TimingPenaltyCycles = state.vdp1State.timingPenalty;
-
-    m_state.displayFB = state.renderer.displayFB;
 
     UpdateResolution<true>();
 
@@ -933,7 +929,7 @@ void VDP::BeginVPhaseLastLine() {
 
     devlog::trace<grp::intr>("## VBlank OUT");
 
-    devlog::trace<grp::vdp2_render>("Begin VDP2 frame, VDP1 framebuffer {}", m_state.displayFB);
+    devlog::trace<grp::vdp2_render>("Begin VDP2 frame, VDP1 framebuffer {}", m_state.fbIndex.display);
 
     m_renderer->VDP2BeginFrame();
 
@@ -942,7 +938,8 @@ void VDP::BeginVPhaseLastLine() {
 }
 
 void VDP::VDP1SwapFramebuffer() {
-    devlog::trace<grp::vdp1>("Swapping framebuffers - draw {}, display {}", m_state.displayFB, m_state.displayFB ^ 1);
+    devlog::trace<grp::vdp1>("Swapping framebuffers - draw {}, display {}", m_state.fbIndex.display,
+                             m_state.fbIndex.draw);
 
     m_state.regs1.prevCommandAddress = m_state.regs1.currCommandAddress;
     m_state.regs1.prevFrameEnded = m_state.regs1.currFrameEnded;
@@ -958,7 +955,7 @@ void VDP::VDP1SwapFramebuffer() {
     // Renderers may rely on this flag to determine which framebuffer to read when rendering the sprite layer on VDP2,
     // and may use multithreading to draw VDP1 and VDP2 graphics. If the flag is flipped before the renderer has a
     // chance to process graphics, it may cause such renderers to display the incorrect VDP1 framebuffer on VDP2.
-    m_state.displayFB ^= 1;
+    m_state.fbIndex.Flip();
 
     if (bit::test<1>(m_state.regs1.plotTrigger)) {
         VDP1BeginFrame();
@@ -966,7 +963,7 @@ void VDP::VDP1SwapFramebuffer() {
 }
 
 void VDP::VDP1BeginFrame() {
-    devlog::trace<grp::vdp1>("Begin VDP1 frame on framebuffer {}", m_state.displayFB ^ 1);
+    devlog::trace<grp::vdp1>("Begin VDP1 frame on framebuffer {}", m_state.fbIndex.draw);
 
     // TODO: setup rendering
     // TODO: figure out VDP1 timings
@@ -998,7 +995,7 @@ void VDP::VDP1BeginFrame() {
 }
 
 void VDP::VDP1EndFrame() {
-    devlog::trace<grp::vdp1>("End VDP1 frame on framebuffer {}", m_state.displayFB ^ 1);
+    devlog::trace<grp::vdp1>("End VDP1 frame on framebuffer {}", m_state.fbIndex.draw);
 
     m_VDP1CtlState.drawing = false;
     m_VDP1TimingPenaltyCycles = 0;

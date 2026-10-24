@@ -278,8 +278,6 @@ struct VDPSaveState {
         LineBackLayerSaveState lineBackLayerState;
         std::array<std::array<VRAMFetcherSaveState, 6>, 2> vramFetchers;
         uint32 vcellScrollInc;
-
-        uint8 displayFB;
     } renderer;
 };
 

@@ -558,15 +558,12 @@ private:
             alignas(16) std::array<Color888, kVDP2CRAMSize / sizeof(uint16)> CRAMCache;
         } vdp2;
 
-        uint8 displayFB;
-
         VDP1RegTVMR tvmr;
 
         void Reset() {
             vdp2.regs.Reset();
             vdp2.mem.Reset();
             vdp2.CRAMCache.fill({.u32 = 0});
-            displayFB = 0;
             tvmr.Reset();
         }
 
@@ -685,12 +682,6 @@ private:
 
     // Retrieves the current set of VDP1 registers.
     const VDP1Regs &VDP1GetRegs() const;
-
-    // Retrieves the current index of the VDP1 display framebuffer.
-    uint8 VDP1GetDisplayFBIndex() const;
-
-    // Retrieves the current index of the VDP1 draw framebuffer.
-    uint8 VDP1GetDrawFBIndex() const;
 
     // Retrieves a reference to the current VDP1 FBRAM in use by the renderer.
     SpriteFB &VDP1GetRendererFBRAM(bool altFB, uint8 fbIndex);

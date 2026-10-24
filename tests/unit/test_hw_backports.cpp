@@ -247,10 +247,11 @@ struct ThreadedVDP1EraseFixture {
 
     // Sets pixel 0 of the display framebuffer in both the render thread and the main state.
     void FillDisplayFBPixel0(uint16 value) {
-        state->displayFB = 1; // CPU writes go to the draw framebuffer, which is FB 0 while FB 1 is displayed
+        // CPU writes go to the draw framebuffer: flip so the display framebuffer is drawn into, then flip back
+        state->fbIndex.Flip();
         renderer->VDP1WriteFB(0, value);
         renderer->PreSaveStateSync();
-        state->displayFB = 0;
+        state->fbIndex.Flip();
     }
 
     // Erase window covering X = 0..7 on row y
@@ -267,7 +268,7 @@ struct ThreadedVDP1EraseFixture {
     }
 
     uint16 ReadDisplayFB(uint32 address) const {
-        return util::ReadBE<uint16>(&state->mem1.FBRAM[state->displayFB][address]);
+        return util::ReadBE<uint16>(&state->mem1.FBRAM[state->fbIndex.display][address]);
     }
 };
 
@@ -324,6 +325,111 @@ TEST_CASE("VDP soft reset keeps the VDP1 command address", "[vdp][vdp1][backport
     CHECK(state->regs1.prevCommandAddress == 0);
 }
 
+TEST_CASE("VDP1 framebuffer index after reset", "[vdp][vdp1][backport]") {
+    // Ymir 9a64f38e: after a hard reset FB 1 is displayed and FB 0 is drawn into. A soft reset keeps the index.
+    auto state = std::make_unique<vdp::VDPState>();
+    CHECK(state->fbIndex.display == 1);
+    CHECK(state->fbIndex.draw == 0);
+
+    state->fbIndex.Flip();
+    CHECK(state->fbIndex.display == 0);
+    CHECK(state->fbIndex.draw == 1);
+
+    state->Reset(false);
+    CHECK(state->fbIndex.display == 0);
+    CHECK(state->fbIndex.draw == 1);
+
+    state->Reset(true);
+    CHECK(state->fbIndex.display == 1);
+    CHECK(state->fbIndex.draw == 0);
+}
+
+TEST_CASE("CPU framebuffer write after reset lands in FBRAM 0", "[vdp][vdp1][backport]") {
+    // Ymir 9a64f38e: the draw framebuffer, which the CPU sees on the bus, is FB 0 after a reset.
+    auto state = std::make_unique<vdp::VDPState>();
+    state->VDP1WriteFB<uint16>(0x100, 0xABCD);
+    CHECK(util::ReadBE<uint16>(&state->mem1.FBRAM[0][0x100]) == 0xABCD);
+    CHECK(util::ReadBE<uint16>(&state->mem1.FBRAM[1][0x100]) == 0x0000);
+}
+
+TEST_CASE("Framebuffer index survives a save state", "[vdp][vdp1][savestate][backport]") {
+    // Ymir 9a64f38e, 4769bb03: the display index is saved once, in VDPSaveState::displayFB.
+    auto state = std::make_unique<vdp::VDPState>();
+    state->fbIndex.Flip();
+    auto saved = std::make_unique<savestate::VDPSaveState>();
+    state->SaveState(*saved);
+    CHECK(saved->displayFB == 0);
+
+    auto loaded = std::make_unique<vdp::VDPState>();
+    loaded->LoadState(*saved);
+    CHECK(loaded->fbIndex.display == 0);
+    CHECK(loaded->fbIndex.draw == 1);
+}
+
+TEST_CASE("Out-of-range saved framebuffer index is sanitised", "[vdp][vdp1][savestate][backport]") {
+    // Ymir 9a64f38e: any nonzero saved display index loads as display 1, draw 0, so a crafted state cannot index past
+    // the two framebuffers.
+    auto state = std::make_unique<vdp::VDPState>();
+    auto saved = std::make_unique<savestate::VDPSaveState>();
+    state->SaveState(*saved);
+    saved->FBRAM[0][0x100] = 0x5A;
+    saved->displayFB = 2;
+
+    auto loaded = std::make_unique<vdp::VDPState>();
+    loaded->fbIndex.Flip();
+    loaded->LoadState(*saved);
+    CHECK(loaded->fbIndex.display == 1);
+    CHECK(loaded->fbIndex.draw == 0);
+    CHECK(loaded->VDP1ReadFB<uint8>(0x100) == 0x5A);
+}
+
+TEST_CASE("Hard reset clears both framebuffers in the threaded VDP1 renderer", "[vdp][vdp1][threaded][backport]") {
+    // Ymir 2220b167, 9a64f38e: FBRAM lives in VDP1Memory, so a hard reset must clear the render thread's copy too, or
+    // the next EndDraw/SwapBuffers copies the stale framebuffer back over the main state.
+    using namespace ymir::vdp;
+
+    auto state = std::make_unique<VDPState>();
+    config::VDP2DebugRender debug{};
+    config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<SoftwareVDPRenderer>(*state, debug, access);
+    renderer->EnableThreadedVDP1(true);
+
+    auto writeFB = [&](uint16 value) {
+        state->VDP1WriteFB<uint16>(0x100, value, [&](uint32 address, uint16 v) { renderer->VDP1WriteFB(address, v); });
+    };
+    auto fbIsClear = [&](uint8 index) {
+        const auto &fb = state->mem1.FBRAM[index];
+        return std::all_of(fb.begin(), fb.end(), [](uint8 b) { return b == 0; });
+    };
+
+    writeFB(0x1111);
+    renderer->PreSaveStateSync(); // the render thread reads the draw index when it processes the write
+    state->fbIndex.Flip();
+    writeFB(0x2222);
+    renderer->PreSaveStateSync();
+    REQUIRE(util::ReadBE<uint16>(&state->mem1.FBRAM[0][0x100]) == 0x1111);
+    REQUIRE(util::ReadBE<uint16>(&state->mem1.FBRAM[1][0x100]) == 0x2222);
+
+    state->Reset(true);
+    renderer->Reset(true);
+    renderer->PreSaveStateSync();
+    CHECK(fbIsClear(0));
+    CHECK(fbIsClear(1));
+
+    // An empty VDP1 frame copies the render thread's framebuffers back to the main state
+    renderer->VDP1BeginFrame();
+    renderer->VDP1EndFrame();
+    renderer->VDP1SwapFramebuffer();
+    state->fbIndex.Flip();
+    renderer->VDP1BeginFrame();
+    renderer->VDP1EndFrame();
+    renderer->PreSaveStateSync();
+    CHECK(fbIsClear(0));
+    CHECK(fbIsClear(1));
+
+    renderer->EnableThreadedVDP1(false);
+}
+
 namespace {
 
 constexpr uint32 kVDP1FBCR = 0x02;
@@ -374,7 +480,7 @@ std::vector<uint8> DrawDoubleDensityFrames(bool threaded) {
     renderer->VDP1EndFrame();
     renderer->PreSaveStateSync();
 
-    const auto &fb = state->mem1.FBRAM[state->displayFB ^ 1];
+    const auto &fb = state->mem1.FBRAM[state->fbIndex.draw];
     std::vector<uint8> out(fb.begin(), fb.end());
     renderer->EnableThreadedVDP1(false);
     return out;
@@ -580,7 +686,7 @@ void SetupSpriteLayer(vdp::VDPState &state) {
     for (uint32 i = 0; i < 1024; ++i) {
         state.mem2.WriteCRAM<uint16>(i * sizeof(uint16), static_cast<uint16>(i * 31 + 1) & 0x7FFF);
     }
-    auto &fb = state.mem1.FBRAM[state.displayFB];
+    auto &fb = state.mem1.FBRAM[state.fbIndex.display];
     for (uint32 i = 0; i < fb.size() / sizeof(uint16); ++i) {
         util::WriteBE<uint16>(&fb[i * sizeof(uint16)], static_cast<uint16>(0x400 | (i & 0x3FF)));
     }
@@ -898,7 +1004,7 @@ struct VDP1StepperFixture {
     }
 
     uint16 ReadPixel(uint32 x, uint32 y) const {
-        const auto &fb = state->mem1.FBRAM[state->displayFB ^ 1];
+        const auto &fb = state->mem1.FBRAM[state->fbIndex.draw];
         return util::ReadBE<uint16>(&fb[(y * 512 + x) * sizeof(uint16)]);
     }
 
