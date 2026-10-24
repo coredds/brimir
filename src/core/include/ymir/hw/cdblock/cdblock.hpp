@@ -113,6 +113,8 @@ private:
         uint8 index;         // current index
     } m_status;
 
+    uint8 m_busyDelay; // Number of ticks to report Busy status
+
     bool m_readyForPeriodicReports; // HACK to avoid overwriting the initial state during the boot sequence
 
     uint32 m_currDriveCycles;   // current cycle count for drive state processing
@@ -177,7 +179,7 @@ private:
     void ReportCDStatus(uint8 statusCode);
 
     // Gets the current CD status code without the flags and taking into account the Play->Pause transition period
-    uint8 GetStatusCode() const;
+    uint8 GetStatusCode(bool ignoreBusy = false) const;
 
     // -------------------------------------------------------------------------
     // Data transfers

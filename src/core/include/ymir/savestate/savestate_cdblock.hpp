@@ -25,6 +25,7 @@ struct CDBlockSaveState {
         uint8 index;
     } status;
 
+    uint8 busyDelay;
     bool readyForPeriodicReports;
 
     uint32 currDriveCycles;

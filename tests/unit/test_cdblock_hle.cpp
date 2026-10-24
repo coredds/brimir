@@ -310,3 +310,45 @@ TEST_CASE("HLE Calculate Actual Size with 0xFFFF offset and count uses the last 
     const auto size = cd->Command(0x5300);
     CHECK((((size[0] & 0xFFu) << 16u) | size[1]) == 1024u);
 }
+
+TEST_CASE("HLE pause reports Busy first", "[cdblock-hle][backport]") {
+    // Ymir 08f44301, 3474b099: pausing reports Busy for a few ticks without changing the underlying drive status.
+    auto cd = std::make_unique<CDBlockFixture>();
+    cd->Seek(800);
+    cd->Command(0x11FF, 0xFFFF);
+    const auto response = cd->Command(0x0000);
+    CHECK(((response[0] >> 8) & 0x0F) == kStatusCodeBusy);
+    CHECK(cd->state.status.statusCode == kStatusCodePause);
+    CHECK(cd->state.busyDelay == 3);
+}
+
+TEST_CASE("HLE Busy status returns to Pause once the delay elapses", "[cdblock-hle][backport]") {
+    // Ymir 3474b099: ProcessDriveState counts the busy delay down; the status underneath is never replaced.
+    auto cd = std::make_unique<CDBlockFixture>(0, true);
+    cd->Seek(800);
+    cd->Command(0x11FF, 0xFFFF);
+    REQUIRE(cd->state.busyDelay == 3);
+
+    cd->scheduler.Advance(kDriveCyclesNotPlaying * 4);
+    const auto response = cd->Command(0x0000);
+    CHECK(cd->state.busyDelay == 0);
+    CHECK(((response[0] >> 8) & 0x0F) == kStatusCodePause);
+}
+
+TEST_CASE("HLE End Data Transfer reports Busy", "[cdblock-hle][backport]") {
+    // Ymir 07de41e8: End Data Transfer starts a one tick Busy period.
+    auto cd = std::make_unique<CDBlockFixture>();
+    const auto response = cd->Command(0x0600);
+    CHECK(((response[0] >> 8) & 0x0F) == kStatusCodeBusy);
+    CHECK(cd->state.busyDelay == 1);
+}
+
+TEST_CASE("HLE busy delay survives a save state", "[cdblock-hle][backport]") {
+    // Ymir 0a9f103e
+    auto cd = std::make_unique<CDBlockFixture>();
+    cd->state.busyDelay = 2;
+    cd->block.LoadState(cd->state);
+    savestate::CDBlockSaveState saved{};
+    cd->block.SaveState(saved);
+    CHECK(saved.busyDelay == 2);
+}

@@ -89,6 +89,7 @@ void CDBlock::Reset(bool hard) {
     m_RR[3] = 0x434B; // 'CK'
 
     m_readyForPeriodicReports = false;
+    m_busyDelay = 0;
 
     m_status.statusCode = kStatusCodePause;
     m_status.frameAddress = 0xFFFFFF;
@@ -207,7 +208,7 @@ void CDBlock::UpdateClockRatios(const sys::ClockRatios &clockRatios) {
 }
 
 void CDBlock::OnDiscLoaded() {
-    const uint8 status = GetStatusCode();
+    const uint8 status = GetStatusCode(true);
     if (status == kStatusCodeNoDisc || status == kStatusCodeOpen || status == kStatusCodePlay ||
         status == kStatusCodeSeek || status == kStatusCodeBusy) {
         // TODO: stay in Busy status while disc is read
@@ -233,7 +234,7 @@ void CDBlock::OnDiscEjected() {
 }
 
 void CDBlock::OpenTray() {
-    if (GetStatusCode() != kStatusCodeOpen) {
+    if (GetStatusCode(true) != kStatusCodeOpen) {
         // TODO: stay in Busy status while disc stops spinning
         m_status.statusCode = kStatusCodeOpen;
         m_discAuthStatus = 0;
@@ -248,7 +249,7 @@ void CDBlock::OpenTray() {
 }
 
 void CDBlock::CloseTray() {
-    if (GetStatusCode() == kStatusCodeOpen) {
+    if (GetStatusCode(true) == kStatusCodeOpen) {
         // TODO: stay in Busy status while drive scans disc
         if (m_disc.sessions.empty()) {
             m_status.statusCode = kStatusCodeNoDisc;
@@ -267,7 +268,7 @@ void CDBlock::CloseTray() {
 }
 
 bool CDBlock::IsTrayOpen() const {
-    return GetStatusCode() == kStatusCodeOpen;
+    return GetStatusCode(true) == kStatusCodeOpen;
 }
 
 void CDBlock::SaveState(savestate::CDBlockSaveState &state) const {
@@ -284,6 +285,7 @@ void CDBlock::SaveState(savestate::CDBlockSaveState &state) const {
     state.status.track = m_status.track;
     state.status.index = m_status.index;
 
+    state.busyDelay = m_busyDelay;
     state.readyForPeriodicReports = m_readyForPeriodicReports;
 
     state.currDriveCycles = m_currDriveCycles;
@@ -431,6 +433,7 @@ void CDBlock::LoadState(const savestate::CDBlockSaveState &state) {
     m_status.track = state.status.track;
     m_status.index = state.status.index;
 
+    m_busyDelay = state.busyDelay;
     m_readyForPeriodicReports = state.readyForPeriodicReports;
 
     m_currDriveCycles = state.currDriveCycles;
@@ -705,7 +708,7 @@ bool CDBlock::SetupGenericPlayback(uint32 startParam, uint32 endParam, uint16 re
     const bool isStartFAD = bit::test<23>(keepStartParam ? m_playStartParam : startParam);
     const bool isEndFAD = bit::test<23>(keepEndParam ? m_playEndParam : endParam);
 
-    const bool paused = GetStatusCode() == kStatusCodePause;
+    const bool paused = GetStatusCode(true) == kStatusCodePause;
 
     // Handle resume from pause for data tracks
     if (keepStartParam && keepEndParam && keepRepeatParam && isStartFAD && isEndFAD && paused) {
@@ -981,7 +984,11 @@ void CDBlock::ProcessDriveState() {
         m_bufferFullPause = false;
     }
 
-    switch (GetStatusCode()) {
+    if (m_busyDelay > 0) {
+        --m_busyDelay;
+    }
+
+    switch (GetStatusCode(true)) {
     case kStatusCodeSeek:
         // HACK: Extremely hacky way to make the status transition from Seek to Play
         if (m_seekTicks > 0) {
@@ -1226,7 +1233,7 @@ void CDBlock::UpdateInterrupts() {
 }
 
 void CDBlock::ReportCDStatus() {
-    ReportCDStatus(m_status.statusCode);
+    ReportCDStatus(GetStatusCode());
 }
 
 void CDBlock::ReportCDStatus(uint8 statusCode) {
@@ -1236,8 +1243,10 @@ void CDBlock::ReportCDStatus(uint8 statusCode) {
     m_RR[3] = m_status.frameAddress;
 }
 
-uint8 CDBlock::GetStatusCode() const {
-    if (m_playEndPending && m_status.statusCode == kStatusCodePause) {
+uint8 CDBlock::GetStatusCode(bool ignoreBusy) const {
+    if (!ignoreBusy && m_busyDelay > 0) {
+        return kStatusCodeBusy;
+    } else if (m_playEndPending && m_status.statusCode == kStatusCodePause) {
         // HACK: Report Play status on the last sector of playback
         return kStatusCodePlay;
     } else {
@@ -1987,6 +1996,10 @@ void CDBlock::CmdEndDataTransfer() {
 
     EndTransfer();
 
+    if (m_busyDelay == 0) {
+        m_busyDelay = 1;
+    }
+
     // Output structure:
     // status code      transferred word count bits 23-16
     // transferred word count bits 15-0
@@ -2038,6 +2051,7 @@ void CDBlock::CmdSeekDisc() {
     devlog::trace<grp::base>("Seek position: {:06X}", startPos);
     if (startPos == 0xFFFFFF) {
         devlog::debug<grp::base>("Paused");
+        m_busyDelay = 3;
         m_status.statusCode = kStatusCodePause;
         m_targetDriveCycles = kDriveCyclesNotPlaying;
         m_bufferFullPause = false;
