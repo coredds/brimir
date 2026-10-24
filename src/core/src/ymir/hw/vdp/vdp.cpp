@@ -40,6 +40,43 @@ VDP::VDP(core::Scheduler &scheduler, core::Configuration &config)
 
 VDP::~VDP() = default;
 
+// Brimir: external renderer hook and the install steps shared with UseRenderer.
+IVDPRenderer *VDP::UseExternalRenderer(const ExternalRendererFactory &factory) {
+    if (!factory) {
+        return nullptr;
+    }
+    return InstallRenderer(factory(m_state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig));
+}
+
+IVDPRenderer *VDP::InstallRenderer(std::unique_ptr<IVDPRenderer> renderer) {
+    if (renderer == nullptr || !renderer->IsValid()) {
+        return nullptr;
+    }
+
+    m_renderer->PreSaveStateSync();
+
+    renderer->Callbacks = m_renderer->Callbacks;
+    if (auto *swRenderer = m_renderer->As<VDPRendererType::Software>()) {
+        m_swRendererCallbacks = swRenderer->SwCallbacks;
+    }
+    if (auto *swRenderer = renderer->As<VDPRendererType::Software>()) {
+        swRenderer->SwCallbacks = m_swRendererCallbacks;
+    }
+    renderer->ConfigureEnhancements(m_enhancements);
+    renderer->VDP2SetResolution(m_HRes, m_VRes, m_exclusiveMonitor);
+    renderer->VDP2SetField(m_state.regs2.TVSTAT.ODD);
+
+    // A new renderer starts with empty derived state (e.g. the software renderer's CRAM colour cache)
+    renderer->PostLoadStateSync();
+
+    IVDPRenderer *pRenderer = renderer.get();
+    m_renderer = std::move(renderer);
+
+    devlog::info<grp::config>("Switched to {} VDP renderer", pRenderer->GetName());
+
+    return pRenderer;
+}
+
 void VDP::Reset(bool hard) {
     m_HRes = vdp::kDefaultResH;
     m_VRes = vdp::kDefaultResV;

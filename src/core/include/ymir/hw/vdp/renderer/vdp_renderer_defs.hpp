@@ -13,6 +13,7 @@ namespace ymir::vdp {
 enum class VDPRendererType {
     Null,
     Software,
+    External, // Brimir: renderer created outside src/core, installed with VDP::UseExternalRenderer
 };
 
 /// @brief Retrieves the name of a given VDP renderer type.
@@ -22,6 +23,7 @@ inline std::string_view GetRendererName(VDPRendererType type) {
     switch (type) {
     case VDPRendererType::Null: return "Null";
     case VDPRendererType::Software: return "Software";
+    case VDPRendererType::External: return "External"; // Brimir
     default: return "Invalid";
     }
 }

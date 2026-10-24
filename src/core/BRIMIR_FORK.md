@@ -3,7 +3,8 @@
 The Ymir hardware layer under `src/core/` is a verbatim copy of upstream
 [Ymir](https://github.com/StrikerX3/ymir), with these exceptions: the SH-2 CPU is
 Brimir-owned so the SH-2 JIT (see `design/sh2-jit.md`) can hook into it, the
-CHD reader's hunk cache is bounded for low-memory hosts, and a few upstream bugs
+CHD reader's hunk cache is bounded for low-memory hosts, the VDP can install a
+renderer created outside `src/core` (for the Vulkan renderer), and a few upstream bugs
 are fixed on Brimir's side only (listed under "Brimir-side fixes of upstream bugs").
 Ymir is used as a reference; these fixes are kept here and not reported upstream.
 
@@ -15,6 +16,10 @@ Ymir is used as a reference; these fixes are kept here and not reported upstream
   (`Bus::PageTableLayout`, `Bus::GetPageTableLayout`) for the SH-2 JIT.
 - The CHD reader's hunk cache: `src/core/src/ymir/media/loader/loader_chd.cpp`
   (`CHDBinaryReader`) and the new `src/core/include/ymir/media/loader/chd_hunk_cache.hpp`.
+- The external-renderer hook, marked `// Brimir:`: `VDPRendererType::External` and its
+  `GetRendererName` case in `src/core/include/ymir/hw/vdp/renderer/vdp_renderer_defs.hpp`;
+  `VDP::ExternalRendererFactory`, `VDP::UseExternalRenderer`, `VDP::InstallRenderer` and the
+  `UseRenderer` body in `src/core/include/ymir/hw/vdp/vdp.hpp` and `src/core/src/ymir/hw/vdp/vdp.cpp`.
 - Brimir-side fixes of upstream bugs, marked `// Brimir:` in place:
   - `src/core/src/ymir/hw/cdblock/cdblock.cpp`: partition number range checks in
     `CmdCalculateActualSize` and `CmdGetSectorInfo`.
@@ -58,6 +63,7 @@ Everything else under `src/core/` stays verbatim upstream.
 | 2026-10-15 | `sh2_jit_iface.hpp`, `sh2.hpp`, `sh2.cpp` | Direct on-chip register reads for the x64 JIT (2D B4): `SH2JitContext::onChipRead` → `SH2::JitOnChipRead`, the partition `0b111` data-read branch of `SH2::MemRead<T, false, false, false>` (misaligned masking, `OnChipRegRead<T, false>`, `OpenBusSeqRead<T>`, unhandled-I/O-area zero) without the partition switch; `OnChipRegRead*` are unchanged. On an upstream sync of `MemRead`, check that the `0b111` case and `JitOnChipRead` still match. |
 | 2026-10-19 | `sh2.cpp` | No JIT flush in `SH2::LoadState` (2D A4): compiled code survives a state load. Every cached block is checked against current memory before it runs: IR-only and non-self-validating native blocks by `BlockCache::Get`, self-validating x64 blocks by their prologue (code page arrays and code bytes), reused retired blocks by the reuse check; the executor interprets at a pending interrupt, in a delay slot, and at PC & 2 when the loaded fetch buffer differs from memory. `SetJitExecutor` and `SH2::Reset` still flush. Validated by lockstep runs across state loads (`brimir_bench --lockstep N --lockstep-reload K`). On an upstream sync of `LoadState`, check that it still writes no state the blocks depend on without a check (`design/sh2-jit-m2d.md`, A4). |
 | 2026-10-23 | `media/loader/loader_chd.cpp` | Upstream CHD read fixes ported (Ymir `64192c4f`): `PGTYPE` starting with `V` means the pregap is stored in the file, otherwise it is generated as zeros (like the postgap) by `SharedSubviewBinaryReader`; `index01FrameAddress = frameAddress + pregap`, real index 00/01 entries, tracks padded to 4 frames in the file, Saturn header read at the first track's index 01 instead of the track-start sector scan and fixed frame 150. `HunkCache` and `CHDBinaryReader` kept as is. On an upstream sync of `loader_chd.cpp`, keep `HunkCache` and check that the track layout still matches. |
+| 2026-10-24 | `hw/vdp/renderer/vdp_renderer_defs.hpp`, `hw/vdp/vdp.hpp`, `hw/vdp/vdp.cpp` | External-renderer hook for the Vulkan renderer (GPU stage 1): `VDPRendererType::External` (name "External"; not in `kRendererTypes`, no `VDPRendererTypeMeta`, since the VDP cannot create it) and `VDP::UseExternalRenderer(factory)`. The factory gets the VDP's `VDPState&`, `vdp2DebugRenderOptions` and `vdp2AccessPatternsConfig`, so the state does not need a public accessor; a `nullptr` or invalid result returns `nullptr` and keeps the current renderer. `UseRenderer<T>` (software and null) and `UseExternalRenderer` share the private `VDP::InstallRenderer`: `PreSaveStateSync()` on the old renderer (drains a threaded software renderer's queues before its destructor joins the threads), carry `Callbacks` and keep the software frame callback in `m_swRendererCallbacks` (so `SetSoftwareRenderCallback` survives software → external → software), `ConfigureEnhancements`, `VDP2SetResolution`, `VDP2SetField`, then **`PostLoadStateSync()` on the new renderer**, then swap. The last one is new for the software renderer too: its CRAM colour cache starts empty and upstream only fills it on CRAM writes and state loads, so an unthreaded software renderer installed mid-session (the fallback from an external renderer) drew palette layers black until the game rewrote CRAM; threaded VDP2 already rebuilt its copy when the render thread started. At construction it runs on a freshly reset CRAM and changes nothing (BIOS lockstep identical). Behaviour change: `UseRenderer` now calls `PreSaveStateSync()` on the old renderer (upstream did not). Call between frames on the emulator thread: VDP1 commands queued but not yet written back are lost, as with a mid-draw save state. On an upstream sync of `vdp.hpp`/`vdp.cpp`, keep `InstallRenderer` (upstream's `Create()`/`PointerResult` rework, `56f76c20`, would need merging into it). Tests: `[vdp][renderer][brimir]` in `tests/unit/test_vdp_external_renderer.cpp`. |
 
 ## Brimir-side fixes of upstream bugs
 

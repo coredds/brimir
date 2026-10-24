@@ -35,6 +35,7 @@
 #include <blockingconcurrentqueue.h>
 
 #include <array>
+#include <functional> // Brimir: ExternalRendererFactory
 #include <iosfwd>
 #include <memory>
 #include <span>
@@ -146,6 +147,19 @@ public:
         }
         return renderer;
     }
+
+    // Brimir: creates a renderer outside src/core. Receives the VDP state and the debug/access-pattern configs the
+    // built-in renderers get.
+    using ExternalRendererFactory = std::function<std::unique_ptr<IVDPRenderer>(
+        VDPState &state, config::VDP2DebugRender &vdp2DebugRenderOptions,
+        const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig)>;
+
+    /// @brief Brimir: switches to a renderer created outside src/core by `factory`.
+    /// Call on the emulator thread, between frames.
+    /// @param[in] factory creates the renderer
+    /// @return a pointer to the installed renderer, or `nullptr` (current renderer kept) if the factory returned
+    /// `nullptr` or an invalid renderer
+    IVDPRenderer *UseExternalRenderer(const ExternalRendererFactory &factory);
 
     /// @brief Retrieves the enhancements configured for this VDP instance.
     /// @return the current enhancements configuration
@@ -269,35 +283,19 @@ private:
     template <typename T, typename... Args>
         requires std::derived_from<T, IVDPRenderer>
     T *UseRenderer(Args &&...args) {
-        T *renderer = new T(std::forward<Args>(args)...);
-        T *pRenderer = renderer;
-        if (renderer == nullptr) {
-            return nullptr;
-        }
-        if (!renderer->IsValid()) {
-            delete renderer;
-            return nullptr;
-        }
-
-        const config::RendererCallbacks callbacks = m_renderer->Callbacks;
-        if (auto *swRenderer = m_renderer->As<VDPRendererType::Software>()) {
-            m_swRendererCallbacks = swRenderer->SwCallbacks;
-        }
-
-        renderer->Callbacks = callbacks;
-        if constexpr (std::is_same_v<T, SoftwareVDPRenderer>) {
-            renderer->SwCallbacks = m_swRendererCallbacks;
-        }
-        renderer->ConfigureEnhancements(m_enhancements);
-        renderer->VDP2SetResolution(m_HRes, m_VRes, m_exclusiveMonitor);
-        renderer->VDP2SetField(m_state.regs2.TVSTAT.ODD);
-
-        m_renderer.reset(renderer);
-
-        devlog::info<grp::config>("Switched to {} VDP renderer", pRenderer->GetName());
-
-        return pRenderer;
+        // Brimir: shares the install steps with UseExternalRenderer
+        return static_cast<T *>(InstallRenderer(std::make_unique<T>(std::forward<Args>(args)...)));
     }
+
+    /// @brief Brimir: installs `renderer` in place of the current one, unless it is `nullptr` or invalid.
+    ///
+    /// Syncs the current renderer (draining a threaded renderer's queues), carries over the callbacks, applies the
+    /// enhancements, resolution and field, then calls `PostLoadStateSync()` on the new renderer so it builds its
+    /// derived state (such as the software renderer's CRAM colour cache) from the current VDP state.
+    ///
+    /// @param[in] renderer the renderer to install
+    /// @return a pointer to the installed renderer, or `nullptr` if `renderer` was `nullptr` or invalid
+    IVDPRenderer *InstallRenderer(std::unique_ptr<IVDPRenderer> renderer);
 
     CBHBlankStateChange m_cbHBlankStateChange;
     CBVBlankStateChange m_cbVBlankStateChange;
