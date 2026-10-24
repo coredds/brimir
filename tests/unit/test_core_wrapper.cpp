@@ -3,16 +3,20 @@
 // Licensed under GPL-3.0
 
 #include "catch_amalgamated.hpp"
+#include "unit/frame_path_cases.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <brimir/savestate_codec.hpp>
 #include <lz4.h>
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <span>
 #include <utility>
+#include <string>
 #include <vector>
 
 using namespace brimir;
@@ -1072,4 +1076,144 @@ TEST_CASE("Save state size covers the cartridge image", "[core][savestate][unit]
     REQUIRE(core.SaveState(buf.data(), buf.size()));
     REQUIRE(core.LoadState(buf.data(), buf.size()));
     REQUIRE(core.GetStateSize() == withCart);
+}
+// ============================================================
+// Software frame path characterization: XBGR->XRGB, overscan crop, rotation
+// ============================================================
+//
+// The expected pixels below are defined from the output side, independently of the bridge's loops:
+//   1. Colour: native XBGR 0xAABBGGRR becomes XRGB 0x00RRGGBB (alpha byte dropped).
+//   2. Crop: if the frame is wider than cropH+32 and taller than cropV+32 it is cut to (w-cropH) x (h-cropV),
+//      starting cropH/2 px from the left and cropV/2 px from the top (integer division); otherwise it is untouched.
+//   3. Rotation of the cropped image C (cw x ch): 90 is clockwise, the output is ch wide and cw tall.
+//        90:  out(x, y) = C(y, ch-1-x)       180: out(x, y) = C(cw-1-x, ch-1-y)       270: out(x, y) = C(cw-1-y, x)
+
+namespace {
+
+using brimir::test::FramePathCase;
+
+uint32_t ExpectedXRGB(uint32_t xbgr) {
+    const uint32_t r = (xbgr >> 0) & 0xFF;
+    const uint32_t g = (xbgr >> 8) & 0xFF;
+    const uint32_t b = (xbgr >> 16) & 0xFF;
+    return (r << 16) | (g << 8) | b;
+}
+
+// Checks one case against the plain description above; returns an empty string on success.
+std::string CheckFramePathCase(const FramePathCase& c) {
+    uint32_t outW = 0, outH = 0;
+    const std::vector<uint32_t> out = brimir::test::CpuFramePath(c, &outW, &outH);
+
+    const bool crops = c.w > c.cropH + 32 && c.h > c.cropV + 32;
+    const uint32_t cw = crops ? c.w - c.cropH : c.w;
+    const uint32_t ch = crops ? c.h - c.cropV : c.h;
+    const uint32_t left = crops ? c.cropH / 2 : 0;
+    const uint32_t top = crops ? c.cropV / 2 : 0;
+
+    const bool swap = c.rotation == 90 || c.rotation == 270;
+    const uint32_t expectW = swap ? ch : cw;
+    const uint32_t expectH = swap ? cw : ch;
+    if (outW != expectW || outH != expectH) {
+        return "size " + std::to_string(outW) + "x" + std::to_string(outH) + ", expected " +
+               std::to_string(expectW) + "x" + std::to_string(expectH);
+    }
+    if (out.size() != static_cast<size_t>(expectW) * expectH) {
+        return "pixel count " + std::to_string(out.size());
+    }
+
+    for (uint32_t y = 0; y < expectH; ++y) {
+        for (uint32_t x = 0; x < expectW; ++x) {
+            uint32_t cx = 0, cy = 0;
+            switch (c.rotation) {
+            case 0:   cx = x;           cy = y;           break;
+            case 90:  cx = y;           cy = ch - 1 - x;  break;
+            case 180: cx = cw - 1 - x;  cy = ch - 1 - y;  break;
+            case 270: cx = cw - 1 - y;  cy = x;           break;
+            }
+            const uint32_t expected =
+                ExpectedXRGB(brimir::test::PatternXBGR(cx + left, cy + top, c.w, c.h));
+            if (out[static_cast<size_t>(y) * expectW + x] != expected) {
+                char msg[160];
+                std::snprintf(msg, sizeof msg, "pixel (%u,%u) = 0x%08X, expected 0x%08X", x, y,
+                              out[static_cast<size_t>(y) * expectW + x], expected);
+                return msg;
+            }
+        }
+    }
+    return {};
+}
+
+std::string DescribeFramePathCase(const FramePathCase& c) {
+    return std::to_string(c.w) + "x" + std::to_string(c.h) + " crop " + std::to_string(c.cropH) + "," +
+           std::to_string(c.cropV) + " rot " + std::to_string(c.rotation);
+}
+
+} // namespace
+
+TEST_CASE("Frame path: XBGR to XRGB drops alpha and swaps R and B", "[core][frame-path]") {
+    CoreWrapper core;
+    const uint32_t frame[4] = {0xFF332211, 0x00FF0000, 0x800000FF, 0xAB00FF00};
+    core.TestInjectFrame(frame, 4, 1);
+
+    REQUIRE(core.GetFramebufferWidth() == 4);
+    REQUIRE(core.GetFramebufferHeight() == 1);
+    REQUIRE(core.GetFramebufferPitch() == 16);
+    const uint32_t* out = static_cast<const uint32_t*>(core.GetFramebuffer());
+    CHECK(out[0] == 0x00112233);
+    CHECK(out[1] == 0x000000FF);
+    CHECK(out[2] == 0x00FF0000);
+    CHECK(out[3] == 0x0000FF00);
+}
+
+TEST_CASE("Frame path: pattern pixels are distinct", "[core][frame-path]") {
+    const std::vector<uint32_t> frame = brimir::test::MakePatternFrame(704, 512);
+    std::vector<uint32_t> sorted = frame;
+    std::sort(sorted.begin(), sorted.end());
+    REQUIRE(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
+    CHECK(std::all_of(frame.begin(), frame.end(), [](uint32_t px) { return (px >> 24) == 0xFF; }));
+}
+
+TEST_CASE("Frame path: size and pixels for every size, overscan and rotation", "[core][frame-path]") {
+    const auto& cases = brimir::test::FramePathCases();
+    REQUIRE(cases.size() == 4 * 5 * 4 * 4);
+    for (const FramePathCase& c : cases) {
+        const std::string error = CheckFramePathCase(c);
+        INFO(DescribeFramePathCase(c));
+        INFO(error);
+        REQUIRE(error.empty());
+    }
+}
+
+TEST_CASE("Frame path: non-square crops and the crop guard", "[core][frame-path]") {
+    for (const FramePathCase& c : brimir::test::FramePathExtraCases()) {
+        const std::string error = CheckFramePathCase(c);
+        INFO(DescribeFramePathCase(c));
+        INFO(error);
+        REQUIRE(error.empty());
+    }
+}
+
+TEST_CASE("Frame path: pitch is tight and settings apply to the next frame", "[core][frame-path]") {
+    CoreWrapper core;
+    const std::vector<uint32_t> frame = brimir::test::MakePatternFrame(320, 224);
+
+    core.TestInjectFrame(frame.data(), 320, 224);
+    CHECK(core.GetFramebufferWidth() == 320);
+    CHECK(core.GetFramebufferPitch() == 320 * 4);
+
+    core.SetRotation(90);
+    core.SetOverscanCrop(32, 32);
+    CHECK(core.GetFramebufferWidth() == 320); // unchanged until the next frame
+
+    core.TestInjectFrame(frame.data(), 320, 224);
+    CHECK(core.GetFramebufferWidth() == 224 - 32);
+    CHECK(core.GetFramebufferHeight() == 320 - 32);
+    CHECK(core.GetFramebufferPitch() == (224 - 32) * 4);
+
+    core.SetRotation(0);
+    core.SetOverscanCrop(0, 0);
+    core.TestInjectFrame(frame.data(), 320, 224);
+    CHECK(core.GetFramebufferWidth() == 320);
+    CHECK(core.GetFramebufferHeight() == 224);
+    CHECK(core.GetFramebufferPitch() == 320 * 4);
 }

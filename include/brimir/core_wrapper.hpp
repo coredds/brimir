@@ -344,6 +344,14 @@ public:
     /// @brief Read-only access to the profiler (for tools and tests)
     const Profiler& GetProfiler() const { return m_profiler; }
 
+#ifdef BRIMIR_BUILD_TESTS
+    /// @brief Test seam: feed a synthetic native frame (Ymir XBGR8888, tightly packed) through the same path
+    /// the VDP frame-complete callback uses. Inline so only test builds that define BRIMIR_BUILD_TESTS see it.
+    void TestInjectFrame(const uint32_t* xbgr, uint32_t w, uint32_t h) {
+        OnFrameComplete(const_cast<uint32_t*>(xbgr), w, h);
+    }
+#endif
+
 private:
     /// @brief Callback for when VDP completes a frame
     void OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height);
