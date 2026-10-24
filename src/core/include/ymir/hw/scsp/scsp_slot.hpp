@@ -690,13 +690,19 @@ struct alignas(128) Slot {
         nextPhase = (nextPhase & 0x3FFF) + phaseInc;
     }
 
-    FORCE_INLINE void IncrementSampleCounter() {
+    FORCE_INLINE void IncrementSampleCounter(bool &suppress) {
         currSample += currPhase >> 14u;
 
-        if (!crossedLoopStart) {
+        const bool currSuppress = suppress;
+        suppress = false;
+
+        if (!active) {
+            // Nothing to do
+        } else if (!crossedLoopStart) {
             const uint16 nextSample = currSample + 1;
             if (nextSample > loopStartAddress) {
                 crossedLoopStart = true;
+                suppress = true;
                 if (loopControl == LoopControl::Reverse) {
                     currSample -= loopStartAddress + loopEndAddress;
                     reverse = true;
@@ -709,13 +715,16 @@ struct alignas(128) Slot {
                     ? loopStartAddress
                     : loopEndAddress;
             const bool crossedLoop = nextSample > loopPoint;
+            suppress = crossedLoop && (loopControl != LoopControl::Off || !currSuppress);
 
             if (reverse != crossedLoop) {
                 switch (loopControl) {
                 case LoopControl::Off:
-                    active = false;
-                    reverse = false;
-                    crossedLoopStart = false;
+                    if (!currSuppress) {
+                        active = false;
+                        reverse = false;
+                        crossedLoopStart = false;
+                    }
                     break;
                 case LoopControl::Normal:
                     if (reverse) {

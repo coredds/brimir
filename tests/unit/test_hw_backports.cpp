@@ -674,3 +674,84 @@ TEST_CASE("SCSP slot reset clears pitch LFO sensitivity", "[scsp][backport]") {
     slot.Reset();
     CHECK(slot.pitchLFOSens == 0);
 }
+
+TEST_CASE("SCSP slot after a loop-start crossing keeps playing past a one-shot end", "[scsp][backport]") {
+    // Ymir aae1dbef: slot N+1 with LPCTL=Off doesn't stop at its loop end if slot N crossed a loop point on the
+    // same sample.
+    auto makeSlot = [](uint16 currSample, bool crossedLoopStart) {
+        scsp::Slot slot;
+        slot.active = true;
+        slot.loopControl = scsp::Slot::LoopControl::Off;
+        slot.loopStartAddress = 4;
+        slot.loopEndAddress = 8;
+        slot.currPhase = 1 << 14;
+        slot.currSample = currSample;
+        slot.crossedLoopStart = crossedLoopStart;
+        return slot;
+    };
+
+    SECTION("loop-start crossing in the previous slot suppresses the one-shot end") {
+        auto s0 = makeSlot(3, false); // 3 -> 4; next sample 5 > loop start: crosses loop start
+        auto s1 = makeSlot(8, true);  // 8 -> 9; next sample 10 > loop end: would stop
+        bool suppress = false;
+
+        s0.IncrementSampleCounter(suppress);
+        CHECK(s0.crossedLoopStart);
+        CHECK(s0.active);
+        CHECK(suppress);
+
+        s1.IncrementSampleCounter(suppress);
+        CHECK(s1.active);
+        CHECK(s1.crossedLoopStart);
+    }
+
+    SECTION("without a previous crossing the slot stops") {
+        auto s1 = makeSlot(8, true);
+        bool suppress = false;
+
+        s1.IncrementSampleCounter(suppress);
+        CHECK_FALSE(s1.active);
+        CHECK_FALSE(s1.crossedLoopStart);
+    }
+
+    SECTION("suppression only lasts one slot") {
+        auto s0 = makeSlot(3, false);
+        auto s1 = makeSlot(8, true);
+        auto s2 = makeSlot(8, true);
+        bool suppress = false;
+
+        s0.IncrementSampleCounter(suppress);
+        s1.IncrementSampleCounter(suppress);
+        s2.IncrementSampleCounter(suppress);
+        CHECK_FALSE(s2.active);
+    }
+
+    SECTION("inactive slots clear the suppression flag") {
+        auto s0 = makeSlot(3, false);
+        auto s1 = makeSlot(0, false);
+        s1.active = false;
+        auto s2 = makeSlot(8, true);
+        bool suppress = false;
+
+        s0.IncrementSampleCounter(suppress);
+        s1.IncrementSampleCounter(suppress);
+        CHECK_FALSE(suppress);
+        s2.IncrementSampleCounter(suppress);
+        CHECK_FALSE(s2.active);
+    }
+}
+
+TEST_CASE("SCSP one-shot PCM suppression flag survives save states", "[scsp][savestate][backport]") {
+    auto saturn = std::make_unique<Saturn>();
+
+    auto state = std::make_unique<savestate::SaveState>();
+    saturn->SaveState(*state);
+    CHECK_FALSE(state->scsp.suppressSlotEnd);
+
+    state->scsp.suppressSlotEnd = true;
+    REQUIRE(saturn->LoadState(*state, true));
+
+    auto state2 = std::make_unique<savestate::SaveState>();
+    saturn->SaveState(*state2);
+    CHECK(state2->scsp.suppressSlotEnd);
+}

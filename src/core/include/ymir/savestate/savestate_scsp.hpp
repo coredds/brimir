@@ -31,6 +31,8 @@ struct SCSPSaveState {
     bool KYONEX;
     bool KYONEXExec;
 
+    bool suppressSlotEnd;
+
     uint32 MVOL;
     bool DAC18B;
     bool MEM4MB;

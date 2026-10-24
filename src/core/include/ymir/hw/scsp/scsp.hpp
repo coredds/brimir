@@ -1082,6 +1082,10 @@ private:
     bool m_kyonex;        // (W) KYONEX - Key on execute
     bool m_kyonexExecute; // KYONEX currently being processed
 
+    // Whether to trigger the one-shot PCM bug.
+    // Slot N+1 with LPCTL=0 doesn't stop playing when slot N crosses the loop threshold and other specific conditions.
+    bool m_suppressSlotEnd;
+
     // --- Mixer Register ---
 
     uint32 m_masterVolume; // (W) MVOL - master volume adjustment after all audio processing
