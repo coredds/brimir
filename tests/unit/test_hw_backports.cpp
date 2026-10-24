@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <vector>
 
@@ -102,6 +103,12 @@ TEST_CASE("VDP2 VCNT is restored from save states", "[vdp][vdp2][savestate][back
     const auto &regs2 = saturn->VDP.GetProbe().GetVDP2Regs();
     CHECK(regs2.VCNT == 123);
     CHECK(regs2.VCNTLatch == 0x3FF);
+}
+
+TEST_CASE("VDP1 FBRAM follows VDP1 VRAM in the save state", "[vdp][vdp1][savestate][backport]") {
+    // Ymir 2220b167: the sprite framebuffers moved into VDP1 memory as FBRAM, saved right after VRAM1.
+    STATIC_REQUIRE(offsetof(savestate::VDPSaveState, FBRAM) == vdp::kVDP1VRAMSize);
+    CHECK(offsetof(savestate::VDPSaveState, FBRAM) == vdp::kVDP1VRAMSize);
 }
 
 namespace {
@@ -260,7 +267,7 @@ struct ThreadedVDP1EraseFixture {
     }
 
     uint16 ReadDisplayFB(uint32 address) const {
-        return util::ReadBE<uint16>(&state->spriteFB[state->displayFB][address]);
+        return util::ReadBE<uint16>(&state->mem1.FBRAM[state->displayFB][address]);
     }
 };
 
@@ -367,7 +374,7 @@ std::vector<uint8> DrawDoubleDensityFrames(bool threaded) {
     renderer->VDP1EndFrame();
     renderer->PreSaveStateSync();
 
-    const auto &fb = state->spriteFB[state->displayFB ^ 1];
+    const auto &fb = state->mem1.FBRAM[state->displayFB ^ 1];
     std::vector<uint8> out(fb.begin(), fb.end());
     renderer->EnableThreadedVDP1(false);
     return out;
@@ -573,7 +580,7 @@ void SetupSpriteLayer(vdp::VDPState &state) {
     for (uint32 i = 0; i < 1024; ++i) {
         state.mem2.WriteCRAM<uint16>(i * sizeof(uint16), static_cast<uint16>(i * 31 + 1) & 0x7FFF);
     }
-    auto &fb = state.spriteFB[state.displayFB];
+    auto &fb = state.mem1.FBRAM[state.displayFB];
     for (uint32 i = 0; i < fb.size() / sizeof(uint16); ++i) {
         util::WriteBE<uint16>(&fb[i * sizeof(uint16)], static_cast<uint16>(0x400 | (i & 0x3FF)));
     }
@@ -891,7 +898,7 @@ struct VDP1StepperFixture {
     }
 
     uint16 ReadPixel(uint32 x, uint32 y) const {
-        const auto &fb = state->spriteFB[state->displayFB ^ 1];
+        const auto &fb = state->mem1.FBRAM[state->displayFB ^ 1];
         return util::ReadBE<uint16>(&fb[(y * 512 + x) * sizeof(uint16)]);
     }
 

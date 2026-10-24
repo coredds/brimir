@@ -323,8 +323,8 @@ void VDP::DumpVDP2CRAM(std::ostream &out) const {
 void VDP::DumpVDP1Framebuffers(std::ostream &out) const {
     const uint8 dispFB = m_state.displayFB;
     const uint8 drawFB = dispFB ^ 1;
-    out.write((const char *)m_state.spriteFB[drawFB].data(), m_state.spriteFB[drawFB].size());
-    out.write((const char *)m_state.spriteFB[dispFB].data(), m_state.spriteFB[dispFB].size());
+    out.write((const char *)m_state.mem1.FBRAM[drawFB].data(), m_state.mem1.FBRAM[drawFB].size());
+    out.write((const char *)m_state.mem1.FBRAM[dispFB].data(), m_state.mem1.FBRAM[dispFB].size());
     m_renderer->DumpExtraVDP1Framebuffers(out);
 }
 

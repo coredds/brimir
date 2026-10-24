@@ -225,11 +225,11 @@ public:
     // VDP1 framebuffer access
 
     std::span<const uint8> VDP1GetDisplayFramebuffer() const {
-        return m_state.spriteFB[m_state.displayFB];
+        return m_state.mem1.FBRAM[m_state.displayFB];
     }
 
     std::span<const uint8> VDP1GetDrawFramebuffer() const {
-        return m_state.spriteFB[m_state.displayFB ^ 1];
+        return m_state.mem1.FBRAM[m_state.displayFB ^ 1];
     }
 
     // -------------------------------------------------------------------------

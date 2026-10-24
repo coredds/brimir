@@ -96,7 +96,7 @@ TEST_CASE("VDP sprite blending and shadow match scalar RGB across lanes and mask
     for (uint32 x = 0; x < width / scale; ++x) {
         const uint16 pixel = static_cast<uint16>((1 + (x % palette.size())) | ((x & 7) << 11) |
                                                  (!blendEnabled(x) << 14) | (shadowEnabled(x) << 15));
-        util::WriteBE<uint16>(&state->spriteFB[state->displayFB][2 * x], pixel);
+        util::WriteBE<uint16>(&state->mem1.FBRAM[state->displayFB][2 * x], pixel);
     }
     CompositeFrame frame;
     frame.Render(*renderer, width);
@@ -155,7 +155,7 @@ TEST_CASE("VDP sprite gradation matches scalar selection and averages", "[vdp][c
     const auto present = [&](uint32 x) { return Selected(maskPattern, x / scale, width / scale); };
     for (uint32 x = 0; x < width / scale; ++x) {
         const uint16 pixel = static_cast<uint16>((1 + colorIndex(x)) | (!present(x * scale) << 14));
-        util::WriteBE<uint16>(&state->spriteFB[state->displayFB][2 * x], pixel);
+        util::WriteBE<uint16>(&state->mem1.FBRAM[state->displayFB][2 * x], pixel);
     }
     CompositeFrame frame;
     frame.Render(*renderer, width);
@@ -238,7 +238,7 @@ TEST_CASE("VDP layered line selection and extended averages match scalar RGB", "
     for (uint32 x = 0; x < width / scale; ++x) {
         const uint16 pixel = static_cast<uint16>((1 + x % palette.size()) |
                                                  (!Selected(maskPattern, x, width / scale) << 14));
-        util::WriteBE<uint16>(&state->spriteFB[state->displayFB][2 * x], pixel);
+        util::WriteBE<uint16>(&state->mem1.FBRAM[state->displayFB][2 * x], pixel);
     }
     CompositeFrame frame;
     frame.Render(*renderer, width);

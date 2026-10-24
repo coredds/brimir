@@ -30,6 +30,7 @@ inline void NoopMemFn(uint32 address, T value) {}
 /// @brief VDP1 memory arrays and accessors.
 struct VDP1Memory {
     alignas(16) std::array<uint8, kVDP1VRAMSize> VRAM;
+    alignas(16) std::array<SpriteFB, 2> FBRAM;
 
     // Hard reset
     void Reset() {
@@ -44,6 +45,8 @@ struct VDP1Memory {
                 VRAM[addr] = 0xAA;
             }
         }
+        FBRAM[0].fill(0);
+        FBRAM[1].fill(0);
     }
 
     template <mem_primitive T>
@@ -843,9 +846,6 @@ struct VDPState {
         if (hard) {
             mem1.Reset();
             mem2.Reset();
-            for (auto &fb : spriteFB) {
-                fb.fill(0);
-            }
             displayFB = 0;
         }
 
@@ -864,10 +864,11 @@ struct VDPState {
 
     void SaveState(savestate::VDPSaveState &state) const {
         state.VRAM1 = mem1.VRAM;
+        state.FBRAM = mem1.FBRAM;
+        state.displayFB = displayFB;
+
         state.VRAM2 = mem2.VRAM;
         state.CRAM = mem2.CRAM;
-        state.spriteFB = spriteFB;
-        state.displayFB = displayFB;
 
         state.regs1.TVMR = regs1.ReadTVMR();
         state.regs1.FBCR = regs1.ReadFBCR();
@@ -1109,10 +1110,11 @@ struct VDPState {
 
     void LoadState(const savestate::VDPSaveState &state) {
         mem1.VRAM = state.VRAM1;
+        mem1.FBRAM = state.FBRAM;
+        displayFB = state.displayFB;
+
         mem2.VRAM = state.VRAM2;
         mem2.CRAM = state.CRAM;
-        spriteFB = state.spriteFB;
-        displayFB = state.displayFB;
 
         regs1.WriteTVMR(state.regs1.TVMR);
         regs1.WriteFBCR(state.regs1.FBCR);
@@ -1335,7 +1337,6 @@ struct VDPState {
 
     VDP1Memory mem1;
     VDP2Memory mem2;
-    alignas(16) std::array<SpriteFB, 2> spriteFB;
     uint8 displayFB; // index of current sprite display buffer, CPU-accessible; opposite buffer is drawn into by VDP1
 
     // -------------------------------------------------------------------------
@@ -1355,7 +1356,7 @@ struct VDPState {
     template <mem_primitive T, typename TMemFn = decltype(NoopMemFn<T>)>
     FORCE_INLINE T VDP1ReadFB(uint32 address, TMemFn &&memFn = NoopMemFn) const {
         address = MapVDP1FBAddress<T>(address);
-        const T value = util::ReadBE<T>(&spriteFB[displayFB ^ 1][address]);
+        const T value = util::ReadBE<T>(&mem1.FBRAM[displayFB ^ 1][address]);
         memFn(address, value);
         return value;
     }
@@ -1363,7 +1364,7 @@ struct VDPState {
     template <mem_primitive T, typename TMemFn = decltype(NoopMemFn<T>)>
     FORCE_INLINE void VDP1WriteFB(uint32 address, T value, TMemFn &&memFn = NoopMemFn) {
         address = MapVDP1FBAddress<T>(address);
-        util::WriteBE<T>(&spriteFB[displayFB ^ 1][address], value);
+        util::WriteBE<T>(&mem1.FBRAM[displayFB ^ 1][address], value);
         memFn(address, value);
     }
 

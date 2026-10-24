@@ -176,12 +176,12 @@ private:
     // field lines complementary to the standard VDP1 framebuffer memory (e.g. while displaying odd lines, this buffer
     // contains even lines).
     // VDP2 rendering will combine both buffers to draw a full-resolution progressive image in one go.
-    alignas(16) std::array<SpriteFB, 2> m_altSpriteFB;
+    alignas(16) std::array<SpriteFB, 2> m_altFBRAM;
 
     // Transparent mesh sprite framebuffer.
     // Used when transparent meshes are enabled.
     // Indexing: [altFB][drawFB]
-    alignas(16) std::array<std::array<SpriteFB, 2>, 2> m_meshFB;
+    alignas(16) std::array<std::array<SpriteFB, 2>, 2> m_meshFBRAM;
 
     // -------------------------------------------------------------------------
     // Threading
@@ -335,15 +335,12 @@ private:
         struct VDP1 {
             VDP1Regs regs;
             VDP1Memory mem;
-            alignas(16) std::array<SpriteFB, 2> spriteFB;
         } vdp1;
 
         void Reset(bool hard) {
             vdp1.regs.Reset(true);
             if (hard) {
                 vdp1.mem.Reset();
-                vdp1.spriteFB[0].fill(0);
-                vdp1.spriteFB[1].fill(0);
             }
         }
 
@@ -695,8 +692,8 @@ private:
     // Retrieves the current index of the VDP1 draw framebuffer.
     uint8 VDP1GetDrawFBIndex() const;
 
-    // Retrieves a reference to the specified VDP1 framebuffer in use by the renderer.
-    SpriteFB &VDP1GetRendererFB(bool altFB, uint8 fbIndex);
+    // Retrieves a reference to the current VDP1 FBRAM in use by the renderer.
+    SpriteFB &VDP1GetRendererFBRAM(bool altFB, uint8 fbIndex);
 
     // Erases the current VDP1 display framebuffer.
     template <bool countCycles>
@@ -1095,8 +1092,8 @@ private:
     // regs2 is a reference to the set of VDP2 registers to use.
     // tvmr is a reference to the VDP1 TVMR register to use.
     // params contains the sprite layer's parameters.
-    // spriteFB is a reference to the sprite framebuffer to read from.
-    // spriteFBOffset is the offset into the buffer of the pixel to read.
+    // fbram is a reference to the sprite framebuffer to read from.
+    // fbramOffset is the offset into the buffer of the pixel to read.
     //
     // colorMode is the CRAM color mode.
     // altField selects the complementary field when rendering deinterlaced frames
@@ -1105,7 +1102,7 @@ private:
     // pixel (false).
     template <uint32 colorMode, bool altField, bool transparentMeshes, bool applyMesh>
     void VDP2DrawSpritePixel(uint32 x, const VDP2Regs &regs2, const VDP1RegTVMR &tvmr, const SpriteParams &params,
-                             const SpriteFB &spriteFB, uint32 spriteFBOffset);
+                             const SpriteFB &fbram, uint32 fbramOffset);
 
     // Draws the current VDP2 scanline of the specified normal background layer.
     //
@@ -1356,14 +1353,14 @@ private:
     //
     // regs2 is a reference to the set of VDP2 registers to use.
     // tvmr is a reference to the VDP1 TVMR register to use.
-    // fb is the VDP1 framebuffer to read sprite data from.
-    // fbOffset is the offset into the framebuffer (in bytes) where the sprite data is located.
+    // fbram is the VDP1 framebuffer to read sprite data from.
+    // fbramOffset is the offset into the framebuffer (in bytes) where the sprite data is located.
     //
     // applyMesh determines if the pixel to be fetched is a transparent mesh pixel (true) or a regular sprite layer
     // pixel (false).
     template <bool applyMesh>
-    SpriteData VDP2FetchSpriteData(const VDP2Regs &regs2, const VDP1RegTVMR &tvmr, const SpriteFB &fb,
-                                   uint32 fbOffset);
+    SpriteData VDP2FetchSpriteData(const VDP2Regs &regs2, const VDP1RegTVMR &tvmr, const SpriteFB &fbram,
+                                   uint32 fbramOffset);
 
     // Retrieves the Y display coordinate based on the current interlace mode.
     //

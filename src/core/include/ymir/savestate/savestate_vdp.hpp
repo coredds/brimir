@@ -10,10 +10,11 @@ namespace ymir::savestate {
 
 struct VDPSaveState {
     alignas(16) std::array<uint8, vdp::kVDP1VRAMSize> VRAM1;
+    alignas(16) std::array<std::array<uint8, vdp::kVDP1FBRAMSize>, 2> FBRAM;
+    uint8 displayFB;
+
     alignas(16) std::array<uint8, vdp::kVDP2VRAMSize> VRAM2;
     alignas(16) std::array<uint8, vdp::kVDP2CRAMSize> CRAM;
-    alignas(16) std::array<std::array<uint8, vdp::kVDP1FBRAMSize>, 2> spriteFB;
-    uint8 displayFB;
 
     struct VDP1SaveState {
         bool drawing;
@@ -227,7 +228,7 @@ struct VDPSaveState {
             sint32 localCoordX;
             sint32 localCoordY;
 
-            std::array<std::array<std::array<uint8, vdp::kVDP1FBRAMSize>, 2>, 2> meshFB;
+            std::array<std::array<std::array<uint8, vdp::kVDP1FBRAMSize>, 2>, 2> meshFBRAM;
         };
 
         struct NBGLayerSaveState {
