@@ -503,6 +503,35 @@ TEST_CASE("Save state version reject", "[core][savestate][unit]") {
     REQUIRE_FALSE(core.LoadState(buf.data(), stateSize));
 }
 
+TEST_CASE("BRI2 state with the previous version is rejected", "[core][savestate][unit][regression]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    // A real state of the current size, with only the version word patched: pins the version bump
+    // independently of sizeof(SaveState), so that states from before the VDP1 FBRAM layout change
+    // are rejected cleanly even if their size happens to match.
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> buf(stateSize);
+    REQUIRE(core.SaveState(buf.data(), stateSize));
+
+    uint32_t compressedSize = 0;
+    std::memcpy(&compressedSize, buf.data() + 12, sizeof(compressedSize));
+    const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
+
+    const uint32_t previousVersion = CoreWrapper::kSaveStateVersion - 1;
+    std::memcpy(buf.data() + 4, &previousVersion, sizeof(previousVersion));
+    REQUIRE_FALSE(core.LoadState(buf.data(), savedSize));
+
+    // The core is unharmed and still runs.
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
+
+    // Control: the same buffer with the current version loads.
+    const uint32_t currentVersion = CoreWrapper::kSaveStateVersion;
+    std::memcpy(buf.data() + 4, &currentVersion, sizeof(currentVersion));
+    REQUIRE(core.LoadState(buf.data(), savedSize));
+}
+
 TEST_CASE("Save state writes 16-byte header", "[core][savestate][unit]") {
     CoreWrapper core;
     REQUIRE(core.Initialize());
@@ -521,7 +550,7 @@ TEST_CASE("Save state writes 16-byte header", "[core][savestate][unit]") {
     std::memcpy(&compressedSize, buf.data() + 12, sizeof(compressedSize));
 
     REQUIRE(magic == 0x32524942); // "BRI2" in LE
-    REQUIRE(version == 2);
+    REQUIRE(version == CoreWrapper::kSaveStateVersion);
     REQUIRE(uncompSize == sizeof(ymir::savestate::SaveState));
     REQUIRE(compressedSize > 0);
     REQUIRE(compressedSize < stateSize - 16);
@@ -539,7 +568,8 @@ TEST_CASE("Save state from before the CD block busy delay and read FIFO is rejec
     constexpr uint32_t kOldUncompressedSize = 6315744;
     REQUIRE(kOldUncompressedSize != sizeof(ymir::savestate::SaveState));
 
-    // A state saved by the previous build: valid BRI2 header and a valid LZ4 payload of the old size.
+    // A state saved by the previous build: valid BRI2 header (current version, so that the size check
+    // is what rejects it) and a valid LZ4 payload of the old size.
     std::vector<char> raw(kOldUncompressedSize, 0);
     std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(raw.size())));
     const int compressed = LZ4_compress_default(raw.data(), reinterpret_cast<char*>(buf.data() + 16),
@@ -547,7 +577,7 @@ TEST_CASE("Save state from before the CD block busy delay and read FIFO is rejec
                                                 static_cast<int>(buf.size() - 16));
     REQUIRE(compressed > 0);
     const uint32_t magic = 0x32524942; // "BRI2" in LE
-    const uint32_t version = 2;
+    const uint32_t version = CoreWrapper::kSaveStateVersion;
     const uint32_t uncompressedSize = kOldUncompressedSize;
     const uint32_t compressedSize = static_cast<uint32_t>(compressed);
     std::memcpy(buf.data(), &magic, 4);
@@ -592,7 +622,7 @@ TEST_CASE("Save state with out-of-range read FIFO cursors is rejected",
                                                     static_cast<int>(buf.size() - 16));
         REQUIRE(compressed > 0);
         const uint32_t magic = 0x32524942; // "BRI2" in LE
-        const uint32_t version = 2;
+        const uint32_t version = CoreWrapper::kSaveStateVersion;
         const uint32_t uncompressedSize = static_cast<uint32_t>(sizeof(*state));
         const uint32_t compressedSize = static_cast<uint32_t>(compressed);
         std::memcpy(buf.data(), &magic, 4);

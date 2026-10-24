@@ -62,7 +62,6 @@ constexpr uint8_t kPersistentSMPCDataVersion = 0x01;
 
 constexpr uint32_t kNewStateMagic    = 0x32524942; // "BRI2" in LE
 constexpr uint32_t kLegacyStateMagic = 0x4D495242; // "BRIM" in LE
-constexpr uint32_t kSaveStateVersion = 2;
 
 bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
                                     const std::filesystem::path &path) {
