@@ -193,6 +193,9 @@ private:
     uint32 m_xferCount;                        // Number of words transferred in the last transfer
     std::array<uint16, 2352 / 2> m_xferBuffer; // Transfer buffer
     uint32 m_xferBufferPos;                    // Transfer buffer position
+    std::array<uint16, 6> m_xferQueue;         // Transfer queue
+    uint8 m_xferQueueWritePos;                 // Transfer queue write cursor position
+    uint8 m_xferQueueReadPos;                  // Transfer queue read cursor position
 
     // Parameters for sector transfers
     uint32 m_xferSectorPos; // Current transfer sector position
@@ -220,6 +223,8 @@ private:
 
     void ReadSector();
 
+    void PrefillFIFO();
+    void AdvanceFIFO();
     uint16 DoReadTransfer();
     void DoWriteTransfer(uint16 value);
 

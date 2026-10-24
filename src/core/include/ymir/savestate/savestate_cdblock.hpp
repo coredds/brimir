@@ -65,6 +65,9 @@ struct CDBlockSaveState {
     uint32 xferCount;
     std::array<uint16, 2352 / sizeof(uint16)> xferBuffer;
     uint32 xferBufferPos;
+    std::array<uint16, 6> xferQueue;
+    uint8 xferQueueWritePos;
+    uint8 xferQueueReadPos;
 
     uint32 xferSectorPos;
     uint32 xferSectorEnd;

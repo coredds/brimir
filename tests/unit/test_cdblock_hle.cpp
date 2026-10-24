@@ -352,3 +352,115 @@ TEST_CASE("HLE busy delay survives a save state", "[cdblock-hle][backport]") {
     cd->block.SaveState(saved);
     CHECK(saved.busyDelay == 2);
 }
+
+
+namespace {
+
+// Distinct TOC words so every word of the transfer can be told apart.
+std::unique_ptr<CDBlockFixture> MakeTOCFixture(std::vector<uint16> &expected) {
+    auto cd = std::make_unique<CDBlockFixture>();
+    auto &toc = cd->disc.sessions.back().toc;
+    expected.clear();
+    for (uint32 i = 0; i < toc.size(); ++i) {
+        toc[i] = 0x41000096u + i * 0x00010203u;
+        expected.push_back(static_cast<uint16>(toc[i] >> 16u));
+        expected.push_back(static_cast<uint16>(toc[i]));
+    }
+    cd->Command(0x0200);
+    return cd;
+}
+
+} // namespace
+
+TEST_CASE("HLE TOC transfer words are unchanged by the read FIFO", "[cdblock-hle][backport]") {
+    // Ymir a8856768: the FIFO prefill must not alter the sequence of words the guest reads.
+    std::vector<uint16> expected;
+    auto cd = MakeTOCFixture(expected);
+    REQUIRE(expected.size() == 204);
+    for (uint32 i = 0; i < expected.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(cd->bus.Read<uint16>(0x5818000) == expected[i]);
+    }
+}
+
+TEST_CASE("HLE read FIFO survives a save state mid-transfer", "[cdblock-hle][backport]") {
+    // Ymir a8856768: the transfer queue and its cursors are part of the save state.
+    std::vector<uint16> expected;
+    auto cd = MakeTOCFixture(expected);
+    for (uint32 i = 0; i < 3; ++i) {
+        REQUIRE(cd->bus.Read<uint16>(0x5818000) == expected[i]);
+    }
+    savestate::CDBlockSaveState saved{};
+    cd->block.SaveState(saved);
+    CHECK(saved.xferQueueReadPos == 3);
+    CHECK(saved.xferQueueWritePos == 2);
+    CHECK(saved.xferQueue[0] == expected[6]);
+    CHECK(saved.xferQueue[5] == expected[5]);
+
+    auto fresh = std::make_unique<CDBlockFixture>();
+    fresh->block.LoadState(saved);
+    savestate::CDBlockSaveState reloaded{};
+    fresh->block.SaveState(reloaded);
+    CHECK(reloaded.xferQueueReadPos == saved.xferQueueReadPos);
+    CHECK(reloaded.xferQueueWritePos == saved.xferQueueWritePos);
+    CHECK(reloaded.xferQueue == saved.xferQueue);
+
+    for (uint32 i = 3; i < expected.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(fresh->bus.Read<uint16>(0x5818000) == expected[i]);
+    }
+}
+
+TEST_CASE("HLE Get Sector transfer across sectors is unchanged by the read FIFO", "[cdblock-hle][backport]") {
+    // Ymir a8856768: the FIFO reads ahead across sector boundaries without skipping or repeating words.
+    auto cd = std::make_unique<CDBlockFixture>();
+    cd->state.getSectorLength = 2048;
+    cd->block.LoadState(cd->state);
+    AddBuffer(*cd, 0, 2352, 1, false);
+    AddBuffer(*cd, 0, 2352, 1, false);
+    uint32 seed = 0;
+    for (auto &buffer : cd->state.buffers) {
+        if (buffer.partitionIndex == 0) {
+            for (uint32 i = 0x10; i < 0x10 + 2048; ++i) {
+                buffer.data[i] = static_cast<uint8>(seed++ * 7u + 3u);
+            }
+        }
+    }
+    cd->block.LoadState(cd->state);
+
+    cd->Command(0x6100, 0, 0, 2);
+    std::vector<uint16> expected;
+    for (const auto &buffer : cd->state.buffers) {
+        if (buffer.partitionIndex == 0) {
+            for (uint32 i = 0; i < 2048; i += 2) {
+                expected.push_back(static_cast<uint16>((buffer.data[0x10 + i] << 8u) | buffer.data[0x10 + i + 1]));
+            }
+        }
+    }
+    REQUIRE(expected.size() == 2048);
+    for (uint32 i = 0; i < expected.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(cd->bus.Read<uint16>(0x5818000) == expected[i]);
+    }
+}
+
+TEST_CASE("HLE End Data Transfer reports the words pulled into the read FIFO", "[cdblock-hle][backport]") {
+    // Ymir a8856768: the FIFO holds up to five words ahead of the guest; upstream counts those as transferred.
+    std::vector<uint16> expected;
+    auto cd = MakeTOCFixture(expected);
+    for (uint32 i = 0; i < 3; ++i) {
+        cd->bus.Read<uint16>(0x5818000);
+    }
+    const auto response = cd->Command(0x0600);
+    CHECK((((response[0] & 0xFFu) << 16u) | response[1]) == 3u + 5u);
+}
+
+TEST_CASE("HLE End Data Transfer count is capped by the transfer length", "[cdblock-hle][backport]") {
+    std::vector<uint16> expected;
+    auto cd = MakeTOCFixture(expected);
+    for (uint32 i = 0; i < 202; ++i) {
+        cd->bus.Read<uint16>(0x5818000);
+    }
+    const auto response = cd->Command(0x0600);
+    CHECK((((response[0] & 0xFFu) << 16u) | response[1]) == 204u);
+}

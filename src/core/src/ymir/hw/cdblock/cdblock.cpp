@@ -136,6 +136,9 @@ void CDBlock::Reset(bool hard) {
     m_xferCount = 0xFFFFFF;
     m_xferBuffer.fill(0xFFFF);
     m_xferBufferPos = 0;
+    m_xferQueue.fill(0xFFFF);
+    m_xferQueueReadPos = 0;
+    m_xferQueueWritePos = 0;
 
     m_xferSubcodeFrameAddress = 0;
     m_xferSubcodeGroup = 0;
@@ -328,6 +331,9 @@ void CDBlock::SaveState(savestate::CDBlockSaveState &state) const {
     state.xferCount = m_xferCount;
     state.xferBuffer = m_xferBuffer;
     state.xferBufferPos = m_xferBufferPos;
+    state.xferQueue = m_xferQueue;
+    state.xferQueueWritePos = m_xferQueueWritePos;
+    state.xferQueueReadPos = m_xferQueueReadPos;
 
     state.xferSectorPos = m_xferSectorPos;
     state.xferSectorEnd = m_xferSectorEnd;
@@ -477,6 +483,9 @@ void CDBlock::LoadState(const savestate::CDBlockSaveState &state) {
     m_xferCount = state.xferCount;
     m_xferBuffer = state.xferBuffer;
     m_xferBufferPos = state.xferBufferPos;
+    m_xferQueue = state.xferQueue;
+    m_xferQueueWritePos = state.xferQueueWritePos;
+    m_xferQueueReadPos = state.xferQueueReadPos;
 
     m_xferSectorPos = state.xferSectorPos;
     m_xferSectorEnd = state.xferSectorEnd;
@@ -1273,6 +1282,7 @@ void CDBlock::SetupTOCTransfer() {
             m_xferBuffer[i * 2 + 1] = toc[i] >> 0u;
         }
     }
+    PrefillFIFO();
 }
 
 CDBlock::SectorTransferResult CDBlock::SetupGetSectorTransfer(uint16 sectorPos, uint16 sectorCount,
@@ -1329,6 +1339,7 @@ CDBlock::SectorTransferResult CDBlock::SetupGetSectorTransfer(uint16 sectorPos, 
     }
 
     ReadSector();
+    PrefillFIFO();
 
     return SectorTransferResult::OK;
 }
@@ -1397,6 +1408,7 @@ uint32 CDBlock::SetupFileInfoTransfer(uint32 fileID) {
         m_xferBuffer[i * 6 + 4] = (fileInfo.unitSize << 8u) | fileInfo.interleaveGapSize;
         m_xferBuffer[i * 6 + 5] = (fileInfo.fileNumber << 8u) | fileInfo.attributes;
     }
+    PrefillFIFO();
 
     return numFileInfos;
 }
@@ -1440,6 +1452,7 @@ bool CDBlock::SetupSubcodeTransfer(uint8 type) {
         m_xferBuffer[7] = util::to_bcd(m);
         m_xferBuffer[8] = util::to_bcd(s);
         m_xferBuffer[9] = util::to_bcd(f);
+        PrefillFIFO();
 
         m_RR[0] = GetStatusCode() << 8u;
         m_RR[1] = 5;
@@ -1472,6 +1485,7 @@ bool CDBlock::SetupSubcodeTransfer(uint8 type) {
             devlog::trace<grp::xfer>("Subcode R-W transfer is unimplemented");
             m_xferBuffer.fill(0xFF);
         }
+        PrefillFIFO();
 
         m_RR[0] = GetStatusCode() << 8u;
         m_RR[1] = 12;
@@ -1518,10 +1532,18 @@ void CDBlock::ReadSector() {
     }
 }
 
-uint16 CDBlock::DoReadTransfer() {
+void CDBlock::PrefillFIFO() {
+    m_xferQueueReadPos = 0;
+    m_xferQueueWritePos = 0;
+    for (uint32 i = 0; i < m_xferQueue.size() - 1; ++i) {
+        AdvanceFIFO();
+    }
+}
+
+void CDBlock::AdvanceFIFO() {
+    // Bail out if the transfer has ended
     if (m_xferPos >= m_xferLength) {
-        // TODO: what to return here?
-        return 0xFFFF;
+        return;
     }
 
     uint16 value;
@@ -1550,11 +1572,19 @@ uint16 CDBlock::DoReadTransfer() {
     case TransferType::FileInfo: break;
     case TransferType::Subcode: break;
 
-    default: ++m_xferExtraCount; return 0; // no active transfer, write-only transfer or unimplemented read transfer
+    default: ++m_xferExtraCount; return; // no active transfer, write-only transfer or unimplemented read transfer
     }
 
-    AdvanceTransfer();
+    m_xferQueue[m_xferQueueWritePos] = value;
+    m_xferQueueWritePos = (m_xferQueueWritePos + 1) % m_xferQueue.size();
 
+    AdvanceTransfer();
+}
+
+uint16 CDBlock::DoReadTransfer() {
+    const uint16 value = m_xferQueue[m_xferQueueReadPos];
+    m_xferQueueReadPos = (m_xferQueueReadPos + 1) % m_xferQueue.size();
+    AdvanceFIFO();
     return value;
 }
 
