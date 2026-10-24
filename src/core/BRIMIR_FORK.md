@@ -21,6 +21,9 @@ Ymir is used as a reference; these fixes are kept here and not reported upstream
   - `src/core/include/ymir/hw/vdp/renderer/vdp_renderer_sw.hpp` and
     `src/core/src/ymir/hw/vdp/renderer/vdp_renderer_sw.cpp`: `VDP1BeginFrame` and the
     `VDP1RenderEvent::BeginFrame` event.
+  - `src/core/include/ymir/util/dirty_bitmap.hpp`: two missing includes, the
+    `FindNext` shift guard and an explicit template argument in the `FindNextGroup`
+    constraint.
 
 Everything else under `src/core/` stays verbatim upstream.
 
@@ -66,6 +69,7 @@ whose CD block read FIFO cursors are out of range, which upstream's `CDBlock::Va
 |---|---|---|---|---|
 | 2026-10-24 | `hw/cdblock/cdblock.cpp` | `CmdCalculateActualSize` and `CmdGetSectorInfo` reject partition numbers with `> kNumPartitions`, so partition `kNumPartitions` (24, which does not exist) reaches `PartitionManager::GetBufferCount`/`GetTail` and reads past the partition table. Guest-triggerable; Calculate Actual Size returned a status computed from that memory. | `>=`, so partition 24 is rejected like any other invalid partition. | `HLE partition commands reject partition numbers past the last partition` (`[cdblock-hle][brimir]`) |
 | 2026-10-24 | `hw/vdp/renderer/vdp_renderer_sw.hpp`, `vdp_renderer_sw.cpp` | `VDP1BeginFrame` runs on the emulator thread. With threaded VDP1 it read the VDP1 render thread's register copy (`VDP1GetRegs()`, since Ymir `ce270c04`) and, with threaded VDP2, the VDP2 render thread's copy, both of which can lag behind the emulator thread's writes. It then wrote `m_VDP1doubleV`, the deinterlace enhancement's vertical doubling flag, while the VDP1 render thread could still be drawing the previous frame's queued commands. A frame could be drawn with the previous frame's FBCR.DIE value, or its commands with the next frame's doubling. Only affects the deinterlace enhancement in double-density interlace modes. | `VDP1BeginFrame` reads `m_state.regs1`/`m_state.regs2` (the emulator thread's registers) and, with threaded VDP1, sends the flag in a new `VDP1RenderEvent::BeginFrame` event that the render thread applies in order with the commands (unthreaded: set directly, as before). | `Threaded VDP1 applies the double-density setting of each frame in order` (`[vdp][vdp1][threaded][brimir]`); failed 50/50 iterations before the fix. |
+| 2026-10-24 | `util/dirty_bitmap.hpp` | The header uses `bit::is_power_of_two` and `std::min` without including `<ymir/util/bit_ops.hpp>` or `<algorithm>`, so it only compiles after other headers. `FindNext` shifts a `uint64_t` by `ones`, which is 64 for a fully set entry (for example after `SetAll`): undefined behavior, harmless only because the shifted value is discarded. The `FindNextGroup` constraint `bit::is_power_of_two(N)` is rejected by MSVC 14.44 for every `N` (member template of a class template, deduced `T`). | Added the two includes and `entry = ones == kBitsPerEntry ? 0 : entry >> ones`; the constraint calls `bit::is_power_of_two<size_t>(N)`. | `DirtyBitmap FindNext walks a fully set entry`, `DirtyBitmap FindNextGroup merges groups with any bit set` (`[util][dirty-bitmap]`) |
 
 ## Upstream SH-2 ports
 
