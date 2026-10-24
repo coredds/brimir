@@ -534,7 +534,8 @@ TEST_CASE("Save state from before the CD block busy delay and read FIFO is rejec
 
     // sizeof(SaveState) was 6315744 (MSVC x64) until the CD block read FIFO (Ymir a8856768) added
     // 16 bytes; the busy delay and the SCSP one-shot flag fit in existing padding. Hard-coded because
-    // the old layout no longer exists to measure.
+    // the old layout no longer exists to measure. On other ABIs the sizes differ anyway, so this test
+    // still proves that a size mismatch is rejected, not that the exact old layout is.
     constexpr uint32_t kOldUncompressedSize = 6315744;
     REQUIRE(kOldUncompressedSize != sizeof(ymir::savestate::SaveState));
 
@@ -555,6 +556,69 @@ TEST_CASE("Save state from before the CD block busy delay and read FIFO is rejec
     std::memcpy(buf.data() + 12, &compressedSize, 4);
 
     REQUIRE_FALSE(core.LoadState(buf.data(), 16 + static_cast<size_t>(compressed)));
+
+    // The core is unharmed and still runs.
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
+}
+
+TEST_CASE("Save state with out-of-range read FIFO cursors is rejected",
+          "[core][savestate][unit][regression]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> saved(stateSize);
+    REQUIRE(core.SaveState(saved.data(), stateSize));
+
+    // Decompress a state saved by the core, patch it, and repack it into a valid BRI2 buffer so that
+    // only the cursor validation can reject it. xferQueue*Pos index a fixed-size array (Ymir a8856768).
+    uint32_t savedCompressedSize = 0;
+    std::memcpy(&savedCompressedSize, saved.data() + 12, 4);
+
+    auto repack = [&](auto&& patch) {
+        auto state = std::make_unique<ymir::savestate::SaveState>();
+        const int n = LZ4_decompress_safe(reinterpret_cast<const char*>(saved.data() + 16),
+                                          reinterpret_cast<char*>(state.get()),
+                                          static_cast<int>(savedCompressedSize),
+                                          static_cast<int>(sizeof(ymir::savestate::SaveState)));
+        REQUIRE(n == static_cast<int>(sizeof(ymir::savestate::SaveState)));
+        patch(*state);
+
+        std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(sizeof(*state))));
+        const int compressed = LZ4_compress_default(reinterpret_cast<const char*>(state.get()),
+                                                    reinterpret_cast<char*>(buf.data() + 16),
+                                                    static_cast<int>(sizeof(*state)),
+                                                    static_cast<int>(buf.size() - 16));
+        REQUIRE(compressed > 0);
+        const uint32_t magic = 0x32524942; // "BRI2" in LE
+        const uint32_t version = 2;
+        const uint32_t uncompressedSize = static_cast<uint32_t>(sizeof(*state));
+        const uint32_t compressedSize = static_cast<uint32_t>(compressed);
+        std::memcpy(buf.data(), &magic, 4);
+        std::memcpy(buf.data() + 4, &version, 4);
+        std::memcpy(buf.data() + 8, &uncompressedSize, 4);
+        std::memcpy(buf.data() + 12, &compressedSize, 4);
+        buf.resize(16 + static_cast<size_t>(compressed));
+        return buf;
+    };
+
+    constexpr auto kQueueSize = std::tuple_size_v<decltype(ymir::savestate::CDBlockSaveState::xferQueue)>;
+
+    SECTION("unmodified state loads") {
+        const auto buf = repack([](ymir::savestate::SaveState&) {});
+        REQUIRE(core.LoadState(buf.data(), buf.size()));
+    }
+
+    SECTION("write cursor out of range") {
+        const auto buf = repack([](ymir::savestate::SaveState& s) { s.cdblock.xferQueueWritePos = kQueueSize; });
+        REQUIRE_FALSE(core.LoadState(buf.data(), buf.size()));
+    }
+
+    SECTION("read cursor out of range") {
+        const auto buf = repack([](ymir::savestate::SaveState& s) { s.cdblock.xferQueueReadPos = 0xFF; });
+        REQUIRE_FALSE(core.LoadState(buf.data(), buf.size()));
+    }
 
     // The core is unharmed and still runs.
     core.RunFrame();

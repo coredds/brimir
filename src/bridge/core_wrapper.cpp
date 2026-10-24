@@ -1155,6 +1155,13 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
     }
 }
 
+// The core's CDBlock::ValidateState() does not range-check the read FIFO cursors, so a crafted state
+// could index outside the queue. The core is kept upstream-verbatim, so the bridge rejects it here.
+static bool HasValidCDBlockCursors(const ymir::savestate::SaveState& state) {
+    const size_t queueSize = state.cdblock.xferQueue.size();
+    return state.cdblock.xferQueueWritePos < queueSize && state.cdblock.xferQueueReadPos < queueSize;
+}
+
 bool CoreWrapper::LoadState(const void* data, size_t size) {
     if (!m_initialized || !m_saturn || !data) {
         return false;
@@ -1211,6 +1218,9 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             if (result != static_cast<int>(uncompSize)) {
                 return false;
             }
+            if (!HasValidCDBlockCursors(*state)) {
+                return false;
+            }
             return m_saturn->LoadState(*state, true);
         }
 
@@ -1231,6 +1241,9 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 static_cast<int>(uncompSize)
             );
             if (result != static_cast<int>(uncompSize)) {
+                return false;
+            }
+            if (!HasValidCDBlockCursors(*state)) {
                 return false;
             }
             return m_saturn->LoadState(*state, true);

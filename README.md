@@ -56,7 +56,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - SCU DSP and DMA emulation
 - CHD and ISO disc format support via libchdr
 - Save states (LZ4-compressed) and backup RAM persistence
-- Versioned save states with backward compatibility
+- Versioned save states (states from incompatible builds are rejected)
 - SRAM managed as a single source of truth for libretro `.srm` files
 - Per-region persistent SMPC/RTC data with automatic migration from the legacy filename
 - Auto-detection of console region from disc; real NTSC/PAL timing reported to the frontend
