@@ -67,6 +67,9 @@ add_executable(brimir_tests
     # VDP2 GPU parameter structs vs the reflected shader layouts, 32-bit rotation math ([vdp2] runs without Vulkan;
     # the [gpu] case is compiled with BRIMIR_VULKAN only)
     unit/test_gpu_vdp2_params.cpp
+    # VDP2 front half (parameter packing, CRAM cache, batching, frame records) through the CPU scene harness
+    unit/vdp2_scene.cpp
+    unit/test_vdp2_front.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
