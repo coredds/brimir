@@ -98,6 +98,10 @@ std::optional<uint32_t> EvaluateDevice(const InstanceFunctions &fn, VkPhysicalDe
                     VersionString(gpu::kRequiredApiVersion);
         return std::nullopt;
     }
+    if (const std::string limit = gpu::UnmetLimit(properties.limits); !limit.empty()) {
+        rejection = name + ": limit " + limit;
+        return std::nullopt;
+    }
 
     VkPhysicalDeviceFeatures features{};
     fn.getFeatures(gpu, &features);
@@ -707,7 +711,8 @@ bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &re
     m.device = std::move(device);
     m.iface = iface;
 
-    // The compute frame output needs Vulkan 1.2, a compute queue and the baseline features. Without them the frames
+    // The compute frame output needs Vulkan 1.2, a compute queue and the baseline features and limits (gpu_version.hpp;
+    // the limits are those of the VDP2 pipelines, so the GPU renderer uses the same check). Without them the frames
     // are still presented through Vulkan (the frontend ignores CPU frames once it runs a hardware context): the
     // bridge's converted frame is uploaded with plain Vulkan 1.0 copies.
     std::string computeIssue;
@@ -723,6 +728,8 @@ bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &re
     } else if (iface->queue_index >= familyCount ||
                !(families[iface->queue_index].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
         computeIssue = "the frontend's queue does not support compute";
+    } else if (const std::string limit = gpu::UnmetLimit(m.device->Properties().limits); !limit.empty()) {
+        computeIssue = std::string(m.device->Properties().deviceName) + ": device limit " + limit;
     } else if (!negotiated && (!gpu::kRequiredCoreFeatures.empty() || !gpu::kRequiredDeviceExtensions.empty())) {
         computeIssue = "the frontend's device was not created through the negotiation interface, so the required "
                        "features are not enabled";

@@ -111,9 +111,10 @@ uint4 UnpackRGBA8(uint color) {
     return uint4(color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF, color >> 24);
 }
 
-// Brimir: the output size the back half pushes (CommonRenderParams::outputSize): HRes, VRes.
+// Brimir: the output size the back half pushes (CommonRenderParams::outputSize): HRes, VRes, clamped to the output
+// images and the composite buffer (kMaxResH x kMaxResV) so a bad value cannot address beyond them.
 uint2 UnpackOutputSize(uint outputSize) {
-    return uint2(outputSize & 0xFFFF, outputSize >> 16);
+    return min(uint2(outputSize & 0xFFFF, outputSize >> 16), uint2(kMaxResH, kMaxResV));
 }
 
 #endif

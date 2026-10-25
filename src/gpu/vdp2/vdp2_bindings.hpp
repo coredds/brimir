@@ -32,8 +32,11 @@
 
 #include "gpu/vdp2/vdp2_hw_params.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <initializer_list>
+#include <span>
 
 namespace brimir::gpu::vdp2 {
 
@@ -80,9 +83,14 @@ inline constexpr uint32_t kBgsDispatchZ = 7; // NBG0-3, RBG0-1, colour calculati
 /// @brief Descriptor kinds, mapped to VkDescriptorType by the Vulkan side.
 enum class DescriptorKind : uint8_t { StorageBuffer, StorageBufferDynamic, SampledImage, StorageImage };
 
+/// @brief Format of an image binding's image (storage images declare it in the shader; sampled views read it as
+/// Unknown). None for buffers.
+enum class ImageFormat : uint8_t { None, Rgba8ui, R32ui };
+
 struct Binding {
     uint32_t binding;
     DescriptorKind kind;
+    ImageFormat format = ImageFormat::None;
 };
 
 inline constexpr std::array<Binding, 7> kRenderSpriteBindings{{
@@ -91,8 +99,8 @@ inline constexpr std::array<Binding, 7> kRenderSpriteBindings{{
     {kBindingCRAMColor, DescriptorKind::StorageBuffer},
     {kBindingRotParamBases, DescriptorKind::StorageBuffer},
     {kBindingSpriteFB, DescriptorKind::StorageBuffer},
-    {kBindingLayerOut, DescriptorKind::StorageImage},
-    {kBindingSpriteAttrsOut, DescriptorKind::StorageImage},
+    {kBindingLayerOut, DescriptorKind::StorageImage, ImageFormat::Rgba8ui},
+    {kBindingSpriteAttrsOut, DescriptorKind::StorageImage, ImageFormat::R32ui},
 }};
 
 inline constexpr std::array<Binding, 10> kRenderBgsBindings{{
@@ -102,20 +110,60 @@ inline constexpr std::array<Binding, 10> kRenderBgsBindings{{
     {kBindingCRAMRotCoeff, DescriptorKind::StorageBuffer},
     {kBindingRotParamBases, DescriptorKind::StorageBuffer},
     {kBindingNBGLines, DescriptorKind::StorageBuffer},
-    {kBindingSpriteAttrsIn, DescriptorKind::SampledImage},
-    {kBindingLayerOut, DescriptorKind::StorageImage},
-    {kBindingRBGLineColorOut, DescriptorKind::StorageImage},
-    {kBindingColorCalcWindowOut, DescriptorKind::StorageImage},
+    {kBindingSpriteAttrsIn, DescriptorKind::SampledImage, ImageFormat::R32ui},
+    {kBindingLayerOut, DescriptorKind::StorageImage, ImageFormat::Rgba8ui},
+    {kBindingRBGLineColorOut, DescriptorKind::StorageImage, ImageFormat::Rgba8ui},
+    {kBindingColorCalcWindowOut, DescriptorKind::StorageImage, ImageFormat::R32ui},
 }};
 
 inline constexpr std::array<Binding, 7> kComposeBindings{{
     {kBindingComposeParams, DescriptorKind::StorageBufferDynamic},
     {kBindingLnclBack, DescriptorKind::StorageBuffer},
-    {kBindingSpriteAttrsIn, DescriptorKind::SampledImage},
-    {kBindingLayerIn, DescriptorKind::SampledImage},
-    {kBindingRBGLineColorIn, DescriptorKind::SampledImage},
-    {kBindingColorCalcWindowIn, DescriptorKind::SampledImage},
+    {kBindingSpriteAttrsIn, DescriptorKind::SampledImage, ImageFormat::R32ui},
+    {kBindingLayerIn, DescriptorKind::SampledImage, ImageFormat::Rgba8ui},
+    {kBindingRBGLineColorIn, DescriptorKind::SampledImage, ImageFormat::Rgba8ui},
+    {kBindingColorCalcWindowIn, DescriptorKind::SampledImage, ImageFormat::R32ui},
     {kBindingCompositeOut, DescriptorKind::StorageBuffer},
 }};
+
+/// @brief Descriptors of the given kinds in one pipeline's set (a compute pipeline has one stage).
+constexpr uint32_t CountBindings(std::span<const Binding> bindings, DescriptorKind a, DescriptorKind b) {
+    uint32_t count = 0;
+    for (const Binding &binding : bindings) {
+        if (binding.kind == a || binding.kind == b) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/// @brief The largest per-stage use over the three VDP2 pipelines (gpu_version.hpp's device limits match these).
+struct StageUsage {
+    uint32_t storageBuffers = 0; // STORAGE_BUFFER and STORAGE_BUFFER_DYNAMIC
+    uint32_t storageImages = 0;
+    uint32_t sampledImages = 0;
+    uint32_t resources = 0; // all descriptors (maxPerStageResources)
+};
+
+constexpr StageUsage MaxStageUsage() {
+    StageUsage usage;
+    for (std::span<const Binding> bindings : {std::span<const Binding>(kRenderSpriteBindings),
+                                              std::span<const Binding>(kRenderBgsBindings),
+                                              std::span<const Binding>(kComposeBindings)}) {
+        const uint32_t storageBuffers =
+            CountBindings(bindings, DescriptorKind::StorageBuffer, DescriptorKind::StorageBufferDynamic);
+        const uint32_t storageImages =
+            CountBindings(bindings, DescriptorKind::StorageImage, DescriptorKind::StorageImage);
+        const uint32_t sampledImages =
+            CountBindings(bindings, DescriptorKind::SampledImage, DescriptorKind::SampledImage);
+        usage.storageBuffers = std::max(usage.storageBuffers, storageBuffers);
+        usage.storageImages = std::max(usage.storageImages, storageImages);
+        usage.sampledImages = std::max(usage.sampledImages, sampledImages);
+        usage.resources = std::max(usage.resources, static_cast<uint32_t>(bindings.size()));
+    }
+    return usage;
+}
+
+inline constexpr StageUsage kMaxStageUsage = MaxStageUsage();
 
 } // namespace brimir::gpu::vdp2

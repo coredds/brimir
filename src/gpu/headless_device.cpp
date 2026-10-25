@@ -103,6 +103,10 @@ Candidate Evaluate(VkPhysicalDevice physical) {
                               VersionString(kRequiredApiVersion);
         return candidate;
     }
+    if (std::string limit = UnmetLimit(properties.limits); !limit.empty()) {
+        candidate.rejection = "limit " + limit;
+        return candidate;
+    }
 
     uint32_t familyCount = 0;
     volk::vkGetPhysicalDeviceQueueFamilyProperties(physical, &familyCount, nullptr);

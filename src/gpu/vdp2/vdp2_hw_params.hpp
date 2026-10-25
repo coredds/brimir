@@ -18,6 +18,7 @@
 #include <ymir/hw/vdp/vdp2_defs.hpp>
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -323,12 +324,20 @@ struct VDP2CommonRenderParams {
 
     // Brimir: the frame's output size as VDP2SetResolution set it (Vdp2FrameRecord::hres/vres): HRes in bits 0-15,
     // VRes in bits 16-31. The shaders use it as the composite pitch and as the bounds they check before touching their
-    // outputs (no robustness features). The back half sets it per dispatch, like startY; the front half leaves it 0.
+    // outputs (no robustness features). The back half sets it per dispatch with MakeOutputSize, like startY; the front
+    // half leaves it 0.
     // Fills the std430 tail (the block size is a multiple of the uint2 alignment).
     HLSLuint outputSize;
 };
 static_assert(sizeof(VDP2CommonRenderParams) == 48);
 static_assert(sizeof(VDP2CommonRenderParams) <= 128, "must fit the minimum maxPushConstantsSize");
+
+/// @brief Brimir: packs VDP2CommonRenderParams::outputSize. The size must fit the output images and the composite
+/// buffer (kMaxResH x kMaxResV); the shaders clamp to that too.
+inline HLSLuint MakeOutputSize(uint32_t hres, uint32_t vres) {
+    assert(hres <= kMaxResH && vres <= kMaxResV);
+    return hres | (vres << 16u);
+}
 
 /// @brief Global VDP2 window parameters.
 struct VDP2GlobalWindowParams {
