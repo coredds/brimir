@@ -141,6 +141,20 @@ check_run(copy_only 300)
 check_vulkan_counters(copy_only)
 require_log(copy_only "using copy-only frame output")
 
+# ... with rotation (90 swaps the axes) and the medium overscan crop: the bridge's transformed frame, as in software.
+set(transform_options --option brimir_rotation=90 --option brimir_overscan=2)
+run_vkhost(software_transformed ${transform_options})
+if(NOT software_transformed_code EQUAL 0)
+    fail(software_transformed "brimir_vkhost exited with ${software_transformed_code}")
+endif()
+if("${software_transformed_hashes}" STREQUAL "${software_hashes}")
+    fail(software_transformed "the rotation and overscan options did not change the frames")
+endif()
+run_vkhost(copy_only_transformed --vulkan --fake-api 1.1 ${transform_options})
+check_run(copy_only_transformed 300 software_transformed)
+check_vulkan_counters(copy_only_transformed)
+require_log(copy_only_transformed "using copy-only frame output")
+
 # A driver reinit mid-run: context_destroy, a new device, context_reset.
 run_vkhost(reset --vulkan --reset-at 120)
 check_run(reset 300)

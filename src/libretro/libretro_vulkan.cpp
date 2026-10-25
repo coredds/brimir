@@ -341,6 +341,7 @@ struct VulkanOutput::Impl {
     VkResult CreateSlots(uint32_t count, VulkanOutputMode wanted);
     void DestroySlots();
     VkResult WaitSlots();
+    VkResult DrainQueue();
     void Withdraw();
     void Teardown();
     void Abandon();
@@ -449,6 +450,28 @@ VkResult VulkanOutput::Impl::WaitSlots() {
     return VK_SUCCESS;
 }
 
+// Waits until everything submitted to the frontend's queue so far (its own frames, which may still sample our slots,
+// included) has completed: an empty submit with a fence, in submission order after all earlier work. The queue lock
+// is held only around the submit, never while waiting (the equivalent of vkQueueWaitIdle without a wait under
+// lock_queue, which the libretro Vulkan contract forbids).
+VkResult VulkanOutput::Impl::DrainQueue() {
+    const auto &vk = device->Table();
+    const VkDevice dev = device->Device();
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    VkResult result = vk.vkCreateFence(dev, &fenceInfo, nullptr, &fence);
+    if (result != VK_SUCCESS) {
+        return result;
+    }
+    const VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    result = device->Submit(submit, fence);
+    if (result == VK_SUCCESS) {
+        result = vk.vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
+    }
+    vk.vkDestroyFence(dev, fence, nullptr);
+    return result;
+}
+
 void VulkanOutput::Impl::DestroySlots() {
     if (device) {
         const auto &vk = device->Table();
@@ -473,6 +496,7 @@ void VulkanOutput::Impl::Withdraw() {
 }
 
 void VulkanOutput::Impl::Teardown() {
+    Withdraw();
     if (device) {
         // Allowed in context_destroy: the frontend is idle and holds no reference to the images any more.
         device->Table().vkDeviceWaitIdle(device->Device());
@@ -505,6 +529,13 @@ VulkanOutput::Impl::Slot *VulkanOutput::Impl::BeginFrame(uint32_t &index, std::s
         if (const VkResult result = WaitSlots(); result != VK_SUCCESS) {
             error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
             DestroySlots();
+            return nullptr;
+        }
+        // The frontend's own work that still samples the old images.
+        if (const VkResult result = DrainQueue(); result != VK_SUCCESS) {
+            // The slots may still be in use: leak them (and the output) rather than free them under the frontend.
+            error = std::string("waiting for the frontend's queue failed: ") + gpu::vk_util::ResultName(result);
+            Abandon();
             return nullptr;
         }
         DestroySlots();
@@ -611,8 +642,9 @@ bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &re
         reason = "the frontend provided no hardware render interface";
         return false;
     }
+    // Later interface versions only append members.
     if (raw->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN ||
-        raw->interface_version != RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION) {
+        raw->interface_version < RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION) {
         reason = "unsupported hardware render interface (type " + std::to_string(static_cast<int>(raw->interface_type)) +
                  ", version " + std::to_string(raw->interface_version) + ")";
         return false;
@@ -757,12 +789,23 @@ bool VulkanOutput::PresentCopy(const void *xrgb, uint32_t w, uint32_t h, size_t 
         return false;
     }
 
-    // Host-coherent: visible to the device at vkQueueSubmit.
+    // Host-coherent: visible to the device at vkQueueSubmit. The frame plus a border column and row repeating its last
+    // column and row (as the compute output, gpu::WrittenSize): a frontend sampling bilinearly at the right and
+    // bottom edges never reads undefined texels.
+    const gpu::OutputSize written = gpu::WrittenSize({w, h});
     const auto *src = static_cast<const uint8_t *>(xrgb);
     auto *dst = static_cast<uint8_t *>(slot->staging.mapped);
     const size_t rowBytes = size_t{w} * 4;
+    const size_t stagingPitch = size_t{written.width} * 4;
     for (uint32_t y = 0; y < h; ++y) {
-        std::memcpy(dst + y * rowBytes, src + y * pitch, rowBytes);
+        uint8_t *row = dst + y * stagingPitch;
+        std::memcpy(row, src + y * pitch, rowBytes);
+        if (written.width > w) {
+            std::memcpy(row + rowBytes, row + rowBytes - 4, 4);
+        }
+    }
+    if (written.height > h) {
+        std::memcpy(dst + h * stagingPitch, dst + (h - 1) * stagingPitch, stagingPitch);
     }
 
     // Earlier readers of the image (the frontend) finish before the copy; the old contents are not needed. The
@@ -773,7 +816,7 @@ bool VulkanOutput::PresentCopy(const void *xrgb, uint32_t w, uint32_t h, size_t 
                                VK_ACCESS_TRANSFER_WRITE_BIT);
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {w, h, 1};
+    region.imageExtent = {written.width, written.height, 1};
     m.device->Table().vkCmdCopyBufferToImage(slot->cmd, slot->staging.buffer, image, VK_IMAGE_LAYOUT_GENERAL, 1,
                                              &region);
     gpu::vk_util::ImageBarrier(*m.device, slot->cmd, image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,

@@ -237,6 +237,13 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
         // No usable device at all, and too late to fall back (the frontend runs its Vulkan driver now): keep
         // handing over software frames, which RetroArch's vulkan driver does not show.
         brimir_log(RETRO_LOG_ERROR, "Vulkan context unusable, presenting software frames: %s", reason.c_str());
+        if (environ_cb) {
+            static std::string text;
+            text = "Brimir: Vulkan renderer unavailable (" + reason.substr(0, 120) +
+                   "). Set Renderer to Software or change the video driver.";
+            retro_message message{text.c_str(), 600};
+            environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+        }
     } else if (g_vulkanOutput->Mode() == brimir::libretro::VulkanOutputMode::CopyOnly) {
         brimir_log(RETRO_LOG_WARN, "Vulkan compute frame output unavailable (%s); using copy-only frame output",
                    reason.c_str());
