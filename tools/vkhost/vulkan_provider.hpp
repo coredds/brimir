@@ -44,8 +44,9 @@ public:
 
 class VulkanProvider {
 public:
-    // Creates the host's instance and device. Throws VulkanUnavailable.
-    VulkanProvider();
+    // Creates the host's instance and device. Throws VulkanUnavailable. A non-zero fakeApiVersion caps the apiVersion
+    // vkGetPhysicalDeviceProperties reports to the core (--fake-api).
+    explicit VulkanProvider(uint32_t fakeApiVersion = 0);
     ~VulkanProvider();
     VulkanProvider(const VulkanProvider&) = delete;
     VulkanProvider& operator=(const VulkanProvider&) = delete;
@@ -89,6 +90,15 @@ public:
     void LockQueue();
     void UnlockQueue();
     uint32_t SyncIndex() const { return m_syncIndex; }
+    uint32_t FakeApiVersion() const { return m_fakeApi; }
+    uint32_t SyncSlots() const { return m_syncSlots; }
+    bool FailPipelines() const { return m_failPipelines; }
+
+    // The sync ring size (mask = (1 << count) - 1, at most 3). Changing it waits for the device first, as the
+    // contract promises. --grow-mask starts at 1 and grows to 3.
+    void SetSyncSlots(uint32_t count);
+    // --fail-compute-on-grow: once the ring grows, vkCreateComputePipelines fails for the core.
+    void SetFailComputeOnGrow(bool fail) { m_failComputeOnGrow = fail; }
 
     struct RealFunctions; // the unwrapped device functions
     const RealFunctions& Real() const;
@@ -108,6 +118,10 @@ private:
     std::unique_ptr<RealFunctions> m_real;
     std::unique_ptr<retro_hw_render_interface_vulkan> m_iface;
     bool m_live = false;
+    uint32_t m_fakeApi = 0;
+    uint32_t m_syncSlots = 3;
+    bool m_failComputeOnGrow = false;
+    bool m_failPipelines = false;
 
     std::vector<Slot> m_slots;
     uint32_t m_syncIndex = 0;

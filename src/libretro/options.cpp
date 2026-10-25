@@ -57,9 +57,9 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "Renderer (restart required)",
         nullptr,
         "Software draws and presents every frame on the CPU. Vulkan presents the frames through the frontend's "
-        "Vulkan driver (the emulation itself is unchanged for now). Vulkan needs a Vulkan 1.2 GPU and the vulkan "
-        "video driver; when the frontend cannot provide it the core falls back to software. Applies when content "
-        "is loaded.",
+        "Vulkan driver (the emulation itself is unchanged for now). Vulkan is only used when the frontend already "
+        "runs the vulkan video driver (the core never switches drivers); otherwise the core uses software. A "
+        "Vulkan 1.2 GPU gets the GPU frame output, older ones a plain copy. Applies when content is loaded.",
         nullptr,
         "video",
         {

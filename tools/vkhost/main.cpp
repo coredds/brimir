@@ -76,9 +76,15 @@ void PrintUsage(std::FILE* out) {
         "  --reset-in-run F  the same reinit from inside frame F's retro_run (at the core's first environment\n"
         "                call), as RetroArch does inside SET_SYSTEM_AV_INFO (PAL content); a SET_SYSTEM_AV_INFO\n"
         "                that changes the frame rate or maximum geometry also triggers one\n"
-        "  --runahead    run-ahead simulation: before each frame one hidden frame (video disabled) that is\n"
-        "                rolled back, and a second instance of the core (refused a hardware context) that\n"
-        "                replays each frame hidden\n"
+        "  --runahead    run-ahead simulation: before each frame one hidden frame (video disabled; not rolled\n"
+        "                back, so compare with a software --runahead run), and a second instance of the core\n"
+        "                (refused a hardware context) running one frame per frame with audio and video disabled\n"
+        "  --preferred-hw gl  with --vulkan: GET_PREFERRED_HW_RENDER reports GL (RetroArch on the gl driver with\n"
+        "                driver switching allowed); SET_HW_RENDER would still be accepted\n"
+        "  --fake-api X.Y  with --vulkan: vkGetPhysicalDeviceProperties tells the core the GPU supports only\n"
+        "                Vulkan X.Y (for example 1.1: the core's copy-only output)\n"
+        "  --grow-mask F  with --vulkan: sync index mask 0b1 until frame F, then 0b111 (device idle)\n"
+        "  --fail-compute-on-grow  with --grow-mask: the core's vkCreateComputePipelines fails after the growth\n"
         "  --help, -h    show this help\n"
         "\n"
         "Exit status: 0 ok, 1 usage, 2 error, 3 a check failed (queue lock, validation, hidden-frame GPU work,\n"
@@ -138,6 +144,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.config.refuseHw = true;
             continue;
         }
+        if (opt == "--fail-compute-on-grow") {
+            args.config.failComputeOnGrow = true;
+            continue;
+        }
         if (opt == "--runahead") {
             args.config.runahead = true;
             continue;
@@ -177,6 +187,26 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 std::fprintf(stderr, "Invalid --reset-in-run value: %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--grow-mask") {
+            if (!ParseInt(value, args.config.growMaskAt)) {
+                std::fprintf(stderr, "Invalid --grow-mask value: %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--preferred-hw") {
+            const std::string hw = value;
+            if (hw != "gl" && hw != "vulkan") {
+                std::fprintf(stderr, "Invalid --preferred-hw value (gl or vulkan): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.config.preferGl = hw == "gl";
+        } else if (opt == "--fake-api") {
+            unsigned major = 0;
+            unsigned minor = 0;
+            if (std::sscanf(value, "%u.%u", &major, &minor) != 2 || major != 1 || minor > 9) {
+                std::fprintf(stderr, "Invalid --fake-api value (1.N): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.config.fakeApi = (major << 22) | (minor << 12); // VK_MAKE_API_VERSION(0, major, minor, 0)
         } else if (opt == "--option") {
             const std::string text = value;
             const size_t eq = text.find('=');
@@ -192,6 +222,12 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     }
     if (args.config.biosPath.empty() && args.config.systemDir.empty()) {
         std::fprintf(stderr, "--bios or --system-dir is required\n");
+        return ParseResult::Error;
+    }
+    if ((args.config.preferGl || args.config.fakeApi != 0 || args.config.growMaskAt >= 0 ||
+         args.config.failComputeOnGrow) &&
+        !args.config.vulkan) {
+        std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
     }
     if ((args.config.resetAt >= 0 || args.config.resetInRun >= 0) && (!args.config.vulkan || args.config.refuseHw)) {

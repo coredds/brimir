@@ -162,11 +162,17 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         m_overrides[key] = value;
     }
     m_refuseHw = config.refuseHw;
+    m_preferGl = config.preferGl;
+    m_growMaskAt = config.growMaskAt;
     m_resetInRun = config.resetInRun;
     m_frameIndex = 0;
     if (config.vulkan && !config.refuseHw) {
         // Like a frontend's video driver, the instance and device exist before the core is loaded.
-        m_vulkan = std::make_unique<VulkanProvider>();
+        m_vulkan = std::make_unique<VulkanProvider>(config.fakeApi);
+        if (config.growMaskAt >= 0) {
+            m_vulkan->SetSyncSlots(1);
+        }
+        m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
     }
 
     auto api = std::make_unique<Api>();
@@ -337,6 +343,9 @@ bool LibretroHost::RunFrame(FrameSink* sink) {
     if (m_vulkan) {
         m_vulkan->SetVideoEnabled(video);
     }
+    if (m_vulkan && m_frameIndex == m_growMaskAt) {
+        m_vulkan->SetSyncSlots(3);
+    }
     m_sink = sink;
     m_resetInRunPending = m_frameIndex == m_resetInRun;
     m_api->run();
@@ -484,7 +493,9 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
         return true;
     case kEnv(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER):
         if (m_vulkan) {
-            *static_cast<unsigned*>(data) = RETRO_HW_CONTEXT_VULKAN;
+            // --preferred-hw gl: RetroArch on the gl driver with driver switching allowed (it would still accept
+            // SET_HW_RENDER and switch to vulkan).
+            *static_cast<unsigned*>(data) = m_preferGl ? RETRO_HW_CONTEXT_OPENGL : RETRO_HW_CONTEXT_VULKAN;
             return true;
         }
         if (m_refuseHw) {
@@ -592,6 +603,12 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
 void LibretroHost::Video(const void* data, unsigned width, unsigned height, size_t pitch) {
     if (data == nullptr) {
         ++m_duplicate; // the core asks the frontend to repeat the last frame
+        if (m_sink != nullptr && m_lastFrame.w != 0) {
+            // Displayed again, as a frontend does.
+            ++m_recordedFrames;
+            HostFrame frame = m_lastFrame;
+            m_sink->OnFrame(std::move(frame));
+        }
         return;
     }
     if (data == RETRO_HW_FRAME_BUFFER_VALID) {
@@ -618,6 +635,7 @@ void LibretroHost::Video(const void* data, unsigned width, unsigned height, size
         }
         ++m_recordedFrames;
         ++m_recordedHardware;
+        m_lastFrame = frame;
         m_sink->OnFrame(std::move(frame));
         return;
     }
@@ -635,6 +653,7 @@ void LibretroHost::Video(const void* data, unsigned width, unsigned height, size
         std::memcpy(&frame.xrgb[static_cast<size_t>(y) * width], rows + static_cast<size_t>(y) * pitch,
                     static_cast<size_t>(width) * sizeof(uint32_t));
     }
+    m_lastFrame = frame;
     m_sink->OnFrame(std::move(frame));
 }
 

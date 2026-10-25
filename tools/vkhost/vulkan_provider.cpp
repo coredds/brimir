@@ -24,8 +24,7 @@ namespace gpu = brimir::gpu;
 
 namespace {
 
-constexpr uint32_t kSyncSlots = 3; // RetroArch's threaded-video ring
-constexpr uint32_t kSyncMask = 0b111;
+constexpr uint32_t kSyncSlots = 3; // RetroArch's threaded-video ring: mask 0b111
 
 VulkanProvider* g_provider = nullptr;
 
@@ -44,6 +43,8 @@ struct VulkanProvider::RealFunctions {
     PFN_vkQueueWaitIdle queueWaitIdle = nullptr;
     PFN_vkWaitForFences waitForFences = nullptr;
     PFN_vkDeviceWaitIdle deviceWaitIdle = nullptr;
+    PFN_vkGetPhysicalDeviceProperties getPhysicalDeviceProperties = nullptr;
+    PFN_vkCreateComputePipelines createComputePipelines = nullptr;
 };
 
 struct VulkanProvider::Slot {
@@ -95,6 +96,20 @@ VKAPI_ATTR VkResult VKAPI_CALL HookDeviceWaitIdle(VkDevice device) {
     return g_provider->Real().deviceWaitIdle(device);
 }
 
+// --fail-compute-on-grow: pipeline creation fails once the sync mask has grown (fault injection).
+VKAPI_ATTR VkResult VKAPI_CALL HookCreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
+                                                          const VkComputePipelineCreateInfo* infos,
+                                                          const VkAllocationCallbacks* allocator,
+                                                          VkPipeline* pipelines) {
+    if (g_provider->FailPipelines()) {
+        for (uint32_t i = 0; i < count; ++i) {
+            pipelines[i] = VK_NULL_HANDLE;
+        }
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return g_provider->Real().createComputePipelines(device, cache, count, infos, allocator, pipelines);
+}
+
 PFN_vkVoidFunction Intercept(const char* name) {
     const VulkanProvider::RealFunctions& real = g_provider->Real();
     if (std::strcmp(name, "vkQueueSubmit") == 0) {
@@ -115,6 +130,9 @@ PFN_vkVoidFunction Intercept(const char* name) {
     if (std::strcmp(name, "vkDeviceWaitIdle") == 0) {
         return reinterpret_cast<PFN_vkVoidFunction>(&HookDeviceWaitIdle);
     }
+    if (std::strcmp(name, "vkCreateComputePipelines") == 0) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&HookCreateComputePipelines);
+    }
     return nullptr;
 }
 
@@ -131,9 +149,19 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL HookGetDeviceProcAddr(VkDevice device, 
     return g_provider->Real().getDeviceProcAddr(device, name);
 }
 
+// --fake-api: the GPU reports an older Vulkan version (to the core only).
+VKAPI_ATTR void VKAPI_CALL HookGetPhysicalDeviceProperties(VkPhysicalDevice physical,
+                                                           VkPhysicalDeviceProperties* properties) {
+    g_provider->Real().getPhysicalDeviceProperties(physical, properties);
+    properties->apiVersion = std::min(properties->apiVersion, g_provider->FakeApiVersion());
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL HookGetInstanceProcAddr(VkInstance instance, const char* name) {
     if (name == nullptr) {
         return nullptr;
+    }
+    if (g_provider->FakeApiVersion() != 0 && std::strcmp(name, "vkGetPhysicalDeviceProperties") == 0) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&HookGetPhysicalDeviceProperties);
     }
     if (std::strcmp(name, "vkGetInstanceProcAddr") == 0) {
         return reinterpret_cast<PFN_vkVoidFunction>(&HookGetInstanceProcAddr);
@@ -165,8 +193,8 @@ uint32_t GetSyncIndex(void* handle) {
     return FromHandle(handle)->SyncIndex();
 }
 
-uint32_t GetSyncIndexMask(void*) {
-    return kSyncMask;
+uint32_t GetSyncIndexMask(void* handle) {
+    return (1u << FromHandle(handle)->SyncSlots()) - 1;
 }
 
 void SetCommandBuffers(void* handle, uint32_t, const VkCommandBuffer*) {
@@ -250,7 +278,8 @@ VkDevice CreateDeviceWrapper(VkPhysicalDevice gpuHandle, void* opaque, const VkD
 
 } // namespace
 
-VulkanProvider::VulkanProvider() : m_real(std::make_unique<RealFunctions>()) {
+VulkanProvider::VulkanProvider(uint32_t fakeApiVersion)
+    : m_real(std::make_unique<RealFunctions>()), m_fakeApi(fakeApiVersion) {
     if (g_provider != nullptr) {
         throw std::runtime_error("only one Vulkan provider at a time");
     }
@@ -262,6 +291,11 @@ VulkanProvider::VulkanProvider() : m_real(std::make_unique<RealFunctions>()) {
     g_provider = this;
     m_real->getInstanceProcAddr = volk::vkGetInstanceProcAddr;
     m_real->getDeviceProcAddr = volk::vkGetDeviceProcAddr;
+    m_real->getPhysicalDeviceProperties = volk::vkGetPhysicalDeviceProperties;
+    if (m_fakeApi != 0) {
+        std::fprintf(stderr, "vkhost: vulkan: the core is told the GPU supports Vulkan %s\n",
+                     VersionString(m_fakeApi).c_str());
+    }
     std::fprintf(stderr, "vkhost: vulkan: %s (Vulkan %s), validation %s\n", m_host->Properties().deviceName,
                  VersionString(m_host->Properties().apiVersion).c_str(), m_host->ValidationEnabled() ? "on" : "off");
 }
@@ -353,6 +387,9 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
                     m_destroyDevice = neg->destroy_device;
                     std::fprintf(stderr, "vkhost: vulkan: device created through create_device2 (negotiation v%u)\n",
                                  neg->interface_version);
+                } else if (m_fakeApi != 0) {
+                    // Expected: the core rejects a GPU below its baseline; RetroArch then uses its default device.
+                    std::fprintf(stderr, "vkhost: vulkan: create_device2 refused; using the host's default device\n");
                 } else {
                     AddProblem("create_device2 failed; using the host's default device");
                 }
@@ -402,11 +439,16 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
     load(m_real->queueWaitIdle, "vkQueueWaitIdle");
     load(m_real->waitForFences, "vkWaitForFences");
     load(m_real->deviceWaitIdle, "vkDeviceWaitIdle");
+    load(m_real->createComputePipelines, "vkCreateComputePipelines");
 
     m_slots.assign(kSyncSlots, Slot{});
     for (Slot& slot : m_slots) {
         VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        m_ctx->Table().vkCreateFence(device, &fenceInfo, nullptr, &slot.fence);
+        if (const VkResult result = m_ctx->Table().vkCreateFence(device, &fenceInfo, nullptr, &slot.fence);
+            result != VK_SUCCESS) {
+            AddProblem(std::string("vkCreateFence failed: ") + gpu::vk_util::ResultName(result));
+            slot.fence = VK_NULL_HANDLE;
+        }
     }
     m_syncIndex = 0;
     m_image = nullptr;
@@ -449,14 +491,16 @@ void VulkanProvider::SelfTest() {
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     VkFence fence = VK_NULL_HANDLE;
-    m_ctx->Table().vkCreateFence(m_ctx->Device(), &fenceInfo, nullptr, &fence);
-    const auto wait = reinterpret_cast<PFN_vkWaitForFences>(
-        HookGetInstanceProcAddr(m_ctx->Instance(), "vkWaitForFences"));
-    LockQueue();
-    wait(m_ctx->Device(), 1, &fence, VK_TRUE, UINT64_MAX);
-    UnlockQueue();
-    m_ctx->Table().vkDestroyFence(m_ctx->Device(), fence, nullptr);
-    const bool waitCaught = m_lockViolations == before + 2;
+    bool waitCaught = false;
+    if (m_ctx->Table().vkCreateFence(m_ctx->Device(), &fenceInfo, nullptr, &fence) == VK_SUCCESS) {
+        const auto wait = reinterpret_cast<PFN_vkWaitForFences>(
+            HookGetInstanceProcAddr(m_ctx->Instance(), "vkWaitForFences"));
+        LockQueue();
+        wait(m_ctx->Device(), 1, &fence, VK_TRUE, UINT64_MAX);
+        UnlockQueue();
+        m_ctx->Table().vkDestroyFence(m_ctx->Device(), fence, nullptr);
+        waitCaught = m_lockViolations == before + 2;
+    }
 
     m_selfTest = false;
     m_lockViolations = before;
@@ -598,6 +642,23 @@ void VulkanProvider::HostUnlock() {
     }
 }
 
+void VulkanProvider::SetSyncSlots(uint32_t count) {
+    count = std::clamp<uint32_t>(count, 1, kSyncSlots);
+    if (count == m_syncSlots) {
+        return;
+    }
+    // libretro_vulkan.h: when the mask changes the device is idle.
+    if (m_live) {
+        m_real->deviceWaitIdle(m_ctx->Device());
+    }
+    if (count > m_syncSlots && m_failComputeOnGrow) {
+        m_failPipelines = true;
+    }
+    m_syncSlots = count;
+    m_syncIndex = 0;
+    std::fprintf(stderr, "vkhost: vulkan: sync index mask now 0x%x\n", (1u << count) - 1);
+}
+
 void VulkanProvider::EndFrame() {
     if (!m_live) {
         return;
@@ -616,7 +677,7 @@ void VulkanProvider::EndFrame() {
         AddProblem("frame fence submit failed");
         slot.pending = false;
     }
-    m_syncIndex = (m_syncIndex + 1) % kSyncSlots;
+    m_syncIndex = (m_syncIndex + 1) % m_syncSlots;
 }
 
 bool VulkanProvider::ReadImage(unsigned w, unsigned h, HostFrame& out) {

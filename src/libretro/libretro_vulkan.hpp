@@ -11,6 +11,7 @@
 
 #include "libretro.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -23,11 +24,24 @@ struct VulkanFrameSettings {
     uint32_t rotation = 0;
 };
 
-// Calls SET_HW_RENDER (RETRO_HW_CONTEXT_VULKAN, Vulkan 1.2) and registers the negotiation interface. Call from
-// retro_load_game only. Returns false and sets reason when the frontend refuses; the core then stays on software.
-// log may be null.
-bool RequestVulkanContext(retro_environment_t environment, retro_hw_context_reset_t contextReset,
-                          retro_hw_context_reset_t contextDestroy, retro_log_printf_t log, std::string &reason);
+enum class VulkanRequest {
+    Accepted,        // SET_HW_RENDER accepted: the frontend calls context_reset after retro_load_game
+    NotVulkanDriver, // GET_PREFERRED_HW_RENDER reports another driver: SET_HW_RENDER is not even tried
+    Refused,         // SET_HW_RENDER refused
+};
+
+// Unless GET_PREFERRED_HW_RENDER reports a driver other than Vulkan, calls SET_HW_RENDER (RETRO_HW_CONTEXT_VULKAN,
+// Vulkan 1.2) and registers the negotiation interface. Call from retro_load_game only. Anything but Accepted sets
+// reason; the core then stays on software. log may be null.
+VulkanRequest RequestVulkanContext(retro_environment_t environment, retro_hw_context_reset_t contextReset,
+                                   retro_hw_context_reset_t contextDestroy, retro_log_printf_t log,
+                                   std::string &reason);
+
+enum class VulkanOutputMode {
+    None,     // no context, or no usable output: software frames
+    Compute,  // FramePresenter: the native frame converted, cropped and rotated by a compute pass
+    CopyOnly, // the bridge's converted frame copied into the image (Vulkan 1.0 transfers; no compute, no 1.2)
+};
 
 // The GPU frame output on the frontend's device: the FramePresenter with one output image per sync slot, plus
 // a command buffer and fence per slot. Every call must come from the libretro thread (retro_run, context_reset or
@@ -41,7 +55,8 @@ public:
     VulkanOutput &operator=(const VulkanOutput &) = delete;
 
     // context_reset: fetches the interface and builds everything on its device. Tears down a previous context on
-    // the same device first. Returns false (Live() stays false) and sets reason when the device is unusable.
+    // the same device first. Uses the compute output when the device allows it, else the copy-only output (reason
+    // then says why). Returns false (Live() stays false) and sets reason when there is no usable device at all.
     bool ContextReset(retro_environment_t environment, std::string &reason);
     // context_destroy: waits for the device to be idle and destroys everything. Safe to call when not live.
     void ContextDestroy();
@@ -49,13 +64,17 @@ public:
     void Abandon();
 
     bool Live() const;
+    VulkanOutputMode Mode() const;
 
-    // Presents a native frame (XBGR8888, tightly packed) with the output transforms: waits for the frontend's
-    // sync slot, records the upload and conversion, submits (queue lock held only around vkQueueSubmit) and hands
-    // the slot's image over with set_image. Sets outW/outH to the size to report to video_cb. Returns false and
-    // sets error when nothing was handed over.
+    // Compute mode: presents a native frame (XBGR8888, tightly packed) with the output transforms: waits for the
+    // frontend's sync slot, records the upload and conversion, submits (queue lock held only around vkQueueSubmit)
+    // and hands the slot's image over with set_image. Sets outW/outH to the size to report to video_cb. Returns
+    // false and sets error when nothing was handed over; Mode() may have changed then (re-creating the slots for a
+    // larger sync mask failed: copy-only, or None with the image withdrawn).
     bool Present(const uint32_t *xbgr, uint32_t w, uint32_t h, const VulkanFrameSettings &settings, unsigned &outW,
                  unsigned &outH, std::string &error);
+    // Copy-only mode: the same with the bridge's final XRGB8888 frame (already converted, cropped and rotated).
+    bool PresentCopy(const void *xrgb, uint32_t w, uint32_t h, size_t pitch, std::string &error);
 
 private:
     struct Impl;

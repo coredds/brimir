@@ -276,6 +276,10 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--refuse-hw` | refuse `SET_HW_RENDER` and the negotiation interface, as RetroArch does on a gl/d3d driver without driver switching (and in a run-ahead second instance) |
 | `--reset-at F` | with `--vulkan`: a video driver reinit before frame F (counted from 0, warmup included): `context_destroy`, the old device destroyed, a new one through the negotiation, `context_reset` |
 | `--reset-in-run F` | the same reinit from inside frame F's `retro_run`, at the core's first environment call, the way RetroArch reinits inside `SET_SYSTEM_AV_INFO` (PAL content). A `SET_SYSTEM_AV_INFO` that changes the frame rate or the maximum geometry while a context is live also triggers one |
+| `--preferred-hw gl` | with `--vulkan`: `GET_PREFERRED_HW_RENDER` reports GL (RetroArch on the gl driver with driver switching allowed); `SET_HW_RENDER` would still be accepted. The core must not ask |
+| `--fake-api X.Y` | with `--vulkan`: `vkGetPhysicalDeviceProperties` (through the core's `get_instance_proc_addr`) caps `apiVersion` at X.Y; with 1.1 the core uses its copy-only output |
+| `--grow-mask F` | with `--vulkan`: sync index mask `0b1` until frame F, then `0b111` (after waiting for the device) |
+| `--fail-compute-on-grow` | with `--grow-mask`: the core's `vkCreateComputePipelines` fails once the mask has grown (fault injection: the core degrades to copy-only) |
 | `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (`retro_unserialize` currently corrupts the heap on BIOS-menu states), so compare against a software run with `--runahead` |
 
 The save directory is always a fresh temporary directory that is removed on exit. Core log messages go to stderr,
@@ -309,8 +313,12 @@ host's function pointers.
 
 The ctest entry `brimir_vkhost_vulkan` (`tests/vkhost_checks.cmake`) runs the BIOS menu (US BIOS from
 `tests/fixtures`, 60 + 300 frames) in software, `--vulkan`, `--vulkan --refuse-hw`, `--vulkan --reset-at 120`,
-`--vulkan --reset-in-run 150` and `--vulkan --runahead`, and requires identical frame hashes; it is skipped without the
-BIOS or a Vulkan device.
+`--vulkan --reset-in-run 150`, `--vulkan --preferred-hw gl`, `--vulkan --fake-api 1.1` (copy-only output),
+`--vulkan --grow-mask 100` (with and without `--fail-compute-on-grow`, which may repeat one frame) and
+`--vulkan --runahead`, and requires identical frame hashes, the validation layer on and zero validation errors,
+queue-lock violations and hidden-frame GPU calls. It is skipped without the BIOS or a Vulkan device
+(`BRIMIR_REQUIRE_VULKAN=1` fails instead; `BRIMIR_VKHOST_ALLOW_NO_VALIDATION=1` only warns without the layer).
+A `video_refresh(NULL)` (dupe) is recorded as a repeat of the last frame.
 
 To compare against `brimir_bench` use the same BIOS, game, `--warmup` and `--frames`, and separate scratch system
 directories that each hold a copy of the RTC file (the core rewrites it):

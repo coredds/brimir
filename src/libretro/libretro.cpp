@@ -203,6 +203,24 @@ static void apply_core_options(bool force) {
 }
 
 #ifdef BRIMIR_VULKAN
+static const char* vulkan_mode_name(brimir::libretro::VulkanOutputMode mode) {
+    switch (mode) {
+    case brimir::libretro::VulkanOutputMode::Compute: return "compute";
+    case brimir::libretro::VulkanOutputMode::CopyOnly: return "copy-only";
+    default: return "none";
+    }
+}
+
+// The bridge hands raw frames to the GPU only for the compute output; the copy-only output uploads the bridge's
+// own converted frame, so the CPU path stays on.
+static void sync_gpu_output(void) {
+    const bool compute =
+        g_vulkanOutput && g_vulkanOutput->Mode() == brimir::libretro::VulkanOutputMode::Compute;
+    if (g_core && g_core->IsGpuOutputActive() != compute) {
+        g_core->SetGpuOutputActive(compute);
+    }
+}
+
 static void RETRO_CALLCONV vulkan_context_reset(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_vulkanRequested) {
@@ -213,30 +231,32 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
     }
     std::string reason;
     const bool live = g_vulkanOutput->ContextReset(environ_cb, reason);
-    if (g_core) {
-        g_core->SetGpuOutputActive(live);
-    }
+    sync_gpu_output();
     g_vulkanPresentErrorLogged = false;
-    if (live) {
-        brimir_log(RETRO_LOG_INFO, "Vulkan frame output ready");
-    } else {
-        // Too late to fall back (the frontend runs its Vulkan driver now): keep handing over software frames.
+    if (!live) {
+        // No usable device at all, and too late to fall back (the frontend runs its Vulkan driver now): keep
+        // handing over software frames, which RetroArch's vulkan driver does not show.
         brimir_log(RETRO_LOG_ERROR, "Vulkan context unusable, presenting software frames: %s", reason.c_str());
+    } else if (g_vulkanOutput->Mode() == brimir::libretro::VulkanOutputMode::CopyOnly) {
+        brimir_log(RETRO_LOG_WARN, "Vulkan compute frame output unavailable (%s); using copy-only frame output",
+                   reason.c_str());
+    } else {
+        brimir_log(RETRO_LOG_INFO, "Vulkan frame output ready");
     }
 }
 
 static void RETRO_CALLCONV vulkan_context_destroy(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (g_core) {
-        g_core->SetGpuOutputActive(false);
-    }
     if (g_vulkanOutput) {
         g_vulkanOutput->ContextDestroy();
     }
+    sync_gpu_output();
 }
 
 // The Vulkan half of retro_run's video output: present the frame RunFrame completed.
 static void present_vulkan_frame(void) {
+    using brimir::libretro::VulkanOutputMode;
+
     // Run-ahead and fast-forward frames the frontend will not show: no GPU work, no set_image, no video_cb.
     int av = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
     if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av) && !(av & RETRO_AV_ENABLE_VIDEO)) {
@@ -246,22 +266,33 @@ static void present_vulkan_frame(void) {
         return;
     }
 
-    const uint32_t* raw = g_core->RawFrame();
+    const VulkanOutputMode mode = g_vulkanOutput->Mode();
     unsigned width = 0;
     unsigned height = 0;
     std::string error;
-    if (raw) {
-        const brimir::FrameOutputSettings& s = g_core->RawFrameSettings();
-        if (!g_vulkanOutput->Present(raw, g_core->RawFrameWidth(), g_core->RawFrameHeight(),
-                                     {s.cropH, s.cropV, s.rotation}, width, height, error)) {
-            raw = nullptr;
-            if (!g_vulkanPresentErrorLogged) {
-                g_vulkanPresentErrorLogged = true;
-                brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed: %s", error.c_str());
-            }
+    bool presented = false;
+    if (mode == VulkanOutputMode::Compute) {
+        if (const uint32_t* raw = g_core->RawFrame()) {
+            const brimir::FrameOutputSettings& s = g_core->RawFrameSettings();
+            presented = g_vulkanOutput->Present(raw, g_core->RawFrameWidth(), g_core->RawFrameHeight(),
+                                                {s.cropH, s.cropV, s.rotation}, width, height, error);
         }
+    } else {
+        width = g_core->GetFramebufferWidth();
+        height = g_core->GetFramebufferHeight();
+        presented = g_vulkanOutput->PresentCopy(g_core->GetFramebuffer(), width, height,
+                                                g_core->GetFramebufferPitch(), error);
     }
-    if (!raw) {
+
+    if (!presented) {
+        if (g_vulkanOutput->Mode() != mode) {
+            brimir_log(RETRO_LOG_WARN, "Vulkan frame output changed to %s: %s",
+                       vulkan_mode_name(g_vulkanOutput->Mode()), error.c_str());
+            sync_gpu_output();
+        } else if (!error.empty() && !g_vulkanPresentErrorLogged) {
+            g_vulkanPresentErrorLogged = true;
+            brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed: %s", error.c_str());
+        }
         // Nothing new to show: repeat the last frame.
         video_cb(nullptr, g_lastWidth, g_lastHeight, 0);
         return;
@@ -427,8 +458,8 @@ RETRO_API void retro_deinit(void) {
         if (g_vulkanOutput->Live()) {
             // The frontend never called context_destroy; its device may be gone, so make no Vulkan call.
             brimir_log(RETRO_LOG_WARN, "Vulkan context still live at deinit; releasing it without cleanup");
-            g_vulkanOutput->Abandon();
         }
+        g_vulkanOutput->Abandon();
         g_vulkanOutput.reset();
     }
     g_vulkanRequested = false;
@@ -600,7 +631,7 @@ RETRO_API void retro_run(void) {
     
     // Output video
 #ifdef BRIMIR_VULKAN
-    if (g_vulkanOutput && g_vulkanOutput->Live() && g_core->IsGpuOutputActive()) {
+    if (g_vulkanOutput && g_vulkanOutput->Live()) {
         present_vulkan_frame();
     } else
 #endif
@@ -835,13 +866,21 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_vulkanRequested = false;
     g_options.renderer = get_option_value("brimir_renderer", "software");
     if (g_options.renderer == "vulkan") {
+        using brimir::libretro::VulkanRequest;
         std::string reason;
-        if (brimir::libretro::RequestVulkanContext(environ_cb, vulkan_context_reset, vulkan_context_destroy, log_cb,
-                                                   reason)) {
+        switch (brimir::libretro::RequestVulkanContext(environ_cb, vulkan_context_reset, vulkan_context_destroy,
+                                                       log_cb, reason)) {
+        case VulkanRequest::Accepted:
             g_vulkanRequested = true;
             brimir_log(RETRO_LOG_INFO, "Vulkan renderer requested");
-        } else {
+            break;
+        case VulkanRequest::NotVulkanDriver:
+            brimir_log(RETRO_LOG_WARN,
+                       "Vulkan renderer selected but the frontend video driver is not Vulkan; using software");
+            break;
+        case VulkanRequest::Refused:
             brimir_log(RETRO_LOG_WARN, "Vulkan renderer unavailable, falling back to software: %s", reason.c_str());
+            break;
         }
     }
 #endif
