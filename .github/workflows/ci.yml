@@ -132,8 +132,9 @@ jobs:
           echo "VK_DRIVER_FILES=$VK_DRIVER_FILES"
           ./build/bin/brimir_tests "[gpu]"
 
-  # The committed SPIR-V headers (src/gpu/shaders/generated) must match the HLSL sources. Uses DXC and spirv-val from
-  # the LunarG Vulkan SDK the headers were generated with; the build jobs never need the SDK.
+  # The committed SPIR-V and layout headers (src/gpu/shaders/generated) must match the HLSL sources. Uses DXC,
+  # spirv-val and spirv-cross from the LunarG Vulkan SDK the headers were generated with; the build jobs never need the
+  # SDK.
   shaders-check:
     runs-on: ubuntu-24.04
     env:
@@ -146,7 +147,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vulkansdk
-          key: vulkansdk-shader-tools-linux-x86_64-${{ env.VULKAN_SDK_VERSION }}
+          key: vulkansdk-shader-tools-v2-linux-x86_64-${{ env.VULKAN_SDK_VERSION }}
 
       - name: Download Vulkan SDK shader tools
         if: steps.sdk-cache.outputs.cache-hit != 'true'
@@ -155,7 +156,7 @@ jobs:
             "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
           mkdir -p "$RUNNER_TEMP/vulkansdk"
           tar -xJf "$RUNNER_TEMP/vulkansdk.tar.xz" -C "$RUNNER_TEMP/vulkansdk" --wildcards \
-            '*/x86_64/bin/dxc*' '*/x86_64/bin/spirv-val' '*/x86_64/lib/libdxcompiler.so*'
+            '*/x86_64/bin/dxc*' '*/x86_64/bin/spirv-val' '*/x86_64/bin/spirv-cross' '*/x86_64/lib/libdxcompiler.so*'
           rm "$RUNNER_TEMP/vulkansdk.tar.xz"
 
       - name: Check generated shader headers

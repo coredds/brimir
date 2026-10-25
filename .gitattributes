@@ -1,5 +1,6 @@
 # Shell scripts run on Linux devices: keep LF on every checkout.
 *.sh text eol=lf
 
-# Generated SPIR-V headers (tools/shaders/build_shaders.cmake writes LF): byte-identical on every checkout.
+# Generated SPIR-V and layout headers (tools/shaders/build_shaders.cmake writes LF): byte-identical on every checkout.
 src/gpu/shaders/generated/*.spv.h text eol=lf
+src/gpu/shaders/generated/*.layout.h text eol=lf

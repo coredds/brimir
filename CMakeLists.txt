@@ -155,6 +155,9 @@ endif()
 # SH-2 JIT library (design/sh2-jit.md)
 add_subdirectory(src/jit)
 
+# Vulkan-free front half of the VDP2 GPU renderer (brimir-vdp2-front), built with or without BRIMIR_VULKAN.
+add_subdirectory(src/gpu/vdp2)
+
 # Vulkan GPU renderer library (brimir-gpu); consumers get BRIMIR_VULKAN=1 through it.
 if(BRIMIR_VULKAN)
     add_subdirectory(src/gpu)

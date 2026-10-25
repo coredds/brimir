@@ -1,12 +1,23 @@
-# Compiles src/gpu/shaders/*.hlsl to SPIR-V and writes src/gpu/shaders/generated/<name>.spv.h.
+# Compiles src/gpu/shaders/*.hlsl to SPIR-V and writes src/gpu/shaders/generated/<name>.spv.h, plus
+# src/gpu/shaders/generated/<name>.layout.h with the reflected layout of the shader's buffer and push-constant blocks.
 #
 #   cmake -P tools/shaders/build_shaders.cmake                          regenerate the headers
 #   cmake -DBRIMIR_SHADERS_CHECK=ON -P tools/shaders/build_shaders.cmake  fail if a header is out of date
 #
-# Needs DXC with SPIR-V support and spirv-val: from $VULKAN_SDK (Bin/ or bin/), from PATH, or passed as
-# -DDXC=<path> -DSPIRV_VAL=<path>. The generated headers are committed, so a normal build needs neither.
-# Every shader is a compute shader with entry point CSMain. Register bindings are shifted per class (all spaces):
-# t -> binding 0+n, u -> binding 16+n, b -> binding 32+n. Output depends only on the DXC version and the sources.
+# Needs DXC with SPIR-V support, spirv-val and spirv-cross: from $VULKAN_SDK (Bin/ or bin/), from PATH, or passed as
+# -DDXC=<path> -DSPIRV_VAL=<path> -DSPIRV_CROSS=<path>. The generated headers are committed, so a normal build needs
+# none of them. Every shader is a compute shader with entry point CSMain. Includes are searched in
+# src/gpu/shaders/include and src/gpu/shaders/vdp2/include. Register bindings are shifted per class (all spaces):
+# t -> binding 0+n, u -> binding 16+n, b -> binding 32+n. Output depends only on the DXC and spirv-cross versions and
+# the sources.
+#
+# Layout headers: for every struct reachable from a storage buffer, uniform buffer or push-constant block (the element
+# struct of a StructuredBuffer, the block itself otherwise), sorted by struct name:
+#   k<Shader>_<Struct>_<member>         member offset in bytes
+#   k<Shader>_<Struct>_<member>_stride  array stride, for array members
+#   k<Shader>_<Struct>_size             std430 size (end of the last member rounded up to the struct's alignment; for a
+#                                       StructuredBuffer element it is checked to equal the array stride)
+# A push-constant or cbuffer block is named after its HLSL type (type.PushConstant.Foo -> Foo).
 
 cmake_minimum_required(VERSION 3.28)
 
@@ -22,17 +33,22 @@ if(DEFINED ENV{VULKAN_SDK})
 endif()
 find_program(DXC NAMES dxc HINTS ${sdk_hints})
 find_program(SPIRV_VAL NAMES spirv-val HINTS ${sdk_hints})
+find_program(SPIRV_CROSS NAMES spirv-cross HINTS ${sdk_hints})
 if(NOT DXC)
     message(FATAL_ERROR "dxc not found: install the Vulkan SDK and set VULKAN_SDK, put dxc on PATH, or pass -DDXC=<path>")
 endif()
 if(NOT SPIRV_VAL)
     message(FATAL_ERROR "spirv-val not found: install the Vulkan SDK and set VULKAN_SDK, put spirv-val on PATH, or pass -DSPIRV_VAL=<path>")
 endif()
+if(NOT SPIRV_CROSS)
+    message(FATAL_ERROR "spirv-cross not found: install the Vulkan SDK and set VULKAN_SDK, put spirv-cross on PATH, or pass -DSPIRV_CROSS=<path>")
+endif()
 
 execute_process(COMMAND "${DXC}" --version OUTPUT_VARIABLE dxc_version ERROR_VARIABLE dxc_version)
 string(STRIP "${dxc_version}" dxc_version)
 message(STATUS "dxc: ${DXC} (${dxc_version})")
 message(STATUS "spirv-val: ${SPIRV_VAL}")
+message(STATUS "spirv-cross: ${SPIRV_CROSS}")
 
 if(DEFINED ENV{RUNNER_TEMP})
     set(tmp_root "$ENV{RUNNER_TEMP}")
@@ -97,6 +113,205 @@ function(brimir_spirv_header spv_file source_name symbol out_var)
     set(${out_var} "${text}" PARENT_SCOPE)
 endfunction()
 
+# std430 size and alignment of a reflected type: a scalar or vector type name, or a struct id ("_12") in `types` (the
+# reflection's "types" object). Struct results are cached per shader (reflect_stem in the caller's scope).
+function(brimir_type_layout types type out_size out_align)
+    if(type MATCHES "^_[0-9]+$")
+        get_property(cached GLOBAL PROPERTY "brimir_layout_${reflect_stem}_${type}")
+        if(cached)
+            list(GET cached 0 size)
+            list(GET cached 1 align)
+        else()
+            string(JSON struct GET "${types}" ${type})
+            string(JSON count LENGTH "${struct}" members)
+            set(end 0)
+            set(align 1)
+            math(EXPR last "${count} - 1")
+            foreach(i RANGE ${last})
+                string(JSON member GET "${struct}" members ${i})
+                brimir_member_layout("${types}" "${member}" member_size member_align)
+                string(JSON offset GET "${member}" offset)
+                math(EXPR member_end "${offset} + ${member_size}")
+                if(member_end GREATER end)
+                    set(end ${member_end})
+                endif()
+                if(member_align GREATER align)
+                    set(align ${member_align})
+                endif()
+            endforeach()
+            math(EXPR size "(${end} + ${align} - 1) / ${align} * ${align}")
+            set_property(GLOBAL PROPERTY "brimir_layout_${reflect_stem}_${type}" "${size};${align}")
+        endif()
+    elseif(type MATCHES "^(uint|int|float|bool)$")
+        set(size 4)
+        set(align 4)
+    elseif(type MATCHES "^[uib]?vec([234])$")
+        math(EXPR size "4 * ${CMAKE_MATCH_1}")
+        if(CMAKE_MATCH_1 EQUAL 2)
+            set(align 8)
+        else()
+            set(align 16)
+        endif()
+    else()
+        message(FATAL_ERROR "${reflect_stem}: unsupported type '${type}' in a reflected block")
+    endif()
+    set(${out_size} ${size} PARENT_SCOPE)
+    set(${out_align} ${align} PARENT_SCOPE)
+endfunction()
+
+# Size and alignment of a struct member (arrays: stride times the outermost dimension).
+function(brimir_member_layout types member out_size out_align)
+    string(JSON type GET "${member}" type)
+    brimir_type_layout("${types}" "${type}" size align)
+    string(JSON dims ERROR_VARIABLE no_array LENGTH "${member}" array)
+    if(NOT no_array)
+        math(EXPR last "${dims} - 1")
+        foreach(i RANGE ${last})
+            string(JSON literal GET "${member}" array_size_is_literal ${i})
+            if(NOT literal)
+                message(FATAL_ERROR "${reflect_stem}: array sized by a specialization constant in a reflected block")
+            endif()
+        endforeach()
+        string(JSON stride GET "${member}" array_stride)
+        string(JSON outer GET "${member}" array ${last}) # spirv-cross lists the innermost dimension first
+        math(EXPR size "${stride} * ${outer}")
+    endif()
+    set(${out_size} ${size} PARENT_SCOPE)
+    set(${out_align} ${align} PARENT_SCOPE)
+endfunction()
+
+# Layout header text from spirv-cross --reflect output (format at the top of this file). LF line endings.
+function(brimir_layout_header json_file source_name symbol out_var)
+    file(READ "${json_file}" json)
+    set(reflect_stem "${symbol}")
+
+    # Root structs: "<id>|<name>|<StructuredBuffer stride or empty>".
+    set(worklist)
+    string(JSON types ERROR_VARIABLE no_types GET "${json}" types)
+    if(no_types)
+        set(types "{}")
+    endif()
+    foreach(kind IN ITEMS ssbos ubos push_constants)
+        string(JSON count ERROR_VARIABLE none LENGTH "${json}" ${kind})
+        if(none OR count EQUAL 0)
+            continue()
+        endif()
+        math(EXPR last "${count} - 1")
+        foreach(i RANGE ${last})
+            string(JSON block GET "${json}" ${kind} ${i} type)
+            string(JSON block_type GET "${types}" ${block})
+            string(JSON block_name GET "${block_type}" name)
+            set(root "${block}")
+            string(REGEX REPLACE "^type\\.(PushConstant\\.|ConstantBuffer\\.)?" "" name "${block_name}")
+            set(stride "")
+            if(kind STREQUAL "ssbos")
+                # DXC wraps (RW)StructuredBuffer<T> / ByteAddressBuffer in a block holding one runtime array "_m0".
+                string(JSON member_count LENGTH "${block_type}" members)
+                string(JSON first GET "${block_type}" members 0)
+                string(JSON first_name GET "${first}" name)
+                string(JSON first_dims ERROR_VARIABLE no_array LENGTH "${first}" array)
+                if(member_count EQUAL 1 AND first_name STREQUAL "_m0" AND NOT no_array)
+                    string(JSON element GET "${first}" type)
+                    if(NOT element MATCHES "^_[0-9]+$")
+                        continue() # elements are scalars or vectors: no struct to describe
+                    endif()
+                    set(root "${element}")
+                    string(JSON element_type GET "${types}" ${element})
+                    string(JSON name GET "${element_type}" name)
+                    string(JSON stride GET "${first}" array_stride)
+                endif()
+            endif()
+            list(APPEND worklist "${root}|${name}|${stride}")
+        endforeach()
+    endforeach()
+
+    set(struct_names)
+    set(done)
+    while(worklist)
+        list(POP_FRONT worklist entry)
+        string(REPLACE "|" ";" parts "${entry}")
+        list(GET parts 0 id)
+        list(GET parts 1 name)
+        list(GET parts 2 stride)
+        if(id IN_LIST done)
+            continue()
+        endif()
+        list(APPEND done "${id}")
+        string(MAKE_C_IDENTIFIER "${name}" name)
+
+        brimir_type_layout("${types}" "${id}" size align)
+        if(NOT stride STREQUAL "" AND NOT stride EQUAL size)
+            message(FATAL_ERROR "${source_name}: ${name} has std430 size ${size} but StructuredBuffer stride ${stride}")
+        endif()
+
+        set(prefix "k${symbol}_${name}")
+        set(text "")
+        string(JSON struct GET "${types}" ${id})
+        string(JSON count LENGTH "${struct}" members)
+        math(EXPR last "${count} - 1")
+        foreach(i RANGE ${last})
+            string(JSON member GET "${struct}" members ${i})
+            string(JSON member_name GET "${member}" name)
+            string(JSON offset GET "${member}" offset)
+            string(APPEND text "inline constexpr uint32_t ${prefix}_${member_name} = ${offset};\n")
+            string(JSON member_stride ERROR_VARIABLE no_array GET "${member}" array_stride)
+            if(NOT no_array)
+                string(APPEND text "inline constexpr uint32_t ${prefix}_${member_name}_stride = ${member_stride};\n")
+            endif()
+            string(JSON member_type GET "${member}" type)
+            if(member_type MATCHES "^_[0-9]+$")
+                string(JSON nested GET "${types}" ${member_type})
+                string(JSON nested_name GET "${nested}" name)
+                list(APPEND worklist "${member_type}|${nested_name}|")
+            endif()
+        endforeach()
+        string(APPEND text "inline constexpr uint32_t ${prefix}_size = ${size};\n")
+
+        if(DEFINED struct_text_${name})
+            if(NOT struct_text_${name} STREQUAL text)
+                message(FATAL_ERROR "${source_name}: two different layouts of struct ${name}")
+            endif()
+        else()
+            set(struct_text_${name} "${text}")
+            list(APPEND struct_names "${name}")
+        endif()
+    endwhile()
+    list(SORT struct_names)
+
+    set(out "// Generated by tools/shaders/build_shaders.cmake from src/gpu/shaders/${source_name} ")
+    string(APPEND out "(spirv-cross --reflect). Do not edit.\n")
+    string(APPEND out "#pragma once\n\n#include <cstdint>\n\nnamespace brimir::gpu::shaders {\n")
+    if(NOT struct_names)
+        string(APPEND out "\n// No struct blocks.\n")
+    endif()
+    foreach(name IN LISTS struct_names)
+        string(APPEND out "\n// ${name}\n${struct_text_${name}}")
+    endforeach()
+    string(APPEND out "\n} // namespace brimir::gpu::shaders\n")
+    set(${out_var} "${out}" PARENT_SCOPE)
+endfunction()
+
+# Compares a generated header with the committed one; writes it, or with BRIMIR_SHADERS_CHECK adds it to `stale`.
+function(brimir_sync_header source_name file_name text)
+    set(header "${generated_dir}/${file_name}")
+    set(current "")
+    if(EXISTS "${header}")
+        file(READ "${header}" current)
+        string(REPLACE "\r\n" "\n" current "${current}") # a CRLF checkout is not a difference
+    endif()
+    if(current STREQUAL text)
+        message(STATUS "${source_name}: generated/${file_name} up to date")
+    elseif(BRIMIR_SHADERS_CHECK)
+        list(APPEND stale "${file_name}")
+        set(stale "${stale}" PARENT_SCOPE)
+        message(STATUS "${source_name}: generated/${file_name} is out of date")
+    else()
+        # file(WRITE) emits CRLF on Windows; the headers are LF everywhere (.gitattributes).
+        file(CONFIGURE OUTPUT "${header}" CONTENT "${text}" @ONLY NEWLINE_STYLE LF)
+        message(STATUS "${source_name}: wrote generated/${file_name}")
+    endif()
+endfunction()
+
 file(GLOB shader_sources LIST_DIRECTORIES false RELATIVE "${shader_dir}" "${shader_dir}/*.hlsl")
 list(SORT shader_sources)
 if(NOT shader_sources)
@@ -114,6 +329,7 @@ foreach(source_name IN LISTS shader_sources)
         COMMAND "${DXC}" -T cs_6_0 -E CSMain -HV 2021 -WX
                 -spirv -fspv-target-env=vulkan1.2 -fvk-use-gl-layout
                 -fvk-t-shift 0 all -fvk-u-shift 16 all -fvk-b-shift 32 all
+                -I "${shader_dir}/include" -I "${shader_dir}/vdp2/include"
                 -Fo "${spv}" "${shader_dir}/${source_name}"
         RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE out)
     if(NOT rc EQUAL 0)
@@ -129,31 +345,30 @@ foreach(source_name IN LISTS shader_sources)
         message(FATAL_ERROR "spirv-val rejected ${source_name}:\n${out}")
     endif()
 
-    brimir_spirv_header("${spv}" "${source_name}" "${symbol}" text)
-    set(header "${generated_dir}/${stem}.spv.h")
-    list(APPEND expected_headers "${stem}.spv.h")
+    set(json "${work_dir}/${stem}.json")
+    execute_process(
+        COMMAND "${SPIRV_CROSS}" "${spv}" --reflect --output "${json}"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE out)
+    if(NOT rc EQUAL 0)
+        file(REMOVE_RECURSE "${work_dir}")
+        message(FATAL_ERROR "spirv-cross --reflect failed on ${source_name}:\n${out}")
+    endif()
 
-    set(current "")
-    if(EXISTS "${header}")
-        file(READ "${header}" current)
-        string(REPLACE "\r\n" "\n" current "${current}") # a CRLF checkout is not a difference
-    endif()
-    if(current STREQUAL text)
-        message(STATUS "${source_name}: up to date")
-    elseif(BRIMIR_SHADERS_CHECK)
-        list(APPEND stale "${stem}.spv.h")
-        message(STATUS "${source_name}: generated/${stem}.spv.h is out of date")
-    else()
-        # file(WRITE) emits CRLF on Windows; the headers are LF everywhere (.gitattributes).
-        file(CONFIGURE OUTPUT "${header}" CONTENT "${text}" @ONLY NEWLINE_STYLE LF)
-        message(STATUS "${source_name}: wrote generated/${stem}.spv.h")
-    endif()
+    brimir_spirv_header("${spv}" "${source_name}" "${symbol}" text)
+    list(APPEND expected_headers "${stem}.spv.h")
+    brimir_sync_header("${source_name}" "${stem}.spv.h" "${text}")
+
+    brimir_layout_header("${json}" "${source_name}" "${symbol}" text)
+    list(APPEND expected_headers "${stem}.layout.h")
+    brimir_sync_header("${source_name}" "${stem}.layout.h" "${text}")
 endforeach()
 
 file(REMOVE_RECURSE "${work_dir}")
 
 # Headers whose shader was removed or renamed.
-file(GLOB existing_headers LIST_DIRECTORIES false RELATIVE "${generated_dir}" "${generated_dir}/*.spv.h")
+file(GLOB existing_headers LIST_DIRECTORIES false RELATIVE "${generated_dir}" "${generated_dir}/*.spv.h"
+     "${generated_dir}/*.layout.h")
+list(SORT existing_headers)
 foreach(header IN LISTS existing_headers)
     if(NOT header IN_LIST expected_headers)
         if(BRIMIR_SHADERS_CHECK)

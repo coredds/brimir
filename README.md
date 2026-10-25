@@ -129,7 +129,7 @@ On Windows, run the commands from a *Developer PowerShell for VS 2022* (or any s
 ### Vulkan renderer (`feature/vulkan-renderer` only)
 
 The GPU renderer work lives on the `feature/vulkan-renderer` branch and is not part of `master` or any release yet.
-There, `-DBRIMIR_VULKAN=ON` (the default on 64-bit Windows x64, Linux x64/arm64 and macOS arm64) builds the Vulkan frame output, the `brimir_renderer` core option and the `brimir_vkhost` tool ([tools/README.md](tools/README.md)). `-DBRIMIR_VULKAN=OFF` builds the core as on `master` (no option, no GPU code). The core never links the Vulkan loader (volk loads it at runtime) and a normal build needs neither the Vulkan SDK nor a shader compiler: the SPIR-V is committed in `src/gpu/shaders/generated/`. After editing a shader in `src/gpu/shaders/`, regenerate it with DXC and `spirv-val` on the path (Vulkan SDK):
+There, `-DBRIMIR_VULKAN=ON` (the default on 64-bit Windows x64, Linux x64/arm64 and macOS arm64) builds the Vulkan frame output, the `brimir_renderer` core option and the `brimir_vkhost` tool ([tools/README.md](tools/README.md)). `-DBRIMIR_VULKAN=OFF` builds the core as on `master` (no option, no GPU code). The core never links the Vulkan loader (volk loads it at runtime) and a normal build needs neither the Vulkan SDK nor a shader compiler: the SPIR-V and the reflected buffer layouts (`*.layout.h`) are committed in `src/gpu/shaders/generated/`. After editing a shader in `src/gpu/shaders/`, regenerate them with DXC, `spirv-val` and `spirv-cross` on the path (Vulkan SDK):
 
 ```bash
 cmake -P tools/shaders/build_shaders.cmake

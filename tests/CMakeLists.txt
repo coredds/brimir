@@ -64,12 +64,16 @@ add_executable(brimir_tests
     unit/jit_fuzz_programs.cpp
     unit/test_jit_x64.cpp
     unit/test_jit_worker.cpp
+    # VDP2 GPU parameter structs vs the reflected shader layouts, 32-bit rotation math ([vdp2] runs without Vulkan;
+    # the [gpu] case is compiled with BRIMIR_VULKAN only)
+    unit/test_gpu_vdp2_params.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
     brimir_bridge
     brimir-jit
     brimir-core
+    brimir-vdp2-front
 )
 
 # Vulkan GPU renderer (src/gpu)
