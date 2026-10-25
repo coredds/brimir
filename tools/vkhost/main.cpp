@@ -5,6 +5,7 @@
 // Command line layer: parses the flags, runs the core through RunCore and prints/dumps the recorded frames.
 // See tools/README.md for usage.
 
+#include "compare.hpp"
 #include "host.hpp"
 
 #include "../frame_hash.hpp"
@@ -40,6 +41,9 @@ enum class ParseResult { Ok, Help, Error };
 struct CliArgs {
     vkhost::HostConfig config;
     bool hash = false;
+    bool compare = false;
+    int dumpFrame = -1; // --dump-frame I: with --dump-dir, write only recorded frame I
+    std::vector<std::pair<std::string, std::string>> compareVulkanOptions;
 };
 
 void PrintUsage(std::FILE* out) {
@@ -85,6 +89,12 @@ void PrintUsage(std::FILE* out) {
         "                Vulkan X.Y (for example 1.1: the core's copy-only output)\n"
         "  --grow-mask F  with --vulkan: sync index mask 0b1 until frame F, then 0b111 (device idle)\n"
         "  --fail-compute-on-grow  with --grow-mask: the core's vkCreateComputePipelines fails after the growth\n"
+        "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
+        "                compare the per-frame hashes; on the first difference report the frame, the first\n"
+        "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
+        "                kept temporary directory). Exit 3 on any difference. Other flags go to both runs\n"
+        "  --compare-vulkan-option key=value  with --compare: core option for the Vulkan run only\n"
+        "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
         "  --help, -h    show this help\n"
         "\n"
         "Exit status: 0 ok, 1 usage, 2 error, 3 a check failed (queue lock, validation, hidden-frame GPU work,\n"
@@ -152,6 +162,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.config.runahead = true;
             continue;
         }
+        if (opt == "--compare") {
+            args.compare = true;
+            continue;
+        }
         if (i + 1 >= argc) {
             std::fprintf(stderr, "Missing value for %s\n", opt.c_str());
             return ParseResult::Error;
@@ -177,6 +191,19 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 std::fprintf(stderr, "Invalid --warmup value: %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--dump-frame") {
+            if (!ParseInt(value, args.dumpFrame)) {
+                std::fprintf(stderr, "Invalid --dump-frame value: %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--compare-vulkan-option") {
+            const std::string text = value;
+            const size_t eq = text.find('=');
+            if (eq == std::string::npos || eq == 0) {
+                std::fprintf(stderr, "Invalid --compare-vulkan-option (expected key=value): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.compareVulkanOptions.emplace_back(text.substr(0, eq), text.substr(eq + 1));
         } else if (opt == "--reset-at") {
             if (!ParseInt(value, args.config.resetAt)) {
                 std::fprintf(stderr, "Invalid --reset-at value: %s\n", value);
@@ -224,13 +251,19 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         std::fprintf(stderr, "--bios or --system-dir is required\n");
         return ParseResult::Error;
     }
+    // With --compare the Vulkan child gets --vulkan and the software child drops the Vulkan-only flags.
+    const bool vulkanRun = args.config.vulkan || args.compare;
     if ((args.config.preferGl || args.config.fakeApi != 0 || args.config.growMaskAt >= 0 ||
          args.config.failComputeOnGrow) &&
-        !args.config.vulkan) {
+        !vulkanRun) {
         std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
     }
-    if ((args.config.resetAt >= 0 || args.config.resetInRun >= 0) && (!args.config.vulkan || args.config.refuseHw)) {
+    if (!args.compare && !args.compareVulkanOptions.empty()) {
+        std::fprintf(stderr, "--compare-vulkan-option needs --compare\n");
+        return ParseResult::Error;
+    }
+    if ((args.config.resetAt >= 0 || args.config.resetInRun >= 0) && (!vulkanRun || args.config.refuseHw)) {
         std::fprintf(stderr, "--reset-at and --reset-in-run need --vulkan (without --refuse-hw)\n");
         return ParseResult::Error;
     }
@@ -240,14 +273,16 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
 // Prints hashes and writes PPMs as the frames arrive, so long runs do not keep every frame in memory.
 class CliSink : public vkhost::FrameSink {
 public:
-    CliSink(bool hash, fs::path dumpDir) : m_hash(hash), m_dumpDir(std::move(dumpDir)) {}
+    CliSink(bool hash, fs::path dumpDir, int dumpFrame)
+        : m_hash(hash), m_dumpDir(std::move(dumpDir)), m_dumpFrame(dumpFrame) {}
 
     void OnFrame(vkhost::HostFrame&& frame) override {
         if (m_hash) {
             const uint64_t hash = brimir_tools::HashFrame(frame.w, frame.h, frame.xrgb.data(), size_t{frame.w} * 4);
             std::printf("frame %zu %ux%u %016llx\n", m_count, frame.w, frame.h, static_cast<unsigned long long>(hash));
         }
-        if (!m_dumpDir.empty() && !WritePpm(frame)) {
+        if (!m_dumpDir.empty() && (m_dumpFrame < 0 || static_cast<size_t>(m_dumpFrame) == m_count) &&
+            !WritePpm(frame)) {
             m_failed = true;
         }
         ++m_count;
@@ -282,6 +317,7 @@ private:
 
     bool m_hash;
     fs::path m_dumpDir;
+    int m_dumpFrame;
     size_t m_count = 0;
     bool m_failed = false;
 };
@@ -299,6 +335,16 @@ int main(int argc, char** argv) {
         return 1;
     case ParseResult::Ok:
         break;
+    }
+
+    if (args.compare) {
+        vkhost::CompareConfig compare;
+        compare.args.assign(argv + 1, argv + argc);
+        compare.systemDir = args.config.systemDir;
+        compare.dumpDir = args.config.dumpDir;
+        compare.frames = args.config.frames;
+        compare.vulkanOptions = args.compareVulkanOptions;
+        return vkhost::RunCompare(compare);
     }
 
     if (args.config.corePath.empty()) {
@@ -325,7 +371,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    CliSink sink(args.hash, args.config.dumpDir);
+    CliSink sink(args.hash, args.config.dumpDir, args.dumpFrame);
     vkhost::RunReport report;
     try {
         report = vkhost::RunCore(args.config, sink);
@@ -339,6 +385,15 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     std::fprintf(stderr, "vkhost: recorded %zu frames (%llu hardware), warmup %d\n", sink.Count(),
                  static_cast<unsigned long long>(report.recordedHardwareFrames), args.config.warmup);
+    if (sink.Count() > 0) {
+        // Wall time of the recorded frames' retro_run calls. Hashing/PPM writing (the sink) is left out; the
+        // Vulkan host's readback of each frame (a wait for the GPU and a copy) is in the first figure only.
+        const double perFrame = (report.recordSeconds - report.sinkSeconds) * 1000.0 / static_cast<double>(sink.Count());
+        const double perFrameNoReadback =
+            (report.recordSeconds - report.sinkSeconds - report.readbackSeconds) * 1000.0 / static_cast<double>(sink.Count());
+        std::fprintf(stderr, "vkhost: timing: %.3f ms/frame (%.3f without the host readback), %zu frames\n", perFrame,
+                     perFrameNoReadback, sink.Count());
+    }
     if (args.config.vulkan) {
         std::fprintf(stderr,
                      "vkhost: vulkan: context resets %llu, core submits %llu, queue-lock violations %llu, "

@@ -169,10 +169,26 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         }
     }
 
+    // Times the sink so the report can separate hashing/PPM writing from the frame cost.
+    struct TimedSink : FrameSink {
+        explicit TimedSink(FrameSink& inner) : m_inner(inner) {}
+        void OnFrame(HostFrame&& frame) override {
+            const auto start = std::chrono::steady_clock::now();
+            m_inner.OnFrame(std::move(frame));
+            seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        }
+        FrameSink& m_inner;
+        double seconds = 0;
+    } timedSink(sink);
+
     RunReport report;
     const int total = config.warmup + config.frames;
     uint64_t secondaryFrames = 0;
+    std::chrono::steady_clock::time_point recordStart;
     for (int i = 0; i < total; ++i) {
+        if (i == config.warmup) {
+            recordStart = std::chrono::steady_clock::now();
+        }
         if (i == config.resetAt) {
             host.ResetContext();
         }
@@ -181,7 +197,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
             host.RunFrame(nullptr);
             host.SetAvEnable(RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO);
         }
-        host.RunFrame(i >= config.warmup ? &sink : nullptr);
+        host.RunFrame(i >= config.warmup ? &timedSink : nullptr);
         if (config.runahead) {
             secondary.SetAvEnable(0);
             secondary.RunFrame(nullptr);
@@ -189,6 +205,8 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         }
     }
 
+    const double recordSeconds =
+        config.frames > 0 ? std::chrono::duration<double>(std::chrono::steady_clock::now() - recordStart).count() : 0;
     if (config.runahead) {
         report.secondaryFrames = secondaryFrames;
         report.secondaryHardwareFrames = secondary.HardwareFrames();
@@ -204,6 +222,8 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     }
     host.Unload();
     host.FillReport(report);
+    report.recordSeconds = recordSeconds;
+    report.sinkSeconds = timedSink.seconds;
     if (report.unreadableFrames > 0) {
         report.problems.push_back(std::to_string(report.unreadableFrames) + " frames could not be read");
     }

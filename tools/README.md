@@ -281,6 +281,9 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--grow-mask F` | with `--vulkan`: sync index mask `0b1` until frame F, then `0b111` (after waiting for the device) |
 | `--fail-compute-on-grow` | with `--grow-mask`: the core's `vkCreateComputePipelines` fails once the mask has grown (fault injection: the core degrades to copy-only) |
 | `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (`retro_unserialize` currently corrupts the heap on BIOS-menu states), so compare against a software run with `--runahead` |
+| `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference |
+| `--compare-vulkan-option key=value` | with `--compare`: a core option for the Vulkan run only (repeatable; to check that a difference is reported) |
+| `--dump-frame I` | with `--dump-dir`: write only recorded frame I |
 
 The save directory is always a fresh temporary directory that is removed on exit. Core log messages go to stderr,
 prefixed `[core <level>]` (`[core#2 ...]` for the run-ahead instance); the Ymir library's own log lines go to stdout,
@@ -315,7 +318,7 @@ The ctest entry `brimir_vkhost_vulkan` (`tests/vkhost_checks.cmake`) runs the BI
 `tests/fixtures`, 60 + 300 frames) in software, `--vulkan`, `--vulkan --refuse-hw`, `--vulkan --reset-at 120`,
 `--vulkan --reset-in-run 150`, `--vulkan --preferred-hw gl`, `--vulkan --fake-api 1.1` (copy-only output),
 `--vulkan --grow-mask 100` (with and without `--fail-compute-on-grow`, which may repeat one frame) and
-`--vulkan --runahead`, and requires identical frame hashes, the validation layer on and zero validation errors,
+`--vulkan --runahead`, plus `--compare` (identical runs pass; a Vulkan run rotated 180 degrees exits 3 and names the first differing pixel), and requires identical frame hashes, the validation layer on and zero validation errors,
 queue-lock violations and hidden-frame GPU calls. It is skipped without the BIOS or a Vulkan device
 (`BRIMIR_REQUIRE_VULKAN=1` fails instead; `BRIMIR_VKHOST_ALLOW_NO_VALIDATION=1` only warns without the layer).
 A `video_refresh(NULL)` (dupe) is recorded as a repeat of the last frame.
@@ -329,6 +332,45 @@ build\bin\brimir_bench.exe  --bios <bios> --system-dir <dirB> --warmup 120 --fra
 ```
 
 The `frame ...` lines are identical for the software path.
+
+### Software vs Vulkan comparison (`--compare`)
+
+```powershell
+build\bin\brimir_vkhost.exe --compare --bios <bios> --system-dir <dir> --game Game.chd --warmup 600 --frames 3600 --option brimir_overscan=2
+```
+
+Runs the same content twice, each in its own child process (a copy of this executable, so the Vulkan run's volk and
+device state cannot disturb the software run): first the software renderer, then `--vulkan`, both with `--hash`. All
+other flags (`--option`, `--warmup`, `--frames`, `--game`, ...) go to both runs; the Vulkan-only switches
+(`--reset-at`, `--fake-api`, ...) go to the Vulkan run only, `--compare-vulkan-option` adds core options to the Vulkan
+run only. Each child gets its own copy of `--system-dir` (the core rewrites the RTC file), so the directory is never
+modified. The children's own summary lines are printed with a `compare: software:` / `compare: vulkan:` prefix; their
+full logs are in the work directory (`%TEMP%\brimir_vkhost\compare-*`), which is removed after a successful comparison.
+
+The per-frame hash lines are compared one by one. On the first difference the tool prints the frame index and both
+hash lines, re-runs both configurations up to that frame with `--dump-frame`, writes both images as PPM
+(`<dump-dir>/software/frame_NNNNN.ppm` and `<dump-dir>/vulkan/...`; `--dump-dir` or else a kept directory inside the
+work directory) and prints the first differing pixel and both values:
+
+```
+compare: FAILED: 5 of 5 frames differ, first at frame 0
+compare:   software: frame 0 320x224 248b219b61e6fcef
+compare:   vulkan  : frame 0 320x224 b1da07f6d5775943
+compare:   first differing pixel (7,0): software 0x000808, vulkan 0x000008
+compare:   67432 of 71680 pixels differ
+```
+
+(that output came from `--compare-vulkan-option brimir_rotation=180`). A re-run that does not reproduce the original
+hashes is noted. A differing frame count, a failed check of the Vulkan run (queue lock, validation, ... exit 3) or a
+software run that fails also fail the comparison. Exit codes: 0 identical (`compare: OK, N frames identical`), 3
+differences or a failed check, 2 setup failure, 4 no usable Vulkan device. The hash covers the width, height and the
+XRGB8888 pixels exactly as `--hash` does; the output parity rule (RGB equal at 1x, alpha not compared) is satisfied by
+the host converting the Vulkan image to XRGB8888.
+
+Each run also prints `vkhost: timing: X ms/frame (Y without the host readback)`: the wall time of the recorded frames'
+`retro_run` calls, minus the time spent hashing or writing PPMs. With `--vulkan`, X includes the host's readback of
+every frame (a wait for the GPU, a copy to a host buffer and a conversion; a real frontend presents the image
+instead), Y leaves that out. With the software renderer both are the same.
 
 Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2`, `GET_VARIABLE`,
 `GET_VARIABLE_UPDATE` (always false), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,

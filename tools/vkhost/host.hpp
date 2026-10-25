@@ -72,6 +72,9 @@ struct RunReport {
     uint64_t secondaryFrames = 0;          // run-ahead: frames the second instance ran
     uint64_t secondaryHardwareFrames = 0;  // run-ahead: must stay 0
     bool secondaryHadContext = false;      // run-ahead: must stay false
+    double recordSeconds = 0;   // wall time of the recorded frames' retro_run calls (sink time included)
+    double sinkSeconds = 0;     // of which in FrameSink::OnFrame (hash, PPM)
+    double readbackSeconds = 0; // of which in the host's set_image readback (Vulkan)
     std::vector<std::string> problems; // anything that fails the run
 };
 
@@ -106,6 +109,7 @@ public:
     uint64_t DuplicateFrames() const { return m_duplicate; }
     uint64_t UnreadableFrames() const { return m_unreadable; }
     uint64_t HardwareFrames() const { return m_hardwareFrames; }
+    double ReadbackSeconds() const { return m_readbackSeconds; }
     bool HadContext() const { return m_contextResets > 0; }
 
     // Adds this instance's counters and problems (Vulkan ones too; complete after Unload).
@@ -185,6 +189,7 @@ private:
     uint64_t m_displayed = 0;
     uint64_t m_duplicate = 0;
     uint64_t m_unreadable = 0;
+    double m_readbackSeconds = 0;
 };
 
 // Loads the core per `config`, runs `warmup` unrecorded frames then `frames` recorded ones, and returns the recorded

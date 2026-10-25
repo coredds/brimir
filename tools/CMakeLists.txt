@@ -11,6 +11,7 @@ target_compile_features(brimir_bench PRIVATE cxx_std_20)
 if(BRIMIR_VULKAN)
     add_executable(brimir_vkhost
         vkhost/main.cpp
+        vkhost/compare.cpp
         vkhost/host.cpp
         vkhost/run_core.cpp
         vkhost/vulkan_provider.cpp

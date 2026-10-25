@@ -7,6 +7,7 @@
 #include <libretro_vulkan.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -386,6 +387,7 @@ void LibretroHost::FillReport(RunReport& report) const {
     report.recordedHardwareFrames += m_recordedHardware;
     report.contextResets += m_contextResets;
     report.unreadableFrames += m_unreadable;
+    report.readbackSeconds += m_readbackSeconds;
     report.hiddenGpuCalls += m_hiddenFrames;
     report.problems.insert(report.problems.end(), m_problems.begin(), m_problems.end());
     if (m_vulkan) {
@@ -628,7 +630,10 @@ void LibretroHost::Video(const void* data, unsigned width, unsigned height, size
         }
         // The image the core handed over with set_image, read in GENERAL layout after its work completed.
         HostFrame frame;
-        if (!m_vulkan->ReadImage(width, height, frame)) {
+        const auto readStart = std::chrono::steady_clock::now();
+        const bool readOk = m_vulkan->ReadImage(width, height, frame);
+        m_readbackSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - readStart).count();
+        if (!readOk) {
             ++m_unreadable;
             Problem("hardware frame without a readable set_image image");
             return;

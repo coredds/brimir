@@ -180,4 +180,25 @@ check_run(runahead 300 software_runahead)
 check_vulkan_counters(runahead)
 require_log(runahead "second instance ran 360 frames, 0 hardware frames, context none")
 
+# --compare: software and Vulkan in two child processes. Identical content passes; a Vulkan run that is rotated 180
+# degrees (the menu has content after 400 frames) must exit 3 and report the first differing pixel.
+execute_process(
+    COMMAND "${VKHOST}" ${common_args} --compare
+    OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
+if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 300 frames identical")
+    message(FATAL_ERROR "--compare of identical runs: exit ${compare_code}\n${compare_out}\n${compare_err}")
+endif()
+execute_process(
+    COMMAND "${VKHOST}" --bios "${BIOS}" --warmup 400 --frames 3 --compare --compare-vulkan-option brimir_rotation=180
+    OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
+string(REGEX MATCH "work directory kept: ([^\r\n]*)\\)" ignored "${compare_out}")
+if(CMAKE_MATCH_1)
+    file(REMOVE_RECURSE "${CMAKE_MATCH_1}")
+endif()
+if(NOT compare_code EQUAL 3 OR NOT compare_out MATCHES "first at frame 0" OR
+   NOT compare_out MATCHES "first differing pixel \\([0-9]+,[0-9]+\\): software 0x[0-9A-F]+, vulkan 0x[0-9A-F]+")
+    message(FATAL_ERROR "--compare of different runs: exit ${compare_code}\n${compare_out}\n${compare_err}")
+endif()
+message(STATUS "--compare: identical runs pass, a difference is reported (exit 3, first pixel)")
+
 message(STATUS "brimir_vkhost Vulkan checks passed")
