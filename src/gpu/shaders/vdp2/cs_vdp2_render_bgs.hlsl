@@ -15,7 +15,9 @@
 //   the rotation bases cover 512 lines;
 // - the per-line NBG state buffer (g_nbgLines) is declared and bound but not read yet;
 // - bounds guards replace D3D12's robust out-of-range accesses (no robustness features): pixels outside HRes x VRes
-//   write nothing, RBG line colours outside their image are dropped and CRAM colour reads beyond CRAM return 0.
+//   write nothing and RBG line colours outside their image are dropped.
+// Where Ymir differs from Brimir's software renderer (the reference), the software semantics are ported, each marked
+// "// Brimir: matches software (sw:<lines>)": RBG line colours read the RGB555 table of CRAM word (address & 0x7FF).
 //
 // Bindings (set 0; tools/shaders/build_shaders.cmake shifts t by 0 and u by 16):
 //   0  t0  g_layerRenderParams   StructuredBuffer<LayerRenderParams>  STORAGE_BUFFER_DYNAMIC
@@ -1064,11 +1066,11 @@ void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint index, uint rotSel
         }
     }
 
-    // Brimir: D3D12 returns 0 for colour reads beyond CRAM (cramAddress can be any 16-bit VRAM value) and drops writes
-    // outside the image (352 x 512); Vulkan has no robust access, so both are explicit.
+    // Brimir: matches software (sw:2234, 2270, 2653-2654, 4923-4930): the line colour is the RGB555 colour of CRAM word
+    // (address & 0x7FF) in every CRAM mode (Ymir reads the mode-dependent colour cache and returns 0 from 2048 up).
+    // Writes outside the image (352 x 512) are dropped, as D3D12 does (no robust access).
     if (pos.x < kMaxNormalResH && pos.y < kMaxResV) {
-        g_rbgLineColorOut[uint3(pos.xy, index)] =
-            cramAddress < kCRAMColorEntries ? UnpackRGBA8(g_cramColor[cramAddress]) : uint4(0, 0, 0, 0);
+        g_rbgLineColorOut[uint3(pos.xy, index)] = UnpackRGBA8(g_cramColor[kCRAM555TableBase + (cramAddress & 0x7FF)]);
     }
 }
 

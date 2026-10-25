@@ -36,7 +36,7 @@ namespace vdp = ymir::vdp;
 // Register addresses (VDP2 register block offsets)
 constexpr uint32_t TVMD = 0x000, RAMCTL = 0x00E, BGON = 0x020, MZCTL = 0x022, CHCTLA = 0x028, BMPNA = 0x02C,
                    PNCN0 = 0x030, MPOFN = 0x03C, SCXIN0 = 0x070, SCXDN0 = 0x072, ZMXIN0 = 0x078, ZMXDN0 = 0x07A,
-                   SCYN2 = 0x092, BKTAU = 0x0AC, BKTAL = 0x0AE, RPMD = 0x0B0, KTCTL = 0x0B4, WPSX0 = 0x0C0,
+                   SCYN2 = 0x092, LCTAU = 0x0A8, LCTAL = 0x0AA, BKTAU = 0x0AC, BKTAL = 0x0AE, RPMD = 0x0B0, KTCTL = 0x0B4, WPSX0 = 0x0C0,
                    WPSY0 = 0x0C2, WPEX0 = 0x0C4, WPEY0 = 0x0C6, WCTLA = 0x0D0, LWTA0U = 0x0D8, LWTA0L = 0x0DA,
                    SPCTL = 0x0E0, SDCTL = 0x0E2, CCCTL = 0x0EC, PRISA = 0x0F0, PRISB = 0x0F2, PRISC = 0x0F4,
                    PRISD = 0x0F6, PRINA = 0x0F8, CCRSA = 0x100, CCRSB = 0x102, CLOFEN = 0x110, CLOFSL = 0x112,
@@ -678,17 +678,45 @@ TEST_CASE("Vdp2FrontEnd CRAM colour cache matches each CRAM mode", "[vdp2][front
         CHECK(c.a == 1);
     }
 
-    // The frame uploads the cache as it is.
+    // The frame uploads the cache as it is, then the RGB555 table of every CRAM word.
     const auto &rec = rig.Run();
     bool found = false;
     for (const Vdp2Copy &copy : rec.copies) {
         if (copy.target == Vdp2Copy::Target::CRAMColors) {
             found = true;
-            REQUIRE(copy.size == sizeof(CRAMColorCache));
-            CHECK(std::memcmp(rec.arena.data() + copy.arenaOffset, front.ColorCache().data(), copy.size) == 0);
+            REQUIRE(copy.size == 2 * sizeof(CRAMColorCache));
+            REQUIRE(copy.dstOffset == 0);
+            const uint8_t *data = rec.arena.data() + copy.arenaOffset;
+            CHECK(std::memcmp(data, front.ColorCache().data(), sizeof(CRAMColorCache)) == 0);
+            for (uint32_t i = 0; i < kVDP2CRAMColorCacheEntries; ++i) {
+                CAPTURE(i);
+                ColorR8G8B8A8 c;
+                std::memcpy(&c, data + (kVDP2CRAM555TableBase + i) * sizeof(c), sizeof(c));
+                const uint16_t word = util::ReadBE<uint16_t>(&rig.state->mem2.CRAM[i * 2]);
+                REQUIRE(same(c, expect555(word)));
+            }
         }
     }
     CHECK(found);
+}
+
+TEST_CASE("Vdp2FrontEnd RGB555 colour cache follows software's in every CRAM mode", "[vdp2][front]") {
+    // Software's m_CRAMCache (sw:897-914) converts every raw CRAM word, whatever the mode; LNCL reads it.
+    const uint32_t mode = GENERATE(0u, 1u, 2u);
+    CAPTURE(mode);
+    FrontRig rig;
+    auto &w = rig.writer;
+    w.Reg(RAMCTL, static_cast<uint16_t>(mode << 12));
+    std::mt19937 rng{mode + 1};
+    for (uint32_t a = 0; a < 0x1000; a += 2) {
+        w.CRAM16(a, static_cast<uint16_t>(rng()));
+    }
+    const auto &cache = rig.Front().Color555Cache();
+    for (uint32_t i = 0; i < kVDP2CRAMColorCacheEntries; ++i) {
+        CAPTURE(i);
+        const vdp::Color555 c5{.u16 = util::ReadBE<uint16_t>(&rig.state->mem2.CRAM[i * 2])};
+        REQUIRE(cache[i].u32 == vdp::ConvertRGB555to888(c5).u32);
+    }
 }
 
 TEST_CASE("Vdp2FrontEnd snapshots CRAM coefficients after a CRAM write with all RBGs off", "[vdp2][front]") {
@@ -875,6 +903,89 @@ TEST_CASE("Vdp2FrontEnd records LNCL/BACK and rotation bases per line", "[vdp2][
     CHECK(rec.rotBases[1].Xst == (1 << 10) + 0x40);
     CHECK(rec.rotBases[223].Xst == (1 << 10) + 223 * 0x40);
     CHECK(rec.rotBases[kMaxResV].tableAddress == 0x80);
+}
+
+TEST_CASE("Vdp2FrontEnd computes lineBackLayerState per line as software does", "[vdp2][front]") {
+    // The software renderer and the front half on their own states, driven in lockstep: per-line LNCL and BACK tables,
+    // CRAM and table writes mid-frame, and the display switched off and on again mid-frame (the latch stays off, so
+    // no line recomputes the colours). After every line, lineBackLayerState must be identical (sw:2513-2528,
+    // 2645-2664), and so must the composite clear colour of a resolution change (sw:518-530).
+    const uint32_t cramMode = GENERATE(0u, 1u, 2u);
+    CAPTURE(cramMode);
+
+    vdp::config::VDP2AccessPatternsConfig access{};
+    vdp::config::VDP2DebugRender debug{};
+    auto swState = std::make_unique<vdp::VDPState>();
+    auto sw = std::make_unique<vdp::SoftwareVDPRenderer>(*swState, debug, access);
+    auto frState = std::make_unique<vdp::VDPState>();
+    auto fr = std::make_unique<FrontEndRenderer>(*frState, access);
+    Vdp2SceneWriter writer;
+    writer.Attach(*swState, *sw);
+    writer.Attach(*frState, *fr);
+
+    constexpr uint32_t kLineTable = 0x10000, kBackTable = 0x11000;
+    constexpr uint16_t kDispBorder = 0x8100; // DISP, BDCLMD
+    std::mt19937 rng{cramMode + 7};
+    writer.Reg(TVMD, kDispBorder);
+    writer.Reg(RAMCTL, static_cast<uint16_t>(cramMode << 12));
+    for (uint32_t a = 0; a < 0x1000; a += 2) {
+        writer.CRAM16(a, static_cast<uint16_t>(rng()));
+    }
+    for (uint32_t y = 0; y < 512; ++y) {
+        writer.VRAM16(kLineTable + y * 2, static_cast<uint16_t>(rng())); // any word: software masks & 0x7FF
+        writer.VRAM16(kBackTable + y * 2, static_cast<uint16_t>(rng()));
+    }
+    writer.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineTable >> 17)));
+    writer.Reg(LCTAL, static_cast<uint16_t>((kLineTable >> 1) & 0xFFFF));
+    writer.Reg(BKTAU, static_cast<uint16_t>(0x8000 | (kBackTable >> 17)));
+    writer.Reg(BKTAL, static_cast<uint16_t>((kBackTable >> 1) & 0xFFFF));
+
+    const auto &swLB = swState->state2.lineBackLayerState;
+    const auto &frLB = frState->state2.lineBackLayerState;
+    const auto same = [&] {
+        return swLB.lineColor.u32 == frLB.lineColor.u32 && swLB.backColor.u32 == frLB.backColor.u32;
+    };
+    uint32_t lines = 0, mismatches = 0;
+    for (uint32_t frame = 0; frame < 3; ++frame) {
+        writer.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) {
+            if (y > 0) {
+                ++lines;
+                mismatches += same() ? 0 : 1;
+            }
+            if (y == 0) {
+                w.Reg(TVMD, kDispBorder);
+            } else if (y == 30) {
+                w.CRAM16(0x7FE, static_cast<uint16_t>(rng())); // a line colour of mode 1
+                w.CRAM16(0x0FE, static_cast<uint16_t>(rng()));
+            } else if (y == 50) {
+                w.VRAM16(kLineTable + 60 * 2, static_cast<uint16_t>(rng()));
+                w.VRAM16(kBackTable + 60 * 2, static_cast<uint16_t>(rng()));
+            } else if (y == 100 && frame == 2) {
+                w.Reg(TVMD, 0x0100); // display off: the latch goes off
+            } else if (y == 150 && frame == 2) {
+                w.Reg(TVMD, kDispBorder); // display on; the latch stays off until the next frame
+            }
+        });
+        CHECK(same());
+    }
+    CHECK(lines > 600);
+    CHECK(mismatches == 0);
+    CHECK(swLB.backColor.u32 != 0);
+
+    // A resolution change clears software's framebuffer (and the front half's composite) to the back colour.
+    uint32_t swPixel = 0;
+    sw->SwCallbacks.FrameComplete.Rebind(&swPixel, [](uint32_t *fb, uint32_t, uint32_t, void *ctx) {
+        *static_cast<uint32_t *>(ctx) = fb[0];
+    });
+    writer.SetResolution(352, 224, false);
+    sw->VDP2EndFrame();
+    fr->front.ConsumeFrame();
+    fr->front.BeginFrame();
+    fr->front.EndFrame();
+    const Vdp2FrameRecord &rec = fr->front.Frame();
+    CHECK(rec.clearComposite);
+    CHECK(rec.clearColor == swPixel);
+    CHECK((swPixel & 0xFFFFFF) == (swLB.backColor.u32 & 0xFFFFFF));
 }
 
 // -----------------------------------------------------------------------------

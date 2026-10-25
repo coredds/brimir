@@ -6,9 +6,10 @@
 // tables), which reaches many pixel paths per scene.
 //
 // Known divergences between the ported shaders and the software renderer are tagged [!shouldfail], with their letter
-// from stage1b-port-inventory.md section 4.1 ((a)-(l)) or the stage 1B Task 3 review ((q)-(t)) in the name; Tasks 5
-// and 6 fix them and remove the tag. Documented exceptions (software behaviour the GPU path does not reproduce, by a
-// controller ruling) are tagged [!shouldfail] too, named "exception <id>". Any other failure is a bug.
+// from stage1b-port-inventory.md section 4.1 in the name; Task 6 fixes (b)-(g) and removes the tag. The ones Task 5
+// fixed ((a), (i), (k), (l) and (q)-(u) from the Task 3 and 4 reviews) keep their letter in the name, as do the
+// guards (j), (m)-(o). Documented exceptions (software behaviour the GPU path does not reproduce, by a controller
+// ruling) are tagged [!shouldfail] too, named "exception <id>". Any other failure is a bug.
 //
 // Also here: upload overflow (64 KiB upload blocks), detach/attach between frames, and FramePresenter::PresentDevice
 // against FramePresenter::Present of the read-back composite.
@@ -528,17 +529,21 @@ void SetupRBG0(Vdp2SceneWriter &w, Shadow &s, const RBG &r, std::mt19937 &rng) {
 // Running and checking
 
 // uniformFrame: the software frame is expected to be one colour (display off), which must not be black.
+// Failures are CHECKs, not REQUIREs, so the caller still runs CloseAndCheckValidation after a failing scene.
 SceneResult Check(gpu::VulkanDevice &device, const Vdp2Scene &scene, const RenderBothOptions &options = {},
                   bool uniformFrame = false) {
     SceneResult result = RenderBoth(scene, device, options);
     INFO(result.Describe());
-    REQUIRE(result.error.empty());
-    if (uniformFrame) {
-        REQUIRE((result.software[0] & 0xFFFFFF) != 0);
-    } else {
-        REQUIRE(result.distinctColors > 1); // the software frame is not trivial
+    CHECK(result.error.empty());
+    if (!result.error.empty()) {
+        return result;
     }
-    REQUIRE(result.identical);
+    if (uniformFrame) {
+        CHECK((!result.software.empty() && (result.software[0] & 0xFFFFFF) != 0));
+    } else {
+        CHECK(result.distinctColors > 1); // the software frame is not trivial
+    }
+    CHECK(result.identical);
     return result;
 }
 
@@ -1071,7 +1076,7 @@ Vdp2Scene ResolutionScene(uint16_t tvmd, bool deinterlace) {
 
 } // namespace
 
-// Single-density interlace without deinterlacing is divergence (t), below.
+// Single-density interlace without deinterlacing is the (t) scene, below.
 TEST_CASE("Scene: resolutions and interlace modes", "[gpu][vdp2][scene]") {
     const uint16_t hreso = GENERATE(0, 1, 2, 3);
     const auto [lsmd, deinterlace] =
@@ -1361,17 +1366,8 @@ TEST_CASE("PresentDevice across detach and attach", "[gpu][vdp2][scene][lavapipe
 }
 
 // =====================================================================================================================
-// Known divergences (stage1b-port-inventory.md section 4.1 letters; (q)-(t) from the stage 1B Task 3 review). Each
-// fails today; the task that fixes it removes [!shouldfail].
-
-TEST_CASE("Scene: (a) per-layer shadow enable", "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng);
-        TwoNBGs(w, s, rng);
-        s.sdctl = 0x0001; // only NBG0 takes shadows; NBG1 and the back screen do not
-        SetupSprites(w, {.type = 0, .shadowPercent = 40}, rng);
-    }));
-}
+// Known divergences (stage1b-port-inventory.md section 4.1 letters). Each fails today; the task that fixes it removes
+// [!shouldfail].
 
 TEST_CASE("Scene: (b) NBG mosaic", "[gpu][vdp2][scene][!shouldfail]") {
     RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
@@ -1459,75 +1455,11 @@ TEST_CASE("Scene: (g) character pattern delay", "[gpu][vdp2][scene][!shouldfail]
     }));
 }
 
-TEST_CASE("Scene: (i) extended colour calculation with layer 1 special colour calculation",
-          "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng);
-        CyclesAll(w);
-        SetupNBG(w, s, {.index = 0, .format = 1, .priority = 6}, rng);
-        SetupNBG(w, s, {.index = 1, .format = 0, .priority = 5, .specialBits = true}, rng);
-        SetupNBG(w, s, {.index = 2, .format = 0, .priority = 4}, rng);
-        w.Reg(CCCTL, 0x0407);
-        w.Reg(SFCCMD, 0x0004); // NBG1 per character
-        w.Reg(CCRNA, 0x0810);
-    }));
-}
-
-// (j) does not diverge in practice: the GPU's line-ratio branch for the back screen needs the back screen's colour
-// calculation enable, which no register sets (VDP2Regs::backScreenParams.colorCalcEnable stays false), so both use
-// the back screen ratio. Kept as a passing scene.
-TEST_CASE("Scene: (j) back screen ratio in second-screen ratio mode", "[gpu][vdp2][scene]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng);
-        CyclesSingle(w, 0);
-        SetupNBG(w, s, {.index = 0, .format = 1}, rng);
-        w.Reg(CCCTL, 0x0221); // second-screen ratio, line colour and NBG0 colour calculation
-        w.Reg(CCRLB, 0x0410); // back ratio 4, line ratio 16
-        w.Reg(CCRNA, 0x0008);
-    }));
-}
-
-TEST_CASE("Scene: (k) LNCL colours in CRAM mode 2", "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng, kDisp, 2);
-        TwoNBGs(w, s, rng);
-        for (uint32_t y = 0; y < 512; ++y) {
-            w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x400)));
-        }
-        w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
-        w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
-        s.lnclen = 0x0003;
-        w.Reg(CCCTL, 0x0023);
-        w.Reg(CCRLB, 0x0010);
-    }));
-}
-
-TEST_CASE("Scene: (k) display off after a frame of per-line back colours", "[gpu][vdp2][scene][!shouldfail]") {
-    // Frame 0 displays per-line back colours and turns the display off (border colour mode on) at its last line;
-    // frame 1 has the display off. Software shows the last computed back colour on every line; the GPU shows each
-    // line's own.
-    Vdp2Scene scene = Make(
-        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-            Base(w, s, rng);
-            TwoNBGs(w, s, rng);
-            BackPerLine(w, rng);
-        },
-        {}, 2);
-    scene.onLine = [frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
-        if (y == 0) {
-            ++*frame;
-        }
-        if (*frame == 1 && y == 223) {
-            w.Reg(TVMD, kBDCLMD);
-        }
-    };
-    RunScene(scene, {}, true);
-}
-
 namespace {
 
-// VDP1 command table: system clipping, local coordinates, `count` random polygons (mesh ones when `mesh`), end.
-void DrawPolygons(Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t count, bool meshToo) {
+// VDP1 command table: system clipping, local coordinates, `count` random polygons (every other one a mesh when
+// `meshToo`; every fourth one coloured `meshColor` when it is not 0), end.
+void DrawPolygons(Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t count, bool meshToo, uint16_t meshColor = 0) {
     uint32_t a = 0;
     const auto cmd = [&](std::array<uint16_t, 16> words) {
         for (uint32_t i = 0; i < 16; ++i) {
@@ -1543,7 +1475,8 @@ void DrawPolygons(Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t count, bool me
         const int wd = 20 + static_cast<int>(Rand(rng, 80)), ht = 20 + static_cast<int>(Rand(rng, 60));
         // Type 0 palette data: priority, ratio, colour
         const uint32_t pri = Rand(rng, 4), ratio = Rand(rng, 8), dot = 1 + Rand(rng, 0x7FF);
-        const uint16_t color = static_cast<uint16_t>((pri << 14) | (ratio << 11) | dot);
+        const uint16_t color = meshColor != 0 && (i & 3) == 3 ? meshColor
+                                                               : static_cast<uint16_t>((pri << 14) | (ratio << 11) | dot);
         const uint16_t pmod = static_cast<uint16_t>(mesh ? 0x0100 : 0);
         cmd({0x0004, 0, pmod, color, 0, 0, static_cast<uint16_t>(x), static_cast<uint16_t>(y),
              static_cast<uint16_t>(x + wd), static_cast<uint16_t>(y), static_cast<uint16_t>(x + wd),
@@ -1597,7 +1530,7 @@ TEST_CASE("Scene: threaded VDP1 sprites and an erase without a swap", "[gpu][vdp
 namespace {
 
 // NBG0/NBG1 under VDP1 polygons, half of them meshes, transparent meshes on; no colour calculation or colour offset
-// (those are divergence (l)).
+// (MeshColorScene, (l), has those).
 Vdp2Scene MeshScene(uint16_t tvmd, bool deinterlace) {
     return Make(
         [tvmd](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
@@ -1620,35 +1553,262 @@ TEST_CASE("Scene: transparent meshes in progressive and double-density deinterla
     RunScene(MeshScene(tvmd, tvmd != 0)); // double density deinterlaced uploads the mesh1 (alt field) slice
 }
 
-TEST_CASE("Scene: (u) mesh alt field in single-density interlace", "[gpu][vdp2][scene][!shouldfail]") {
-    // Software reads m_meshFBRAM[altField] for the alt-field (odd) rows (sw:2690); the sprite shader reads field 0
-    // there (field 1 only in double density). Fixed in Task 5.
-    RunScene(MeshScene(kLSMDSingle, true));
+// Documented exception U2 (stage 1B ruling 8): in exclusive monitor modes software reads framebuffer pixel x / 2 and
+// draws it at even output x only (xOutputShift = 1 without the doubleResH copy to x + 1, sw:2672-2727), leaving odd x
+// transparent; the sprite shader draws every output x from framebuffer x. No known game uses exclusive monitor modes.
+TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, static_cast<uint16_t>(kDisp | 4));
+        CyclesSingle(w, 0);
+        SetupNBG(w, s, {.index = 0, .format = 0, .priority = 3}, rng);
+        SetupSprites(w, {.type = 0}, rng);
+    }));
 }
 
-TEST_CASE("Scene: (l) transparent mesh colour calculation and colour offset", "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make(
+// =====================================================================================================================
+// Compose, sprite and line colour parity with the software renderer (stage 1B Task 5). Each scene was a divergence of
+// the ported Ymir shaders, by its letter from stage1b-port-inventory.md section 4.1 ((a)-(o)) or the stage 1B Task 3
+// and 4 reviews ((q)-(u)); (j) and (m)-(o) never diverged and stay as guards.
+
+TEST_CASE("Scene: (a) per-layer shadow enable over NBGs and the back screen", "[gpu][vdp2][scene][lavapipe]") {
+    // SDCTL: bit 0 NBG0, bit 1 NBG1, bit 5 back screen. Normal shadows (type 0) and MSB shadows (type 2).
+    const uint16_t sdctl = GENERATE(uint16_t{0x00}, uint16_t{0x01}, uint16_t{0x02}, uint16_t{0x20}, uint16_t{0x23});
+    const bool msb = GENERATE(false, true);
+    CAPTURE(sdctl, msb);
+    RunScene(Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        TwoNBGs(w, s, rng);
+        s.sdctl = sdctl;
+        SetupSprites(w, {.type = msb ? 2u : 0u, .shadowPercent = msb ? 0u : 40u}, rng);
+    }));
+}
+
+TEST_CASE("Scene: (a) per-layer shadow enable over RBG0", "[gpu][vdp2][scene]") {
+    // SDCTL: bit 4 RBG0, bit 5 back screen. RBG0 at priority 1, below every sprite.
+    const uint16_t sdctl = GENERATE(uint16_t{0x00}, uint16_t{0x10}, uint16_t{0x20});
+    CAPTURE(sdctl);
+    RunScene(Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        SetupRBG0(w, s, {.priority = 1}, rng);
+        s.sdctl = sdctl;
+        SetupSprites(w, {.type = 0, .shadowPercent = 40}, rng);
+    }));
+}
+
+TEST_CASE("Scene: (i) extended colour calculation with layer 1 special colour calculation", "[gpu][vdp2][scene]") {
+    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        CyclesAll(w);
+        SetupNBG(w, s, {.index = 0, .format = 1, .priority = 6}, rng);
+        SetupNBG(w, s, {.index = 1, .format = 0, .priority = 5, .specialBits = true}, rng);
+        SetupNBG(w, s, {.index = 2, .format = 0, .priority = 4}, rng);
+        w.Reg(CCCTL, 0x0407);
+        w.Reg(SFCCMD, 0x0004); // NBG1 per character
+        w.Reg(CCRNA, 0x0810);
+    }));
+}
+
+TEST_CASE("Scene: (i) extended colour calculation with the colour calculation window", "[gpu][vdp2][scene]") {
+    // Layer 0 and layer 1 share the window result of their pixel, so only the special colour calculation bit (above)
+    // can tell the layer-1 enables apart; this one guards the window path with sprites on layer 1.
+    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        CyclesAll(w);
+        SetupNBG(w, s, {.index = 0, .format = 1, .priority = 7}, rng);
+        SetupNBG(w, s, {.index = 1, .format = 0, .priority = 2}, rng);
+        SetupSprites(w, {.type = 1}, rng);
+        WindowRects(w, false);
+        w.Reg(WCTLD, 0x0200); // colour calculation window: W0
+        w.Reg(CCCTL, 0x0443); // extended; sprite, NBG0, NBG1
+        w.Reg(CCRNA, 0x0810);
+    }));
+}
+
+// (j) never diverged: the GPU's line-ratio branch for the back screen needs the back screen's colour calculation enable,
+// which no register sets (VDP2Regs::backScreenParams.colorCalcEnable stays false). The shader now returns the back
+// screen ratio directly, as software does.
+TEST_CASE("Scene: (j) back screen ratio in second-screen ratio mode", "[gpu][vdp2][scene]") {
+    const bool sprites = GENERATE(false, true);
+    CAPTURE(sprites);
+    RunScene(Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        CyclesSingle(w, 0);
+        SetupNBG(w, s, {.index = 0, .format = 1}, rng);
+        if (sprites) {
+            SetupSprites(w, {.type = 1, .transparentPercent = 60}, rng);
+        }
+        w.Reg(CCCTL, 0x0261); // second-screen ratio, line colour, sprite and NBG0 colour calculation
+        w.Reg(CCRLB, 0x0410); // back ratio 4, line ratio 16
+        w.Reg(CCRNA, 0x0008);
+    }));
+}
+
+TEST_CASE("Scene: (k) LNCL colours in CRAM mode 2", "[gpu][vdp2][scene][lavapipe]") {
+    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, kDisp, 2);
+        TwoNBGs(w, s, rng);
+        for (uint32_t y = 0; y < 512; ++y) {
+            w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x10000))); // any word: & 0x7FF
+        }
+        w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
+        w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
+        s.lnclen = 0x0003;
+        w.Reg(CCCTL, 0x0023);
+        w.Reg(CCRLB, 0x0010);
+    }));
+}
+
+TEST_CASE("Scene: (k) display off after a frame of per-line back colours", "[gpu][vdp2][scene][lavapipe]") {
+    // Frame 0 displays per-line back colours and turns the display off (border colour mode on) at its last line;
+    // frame 1 has the display off. Software shows the last computed back colour on every line (the display latch is
+    // off, so no line recomputes it).
+    Vdp2Scene scene = Make(
         [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng);
             TwoNBGs(w, s, rng);
-            w.Reg(SPCTL, 0x0000);
+            BackPerLine(w, rng);
+        },
+        {}, 2);
+    scene.onLine = [frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            ++*frame;
+        }
+        if (*frame == 1 && y == 223) {
+            w.Reg(TVMD, kBDCLMD);
+        }
+    };
+    RunScene(scene, {}, true);
+}
+
+TEST_CASE("Scene: (k) display switched off and on mid-frame", "[gpu][vdp2][scene]") {
+    // The display goes off at line 60 and on again at line 120 (border colour mode on from then): the display latch
+    // stays off to the end of the frame, so lines 120 and below are drawn with the line colour and back colour of line
+    // 59 (software skips the per-line updates), and lines 60-119 show the border colour mode latched at the frame start
+    // (on from the second frame: line 59's back colour).
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, kDisp, 1);
+            TwoNBGs(w, s, rng);
+            BackPerLine(w, rng);
+            for (uint32_t y = 0; y < 512; ++y) {
+                w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x800)));
+            }
+            w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
+            w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
+            s.lnclen = 0x0001;
+            w.Reg(CCCTL, 0x0021);
+            w.Reg(CCRLB, 0x0C08);
+        },
+        {}, 2);
+    scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 60) {
+            w.Reg(TVMD, kBDCLMD);
+        } else if (y == 120) {
+            w.Reg(TVMD, static_cast<uint16_t>(kDisp | kBDCLMD));
+        } else if (y == 0) {
+            w.Reg(TVMD, kDisp);
+        }
+    };
+    RunScene(scene);
+}
+
+namespace {
+
+// Transparent meshes over NBG0/NBG1 with sprite colour calculation and colour offsets. variant:
+// 0 condition priority <= 7 (all), ratio blend; 1 priority == 4, additive; 2 priority >= 5, second-screen ratio;
+// 3 colour MSB; 4 colour offset on NBG0/NBG1 only (not the sprite), sprite colour calculation off; 5 sprite colour
+// offset B; 6 sprite type 2 with mesh pixels 0x8000 (transparent with the shadow bit: priority set, not normal).
+Vdp2Scene MeshColorScene(uint32_t variant) {
+    return Make(
+        [variant](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            static constexpr uint16_t kSPCTL[] = {0x0700, 0x1400, 0x2500, 0x3000, 0x0700, 0x0700, 0x0702};
+            w.Reg(SPCTL, kSPCTL[variant]);
             w.Reg(PRISA, 0x0706);
             w.Reg(PRISB, 0x0402);
             w.Reg(CCRSA, 0x0810);
             w.Reg(CCRSB, 0x1804);
-            w.Reg(CCCTL, 0x0041);  // sprite and NBG0 colour calculation
-            w.Reg(CLOFEN, 0x0040); // sprite colour offset
+            w.Reg(CCRSC, 0x1F00);
+            w.Reg(CCRSD, 0x0C14);
+            w.Reg(CCRNA, 0x0A14);
+            const uint16_t ccmd = variant == 1 ? 0x0100 : variant == 2 ? 0x0200 : 0;
+            w.Reg(CCCTL, static_cast<uint16_t>(ccmd | (variant == 4 ? 0x0003 : 0x0043)));
+            w.Reg(CLOFEN, variant == 4 ? 0x0003 : 0x0041);
+            w.Reg(CLOFSL, variant == 5 ? 0x0040 : 0x0002);
             w.Reg(COAR, 0x0080);
+            w.Reg(COAG, 0x01E0);
+            w.Reg(COBR, 0x01C0);
+            w.Reg(COBB, 0x0050);
+            DrawPolygons(w, rng, 24, true, variant == 6 ? uint16_t{0x8000} : uint16_t{0});
+        },
+        {.transparentMeshes = true});
+}
+
+} // namespace
+
+TEST_CASE("Scene: (l) transparent mesh colour calculation and colour offset", "[gpu][vdp2][scene][lavapipe]") {
+    const uint32_t variant = GENERATE(range(0u, 7u));
+    CAPTURE(variant);
+    RunScene(MeshColorScene(variant));
+}
+
+TEST_CASE("Scene: (m) colour offsets of zero", "[gpu][vdp2][scene]") {
+    // Software applies an enabled offset only when it is non-zero; the shader adds it anyway (adding zero).
+    RunScene(Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            w.Reg(SPCTL, 0x0700);
+            w.Reg(PRISA, 0x0706);
+            w.Reg(PRISB, 0x0402);
+            w.Reg(CCCTL, 0x0043);
+            w.Reg(CCRNA, 0x0A14);
+            w.Reg(CLOFEN, 0x007F); // every layer
+            w.Reg(CLOFSL, 0x0042); // sprite and NBG1 use B (zero), the others A
+            w.Reg(COAR, 0x0030);
+            w.Reg(COAB, 0x01F0);
             DrawPolygons(w, rng, 16, true);
         },
         {.transparentMeshes = true}));
 }
 
-TEST_CASE("Scene: (q) sprite reads past the 256 KiB framebuffer in exclusive monitor mode",
-          "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (n) ratio blends at every ratio", "[gpu][vdp2][scene]") {
+    auto device = OpenDevice();
+    for (uint32_t ratio = 0; ratio < 32; ratio += 3) {
+        CAPTURE(ratio);
+        Check(*device, Make([ratio](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            SetupSprites(w, {.type = 1}, rng); // random sprite ratios
+            w.Reg(CCCTL, 0x0043);
+            w.Reg(CCRNA, static_cast<uint16_t>(ratio | ((31 - ratio) << 8)));
+        }));
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: (o) colour gradation at the left edge", "[gpu][vdp2][scene]") {
+    // Pixels 0 and 1 have no left neighbours: software uses input[0] and the average of input[0] and input[1], the
+    // shader clamps its taps at x = 0 (the same values).
+    const uint32_t screen = GENERATE(2u, 4u); // NBG0, NBG1
+    CAPTURE(screen);
+    RunScene(Make([screen](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        CyclesAll(w);
+        SetupNBG(w, s, {.index = 0, .format = 1, .transparency = false, .priority = 6}, rng);
+        SetupNBG(w, s, {.index = 1, .format = 0, .transparency = false, .priority = 3}, rng);
+        w.Reg(SCXIN0, 3);
+        w.Reg(SCXIN1, 5);
+        w.Reg(CCCTL, static_cast<uint16_t>(0x8000 | (screen << 12) | 0x0003));
+        w.Reg(CCRNA, 0x0A14);
+    }));
+}
+
+TEST_CASE("Scene: (q) sprite reads past the 256 KiB framebuffer in exclusive monitor mode", "[gpu][vdp2][scene]") {
     // 480 lines read framebuffer rows 256-479, past the 256 KiB framebuffer: software wraps to rows 0-223 of the
-    // display framebuffer (empty here), the GPU reads the next slice, framebuffer 1, which frame 0 displayed (random).
-    // Rows 0-255 are empty on both, so only the wrap differs.
+    // display framebuffer (empty here); the shader read the next slice, framebuffer 1, which frame 0 displayed
+    // (random). Rows 0-255 are empty on both, so only the wrap differs.
     Vdp2Scene scene = Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng, static_cast<uint16_t>(kDisp | 4));
         CyclesSingle(w, 0);
@@ -1666,22 +1826,13 @@ TEST_CASE("Scene: (q) sprite reads past the 256 KiB framebuffer in exclusive mon
     RunScene(scene);
 }
 
-// Documented exception U2 (stage 1B ruling 8): in exclusive monitor modes software reads framebuffer pixel x / 2 and
-// draws it at even output x only (xOutputShift = 1 without the doubleResH copy to x + 1, sw:2672-2727), leaving odd x
-// transparent; the sprite shader draws every output x from framebuffer x. No known game uses exclusive monitor modes.
-TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng, static_cast<uint16_t>(kDisp | 4));
-        CyclesSingle(w, 0);
-        SetupNBG(w, s, {.index = 0, .format = 0, .priority = 3}, rng);
-        SetupSprites(w, {.type = 0}, rng);
-    }));
-}
-
-TEST_CASE("Scene: (r) RBG line colour from CRAM indices of 2048 and above", "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng, kDisp, 1);
-        SetupRBG0(w, s, {}, rng);
+TEST_CASE("Scene: (r) RBG line colour from CRAM indices of 2048 and above", "[gpu][vdp2][scene]") {
+    const uint32_t cramMode = GENERATE(1u, 2u);
+    const bool coeffLineColor = GENERATE(false, true);
+    CAPTURE(cramMode, coeffLineColor);
+    RunScene(Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, kDisp, cramMode);
+        SetupRBG0(w, s, {.coeffTable = coeffLineColor, .coeffLineColor = coeffLineColor}, rng);
         for (uint32_t y = 0; y < 512; ++y) {
             w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(0x800 + Rand(rng, 0xF000)));
         }
@@ -1693,19 +1844,20 @@ TEST_CASE("Scene: (r) RBG line colour from CRAM indices of 2048 and above", "[gp
     }));
 }
 
-TEST_CASE("Scene: (s) rotated sprites under deinterlace", "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (s) rotated sprites under deinterlace", "[gpu][vdp2][scene][lavapipe]") {
+    const uint16_t lsmd = GENERATE(kLSMDSingle, kLSMDDouble);
+    CAPTURE(lsmd);
     RunScene(Make(
-        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-            Base(w, s, rng, static_cast<uint16_t>(kDisp | kLSMDDouble));
+        [lsmd](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | lsmd));
             SetupRBG0(w, s, {}, rng);
             SetupSprites(w, {.type = 0, .tvmr = 2}, rng);
         },
         {.deinterlace = true}, 2));
 }
 
-TEST_CASE("Scene: (t) resolutions in single-density interlace without deinterlacing",
-          "[gpu][vdp2][scene][!shouldfail]") {
-    // The back screen of field lines 112 and below lands on the wrong rows (GPU: black from row 224).
+TEST_CASE("Scene: (t) resolutions in single-density interlace without deinterlacing", "[gpu][vdp2][scene]") {
+    // The back screen of field lines 112 and below landed on the wrong rows (GPU: black from row 224).
     auto device = OpenDevice();
     for (uint16_t hreso = 0; hreso < 4; ++hreso) {
         CAPTURE(hreso);
@@ -1714,11 +1866,15 @@ TEST_CASE("Scene: (t) resolutions in single-density interlace without deinterlac
     CloseAndCheckValidation(device);
 }
 
-TEST_CASE("Scene: (t) LNCL and BACK per line in single-density interlace without deinterlacing",
-          "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (t) LNCL and BACK per line in interlaced modes", "[gpu][vdp2][scene][lavapipe]") {
+    const auto [lsmd, deinterlace] =
+        GENERATE(std::pair{kLSMDSingle, false}, std::pair{kLSMDSingle, true}, std::pair{kLSMDDouble, false},
+                 std::pair{kLSMDDouble, true});
+    CAPTURE(lsmd, deinterlace);
+    const uint16_t tvmd = static_cast<uint16_t>(kDisp | lsmd);
     RunScene(Make(
-        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-            Base(w, s, rng, static_cast<uint16_t>(kDisp | kLSMDSingle), 1);
+        [tvmd](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, tvmd, 1);
             TwoNBGs(w, s, rng);
             BackPerLine(w, rng);
             for (uint32_t y = 0; y < 512; ++y) {
@@ -1730,7 +1886,14 @@ TEST_CASE("Scene: (t) LNCL and BACK per line in single-density interlace without
             w.Reg(CCCTL, 0x0021);
             w.Reg(CCRLB, 0x0C08);
         },
-        {.deinterlace = false}, 3));
+        {.deinterlace = deinterlace}, 3));
+}
+
+TEST_CASE("Scene: (u) mesh alt field in single-density interlace", "[gpu][vdp2][scene][lavapipe]") {
+    // Software reads the alt mesh framebuffer (m_meshFBRAM[1]) for the alt-field rows whenever it deinterlaces
+    // (sw:2690), in single density too, where VDP1 never draws into it (sw:1119): meshes show on the main field rows
+    // only. The renderer captures that slice and the sprite shader reads it.
+    RunScene(MeshScene(kLSMDSingle, true));
 }
 
 // =====================================================================================================================

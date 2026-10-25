@@ -102,8 +102,11 @@ static const uint kBackScreenOffset = kMaxResV;
 // Reads beyond it return 0, as Ymir's D3D12 raw-buffer reads do (Vulkan has no robust access in the baseline).
 static const uint kVDP1FBRAMBufferSize = kVDP1FBRAMSize * 8;
 
-// Brimir: entries in the CRAM colour buffer (StructuredBuffer<uint>, one packed RGBA8 colour per entry).
+// Brimir: entries in the CRAM colour buffer (StructuredBuffer<uint>, one packed RGBA8 colour per entry): the
+// mode-dependent colour cache, then from kCRAM555TableBase every CRAM word as RGB555 (the software renderer's colour
+// cache, which line colours read in every CRAM mode; kVDP2CRAM555TableBase in vdp2_hw_params.hpp).
 static const uint kCRAMColorEntries = 2048;
+static const uint kCRAM555TableBase = kCRAMColorEntries;
 
 // Brimir: CRAM colours and LNCL/BACK are StructuredBuffer<uint> of packed RGBA8 (ColorR8G8B8A8, r in the low byte)
 // instead of Buffer<uint4> views of R8G8B8A8_UINT: no texel buffer and no Rgba32ui format declaration.

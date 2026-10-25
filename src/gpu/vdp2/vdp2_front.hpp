@@ -139,9 +139,14 @@ public:
     /// @brief Device (re)attach: the next frame uploads all of VRAM and CRAM.
     void MarkAllDirty();
 
-    /// @brief The mode-dependent RGBA8 CRAM colour cache (as uploaded by CRAMColors copies).
+    /// @brief The mode-dependent RGBA8 CRAM colour cache (the first half of CRAMColors copies).
     const CRAMColorCache &ColorCache() const {
         return m_cramColorCache;
+    }
+
+    /// @brief The software renderer's RGB555 colour cache of every CRAM word (the second half of CRAMColors copies).
+    const std::array<ymir::vdp::Color888, kVDP2CRAMColorCacheEntries> &Color555Cache() const {
+        return m_cram555Cache;
     }
 
 private:
@@ -161,6 +166,8 @@ private:
     static constexpr uint32_t kVRAMChunkShift = 8; // 256-byte chunks
     util::DirtyBitmap<(ymir::vdp::kVDP2VRAMSize >> kVRAMChunkShift)> m_vramDirty;
     CRAMColorCache m_cramColorCache{};
+    // Brimir: SoftwareVDPRenderer::m_CRAMCache, maintained the same way (sw:97, 233-236, 905-914)
+    std::array<ymir::vdp::Color888, kVDP2CRAMColorCacheEntries> m_cram555Cache{};
     uint64_t m_cramGeneration = 1;
     uint64_t m_flushedCRAMGeneration = 0;
     std::array<bool, 2> m_resetNBGScrollY{};
@@ -173,9 +180,11 @@ private:
     VDP2LayerRenderParams m_flushedLayer{};
     VDP2ComposeParams m_flushedCompose{};
 
-    // Per-line arrays (persist across frames, as in Ymir: display-off lines repeat the previous line)
+    // Per-line arrays (persist across frames; lines prepared with the display latch off repeat the last computed state,
+    // as software's)
     std::array<ColorR8G8B8A8, 2 * kMaxResV> m_lnclBack{};
     std::array<VDP2RotParamBase, 2 * kMaxResV> m_rotParamBases{};
+    std::array<VDP2RotParamBase, 2> m_lastRotParamBases{}; // the last computed bases of parameters A and B
 
     // Batching (d3d:586-587)
     uint32_t m_nextLayerRenderLine = 0;
@@ -213,6 +222,8 @@ private:
 
     // --- Brimir ------------------------------------------------------------------------------------------------------
     void PrepareLine(uint32_t y);
+    void Cache555Color(uint32_t address);
+    void StoreLineColorBackScreens(uint32_t y);
     void CountFeatures();
     uint32_t YShift() const;
     uint32_t AppendArena(const void *data, size_t size, uint32_t alignment = 4);

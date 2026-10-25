@@ -722,7 +722,11 @@ inline constexpr size_t kVDP2CRAMColorCacheEntries = ymir::vdp::kVDP2CRAMSize / 
 using CRAMColorCache = std::array<ColorR8G8B8A8, kVDP2CRAMColorCacheEntries>;
 
 /// @brief Size of the VDP2 CRAM color buffer, in bytes.
-inline constexpr uint32_t kVDP2CRAMColorBufferSize = sizeof(CRAMColorCache);
+// Brimir: two tables of kVDP2CRAMColorCacheEntries: the mode-dependent colour cache, then (from entry
+// kVDP2CRAM555TableBase) every CRAM word as RGB555, the software renderer's colour cache (sw:897-914), which line colours
+// read in every CRAM mode.
+inline constexpr uint32_t kVDP2CRAM555TableBase = kVDP2CRAMColorCacheEntries;
+inline constexpr uint32_t kVDP2CRAMColorBufferSize = 2 * sizeof(CRAMColorCache);
 
 /// @brief Size of the VDP2 CRAM rotation coefficients buffer, in bytes.
 /// The second half of CRAM can be used for that purpose.

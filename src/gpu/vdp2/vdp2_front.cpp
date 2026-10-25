@@ -2,6 +2,7 @@
 
 #include <ymir/hw/vdp/vdp_common_defs.hpp>
 #include <ymir/util/bit_ops.hpp>
+#include <ymir/util/data_ops.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -32,6 +33,11 @@ bool Differs(const T &lhs, const T &rhs) {
     return std::memcmp(&lhs, &rhs, sizeof(T)) != 0;
 }
 
+ColorR8G8B8A8 ToRGBA8(Color888 c) {
+    return {static_cast<uint8_t>(c.r), static_cast<uint8_t>(c.g), static_cast<uint8_t>(c.b),
+            static_cast<uint8_t>(c.msb)};
+}
+
 } // namespace
 
 Vdp2FrontEnd::Vdp2FrontEnd(VDPState &state, const config::VDP2AccessPatternsConfig &accessPatternsConfig)
@@ -54,6 +60,8 @@ void Vdp2FrontEnd::Reset(bool hard) {
     m_pendingClearColor = 0xFF000000u;
     if (hard) {
         m_cramColorCache.fill({});
+        // Brimir: matches software (sw:96-98)
+        m_cram555Cache.fill({});
     }
 
     m_vramDirty.SetAll();
@@ -68,6 +76,10 @@ void Vdp2FrontEnd::Reset(bool hard) {
 
 // Ported from d3d:4612-4625 (PostLoadStateSync, VDP2 part).
 void Vdp2FrontEnd::PostLoadStateSync() {
+    // Brimir: matches software (sw:234-236)
+    for (uint32 address = 0; address < kVDP2CRAMSize; address += 2) {
+        Cache555Color(address);
+    }
     CacheAllCRAMColors();
     UpdateEnabledLayers();
     m_vramDirty.SetAll();
@@ -131,6 +143,13 @@ void Vdp2FrontEnd::CacheCRAMColor(uint32_t address) {
     }
 }
 
+// Brimir: matches software (sw:905-914, VDP2UpdateCRAMCache for one 16-bit or 8-bit write).
+void Vdp2FrontEnd::Cache555Color(uint32_t address) {
+    address &= (kVDP2CRAMSize - 1) & ~1u;
+    const Color555 color5{.u16 = util::ReadBE<uint16>(&m_state.mem2.CRAM[address])}; // raw CRAM, as software
+    m_cram555Cache[address / sizeof(uint16)] = ConvertRGB555to888(color5);
+}
+
 // Ported from d3d:3488-3526 (VDP2CacheAllCRAMColors).
 void Vdp2FrontEnd::CacheAllCRAMColors() {
     CRAMColorCache &colorCache = m_cramColorCache;
@@ -184,6 +203,7 @@ void Vdp2FrontEnd::WriteVRAM(uint32_t address) {
 void Vdp2FrontEnd::WriteCRAM(uint32_t address) {
     ++m_cramGeneration;
     CacheCRAMColor(address);
+    Cache555Color(address); // Brimir: matches software (sw:407-408)
 }
 
 // Ported from d3d:3537-3623 (VDP2WriteReg).
@@ -262,35 +282,42 @@ void Vdp2FrontEnd::InitNBGs() {
 }
 
 // Ported from d3d:4129-4154 (VDP2DrawLineColorBackScreens).
+// Brimir: matches software (sw:2645-2664): the colours are computed into state2.lineBackLayerState, LNCL from the
+// RGB555 colour cache of CRAM word (value & 0x7FF) in every CRAM mode. PrepareLine calls this only while the display
+// latch is on (sw:2518-2520); every line stores the state as it is then, so lines prepared with the latch off repeat
+// the last computed colours, as software composes them.
 void Vdp2FrontEnd::DrawLineColorBackScreens(uint32_t y) {
     const VDP2Regs &regs = m_state.regs2;
+    LineBackLayerState &state = m_state.state2.lineBackLayerState;
 
-    if (regs.displayEnabledLatch) {
-        // Read line color screen color
-        const LineBackScreenParams &lineParams = regs.lineScreenParams;
-        const uint32 lnclY = lineParams.perLine ? y : 0;
-        const uint32 lineAddress = lineParams.baseAddress + lnclY * sizeof(uint16);
-        const uint32 cramAddress = m_state.mem2.ReadVRAM<uint16>(lineAddress);
-        m_lnclBack[y] = m_cramColorCache[cramAddress & 0x7FF];
-
-        // Read back screen color
-        const LineBackScreenParams &backParams = regs.backScreenParams;
-        const uint32 backY = backParams.perLine ? y : 0;
-        const uint32 backAddress = backParams.baseAddress + backY * sizeof(Color555);
-        const Color555 color5{.u16 = m_state.mem2.ReadVRAM<uint16>(backAddress)};
-        const Color888 color8 = ConvertRGB555to888(color5);
-        ColorR8G8B8A8 &back = m_lnclBack[kMaxResV + y];
-        back.r = color8.r;
-        back.g = color8.g;
-        back.b = color8.b;
-        back.a = color8.msb;
-    } else if (y > 0) {
-        m_lnclBack[y] = m_lnclBack[y - 1];
-        m_lnclBack[kMaxResV + y] = m_lnclBack[kMaxResV + y - 1];
+    // Read line color screen color
+    const LineBackScreenParams &lineParams = regs.lineScreenParams;
+    uint32 lineAddress = lineParams.baseAddress;
+    if (lineParams.perLine) {
+        lineAddress += y * sizeof(uint16);
     }
+    const uint32 cramAddress = m_state.mem2.ReadVRAM<uint16>(lineAddress) * sizeof(uint16);
+    state.lineColor = m_cram555Cache[(cramAddress / sizeof(uint16)) & 0x7FF];
+
+    // Read back screen color
+    const LineBackScreenParams &backParams = regs.backScreenParams;
+    uint32 backAddress = backParams.baseAddress;
+    if (backParams.perLine) {
+        backAddress += y * sizeof(Color555);
+    }
+    const Color555 color555{.u16 = m_state.mem2.ReadVRAM<uint16>(backAddress)};
+    state.backColor = ConvertRGB555to888(color555);
 }
 
-// Ported from d3d:4180-4225 (VDP2UpdateRotationParameterBases). Brimir: kMaxResV rows per parameter.
+void Vdp2FrontEnd::StoreLineColorBackScreens(uint32_t y) {
+    const LineBackLayerState &state = m_state.state2.lineBackLayerState;
+    m_lnclBack[y] = ToRGBA8(state.lineColor);
+    m_lnclBack[kMaxResV + y] = ToRGBA8(state.backColor);
+}
+
+// Ported from d3d:4180-4225 (VDP2UpdateRotationParameterBases). Brimir: kMaxResV rows per parameter; Xst, Yst and KA
+// accumulate from the last computed line, as software's rotParamStates do (sw:2156-2184), so lines skipped with the
+// display latch off or with no RBG enabled continue where software does.
 void Vdp2FrontEnd::UpdateRotationParameterBases(uint32_t y) {
     VDP2Regs &regs2 = m_state.regs2;
     if (!regs2.bgEnabled[4] && !regs2.bgEnabled[5]) {
@@ -302,7 +329,7 @@ void Vdp2FrontEnd::UpdateRotationParameterBases(uint32_t y) {
 
     const uint32 baseAddress = regs2.commonRotParams.baseAddress & 0xFFF7C; // mask bit 6 (shifted left by 1)
     for (uint32 i = 0; i < 2; ++i) {
-        VDP2RotParamBase &base = m_rotParamBases[i * kMaxResV + y];
+        VDP2RotParamBase &base = m_lastRotParamBases[i];
         RotationParams &src = regs2.rotParams[i];
 
         const uint32 address = baseAddress + i * 0x80;
@@ -313,18 +340,14 @@ void Vdp2FrontEnd::UpdateRotationParameterBases(uint32_t y) {
             base.Xst = bit::extract_signed<6, 28, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x00));
             src.readXst = false;
         } else {
-            const VDP2RotParamBase &prevBase = m_rotParamBases[i * kMaxResV + y - 1];
-            base.Xst =
-                prevBase.Xst + bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x0C));
+            base.Xst += bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x0C));
         }
 
         if (readAll || src.readYst) {
             base.Yst = bit::extract_signed<6, 28, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x04));
             src.readYst = false;
         } else {
-            const VDP2RotParamBase &prevBase = m_rotParamBases[i * kMaxResV + y - 1];
-            base.Yst =
-                prevBase.Yst + bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x10));
+            base.Yst += bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x10));
         }
 
         if (readAll || src.readKAst) {
@@ -332,8 +355,7 @@ void Vdp2FrontEnd::UpdateRotationParameterBases(uint32_t y) {
             base.KA = src.coeffTableAddressOffset + KAst;
             src.readKAst = false;
         } else {
-            const VDP2RotParamBase &prevBase = m_rotParamBases[i * kMaxResV + y - 1];
-            base.KA = prevBase.KA + bit::extract_signed<6, 25>(m_state.mem2.ReadVRAM<uint32>(address + 0x58));
+            base.KA += bit::extract_signed<6, 25>(m_state.mem2.ReadVRAM<uint32>(address + 0x58));
         }
     }
 }
@@ -706,7 +728,14 @@ void Vdp2FrontEnd::FlushCRAM() {
     }
     m_flushedCRAMGeneration = m_cramGeneration;
 
-    const uint32_t colorsOffset = AppendArena(m_cramColorCache.data(), sizeof(CRAMColorCache));
+    // Brimir: the mode-dependent cache, then the RGB555 table of every CRAM word for line colours (sw:2653-2654, 2270).
+    std::array<ColorR8G8B8A8, 2 * kVDP2CRAMColorCacheEntries> colors;
+    std::copy(m_cramColorCache.begin(), m_cramColorCache.end(), colors.begin());
+    for (size_t i = 0; i < m_cram555Cache.size(); ++i) {
+        colors[kVDP2CRAM555TableBase + i] = ToRGBA8(m_cram555Cache[i]);
+    }
+    static_assert(sizeof(colors) == kVDP2CRAMColorBufferSize);
+    const uint32_t colorsOffset = AppendArena(colors.data(), sizeof(colors));
     m_record.copies.push_back({colorsOffset, 0, kVDP2CRAMColorBufferSize, Vdp2Copy::Target::CRAMColors});
 
     // Brimir: Ymir uploads the coefficient half only if an RBG and CRAM coefficients are enabled at this moment, and
@@ -817,7 +846,8 @@ void Vdp2FrontEnd::BeginFrame() {
     m_layerSnapshotOffset = UINT32_MAX;
     m_composeSnapshotOffset = UINT32_MAX;
 
-    CalcAccessPatterns();
+    // Brimir: matches software (sw:2070-2078, 2522): access patterns are computed per line only, in PrepareLine while
+    // the display latch is on; Ymir also computes them here.
     InitNBGs();
 
     // Brimir: Ymir clears scrollYIncBase after UpdateState(0) has uploaded the parameters, so the first batch could
@@ -916,11 +946,18 @@ void Vdp2FrontEnd::EndFrame() {
 // The per-line CPU work of d3d:4446-4450, one function per per-line computation so that the software-exact versions
 // can replace them.
 void Vdp2FrontEnd::PrepareLine(uint32_t y) {
-    CalcAccessPatterns();
-    CalcVCellScrollDelay();
-    DrawLineColorBackScreens(y);
-    UpdateRotationParameterBases(y);
-    m_state.state2.UpdateRotationPageBaseAddresses(m_state.regs2);
+    // Brimir: matches software (sw:2513-2528): nothing is updated while the display latch is off.
+    if (m_state.regs2.displayEnabledLatch) {
+        CalcAccessPatterns();
+        CalcVCellScrollDelay();
+        UpdateRotationParameterBases(y);
+        m_state.state2.UpdateRotationPageBaseAddresses(m_state.regs2);
+        DrawLineColorBackScreens(y);
+    }
+    StoreLineColorBackScreens(y);
+    for (uint32 i = 0; i < 2; ++i) {
+        m_rotParamBases[i * kMaxResV + y] = m_lastRotParamBases[i];
+    }
     CountFeatures();
 }
 

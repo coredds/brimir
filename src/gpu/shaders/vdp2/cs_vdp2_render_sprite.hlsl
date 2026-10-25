@@ -8,6 +8,10 @@
 // - the layer image is declared rgba8ui and the sprite attributes r32ui (no extended storage formats);
 // - bounds guards replace D3D12's robust out-of-range accesses (no robustness features): pixels outside
 //   HRes x VRes and layers beyond the mesh layer write nothing, and framebuffer reads beyond the buffer return 0.
+// Where Ymir's sprite layer differs from Brimir's software renderer (the reference), the software semantics are
+// ported, each marked "// Brimir: matches software (sw:<lines>)": framebuffer offsets wrap within the framebuffer,
+// and under deinterlacing rotated sprites use the line's coordinates and the alt fields read the framebuffers software
+// reads.
 //
 // Bindings (set 0; tools/shaders/build_shaders.cmake shifts t by 0 and u by 16):
 //   0  t0  g_layerRenderParams  StructuredBuffer<LayerRenderParams>  STORAGE_BUFFER_DYNAMIC
@@ -93,22 +97,32 @@ uint LoadSpriteFB(uint address) {
     return address < kVDP1FBRAMBufferSize ? g_spriteFB.Load(address) : 0;
 }
 
-uint ReadSprite8(uint address, uint field) {
-    address += kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset;
+// Brimir: matches software (sw:5522, 5528, 2766): framebuffer offsets wrap within the 256 KiB framebuffer
+// (& 0x3FFFF, & 0x3FFFE) before the slice base is added, instead of reading into the next slice.
+uint ReadFB8(uint address, uint sliceBase) {
+    address = (address & 0x3FFFF) + sliceBase;
     return BitExtract(LoadSpriteFB(address & ~3), (address & 3) * 8, 8); // Brimir: LoadSpriteFB
 }
 
-uint ReadSprite16(uint address, uint field) {
-    address += kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset;
+uint ReadFB16(uint address, uint sliceBase) {
+    address = (address & 0x3FFFE) + sliceBase;
     return ByteSwap16(LoadSpriteFB(address & ~3) >> ((address & 2) * 8)); // Brimir: LoadSpriteFB
 }
 
+uint ReadSprite8(uint address, uint field) {
+    return ReadFB8(address, kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
+}
+
+uint ReadSprite16(uint address, uint field) {
+    return ReadFB16(address, kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
+}
+
 uint ReadMesh8(uint address, uint field) {
-    return ReadSprite8(kVDP1MeshFBOffset + address, field);
+    return ReadFB8(address, kVDP1MeshFBOffset + kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
 }
 
 uint ReadMesh16(uint address, uint field) {
-    return ReadSprite16(kVDP1MeshFBOffset + address, field);
+    return ReadFB16(address, kVDP1MeshFBOffset + kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
 }
 
 uint ReadVRAM16(uint address) {
@@ -466,25 +480,30 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
 
     SpriteOutput output = { kTransparentPixel, 0, false, false, false };
 
+    // Brimir: matches software (sw:2558-2563, 2685-2690): when deinterlacing, pos.y is (line << 1) | alt field. Both
+    // fields of a line use the line's rotation coordinates (sw:2335, 2697); the alt field reads the alt framebuffer in
+    // double density only, and the alt mesh framebuffer in any interlaced mode. (Ymir indexes the rotation bases by
+    // the doubled row and uses field 0 for rotated sprites and for meshes outside double density.)
+    uint fieldLine = pos.y;
+    uint altField = 0;
+    if (deinterlace && interlaceMode >= kInterlaceModeSingleDensity) {
+        altField = pos.y & 1;
+        fieldLine >>= 1;
+    }
+    const uint field = meshLayer || interlaceMode == kInterlaceModeDoubleDensity ? altField : 0;
+
     uint2 spritePos;
-    uint field = 0;
     if (rotate) {
-        spritePos = CalcRotationSpriteCoordinates(pos);
+        spritePos = CalcRotationSpriteCoordinates(uint2(pos.x, fieldLine));
         if (any(spritePos >= fbSize)) {
             return output;
         }
     } else {
-        spritePos = pos;
+        spritePos = uint2(pos.x, fieldLine);
         if (inHalfResH) {
             spritePos.x <<= 1;
         } else if (outHalfResH) {
             spritePos.x >>= 1;
-        }
-        if (deinterlace && interlaceMode >= kInterlaceModeSingleDensity) {
-            if (interlaceMode == kInterlaceModeDoubleDensity && (spritePos.y & 1)) {
-                field = 1;
-            }
-            spritePos.y >>= 1;
         }
     }
     const uint fbAddr = spritePos.x + spritePos.y * fbSize.x;

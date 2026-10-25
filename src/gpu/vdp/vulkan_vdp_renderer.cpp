@@ -251,7 +251,8 @@ void VulkanVDPRenderer::CaptureSpriteSlices() {
     }
     const uint8_t display = m_state.fbIndex.display & 1u;
     const bool doubleDensity = m_state.regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
-    const bool deinterlaceDD = m_enhancements.deinterlace && doubleDensity;
+    const bool deinterlace = m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced();
+    const bool deinterlaceDD = deinterlace && doubleDensity;
 
     using Slice = std::span<const uint8_t, vdp2::kSpriteSliceSize>;
     static_assert(sizeof(SpriteFB) == vdp2::kSpriteSliceSize);
@@ -261,7 +262,9 @@ void VulkanVDPRenderer::CaptureSpriteSlices() {
     }
     if (m_enhancements.transparentMeshes) {
         m_front.AddSpriteSlice(vdp2::kSpriteSliceMesh0, Slice{m_vdp1->GetMeshFBRAM(false, display)});
-        if (deinterlaceDD) {
+        // Brimir: matches software (sw:2690): the alt field reads the alt mesh framebuffer whenever deinterlacing, in
+        // single density too (the alt sprite framebuffer only in double density).
+        if (deinterlace) {
             m_front.AddSpriteSlice(vdp2::kSpriteSliceMesh1, Slice{m_vdp1->GetMeshFBRAM(true, display)});
         }
     }

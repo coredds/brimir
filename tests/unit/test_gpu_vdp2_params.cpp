@@ -422,8 +422,10 @@ TEST_CASE("VDP2 GPU limits", "[vdp2][params]") {
     STATIC_CHECK(kMaxResH == 704);
     STATIC_CHECK(kMaxResV == 512);
     STATIC_CHECK(sizeof(ColorR8G8B8A8) == 4);
-    STATIC_CHECK(sizeof(CRAMColorCache) == kVDP2CRAMColorBufferSize);
-    STATIC_CHECK(kVDP2CRAMColorBufferSize == 8192);
+    STATIC_CHECK(sizeof(CRAMColorCache) == 8192);
+    // The mode-dependent colour cache, then the RGB555 table (2048 entries each)
+    STATIC_CHECK(kVDP2CRAM555TableBase == 2048);
+    STATIC_CHECK(kVDP2CRAMColorBufferSize == 2 * sizeof(CRAMColorCache));
     STATIC_CHECK(kVDP2CRAMRotCoeffBufferSize == 2048);
 }
 
