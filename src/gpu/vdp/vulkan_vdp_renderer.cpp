@@ -59,6 +59,13 @@ bool VulkanVDPRenderer::RecordPendingFrame(uint32_t context, VkCommandBuffer cmd
     return recorded;
 }
 
+void VulkanVDPRenderer::RecordedFrameDropped() {
+    if (m_backend) {
+        m_backend->FrameDropped();
+    }
+    m_front.MarkAllDirty();
+}
+
 VkBuffer VulkanVDPRenderer::CompositeBuffer() const {
     return m_backend ? m_backend->CompositeBuffer() : VK_NULL_HANDLE;
 }

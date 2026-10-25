@@ -7,14 +7,15 @@
 //
 // Known divergences between the ported shaders and the software renderer are tagged [!shouldfail], with their letter
 // from stage1b-port-inventory.md section 4.1 ((a)-(l)) or the stage 1B Task 3 review ((q)-(t)) in the name; Tasks 5
-// and 6 fix them and remove the tag. Any other failure is a bug.
+// and 6 fix them and remove the tag. Documented exceptions (software behaviour the GPU path does not reproduce, by a
+// controller ruling) are tagged [!shouldfail] too, named "exception <id>". Any other failure is a bug.
 //
 // Also here: upload overflow (64 KiB upload blocks), detach/attach between frames, and FramePresenter::PresentDevice
 // against FramePresenter::Present of the read-back composite.
 //
 // [gpu][vdp2][scene]; SKIP without a Vulkan device. Every scene runs on both drivers (the full suite takes ~25 s on the
-// desktop GPU, ~40 s on lavapipe); [lavapipe] marks a quick cross-section for manual runs. Two scenes tagged
-// [.][unruled] reproduce divergences outside the known list, reported for a ruling and hidden from the suite until then.
+// desktop GPU, ~40 s on lavapipe); [lavapipe] marks a quick cross-section for manual runs. BRIMIR_VDP2_POISON=1 runs
+// them with the layer images poisoned every frame (any read of a texel the frame did not write changes the result).
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
@@ -537,7 +538,7 @@ SceneResult Check(gpu::VulkanDevice &device, const Vdp2Scene &scene, const Rende
     } else {
         REQUIRE(result.distinctColors > 1); // the software frame is not trivial
     }
-    CHECK(result.identical);
+    REQUIRE(result.identical);
     return result;
 }
 
@@ -924,11 +925,9 @@ TEST_CASE("Scene: extended colour calculation", "[gpu][vdp2][scene]") {
     }));
 }
 
-// UNRULED divergence, reported in the stage 1B Task 4 report and hidden from the suite until the controller rules (not
-// one of the known (a)-(l), (q)-(t)): where the gradation screen is one of the top two layers at x but not at x - 2,
-// software leaves layer 1 ungraded. Color888GradationMasked(output.subspan(2), mask, input) reads mask[x - 2] for
-// output x (sw:4207, 3544-3640); the compose shader grades every such pixel.
-TEST_CASE("Scene: colour gradation of partly covered screens", "[gpu][vdp2][scene][.][unruled]") {
+// Pixels where the gradation screen is one of the top two layers at x but not at x - 2 (software read the mask two
+// pixels to the left until master 36ea9f9, stage 1B ruling 7).
+TEST_CASE("Scene: colour gradation of partly covered screens", "[gpu][vdp2][scene]") {
     const uint32_t screen = GENERATE(0u, 2u, 4u);
     CAPTURE(screen);
     RunScene(Make([screen](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
@@ -1292,6 +1291,75 @@ TEST_CASE("PresentDevice of the composite equals Present of its readback", "[gpu
     CloseAndCheckValidation(device);
 }
 
+TEST_CASE("Scene: a recorded frame that is never submitted is redone", "[gpu][vdp2][scene][lavapipe]") {
+    // Frame 0 carries the resolution clear and every upload; its command buffer is dropped. The clear must be pending
+    // again for frame 1, and frame 2 must still match software.
+    auto device = OpenDevice();
+    bool clearPendingAfterDrop = false;
+    RenderBothOptions options;
+    options.dropFrame = 0;
+    options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (frame == 1) {
+            clearPendingAfterDrop = vulkan.Backend()->CompositeClearPendingForTest();
+        }
+    };
+    Check(*device, Make(
+                       [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                           Base(w, s, rng);
+                           TwoNBGs(w, s, rng);
+                           SetupSprites(w, {.type = 1}, rng);
+                       },
+                       {}, 3),
+          options);
+    CHECK(clearPendingAfterDrop);
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("PresentDevice across detach and attach", "[gpu][vdp2][scene][lavapipe]") {
+    // A live presenter keeps presenting the composite of a back half that is destroyed and recreated every frame (its
+    // buffer handle may be reused); the descriptor must follow, under validation.
+    namespace vdp = ymir::vdp;
+    auto device = OpenDevice();
+    {
+        auto state = std::make_unique<vdp::VDPState>();
+        vdp::config::VDP2DebugRender debug{};
+        vdp::config::VDP2AccessPatternsConfig access{};
+        auto vulkan = std::make_unique<gpu::VulkanVDPRenderer>(*state, debug, access);
+        gpu::FramePresenter presenter(*device, 1);
+        REQUIRE(presenter.Ok());
+        Vdp2SceneWriter writer;
+        writer.Attach(*state, *vulkan);
+        Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+        }).setup(writer);
+        for (uint32_t i = 0; i < 4; ++i) {
+            CAPTURE(i);
+            vulkan->DetachDevice(); // the previous frame finished (SubmitOneShot waits)
+            vulkan->AttachDevice(*device, 1);
+            REQUIRE(vulkan->Attached());
+            writer.Reg(SCXIN0, static_cast<uint16_t>(i * 11));
+            writer.RunFrame();
+            REQUIRE(vulkan->HasPendingFrame());
+            REQUIRE(gpu::vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
+                        REQUIRE(vulkan->RecordPendingFrame(0, cmd));
+                        REQUIRE(presenter.PresentDevice(0, vulkan->CompositeBuffer(), 320, 224, {}, cmd));
+                    }) == VK_SUCCESS);
+            const std::vector<uint32_t> composite = ReadbackBuffer(*device, vulkan->CompositeBuffer(), 320 * 224);
+            const std::vector<uint32_t> shown = presenter.ReadbackXRGB(0, {320, 224});
+            REQUIRE(composite.size() == shown.size());
+            uint32_t mismatches = 0;
+            for (size_t p = 0; p < shown.size(); ++p) {
+                const uint32_t c = composite[p];
+                const uint32_t xrgb = ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+                mismatches += xrgb != shown[p];
+            }
+            CHECK(mismatches == 0);
+        }
+    }
+    CloseAndCheckValidation(device);
+}
+
 // =====================================================================================================================
 // Known divergences (stage1b-port-inventory.md section 4.1 letters; (q)-(t) from the stage 1B Task 3 review). Each
 // fails today; the task that fixes it removes [!shouldfail].
@@ -1526,6 +1594,38 @@ TEST_CASE("Scene: threaded VDP1 sprites and an erase without a swap", "[gpu][vdp
     RunScene(scene, options);
 }
 
+namespace {
+
+// NBG0/NBG1 under VDP1 polygons, half of them meshes, transparent meshes on; no colour calculation or colour offset
+// (those are divergence (l)).
+Vdp2Scene MeshScene(uint16_t tvmd, bool deinterlace) {
+    return Make(
+        [tvmd](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | tvmd));
+            TwoNBGs(w, s, rng);
+            w.Reg(SPCTL, 0x0000);
+            w.Reg(PRISA, 0x0706);
+            w.Reg(PRISB, 0x0402);
+            DrawPolygons(w, rng, 16, true);
+        },
+        {.deinterlace = deinterlace, .transparentMeshes = true}, 3);
+}
+
+} // namespace
+
+TEST_CASE("Scene: transparent meshes in progressive and double-density deinterlaced modes",
+          "[gpu][vdp2][scene][lavapipe]") {
+    const uint16_t tvmd = GENERATE(uint16_t{0}, kLSMDDouble);
+    CAPTURE(tvmd);
+    RunScene(MeshScene(tvmd, tvmd != 0)); // double density deinterlaced uploads the mesh1 (alt field) slice
+}
+
+TEST_CASE("Scene: (u) mesh alt field in single-density interlace", "[gpu][vdp2][scene][!shouldfail]") {
+    // Software reads m_meshFBRAM[altField] for the alt-field (odd) rows (sw:2690); the sprite shader reads field 0
+    // there (field 1 only in double density). Fixed in Task 5.
+    RunScene(MeshScene(kLSMDSingle, true));
+}
+
 TEST_CASE("Scene: (l) transparent mesh colour calculation and colour offset", "[gpu][vdp2][scene][!shouldfail]") {
     RunScene(Make(
         [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
@@ -1566,10 +1666,10 @@ TEST_CASE("Scene: (q) sprite reads past the 256 KiB framebuffer in exclusive mon
     RunScene(scene);
 }
 
-// UNRULED divergence, reported in the stage 1B Task 4 report and hidden from the suite until the controller rules: in
-// exclusive monitor modes software draws each sprite framebuffer pixel at even output x only (xOutputShift = 1 without
-// the doubleResH pixel copy, sw:2672-2727), the sprite shader draws every x from framebuffer x.
-TEST_CASE("Scene: sprites in exclusive monitor mode", "[gpu][vdp2][scene][.][unruled]") {
+// Documented exception U2 (stage 1B ruling 8): in exclusive monitor modes software reads framebuffer pixel x / 2 and
+// draws it at even output x only (xOutputShift = 1 without the doubleResH copy to x + 1, sw:2672-2727), leaving odd x
+// transparent; the sprite shader draws every output x from framebuffer x. No known game uses exclusive monitor modes.
+TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2][scene][!shouldfail]") {
     RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng, static_cast<uint16_t>(kDisp | 4));
         CyclesSingle(w, 0);

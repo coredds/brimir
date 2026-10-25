@@ -91,7 +91,7 @@ struct Vdp2FrameRecord {
 
     // Display FB sprite slices captured at the frame's first line (UINT32_MAX = not uploaded this frame).
     std::array<uint32_t, 4> spriteSliceOffset;
-    uint32_t spriteDisplayFB; // the display framebuffer (0 or 1) the slices were captured from
+    uint32_t spriteDisplayFB = 0; // the display framebuffer (0 or 1) the slices were captured from
 
     uint32_t hres, vres;
     uint32_t fieldLines;          // lines rendered per field (VRes, or VRes / 2 in normal interlaced modes)

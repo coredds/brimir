@@ -4,6 +4,7 @@
 #include <ymir/util/data_ops.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -321,6 +322,37 @@ std::vector<uint32_t> ReadbackBuffer(gpu::VulkanDevice &device, VkBuffer buffer,
     return out;
 }
 
+namespace {
+
+// Records a command buffer and destroys it without submitting it.
+bool RecordWithoutSubmit(gpu::VulkanDevice &device, const std::function<void(VkCommandBuffer)> &record) {
+    const auto &vk = device.Table();
+    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.queueFamilyIndex = device.QueueFamily();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vk.vkCreateCommandPool(device.Device(), &poolInfo, nullptr, &pool) != VK_SUCCESS) {
+        return false;
+    }
+    VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocInfo.commandPool = pool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    bool ok = vk.vkAllocateCommandBuffers(device.Device(), &allocInfo, &cmd) == VK_SUCCESS;
+    if (ok) {
+        const VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        ok = vk.vkBeginCommandBuffer(cmd, &beginInfo) == VK_SUCCESS;
+    }
+    if (ok) {
+        record(cmd);
+        ok = vk.vkEndCommandBuffer(cmd) == VK_SUCCESS;
+    }
+    vk.vkDestroyCommandPool(device.Device(), pool, nullptr);
+    return ok;
+}
+
+} // namespace
+
 SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const RenderBothOptions &options) {
     SceneResult result;
 
@@ -357,6 +389,9 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         vulkan->Backend()->ForceUploadBlockSizeForTest(options.uploadBlockSize);
     }
     vulkan->EnableThreadedVDP1(options.threadedVDP1);
+    // BRIMIR_VDP2_POISON=1 runs every scene with poisoned layer images (read-before-write check).
+    const char *poison = std::getenv("BRIMIR_VDP2_POISON");
+    const bool poisonImages = options.poisonImages || (poison && std::string(poison) == "1");
 
     Vdp2SceneWriter writer{scene.enhancements};
     writer.Attach(*swState, *software);
@@ -369,9 +404,24 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
             options.beforeFrame(frame, *vulkan, device);
         }
         writer.RunFrame(scene.onLine);
+        if (frame + 1 == scene.frames && !vulkan->HasPendingFrame()) {
+            result.error = "the last frame has no recorded GPU frame";
+            return result;
+        }
         if (vulkan->HasPendingFrame()) {
+            vulkan->Backend()->SetPoisonImagesForTest(poisonImages); // the back half may be new (re-attached)
             bool recorded = false;
             const uint32_t context = frame % std::max(options.frameContexts, 1u);
+            if (frame == options.dropFrame) {
+                if (!RecordWithoutSubmit(device, [&](VkCommandBuffer cmd) {
+                        recorded = vulkan->RecordPendingFrame(context, cmd);
+                    }) || !recorded) {
+                    result.error = "frame " + std::to_string(frame) + ": recording failed";
+                    return result;
+                }
+                vulkan->RecordedFrameDropped();
+                continue;
+            }
             const VkResult submit = gpu::vk_util::SubmitOneShot(
                 device, [&](VkCommandBuffer cmd) { recorded = vulkan->RecordPendingFrame(context, cmd); });
             if (submit != VK_SUCCESS || !recorded) {

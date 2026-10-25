@@ -98,7 +98,9 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
     }
 
     // Images (VK_IMAGE_LAYOUT_GENERAL while in use; sampled and storage bindings share one view)
-    constexpr VkImageUsageFlags kImageUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    // TRANSFER_DST for the test-only poison clear.
+    constexpr VkImageUsageFlags kImageUsage =
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     const struct {
         vk_util::Image *image;
         vk_util::ImageDesc desc;
@@ -175,6 +177,15 @@ void Vdp2VulkanBackend::DestroyBlock(UploadBlock &block) {
     m_device.Table().vkDestroyDescriptorPool(m_device.Device(), block.pool, nullptr); // frees the sets
     vk_util::DestroyBuffer(m_device, block.buffer);
     block = UploadBlock{};
+}
+
+void Vdp2VulkanBackend::FrameDropped() {
+    if (m_recorded.clearComposite && !m_pending.clearComposite) {
+        m_pending.clearComposite = true;
+        m_pending.clearColor = m_recorded.clearColor;
+    }
+    m_pending.zeroSpriteFB |= m_recorded.zeroSpriteFB;
+    m_recorded = {};
 }
 
 void Vdp2VulkanBackend::ForceUploadBlockSizeForTest(size_t bytes) {
@@ -327,6 +338,12 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     if (!Ok() || contextIndex >= m_contexts.size() || cmd == VK_NULL_HANDLE) {
         return false;
     }
+    // The frame's clear request becomes pending first, so a failed Record keeps it for the next frame (a newer clear
+    // replaces an older one, as in the software framebuffer).
+    if (frame.clearComposite) {
+        m_pending.clearComposite = true;
+        m_pending.clearColor = frame.clearColor;
+    }
     const auto &vk = m_device.Table();
     FrameContext &context = m_contexts[contextIndex];
     ResetContext(context);
@@ -363,12 +380,19 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     Barrier(cmd, kCompute | kTransfer, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer,
             VK_ACCESS_TRANSFER_WRITE_BIT);
 
-    if (frame.clearComposite || !m_compositeInitialized) {
-        // A new composite (device attach) starts black, as a freshly reset software framebuffer.
-        const uint32_t color = frame.clearComposite ? frame.clearColor : 0xFF000000u;
-        vk.vkCmdFillBuffer(cmd, m_composite.buffer, 0, VK_WHOLE_SIZE, color);
-        m_compositeInitialized = true;
+    // Pending one-time work: the composite clear, and zeroing the sprite framebuffer of a new back half so slots that
+    // are never uploaded read zeros. Recorded here, it stays recorded unless the caller reports the command buffer
+    // dropped (FrameDropped).
+    m_recorded = m_pending;
+    if (m_pending.clearComposite) {
+        vk.vkCmdFillBuffer(cmd, m_composite.buffer, 0, VK_WHOLE_SIZE, m_pending.clearColor);
     }
+    if (m_pending.zeroSpriteFB) {
+        vk.vkCmdFillBuffer(cmd, m_spriteFB.buffer, 0, VK_WHOLE_SIZE, 0);
+        // The slice copies below overwrite parts of it (WAW).
+        Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT);
+    }
+    m_pending = {};
 
     const VkBuffer linesBuffer = linesBlock.buffer.buffer;
     const VkBufferCopy rotCopy{lines.offset, 0, kRotBasesBytes};
@@ -398,7 +422,15 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     // frame), so they start from UNDEFINED each frame, independent of what earlier command buffers did.
     for (const vk_util::Image *image : {&m_layers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow}) {
         vk_util::ImageBarrier(m_device, cmd, image->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                              kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
+                              kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute | kTransfer,
+                              kShaderRW | VK_ACCESS_TRANSFER_WRITE_BIT);
+        if (m_poisonImages) {
+            // Test only: any read of a texel this frame did not write sees the poison value.
+            VkClearColorValue poison{};
+            poison.uint32[0] = poison.uint32[1] = poison.uint32[2] = poison.uint32[3] = 0xA5A5A5A5u;
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
+            vk.vkCmdClearColorImage(cmd, image->image, VK_IMAGE_LAYOUT_GENERAL, &poison, 1, &range);
+        }
     }
     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, kShaderRW);
 

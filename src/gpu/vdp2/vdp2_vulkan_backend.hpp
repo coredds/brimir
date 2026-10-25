@@ -40,14 +40,25 @@ public:
     // into cmd. Afterwards the composite buffer holds the frame (HRes x VRes, pitch HRes) and its writes are visible to
     // compute shader and transfer reads recorded later. The context's previous Record must have completed on the GPU.
     // Returns false and records nothing when the backend failed to initialize, context is out of range or an upload
-    // block cannot be allocated (the caller then re-uploads everything with the next frame).
+    // block cannot be allocated (the caller then re-uploads everything with the next frame; the frame's composite clear
+    // stays pending for the next Record).
     bool Record(const Vdp2FrameRecord &frame, uint32_t context, VkCommandBuffer cmd);
 
     // The persistent composite: uint[704 * 512] of packed XBGR (0xAABBGGRR), STORAGE | TRANSFER_SRC | TRANSFER_DST.
     VkBuffer CompositeBuffer() const { return m_composite.buffer; }
 
+    // The command buffer of the last successful Record will not be submitted (or was discarded): the one-time work it
+    // carried (a composite clear, zeroing the sprite framebuffer) is pending again for the next Record. Its uploads are
+    // lost too; the caller makes the front half re-upload everything (Vdp2FrontEnd::MarkAllDirty).
+    void FrameDropped();
+
     // Size of the base upload block of every context (reallocated at each context's next Record).
     void ForceUploadBlockSizeForTest(size_t bytes);
+    // Fill the layer, sprite attribute, RBG line colour and colour calculation window images with 0xA5 bytes at the
+    // start of every frame, so reads of texels the frame did not write show up as differences.
+    void SetPoisonImagesForTest(bool enable) { m_poisonImages = enable; }
+    // A composite clear will be recorded by the next Record.
+    bool CompositeClearPendingForTest() const { return m_pending.clearComposite; }
     // Upload blocks the context used for its last Record (1 = no overflow).
     uint32_t UploadBlocksForTest(uint32_t context) const;
 
@@ -99,7 +110,17 @@ private:
     vk_util::Image m_spriteAttrs;   // R32_UINT 704x512, 2 layers
     vk_util::Image m_rbgLineColor;  // R8G8B8A8_UINT 352x512, 2 layers
     vk_util::Image m_colorCalcWindow; // R32_UINT 704x512
-    bool m_compositeInitialized = false;
+
+    // One-time work for the next Record (a new back half clears its composite to black and zeroes the sprite
+    // framebuffer), and what the last successful Record recorded (re-armed by FrameDropped).
+    struct PendingWork {
+        bool clearComposite = false;
+        uint32_t clearColor = 0xFF000000u;
+        bool zeroSpriteFB = false;
+    };
+    PendingWork m_pending{.clearComposite = true, .zeroSpriteFB = true};
+    PendingWork m_recorded{};
+    bool m_poisonImages = false;
 
     std::array<VkDescriptorSetLayout, kPipelineCount> m_setLayouts{};
     std::array<VkPipelineLayout, kPipelineCount> m_pipelineLayouts{};

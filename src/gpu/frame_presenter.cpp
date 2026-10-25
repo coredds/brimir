@@ -224,18 +224,16 @@ bool FramePresenter::PresentDevice(uint32_t slotIndex, VkBuffer source, uint32_t
         return false;
     }
     Slot &slot = m_slots[slotIndex];
-    if (slot.deviceSource != source) {
-        // The slot's previous frame is done (precondition), so its device set is not in use.
-        const VkDescriptorBufferInfo bufferInfo{source, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = slot.deviceSet;
-        write.dstBinding = kSourceBinding;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.pBufferInfo = &bufferInfo;
-        m_device.Table().vkUpdateDescriptorSets(m_device.Device(), 1, &write, 0, nullptr);
-        slot.deviceSource = source;
-    }
+    // Rewritten on every call: the slot's previous frame is done (precondition), so its device set is not in use, and
+    // a handle value cannot be trusted to name the same buffer (a destroyed buffer's handle can be reused).
+    const VkDescriptorBufferInfo bufferInfo{source, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = slot.deviceSet;
+    write.dstBinding = kSourceBinding;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &bufferInfo;
+    m_device.Table().vkUpdateDescriptorSets(m_device.Device(), 1, &write, 0, nullptr);
 
     // Whatever wrote the source (the VDP2 compose pass, a copy) is visible to the shader.
     vk_util::GlobalBarrier(m_device, cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,

@@ -139,6 +139,9 @@ struct RenderBothOptions {
     uint32_t frameContexts = 2;
     size_t uploadBlockSize = 0; // 0 = the backend's default
     bool threadedVDP1 = false;  // the Vulkan renderer's inner software VDP1 runs on its own thread
+    bool poisonImages = false;  // Vdp2VulkanBackend::SetPoisonImagesForTest (also with BRIMIR_VDP2_POISON=1)
+    // This frame is recorded into a command buffer that is never submitted, then RecordedFrameDropped.
+    uint32_t dropFrame = UINT32_MAX;
     // Called before each frame (0-based), after setup, with the Vulkan renderer and the device.
     std::function<void(uint32_t frame, gpu::VulkanVDPRenderer &, gpu::VulkanDevice &)> beforeFrame;
 };

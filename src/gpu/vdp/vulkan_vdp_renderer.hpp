@@ -38,7 +38,9 @@ public:
     // Device
 
     // Creates the back half on `device` (frameContexts upload contexts, see Vdp2VulkanBackend). The next frame uploads
-    // all of VRAM and CRAM and starts from a cleared composite. Attached() is false if the back half failed.
+    // all of VRAM and CRAM and starts from a cleared composite. Attached() is false if the back half failed. When
+    // already attached, the old back half is destroyed immediately: the caller must have waited for the device to be
+    // idle first (as for DetachDevice).
     void AttachDevice(VulkanDevice &device, uint32_t frameContexts);
     // Drops the pending frame and destroys the GPU resources. The caller has waited for the device to be idle.
     void DetachDevice();
@@ -59,6 +61,10 @@ public:
     // Replays the pending frame into cmd (see Vdp2VulkanBackend::Record) and consumes it. When recording fails, the
     // next frame uploads everything again. Returns false when there was nothing to record or recording failed.
     bool RecordPendingFrame(uint32_t context, VkCommandBuffer cmd);
+    // The command buffer of the last successful RecordPendingFrame will not be submitted (submission failed, or the
+    // frame was abandoned): its uploads and one-time work (composite clear) are redone with the next frame. Task 7's
+    // caller must call this whenever a recorded command buffer does not reach the queue.
+    void RecordedFrameDropped();
     // The persistent composite (VK_NULL_HANDLE while detached).
     VkBuffer CompositeBuffer() const;
 

@@ -87,8 +87,7 @@ private:
         vk_util::Image output; // output.view: R8G8B8A8_UNORM, for the frontend
         VkImageView storageView = VK_NULL_HANDLE; // R32_UINT, written by the shader
         VkDescriptorSet set = VK_NULL_HANDLE;
-        VkDescriptorSet deviceSet = VK_NULL_HANDLE; // PresentDevice: binding 0 = deviceSource
-        VkBuffer deviceSource = VK_NULL_HANDLE;
+        VkDescriptorSet deviceSet = VK_NULL_HANDLE; // PresentDevice: binding 0 rewritten on every call
         bool presented = false; // a Present was recorded (ReadbackXRGB's precondition only)
     };
 
