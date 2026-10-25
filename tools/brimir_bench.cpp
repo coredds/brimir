@@ -10,6 +10,8 @@
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
 
+#include "frame_hash.hpp"
+
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
 #include <ymir/util/date_time.hpp>
@@ -47,6 +49,7 @@ struct Args {
     bool jitSyncCompile = false; // --jit-sync-compile: the JIT core compiles without a worker thread
     bool cdPreload = true;     // the core's default (brimir_cd_preload enabled)
     bool threadedVdp = true;   // the core's default; --no-threaded-vdp renders VDP1/VDP2 on the emulation thread
+    bool hash = false;         // --hash: print a frame hash per measured frame
     bool backendGiven = false; // --jit-backend given explicitly
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
     bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
@@ -106,6 +109,9 @@ void PrintUsage(std::FILE* out) {
         "                state, run and compare K / 2 more frames, then load the saved state into both\n"
         "                cores and continue (the JIT keeps its compiled code across the load). Replayed\n"
         "                frames count toward N.\n"
+        "  --hash        print one line per measured frame, 'frame <i> <w>x<h> <hash>' (64-bit FNV-1a of the\n"
+        "                size and XRGB8888 pixels, the same as brimir_vkhost --hash). Not with --lockstep or\n"
+        "                --dump-at.\n"
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -146,6 +152,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
         }
         if (opt == "--no-threaded-vdp") {
             args.threadedVdp = false;
+            continue;
+        }
+        if (opt == "--hash") {
+            args.hash = true;
             continue;
         }
         if (i + 1 >= argc) {
@@ -221,6 +231,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     // options would otherwise be silently ignored.
     if (args.lockstep >= 0 && (args.sh2Jit || args.framesGiven || args.warmupGiven)) {
         std::fprintf(stderr, "--lockstep cannot be combined with --sh2-jit, --frames or --warmup\n");
+        return ParseResult::Error;
+    }
+    if (args.hash && (args.lockstep >= 0 || args.dumpAt >= 0)) {
+        std::fprintf(stderr, "--hash cannot be combined with --lockstep or --dump-at\n");
         return ParseResult::Error;
     }
     if (args.lockstepReload > 0 && args.lockstep < 0) {
@@ -594,6 +608,11 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
 
     std::vector<double> frameMs;
     frameMs.reserve(static_cast<size_t>(args.frames));
+    struct FrameHash {
+        unsigned w, h;
+        uint64_t hash;
+    };
+    std::vector<FrameHash> frameHashes;
     // JIT compile work per measured frame (both CPUs), to explain the slowest frames.
     std::vector<CompileCounters> frameCompiles;
     frameCompiles.reserve(static_cast<size_t>(args.frames));
@@ -609,6 +628,12 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         core.RunFrame();
         const auto end = std::chrono::steady_clock::now();
         frameMs.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+        if (args.hash) {
+            const unsigned w = core.GetFramebufferWidth();
+            const unsigned h = core.GetFramebufferHeight();
+            frameHashes.push_back(
+                {w, h, brimir_tools::HashFrame(w, h, core.GetFramebuffer(), core.GetFramebufferPitch())});
+        }
         const CompileCounters after = ReadCompileCounters(core);
         frameCompiles.push_back({after.compiles - before.compiles, after.nativeCompiles - before.nativeCompiles,
                                  after.compileNs - before.compileNs, after.flushes - before.flushes,
@@ -627,6 +652,11 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                 }
             }
         }
+    }
+
+    for (size_t i = 0; i < frameHashes.size(); ++i) {
+        std::printf("frame %zu %ux%u %016llx\n", i, frameHashes[i].w, frameHashes[i].h,
+                    static_cast<unsigned long long>(frameHashes[i].hash));
     }
 
     double total = 0.0;

@@ -537,10 +537,8 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code) {
 }
 
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {
-    if (!game) {
-        brimir_log(RETRO_LOG_ERROR, "No game provided");
-        return false;
-    }
+    // No content (SET_SUPPORT_NO_GAME): the BIOS runs on its own, like brimir_bench without --game.
+    const bool no_content = game == nullptr;
 
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
 
@@ -553,7 +551,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // geometry update on its first frame regardless.
     reset_frame_state();
 
-    brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path ? game->path : "unknown");
+    brimir_log(RETRO_LOG_INFO, "Loading game: %s", no_content ? "(none)" : game->path ? game->path : "unknown");
 
     // Set pixel format - XRGB8888 for full quality (lossless from VDP output)
     // This is a lossless channel swap from VDP's native XBGR8888, replacing the old
@@ -670,16 +668,18 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
     }
     
-    brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
+    if (!no_content) {
+        brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
 
-    if (!g_core->LoadGame(game->path, save_dir, system_dir)) {
-        const std::string& error = g_core->GetLastError();
-        brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
-            error.empty() ? "(no error message)" : error.c_str());
-        return false;
+        if (!g_core->LoadGame(game->path, save_dir, system_dir)) {
+            const std::string& error = g_core->GetLastError();
+            brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
+                error.empty() ? "(no error message)" : error.c_str());
+            return false;
+        }
+
+        brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
     }
-
-    brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
 
     // Apply core options after the disc is loaded. Region autodetection happens
     // during disc loading, so options that disable it must not be applied until

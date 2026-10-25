@@ -226,7 +226,7 @@ if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
     endif()
 endif()
 
-foreach(target IN ITEMS brimir-core brimir-jit brimir-gpu brimir_bridge brimir_libretro_api brimir_libretro brimir_tests brimir_bench)
+foreach(target IN ITEMS brimir-core brimir-jit brimir-gpu brimir_bridge brimir_libretro_api brimir_libretro brimir_tests brimir_bench brimir_vkhost)
     if(TARGET ${target})
         set(enable_ipo FALSE)
         if(target IN_LIST brimir_ipo_targets)

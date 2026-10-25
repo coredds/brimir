@@ -230,7 +230,71 @@ Exit codes: 0 success (including `--help`), 1 usage error (usage is printed to
 stderr), 2 load or setup failure (BIOS, game, state, missing `--system-dir`,
 temp directory errors), 3 lockstep divergence.
 
-## bench/ — benchmark hosts (Linux devices)
+### Frame hashes
+
+`--hash` prints one line per measured frame, after the warmup and before the report:
+
+```
+frame 0 320x224 65d0bc3658c2307f
+```
+
+`<i>` counts from 0, then the frame size and a 64-bit FNV-1a hash of the width, the height and the XRGB8888 pixels
+(`tools/frame_hash.hpp`, shared with `brimir_vkhost`, so the two tools' lines compare directly). The hash is computed
+outside the timed region. It cannot be combined with `--lockstep` or `--dump-at`. The Ymir core library also logs
+to stdout, so filter for lines that start with `frame `.
+
+## brimir_vkhost - headless libretro host
+
+A frontend without a window: it loads the built `brimir_libretro` library dynamically (LoadLibrary/dlopen), as
+RetroArch does, answers the core's environment calls, runs it and records every frame the core displays. Unlike
+`brimir_bench` it goes through the libretro API, so it exercises the core options, geometry and video callback paths
+that a frontend sees. It is built only with `BRIMIR_VULKAN` (the Vulkan context provider that hardware frames need is
+added to it):
+
+```powershell
+cmake --build build --target brimir_vkhost
+```
+
+```powershell
+build\bin\brimir_vkhost.exe --bios F:\Roms\BIOS\mpr-17933.bin --system-dir %TEMP%\scratch-system --frames 300 --hash
+build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --option brimir_overscan=1 --dump-dir frames
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--core <library>` | core to load (default: `brimir_libretro.dll` next to the executable, or `brimir_libretro.so` next to it or in `../lib`) |
+| `--bios <file>` | BIOS image. It is copied into the system directory under its own file name (the core searches that directory) and selected with the `brimir_bios` option, so other BIOS files in the directory are ignored |
+| `--game <file>` | content (`cue`, `chd`, `ccd`, `mds`, `iso`, `m3u`). Omit it to run the BIOS menu on its own |
+| `--system-dir <dir>` | system directory; default is a fresh temporary one. As for `brimir_bench`, a game needs a configured `brimir_saturn_rtc_<jp\|us_eu>.smpc` in it, and the BIOS is copied into it, so use a scratch copy. One of `--bios` and `--system-dir` is required |
+| `--frames N` | recorded frames (default 300) |
+| `--warmup N` | frames run before recording (default 120, the same as `brimir_bench`) |
+| `--option key=value` | core option override (repeatable). Every other option answers with the default the core declares through `SET_CORE_OPTIONS_V2` |
+| `--hash` | one line per recorded frame, `frame <i> <w>x<h> <hash>`, the same as `brimir_bench --hash` |
+| `--dump-dir <dir>` | write each recorded frame as `frame_<i>.ppm` |
+| `--verbose` | also log core debug messages, geometry changes and AV info changes |
+
+The save directory is always a fresh temporary directory that is removed on exit. Core log messages go to stderr,
+prefixed `[core <level>]`; the Ymir library's own log lines go to stdout, so filter hash output for lines that start
+with `frame `. Exit codes: 0 success, 1 usage error, 2 load or setup failure.
+
+To compare against `brimir_bench` use the same BIOS, game, `--warmup` and `--frames`, and separate scratch system
+directories that each hold a copy of the RTC file (the core rewrites it):
+
+```powershell
+build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dirA> --warmup 120 --frames 300 --hash
+build\bin\brimir_bench.exe  --bios <bios> --system-dir <dirB> --warmup 120 --frames 300 --hash
+```
+
+The `frame ...` lines are identical for the software path.
+
+Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2`, `GET_VARIABLE`,
+`GET_VARIABLE_UPDATE` (always false), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,
+`GET_SAVE_DIRECTORY`, `SET_SYSTEM_AV_INFO`, `SET_GEOMETRY`, `GET_LOG_INTERFACE`, `GET_INPUT_BITMASKS`,
+`GET_AUDIO_VIDEO_ENABLE`, `GET/SET_DISK_CONTROL_(EXT_)INTERFACE`, and `SET_SUPPORT_NO_GAME`,
+`SET_INPUT_DESCRIPTORS` and `SET_MEMORY_MAPS` (accepted, ignored). Any other call returns false and is logged once
+as `environment call N not supported`. Audio and input are no-ops.
+
+## bench/ - benchmark hosts (Linux devices)
 
 Scripts that run the `design/sh2-baseline.md` method (the BIOS menu and the six
 reference titles) on a dedicated Linux device, such as an ARM single-board
