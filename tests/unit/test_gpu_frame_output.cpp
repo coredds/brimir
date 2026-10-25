@@ -9,6 +9,7 @@
 #include <gpu/frame_presenter.hpp>
 #include <gpu/vk_util.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -58,6 +59,20 @@ size_t CountMismatches(const std::vector<uint32_t> &gpu, const std::vector<uint3
         }
     }
     return mismatches;
+}
+
+// The bridge's w x h frame as the output image holds it (gpu::WrittenSize): plus a border column and row repeating
+// the last column and row, where the image has room for them.
+std::vector<uint32_t> WithBorder(const std::vector<uint32_t> &frame, uint32_t w, uint32_t h) {
+    const OutputSize written = WrittenSize({w, h});
+    std::vector<uint32_t> out(static_cast<size_t>(written.width) * written.height);
+    for (uint32_t y = 0; y < written.height; ++y) {
+        for (uint32_t x = 0; x < written.width; ++x) {
+            out[static_cast<size_t>(y) * written.width + x] =
+                frame[static_cast<size_t>(std::min(y, h - 1)) * w + std::min(x, w - 1)];
+        }
+    }
+    return out;
 }
 
 bool PresentBatch(VulkanDevice &device, FramePresenter &presenter, const std::vector<const FramePathCase *> &batch,
@@ -138,10 +153,14 @@ TEST_CASE("Frame output pass equals the software bridge for every frame path cas
                 uint32_t h = 0;
                 const std::vector<uint32_t> expected = CpuFramePath(c, &w, &h);
                 const OutputSize size = ComputeOutputSize(c.w, c.h, SettingsOf(c));
-                const std::vector<uint32_t> actual = presenter.ReadbackXRGB(slot, size);
+                // The frame and its replicated border.
+                const OutputSize written = WrittenSize(size);
+                const std::vector<uint32_t> actual = presenter.ReadbackXRGB(slot, written);
                 INFO(Describe(c) << " in slot " << slot);
                 REQUIRE(size == OutputSize{w, h});
-                const size_t mismatches = CountMismatches(actual, expected, w);
+                CHECK(written == OutputSize{std::min(w + 1, FramePresenter::kMaxOutputSize),
+                                            std::min(h + 1, FramePresenter::kMaxOutputSize)});
+                const size_t mismatches = CountMismatches(actual, WithBorder(expected, w, h), written.width);
                 CHECK(mismatches == 0);
                 failures += mismatches != 0;
             }
@@ -197,8 +216,9 @@ TEST_CASE("Frame output slots keep their own frames", "[gpu][frame-output]") {
         for (uint32_t slot = 0; slot < kSlots; ++slot) {
             INFO("slot " << slot);
             const uint32_t round = slot == 1 ? 1 : 0;
-            CHECK(CountMismatches(presenter.ReadbackXRGB(slot, size), expectedFor(salt(slot, round)), size.width) ==
-                  0);
+            CHECK(CountMismatches(presenter.ReadbackXRGB(slot, WrittenSize(size)),
+                                  WithBorder(expectedFor(salt(slot, round)), size.width, size.height),
+                                  WrittenSize(size).width) == 0);
         }
     }
     CloseAndCheckValidation(device);
@@ -226,6 +246,20 @@ TEST_CASE("FramePresenter::Present rejects invalid input without recording", "[g
                                           FramePresenter::kMaxSourceHeight, {.rotation = 270}, cmd));
               }) == VK_SUCCESS);
         CHECK(presenter.ReadbackXRGB(1, {512, 704}).size() == 512u * 704u);
+        // Its border: a column only (the image is 704 high), and the pixels with it equal the bridge's.
+        {
+            const FramePathCase c{FramePresenter::kMaxSourceWidth, FramePresenter::kMaxSourceHeight, 0, 0, 270, false};
+            const std::vector<uint32_t> largest = MakePatternFrame(c.w, c.h);
+            REQUIRE(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
+                        CHECK(presenter.Present(0, largest.data(), c.w, c.h, SettingsOf(c), cmd));
+                    }) == VK_SUCCESS);
+            uint32_t w = 0;
+            uint32_t h = 0;
+            const std::vector<uint32_t> expected = CpuFramePath(c, &w, &h);
+            REQUIRE(OutputSize{w, h} == OutputSize{512, 704});
+            REQUIRE(WrittenSize({w, h}) == OutputSize{513, 704});
+            CHECK(CountMismatches(presenter.ReadbackXRGB(0, {513, 704}), WithBorder(expected, w, h), 513) == 0);
+        }
         CHECK(presenter.ReadbackXRGB(1, {705, 1}).empty());
         CHECK(presenter.ReadbackXRGB(2, {1, 1}).empty());
     }

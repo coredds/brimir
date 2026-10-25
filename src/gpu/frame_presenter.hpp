@@ -31,6 +31,11 @@ struct OutputSize {
 // 32 px on both axes; otherwise the frame passes through uncropped. 90/270 swap the axes.
 OutputSize ComputeOutputSize(uint32_t w, uint32_t h, const OutputSettings &settings);
 
+// The part of the output image a Present writes for an output of `size`: the frame plus a 1-pixel border column and
+// row (clamped to kMaxOutputSize) repeating its last column and row, so a frontend sampling bilinearly at the right
+// and bottom edges never reads undefined texels.
+OutputSize WrittenSize(OutputSize size);
+
 class FramePresenter {
 public:
     // Largest native frame (VDP2 hi-res interlaced) and output image size (square so 90/270 fit).
@@ -54,8 +59,9 @@ public:
     // Copies the frame into the slot's upload buffer now and records the upload copy, the conversion dispatch and
     // the barriers into cmd. The slot's previous frame must no longer be in use (GPU or frontend). Afterwards the
     // image is in VK_IMAGE_LAYOUT_GENERAL with the compute writes available to any later read; its top-left
-    // ComputeOutputSize(w, h, settings) pixels hold the frame. Returns false and records nothing when the
-    // presenter failed to initialize, slot is out of range, xbgr is null or w x h is zero or exceeds 704 x 512.
+    // ComputeOutputSize(w, h, settings) pixels hold the frame, followed by the replicated border (WrittenSize).
+    // Returns false and records nothing when the presenter failed to initialize, slot is out of range, xbgr is null
+    // or w x h is zero or exceeds 704 x 512.
     bool Present(uint32_t slot, const uint32_t *xbgr, uint32_t w, uint32_t h, const OutputSettings &settings,
                  VkCommandBuffer cmd);
 
@@ -64,7 +70,8 @@ public:
     VkImageView OutputView(uint32_t slot) const;
 
     // Test/vkhost helper: reads the top-left size pixels of the slot's image back as XRGB8888 (0x00RRGGBB, tightly
-    // packed) in a one-shot submit. Call after the Present for the slot has completed; empty on failure.
+    // packed) in a one-shot submit (pass WrittenSize(...) to include the border). Call after the Present for the slot
+    // has completed; empty on failure.
     std::vector<uint32_t> ReadbackXRGB(uint32_t slot, OutputSize size);
 
 private:

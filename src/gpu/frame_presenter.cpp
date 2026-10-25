@@ -2,6 +2,7 @@
 
 #include "shaders/generated/cs_frame_output.spv.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -27,6 +28,8 @@ struct PushConstants {
     uint32_t outWidth;
     uint32_t outHeight;
     uint32_t rotation;
+    uint32_t writeWidth;
+    uint32_t writeHeight;
 };
 
 uint32_t EffectiveRotation(uint32_t rotation) {
@@ -57,6 +60,11 @@ OutputSize ComputeOutputSize(uint32_t w, uint32_t h, const OutputSettings &setti
         size = {size.height, size.width};
     }
     return size;
+}
+
+OutputSize WrittenSize(OutputSize size) {
+    return {std::min(size.width + 1, FramePresenter::kMaxOutputSize),
+            std::min(size.height + 1, FramePresenter::kMaxOutputSize)};
 }
 
 FramePresenter::FramePresenter(VulkanDevice &device, uint32_t slotCount) : m_device(device) {
@@ -209,6 +217,7 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
     slot.presented = true;
 
     const OutputSize size = ComputeOutputSize(w, h, settings);
+    const OutputSize written = WrittenSize(size);
     const bool crop = CropApplies(w, h, settings);
     const PushConstants push{
         .srcWidth = w,
@@ -218,11 +227,14 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
         .outWidth = size.width,
         .outHeight = size.height,
         .rotation = EffectiveRotation(settings.rotation),
+        .writeWidth = written.width,
+        .writeHeight = written.height,
     };
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
     vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &slot.set, 0, nullptr);
     vk.vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    vk.vkCmdDispatch(cmd, (size.width + kGroupSize - 1) / kGroupSize, (size.height + kGroupSize - 1) / kGroupSize, 1);
+    vk.vkCmdDispatch(cmd, (written.width + kGroupSize - 1) / kGroupSize, (written.height + kGroupSize - 1) / kGroupSize,
+                     1);
 
     // Make the writes available to whatever reads the image next (frontend sampling or blit, a readback).
     vk_util::ImageBarrier(m_device, cmd, slot.output.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
