@@ -20,14 +20,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::WrapExternal(const ExternalDevice &h
         SetReason(reason, "no vkGetInstanceProcAddr");
         return nullptr;
     }
-    // volk's instance-level globals are process-wide: only reload them when they point elsewhere, so wrapping a
-    // headless device's handles keeps volkInitialize()'s loader handle.
+    // Only re-initialize when the handler differs: volkInitializeCustom drops volkInitialize()'s loader handle.
     if (volk::vkGetInstanceProcAddr != handles.getInstanceProcAddr) {
         volk::volkInitializeCustom(handles.getInstanceProcAddr);
     }
-    if (volk::volkGetLoadedInstance() != handles.instance) {
-        volk::volkLoadInstanceOnly(handles.instance);
-    }
+    // Always reload the instance-level functions: after a frontend context reset a new instance can have the
+    // destroyed one's address, and pointers resolved through the old one (layers, extension commands) dangle.
+    volk::volkLoadInstanceOnly(handles.instance);
 
     std::unique_ptr<VulkanDevice> device(new VulkanDevice());
     if (!device->Init(handles, reason)) {
@@ -87,6 +86,10 @@ VulkanDevice::~VulkanDevice() {
     }
     if (m_instance != VK_NULL_HANDLE && m_destroyInstance) {
         m_destroyInstance(m_instance, nullptr);
+        // Don't leave volk's instance-level globals resolved through the destroyed instance.
+        if (volk::volkGetLoadedInstance() == m_instance) {
+            volk::volkLoadInstanceOnly(VK_NULL_HANDLE);
+        }
     }
 }
 

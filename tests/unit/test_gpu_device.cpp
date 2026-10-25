@@ -113,6 +113,37 @@ void CheckFill(const std::vector<uint32_t> &values) {
     }
 }
 
+// Forwarding stand-ins for a frontend's get_instance_proc_addr / get_device_proc_addr that count their calls.
+PFN_vkGetInstanceProcAddr g_realGipa = nullptr;
+PFN_vkGetDeviceProcAddr g_realGdpa = nullptr;
+std::atomic<uint32_t> g_gipaInstanceCalls{0};
+std::atomic<uint32_t> g_gdpaCalls{0};
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL CountingGipa(VkInstance instance, const char *name) {
+    if (instance != VK_NULL_HANDLE) {
+        g_gipaInstanceCalls.fetch_add(1);
+    }
+    return g_realGipa(instance, name);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL CountingGdpa(VkDevice device, const char *name) {
+    g_gdpaCalls.fetch_add(1);
+    return g_realGdpa(device, name);
+}
+
+ExternalDevice HandlesOf(const VulkanDevice &owner) {
+    return ExternalDevice{
+        .instance = owner.Instance(),
+        .physical = owner.Physical(),
+        .device = owner.Device(),
+        .queue = owner.Queue(),
+        .queueFamily = owner.QueueFamily(),
+        .getInstanceProcAddr = volk::vkGetInstanceProcAddr,
+        .getDeviceProcAddr = volk::vkGetDeviceProcAddr,
+        .apiVersion = kRequiredApiVersion,
+    };
+}
+
 } // namespace
 
 TEST_CASE("Headless Vulkan device meets the 1.2 compute baseline", "[gpu]") {
@@ -205,19 +236,22 @@ TEST_CASE("Image helpers create, transition, clear and read back an image", "[gp
 TEST_CASE("Non-owning VulkanDevice works on external handles and leaves them alive", "[gpu]") {
     auto owner = OpenDevice();
 
-    ExternalDevice handles{
-        .instance = owner->Instance(),
-        .physical = owner->Physical(),
-        .device = owner->Device(),
-        .queue = owner->Queue(),
-        .queueFamily = owner->QueueFamily(),
-        .getInstanceProcAddr = volk::vkGetInstanceProcAddr,
-        .getDeviceProcAddr = volk::vkGetDeviceProcAddr,
-        .apiVersion = kRequiredApiVersion,
-    };
+    // Wrap through counting stubs, as a frontend's own get_*_proc_addr would be.
+    ExternalDevice handles = HandlesOf(*owner);
+    g_realGipa = handles.getInstanceProcAddr;
+    g_realGdpa = handles.getDeviceProcAddr;
+    g_gipaInstanceCalls = 0;
+    g_gdpaCalls = 0;
+    handles.getInstanceProcAddr = CountingGipa;
+    handles.getDeviceProcAddr = CountingGdpa;
     std::string reason;
     auto view = VulkanDevice::WrapExternal(handles, &reason);
+    // Hand volk back the real loader entry point for the rest of the process (the stub keeps forwarding meanwhile).
+    volk::volkInitializeCustom(g_realGipa);
+    volk::volkLoadInstanceOnly(owner->Instance());
     REQUIRE(view != nullptr);
+    CHECK(g_gipaInstanceCalls.load() > 0); // instance-level functions reloaded through the frontend's GIPA
+    CHECK(g_gdpaCalls.load() > 0);         // device table loaded through the frontend's GDPA
     CHECK_FALSE(view->OwnsDevice());
     CHECK(view->Device() == owner->Device());
     CHECK(view->Queue() == owner->Queue());
@@ -235,6 +269,26 @@ TEST_CASE("Non-owning VulkanDevice works on external handles and leaves them ali
     // The device, queue and instance are still usable through the owner.
     CheckFill(RunFill(*owner, 257));
     CloseAndCheckValidation(owner);
+}
+
+// A frontend context reset (context_destroy, then context_reset on a new instance that may reuse the old address).
+TEST_CASE("Wrapping a device created after another was destroyed reloads volk", "[gpu]") {
+    auto first = OpenDevice();
+    const VkInstance firstInstance = first->Instance();
+    CloseAndCheckValidation(first);
+    // The destroyed instance no longer backs volk's instance-level functions.
+    CHECK(volk::volkGetLoadedInstance() != firstInstance);
+
+    auto second = OpenDevice();
+    // Point volk at nothing, as after a frontend tore its instance down; WrapExternal must reload regardless.
+    volk::volkLoadInstanceOnly(VK_NULL_HANDLE);
+    std::string reason;
+    auto view = VulkanDevice::WrapExternal(HandlesOf(*second), &reason);
+    REQUIRE(view != nullptr);
+    CHECK(volk::volkGetLoadedInstance() == second->Instance());
+    CheckFill(RunFill(*view, 1000));
+    view.reset();
+    CloseAndCheckValidation(second);
 }
 
 TEST_CASE("Headless device selection honours preferredDeviceName", "[gpu]") {
