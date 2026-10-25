@@ -171,10 +171,78 @@ TEST_CASE("VDP sprite gradation matches scalar selection and averages", "[vdp][c
                 value = source(x);
                 if (x == 1) {
                     value = (source(0) + source(1)) / 2;
-                } else if (x >= 2 && present(x - 2)) {
-                    // Match the existing caller's unshifted mask and two-pixel destination offset.
+                } else if (x >= 2) {
                     value = ((source(x - 2) + source(x - 1)) / 2 + source(x)) / 2;
                 }
+            }
+            expected |= value << (channel * 8);
+        }
+        CHECK(frame.line[x] == expected);
+    }
+}
+
+TEST_CASE("VDP color gradation uses the mask of the pixel it writes", "[vdp][composite][gradation][regression][brimir]") {
+    const uint32 mode = GENERATE(0u, 1u);
+    constexpr std::array<uint32, 2> widths{320, 352};
+    const uint32 width = widths[mode];
+    // The gradation screen (NBG0) is among the top two layers from x0 on; before that a sprite and NBG1 cover it.
+    // 320 wide: x0 = 100 is in an AVX2 block, 314 in the SSE2 block, 318 in the scalar tail.
+    const uint32 x0 = GENERATE(2u, 5u, 100u, 314u, 318u);
+    CAPTURE(width, x0);
+
+    auto state = std::make_unique<VDPState>();
+    config::VDP2DebugRender debug{};
+    config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<SoftwareVDPRenderer>(*state, debug, access);
+    auto &regs = state->regs2;
+    regs.WriteTVMD(static_cast<uint16>(0x8000 | mode));
+    regs.LatchTVMD();
+    regs.WriteBGON(0x0303);
+    regs.WriteCHCTLA(0x3A3A); // NBG0 and NBG1: 1024-wide RGB555 bitmaps.
+    regs.WriteMPOFN(0x21);    // NBG0 bitmap in bank A1, NBG1 bitmap in bank B0.
+    regs.WriteCYCA0L(0x4444);
+    regs.WriteCYCA0U(0x4444);
+    regs.WriteCYCA1L(0x4444);
+    regs.WriteCYCA1U(0x4444);
+    regs.WriteCYCB0L(0x5555);
+    regs.WriteCYCB0U(0x5555);
+    regs.WritePRINA(0x0201); // NBG0 priority 1, NBG1 priority 2.
+    regs.WritePRISA(0x0003); // Sprite priority 3.
+    regs.WriteSPCTL(0x1300);
+    regs.WriteCCCTL(0xA042); // NBG0 gradation; color calculation on the sprite and NBG1 (the topmost layer).
+    regs.WriteCCRSA(31);     // Ratio zero exposes the second screen directly.
+    regs.WriteCCRNA(31u << 8);
+    regs.WriteBKTAU(0);
+    regs.WriteBKTAL(0x0080);
+    state->mem2.WriteVRAM<uint16>(0x100, 0x51AF);
+    state->mem2.WriteCRAM<uint16>(2, 0x7FFF);
+
+    const auto nbg0 = [](uint32 x) {
+        return ((x * 37 + 5) & 31) | (((x * 91 + 13) & 31) << 5) | (((x * 53 + 7) & 31) << 10);
+    };
+    const auto nbg1 = [](uint32 x) {
+        return ((x * 7 + 3) & 31) | (((x * 11 + 9) & 31) << 5) | (((x * 13 + 1) & 31) << 10);
+    };
+    for (uint32 x = 0; x < width; ++x) {
+        state->mem2.WriteVRAM<uint16>(0x20000 + 2 * x, 0x8000 | nbg0(x));
+        state->mem2.WriteVRAM<uint16>(0x40000 + 2 * x, 0x8000 | nbg1(x));
+        util::WriteBE<uint16>(&state->mem1.FBRAM[state->fbIndex.display][2 * x], x < x0 ? 1 : 0);
+    }
+    CompositeFrame frame;
+    frame.Render(*renderer, width);
+
+    const auto channelOf = [](uint32 rgb, uint32 channel) { return ((rgb >> (channel * 5)) & 31) * 8; };
+    for (uint32 x = 0; x < width; ++x) {
+        CAPTURE(x);
+        uint32 expected = 0xFF000000u;
+        for (uint32 channel = 0; channel < 3; ++channel) {
+            uint32 value;
+            if (x < x0) {
+                value = channelOf(nbg1(x), channel);
+            } else {
+                value = ((channelOf(nbg0(x - 2), channel) + channelOf(nbg0(x - 1), channel)) / 2 +
+                         channelOf(nbg0(x), channel)) /
+                        2;
             }
             expected |= value << (channel * 8);
         }

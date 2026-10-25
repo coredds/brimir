@@ -3541,8 +3541,8 @@ FORCE_INLINE static void Color888SelectMasked(const std::span<Color888> dest,
     }
 }
 
-FORCE_INLINE static void Color888GradationMasked(const std::span<Color888> dest,
-                                                 const std::span<const bool, kMaxResH> mask,
+// Brimir: mask[i] is the mask of the pixel written to dest[i]; the caller passes the mask shifted like dest.
+FORCE_INLINE static void Color888GradationMasked(const std::span<Color888> dest, const std::span<const bool> mask,
                                                  const std::span<const Color888> src) {
     size_t i = 0;
 
@@ -4204,7 +4204,10 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
             // TODO: should pixels 0 and 1 pull from pixels -1 and -2?
             output[0] = input[0];
             output[1] = AverageRGB888(input[0], input[1]);
-            Color888GradationMasked(std::span{output}.subspan(2, m_HRes - 2), std::span{mask}, std::span{input});
+            // Brimir: dest[i] is output pixel i+2, so use the mask of that pixel (upstream passed the unshifted mask,
+            // which selected with the mask of pixel i)
+            Color888GradationMasked(std::span{output}.subspan(2, m_HRes - 2), std::span{mask}.subspan(2, m_HRes - 2),
+                                    std::span{input});
 
             // Set layer 1 output to the color gradation screen where the designated screen is the topmost two layers
             for (uint32 x = 0; x < m_HRes; x++) {
