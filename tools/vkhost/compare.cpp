@@ -38,13 +38,13 @@ namespace fs = std::filesystem;
 
 // Command line flags that take no value; every other flag consumes the next argument.
 const std::set<std::string> kValueless = {"--hash",        "--verbose", "--vulkan",  "--refuse-hw",
-                                          "--runahead",    "--compare", "--fail-compute-on-grow"};
+                                          "--runahead",    "--compare", "--fail-compute-on-grow", "--no-validation"};
 // Dropped from both children (the compare adds its own).
 const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",       "--dump-dir", "--dump-frame",
                                         "--system-dir", "--frames", "--compare-vulkan-option"};
 // Only valid together with --vulkan: dropped from the software child.
 const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--preferred-hw",
-                                           "--fake-api",   "--grow-mask",    "--fail-compute-on-grow"};
+                                           "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--no-validation"};
 
 fs::path SelfPath() {
 #ifdef _WIN32
@@ -216,6 +216,93 @@ std::vector<std::string> BuildArgs(const std::vector<std::string>& in, bool vulk
     return out;
 }
 
+// Removes the work directory when it goes out of scope unless the logs and dumps are worth keeping.
+class WorkDir {
+public:
+    explicit WorkDir(fs::path path) : m_path(std::move(path)) {}
+    ~WorkDir() {
+        if (!m_keep) {
+            std::error_code ec;
+            fs::remove_all(m_path, ec);
+        }
+    }
+    WorkDir(const WorkDir&) = delete;
+    WorkDir& operator=(const WorkDir&) = delete;
+    const fs::path& Path() const { return m_path; }
+    void Keep() { m_keep = true; }
+
+private:
+    fs::path m_path;
+    bool m_keep = false;
+};
+
+// What the Vulkan child's stderr says about how it ran.
+struct VulkanFacts {
+    bool outputReady = false;                    // "Vulkan frame output ready"
+    std::vector<std::string> degraded;           // log lines that mean software or copy-only output
+    long long hardwareFrames = -1;               // "recorded N frames (H hardware)"
+    long long submits = -1;                      // "core submits S"
+    bool validationOn = false;
+    long long validationErrors = -1;
+};
+
+VulkanFacts ParseVulkanFacts(const fs::path& stderrFile) {
+    static const char* const kDegraded[] = {"falling back to software",
+                                            "frontend video driver is not Vulkan",
+                                            "Vulkan context unusable",
+                                            "using copy-only frame output",
+                                            "Vulkan frame output changed to",
+                                            "Vulkan frame output failed",
+                                            "Vulkan context still live"};
+    VulkanFacts facts;
+    std::istringstream lines(ReadAll(stderrFile));
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.find("Vulkan frame output ready") != std::string::npos) {
+            facts.outputReady = true;
+        }
+        for (const char* needle : kDegraded) {
+            if (line.find(needle) != std::string::npos) {
+                facts.degraded.push_back(line);
+                break;
+            }
+        }
+        long long frames = 0;
+        long long hardware = 0;
+        if (std::sscanf(line.c_str(), "vkhost: recorded %lld frames (%lld hardware)", &frames, &hardware) == 2) {
+            facts.hardwareFrames = hardware;
+        }
+        long long resets = 0;
+        long long submits = 0;
+        if (std::sscanf(line.c_str(), "vkhost: vulkan: context resets %lld, core submits %lld,", &resets, &submits) == 2) {
+            facts.submits = submits;
+            facts.validationOn = line.find("validation on,") != std::string::npos;
+            const size_t pos = line.find("validation errors ");
+            if (pos != std::string::npos) {
+                facts.validationErrors = std::atoll(line.c_str() + pos + 18);
+            }
+        }
+    }
+    return facts;
+}
+
+// The last lines of a child's stderr, for a run that failed before it produced anything to compare.
+void PrintTail(const char* label, const ChildResult& child) {
+    std::vector<std::string> all;
+    std::istringstream lines(ReadAll(child.stderrFile));
+    std::string line;
+    while (std::getline(lines, line)) {
+        all.push_back(line);
+    }
+    const size_t from = all.size() > 12 ? all.size() - 12 : 0;
+    for (size_t i = from; i < all.size(); ++i) {
+        std::fprintf(stderr, "compare: %s stderr: %s\n", label, all[i].c_str());
+    }
+}
+
 } // namespace
 
 int RunCompare(const CompareConfig& config) {
@@ -224,16 +311,18 @@ int RunCompare(const CompareConfig& config) {
         std::fprintf(stderr, "compare: cannot find this executable\n");
         return 2;
     }
-    const fs::path work = fs::temp_directory_path() / "brimir_vkhost" /
-                          ("compare-" + std::to_string(ProcessId()) + "-" +
-                           std::to_string(static_cast<long long>(
-                               std::chrono::steady_clock::now().time_since_epoch().count())));
+    const fs::path workPath = fs::temp_directory_path() / "brimir_vkhost" /
+                              ("compare-" + std::to_string(ProcessId()) + "-" +
+                               std::to_string(static_cast<long long>(
+                                   std::chrono::steady_clock::now().time_since_epoch().count())));
     std::error_code ec;
-    fs::create_directories(work, ec);
+    fs::create_directories(workPath, ec);
     if (ec) {
-        std::fprintf(stderr, "compare: cannot create %s: %s\n", work.string().c_str(), ec.message().c_str());
+        std::fprintf(stderr, "compare: cannot create %s: %s\n", workPath.string().c_str(), ec.message().c_str());
         return 2;
     }
+    WorkDir workGuard(workPath);
+    const fs::path& work = workGuard.Path();
     const fs::path dumpRoot = config.dumpDir.empty() ? work / "dump" : fs::path(config.dumpDir);
 
     std::vector<std::string> swArgs = BuildArgs(config.args, false);
@@ -241,6 +330,15 @@ int RunCompare(const CompareConfig& config) {
     for (const auto& [key, value] : config.vulkanOptions) {
         vkArgs.push_back("--option");
         vkArgs.push_back(key + "=" + value);
+    }
+    // Test hook (tests/vkhost_checks.cmake): extra arguments for the Vulkan child only, so the "the Vulkan run really
+    // used the compute output" checks below can be exercised with --refuse-hw, --fake-api and the like.
+    if (const char* extra = std::getenv("BRIMIR_VKHOST_COMPARE_VULKAN_ARGS")) {
+        std::istringstream words(extra);
+        std::string word;
+        while (words >> word) {
+            vkArgs.push_back(word);
+        }
     }
     const std::vector<std::string> frameArgs = {"--frames", std::to_string(config.frames), "--hash"};
     swArgs.insert(swArgs.end(), frameArgs.begin(), frameArgs.end());
@@ -252,7 +350,8 @@ int RunCompare(const CompareConfig& config) {
     PrintSummary("software", sw);
     std::printf("compare: software: exit %d, %zu frames, %.1f s\n", sw.exitCode, sw.hashLines.size(), sw.seconds);
     if (sw.exitCode != 0) {
-        std::fprintf(stderr, "compare: the software run failed (log: %s)\n", sw.stderrFile.string().c_str());
+        std::fprintf(stderr, "compare: the software run failed\n");
+        PrintTail("software", sw);
         return 2;
     }
 
@@ -266,7 +365,8 @@ int RunCompare(const CompareConfig& config) {
         return 4;
     }
     if (vk.exitCode != 0 && vk.exitCode != 3) {
-        std::fprintf(stderr, "compare: the vulkan run failed (log: %s)\n", vk.stderrFile.string().c_str());
+        std::fprintf(stderr, "compare: the vulkan run failed\n");
+        PrintTail("vulkan", vk);
         return 2;
     }
 
@@ -281,16 +381,42 @@ int RunCompare(const CompareConfig& config) {
             ++differing;
         }
     }
-    const bool countMismatch = sw.hashLines.size() != vk.hashLines.size();
-    const bool failed = vk.exitCode != 0 || countMismatch || differing > 0;
+    const size_t expected = static_cast<size_t>(config.frames);
+    bool failed = false;
+    auto fail = [&](const std::string& message) {
+        failed = true;
+        std::printf("compare: FAILED: %s\n", message.c_str());
+    };
     if (vk.exitCode != 0) {
-        std::printf("compare: FAILED: the vulkan run's own checks failed (exit 3)\n");
+        fail("the vulkan run's own checks failed (exit 3)");
     }
-    if (countMismatch) {
-        std::printf("compare: FAILED: frame counts differ: software %zu, vulkan %zu\n", sw.hashLines.size(),
-                    vk.hashLines.size());
+    if (sw.hashLines.size() != vk.hashLines.size()) {
+        fail("frame counts differ: software " + std::to_string(sw.hashLines.size()) + ", vulkan " +
+             std::to_string(vk.hashLines.size()));
     }
+    if (sw.hashLines.size() != expected || vk.hashLines.size() != expected) {
+        fail("expected " + std::to_string(expected) + " frames from each run, got software " +
+             std::to_string(sw.hashLines.size()) + ", vulkan " + std::to_string(vk.hashLines.size()));
+    }
+
+    // The Vulkan run must have used the compute output for every frame, or the comparison proves nothing.
+    const VulkanFacts facts = ParseVulkanFacts(vk.stderrFile);
+    if (!facts.outputReady) {
+        fail("no \"Vulkan frame output ready\" in the vulkan run's log: the core did not take the Vulkan path");
+    }
+    for (const std::string& line : facts.degraded) {
+        fail("the vulkan run was not on the compute output: " + line);
+    }
+    if (facts.hardwareFrames != static_cast<long long>(expected)) {
+        fail("the vulkan run read back " + std::to_string(facts.hardwareFrames) + " hardware frames, expected " +
+             std::to_string(expected));
+    }
+    if (facts.submits <= 0) {
+        fail("the vulkan run made " + std::to_string(facts.submits) + " core submits");
+    }
+
     if (differing > 0) {
+        failed = true;
         std::printf("compare: FAILED: %zu of %zu frames differ, first at frame %zu\n", differing, common, first);
         std::printf("compare:   software: %s\n", sw.hashLines[first].c_str());
         std::printf("compare:   vulkan  : %s\n", vk.hashLines[first].c_str());
@@ -364,11 +490,14 @@ int RunCompare(const CompareConfig& config) {
     }
 
     if (failed) {
+        workGuard.Keep();
         std::printf("compare: FAILED (work directory kept: %s)\n", work.string().c_str());
         return 3;
     }
-    std::printf("compare: OK, %zu frames identical (software vs vulkan)\n", common);
-    fs::remove_all(work, ec);
+    std::printf("compare: OK, %zu frames identical (software vs vulkan compute output: %lld hardware frames, "
+                "%lld core submits, validation %s, %lld validation errors)\n",
+                common, facts.hardwareFrames, facts.submits, facts.validationOn ? "on" : "off",
+                facts.validationErrors);
     return 0;
 }
 

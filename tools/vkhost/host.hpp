@@ -55,6 +55,7 @@ struct HostConfig {
     bool preferGl = false; // --preferred-hw gl: GET_PREFERRED_HW_RENDER reports GL (SET_HW_RENDER still accepted)
     uint32_t fakeApi = 0;  // --fake-api X.Y: the core is told the GPU supports only this Vulkan version
     int growMaskAt = -1;   // --grow-mask F: sync mask 0b1 until frame F, then 0b111
+    bool noValidation = false;      // --no-validation: do not load the validation layer (timing runs)
     bool failComputeOnGrow = false; // --fail-compute-on-grow: the core's pipeline creation fails after the growth
 };
 

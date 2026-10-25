@@ -185,7 +185,8 @@ require_log(runahead "second instance ran 360 frames, 0 hardware frames, context
 execute_process(
     COMMAND "${VKHOST}" ${common_args} --compare
     OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
-if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 300 frames identical")
+if(NOT compare_code EQUAL 0 OR
+   NOT compare_out MATCHES "compare: OK, 300 frames identical \\(software vs vulkan compute output: 300 hardware frames, [1-9][0-9]* core submits, validation on, 0 validation errors\\)")
     message(FATAL_ERROR "--compare of identical runs: exit ${compare_code}\n${compare_out}\n${compare_err}")
 endif()
 execute_process(
@@ -200,5 +201,37 @@ if(NOT compare_code EQUAL 3 OR NOT compare_out MATCHES "first at frame 0" OR
     message(FATAL_ERROR "--compare of different runs: exit ${compare_code}\n${compare_out}\n${compare_err}")
 endif()
 message(STATUS "--compare: identical runs pass, a difference is reported (exit 3, first pixel)")
+
+# --compare must not pass when the Vulkan run silently stayed on software or the copy-only output (the comparison
+# would be vacuous). The environment hook adds arguments to the Vulkan child only.
+foreach(case IN ITEMS "--refuse-hw|no \"Vulkan frame output ready\"" "--fake-api 1.1|using copy-only frame output"
+                      "--preferred-hw gl|read back 0 hardware frames")
+    string(REPLACE "|" ";" case_parts "${case}")
+    list(GET case_parts 0 case_args)
+    list(GET case_parts 1 case_expect)
+    set(ENV{BRIMIR_VKHOST_COMPARE_VULKAN_ARGS} "${case_args}")
+    execute_process(
+        COMMAND "${VKHOST}" --bios "${BIOS}" --warmup 30 --frames 30 --compare
+        OUTPUT_VARIABLE vacuous_out ERROR_VARIABLE vacuous_err RESULT_VARIABLE vacuous_code)
+    unset(ENV{BRIMIR_VKHOST_COMPARE_VULKAN_ARGS})
+    string(REGEX MATCH "work directory kept: ([^\r\n]*)\\)" ignored "${vacuous_out}")
+    if(CMAKE_MATCH_1)
+        file(REMOVE_RECURSE "${CMAKE_MATCH_1}")
+    endif()
+    if(NOT vacuous_code EQUAL 3 OR NOT vacuous_out MATCHES "compare: FAILED" OR NOT vacuous_out MATCHES "${case_expect}")
+        message(FATAL_ERROR "--compare with Vulkan child '${case_args}' must fail with '${case_expect}': exit "
+                            "${vacuous_code}\n${vacuous_out}\n${vacuous_err}")
+    endif()
+endforeach()
+# ... and the options that would make the Vulkan run leave the compute output are refused up front.
+foreach(rejected IN ITEMS "--refuse-hw" "--fake-api;1.1" "--option;brimir_renderer=software")
+    execute_process(
+        COMMAND "${VKHOST}" --bios "${BIOS}" --warmup 1 --frames 1 --compare ${rejected}
+        OUTPUT_QUIET ERROR_VARIABLE rejected_err RESULT_VARIABLE rejected_code)
+    if(NOT rejected_code EQUAL 1)
+        message(FATAL_ERROR "--compare ${rejected} must be a usage error (exit 1), got ${rejected_code}\n${rejected_err}")
+    endif()
+endforeach()
+message(STATUS "--compare: vacuous Vulkan runs and conflicting options are rejected")
 
 message(STATUS "brimir_vkhost Vulkan checks passed")

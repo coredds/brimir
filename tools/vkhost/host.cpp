@@ -169,7 +169,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_frameIndex = 0;
     if (config.vulkan && !config.refuseHw) {
         // Like a frontend's video driver, the instance and device exist before the core is loaded.
-        m_vulkan = std::make_unique<VulkanProvider>(config.fakeApi);
+        m_vulkan = std::make_unique<VulkanProvider>(config.fakeApi, !config.noValidation);
         if (config.growMaskAt >= 0) {
             m_vulkan->SetSyncSlots(1);
         }

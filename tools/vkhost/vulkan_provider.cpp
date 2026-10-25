@@ -278,13 +278,13 @@ VkDevice CreateDeviceWrapper(VkPhysicalDevice gpuHandle, void* opaque, const VkD
 
 } // namespace
 
-VulkanProvider::VulkanProvider(uint32_t fakeApiVersion)
+VulkanProvider::VulkanProvider(uint32_t fakeApiVersion, bool validation)
     : m_real(std::make_unique<RealFunctions>()), m_fakeApi(fakeApiVersion) {
     if (g_provider != nullptr) {
         throw std::runtime_error("only one Vulkan provider at a time");
     }
     std::string reason;
-    m_host = gpu::CreateHeadlessDevice({.validation = true}, &reason);
+    m_host = gpu::CreateHeadlessDevice({.validation = validation}, &reason);
     if (!m_host) {
         throw VulkanUnavailable(reason);
     }

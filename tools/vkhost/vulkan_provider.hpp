@@ -45,8 +45,9 @@ public:
 class VulkanProvider {
 public:
     // Creates the host's instance and device. Throws VulkanUnavailable. A non-zero fakeApiVersion caps the apiVersion
-    // vkGetPhysicalDeviceProperties reports to the core (--fake-api).
-    explicit VulkanProvider(uint32_t fakeApiVersion = 0);
+    // vkGetPhysicalDeviceProperties reports to the core (--fake-api). alidation = false (--no-validation) leaves the
+    // validation layer out, for timing runs.
+    explicit VulkanProvider(uint32_t fakeApiVersion = 0, bool validation = true);
     ~VulkanProvider();
     VulkanProvider(const VulkanProvider&) = delete;
     VulkanProvider& operator=(const VulkanProvider&) = delete;

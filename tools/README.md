@@ -280,8 +280,9 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--fake-api X.Y` | with `--vulkan`: `vkGetPhysicalDeviceProperties` (through the core's `get_instance_proc_addr`) caps `apiVersion` at X.Y; with 1.1 the core uses its copy-only output |
 | `--grow-mask F` | with `--vulkan`: sync index mask `0b1` until frame F, then `0b111` (after waiting for the device) |
 | `--fail-compute-on-grow` | with `--grow-mask`: the core's `vkCreateComputePipelines` fails once the mask has grown (fault injection: the core degrades to copy-only) |
-| `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (`retro_unserialize` currently corrupts the heap on BIOS-menu states), so compare against a software run with `--runahead` |
-| `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference |
+| `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (a pre-existing heap corruption in `retro_unserialize` was observed on BIOS-menu states; it may affect any state), so compare against a software run with `--runahead` |
+| `--no-validation` | with `--vulkan` or `--compare`: do not load the Vulkan validation layer (the layer slows the Vulkan run; use it for timing) |
+| `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference or when the Vulkan run was not on the compute output for every frame |
 | `--compare-vulkan-option key=value` | with `--compare`: a core option for the Vulkan run only (repeatable; to check that a difference is reported) |
 | `--dump-frame I` | with `--dump-dir`: write only recorded frame I |
 
@@ -363,14 +364,23 @@ compare:   67432 of 71680 pixels differ
 (that output came from `--compare-vulkan-option brimir_rotation=180`). A re-run that does not reproduce the original
 hashes is noted. A differing frame count, a failed check of the Vulkan run (queue lock, validation, ... exit 3) or a
 software run that fails also fail the comparison. Exit codes: 0 identical (`compare: OK, N frames identical`), 3
-differences or a failed check, 2 setup failure, 4 no usable Vulkan device. The hash covers the width, height and the
+differences or a failed check, 2 setup failure, 4 no usable Vulkan device. A Vulkan run that silently stays on software
+(or on the copy-only output) would match trivially, so `--compare` also requires: exactly `--frames` frames from both
+runs, a `Vulkan frame output ready` log line in the Vulkan run, no fallback or copy-only log line, as many hardware frames
+as frames and more than 0 core submits; otherwise it fails with exit 3 and says which. The result line states what was
+verified (`compare: OK, 3600 frames identical (software vs vulkan compute output: 3600 hardware frames, 4200 core
+submits, validation on, 0 validation errors)`). `--compare` is refused (exit 1) together with `--refuse-hw`,
+`--preferred-hw`, `--fake-api`, `--fail-compute-on-grow` and any `brimir_renderer` option. The environment variable
+`BRIMIR_VKHOST_COMPARE_VULKAN_ARGS` adds arguments to the Vulkan child only (a test hook: ctest uses it to check that
+the vacuous cases fail). The hash covers the width, height and the
 XRGB8888 pixels exactly as `--hash` does; the output parity rule (RGB equal at 1x, alpha not compared) is satisfied by
 the host converting the Vulkan image to XRGB8888.
 
 Each run also prints `vkhost: timing: X ms/frame (Y without the host readback)`: the wall time of the recorded frames'
 `retro_run` calls, minus the time spent hashing or writing PPMs. With `--vulkan`, X includes the host's readback of
 every frame (a wait for the GPU, a copy to a host buffer and a conversion; a real frontend presents the image
-instead), Y leaves that out. With the software renderer both are the same.
+instead), Y leaves that out. With the software renderer both are the same. Time Vulkan runs with `--no-validation`:
+the validation layer is on by default and slows the Vulkan run.
 
 Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2`, `GET_VARIABLE`,
 `GET_VARIABLE_UPDATE` (always false), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,

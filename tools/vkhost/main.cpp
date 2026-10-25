@@ -10,6 +10,7 @@
 
 #include "../frame_hash.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -89,10 +90,12 @@ void PrintUsage(std::FILE* out) {
         "                Vulkan X.Y (for example 1.1: the core's copy-only output)\n"
         "  --grow-mask F  with --vulkan: sync index mask 0b1 until frame F, then 0b111 (device idle)\n"
         "  --fail-compute-on-grow  with --grow-mask: the core's vkCreateComputePipelines fails after the growth\n"
+        "  --no-validation  with --vulkan/--compare: do not load the validation layer (timing runs)\n"
         "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
         "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
-        "                kept temporary directory). Exit 3 on any difference. Other flags go to both runs\n"
+        "                kept temporary directory). Exit 3 on any difference, or when the Vulkan run did not use the\n"
+        "                compute frame output for every frame. Other flags go to both runs\n"
         "  --compare-vulkan-option key=value  with --compare: core option for the Vulkan run only\n"
         "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
         "  --help, -h    show this help\n"
@@ -164,6 +167,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--compare") {
             args.compare = true;
+            continue;
+        }
+        if (opt == "--no-validation") {
+            args.config.noValidation = true;
             continue;
         }
         if (i + 1 >= argc) {
@@ -259,9 +266,27 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
     }
+    if (args.config.noValidation && !vulkanRun) {
+        std::fprintf(stderr, "--no-validation needs --vulkan or --compare\n");
+        return ParseResult::Error;
+    }
     if (!args.compare && !args.compareVulkanOptions.empty()) {
         std::fprintf(stderr, "--compare-vulkan-option needs --compare\n");
         return ParseResult::Error;
+    }
+    if (args.compare) {
+        // The comparison is only meaningful when the Vulkan run really uses the compute output.
+        if (args.config.refuseHw || args.config.preferGl || args.config.fakeApi != 0 || args.config.failComputeOnGrow) {
+            std::fprintf(stderr, "--compare cannot be combined with --refuse-hw, --preferred-hw, --fake-api or "
+                                 "--fail-compute-on-grow (they make the Vulkan run leave the compute output)\n");
+            return ParseResult::Error;
+        }
+        auto overridesRenderer = [](const std::pair<std::string, std::string>& o) { return o.first == "brimir_renderer"; };
+        if (std::any_of(args.config.options.begin(), args.config.options.end(), overridesRenderer) ||
+            std::any_of(args.compareVulkanOptions.begin(), args.compareVulkanOptions.end(), overridesRenderer)) {
+            std::fprintf(stderr, "--compare selects brimir_renderer itself; do not override it with --option\n");
+            return ParseResult::Error;
+        }
     }
     if ((args.config.resetAt >= 0 || args.config.resetInRun >= 0) && (!vulkanRun || args.config.refuseHw)) {
         std::fprintf(stderr, "--reset-at and --reset-in-run need --vulkan (without --refuse-hw)\n");
