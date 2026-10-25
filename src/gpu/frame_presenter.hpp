@@ -3,7 +3,8 @@
 // The GPU frame output pass: takes a native Ymir frame (XBGR8888, 0xAABBGGRR, pitch = width) and produces the
 // frame the libretro layer presents, in an R8G8B8A8_UNORM image per sync slot. The transforms are the bridge's
 // (CoreWrapper::OnFrameComplete): XBGR -> RGB, overscan crop, then rotation. At 1x the RGB channels equal the
-// software path's XRGB8888 output byte for byte; alpha is written as 1.0 (the software path leaves 0x00).
+// software path's XRGB8888 output byte for byte; alpha is 0xFF (the software path leaves 0x00). The shader stores
+// the packed words through an R32_UINT view of each image, so no float conversion is involved.
 
 #include "vk_device.hpp"
 #include "vk_util.hpp"
@@ -14,7 +15,8 @@
 namespace brimir::gpu {
 
 struct OutputSettings {
-    // Total overscan crop per axis (left/top get half, rounded down), as CoreWrapper::SetOverscanCrop.
+    // Total overscan crop per axis (left/top get half, rounded down), as CoreWrapper::SetOverscanCrop. The bridge's
+    // crops are int: values above INT_MAX never apply (like any crop the frame is too small for).
     uint32_t cropH = 0, cropV = 0;
     // 0, 90 (clockwise), 180 or 270 (counter-clockwise); anything else is 0.
     uint32_t rotation = 0;
@@ -38,6 +40,8 @@ public:
 
     // Creates slotCount output images and upload buffers. Check Ok() afterwards.
     FramePresenter(VulkanDevice &device, uint32_t slotCount);
+    // Destroys everything immediately: the GPU (and the frontend) must be done with every slot first, e.g. after
+    // vkDeviceWaitIdle in context_destroy.
     ~FramePresenter();
     FramePresenter(const FramePresenter &) = delete;
     FramePresenter &operator=(const FramePresenter &) = delete;
@@ -55,6 +59,7 @@ public:
     bool Present(uint32_t slot, const uint32_t *xbgr, uint32_t w, uint32_t h, const OutputSettings &settings,
                  VkCommandBuffer cmd);
 
+    // The slot's image and its R8G8B8A8_UNORM view (for retro_vulkan_image); null when slot is out of range.
     VkImage OutputImage(uint32_t slot) const;
     VkImageView OutputView(uint32_t slot) const;
 
@@ -66,9 +71,10 @@ private:
     struct Slot {
         vk_util::Buffer upload; // host-visible staging
         vk_util::Buffer source; // device-local, read by the shader
-        vk_util::Image output;
+        vk_util::Image output; // output.view: R8G8B8A8_UNORM, for the frontend
+        VkImageView storageView = VK_NULL_HANDLE; // R32_UINT, written by the shader
         VkDescriptorSet set = VK_NULL_HANDLE;
-        bool written = false; // the image has left VK_IMAGE_LAYOUT_UNDEFINED
+        bool presented = false; // a Present was recorded (ReadbackXRGB's precondition only)
     };
 
     VkResult Init(uint32_t slotCount);

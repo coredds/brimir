@@ -84,8 +84,21 @@ TEST_CASE("ComputeOutputSize equals the bridge's output size for every frame pat
     }
     // Rotations the bridge does not know are treated as 0.
     CHECK(ComputeOutputSize(320, 224, {.rotation = 45}) == OutputSize{320, 224});
-    // A crop far larger than the frame is rejected by the guard (no unsigned wrap-around).
+    // Crops above INT_MAX (the bridge's crops are int) never apply, including values where crop + 32 would wrap
+    // around in 32 bits.
     CHECK(ComputeOutputSize(320, 224, {.cropH = 0xFFFFFFF0u, .cropV = 0}) == OutputSize{320, 224});
+    CHECK(ComputeOutputSize(320, 224, {.cropH = 0, .cropV = 0x80000000u}) == OutputSize{320, 224});
+    // A crop at the guard's limit is rejected, one below it applies (and both agree with the bridge).
+    CHECK(ComputeOutputSize(320, 224, {.cropH = 288, .cropV = 0}) == OutputSize{320, 224});
+    CHECK(ComputeOutputSize(320, 224, {.cropH = 287, .cropV = 0}) == OutputSize{33, 224});
+    for (const FramePathCase c : {FramePathCase{320, 224, 288, 0, 0, false}, FramePathCase{320, 224, 287, 0, 0, false},
+                                  FramePathCase{320, 224, 0, 191, 90, false}, FramePathCase{320, 224, 0, 192, 90, false}}) {
+        uint32_t w = 0;
+        uint32_t h = 0;
+        CpuFramePath(c, &w, &h);
+        INFO(Describe(c));
+        CHECK(ComputeOutputSize(c.w, c.h, SettingsOf(c)) == OutputSize{w, h});
+    }
 }
 
 TEST_CASE("Frame output pass equals the software bridge for every frame path case", "[gpu][frame-output]") {

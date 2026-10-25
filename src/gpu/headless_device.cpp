@@ -4,6 +4,7 @@
 #include "vk_util.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -179,6 +180,11 @@ std::unique_ptr<VulkanDevice> HeadlessDeviceAccess::Create(const HeadlessOptions
     std::vector<const char *> layers;
     std::vector<const char *> instanceExtensions;
     bool debugUtils = false;
+    // Synchronization validation (BRIMIR_VK_SYNC_VALIDATION=1): through VK_EXT_layer_settings when the layer has it,
+    // which also enables the checks of shader accesses through descriptors (syncval_shader_accesses_heuristic, off
+    // by default), else through VK_EXT_validation_features (command-level accesses only).
+    bool syncLayerSettings = false;
+    bool syncFeatures = false;
     if (options.validation) {
         if (HasLayer(kValidationLayer)) {
             layers.push_back(kValidationLayer);
@@ -186,6 +192,20 @@ std::unique_ptr<VulkanDevice> HeadlessDeviceAccess::Create(const HeadlessOptions
                          HasInstanceExtension(kValidationLayer, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
             if (debugUtils) {
                 instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            }
+            const char *syncEnv = std::getenv("BRIMIR_VK_SYNC_VALIDATION");
+            if (syncEnv && std::strcmp(syncEnv, "1") == 0) {
+                if (HasInstanceExtension(kValidationLayer, VK_EXT_LAYER_SETTINGS_EXTENSION_NAME)) {
+                    syncLayerSettings = true;
+                    instanceExtensions.push_back(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
+                } else if (HasInstanceExtension(kValidationLayer, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME)) {
+                    syncFeatures = true;
+                    instanceExtensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                    std::fprintf(stderr, "[vulkan] %s is not available; synchronization validation without shader "
+                                         "accesses\n", VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
+                } else {
+                    std::fprintf(stderr, "[vulkan] the validation layer cannot enable synchronization validation\n");
+                }
             }
         } else {
             std::fprintf(stderr, "[vulkan] %s is not installed; running without validation\n", kValidationLayer);
@@ -206,14 +226,38 @@ std::unique_ptr<VulkanDevice> HeadlessDeviceAccess::Create(const HeadlessOptions
     messengerInfo.pfnUserCallback = OnDebugMessage;
     messengerInfo.pUserData = device->m_validationErrors.get();
 
+    // Chained so instance creation and destruction are validated too.
+    const void *instanceNext = debugUtils ? &messengerInfo : nullptr;
+
+    const VkBool32 settingOn = VK_TRUE;
+    const std::array<VkLayerSettingEXT, 2> syncSettings{{
+        {kValidationLayer, "validate_sync", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &settingOn},
+        {kValidationLayer, "syncval_shader_accesses_heuristic", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &settingOn},
+    }};
+    VkLayerSettingsCreateInfoEXT layerSettings{VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT};
+    layerSettings.settingCount = static_cast<uint32_t>(syncSettings.size());
+    layerSettings.pSettings = syncSettings.data();
+    if (syncLayerSettings) {
+        layerSettings.pNext = instanceNext;
+        instanceNext = &layerSettings;
+    }
+
+    const VkValidationFeatureEnableEXT syncFeature = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+    VkValidationFeaturesEXT validationFeatures{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
+    validationFeatures.enabledValidationFeatureCount = 1;
+    validationFeatures.pEnabledValidationFeatures = &syncFeature;
+    if (syncFeatures) {
+        validationFeatures.pNext = instanceNext;
+        instanceNext = &validationFeatures;
+    }
+
     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     appInfo.pApplicationName = "brimir-headless";
     appInfo.pEngineName = "Brimir";
     appInfo.apiVersion = kRequiredApiVersion;
 
     VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    // Chained so instance creation and destruction are validated too.
-    instanceInfo.pNext = debugUtils ? &messengerInfo : nullptr;
+    instanceInfo.pNext = instanceNext;
     instanceInfo.flags = instanceFlags;
     instanceInfo.pApplicationInfo = &appInfo;
     instanceInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());

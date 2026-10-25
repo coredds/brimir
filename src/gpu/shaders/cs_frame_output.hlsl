@@ -14,8 +14,10 @@ struct Params {
 
 [[vk::push_constant]] Params gParams;
 
-StructuredBuffer<uint> gSource : register(t0); // 0xAABBGGRR
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gOutput : register(u0);
+StructuredBuffer<uint> gSource : register(t0); // 0xAABBGGRR = bytes R, G, B, A
+// An R32_UINT view of the R8G8B8A8_UNORM output image: the packed word is stored unchanged, so the RGB bytes are the
+// source's exactly (no float -> UNORM rounding).
+[[vk::image_format("r32ui")]] RWTexture2D<uint> gOutput : register(u0);
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
@@ -40,6 +42,5 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
 
     const uint pixel = gSource[(sy + gParams.cropTop) * gParams.srcWidth + sx + gParams.cropLeft];
-    const float3 rgb = float3(pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF);
-    gOutput[uint2(x, y)] = float4(rgb / 255.0, 1.0);
+    gOutput[uint2(x, y)] = pixel | 0xFF000000; // opaque alpha
 }

@@ -3,6 +3,7 @@
 #include "shaders/generated/cs_frame_output.spv.h"
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 
 namespace brimir::gpu {
@@ -10,6 +11,7 @@ namespace brimir::gpu {
 namespace {
 
 constexpr VkFormat kOutputFormat = VK_FORMAT_R8G8B8A8_UNORM;
+constexpr VkFormat kStorageViewFormat = VK_FORMAT_R32_UINT;
 constexpr uint32_t kSourceBinding = 0;  // t0
 constexpr uint32_t kOutputBinding = 16; // u0
 constexpr uint32_t kGroupSize = 8;
@@ -31,9 +33,13 @@ uint32_t EffectiveRotation(uint32_t rotation) {
     return (rotation == 90 || rotation == 180 || rotation == 270) ? rotation : 0;
 }
 
-// The bridge's crop guard: crop only when the frame exceeds the crop by more than 32 px on both axes.
+// The bridge's crop guard: crop only when the frame exceeds the crop by more than 32 px on both axes. The bridge's
+// crops are int; larger values never apply.
 bool CropApplies(uint32_t w, uint32_t h, const OutputSettings &settings) {
     if (settings.cropH == 0 && settings.cropV == 0) {
+        return false;
+    }
+    if (settings.cropH > uint32_t{INT32_MAX} || settings.cropV > uint32_t{INT32_MAX}) {
         return false;
     }
     return uint64_t{w} > uint64_t{settings.cropH} + 32 && uint64_t{h} > uint64_t{settings.cropV} + 32;
@@ -103,6 +109,7 @@ VkResult FramePresenter::Init(uint32_t slotCount) {
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
     };
+    const auto &vk = m_device.Table();
     m_slots.resize(slotCount);
     for (Slot &slot : m_slots) {
         result = vk_util::CreateBuffer(m_device, kSourceBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -120,13 +127,23 @@ VkResult FramePresenter::Init(uint32_t slotCount) {
             result = vk_util::CreateImage2D(m_device, imageDesc, slot.output);
         }
         if (result == VK_SUCCESS) {
+            // The shader writes packed words through an R32_UINT view (same 32-bit compatibility class; R32_UINT
+            // storage images are mandatory), so the bytes are stored exactly.
+            VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            viewInfo.image = slot.output.image;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = kStorageViewFormat;
+            viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            result = vk.vkCreateImageView(m_device.Device(), &viewInfo, nullptr, &slot.storageView);
+        }
+        if (result == VK_SUCCESS) {
             result = vk_util::AllocateDescriptorSet(m_device, m_pool, m_setLayout, slot.set);
         }
         if (result != VK_SUCCESS) {
             return result;
         }
         vk_util::WriteStorageBuffer(m_device, slot.set, kSourceBinding, slot.source);
-        vk_util::WriteStorageImage(m_device, slot.set, kOutputBinding, slot.output.view);
+        vk_util::WriteStorageImage(m_device, slot.set, kOutputBinding, slot.storageView);
     }
     return VK_SUCCESS;
 }
@@ -135,6 +152,7 @@ void FramePresenter::Destroy() {
     const auto &vk = m_device.Table();
     const VkDevice dev = m_device.Device();
     for (Slot &slot : m_slots) {
+        vk.vkDestroyImageView(dev, slot.storageView, nullptr);
         vk_util::DestroyImage(m_device, slot.output);
         vk_util::DestroyBuffer(m_device, slot.source);
         vk_util::DestroyBuffer(m_device, slot.upload);
@@ -164,8 +182,10 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
     const VkDeviceSize bytes = VkDeviceSize{w} * h * sizeof(uint32_t);
     std::memcpy(slot.upload.mapped, xbgr, static_cast<size_t>(bytes));
 
-    // The previous frame's shader reads of the source buffer must finish before the copy overwrites it.
-    vk_util::GlobalBarrier(m_device, cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, 0);
+    // The previous frame's shader reads (WAR) and copy writes (WAW) of the source buffer must be done before the
+    // copy overwrites it.
+    vk_util::GlobalBarrier(m_device, cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
     const VkBufferCopy copy{0, 0, bytes};
     vk.vkCmdCopyBuffer(cmd, slot.upload.buffer, slot.source.buffer, 1, &copy);
 
@@ -180,14 +200,13 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
     vk.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
                             1, &sourceBarrier, 0, nullptr);
 
-    // Earlier users of the image (the frontend's reads, a readback) finish before the shader writes it. The first
-    // use leaves UNDEFINED; afterwards the contents outside the new frame are not needed either, but GENERAL keeps
-    // the layout the frontend was handed.
-    vk_util::ImageBarrier(m_device, cmd, slot.output.image,
-                          slot.written ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+    // Earlier users of the image (the frontend's reads, a readback) finish before the shader writes it. The old
+    // contents are not needed, so the transition is always from UNDEFINED (independent of what was recorded or
+    // submitted before, and of the order command buffers are submitted in).
+    vk_util::ImageBarrier(m_device, cmd, slot.output.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                           VK_ACCESS_SHADER_WRITE_BIT);
-    slot.written = true;
+    slot.presented = true;
 
     const OutputSize size = ComputeOutputSize(w, h, settings);
     const bool crop = CropApplies(w, h, settings);
@@ -222,7 +241,7 @@ VkImageView FramePresenter::OutputView(uint32_t slot) const {
 
 std::vector<uint32_t> FramePresenter::ReadbackXRGB(uint32_t slotIndex, OutputSize size) {
     std::vector<uint32_t> pixels;
-    if (!Ok() || slotIndex >= m_slots.size() || !m_slots[slotIndex].written || size.width == 0 || size.height == 0 ||
+    if (!Ok() || slotIndex >= m_slots.size() || !m_slots[slotIndex].presented || size.width == 0 || size.height == 0 ||
         size.width > kMaxOutputSize || size.height > kMaxOutputSize) {
         return pixels;
     }
