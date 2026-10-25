@@ -10,6 +10,7 @@ add_library(brimir-gpu STATIC
     volk_impl.cpp
     vk_device.cpp
     vk_util.cpp
+    frame_presenter.cpp
     # Tests and tools only (volkInitialize); the core wraps the frontend's device instead.
     headless_device.cpp
 )

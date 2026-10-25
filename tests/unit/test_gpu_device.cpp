@@ -3,6 +3,7 @@
 // validation error (including leaks reported at device destruction) and SKIPs when there is no usable Vulkan device
 // (fails instead with BRIMIR_REQUIRE_VULKAN=1).
 #include "catch_amalgamated.hpp"
+#include "gpu_test_device.hpp"
 
 #include <gpu/gpu_version.hpp>
 #include <gpu/headless_device.hpp>
@@ -23,36 +24,8 @@ namespace vu = brimir::gpu::vk_util;
 
 namespace {
 
-// BRIMIR_REQUIRE_VULKAN=1 (the gpu-lavapipe CI job) turns a missing device or validation layer into a failure.
-bool RequireVulkan() {
-    const char *env = std::getenv("BRIMIR_REQUIRE_VULKAN");
-    return env && std::strcmp(env, "1") == 0;
-}
-
-std::unique_ptr<VulkanDevice> OpenDevice(HeadlessOptions options = {.validation = true}) {
-    std::string reason;
-    auto device = CreateHeadlessDevice(options, &reason);
-    if (!device) {
-        if (RequireVulkan()) {
-            FAIL("no Vulkan device: " << reason);
-        }
-        SKIP("no Vulkan device: " << reason);
-    }
-    if (RequireVulkan() && options.validation && !device->ValidationEnabled()) {
-        FAIL("VK_LAYER_KHRONOS_validation is not installed");
-    }
-    return device;
-}
-
-// Destroys the device (validation reports leaks then) and checks that no validation error was reported at all.
-void CloseAndCheckValidation(std::unique_ptr<VulkanDevice> &device) {
-    const bool validation = device->ValidationEnabled();
-    auto errors = device->ValidationErrors();
-    device.reset();
-    if (validation) {
-        CHECK(errors->load() == 0);
-    }
-}
+using brimir::test::CloseAndCheckValidation;
+using brimir::test::OpenDevice;
 
 // Runs cs_fill_test over `count` uint elements on `device` and returns the buffer contents.
 std::vector<uint32_t> RunFill(VulkanDevice &device, uint32_t count) {

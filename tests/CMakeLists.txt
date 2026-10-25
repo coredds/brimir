@@ -78,6 +78,8 @@ if(BRIMIR_VULKAN)
         unit/test_gpu_build.cpp
         # Headless device, owning/non-owning VulkanDevice, vk_util helpers (SKIP without a Vulkan device)
         unit/test_gpu_device.cpp
+        # Frame output pass (convert, overscan crop, rotation) against the software bridge
+        unit/test_gpu_frame_output.cpp
     )
     target_link_libraries(brimir_tests PRIVATE brimir-gpu)
 endif()
