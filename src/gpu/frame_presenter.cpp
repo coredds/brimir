@@ -92,10 +92,11 @@ VkResult FramePresenter::Init(uint32_t slotCount) {
         return result;
     }
     const std::array<VkDescriptorPoolSize, 2> poolSizes{{
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, slotCount},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, slotCount},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * slotCount},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * slotCount},
     }};
-    result = vk_util::CreateDescriptorPool(m_device, poolSizes, slotCount, m_pool);
+    // Two sets per slot: the upload source (Present) and a device buffer (PresentDevice).
+    result = vk_util::CreateDescriptorPool(m_device, poolSizes, 2 * slotCount, m_pool);
     if (result != VK_SUCCESS) {
         return result;
     }
@@ -147,11 +148,15 @@ VkResult FramePresenter::Init(uint32_t slotCount) {
         if (result == VK_SUCCESS) {
             result = vk_util::AllocateDescriptorSet(m_device, m_pool, m_setLayout, slot.set);
         }
+        if (result == VK_SUCCESS) {
+            result = vk_util::AllocateDescriptorSet(m_device, m_pool, m_setLayout, slot.deviceSet);
+        }
         if (result != VK_SUCCESS) {
             return result;
         }
         vk_util::WriteStorageBuffer(m_device, slot.set, kSourceBinding, slot.source);
         vk_util::WriteStorageImage(m_device, slot.set, kOutputBinding, slot.storageView);
+        vk_util::WriteStorageImage(m_device, slot.deviceSet, kOutputBinding, slot.storageView);
     }
     return VK_SUCCESS;
 }
@@ -208,6 +213,42 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
     vk.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
                             1, &sourceBarrier, 0, nullptr);
 
+    RecordConversion(slot, slot.set, w, h, settings, cmd);
+    return true;
+}
+
+bool FramePresenter::PresentDevice(uint32_t slotIndex, VkBuffer source, uint32_t w, uint32_t h,
+                                   const OutputSettings &settings, VkCommandBuffer cmd) {
+    if (!Ok() || slotIndex >= m_slots.size() || source == VK_NULL_HANDLE || w == 0 || h == 0 ||
+        w > kMaxSourceWidth || h > kMaxSourceHeight) {
+        return false;
+    }
+    Slot &slot = m_slots[slotIndex];
+    if (slot.deviceSource != source) {
+        // The slot's previous frame is done (precondition), so its device set is not in use.
+        const VkDescriptorBufferInfo bufferInfo{source, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = slot.deviceSet;
+        write.dstBinding = kSourceBinding;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &bufferInfo;
+        m_device.Table().vkUpdateDescriptorSets(m_device.Device(), 1, &write, 0, nullptr);
+        slot.deviceSource = source;
+    }
+
+    // Whatever wrote the source (the VDP2 compose pass, a copy) is visible to the shader.
+    vk_util::GlobalBarrier(m_device, cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    RecordConversion(slot, slot.deviceSet, w, h, settings, cmd);
+    return true;
+}
+
+void FramePresenter::RecordConversion(Slot &slot, VkDescriptorSet set, uint32_t w, uint32_t h,
+                                      const OutputSettings &settings, VkCommandBuffer cmd) {
+    const auto &vk = m_device.Table();
+
     // Earlier users of the image (the frontend's reads, a readback) finish before the shader writes it. The old
     // contents are not needed, so the transition is always from UNDEFINED (independent of what was recorded or
     // submitted before, and of the order command buffers are submitted in).
@@ -231,7 +272,7 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
         .writeHeight = written.height,
     };
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
-    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &slot.set, 0, nullptr);
+    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &set, 0, nullptr);
     vk.vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vk.vkCmdDispatch(cmd, (written.width + kGroupSize - 1) / kGroupSize, (written.height + kGroupSize - 1) / kGroupSize,
                      1);
@@ -240,7 +281,6 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
     vk_util::ImageBarrier(m_device, cmd, slot.output.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT);
-    return true;
 }
 
 VkImage FramePresenter::OutputImage(uint32_t slot) const {

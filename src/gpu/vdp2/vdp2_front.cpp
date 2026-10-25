@@ -756,6 +756,7 @@ void Vdp2FrontEnd::AddSpriteSlice(uint32_t index, std::span<const uint8_t, kSpri
         return;
     }
     m_record.spriteSliceOffset[index] = AppendArena(data.data(), data.size());
+    m_record.spriteDisplayFB = m_state.fbIndex.display & 1u;
     if (index >= kSpriteSliceMesh0) {
         ++m_record.features.meshSlices;
     }

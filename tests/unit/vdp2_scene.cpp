@@ -4,7 +4,9 @@
 #include <ymir/util/data_ops.hpp>
 
 #include <algorithm>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 
 namespace brimir::test {
 
@@ -96,6 +98,46 @@ void Vdp2SceneWriter::SwapFramebuffers() {
         t.renderer->VDP1SwapFramebuffer();
         t.state->fbIndex.Flip();
     }
+}
+
+void Vdp2SceneWriter::EraseFramebuffer() {
+    for (Target &t : m_targets) {
+        t.renderer->VDP1EraseFramebuffer(0);
+    }
+}
+
+void Vdp2SceneWriter::VDP1VRAM16(uint32_t address, uint16_t value) {
+    // VDP::VDP1WriteVRAM (vdp.cpp:379-386)
+    for (Target &t : m_targets) {
+        t.state->mem1.WriteVRAM<uint16>(
+            address, value, [&](uint32 address, uint16 value) { t.renderer->VDP1WriteVRAM(address, value); });
+    }
+}
+
+void Vdp2SceneWriter::DrawVDP1() {
+    // VDP::VDP1BeginFrame, VDP1ProcessCommand and VDP1EndFrame (vdp.cpp:1005-1080), without timing or jumps.
+    for (Target &t : m_targets) {
+        t.state->regs1.returnAddress = kVDP1NoReturn;
+        t.state->regs1.nextCommandAddress = 0;
+        t.state->regs1.currFrameEnded = false;
+        t.renderer->VDP1BeginFrame();
+        for (uint32_t address = 0; address < kVDP1VRAMSize; address += 0x20) {
+            const VDP1Command::Control control{.u16 = t.state->mem1.ReadVRAM<uint16>(address)};
+            if (control.end) {
+                break;
+            }
+            if (!control.skip && control.IsValid()) {
+                t.state->regs1.currCommandAddress = address;
+                t.renderer->VDP1ExecuteCommand(address, control);
+            }
+        }
+        t.state->regs1.currFrameEnded = true;
+        t.renderer->VDP1EndFrame();
+    }
+}
+
+uint32_t Vdp2SceneWriter::DrawFramebuffer() const {
+    return m_targets.empty() ? 0 : m_targets[0].state->fbIndex.draw;
 }
 
 uint32_t Vdp2SceneWriter::FieldLines() const {
@@ -227,4 +269,158 @@ std::vector<uint32_t> RenderSoftware(const Vdp2Scene &scene, uint32_t *outWidth,
     return std::move(capture.pixels);
 }
 
+std::string SceneResult::Describe() const {
+    std::ostringstream out;
+    if (!error.empty()) {
+        out << "harness error: " << error;
+        return out.str();
+    }
+    out << width << "x" << height << ", " << distinctColors << " distinct software colours, ";
+    if (identical) {
+        out << "identical";
+    } else {
+        out << diffCount << " pixels differ; first at (" << diffX << ", " << diffY << "): software 0x" << std::hex
+            << std::setw(6) << std::setfill('0') << (softwarePixel & 0xFFFFFF) << ", gpu 0x" << std::setw(6)
+            << (gpuPixel & 0xFFFFFF) << " (XBGR)";
+    }
+    return out.str();
+}
+
 } // namespace brimir::test
+
+#if BRIMIR_VULKAN
+
+    #include <gpu/vdp/vulkan_vdp_renderer.hpp>
+    #include <gpu/vk_util.hpp>
+
+namespace brimir::test {
+
+std::vector<uint32_t> ReadbackBuffer(gpu::VulkanDevice &device, VkBuffer buffer, uint32_t words) {
+    namespace vu = gpu::vk_util;
+    std::vector<uint32_t> out;
+    vu::Buffer host;
+    const VkDeviceSize bytes = VkDeviceSize{words} * sizeof(uint32_t);
+    if (words == 0 || vu::CreateBuffer(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                       host) != VK_SUCCESS) {
+        return out;
+    }
+    const VkResult result = vu::SubmitOneShot(device, [&](VkCommandBuffer cmd) {
+        vu::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        const VkBufferCopy region{0, 0, bytes};
+        device.Table().vkCmdCopyBuffer(cmd, buffer, host.buffer, 1, &region);
+        vu::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                          VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+    });
+    if (result == VK_SUCCESS && host.mapped != nullptr) {
+        const auto *words32 = static_cast<const uint32_t *>(host.mapped);
+        out.assign(words32, words32 + words);
+    }
+    vu::DestroyBuffer(device, host);
+    return out;
+}
+
+SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const RenderBothOptions &options) {
+    SceneResult result;
+
+    struct Capture {
+        std::vector<uint32_t> pixels;
+        uint32_t width = 0;
+        uint32_t height = 0;
+    } capture;
+
+    // Separate states: the front half maintains per-line VDPState fields that the software renderer also maintains.
+    auto swState = std::make_unique<VDPState>();
+    auto vkState = std::make_unique<VDPState>();
+    config::VDP2DebugRender swDebug{}, vkDebug{};
+    config::VDP2AccessPatternsConfig access{};
+    auto software = std::make_unique<SoftwareVDPRenderer>(*swState, swDebug, access);
+    software->SwCallbacks.FrameComplete.Rebind(&capture, [](uint32 *fb, uint32 w, uint32 h, void *context) {
+        auto &out = *static_cast<Capture *>(context);
+        out.pixels.assign(fb, fb + static_cast<size_t>(w) * h);
+        out.width = w;
+        out.height = h;
+    });
+    auto vulkan = std::make_unique<gpu::VulkanVDPRenderer>(*vkState, vkDebug, access);
+    uint32_t gpuWidth = 0, gpuHeight = 0;
+    vulkan->FrameReady = [&](uint32_t w, uint32_t h) {
+        gpuWidth = w;
+        gpuHeight = h;
+    };
+    vulkan->AttachDevice(device, options.frameContexts);
+    if (!vulkan->Attached()) {
+        result.error = "AttachDevice failed";
+        return result;
+    }
+    if (options.uploadBlockSize != 0) {
+        vulkan->Backend()->ForceUploadBlockSizeForTest(options.uploadBlockSize);
+    }
+    vulkan->EnableThreadedVDP1(options.threadedVDP1);
+
+    Vdp2SceneWriter writer{scene.enhancements};
+    writer.Attach(*swState, *software);
+    writer.Attach(*vkState, *vulkan);
+    if (scene.setup) {
+        scene.setup(writer);
+    }
+    for (uint32_t frame = 0; frame < scene.frames; ++frame) {
+        if (options.beforeFrame) {
+            options.beforeFrame(frame, *vulkan, device);
+        }
+        writer.RunFrame(scene.onLine);
+        if (vulkan->HasPendingFrame()) {
+            bool recorded = false;
+            const uint32_t context = frame % std::max(options.frameContexts, 1u);
+            const VkResult submit = gpu::vk_util::SubmitOneShot(
+                device, [&](VkCommandBuffer cmd) { recorded = vulkan->RecordPendingFrame(context, cmd); });
+            if (submit != VK_SUCCESS || !recorded) {
+                result.error = "frame " + std::to_string(frame) + ": recording or submission failed";
+                return result;
+            }
+        }
+    }
+
+    if (capture.pixels.empty() || gpuWidth != capture.width || gpuHeight != capture.height) {
+        result.error = "frame size mismatch: software " + std::to_string(capture.width) + "x" +
+                       std::to_string(capture.height) + ", gpu " + std::to_string(gpuWidth) + "x" +
+                       std::to_string(gpuHeight);
+        return result;
+    }
+    if (!vulkan->Attached()) {
+        result.error = "no device attached after the last frame";
+        return result;
+    }
+    result.width = capture.width;
+    result.height = capture.height;
+    result.software = std::move(capture.pixels);
+    result.gpu = ReadbackBuffer(device, vulkan->CompositeBuffer(), result.width * result.height);
+    if (result.gpu.size() != result.software.size()) {
+        result.error = "composite readback failed";
+        return result;
+    }
+
+    std::vector<uint32_t> colors;
+    for (size_t i = 0; i < result.software.size(); ++i) {
+        const uint32_t sw = result.software[i] & 0xFFFFFF;
+        const uint32_t gpu = result.gpu[i] & 0xFFFFFF;
+        if (colors.size() < 64 && std::find(colors.begin(), colors.end(), sw) == colors.end()) {
+            colors.push_back(sw);
+        }
+        if (sw != gpu) {
+            if (result.diffCount++ == 0) {
+                result.diffX = static_cast<uint32_t>(i % result.width);
+                result.diffY = static_cast<uint32_t>(i / result.width);
+                result.softwarePixel = result.software[i];
+                result.gpuPixel = result.gpu[i];
+            }
+        }
+    }
+    result.distinctColors = static_cast<uint32_t>(colors.size());
+    result.identical = result.diffCount == 0;
+    return result;
+}
+
+} // namespace brimir::test
+
+#endif // BRIMIR_VULKAN

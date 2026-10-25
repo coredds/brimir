@@ -173,6 +173,15 @@ public:
         return m_VDP1QuadTerminations;
     }
 
+    // Brimir: read-only access to the VDP1 auxiliary framebuffers for the external (Vulkan) renderer's VDP2 sprite
+    // layer. Not synchronized with a threaded VDP1: call VDP1SyncFB (or rely on a framebuffer swap) first.
+    const SpriteFB &GetAltFBRAM(uint8 fbIndex) const {
+        return m_altFBRAM[fbIndex & 1];
+    }
+    const SpriteFB &GetMeshFBRAM(bool altField, uint8 fbIndex) const {
+        return m_meshFBRAM[altField][fbIndex & 1];
+    }
+
 private:
     VDPState &m_state;
     config::VDP2DebugRender &m_vdp2DebugRenderOptions;

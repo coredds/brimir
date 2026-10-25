@@ -65,6 +65,12 @@ public:
     bool Present(uint32_t slot, const uint32_t *xbgr, uint32_t w, uint32_t h, const OutputSettings &settings,
                  VkCommandBuffer cmd);
 
+    // As Present, but the frame (XBGR8888, pitch = w) is already on the device: the shader reads `source` (a storage
+    // buffer, e.g. the VDP2 composite) through the slot's second descriptor set, with no upload. Writes to `source`
+    // recorded earlier in cmd or in earlier submissions are made visible here.
+    bool PresentDevice(uint32_t slot, VkBuffer source, uint32_t w, uint32_t h, const OutputSettings &settings,
+                       VkCommandBuffer cmd);
+
     // The slot's image and its R8G8B8A8_UNORM view (for retro_vulkan_image); null when slot is out of range.
     VkImage OutputImage(uint32_t slot) const;
     VkImageView OutputView(uint32_t slot) const;
@@ -81,11 +87,16 @@ private:
         vk_util::Image output; // output.view: R8G8B8A8_UNORM, for the frontend
         VkImageView storageView = VK_NULL_HANDLE; // R32_UINT, written by the shader
         VkDescriptorSet set = VK_NULL_HANDLE;
+        VkDescriptorSet deviceSet = VK_NULL_HANDLE; // PresentDevice: binding 0 = deviceSource
+        VkBuffer deviceSource = VK_NULL_HANDLE;
         bool presented = false; // a Present was recorded (ReadbackXRGB's precondition only)
     };
 
     VkResult Init(uint32_t slotCount);
     void Destroy();
+    // The image transition, conversion dispatch and final barrier shared by Present and PresentDevice.
+    void RecordConversion(Slot &slot, VkDescriptorSet set, uint32_t w, uint32_t h, const OutputSettings &settings,
+                          VkCommandBuffer cmd);
 
     VulkanDevice &m_device;
     VkResult m_result = VK_ERROR_INITIALIZATION_FAILED;

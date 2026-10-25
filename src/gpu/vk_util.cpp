@@ -1,5 +1,6 @@
 #include "vk_util.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace brimir::gpu::vk_util {
@@ -120,7 +121,7 @@ VkResult CreateImage2D(const VulkanDevice &device, const ImageDesc &desc, Image 
     info.format = desc.format;
     info.extent = {desc.width, desc.height, 1};
     info.mipLevels = 1;
-    info.arrayLayers = 1;
+    info.arrayLayers = std::max(desc.arrayLayers, 1u);
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
     info.usage = desc.usage;
@@ -138,9 +139,9 @@ VkResult CreateImage2D(const VulkanDevice &device, const ImageDesc &desc, Image 
     if (result == VK_SUCCESS && desc.createView) {
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = image.image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.viewType = info.arrayLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = desc.viewFormat != VK_FORMAT_UNDEFINED ? desc.viewFormat : desc.format;
-        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, info.arrayLayers};
         result = vk.vkCreateImageView(device.Device(), &viewInfo, nullptr, &image.view);
     }
     if (result != VK_SUCCESS) {

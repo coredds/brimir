@@ -39,6 +39,8 @@ struct ImageDesc {
     // A 2D color view in viewFormat (format when VK_FORMAT_UNDEFINED); needs a usage a view is valid for.
     bool createView = true;
     VkFormat viewFormat = VK_FORMAT_UNDEFINED;
+    // More than one layer makes a 2D array image, and the view a 2D array view of all layers.
+    uint32_t arrayLayers = 1;
 };
 
 struct Image {
@@ -49,7 +51,7 @@ struct Image {
     VkExtent2D extent{};
 };
 
-// A device-local, optimal-tiling, single-mip 2D image in VK_IMAGE_LAYOUT_UNDEFINED.
+// A device-local, optimal-tiling, single-mip 2D (array) image in VK_IMAGE_LAYOUT_UNDEFINED.
 VkResult CreateImage2D(const VulkanDevice &device, const ImageDesc &desc, Image &out);
 void DestroyImage(const VulkanDevice &device, Image &image);
 

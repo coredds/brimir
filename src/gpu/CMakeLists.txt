@@ -11,6 +11,9 @@ add_library(brimir-gpu STATIC
     vk_device.cpp
     vk_util.cpp
     frame_presenter.cpp
+    # VDP2 on the GPU: the Vulkan back half and the renderer (VDP1 in software)
+    vdp2/vdp2_vulkan_backend.cpp
+    vdp/vulkan_vdp_renderer.cpp
     # Tests and tools only (volkInitialize); the core wraps the frontend's device instead.
     headless_device.cpp
 )

@@ -767,6 +767,7 @@ TEST_CASE("Vdp2FrontEnd copies sprite slices into the frame arena", "[vdp2][fron
         mesh[i] = static_cast<uint8_t>(i * 13 + 1);
     }
 
+    state->fbIndex.display = 1;
     front.BeginFrame();
     front.RenderLine(0);
     front.AddSpriteSlice(kSpriteSliceMain, std::span<const uint8_t, kSpriteSliceSize>{main.data(), kSpriteSliceSize});
@@ -784,6 +785,7 @@ TEST_CASE("Vdp2FrontEnd copies sprite slices into the frame arena", "[vdp2][fron
     CHECK(rec.spriteSliceOffset[kSpriteSliceAlt] == UINT32_MAX);
     CHECK(rec.spriteSliceOffset[kSpriteSliceMesh1] == UINT32_MAX);
     CHECK(rec.spriteSliceOffset[kSpriteSliceMain] % 4 == 0);
+    CHECK(rec.spriteDisplayFB == 1); // where the back half places the slices
     main[0] ^= 0xFF;
     CHECK(std::memcmp(rec.arena.data() + rec.spriteSliceOffset[kSpriteSliceMain], main.data(), kSpriteSliceSize) == 0);
     CHECK(std::memcmp(rec.arena.data() + rec.spriteSliceOffset[kSpriteSliceMesh0], mesh.data(), kSpriteSliceSize) ==
