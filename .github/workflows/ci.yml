@@ -30,7 +30,7 @@ jobs:
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench --parallel
+        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench brimir_vkhost --parallel
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -54,7 +54,7 @@ jobs:
             -DBRIMIR_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench --parallel $(nproc)
+        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench brimir_vkhost --parallel $(nproc)
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -76,7 +76,8 @@ jobs:
       - name: Lower ASLR entropy for ThreadSanitizer
         run: sudo sysctl vm.mmap_rnd_bits=28
 
-      # Also the BRIMIR_VULKAN=OFF build check: the JIT tests don't touch the GPU renderer.
+      # Also the BRIMIR_VULKAN=OFF build check (brimir_libretro and brimir_tests): the JIT tests don't touch the GPU
+      # renderer.
       - name: Configure CMake
         run: |
           cmake -B build -G Ninja \
@@ -90,7 +91,7 @@ jobs:
             -DBRIMIR_VULKAN=OFF
 
       - name: Build
-        run: cmake --build build --target brimir_tests --parallel $(nproc)
+        run: cmake --build build --target brimir_libretro brimir_tests --parallel $(nproc)
 
       - name: Test
         env:

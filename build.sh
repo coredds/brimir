@@ -6,7 +6,7 @@ set -e
 BUILD_TYPE="Release"
 CLEAN=false
 RECONFIGURE=false
-GPU=true
+GPU=default
 JOBS=$(nproc 2>/dev/null || echo 4)
 
 # Parse arguments
@@ -16,6 +16,7 @@ while [[ $# -gt 0 ]]; do
         --release)      BUILD_TYPE="Release"; shift ;;
         --clean)        CLEAN=true; shift ;;
         --reconfigure)  RECONFIGURE=true; shift ;;
+        --gpu)          GPU=true; shift ;;
         --no-gpu)       GPU=false; shift ;;
         --jobs|-j)      JOBS="$2"; shift 2 ;;
         --help|-h)
@@ -26,7 +27,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --release        Build in Release mode (default)"
             echo "  --clean          Clean build directory before building"
             echo "  --reconfigure    Force CMake reconfiguration"
-            echo "  --no-gpu         Disable Vulkan GPU renderer (enabled by default)"
+            echo "  --gpu            Build the Vulkan GPU renderer (BRIMIR_VULKAN=ON)"
+            echo "  --no-gpu         Do not build the Vulkan GPU renderer (BRIMIR_VULKAN=OFF)"
+            echo "                   Neither: CMake's platform default (on for Linux x64/arm64)"
             echo "  --jobs, -j N     Number of parallel build jobs (default: nproc)"
             echo "  --help, -h       Show this help"
             exit 0
@@ -57,14 +60,18 @@ if [ "$RECONFIGURE" = true ] || [ ! -f "build/CMakeCache.txt" ]; then
     echo ""
     echo "Configuring CMake..."
     echo "  Build Type: $BUILD_TYPE"
-    echo "  GPU: $([ "$GPU" = true ] && echo 'Enabled (Vulkan)' || echo 'Disabled')"
+    case "$GPU" in
+        true)  echo "  GPU: Enabled (Vulkan, --gpu)" ;;
+        false) echo "  GPU: Disabled (--no-gpu)" ;;
+        *)     echo "  GPU: CMake default (platform default or cached value)" ;;
+    esac
     echo ""
 
     CMAKE_ARGS="-B build -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE"
 
     if [ "$GPU" = true ]; then
         CMAKE_ARGS="$CMAKE_ARGS -DBRIMIR_VULKAN=ON"
-    else
+    elif [ "$GPU" = false ]; then
         CMAKE_ARGS="$CMAKE_ARGS -DBRIMIR_VULKAN=OFF"
     fi
 

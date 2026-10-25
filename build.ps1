@@ -8,14 +8,17 @@ param(
     [switch]$Clean,
     [switch]$Reconfigure,
     [switch]$Target,
-    [switch]$GPU = $true,
+    [switch]$GPU,
     [switch]$NoGPU
 )
 
 $ErrorActionPreference = "Stop"
 
-# NoGPU overrides GPU
-if ($NoGPU) { $GPU = $false }
+# -GPU forces BRIMIR_VULKAN=ON, -NoGPU forces OFF; neither keeps CMake's platform default.
+if ($GPU -and $NoGPU) {
+    Write-Host "ERROR: -GPU and -NoGPU are mutually exclusive" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -106,11 +109,13 @@ if ($Reconfigure -or -not (Test-Path "build/CMakeCache.txt")) {
     
     # GPU (Vulkan) rendering
     if ($GPU) {
-        Write-Host "  GPU Rendering: ENABLED (Vulkan)" -ForegroundColor Cyan
+        Write-Host "  GPU Rendering: ENABLED (Vulkan, -GPU)" -ForegroundColor Cyan
         $cmakeArgs += @("-DBRIMIR_VULKAN=ON")
-    } else {
-        Write-Host "  GPU Rendering: Disabled (use default or remove -NoGPU to enable)" -ForegroundColor DarkGray
+    } elseif ($NoGPU) {
+        Write-Host "  GPU Rendering: Disabled (-NoGPU)" -ForegroundColor DarkGray
         $cmakeArgs += @("-DBRIMIR_VULKAN=OFF")
+    } else {
+        Write-Host "  GPU Rendering: CMake default (platform default or cached value; -GPU forces on, -NoGPU off)" -ForegroundColor Cyan
     }
     
     & cmake @cmakeArgs
