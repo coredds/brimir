@@ -3,6 +3,7 @@
 add_library(brimir_bridge OBJECT
     core_wrapper.cpp
     lockstep.cpp
+    savestate_codec.cpp
 )
 
 target_include_directories(brimir_bridge PUBLIC

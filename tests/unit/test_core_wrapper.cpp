@@ -4,11 +4,14 @@
 
 #include "catch_amalgamated.hpp"
 #include <brimir/core_wrapper.hpp>
+#include <brimir/savestate_codec.hpp>
 #include <lz4.h>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <span>
 #include <vector>
 
 using namespace brimir;
@@ -507,8 +510,8 @@ TEST_CASE("BRI2 state with the previous version is rejected", "[core][savestate]
     CoreWrapper core;
     REQUIRE(core.Initialize());
 
-    // A real state of the current size, with only the version word patched: pins the version bump
-    // independently of sizeof(SaveState), so that states from before the VDP1 FBRAM layout change
+    // A real current state, with only the version word patched: pins the version bump independently
+    // of the payload size, so that earlier states (raw SaveState structs holding stale heap pointers)
     // are rejected cleanly even if their size happens to match.
     const size_t stateSize = core.GetStateSize();
     std::vector<uint8_t> buf(stateSize);
@@ -549,9 +552,12 @@ TEST_CASE("Save state writes 16-byte header", "[core][savestate][unit]") {
     std::memcpy(&uncompSize, buf.data() + 8, sizeof(uncompSize));
     std::memcpy(&compressedSize, buf.data() + 12, sizeof(compressedSize));
 
+    auto state = std::make_unique<ymir::savestate::SaveState>();
+    core.GetSaturn()->SaveState(*state);
+
     REQUIRE(magic == 0x32524942); // "BRI2" in LE
     REQUIRE(version == CoreWrapper::kSaveStateVersion);
-    REQUIRE(uncompSize == sizeof(ymir::savestate::SaveState));
+    REQUIRE(uncompSize == EncodedSaveStateSize(*state));
     REQUIRE(compressedSize > 0);
     REQUIRE(compressedSize < stateSize - 16);
 }
@@ -561,14 +567,17 @@ TEST_CASE("Save state from before the CD block busy delay and read FIFO is rejec
     CoreWrapper core;
     REQUIRE(core.Initialize());
 
-    // sizeof(SaveState) was 6315744 (MSVC x64) until the CD block read FIFO (Ymir a8856768) added
-    // 16 bytes; the busy delay and the SCSP one-shot flag fit in existing padding. Hard-coded because
-    // the old layout no longer exists to measure. On other ABIs the sizes differ anyway, so this test
-    // still proves that a size mismatch is rejected, not that the exact old layout is.
+    // Such states held the raw SaveState struct: sizeof(SaveState) was 6315744 (MSVC x64) until the CD
+    // block read FIFO (Ymir a8856768) added 16 bytes. Hard-coded because the old layout no longer exists
+    // to measure. On other ABIs the sizes differ anyway, so this test still proves that a raw-struct
+    // payload of a foreign size is rejected, not that the exact old layout is.
     constexpr uint32_t kOldUncompressedSize = 6315744;
-    REQUIRE(kOldUncompressedSize != sizeof(ymir::savestate::SaveState));
+    {
+        auto empty = std::make_unique<ymir::savestate::SaveState>();
+        REQUIRE(kOldUncompressedSize != EncodedSaveStateSize(*empty));
+    }
 
-    // A state saved by the previous build: valid BRI2 header (current version, so that the size check
+    // A state saved by an old build: valid BRI2 header (current version, so that the payload decoder
     // is what rejects it) and a valid LZ4 payload of the old size.
     std::vector<char> raw(kOldUncompressedSize, 0);
     std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(raw.size())));
@@ -602,12 +611,14 @@ TEST_CASE("Save state in the pre-versioned BRIM format is rejected", "[core][sav
     const size_t stateSize = core.GetStateSize();
     std::vector<uint8_t> saved(stateSize);
     REQUIRE(core.SaveState(saved.data(), stateSize));
+    uint32_t savedPayloadSize = 0;
     uint32_t savedCompressedSize = 0;
+    std::memcpy(&savedPayloadSize, saved.data() + 8, 4);
     std::memcpy(&savedCompressedSize, saved.data() + 12, 4);
 
     std::vector<uint8_t> buf(8 + static_cast<size_t>(savedCompressedSize));
     const uint32_t magic = 0x4D495242; // "BRIM" in LE
-    const uint32_t uncompressedSize = static_cast<uint32_t>(sizeof(ymir::savestate::SaveState));
+    const uint32_t uncompressedSize = savedPayloadSize;
     std::memcpy(buf.data(), &magic, 4);
     std::memcpy(buf.data() + 4, &uncompressedSize, 4);
     std::memcpy(buf.data() + 8, saved.data() + 16, savedCompressedSize);
@@ -628,29 +639,35 @@ TEST_CASE("Save state with out-of-range read FIFO cursors is rejected",
     std::vector<uint8_t> saved(stateSize);
     REQUIRE(core.SaveState(saved.data(), stateSize));
 
-    // Decompress a state saved by the core, patch it, and repack it into a valid BRI2 buffer so that
-    // only the cursor validation can reject it. xferQueue*Pos index a fixed-size array (Ymir a8856768).
+    // Decompress and decode a state saved by the core, patch it, and repack it into a valid BRI2 buffer
+    // so that only the cursor validation can reject it. xferQueue*Pos index a fixed-size array (Ymir
+    // a8856768).
+    uint32_t savedPayloadSize = 0;
     uint32_t savedCompressedSize = 0;
+    std::memcpy(&savedPayloadSize, saved.data() + 8, 4);
     std::memcpy(&savedCompressedSize, saved.data() + 12, 4);
 
     auto repack = [&](auto&& patch) {
-        auto state = std::make_unique<ymir::savestate::SaveState>();
+        std::vector<uint8_t> payload(savedPayloadSize);
         const int n = LZ4_decompress_safe(reinterpret_cast<const char*>(saved.data() + 16),
-                                          reinterpret_cast<char*>(state.get()),
+                                          reinterpret_cast<char*>(payload.data()),
                                           static_cast<int>(savedCompressedSize),
-                                          static_cast<int>(sizeof(ymir::savestate::SaveState)));
-        REQUIRE(n == static_cast<int>(sizeof(ymir::savestate::SaveState)));
+                                          static_cast<int>(payload.size()));
+        REQUIRE(n == static_cast<int>(payload.size()));
+        auto state = std::make_unique<ymir::savestate::SaveState>();
+        REQUIRE(DecodeSaveState(payload, *state));
         patch(*state);
+        REQUIRE(EncodeSaveState(*state, payload));
 
-        std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(sizeof(*state))));
-        const int compressed = LZ4_compress_default(reinterpret_cast<const char*>(state.get()),
+        std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(payload.size())));
+        const int compressed = LZ4_compress_default(reinterpret_cast<const char*>(payload.data()),
                                                     reinterpret_cast<char*>(buf.data() + 16),
-                                                    static_cast<int>(sizeof(*state)),
+                                                    static_cast<int>(payload.size()),
                                                     static_cast<int>(buf.size() - 16));
         REQUIRE(compressed > 0);
         const uint32_t magic = 0x32524942; // "BRI2" in LE
         const uint32_t version = CoreWrapper::kSaveStateVersion;
-        const uint32_t uncompressedSize = static_cast<uint32_t>(sizeof(*state));
+        const uint32_t uncompressedSize = static_cast<uint32_t>(payload.size());
         const uint32_t compressedSize = static_cast<uint32_t>(compressed);
         std::memcpy(buf.data(), &magic, 4);
         std::memcpy(buf.data() + 4, &version, 4);
@@ -680,4 +697,212 @@ TEST_CASE("Save state with out-of-range read FIFO cursors is rejected",
     // The core is unharmed and still runs.
     core.RunFrame();
     REQUIRE(core.GetFramebuffer() != nullptr);
+}
+
+TEST_CASE("Save state preserves DRAM cartridge contents", "[core][savestate][unit][regression]") {
+    // The cartridge RAM lives in a std::vector inside the SCU save state; a raw copy of the SaveState
+    // struct stored only the vector's heap pointer, so the contents were lost (and the load read freed
+    // memory).
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    ymir::Saturn* saturn = core.GetSaturn();
+    REQUIRE(saturn != nullptr);
+    auto* cart = saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>();
+    REQUIRE(cart != nullptr);
+
+    constexpr size_t kCartSize = 4 * 1024 * 1024;
+    std::vector<uint8_t> original(kCartSize);
+    for (size_t i = 0; i < original.size(); ++i) {
+        original[i] = static_cast<uint8_t>((i * 31u + (i >> 12)) ^ 0x5A);
+    }
+    cart->LoadRAM(std::span<const uint8_t, kCartSize>(original.data(), kCartSize));
+
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> buf(stateSize);
+    REQUIRE(core.SaveState(buf.data(), stateSize));
+
+    const std::vector<uint8_t> other(kCartSize, 0xEE);
+    cart->LoadRAM(std::span<const uint8_t, kCartSize>(other.data(), kCartSize));
+
+    REQUIRE(core.LoadState(buf.data(), stateSize));
+
+    auto* loaded = saturn->GetCartridge().As<ymir::cart::CartType::DRAM32Mbit>();
+    REQUIRE(loaded != nullptr);
+    std::vector<uint8_t> restored(kCartSize);
+    loaded->DumpRAM(std::span<uint8_t, kCartSize>(restored.data(), kCartSize));
+    REQUIRE(restored == original);
+}
+
+TEST_CASE("Save state preserves the SMPC INTBACK report across core instances",
+          "[core][savestate][unit][regression]") {
+    // The INTBACK report is a std::vector inside the SMPC save state. A raw copy of the SaveState struct
+    // carried core A's heap pointer into core B: a use-after-free once A is gone.
+    const std::vector<uint8_t> report{0xF1, 0x02, 0xAB, 0xCD, 0xF1, 0x02, 0x12, 0x34};
+
+    std::vector<uint8_t> buf;
+    size_t stateSize = 0;
+    {
+        auto coreA = std::make_unique<CoreWrapper>();
+        REQUIRE(coreA->Initialize());
+        ymir::Saturn* saturn = coreA->GetSaturn();
+        REQUIRE(saturn != nullptr);
+
+        ymir::savestate::SMPCSaveState smpc{};
+        saturn->SMPC.SaveState(smpc);
+        smpc.intback.report = report;
+        smpc.intback.reportOffset = 2;
+        saturn->SMPC.LoadState(smpc);
+
+        stateSize = coreA->GetStateSize();
+        buf.resize(stateSize);
+        REQUIRE(coreA->SaveState(buf.data(), stateSize));
+    }
+
+    // Reuse the heap that core A released.
+    std::vector<std::vector<uint8_t>> scribble;
+    for (int i = 0; i < 64; ++i) {
+        scribble.emplace_back(static_cast<size_t>(16) << (i % 8), static_cast<uint8_t>(0xCC));
+    }
+
+    auto coreB = std::make_unique<CoreWrapper>();
+    REQUIRE(coreB->Initialize());
+    REQUIRE(coreB->LoadState(buf.data(), stateSize));
+
+    ymir::savestate::SMPCSaveState loaded{};
+    coreB->GetSaturn()->SMPC.SaveState(loaded);
+    REQUIRE(loaded.intback.report == report);
+    REQUIRE(loaded.intback.reportOffset == 2);
+}
+
+TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads", "[core][savestate][unit]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    ymir::Saturn* saturn = core.GetSaturn();
+    saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
+
+    auto state = std::make_unique<ymir::savestate::SaveState>();
+    saturn->SaveState(*state);
+    state->smpc.intback.report = {0xF1, 0x02, 0xAB, 0xCD, 0xF0};
+    state->smpc.intback.reportOffset = 0;
+
+    std::vector<uint8_t> payload;
+    REQUIRE(EncodeSaveState(*state, payload));
+    REQUIRE(payload.size() == EncodedSaveStateSize(*state));
+    REQUIRE(payload.size() <= MaxEncodedSaveStateSize(state->scu.cartData.size()));
+
+    auto decoded = std::make_unique<ymir::savestate::SaveState>();
+    REQUIRE(DecodeSaveState(payload, *decoded));
+    REQUIRE(decoded->scu.cartData == state->scu.cartData);
+    REQUIRE(decoded->smpc.intback.report == state->smpc.intback.report);
+
+    SECTION("truncated") {
+        for (const size_t size : {size_t{0}, size_t{1}, payload.size() / 2, payload.size() - 1}) {
+            REQUIRE_FALSE(DecodeSaveState(std::span<const uint8_t>(payload.data(), size), *decoded));
+        }
+    }
+
+    SECTION("trailing bytes") {
+        payload.push_back(0);
+        REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
+    }
+
+    SECTION("cartridge length word out of range") {
+        // The cartridge length word follows the scheduler, system, both SH-2s, and the SCU's DMA, DSP
+        // and cartridge type fields.
+        const size_t offset = sizeof(state->scheduler) + sizeof(state->system) + sizeof(state->msh2) +
+                              sizeof(state->ssh2) + sizeof(state->scu.dma) + sizeof(state->scu.dsp) +
+                              sizeof(state->scu.cartType);
+        uint32_t length = 0;
+        std::memcpy(&length, payload.data() + offset, 4);
+        REQUIRE(length == state->scu.cartData.size());
+        const uint32_t huge = 0xFFFFFFFF;
+        std::memcpy(payload.data() + offset, &huge, 4);
+        REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
+    }
+
+    SECTION("cartridge image size does not match the cartridge type") {
+        state->scu.cartType = ymir::savestate::SCUSaveState::CartType::DRAM48Mbit;
+        REQUIRE(EncodeSaveState(*state, payload));
+        REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
+    }
+
+    SECTION("unknown cartridge type") {
+        state->scu.cartType = static_cast<ymir::savestate::SCUSaveState::CartType>(7);
+        REQUIRE(EncodeSaveState(*state, payload));
+        REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
+    }
+
+    SECTION("INTBACK report offset past the report") {
+        state->smpc.intback.reportOffset = state->smpc.intback.report.size() + 1;
+        REQUIRE(EncodeSaveState(*state, payload));
+        REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
+    }
+
+    SECTION("INTBACK report longer than SMPC can build is not encoded") {
+        state->smpc.intback.report.assign(kMaxSaveStateINTBACKReportSize + 1, 0);
+        REQUIRE_FALSE(EncodeSaveState(*state, payload));
+    }
+
+    SECTION("bool that is neither 0 nor 1") {
+        const uint8_t two = 2;
+        std::memcpy(&state->cdblockLLE, &two, 1);
+        REQUIRE(EncodeSaveState(*state, payload));
+        REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
+    }
+}
+
+TEST_CASE("Save state with an inconsistent BRI2 header is rejected", "[core][savestate][unit]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> buf(stateSize);
+    REQUIRE(core.SaveState(buf.data(), stateSize));
+    uint32_t payloadSize = 0;
+    uint32_t compressedSize = 0;
+    std::memcpy(&payloadSize, buf.data() + 8, 4);
+    std::memcpy(&compressedSize, buf.data() + 12, 4);
+    const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
+
+    SECTION("payload size larger than the payload") {
+        const uint32_t patched = payloadSize + 1;
+        std::memcpy(buf.data() + 8, &patched, 4);
+        REQUIRE_FALSE(core.LoadState(buf.data(), savedSize));
+    }
+
+    SECTION("payload size beyond any valid state") {
+        const uint32_t patched = 0xFFFFFFFF;
+        std::memcpy(buf.data() + 8, &patched, 4);
+        REQUIRE_FALSE(core.LoadState(buf.data(), savedSize));
+    }
+
+    SECTION("compressed size beyond the buffer") {
+        const uint32_t patched = compressedSize + 1;
+        std::memcpy(buf.data() + 12, &patched, 4);
+        REQUIRE_FALSE(core.LoadState(buf.data(), savedSize));
+    }
+
+    SECTION("header only") {
+        REQUIRE_FALSE(core.LoadState(buf.data(), 16));
+    }
+
+    // The core is unharmed and still runs, and the untouched state loads.
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
+}
+
+TEST_CASE("Save state size covers the cartridge image", "[core][savestate][unit]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    const size_t withoutCart = core.GetStateSize();
+    core.GetSaturn()->InsertCartridge<ymir::cart::DRAM48MbitCartridge>();
+    const size_t withCart = core.GetStateSize();
+    REQUIRE(withCart > withoutCart + 6 * 1024 * 1024);
+
+    // Stable across a save and a load within the session.
+    std::vector<uint8_t> buf(withCart);
+    REQUIRE(core.SaveState(buf.data(), buf.size()));
+    REQUIRE(core.LoadState(buf.data(), buf.size()));
+    REQUIRE(core.GetStateSize() == withCart);
 }

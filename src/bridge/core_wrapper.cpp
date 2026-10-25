@@ -3,6 +3,7 @@
 // Licensed under GPL-3.0
 
 #include "brimir/core_wrapper.hpp"
+#include <brimir/savestate_codec.hpp>
 #include <brimir/jit/compile_worker.hpp>
 #include <brimir/jit/executor.hpp>
 
@@ -16,6 +17,7 @@
 #include <ymir/db/rom_cart_db.hpp>
 #include <ymir/db/ipl_db.hpp>
 #include <ymir/hw/cart/cart_impl_dram.hpp>
+#include <ymir/hw/cart/rom_cart_defs.hpp>
 #include <ymir/core/hash.hpp>
 #include <ymir/hw/smpc/smpc_defs.hpp>
 #include <ymir/util/bit_ops.hpp>
@@ -1092,14 +1094,27 @@ size_t CoreWrapper::GetAudioSamples(int16_t* buffer, size_t max_samples) {
     return m_audioRingBuffer.Pop(buffer, max_samples);
 }
 
+// Size of the cartridge image SCU::SaveState puts in a state for the inserted cartridge.
+static size_t CartDataSize(ymir::Saturn& saturn) {
+    switch (saturn.GetCartridge().GetType()) {
+    case ymir::cart::CartType::DRAM8Mbit: return 1_MiB;
+    case ymir::cart::CartType::DRAM32Mbit: return 4_MiB;
+    case ymir::cart::CartType::DRAM48Mbit: return 6_MiB;
+    case ymir::cart::CartType::ROM: return ymir::cart::kROMCartSize;
+    default: return 0;
+    }
+}
+
 size_t CoreWrapper::GetStateSize() const {
     if (!m_initialized || !m_saturn) {
         return 0;
     }
 
-    // Header (16 bytes: magic, version, uncompressed size, compressed size)
-    // + max compressed size.
-    return static_cast<size_t>(LZ4_compressBound(static_cast<int>(sizeof(ymir::savestate::SaveState)))) + 16;
+    // Header (16 bytes: magic, version, payload size, compressed size) + LZ4 bound of the largest
+    // payload this session can produce. Stable while a game is loaded (the cartridge is chosen at
+    // load), but larger for games with a RAM cartridge than without.
+    const size_t maxPayload = MaxEncodedSaveStateSize(CartDataSize(*m_saturn));
+    return static_cast<size_t>(LZ4_compressBound(static_cast<int>(maxPayload))) + 16;
 }
 
 bool CoreWrapper::SaveState(void* data, size_t size) {
@@ -1120,20 +1135,25 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         auto state = std::make_unique<ymir::savestate::SaveState>();
         m_saturn->SaveState(*state);
 
-        // Write 16-byte header: magic + version + uncompressed size + placeholder compressed size
+        // The struct holds std::vectors, so it is serialized field by field rather than copied raw.
+        if (!EncodeSaveState(*state, m_statePayload)) {
+            return false;
+        }
+
+        // Write 16-byte header: magic + version + payload size + placeholder compressed size
         const uint32_t magic = kNewStateMagic;
         const uint32_t version = kSaveStateVersion;
-        const uint32_t uncompSize = static_cast<uint32_t>(sizeof(ymir::savestate::SaveState));
+        const uint32_t uncompSize = static_cast<uint32_t>(m_statePayload.size());
         auto* out = static_cast<uint8_t*>(data);
         std::memcpy(out, &magic, 4);
         std::memcpy(out + 4, &version, 4);
         std::memcpy(out + 8, &uncompSize, 4);
 
         // Compress with LZ4
-        int srcSize = static_cast<int>(sizeof(ymir::savestate::SaveState));
-        int dstCapacity = static_cast<int>(size - 16);
+        int srcSize = static_cast<int>(m_statePayload.size());
+        int dstCapacity = static_cast<int>(std::min<size_t>(size - 16, static_cast<size_t>(INT32_MAX)));
         int compressedSize = LZ4_compress_default(
-            reinterpret_cast<const char*>(state.get()),
+            reinterpret_cast<const char*>(m_statePayload.data()),
             reinterpret_cast<char*>(out + 16),
             srcSize,
             dstCapacity
@@ -1178,43 +1198,39 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
         uint32_t magic = 0;
         std::memcpy(&magic, in, 4);
 
-        // New format: [magic:4][version:4][uncompSize:4][compressedSize:4] followed by LZ4 data
-        if (magic == kNewStateMagic && size >= 12) {
+        // [magic:4][version:4][payloadSize:4][compressedSize:4] followed by the LZ4-compressed payload
+        // (see savestate_codec.hpp). Earlier versions held the raw SaveState struct, whose std::vector
+        // members were stored as heap pointers: they cannot be loaded safely.
+        if (magic == kNewStateMagic && size >= 16) {
             uint32_t version = 0;
-            uint32_t uncompSize = 0;
+            uint32_t payloadSize = 0;
+            uint32_t compressedSize = 0;
             std::memcpy(&version, in + 4, 4);
-            std::memcpy(&uncompSize, in + 8, 4);
+            std::memcpy(&payloadSize, in + 8, 4);
+            std::memcpy(&compressedSize, in + 12, 4);
 
             if (version != kSaveStateVersion) {
                 return false;
             }
-            if (uncompSize != sizeof(ymir::savestate::SaveState)) {
+            if (payloadSize > MaxEncodedSaveStateSize(kMaxSaveStateCartDataSize)) {
+                return false;
+            }
+            if (compressedSize > size - 16 || compressedSize > static_cast<uint32_t>(INT32_MAX)) {
                 return false;
             }
 
-            int headerSize;
-            int compressedSize;
-            if (size >= 16) {
-                uint32_t storedCompressedSize = 0;
-                std::memcpy(&storedCompressedSize, in + 12, 4);
-                compressedSize = static_cast<int>(storedCompressedSize);
-                headerSize = 16;
-            } else {
-                // v1 header fallback (12 bytes) - the entire trailing buffer is LZ4 data.
-                // This can fail when the buffer contains trailing garbage, but preserves
-                // compatibility with old save states that happened to work.
-                compressedSize = static_cast<int>(size - 12);
-                headerSize = 12;
-            }
-
-            auto state = std::make_unique<ymir::savestate::SaveState>();
+            m_statePayload.resize(payloadSize);
             int result = LZ4_decompress_safe(
-                reinterpret_cast<const char*>(in + headerSize),
-                reinterpret_cast<char*>(state.get()),
-                compressedSize,
-                static_cast<int>(uncompSize)
+                reinterpret_cast<const char*>(in + 16),
+                reinterpret_cast<char*>(m_statePayload.data()),
+                static_cast<int>(compressedSize),
+                static_cast<int>(payloadSize)
             );
-            if (result != static_cast<int>(uncompSize)) {
+            if (result != static_cast<int>(payloadSize)) {
+                return false;
+            }
+            auto state = std::make_unique<ymir::savestate::SaveState>();
+            if (!DecodeSaveState(m_statePayload, *state)) {
                 return false;
             }
             if (!HasValidCDBlockCursors(*state)) {

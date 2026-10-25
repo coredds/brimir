@@ -56,8 +56,9 @@ enum class ConsoleRegion {
 class CoreWrapper {
 public:
     /// @brief Version word in the BRI2 save-state header; states of any other version are rejected, as are
-    /// the older unversioned "BRIM" states
-    static constexpr uint32_t kSaveStateVersion = 3;
+    /// the older unversioned "BRIM" states. Version 4 serializes the state field by field
+    /// (savestate_codec.hpp); earlier versions held the raw struct, including stale heap pointers.
+    static constexpr uint32_t kSaveStateVersion = 4;
 
     CoreWrapper();
     ~CoreWrapper();
@@ -181,7 +182,7 @@ public:
     size_t GetAudioSamples(int16_t* buffer, size_t max_samples);
 
     /// @brief Get the size needed for a save state
-    /// @return Size in bytes
+    /// @return Size in bytes; stable while a game is loaded, larger for games with a RAM cartridge
     size_t GetStateSize() const;
 
     /// @brief Save state to buffer
@@ -389,6 +390,10 @@ private:
     
     // Last error message from operations (for debugging)
     std::string m_lastError;
+
+    // Uncompressed save-state payload, kept between calls so that rewind and run-ahead do not
+    // reallocate it every frame
+    std::vector<uint8_t> m_statePayload;
     
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;
