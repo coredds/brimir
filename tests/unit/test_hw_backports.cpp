@@ -1237,3 +1237,86 @@ TEST_CASE("VDP1 LineStepper precision parameter keeps in-range lines unchanged",
         }
     }
 }
+
+namespace {
+
+// Draws transparent-mesh VDP1 lines at the given Y coordinates and renders VDP2 line 0 over a black back screen. The sprite
+// layer uses the mixed format so the mesh pixels are RGB data.
+std::array<uint32, 4> RenderMeshLines(uint16 tvmd, uint16 fbcr, std::initializer_list<uint16> ys) {
+    auto state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    renderer->ConfigureEnhancements({.deinterlace = true, .transparentMeshes = true});
+    FrameCapture capture;
+
+    auto &regs = state->regs2;
+    regs.WriteTVMD(tvmd);
+    regs.LatchTVMD();
+    regs.WriteBGON(0);
+    regs.WriteSPCTL(0x0020); // sprite type 0, mixed format (MSB = RGB data)
+    regs.WritePRISA(0x0007);
+    regs.WriteBKTAU(0x0000);
+    regs.WriteBKTAL(0x0080);
+    state->mem2.WriteVRAM<uint16>(0x100, 0x0000);
+    state->state1.sysClipH = 319;
+    state->state1.sysClipV = 255;
+    state->state2.layerEnabled[0] = true;
+
+    state->regs1.WriteFBCR(fbcr);
+    uint32 cmd = 0x100;
+    for (uint16 y : ys) {
+        state->mem1.WriteVRAM<uint16>(cmd + 0x00, 0x0006); // draw line
+        state->mem1.WriteVRAM<uint16>(cmd + 0x04, 0x0100); // CMDPMOD: mesh
+        state->mem1.WriteVRAM<uint16>(cmd + 0x06, 0x83E0); // CMDCOLR: RGB green
+        state->mem1.WriteVRAM<uint16>(cmd + 0x0C, 0);      // XA
+        state->mem1.WriteVRAM<uint16>(cmd + 0x0E, y);      // YA
+        state->mem1.WriteVRAM<uint16>(cmd + 0x10, 7);      // XB
+        state->mem1.WriteVRAM<uint16>(cmd + 0x12, y);      // YB
+        cmd += 0x20;
+    }
+
+    renderer->PostLoadStateSync();
+    capture.Bind(*renderer);
+    renderer->VDP1BeginFrame();
+    for (uint32 i = 0; i < ys.size(); ++i) {
+        renderer->VDP1ExecuteCommand(0x100 + i * 0x20, vdp::VDP1Command::Control{.u16 = 0x0006});
+    }
+    renderer->VDP1EndFrame();
+    state->fbIndex.Flip(); // display the framebuffer that was just drawn
+
+    renderer->VDP2SetResolution(320, 448, false);
+    renderer->VDP2BeginFrame();
+    renderer->VDP2RenderLine(0);
+    renderer->VDP2EndFrame();
+    REQUIRE(capture.width == 320);
+    return {capture.At(0, 0), capture.At(0, 1), capture.At(0, 2), capture.At(0, 3)};
+}
+
+} // namespace
+
+TEST_CASE("Transparent meshes are drawn on both deinterlaced fields in single-density interlace",
+          "[vdp][vdp2][mesh][brimir]") {
+    // Brimir fix (same in upstream Ymir): the alternate field read the mesh framebuffer that VDP1 only fills in double
+    // density, so meshes vanished on every other output row.
+    constexpr uint32 kBack = 0xFF000000;
+    const auto rows = RenderMeshLines(0x8080, 0x0000, {0}); // single-density interlace
+
+    // The mesh is blended with the back screen, so it is neither the back color nor the pure mesh color
+    CHECK(rows[0] != kBack);
+    CHECK(rows[0] != RGB555to888(0x83E0));
+    CHECK(rows[1] == rows[0]);
+    // Line 1 has no mesh
+    CHECK(rows[2] == kBack);
+    CHECK(rows[3] == kBack);
+}
+
+TEST_CASE("Transparent meshes keep both fields in double-density interlace", "[vdp][vdp2][mesh][brimir]") {
+    constexpr uint32 kBack = 0xFF000000;
+    const auto rows = RenderMeshLines(0x80C0, kFBCR_DIE, {0, 1}); // double-density interlace, VDP1 rows 0 and 1
+
+    CHECK(rows[0] != kBack);
+    CHECK(rows[1] == rows[0]);
+    CHECK(rows[2] == kBack);
+    CHECK(rows[3] == kBack);
+}

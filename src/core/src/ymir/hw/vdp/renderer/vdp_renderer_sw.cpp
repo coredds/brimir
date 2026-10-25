@@ -2687,7 +2687,9 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs
 
     [[maybe_unused]] auto &meshLayerOut = m_meshLayerOutput[altField];
     [[maybe_unused]] auto &meshLayerAttrs = m_meshLayerAttrs[altField];
-    [[maybe_unused]] const auto &meshFB = m_meshFBRAM[altField][fbIndex];
+    // Brimir: VDP1 only draws to the alternate mesh framebuffer in double density, like the main framebuffer above.
+    // Upstream indexes it by altField alone, so meshes vanish on the alternate field in single-density interlace.
+    [[maybe_unused]] const auto &meshFB = m_meshFBRAM[doubleDensity && altField][fbIndex];
 
     for (uint32 x = 0; x < maxX; x++) {
         const uint32 xx = x << xOutputShift;
