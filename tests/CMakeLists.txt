@@ -76,6 +76,8 @@ target_link_libraries(brimir_tests PRIVATE
 if(BRIMIR_VULKAN)
     target_sources(brimir_tests PRIVATE
         unit/test_gpu_build.cpp
+        # Headless device, owning/non-owning VulkanDevice, vk_util helpers (SKIP without a Vulkan device)
+        unit/test_gpu_device.cpp
     )
     target_link_libraries(brimir_tests PRIVATE brimir-gpu)
 endif()

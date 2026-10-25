@@ -8,6 +8,10 @@ target_compile_definitions(vulkan_headers INTERFACE VK_NO_PROTOTYPES)
 
 add_library(brimir-gpu STATIC
     volk_impl.cpp
+    vk_device.cpp
+    vk_util.cpp
+    # Tests and tools only (volkInitialize); the core wraps the frontend's device instead.
+    headless_device.cpp
 )
 
 # Consumers include "gpu/..." (and "gpu/shaders/generated/*.spv.h"), plus <volk.h> and <libretro_vulkan.h>.

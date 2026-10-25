@@ -97,6 +97,40 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1 suppressions=${{ github.workspace }}/tests/tsan_suppressions.txt
         run: ./build/bin/brimir_tests "[jit]"
 
+  # The [gpu] tests on Mesa's lavapipe (software Vulkan) with the Khronos validation layer: headless device, compute
+  # helpers, zero validation errors. BRIMIR_REQUIRE_VULKAN=1 makes a missing device or layer fail instead of SKIP.
+  gpu-lavapipe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build \
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DBRIMIR_BUILD_TESTS=ON \
+            -DBRIMIR_VULKAN=ON
+
+      - name: Build
+        run: cmake --build build --target brimir_tests --parallel $(nproc)
+
+      # The manifest is lvp_icd.json in noble-updates' Mesa (lvp_icd.<arch>.json in some older packages).
+      - name: Test
+        env:
+          BRIMIR_REQUIRE_VULKAN: 1
+        run: |
+          export VK_DRIVER_FILES="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)"
+          echo "VK_DRIVER_FILES=$VK_DRIVER_FILES"
+          ./build/bin/brimir_tests "[gpu]"
+
   # The committed SPIR-V headers (src/gpu/shaders/generated) must match the HLSL sources. Uses DXC and spirv-val from
   # the LunarG Vulkan SDK the headers were generated with; the build jobs never need the SDK.
   shaders-check:
