@@ -31,6 +31,10 @@ namespace smpc {
 struct PersistentSMPCData;
 }
 
+namespace savestate {
+struct SaveState;
+}
+
 namespace peripheral {
 class ControlPad;
 struct PeripheralReport;
@@ -196,6 +200,9 @@ public:
     /// @param size Size of the buffer
     /// @return true if successful
     bool LoadState(const void* data, size_t size);
+
+    /// @brief Why the last LoadState() rejected a well-formed state, or an empty string
+    const std::string& GetLastStateError() const { return m_lastStateError; }
 
     /// @brief Check if the emulator is initialized
     /// @return true if initialized
@@ -391,9 +398,11 @@ private:
     // Last error message from operations (for debugging)
     std::string m_lastError;
 
-    // Uncompressed save-state payload, kept between calls so that rewind and run-ahead do not
-    // reallocate it every frame
+    // Uncompressed save-state payload and decoded state (several MB each), kept between calls so
+    // that rewind and run-ahead do not reallocate them every frame
     std::vector<uint8_t> m_statePayload;
+    std::unique_ptr<ymir::savestate::SaveState> m_stateScratch;
+    std::string m_lastStateError;
     
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;

@@ -510,7 +510,13 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
     if (!g_core) {
         return false;
     }
-    return g_core->LoadState(data, size);
+    if (g_core->LoadState(data, size)) {
+        return true;
+    }
+    if (!g_core->GetLastStateError().empty()) {
+        brimir_log(RETRO_LOG_WARN, "Save state rejected: %s", g_core->GetLastStateError().c_str());
+    }
+    return false;
 }
 
 RETRO_API void retro_cheat_reset(void) {

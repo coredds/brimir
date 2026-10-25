@@ -1105,6 +1105,26 @@ static size_t CartDataSize(ymir::Saturn& saturn) {
     }
 }
 
+// The save-state cartridge type of the inserted cartridge.
+static ymir::savestate::SCUSaveState::CartType InsertedCartType(ymir::Saturn& saturn) {
+    using CartType = ymir::savestate::SCUSaveState::CartType;
+    switch (saturn.GetCartridge().GetType()) {
+    case ymir::cart::CartType::BackupMemory: return CartType::BackupMemory;
+    case ymir::cart::CartType::DRAM8Mbit: return CartType::DRAM8Mbit;
+    case ymir::cart::CartType::DRAM32Mbit: return CartType::DRAM32Mbit;
+    case ymir::cart::CartType::DRAM48Mbit: return CartType::DRAM48Mbit;
+    case ymir::cart::CartType::ROM: return CartType::ROM;
+    default: return CartType::None;
+    }
+}
+
+static ymir::savestate::SaveState& Scratch(std::unique_ptr<ymir::savestate::SaveState>& state) {
+    if (!state) {
+        state = std::make_unique<ymir::savestate::SaveState>();
+    }
+    return *state;
+}
+
 size_t CoreWrapper::GetStateSize() const {
     if (!m_initialized || !m_saturn) {
         return 0;
@@ -1132,11 +1152,13 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         // Ymir's software renderer handles its own worker-thread synchronization
         // in VDP::SaveState() via PreSaveStateSync(). The libretro frontend
         // ensures serialize/unserialize do not run concurrently with retro_run().
-        auto state = std::make_unique<ymir::savestate::SaveState>();
-        m_saturn->SaveState(*state);
+        // Reset first: Saturn::SaveState does not write every member.
+        auto& state = Scratch(m_stateScratch);
+        ResetSaveState(state);
+        m_saturn->SaveState(state);
 
         // The struct holds std::vectors, so it is serialized field by field rather than copied raw.
-        if (!EncodeSaveState(*state, m_statePayload)) {
+        if (!EncodeSaveState(state, m_statePayload)) {
             return false;
         }
 
@@ -1186,6 +1208,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
         return false;
     }
 
+    m_lastStateError.clear();
     try {
         // Ymir's VDP::LoadState() uses PostLoadStateSync() to refresh the
         // worker-thread copies after the main state is restored.
@@ -1229,14 +1252,29 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             if (result != static_cast<int>(payloadSize)) {
                 return false;
             }
-            auto state = std::make_unique<ymir::savestate::SaveState>();
-            if (!DecodeSaveState(m_statePayload, *state)) {
+            // DecodeSaveState writes every member, so the scratch state needs no reset.
+            auto& state = Scratch(m_stateScratch);
+            if (!DecodeSaveState(m_statePayload, state)) {
                 return false;
             }
-            if (!HasValidCDBlockCursors(*state)) {
+            if (!HasValidCDBlockCursors(state)) {
                 return false;
             }
-            return m_saturn->LoadState(*state, true);
+            // SCU::LoadState inserts the state's cartridge and nothing compares disc hashes, so a state
+            // from another game could swap the cartridge mid-session: GetStateSize() would change under
+            // the frontend's rewind and run-ahead buffers, and the cartridge RAM file would no longer
+            // match. Brimir never inserts ROM cartridges, and SCU::LoadState reads their 2 MiB image
+            // through a 4 MiB span.
+            using CartType = ymir::savestate::SCUSaveState::CartType;
+            if (state.scu.cartType == CartType::ROM) {
+                m_lastStateError = "the state has a ROM cartridge, which Brimir does not support";
+                return false;
+            }
+            if (state.scu.cartType != InsertedCartType(*m_saturn)) {
+                m_lastStateError = "the state's cartridge differs from the inserted one (state from another game?)";
+                return false;
+            }
+            return m_saturn->LoadState(state, true);
         }
 
         // Old Brimir format ("BRIM": [magic:4][uncompSize:4] + LZ4 data, no version word) predates the

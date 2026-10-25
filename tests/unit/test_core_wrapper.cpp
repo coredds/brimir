@@ -886,7 +886,73 @@ TEST_CASE("Save state with an inconsistent BRI2 header is rejected", "[core][sav
         REQUIRE_FALSE(core.LoadState(buf.data(), 16));
     }
 
-    // The core is unharmed and still runs, and the untouched state loads.
+    // The core is unharmed and still runs, and the state loads once its header is restored.
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
+    std::memcpy(buf.data() + 8, &payloadSize, 4);
+    std::memcpy(buf.data() + 12, &compressedSize, 4);
+    REQUIRE(core.LoadState(buf.data(), savedSize));
+}
+
+TEST_CASE("Save state with a different cartridge than the inserted one is rejected",
+          "[core][savestate][unit][regression]") {
+    // SCU::LoadState inserts the state's cartridge, and the core does not compare disc hashes, so a
+    // mismatched state would swap the cartridge mid-session and change GetStateSize() under the
+    // frontend's rewind and run-ahead buffers.
+    auto saveFrom = [](auto&& insertCart) {
+        CoreWrapper source;
+        REQUIRE(source.Initialize());
+        insertCart(*source.GetSaturn());
+        std::vector<uint8_t> buf(source.GetStateSize());
+        REQUIRE(source.SaveState(buf.data(), buf.size()));
+        return buf;
+    };
+    const auto noCart = [](ymir::Saturn&) {};
+    const auto dram8 = [](ymir::Saturn& s) { s.InsertCartridge<ymir::cart::DRAM8MbitCartridge>(); };
+    const auto dram32 = [](ymir::Saturn& s) { s.InsertCartridge<ymir::cart::DRAM32MbitCartridge>(); };
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    std::vector<uint8_t> buf;
+    ymir::cart::CartType expectedType = ymir::cart::CartType::None;
+
+    SECTION("cartridge state into a session without a cartridge") {
+        buf = saveFrom(dram32);
+    }
+
+    SECTION("state without a cartridge into a cartridge session") {
+        dram8(*core.GetSaturn());
+        expectedType = ymir::cart::CartType::DRAM8Mbit;
+        buf = saveFrom(noCart);
+    }
+
+    SECTION("different DRAM cartridge") {
+        dram8(*core.GetSaturn());
+        expectedType = ymir::cart::CartType::DRAM8Mbit;
+        buf = saveFrom(dram32);
+    }
+
+    const size_t sizeBefore = core.GetStateSize();
+    REQUIRE_FALSE(core.LoadState(buf.data(), buf.size()));
+    REQUIRE(core.GetSaturn()->GetCartridge().GetType() == expectedType);
+    REQUIRE(core.GetStateSize() == sizeBefore);
+
+    // The core is unharmed and still runs.
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
+}
+
+TEST_CASE("Save state of a ROM cartridge session is rejected", "[core][savestate][unit]") {
+    // Brimir never inserts ROM cartridges, and SCU::LoadState reads the 2 MiB ROM image through a
+    // 4 MiB span.
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.GetSaturn()->InsertCartridge<ymir::cart::ROMCartridge>();
+
+    std::vector<uint8_t> buf(core.GetStateSize());
+    REQUIRE(core.SaveState(buf.data(), buf.size()));
+    REQUIRE_FALSE(core.LoadState(buf.data(), buf.size()));
+
     core.RunFrame();
     REQUIRE(core.GetFramebuffer() != nullptr);
 }

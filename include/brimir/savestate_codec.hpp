@@ -36,7 +36,12 @@ size_t MaxEncodedSaveStateSize(size_t cartDataSize);
 /// @return false if a variable-size field exceeds its limit (the decoder would reject it)
 bool EncodeSaveState(const ymir::savestate::SaveState& state, std::vector<uint8_t>& out);
 
-/// @brief Fills state from a payload written by EncodeSaveState
+/// @brief Zeroes every member as value-initialization would (padding included); the vectors are
+/// emptied but keep their capacity. Lets a SaveState object be reused: Saturn::SaveState does not
+/// write every member (only one of the HLE and LLE CD block states, for instance).
+void ResetSaveState(ymir::savestate::SaveState& state);
+
+/// @brief Fills every member of state from a payload written by EncodeSaveState
 /// @return false if the payload is truncated, has trailing bytes, or holds an invalid length,
 /// cartridge type, bool or INTBACK report offset; state is then partially overwritten
 bool DecodeSaveState(std::span<const uint8_t> payload, ymir::savestate::SaveState& state);

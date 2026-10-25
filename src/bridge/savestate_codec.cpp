@@ -123,6 +123,20 @@ private:
     bool m_ok = true;
 };
 
+// Zeroes every field, padding included, as value-initialization does; vectors keep their capacity.
+class Clearer {
+public:
+    template <typename T>
+    void Raw(T& value) {
+        static_assert(std::is_trivially_copyable_v<T>, "only trivially copyable members are cleared bytewise");
+        std::memset(&value, 0, sizeof(T));
+    }
+
+    void Size(size_t& value) { value = 0; }
+
+    void Vector(std::vector<uint8>& value, size_t /*maxSize*/) { value.clear(); }
+};
+
 template <typename Archive, typename State>
 void VisitSCU(Archive& ar, State& scu) {
     auto& [dma, dsp, cartType, cartData, intrMask, intrStatus, abusIntrsPendingAck, pendingIntrLevel,
@@ -239,6 +253,11 @@ bool EncodeSaveState(const SaveState& state, std::vector<uint8_t>& out) {
     Writer writer(out.data());
     Visit(writer, state);
     return writer.Ok();
+}
+
+void ResetSaveState(SaveState& state) {
+    Clearer clearer;
+    Visit(clearer, state);
 }
 
 bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state) {
