@@ -1,6 +1,6 @@
 # Vulkan-free front half of the VDP2 GPU renderer: the GPU-visible parameter structs (vdp2_hw_params.hpp), the 32-bit
-# rotation math (int64_emu.hpp), the generated shader layout headers (gpu/shaders/generated/*.layout.h) and the
-# front end that records VDP2 frames (vdp2_front.*). Nothing here includes a Vulkan header. Added regardless of
+# rotation math (int64_emu.hpp), the VDP2 shader binding table (vdp2_bindings.hpp), the generated shader layout headers
+# (gpu/shaders/generated/*.layout.h) and the front end that records VDP2 frames (vdp2_front.*). Nothing here includes a Vulkan header. Added regardless of
 # BRIMIR_VULKAN, so its [vdp2] tests also run in BRIMIR_VULKAN=OFF builds; brimir-gpu links it.
 
 add_library(brimir-vdp2-front STATIC

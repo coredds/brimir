@@ -9,9 +9,9 @@
 // - namespace brimir::gpu::vdp2 and <cstdint> types (uint32 -> uint32_t, ...); Windows UINT -> uint32_t;
 // - no cmrc (Ymir's embedded shader filesystem, kCSEntrypoint and g_fsShaders are not copied);
 // - VDP2ComposeParams re-padded to the std430 layout the Vulkan shaders see (Ymir's host struct is packed for D3D12);
-// - VDP2CommonRenderParams fills the std430 hole before spritePriosRatios and pads its tail (push-constant block);
-// - Brimir fields: VDP2CommonRenderParams::borderColorModeLatch, VDP2ComposeParams::shadowEnable, VDP2NBGLine,
-//   kMaxResH/kMaxResV.
+// - VDP2CommonRenderParams fills the std430 hole before spritePriosRatios and its tail (push-constant block);
+// - Brimir fields: VDP2CommonRenderParams::borderColorModeLatch and outputSize, VDP2ComposeParams::shadowEnable,
+//   VDP2NBGLine, kMaxResH/kMaxResV.
 // Every offset and size is checked against the shaders' reflected layouts in tests/unit/test_gpu_vdp2_params.cpp.
 // No Vulkan header may be included here.
 
@@ -321,8 +321,11 @@ struct VDP2CommonRenderParams {
 
     EnhancementsParams enhancements;
 
-    // Brimir: explicit tail padding to the std430 block size (a multiple of the uint2 alignment).
-    HLSLuint pad;
+    // Brimir: the frame's output size as VDP2SetResolution set it (Vdp2FrameRecord::hres/vres): HRes in bits 0-15,
+    // VRes in bits 16-31. The shaders use it as the composite pitch and as the bounds they check before touching their
+    // outputs (no robustness features). The back half sets it per dispatch, like startY; the front half leaves it 0.
+    // Fills the std430 tail (the block size is a multiple of the uint2 alignment).
+    HLSLuint outputSize;
 };
 static_assert(sizeof(VDP2CommonRenderParams) == 48);
 static_assert(sizeof(VDP2CommonRenderParams) <= 128, "must fit the minimum maxPushConstantsSize");

@@ -343,7 +343,7 @@ void Vdp2FrontEnd::UpdateRotationParameterBases(uint32_t y) {
 
 // Ported from d3d:3715-3833 (VDP2UpdateCommonRenderParams).
 void Vdp2FrontEnd::UpdateCommonRenderParams() {
-    // m_common.startY stays 0: the back half sets it per dispatch.
+    // m_common.startY and outputSize stay 0: the back half sets them per dispatch.
 
     const VDP1Regs &regs1 = m_state.regs1;
     const VDP2Regs &regs2 = m_state.regs2;

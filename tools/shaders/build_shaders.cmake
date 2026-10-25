@@ -1,5 +1,7 @@
-# Compiles src/gpu/shaders/*.hlsl to SPIR-V and writes src/gpu/shaders/generated/<name>.spv.h, plus
-# src/gpu/shaders/generated/<name>.layout.h with the reflected layout of the shader's buffer and push-constant blocks.
+# Compiles src/gpu/shaders/*.hlsl and src/gpu/shaders/<subdir>/*.hlsl to SPIR-V and writes
+# src/gpu/shaders/generated/<name>.spv.h, plus src/gpu/shaders/generated/<name>.layout.h with the reflected layout of
+# the shader's buffer and push-constant blocks. <name> is the file name without extension; in a subdirectory, without
+# a leading "cs_" too (vdp2/cs_vdp2_compose.hlsl -> vdp2_compose.spv.h, kVdp2ComposeSpv). Names must be unique.
 #
 #   cmake -P tools/shaders/build_shaders.cmake                          regenerate the headers
 #   cmake -DBRIMIR_SHADERS_CHECK=ON -P tools/shaders/build_shaders.cmake  fail if a header is out of date
@@ -8,11 +10,13 @@
 # -DDXC=<path> -DSPIRV_VAL=<path> -DSPIRV_CROSS=<path>. The generated headers are committed, so a normal build needs
 # none of them. Every shader is a compute shader with entry point CSMain. Includes are searched in
 # src/gpu/shaders/include and src/gpu/shaders/vdp2/include. Register bindings are shifted per class (all spaces):
-# t -> binding 0+n, u -> binding 16+n, b -> binding 32+n. Output depends only on the DXC and spirv-cross versions and
-# the sources.
+# t -> binding 0+n, u -> binding 16+n, b -> binding 32+n. Declared bindings are kept even when unused
+# (-fspv-preserve-bindings), so a module's interface is what its source declares. Output depends only on the DXC and
+# spirv-cross versions and the sources.
 #
 # Layout headers: for every struct reachable from a storage buffer, uniform buffer or push-constant block (the element
-# struct of a StructuredBuffer, the block itself otherwise), sorted by struct name:
+# struct of a StructuredBuffer, the block itself otherwise; declared but unused StructuredBuffers included), sorted by
+# struct name:
 #   k<Shader>_<Struct>_<member>         member offset in bytes
 #   k<Shader>_<Struct>_<member>_stride  array stride, for array members
 #   k<Shader>_<Struct>_size             std430 size (end of the last member rounded up to the struct's alignment; for a
@@ -224,6 +228,29 @@ function(brimir_layout_header json_file source_name symbol out_var)
             list(APPEND worklist "${root}|${name}|${stride}")
         endforeach()
     endforeach()
+    # Declared but unused StructuredBuffers (kept by -fspv-preserve-bindings) are not in "ssbos"; their block types are
+    # still in "types".
+    string(JSON type_count LENGTH "${types}")
+    if(type_count GREATER 0)
+        math(EXPR last "${type_count} - 1")
+        foreach(i RANGE ${last})
+            string(JSON id MEMBER "${types}" ${i})
+            string(JSON block_type GET "${types}" ${id})
+            string(JSON block_name GET "${block_type}" name)
+            if(NOT block_name MATCHES "^type\\.(RW)?StructuredBuffer\\.")
+                continue()
+            endif()
+            string(JSON first GET "${block_type}" members 0)
+            string(JSON element GET "${first}" type)
+            if(NOT element MATCHES "^_[0-9]+$")
+                continue()
+            endif()
+            string(JSON element_type GET "${types}" ${element})
+            string(JSON name GET "${element_type}" name)
+            string(JSON stride GET "${first}" array_stride)
+            list(APPEND worklist "${element}|${name}|${stride}")
+        endforeach()
+    endif()
 
     set(struct_names)
     set(done)
@@ -312,7 +339,8 @@ function(brimir_sync_header source_name file_name text)
     endif()
 endfunction()
 
-file(GLOB shader_sources LIST_DIRECTORIES false RELATIVE "${shader_dir}" "${shader_dir}/*.hlsl")
+file(GLOB shader_sources LIST_DIRECTORIES false RELATIVE "${shader_dir}" "${shader_dir}/*.hlsl"
+     "${shader_dir}/*/*.hlsl")
 list(SORT shader_sources)
 if(NOT shader_sources)
     message(FATAL_ERROR "no shaders found in ${shader_dir}")
@@ -320,14 +348,23 @@ endif()
 
 set(expected_headers)
 set(stale)
+set(stems)
 foreach(source_name IN LISTS shader_sources)
     get_filename_component(stem "${source_name}" NAME_WE)
+    if(source_name MATCHES "/")
+        # Shaders in a subdirectory drop their "cs_" prefix: vdp2/cs_vdp2_compose.hlsl -> vdp2_compose.spv.h.
+        string(REGEX REPLACE "^cs_" "" stem "${stem}")
+    endif()
+    if(stem IN_LIST stems)
+        message(FATAL_ERROR "${source_name}: generated name ${stem} is already taken by another shader")
+    endif()
+    list(APPEND stems "${stem}")
     brimir_shader_symbol("${stem}" symbol)
     set(spv "${work_dir}/${stem}.spv")
 
     execute_process(
         COMMAND "${DXC}" -T cs_6_0 -E CSMain -HV 2021 -WX
-                -spirv -fspv-target-env=vulkan1.2 -fvk-use-gl-layout
+                -spirv -fspv-target-env=vulkan1.2 -fvk-use-gl-layout -fspv-preserve-bindings
                 -fvk-t-shift 0 all -fvk-u-shift 16 all -fvk-b-shift 32 all
                 -I "${shader_dir}/include" -I "${shader_dir}/vdp2/include"
                 -Fo "${spv}" "${shader_dir}/${source_name}"

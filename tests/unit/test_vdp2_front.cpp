@@ -946,6 +946,17 @@ TEST_CASE("Vdp2SceneWriter drives several state and renderer pairs in lockstep",
     CHECK(a.state->regs2.TVSTAT.ODD == b.state->regs2.TVSTAT.ODD);
     CHECK(a.state->mem2.VRAM == b.state->mem2.VRAM);
     CHECK(a.state->mem2.CRAM == b.state->mem2.CRAM);
-    CHECK(std::memcmp(&a.state->state2.nbgLayerStates, &b.state->state2.nbgLayerStates,
-                      sizeof(a.state->state2.nbgLayerStates)) == 0);
+    // Field by field: NBGLayerState has padding after its bools, which memcmp would compare too.
+    for (size_t i = 0; i < a.state->state2.nbgLayerStates.size(); ++i) {
+        const auto &sa = a.state->state2.nbgLayerStates[i];
+        const auto &sb = b.state->state2.nbgLayerStates[i];
+        CHECK(sa.fracScrollX == sb.fracScrollX);
+        CHECK(sa.fracScrollY == sb.fracScrollY);
+        CHECK(sa.scrollIncH == sb.scrollIncH);
+        CHECK(sa.lineScrollTableAddress == sb.lineScrollTableAddress);
+        CHECK(sa.vcellScrollOffset == sb.vcellScrollOffset);
+        CHECK(sa.vcellScrollDelay == sb.vcellScrollDelay);
+        CHECK(sa.vcellScrollRepeat == sb.vcellScrollRepeat);
+        CHECK(sa.mosaicCounterY == sb.mosaicCounterY);
+    }
 }

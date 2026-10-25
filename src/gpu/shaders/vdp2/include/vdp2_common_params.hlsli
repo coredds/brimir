@@ -18,8 +18,10 @@ struct CommonRenderParams {
     uint vcellScroll;
     uint windows;
     uint enhancements;
-    // Brimir: explicit tail padding to the std430 size (48, a multiple of the uint2 alignment).
-    uint pad;
+    // Brimir: the frame's output size (VDP2SetResolution), HRes in bits 0-15 and VRes in bits 16-31: the composite
+    // pitch and the bounds every shader checks before touching its outputs. Set per dispatch by the back half, like
+    // startY. Fills the std430 tail (48 bytes, a multiple of the uint2 alignment).
+    uint outputSize;
 };
 
 #endif

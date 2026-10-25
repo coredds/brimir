@@ -1,6 +1,6 @@
 // VDP2 GPU parameter structs and 32-bit rotation math (src/gpu/vdp2/vdp2_hw_params.hpp, src/gpu/vdp2/int64_emu.hpp).
-// - The host structs match the std430 layouts reflected from the shaders that declare them
-//   (src/gpu/shaders/generated/*.layout.h).
+// - The host structs match the std430 layouts reflected from the VDP2 shaders that declare them
+//   (src/gpu/shaders/generated/vdp2_*.layout.h).
 // - RotDotShr10 / RotCoordShr equal the 64-bit expressions of Ymir's cs_vdp2_render_bgs.hlsl (lines 444-445, 502-503)
 //   on edge values and 1,000,000 seeded random cases, and the HLSL copy (int64_emu.hlsli, through test_int64_emu.hlsl)
 //   equals the C++ mirror on 65,536 cases.
@@ -8,7 +8,9 @@
 // without a Vulkan device.
 #include "catch_amalgamated.hpp"
 
-#include <gpu/shaders/generated/cs_vdp2_layout_probe.layout.h>
+#include <gpu/shaders/generated/vdp2_compose.layout.h>
+#include <gpu/shaders/generated/vdp2_render_bgs.layout.h>
+#include <gpu/shaders/generated/vdp2_render_sprite.layout.h>
 #include <gpu/shaders/generated/test_int64_emu.layout.h>
 #include <gpu/vdp2/int64_emu.hpp>
 #include <gpu/vdp2/vdp2_hw_params.hpp>
@@ -208,41 +210,72 @@ TEST_CASE("RotDotShr10 and RotCoordShr equal the int64_t expressions on 1,000,00
 #define CHECK_OFFSET(type, member, constant) CHECK(offsetof(type, member) == sh::constant)
 #define CHECK_SIZE(type, constant) CHECK(sizeof(type) == sh::constant)
 
+// The push-constant block as each of the three VDP2 shaders declares it.
+#define CHECK_COMMON_PARAMS(shader)                                                                                    \
+    do {                                                                                                               \
+        CHECK_OFFSET(VDP2CommonRenderParams, startY, k##shader##_CommonRenderParams_startY);                           \
+        CHECK_OFFSET(VDP2CommonRenderParams, displayParams, k##shader##_CommonRenderParams_displayParams);             \
+        CHECK_OFFSET(VDP2CommonRenderParams, layerParams, k##shader##_CommonRenderParams_layerParams);                 \
+        CHECK_OFFSET(VDP2CommonRenderParams, rotParams, k##shader##_CommonRenderParams_rotParams);                     \
+        CHECK_OFFSET(VDP2CommonRenderParams, spriteParams, k##shader##_CommonRenderParams_spriteParams);               \
+        CHECK_OFFSET(VDP2CommonRenderParams, borderColorModeLatch,                                                     \
+                     k##shader##_CommonRenderParams_borderColorModeLatch);                                             \
+        CHECK_OFFSET(VDP2CommonRenderParams, spritePriosRatios, k##shader##_CommonRenderParams_spritePriosRatios);     \
+        CHECK_OFFSET(VDP2CommonRenderParams, vcellScroll, k##shader##_CommonRenderParams_vcellScroll);                 \
+        CHECK_OFFSET(VDP2CommonRenderParams, windows, k##shader##_CommonRenderParams_windows);                         \
+        CHECK_OFFSET(VDP2CommonRenderParams, enhancements, k##shader##_CommonRenderParams_enhancements);               \
+        CHECK_OFFSET(VDP2CommonRenderParams, outputSize, k##shader##_CommonRenderParams_outputSize);                   \
+        CHECK_SIZE(VDP2CommonRenderParams, k##shader##_CommonRenderParams_size);                                       \
+    } while (false)
+
 TEST_CASE("VDP2 host parameter structs match the reflected std430 layouts", "[vdp2][params]") {
     SECTION("VDP2CommonRenderParams (push constants)") {
-        CHECK_OFFSET(VDP2CommonRenderParams, startY, kCsVdp2LayoutProbe_CommonRenderParams_startY);
-        CHECK_OFFSET(VDP2CommonRenderParams, displayParams, kCsVdp2LayoutProbe_CommonRenderParams_displayParams);
-        CHECK_OFFSET(VDP2CommonRenderParams, layerParams, kCsVdp2LayoutProbe_CommonRenderParams_layerParams);
-        CHECK_OFFSET(VDP2CommonRenderParams, rotParams, kCsVdp2LayoutProbe_CommonRenderParams_rotParams);
-        CHECK_OFFSET(VDP2CommonRenderParams, spriteParams, kCsVdp2LayoutProbe_CommonRenderParams_spriteParams);
-        CHECK_OFFSET(VDP2CommonRenderParams, borderColorModeLatch,
-                     kCsVdp2LayoutProbe_CommonRenderParams_borderColorModeLatch);
-        CHECK_OFFSET(VDP2CommonRenderParams, spritePriosRatios,
-                     kCsVdp2LayoutProbe_CommonRenderParams_spritePriosRatios);
-        CHECK_OFFSET(VDP2CommonRenderParams, vcellScroll, kCsVdp2LayoutProbe_CommonRenderParams_vcellScroll);
-        CHECK_OFFSET(VDP2CommonRenderParams, windows, kCsVdp2LayoutProbe_CommonRenderParams_windows);
-        CHECK_OFFSET(VDP2CommonRenderParams, enhancements, kCsVdp2LayoutProbe_CommonRenderParams_enhancements);
-        CHECK_OFFSET(VDP2CommonRenderParams, pad, kCsVdp2LayoutProbe_CommonRenderParams_pad);
-        CHECK_SIZE(VDP2CommonRenderParams, kCsVdp2LayoutProbe_CommonRenderParams_size);
+        CHECK_COMMON_PARAMS(Vdp2RenderSprite);
+        CHECK_COMMON_PARAMS(Vdp2RenderBgs);
+        CHECK_COMMON_PARAMS(Vdp2Compose);
+        STATIC_CHECK(offsetof(VDP2CommonRenderParams, borderColorModeLatch) == 20);
+        STATIC_CHECK(offsetof(VDP2CommonRenderParams, spritePriosRatios) == 24);
+        STATIC_CHECK(offsetof(VDP2CommonRenderParams, outputSize) == 44);
         CHECK(sizeof(VDP2CommonRenderParams) <= 128); // the push-constant minimum
     }
+    SECTION("The sprite shader declares the layer parameters and rotation bases as the background shader does") {
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_size == sh::kVdp2RenderBgs_LayerRenderParams_size);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_nbg == sh::kVdp2RenderBgs_LayerRenderParams_nbg);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_rbg == sh::kVdp2RenderBgs_LayerRenderParams_rbg);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_windows == sh::kVdp2RenderBgs_LayerRenderParams_windows);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_windows_stride ==
+              sh::kVdp2RenderBgs_LayerRenderParams_windows_stride);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_rotWindows == sh::kVdp2RenderBgs_LayerRenderParams_rotWindows);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_lineScreenParams ==
+              sh::kVdp2RenderBgs_LayerRenderParams_lineScreenParams);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_backScreenParams ==
+              sh::kVdp2RenderBgs_LayerRenderParams_backScreenParams);
+        CHECK(sh::kVdp2RenderSprite_LayerRenderParams_specialFunctionCodes ==
+              sh::kVdp2RenderBgs_LayerRenderParams_specialFunctionCodes);
+        CHECK(sh::kVdp2RenderSprite_GlobalWindowParams_size == sh::kVdp2RenderBgs_GlobalWindowParams_size);
+        CHECK(sh::kVdp2RenderSprite_NBGParams_size == sh::kVdp2RenderBgs_NBGParams_size);
+        CHECK(sh::kVdp2RenderSprite_RBGParams_size == sh::kVdp2RenderBgs_RBGParams_size);
+        CHECK(sh::kVdp2RenderSprite_BaseBGParams_size == sh::kVdp2RenderBgs_BaseBGParams_size);
+        CHECK(sh::kVdp2RenderSprite_RotParamBase_size == sh::kVdp2RenderBgs_RotParamBase_size);
+        CHECK(sh::kVdp2RenderSprite_RotParamBase_KA == sh::kVdp2RenderBgs_RotParamBase_KA);
+    }
     SECTION("VDP2ComposeParams") {
-        CHECK_OFFSET(VDP2ComposeParams, colorCalcEnable, kCsVdp2LayoutProbe_ComposeParams_colorCalcEnable);
-        CHECK_OFFSET(VDP2ComposeParams, colorOffsetEnable, kCsVdp2LayoutProbe_ComposeParams_colorOffsetEnable);
-        CHECK_OFFSET(VDP2ComposeParams, colorOffsetSelect, kCsVdp2LayoutProbe_ComposeParams_colorOffsetSelect);
-        CHECK_OFFSET(VDP2ComposeParams, lineColorEnable, kCsVdp2LayoutProbe_ComposeParams_lineColorEnable);
-        CHECK_OFFSET(VDP2ComposeParams, colorOffsetA, kCsVdp2LayoutProbe_ComposeParams_colorOffsetA);
-        CHECK_OFFSET(VDP2ComposeParams, shadowEnable, kCsVdp2LayoutProbe_ComposeParams_shadowEnable);
-        CHECK_OFFSET(VDP2ComposeParams, colorOffsetB, kCsVdp2LayoutProbe_ComposeParams_colorOffsetB);
-        CHECK_OFFSET(VDP2ComposeParams, bgColorCalcRatios, kCsVdp2LayoutProbe_ComposeParams_bgColorCalcRatios);
+        CHECK_OFFSET(VDP2ComposeParams, colorCalcEnable, kVdp2Compose_ComposeParams_colorCalcEnable);
+        CHECK_OFFSET(VDP2ComposeParams, colorOffsetEnable, kVdp2Compose_ComposeParams_colorOffsetEnable);
+        CHECK_OFFSET(VDP2ComposeParams, colorOffsetSelect, kVdp2Compose_ComposeParams_colorOffsetSelect);
+        CHECK_OFFSET(VDP2ComposeParams, lineColorEnable, kVdp2Compose_ComposeParams_lineColorEnable);
+        CHECK_OFFSET(VDP2ComposeParams, colorOffsetA, kVdp2Compose_ComposeParams_colorOffsetA);
+        CHECK_OFFSET(VDP2ComposeParams, shadowEnable, kVdp2Compose_ComposeParams_shadowEnable);
+        CHECK_OFFSET(VDP2ComposeParams, colorOffsetB, kVdp2Compose_ComposeParams_colorOffsetB);
+        CHECK_OFFSET(VDP2ComposeParams, bgColorCalcRatios, kVdp2Compose_ComposeParams_bgColorCalcRatios);
         CHECK(sizeof(decltype(VDP2ComposeParams::bgColorCalcRatios)::value_type) ==
-              sh::kCsVdp2LayoutProbe_ComposeParams_bgColorCalcRatios_stride);
+              sh::kVdp2Compose_ComposeParams_bgColorCalcRatios_stride);
         CHECK_OFFSET(VDP2ComposeParams, backLineColorCalcRatios,
-                     kCsVdp2LayoutProbe_ComposeParams_backLineColorCalcRatios);
+                     kVdp2Compose_ComposeParams_backLineColorCalcRatios);
         CHECK(sizeof(decltype(VDP2ComposeParams::backLineColorCalcRatios)::value_type) ==
-              sh::kCsVdp2LayoutProbe_ComposeParams_backLineColorCalcRatios_stride);
-        CHECK_OFFSET(VDP2ComposeParams, pad, kCsVdp2LayoutProbe_ComposeParams_pad);
-        CHECK_SIZE(VDP2ComposeParams, kCsVdp2LayoutProbe_ComposeParams_size);
+              sh::kVdp2Compose_ComposeParams_backLineColorCalcRatios_stride);
+        CHECK_OFFSET(VDP2ComposeParams, pad, kVdp2Compose_ComposeParams_pad);
+        CHECK_SIZE(VDP2ComposeParams, kVdp2Compose_ComposeParams_size);
         // The inventory's std430 offsets (section 5.2).
         STATIC_CHECK(offsetof(VDP2ComposeParams, colorOffsetB) == 32);
         STATIC_CHECK(offsetof(VDP2ComposeParams, bgColorCalcRatios) == 44);
@@ -250,123 +283,123 @@ TEST_CASE("VDP2 host parameter structs match the reflected std430 layouts", "[vd
         STATIC_CHECK(sizeof(VDP2ComposeParams) == 80);
     }
     SECTION("VDP2RotParamBase") {
-        CHECK_OFFSET(VDP2RotParamBase, tableAddress, kCsVdp2LayoutProbe_RotParamBase_tableAddress);
-        CHECK_OFFSET(VDP2RotParamBase, Xst, kCsVdp2LayoutProbe_RotParamBase_Xst);
-        CHECK_OFFSET(VDP2RotParamBase, Yst, kCsVdp2LayoutProbe_RotParamBase_Yst);
-        CHECK_OFFSET(VDP2RotParamBase, KA, kCsVdp2LayoutProbe_RotParamBase_KA);
-        CHECK_SIZE(VDP2RotParamBase, kCsVdp2LayoutProbe_RotParamBase_size);
+        CHECK_OFFSET(VDP2RotParamBase, tableAddress, kVdp2RenderBgs_RotParamBase_tableAddress);
+        CHECK_OFFSET(VDP2RotParamBase, Xst, kVdp2RenderBgs_RotParamBase_Xst);
+        CHECK_OFFSET(VDP2RotParamBase, Yst, kVdp2RenderBgs_RotParamBase_Yst);
+        CHECK_OFFSET(VDP2RotParamBase, KA, kVdp2RenderBgs_RotParamBase_KA);
+        CHECK_SIZE(VDP2RotParamBase, kVdp2RenderBgs_RotParamBase_size);
     }
     SECTION("VDP2NBGLine") {
-        CHECK_OFFSET(VDP2NBGLine, fracScrollX, kCsVdp2LayoutProbe_NBGLine_fracScrollX);
-        CHECK_OFFSET(VDP2NBGLine, fracScrollY, kCsVdp2LayoutProbe_NBGLine_fracScrollY);
-        CHECK_OFFSET(VDP2NBGLine, scrollIncH, kCsVdp2LayoutProbe_NBGLine_scrollIncH);
-        CHECK_OFFSET(VDP2NBGLine, mosaicSrcLine, kCsVdp2LayoutProbe_NBGLine_mosaicSrcLine);
-        CHECK_OFFSET(VDP2NBGLine, prevLastVCellScroll, kCsVdp2LayoutProbe_NBGLine_prevLastVCellScroll);
-        CHECK_OFFSET(VDP2NBGLine, prevLineEndScrollX, kCsVdp2LayoutProbe_NBGLine_prevLineEndScrollX);
-        CHECK_OFFSET(VDP2NBGLine, prevLineEndScrollY, kCsVdp2LayoutProbe_NBGLine_prevLineEndScrollY);
-        CHECK_OFFSET(VDP2NBGLine, pad, kCsVdp2LayoutProbe_NBGLine_pad);
-        CHECK_SIZE(VDP2NBGLine, kCsVdp2LayoutProbe_NBGLine_size);
+        CHECK_OFFSET(VDP2NBGLine, fracScrollX, kVdp2RenderBgs_NBGLine_fracScrollX);
+        CHECK_OFFSET(VDP2NBGLine, fracScrollY, kVdp2RenderBgs_NBGLine_fracScrollY);
+        CHECK_OFFSET(VDP2NBGLine, scrollIncH, kVdp2RenderBgs_NBGLine_scrollIncH);
+        CHECK_OFFSET(VDP2NBGLine, mosaicSrcLine, kVdp2RenderBgs_NBGLine_mosaicSrcLine);
+        CHECK_OFFSET(VDP2NBGLine, prevLastVCellScroll, kVdp2RenderBgs_NBGLine_prevLastVCellScroll);
+        CHECK_OFFSET(VDP2NBGLine, prevLineEndScrollX, kVdp2RenderBgs_NBGLine_prevLineEndScrollX);
+        CHECK_OFFSET(VDP2NBGLine, prevLineEndScrollY, kVdp2RenderBgs_NBGLine_prevLineEndScrollY);
+        CHECK_OFFSET(VDP2NBGLine, pad, kVdp2RenderBgs_NBGLine_pad);
+        CHECK_SIZE(VDP2NBGLine, kVdp2RenderBgs_NBGLine_size);
         STATIC_CHECK(sizeof(VDP2NBGLine) == 32);
     }
     SECTION("VDP2LayerRenderParams") {
-        CHECK_OFFSET(VDP2LayerRenderParams, nbg, kCsVdp2LayoutProbe_LayerRenderParams_nbg);
-        CHECK(sizeof(NBGParams) == sh::kCsVdp2LayoutProbe_LayerRenderParams_nbg_stride);
-        CHECK_OFFSET(VDP2LayerRenderParams, rbg, kCsVdp2LayoutProbe_LayerRenderParams_rbg);
-        CHECK(sizeof(RBGParams) == sh::kCsVdp2LayoutProbe_LayerRenderParams_rbg_stride);
-        CHECK_OFFSET(VDP2LayerRenderParams, windows, kCsVdp2LayoutProbe_LayerRenderParams_windows);
-        CHECK(sizeof(VDP2GlobalWindowParams) == sh::kCsVdp2LayoutProbe_LayerRenderParams_windows_stride);
-        CHECK_OFFSET(VDP2LayerRenderParams, rotWindows, kCsVdp2LayoutProbe_LayerRenderParams_rotWindows);
-        CHECK_OFFSET(VDP2LayerRenderParams, lineScreenParams, kCsVdp2LayoutProbe_LayerRenderParams_lineScreenParams);
-        CHECK_OFFSET(VDP2LayerRenderParams, backScreenParams, kCsVdp2LayoutProbe_LayerRenderParams_backScreenParams);
+        CHECK_OFFSET(VDP2LayerRenderParams, nbg, kVdp2RenderBgs_LayerRenderParams_nbg);
+        CHECK(sizeof(NBGParams) == sh::kVdp2RenderBgs_LayerRenderParams_nbg_stride);
+        CHECK_OFFSET(VDP2LayerRenderParams, rbg, kVdp2RenderBgs_LayerRenderParams_rbg);
+        CHECK(sizeof(RBGParams) == sh::kVdp2RenderBgs_LayerRenderParams_rbg_stride);
+        CHECK_OFFSET(VDP2LayerRenderParams, windows, kVdp2RenderBgs_LayerRenderParams_windows);
+        CHECK(sizeof(VDP2GlobalWindowParams) == sh::kVdp2RenderBgs_LayerRenderParams_windows_stride);
+        CHECK_OFFSET(VDP2LayerRenderParams, rotWindows, kVdp2RenderBgs_LayerRenderParams_rotWindows);
+        CHECK_OFFSET(VDP2LayerRenderParams, lineScreenParams, kVdp2RenderBgs_LayerRenderParams_lineScreenParams);
+        CHECK_OFFSET(VDP2LayerRenderParams, backScreenParams, kVdp2RenderBgs_LayerRenderParams_backScreenParams);
         CHECK_OFFSET(VDP2LayerRenderParams, specialFunctionCodes,
-                     kCsVdp2LayoutProbe_LayerRenderParams_specialFunctionCodes);
-        CHECK_SIZE(VDP2LayerRenderParams, kCsVdp2LayoutProbe_LayerRenderParams_size);
+                     kVdp2RenderBgs_LayerRenderParams_specialFunctionCodes);
+        CHECK_SIZE(VDP2LayerRenderParams, kVdp2RenderBgs_LayerRenderParams_size);
         STATIC_CHECK(sizeof(VDP2LayerRenderParams) == 1464);
     }
     SECTION("NBGParams") {
-        CHECK_OFFSET(NBGParams, base, kCsVdp2LayoutProbe_NBGParams_base);
-        CHECK_OFFSET(NBGParams, scrollAmount, kCsVdp2LayoutProbe_NBGParams_scrollAmount);
-        CHECK_OFFSET(NBGParams, scrollInc, kCsVdp2LayoutProbe_NBGParams_scrollInc);
-        CHECK_OFFSET(NBGParams, pageBaseAddresses, kCsVdp2LayoutProbe_NBGParams_pageBaseAddresses);
+        CHECK_OFFSET(NBGParams, base, kVdp2RenderBgs_NBGParams_base);
+        CHECK_OFFSET(NBGParams, scrollAmount, kVdp2RenderBgs_NBGParams_scrollAmount);
+        CHECK_OFFSET(NBGParams, scrollInc, kVdp2RenderBgs_NBGParams_scrollInc);
+        CHECK_OFFSET(NBGParams, pageBaseAddresses, kVdp2RenderBgs_NBGParams_pageBaseAddresses);
         CHECK(sizeof(decltype(NBGParams::pageBaseAddresses)::value_type) ==
-              sh::kCsVdp2LayoutProbe_NBGParams_pageBaseAddresses_stride);
-        CHECK_OFFSET(NBGParams, vcellScrollEnable, kCsVdp2LayoutProbe_NBGParams_vcellScrollEnable);
-        CHECK_OFFSET(NBGParams, lineScrollXEnable, kCsVdp2LayoutProbe_NBGParams_lineScrollXEnable);
-        CHECK_OFFSET(NBGParams, lineScrollYEnable, kCsVdp2LayoutProbe_NBGParams_lineScrollYEnable);
-        CHECK_OFFSET(NBGParams, lineZoomEnable, kCsVdp2LayoutProbe_NBGParams_lineZoomEnable);
-        CHECK_OFFSET(NBGParams, lineScrollInterval, kCsVdp2LayoutProbe_NBGParams_lineScrollInterval);
-        CHECK_OFFSET(NBGParams, lineScrollTableAddress, kCsVdp2LayoutProbe_NBGParams_lineScrollTableAddress);
-        CHECK_OFFSET(NBGParams, vcellScrollOffset, kCsVdp2LayoutProbe_NBGParams_vcellScrollOffset);
-        CHECK_OFFSET(NBGParams, vcellScrollDelay, kCsVdp2LayoutProbe_NBGParams_vcellScrollDelay);
-        CHECK_OFFSET(NBGParams, vcellScrollRepeat, kCsVdp2LayoutProbe_NBGParams_vcellScrollRepeat);
-        CHECK_OFFSET(NBGParams, scrollYIncBase, kCsVdp2LayoutProbe_NBGParams_scrollYIncBase);
-        CHECK_SIZE(NBGParams, kCsVdp2LayoutProbe_NBGParams_size);
+              sh::kVdp2RenderBgs_NBGParams_pageBaseAddresses_stride);
+        CHECK_OFFSET(NBGParams, vcellScrollEnable, kVdp2RenderBgs_NBGParams_vcellScrollEnable);
+        CHECK_OFFSET(NBGParams, lineScrollXEnable, kVdp2RenderBgs_NBGParams_lineScrollXEnable);
+        CHECK_OFFSET(NBGParams, lineScrollYEnable, kVdp2RenderBgs_NBGParams_lineScrollYEnable);
+        CHECK_OFFSET(NBGParams, lineZoomEnable, kVdp2RenderBgs_NBGParams_lineZoomEnable);
+        CHECK_OFFSET(NBGParams, lineScrollInterval, kVdp2RenderBgs_NBGParams_lineScrollInterval);
+        CHECK_OFFSET(NBGParams, lineScrollTableAddress, kVdp2RenderBgs_NBGParams_lineScrollTableAddress);
+        CHECK_OFFSET(NBGParams, vcellScrollOffset, kVdp2RenderBgs_NBGParams_vcellScrollOffset);
+        CHECK_OFFSET(NBGParams, vcellScrollDelay, kVdp2RenderBgs_NBGParams_vcellScrollDelay);
+        CHECK_OFFSET(NBGParams, vcellScrollRepeat, kVdp2RenderBgs_NBGParams_vcellScrollRepeat);
+        CHECK_OFFSET(NBGParams, scrollYIncBase, kVdp2RenderBgs_NBGParams_scrollYIncBase);
+        CHECK_SIZE(NBGParams, kVdp2RenderBgs_NBGParams_size);
     }
     SECTION("RBGParams") {
-        CHECK_OFFSET(RBGParams, base, kCsVdp2LayoutProbe_RBGParams_base);
-        CHECK_OFFSET(RBGParams, screenOverProcess, kCsVdp2LayoutProbe_RBGParams_screenOverProcess);
-        CHECK_OFFSET(RBGParams, screenOverPatternName, kCsVdp2LayoutProbe_RBGParams_screenOverPatternName);
-        CHECK_OFFSET(RBGParams, pageBaseAddresses, kCsVdp2LayoutProbe_RBGParams_pageBaseAddresses);
+        CHECK_OFFSET(RBGParams, base, kVdp2RenderBgs_RBGParams_base);
+        CHECK_OFFSET(RBGParams, screenOverProcess, kVdp2RenderBgs_RBGParams_screenOverProcess);
+        CHECK_OFFSET(RBGParams, screenOverPatternName, kVdp2RenderBgs_RBGParams_screenOverPatternName);
+        CHECK_OFFSET(RBGParams, pageBaseAddresses, kVdp2RenderBgs_RBGParams_pageBaseAddresses);
         CHECK(sizeof(decltype(RBGParams::pageBaseAddresses)::value_type) ==
-              sh::kCsVdp2LayoutProbe_RBGParams_pageBaseAddresses_stride);
-        CHECK_SIZE(RBGParams, kCsVdp2LayoutProbe_RBGParams_size);
+              sh::kVdp2RenderBgs_RBGParams_pageBaseAddresses_stride);
+        CHECK_SIZE(RBGParams, kVdp2RenderBgs_RBGParams_size);
     }
     SECTION("VDP2BaseBGParams") {
-        CHECK_OFFSET(VDP2BaseBGParams, enabled, kCsVdp2LayoutProbe_BaseBGParams_enabled);
-        CHECK_OFFSET(VDP2BaseBGParams, enableTransparency, kCsVdp2LayoutProbe_BaseBGParams_enableTransparency);
-        CHECK_OFFSET(VDP2BaseBGParams, bitmap, kCsVdp2LayoutProbe_BaseBGParams_bitmap);
-        CHECK_OFFSET(VDP2BaseBGParams, priorityNumber, kCsVdp2LayoutProbe_BaseBGParams_priorityNumber);
-        CHECK_OFFSET(VDP2BaseBGParams, priorityMode, kCsVdp2LayoutProbe_BaseBGParams_priorityMode);
-        CHECK_OFFSET(VDP2BaseBGParams, specialFunctionSelect, kCsVdp2LayoutProbe_BaseBGParams_specialFunctionSelect);
-        CHECK_OFFSET(VDP2BaseBGParams, cellSizeShift, kCsVdp2LayoutProbe_BaseBGParams_cellSizeShift);
-        CHECK_OFFSET(VDP2BaseBGParams, colorFormat, kCsVdp2LayoutProbe_BaseBGParams_colorFormat);
-        CHECK_OFFSET(VDP2BaseBGParams, cramOffset, kCsVdp2LayoutProbe_BaseBGParams_cramOffset);
-        CHECK_OFFSET(VDP2BaseBGParams, supplScrollCharNum, kCsVdp2LayoutProbe_BaseBGParams_supplScrollCharNum);
-        CHECK_OFFSET(VDP2BaseBGParams, supplPalNum, kCsVdp2LayoutProbe_BaseBGParams_supplPalNum);
-        CHECK_OFFSET(VDP2BaseBGParams, supplSpecialColorCalc, kCsVdp2LayoutProbe_BaseBGParams_supplSpecialColorCalc);
-        CHECK_OFFSET(VDP2BaseBGParams, supplSpecialPriority, kCsVdp2LayoutProbe_BaseBGParams_supplSpecialPriority);
-        CHECK_OFFSET(VDP2BaseBGParams, mosaicEnable, kCsVdp2LayoutProbe_BaseBGParams_mosaicEnable);
-        CHECK_OFFSET(VDP2BaseBGParams, colorCalcEnable, kCsVdp2LayoutProbe_BaseBGParams_colorCalcEnable);
-        CHECK_OFFSET(VDP2BaseBGParams, extChar, kCsVdp2LayoutProbe_BaseBGParams_extChar);
-        CHECK_OFFSET(VDP2BaseBGParams, twoWordChar, kCsVdp2LayoutProbe_BaseBGParams_twoWordChar);
-        CHECK_OFFSET(VDP2BaseBGParams, patNameAccess, kCsVdp2LayoutProbe_BaseBGParams_patNameAccess);
-        CHECK_OFFSET(VDP2BaseBGParams, charPatAccess, kCsVdp2LayoutProbe_BaseBGParams_charPatAccess);
-        CHECK_OFFSET(VDP2BaseBGParams, charPatDelay, kCsVdp2LayoutProbe_BaseBGParams_charPatDelay);
-        CHECK_OFFSET(VDP2BaseBGParams, vramDataOffset, kCsVdp2LayoutProbe_BaseBGParams_vramDataOffset);
-        CHECK_OFFSET(VDP2BaseBGParams, specialColorCalcMode, kCsVdp2LayoutProbe_BaseBGParams_specialColorCalcMode);
-        CHECK_OFFSET(VDP2BaseBGParams, pageShift, kCsVdp2LayoutProbe_BaseBGParams_pageShift);
-        CHECK_OFFSET(VDP2BaseBGParams, bitmapSize, kCsVdp2LayoutProbe_BaseBGParams_bitmapSize);
-        CHECK_OFFSET(VDP2BaseBGParams, bitmapBaseAddress, kCsVdp2LayoutProbe_BaseBGParams_bitmapBaseAddress);
-        CHECK_OFFSET(VDP2BaseBGParams, windowParams, kCsVdp2LayoutProbe_BaseBGParams_windowParams);
-        CHECK_SIZE(VDP2BaseBGParams, kCsVdp2LayoutProbe_BaseBGParams_size);
+        CHECK_OFFSET(VDP2BaseBGParams, enabled, kVdp2RenderBgs_BaseBGParams_enabled);
+        CHECK_OFFSET(VDP2BaseBGParams, enableTransparency, kVdp2RenderBgs_BaseBGParams_enableTransparency);
+        CHECK_OFFSET(VDP2BaseBGParams, bitmap, kVdp2RenderBgs_BaseBGParams_bitmap);
+        CHECK_OFFSET(VDP2BaseBGParams, priorityNumber, kVdp2RenderBgs_BaseBGParams_priorityNumber);
+        CHECK_OFFSET(VDP2BaseBGParams, priorityMode, kVdp2RenderBgs_BaseBGParams_priorityMode);
+        CHECK_OFFSET(VDP2BaseBGParams, specialFunctionSelect, kVdp2RenderBgs_BaseBGParams_specialFunctionSelect);
+        CHECK_OFFSET(VDP2BaseBGParams, cellSizeShift, kVdp2RenderBgs_BaseBGParams_cellSizeShift);
+        CHECK_OFFSET(VDP2BaseBGParams, colorFormat, kVdp2RenderBgs_BaseBGParams_colorFormat);
+        CHECK_OFFSET(VDP2BaseBGParams, cramOffset, kVdp2RenderBgs_BaseBGParams_cramOffset);
+        CHECK_OFFSET(VDP2BaseBGParams, supplScrollCharNum, kVdp2RenderBgs_BaseBGParams_supplScrollCharNum);
+        CHECK_OFFSET(VDP2BaseBGParams, supplPalNum, kVdp2RenderBgs_BaseBGParams_supplPalNum);
+        CHECK_OFFSET(VDP2BaseBGParams, supplSpecialColorCalc, kVdp2RenderBgs_BaseBGParams_supplSpecialColorCalc);
+        CHECK_OFFSET(VDP2BaseBGParams, supplSpecialPriority, kVdp2RenderBgs_BaseBGParams_supplSpecialPriority);
+        CHECK_OFFSET(VDP2BaseBGParams, mosaicEnable, kVdp2RenderBgs_BaseBGParams_mosaicEnable);
+        CHECK_OFFSET(VDP2BaseBGParams, colorCalcEnable, kVdp2RenderBgs_BaseBGParams_colorCalcEnable);
+        CHECK_OFFSET(VDP2BaseBGParams, extChar, kVdp2RenderBgs_BaseBGParams_extChar);
+        CHECK_OFFSET(VDP2BaseBGParams, twoWordChar, kVdp2RenderBgs_BaseBGParams_twoWordChar);
+        CHECK_OFFSET(VDP2BaseBGParams, patNameAccess, kVdp2RenderBgs_BaseBGParams_patNameAccess);
+        CHECK_OFFSET(VDP2BaseBGParams, charPatAccess, kVdp2RenderBgs_BaseBGParams_charPatAccess);
+        CHECK_OFFSET(VDP2BaseBGParams, charPatDelay, kVdp2RenderBgs_BaseBGParams_charPatDelay);
+        CHECK_OFFSET(VDP2BaseBGParams, vramDataOffset, kVdp2RenderBgs_BaseBGParams_vramDataOffset);
+        CHECK_OFFSET(VDP2BaseBGParams, specialColorCalcMode, kVdp2RenderBgs_BaseBGParams_specialColorCalcMode);
+        CHECK_OFFSET(VDP2BaseBGParams, pageShift, kVdp2RenderBgs_BaseBGParams_pageShift);
+        CHECK_OFFSET(VDP2BaseBGParams, bitmapSize, kVdp2RenderBgs_BaseBGParams_bitmapSize);
+        CHECK_OFFSET(VDP2BaseBGParams, bitmapBaseAddress, kVdp2RenderBgs_BaseBGParams_bitmapBaseAddress);
+        CHECK_OFFSET(VDP2BaseBGParams, windowParams, kVdp2RenderBgs_BaseBGParams_windowParams);
+        CHECK_SIZE(VDP2BaseBGParams, kVdp2RenderBgs_BaseBGParams_size);
         STATIC_CHECK(offsetof(VDP2BaseBGParams, pageShift) == 88);
     }
     SECTION("Window and line/back screen params") {
-        CHECK_OFFSET(VDP2GlobalWindowParams, start, kCsVdp2LayoutProbe_GlobalWindowParams_start);
-        CHECK_OFFSET(VDP2GlobalWindowParams, end, kCsVdp2LayoutProbe_GlobalWindowParams_end);
+        CHECK_OFFSET(VDP2GlobalWindowParams, start, kVdp2RenderBgs_GlobalWindowParams_start);
+        CHECK_OFFSET(VDP2GlobalWindowParams, end, kVdp2RenderBgs_GlobalWindowParams_end);
         CHECK_OFFSET(VDP2GlobalWindowParams, lineWindowTableAddress,
-                     kCsVdp2LayoutProbe_GlobalWindowParams_lineWindowTableAddress);
+                     kVdp2RenderBgs_GlobalWindowParams_lineWindowTableAddress);
         CHECK_OFFSET(VDP2GlobalWindowParams, lineWindowTableEnable,
-                     kCsVdp2LayoutProbe_GlobalWindowParams_lineWindowTableEnable);
-        CHECK_SIZE(VDP2GlobalWindowParams, kCsVdp2LayoutProbe_GlobalWindowParams_size);
+                     kVdp2RenderBgs_GlobalWindowParams_lineWindowTableEnable);
+        CHECK_SIZE(VDP2GlobalWindowParams, kVdp2RenderBgs_GlobalWindowParams_size);
 
-        CHECK_OFFSET(VDP2LayerWindowParams, windowLogicAnd, kCsVdp2LayoutProbe_LayerWindowParams_windowLogicAnd);
-        CHECK_OFFSET(VDP2LayerWindowParams, window0Enable, kCsVdp2LayoutProbe_LayerWindowParams_window0Enable);
-        CHECK_OFFSET(VDP2LayerWindowParams, window0Invert, kCsVdp2LayoutProbe_LayerWindowParams_window0Invert);
-        CHECK_OFFSET(VDP2LayerWindowParams, window1Enable, kCsVdp2LayoutProbe_LayerWindowParams_window1Enable);
-        CHECK_OFFSET(VDP2LayerWindowParams, window1Invert, kCsVdp2LayoutProbe_LayerWindowParams_window1Invert);
-        CHECK_SIZE(VDP2LayerWindowParams, kCsVdp2LayoutProbe_LayerWindowParams_size);
+        CHECK_OFFSET(VDP2LayerWindowParams, windowLogicAnd, kVdp2RenderBgs_LayerWindowParams_windowLogicAnd);
+        CHECK_OFFSET(VDP2LayerWindowParams, window0Enable, kVdp2RenderBgs_LayerWindowParams_window0Enable);
+        CHECK_OFFSET(VDP2LayerWindowParams, window0Invert, kVdp2RenderBgs_LayerWindowParams_window0Invert);
+        CHECK_OFFSET(VDP2LayerWindowParams, window1Enable, kVdp2RenderBgs_LayerWindowParams_window1Enable);
+        CHECK_OFFSET(VDP2LayerWindowParams, window1Invert, kVdp2RenderBgs_LayerWindowParams_window1Invert);
+        CHECK_SIZE(VDP2LayerWindowParams, kVdp2RenderBgs_LayerWindowParams_size);
 
-        CHECK_OFFSET(VDP2LayerWindowParamsS, base, kCsVdp2LayoutProbe_LayerWindowParamsS_base);
+        CHECK_OFFSET(VDP2LayerWindowParamsS, base, kVdp2RenderBgs_LayerWindowParamsS_base);
         CHECK_OFFSET(VDP2LayerWindowParamsS, spriteWindowEnable,
-                     kCsVdp2LayoutProbe_LayerWindowParamsS_spriteWindowEnable);
+                     kVdp2RenderBgs_LayerWindowParamsS_spriteWindowEnable);
         CHECK_OFFSET(VDP2LayerWindowParamsS, spriteWindowInvert,
-                     kCsVdp2LayoutProbe_LayerWindowParamsS_spriteWindowInvert);
-        CHECK_SIZE(VDP2LayerWindowParamsS, kCsVdp2LayoutProbe_LayerWindowParamsS_size);
+                     kVdp2RenderBgs_LayerWindowParamsS_spriteWindowInvert);
+        CHECK_SIZE(VDP2LayerWindowParamsS, kVdp2RenderBgs_LayerWindowParamsS_size);
 
-        CHECK_OFFSET(VDP2LineBackScreenParams, baseAddress, kCsVdp2LayoutProbe_LineBackScreenParams_baseAddress);
-        CHECK_OFFSET(VDP2LineBackScreenParams, perLine, kCsVdp2LayoutProbe_LineBackScreenParams_perLine);
-        CHECK_SIZE(VDP2LineBackScreenParams, kCsVdp2LayoutProbe_LineBackScreenParams_size);
+        CHECK_OFFSET(VDP2LineBackScreenParams, baseAddress, kVdp2RenderBgs_LineBackScreenParams_baseAddress);
+        CHECK_OFFSET(VDP2LineBackScreenParams, perLine, kVdp2RenderBgs_LineBackScreenParams_perLine);
+        CHECK_SIZE(VDP2LineBackScreenParams, kVdp2RenderBgs_LineBackScreenParams_size);
     }
     SECTION("test_int64_emu buffers") {
         CHECK_OFFSET(Int64EmuCase, a0, kTestInt64Emu_Int64EmuCase_a0);
