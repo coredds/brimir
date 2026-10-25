@@ -67,7 +67,22 @@ void PrintUsage(std::FILE* out) {
         "                size and XRGB8888 pixels, the same as brimir_bench --hash)\n"
         "  --dump-dir    write every recorded frame as frame_<i>.ppm into this directory\n"
         "  --verbose     also log debug messages and geometry changes\n"
-        "  --help, -h    show this help\n",
+        "  --vulkan      act as a Vulkan frontend: answer SET_HW_RENDER, run the context negotiation and read\n"
+        "                back every set_image image (selects brimir_renderer=vulkan). Uses the validation layer\n"
+        "                when installed; BRIMIR_VK_DEVICE picks the GPU\n"
+        "  --refuse-hw   refuse SET_HW_RENDER, as RetroArch does on a gl/d3d driver without driver switching\n"
+        "  --reset-at F  with --vulkan: driver reinit before frame F (counting warmup frames from 0):\n"
+        "                context_destroy, a new device through the negotiation, context_reset\n"
+        "  --reset-in-run F  the same reinit from inside frame F's retro_run (at the core's first environment\n"
+        "                call), as RetroArch does inside SET_SYSTEM_AV_INFO (PAL content); a SET_SYSTEM_AV_INFO\n"
+        "                that changes the frame rate or maximum geometry also triggers one\n"
+        "  --runahead    run-ahead simulation: before each frame one hidden frame (video disabled) that is\n"
+        "                rolled back, and a second instance of the core (refused a hardware context) that\n"
+        "                replays each frame hidden\n"
+        "  --help, -h    show this help\n"
+        "\n"
+        "Exit status: 0 ok, 1 usage, 2 error, 3 a check failed (queue lock, validation, hidden-frame GPU work,\n"
+        "unreadable frames; see the 'problem:' lines), 4 --vulkan without a usable Vulkan device.\n",
         out);
 }
 
@@ -115,6 +130,18 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.config.verbose = true;
             continue;
         }
+        if (opt == "--vulkan") {
+            args.config.vulkan = true;
+            continue;
+        }
+        if (opt == "--refuse-hw") {
+            args.config.refuseHw = true;
+            continue;
+        }
+        if (opt == "--runahead") {
+            args.config.runahead = true;
+            continue;
+        }
         if (i + 1 >= argc) {
             std::fprintf(stderr, "Missing value for %s\n", opt.c_str());
             return ParseResult::Error;
@@ -140,6 +167,16 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 std::fprintf(stderr, "Invalid --warmup value: %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--reset-at") {
+            if (!ParseInt(value, args.config.resetAt)) {
+                std::fprintf(stderr, "Invalid --reset-at value: %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--reset-in-run") {
+            if (!ParseInt(value, args.config.resetInRun)) {
+                std::fprintf(stderr, "Invalid --reset-in-run value: %s\n", value);
+                return ParseResult::Error;
+            }
         } else if (opt == "--option") {
             const std::string text = value;
             const size_t eq = text.find('=');
@@ -155,6 +192,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     }
     if (args.config.biosPath.empty() && args.config.systemDir.empty()) {
         std::fprintf(stderr, "--bios or --system-dir is required\n");
+        return ParseResult::Error;
+    }
+    if ((args.config.resetAt >= 0 || args.config.resetInRun >= 0) && (!args.config.vulkan || args.config.refuseHw)) {
+        std::fprintf(stderr, "--reset-at and --reset-in-run need --vulkan (without --refuse-hw)\n");
         return ParseResult::Error;
     }
     return ParseResult::Ok;
@@ -249,13 +290,40 @@ int main(int argc, char** argv) {
     }
 
     CliSink sink(args.hash, args.config.dumpDir);
+    vkhost::RunReport report;
     try {
-        vkhost::RunCore(args.config, sink);
+        report = vkhost::RunCore(args.config, sink);
+    } catch (const vkhost::VulkanUnavailable& e) {
+        std::fprintf(stderr, "vkhost: Vulkan unavailable: %s\n", e.what());
+        return 4;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Error: %s\n", e.what());
         return 2;
     }
     std::fflush(stdout);
-    std::fprintf(stderr, "vkhost: recorded %zu frames (warmup %d)\n", sink.Count(), args.config.warmup);
-    return sink.Failed() ? 2 : 0;
+    std::fprintf(stderr, "vkhost: recorded %zu frames (%llu hardware), warmup %d\n", sink.Count(),
+                 static_cast<unsigned long long>(report.recordedHardwareFrames), args.config.warmup);
+    if (args.config.vulkan) {
+        std::fprintf(stderr,
+                     "vkhost: vulkan: context resets %llu, core submits %llu, queue-lock violations %llu, "
+                     "hidden-frame GPU calls %llu, validation %s, validation errors %u\n",
+                     static_cast<unsigned long long>(report.contextResets),
+                     static_cast<unsigned long long>(report.coreSubmits),
+                     static_cast<unsigned long long>(report.lockViolations),
+                     static_cast<unsigned long long>(report.hiddenGpuCalls), report.validation ? "on" : "off",
+                     report.validationErrors);
+    }
+    if (args.config.runahead) {
+        std::fprintf(stderr, "vkhost: runahead: second instance ran %llu frames, %llu hardware frames, context %s\n",
+                     static_cast<unsigned long long>(report.secondaryFrames),
+                     static_cast<unsigned long long>(report.secondaryHardwareFrames),
+                     report.secondaryHadContext ? "yes" : "none");
+    }
+    for (const std::string& problem : report.problems) {
+        std::fprintf(stderr, "vkhost: FAILED: %s\n", problem.c_str());
+    }
+    if (sink.Failed()) {
+        return 2;
+    }
+    return report.problems.empty() ? 0 : 3;
 }

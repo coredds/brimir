@@ -177,6 +177,9 @@ add_library(brimir_libretro SHARED
 
 # Link with Brimir core
 target_link_libraries(brimir_libretro PRIVATE brimir-jit brimir::brimir-core)
+if(BRIMIR_VULKAN)
+    target_link_libraries(brimir_libretro PRIVATE brimir-gpu)
+endif()
 
 # Platform-specific link dependencies
 if(UNIX)

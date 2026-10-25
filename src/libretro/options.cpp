@@ -50,6 +50,26 @@ static struct retro_core_option_v2_definition option_defs[] = {
         },
         "auto"
     },
+#ifdef BRIMIR_VULKAN
+    {
+        // Read once at content load (retro_load_game), like brimir_bios.
+        "brimir_renderer",
+        "Renderer (restart required)",
+        nullptr,
+        "Software draws and presents every frame on the CPU. Vulkan presents the frames through the frontend's "
+        "Vulkan driver (the emulation itself is unchanged for now). Vulkan needs a Vulkan 1.2 GPU and the vulkan "
+        "video driver; when the frontend cannot provide it the core falls back to software. Applies when content "
+        "is loaded.",
+        nullptr,
+        "video",
+        {
+            { "software", "Software" },
+            { "vulkan", "Vulkan" },
+            { nullptr, nullptr }
+        },
+        "software"
+    },
+#endif
     {
         "brimir_deinterlacing",
         "Deinterlacing",

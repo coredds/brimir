@@ -4,6 +4,9 @@
 
 #include "host.hpp"
 
+#include <libretro_vulkan.h>
+
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -32,7 +35,9 @@ constexpr unsigned kEnv(unsigned cmd) {
     return cmd & ~(RETRO_ENVIRONMENT_EXPERIMENTAL | RETRO_ENVIRONMENT_PRIVATE);
 }
 
-LibretroHost* g_host = nullptr;
+// Libretro callbacks carry no user data: one set of thunks per instance slot.
+constexpr int kMaxHosts = 2;
+LibretroHost* g_hosts[kMaxHosts] = {};
 bool g_verbose = false;
 
 // Shared library handle, loaded the way a frontend does.
@@ -83,13 +88,14 @@ private:
     void* m_handle = nullptr;
 };
 
+template <int Slot>
 void RETRO_CALLCONV LogCallback(enum retro_log_level level, const char* fmt, ...) {
     if (level == RETRO_LOG_DEBUG && !g_verbose) {
         return;
     }
     static const char* const names[] = {"debug", "info", "warn", "error"};
     const unsigned index = static_cast<unsigned>(level);
-    std::fprintf(stderr, "[core %s] ", index < 4 ? names[index] : "?");
+    std::fprintf(stderr, Slot == 0 ? "[core %s] " : "[core#2 %s] ", index < 4 ? names[index] : "?");
     va_list args;
     va_start(args, fmt);
     std::vfprintf(stderr, fmt, args);
@@ -123,6 +129,9 @@ struct LibretroHost::Api {
     bool (*load_game)(const retro_game_info*) = nullptr;
     void (*unload_game)() = nullptr;
     void (*run)() = nullptr;
+    size_t (*serialize_size)() = nullptr;
+    bool (*serialize)(void*, size_t) = nullptr;
+    bool (*unserialize)(const void*, size_t) = nullptr;
 };
 
 LibretroHost::LibretroHost() = default;
@@ -132,8 +141,16 @@ LibretroHost::~LibretroHost() {
 }
 
 bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, const std::string& saveDir) {
-    if (g_host != nullptr) {
-        std::fprintf(stderr, "vkhost: only one core can be loaded at a time\n");
+    if (m_slot >= 0) {
+        std::fprintf(stderr, "vkhost: this host already has a core loaded\n");
+        return false;
+    }
+    int slot = 0;
+    while (slot < kMaxHosts && g_hosts[slot] != nullptr) {
+        ++slot;
+    }
+    if (slot == kMaxHosts) {
+        std::fprintf(stderr, "vkhost: at most %d cores can be loaded at a time\n", kMaxHosts);
         return false;
     }
     m_systemDir = systemDir;
@@ -143,6 +160,13 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_overrides.clear();
     for (const auto& [key, value] : config.options) {
         m_overrides[key] = value;
+    }
+    m_refuseHw = config.refuseHw;
+    m_resetInRun = config.resetInRun;
+    m_frameIndex = 0;
+    if (config.vulkan && !config.refuseHw) {
+        // Like a frontend's video driver, the instance and device exist before the core is loaded.
+        m_vulkan = std::make_unique<VulkanProvider>();
     }
 
     auto api = std::make_unique<Api>();
@@ -173,6 +197,9 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     resolve(api->load_game, "retro_load_game");
     resolve(api->unload_game, "retro_unload_game");
     resolve(api->run, "retro_run");
+    resolve(api->serialize_size, "retro_serialize_size");
+    resolve(api->serialize, "retro_serialize");
+    resolve(api->unserialize, "retro_unserialize");
     if (missing) {
         return false;
     }
@@ -183,13 +210,14 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     }
 
     m_api = std::move(api);
-    g_host = this;
+    m_slot = slot;
+    g_hosts[slot] = this;
 
     // RetroArch order: environment, init, the other callbacks, then the content.
-    m_api->set_environment(&LibretroHost::EnvironmentThunk);
+    m_api->set_environment(slot == 0 ? &LibretroHost::EnvironmentThunk<0> : &LibretroHost::EnvironmentThunk<1>);
     m_api->init();
     m_coreInitialized = true;
-    m_api->set_video_refresh(&LibretroHost::VideoThunk);
+    m_api->set_video_refresh(slot == 0 ? &LibretroHost::VideoThunk<0> : &LibretroHost::VideoThunk<1>);
     m_api->set_audio_sample(&LibretroHost::AudioSampleThunk);
     m_api->set_audio_sample_batch(&LibretroHost::AudioBatchThunk);
     m_api->set_input_poll(&LibretroHost::InputPollThunk);
@@ -226,43 +254,156 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         std::fprintf(stderr, "vkhost: the core did not select XRGB8888 (the only format this host reads)\n");
         return false;
     }
+
+    // RetroArch builds the video driver after retro_load_game: the device, then context_reset.
+    if (m_hwAccepted && !StartContext()) {
+        return false;
+    }
     return true;
+}
+
+bool LibretroHost::StartContext() {
+    if (!m_vulkan->CreateContext(m_negotiation)) {
+        std::fprintf(stderr, "vkhost: creating the Vulkan context failed\n");
+        return false;
+    }
+    m_contextLive = true;
+    ++m_contextResets;
+    if (m_hwRender.context_reset != nullptr) {
+        m_hwRender.context_reset();
+    }
+    return true;
+}
+
+bool LibretroHost::ResetContext() {
+    if (!m_contextLive) {
+        Problem("--reset-at: there is no hardware context to reset");
+        return false;
+    }
+    std::fprintf(stderr, "vkhost: vulkan: driver reinit (context_destroy, new device, context_reset)\n");
+    if (m_hwRender.context_destroy != nullptr) {
+        m_hwRender.context_destroy();
+    }
+    m_contextLive = false;
+    m_vulkan->DestroyContext();
+    return StartContext();
 }
 
 void LibretroHost::Unload() {
     if (m_api) {
+        // RetroArch's order: context_destroy, retro_unload_game, then the video driver frees the device
+        // (destroy_device, vkDestroyDevice).
+        if (m_contextLive) {
+            if (m_hwRender.context_destroy != nullptr) {
+                m_hwRender.context_destroy();
+            }
+            m_contextLive = false;
+        }
         if (m_contentLoaded) {
             m_api->unload_game();
             m_contentLoaded = false;
+        }
+        if (m_vulkan) {
+            m_vulkan->DestroyContext();
         }
         if (m_coreInitialized) {
             m_api->deinit();
             m_coreInitialized = false;
         }
-        m_api.reset();
     }
-    if (g_host == this) {
-        g_host = nullptr;
+    if (m_vulkan) {
+        m_coreSubmits = m_vulkan->CoreSubmits();
+        m_lockViolations = m_vulkan->LockViolations();
+        m_hiddenGpuCalls = m_vulkan->HiddenGpuCalls();
+        m_validation = m_vulkan->ValidationEnabled();
+        m_problems.insert(m_problems.end(), m_vulkan->Problems().begin(), m_vulkan->Problems().end());
+        // Destroying the instance can still report (leaks): read the counter afterwards.
+        const auto validationErrors = m_vulkan->ValidationCounter();
+        m_vulkan.reset();
+        m_validationErrors = validationErrors ? validationErrors->load() : 0;
     }
+    m_api.reset();
+    if (m_slot >= 0 && g_hosts[m_slot] == this) {
+        g_hosts[m_slot] = nullptr;
+    }
+    m_slot = -1;
 }
 
 bool LibretroHost::RunFrame(FrameSink* sink) {
     if (!m_api || !m_contentLoaded) {
         return false;
     }
+    const bool video = (m_avEnable & RETRO_AV_ENABLE_VIDEO) != 0;
+    if (m_vulkan) {
+        m_vulkan->SetVideoEnabled(video);
+    }
     m_sink = sink;
+    m_resetInRunPending = m_frameIndex == m_resetInRun;
     m_api->run();
+    if (m_resetInRunPending) {
+        m_resetInRunPending = false;
+        Problem("--reset-in-run: the core made no environment call in the frame");
+    }
+    ++m_frameIndex;
     m_sink = nullptr;
+    if (m_vulkan && m_contextLive && video) {
+        m_vulkan->EndFrame();
+    }
     return true;
 }
 
-bool RETRO_CALLCONV LibretroHost::EnvironmentThunk(unsigned cmd, void* data) {
-    return g_host != nullptr && g_host->Environment(cmd, data);
+bool LibretroHost::Serialize(std::vector<uint8_t>& state) {
+    if (!m_api || !m_contentLoaded) {
+        return false;
+    }
+    state.resize(m_api->serialize_size());
+    return !state.empty() && m_api->serialize(state.data(), state.size());
 }
 
+bool LibretroHost::Unserialize(const std::vector<uint8_t>& state) {
+    return m_api && m_contentLoaded && m_api->unserialize(state.data(), state.size());
+}
+
+void LibretroHost::Problem(const std::string& text) {
+    // Each kind once; the counters carry the totals.
+    if (std::find(m_problems.begin(), m_problems.end(), text) == m_problems.end()) {
+        m_problems.push_back(text);
+        std::fprintf(stderr, "vkhost: problem: %s\n", text.c_str());
+    }
+}
+
+void LibretroHost::FillReport(RunReport& report) const {
+    report.recordedFrames += m_recordedFrames;
+    report.recordedHardwareFrames += m_recordedHardware;
+    report.contextResets += m_contextResets;
+    report.unreadableFrames += m_unreadable;
+    report.hiddenGpuCalls += m_hiddenFrames;
+    report.problems.insert(report.problems.end(), m_problems.begin(), m_problems.end());
+    if (m_vulkan) {
+        report.coreSubmits += m_vulkan->CoreSubmits();
+        report.lockViolations += m_vulkan->LockViolations();
+        report.hiddenGpuCalls += m_vulkan->HiddenGpuCalls();
+        report.validation = report.validation || m_vulkan->ValidationEnabled();
+        report.validationErrors += m_vulkan->ValidationErrors();
+        report.problems.insert(report.problems.end(), m_vulkan->Problems().begin(), m_vulkan->Problems().end());
+    } else {
+        report.coreSubmits += m_coreSubmits;
+        report.lockViolations += m_lockViolations;
+        report.hiddenGpuCalls += m_hiddenGpuCalls;
+        report.validation = report.validation || m_validation;
+        report.validationErrors += m_validationErrors;
+    }
+}
+
+template <int Slot>
+bool RETRO_CALLCONV LibretroHost::EnvironmentThunk(unsigned cmd, void* data) {
+    return g_hosts[Slot] != nullptr && g_hosts[Slot]->Environment(cmd, data);
+}
+
+template <int Slot>
 void RETRO_CALLCONV LibretroHost::VideoThunk(const void* data, unsigned width, unsigned height, size_t pitch) {
-    if (g_host != nullptr) {
-        g_host->Video(data, width, height, pitch);
+    if (g_hosts[Slot] != nullptr) {
+        g_hosts[Slot]->Video(data, width, height, pitch);
     }
 }
 
@@ -326,6 +467,12 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
     }
     case kEnv(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE):
         *static_cast<bool*>(data) = false;
+        if (m_resetInRunPending) {
+            // A driver reinit from inside retro_run, the way RetroArch runs one inside SET_SYSTEM_AV_INFO: the
+            // core gets context_destroy and context_reset while its own call is still in progress.
+            m_resetInRunPending = false;
+            ResetContext();
+        }
         return true;
     case kEnv(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME):
     case kEnv(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS):
@@ -333,7 +480,58 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
     case kEnv(RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE):
         return true;
     case kEnv(RETRO_ENVIRONMENT_GET_LOG_INTERFACE):
-        static_cast<retro_log_callback*>(data)->log = &LogCallback;
+        static_cast<retro_log_callback*>(data)->log = m_slot == 0 ? &LogCallback<0> : &LogCallback<1>;
+        return true;
+    case kEnv(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER):
+        if (m_vulkan) {
+            *static_cast<unsigned*>(data) = RETRO_HW_CONTEXT_VULKAN;
+            return true;
+        }
+        if (m_refuseHw) {
+            // RetroArch on the gl driver with driver switching disabled: reports gl, returns false.
+            *static_cast<unsigned*>(data) = RETRO_HW_CONTEXT_OPENGL;
+        }
+        return false;
+    case kEnv(RETRO_ENVIRONMENT_SET_HW_RENDER): {
+        auto* callback = static_cast<retro_hw_render_callback*>(data);
+        if (!m_vulkan || m_refuseHw || callback->context_type != RETRO_HW_CONTEXT_VULKAN) {
+            std::fprintf(stderr, "vkhost: SET_HW_RENDER (context type %d) refused\n",
+                         static_cast<int>(callback->context_type));
+            return false;
+        }
+        if (m_contentLoaded) {
+            Problem("SET_HW_RENDER outside retro_load_game");
+        }
+        // Not used with Vulkan; RetroArch fills them for GL.
+        callback->get_current_framebuffer = nullptr;
+        callback->get_proc_address = nullptr;
+        m_hwRender = *callback;
+        m_hwAccepted = true;
+        std::fprintf(stderr, "vkhost: SET_HW_RENDER Vulkan %u.%u accepted\n", callback->version_major,
+                     callback->version_minor);
+        return true;
+    }
+    case kEnv(RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT): {
+        auto* support = static_cast<retro_hw_render_context_negotiation_interface*>(data);
+        if (!m_vulkan || support->interface_type != RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN) {
+            return false;
+        }
+        support->interface_version = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION;
+        return true;
+    }
+    case kEnv(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE):
+        // RetroArch refuses it in a run-ahead second instance, like SET_HW_RENDER. Only the pointer is kept: the
+        // core's struct must be static (it is used again at every driver reinit).
+        if (!m_vulkan || m_refuseHw) {
+            return false;
+        }
+        m_negotiation = static_cast<const retro_hw_render_context_negotiation_interface*>(data);
+        return true;
+    case kEnv(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE):
+        if (!m_vulkan || !m_contextLive) {
+            return false;
+        }
+        *static_cast<const retro_hw_render_interface**>(data) = m_vulkan->Interface();
         return true;
     case kEnv(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS):
         return true;
@@ -356,14 +554,24 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
     case kEnv(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY):
         *static_cast<const char**>(data) = m_saveDir.c_str();
         return true;
-    case kEnv(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO):
-        m_avInfo = *static_cast<const retro_system_av_info*>(data);
+    case kEnv(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO): {
+        const auto& info = *static_cast<const retro_system_av_info*>(data);
+        // RetroArch reinits the video driver (context_destroy, context_reset) inside the call when the maximum
+        // geometry or the frame rate changes.
+        const bool reinit = m_contextLive && (info.geometry.max_width != m_avInfo.geometry.max_width ||
+                                              info.geometry.max_height != m_avInfo.geometry.max_height ||
+                                              info.timing.fps != m_avInfo.timing.fps);
+        m_avInfo = info;
         m_geometry = m_avInfo.geometry;
         if (m_verbose) {
             std::fprintf(stderr, "vkhost: SET_SYSTEM_AV_INFO %ux%u (max %ux%u) %.2f fps\n", m_geometry.base_width,
                          m_geometry.base_height, m_geometry.max_width, m_geometry.max_height, m_avInfo.timing.fps);
         }
+        if (reinit) {
+            ResetContext();
+        }
         return true;
+    }
     case kEnv(RETRO_ENVIRONMENT_SET_GEOMETRY):
         m_geometry = *static_cast<const retro_game_geometry*>(data);
         m_avInfo.geometry = m_geometry;
@@ -387,17 +595,37 @@ void LibretroHost::Video(const void* data, unsigned width, unsigned height, size
         return;
     }
     if (data == RETRO_HW_FRAME_BUFFER_VALID) {
-        // Task 6: read back the retro_vulkan_image the core handed over with set_image.
-        ++m_unreadable;
-        if (m_unreadable == 1) {
-            std::fprintf(stderr, "vkhost: hardware frame received but no hardware context is implemented\n");
+        if (!m_vulkan || !m_contextLive) {
+            ++m_unreadable;
+            Problem("hardware frame without a hardware context");
+            return;
         }
+        if ((m_avEnable & RETRO_AV_ENABLE_VIDEO) == 0) {
+            ++m_hiddenFrames;
+            Problem("hardware frame in a frame with video disabled");
+        }
+        ++m_displayed;
+        ++m_hardwareFrames;
+        if (m_sink == nullptr) {
+            return;
+        }
+        // The image the core handed over with set_image, read in GENERAL layout after its work completed.
+        HostFrame frame;
+        if (!m_vulkan->ReadImage(width, height, frame)) {
+            ++m_unreadable;
+            Problem("hardware frame without a readable set_image image");
+            return;
+        }
+        ++m_recordedFrames;
+        ++m_recordedHardware;
+        m_sink->OnFrame(std::move(frame));
         return;
     }
     ++m_displayed;
     if (m_sink == nullptr) {
         return;
     }
+    ++m_recordedFrames;
     HostFrame frame;
     frame.w = width;
     frame.h = height;

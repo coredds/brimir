@@ -1217,3 +1217,45 @@ TEST_CASE("Frame path: pitch is tight and settings apply to the next frame", "[c
     CHECK(core.GetFramebufferHeight() == 224);
     CHECK(core.GetFramebufferPitch() == 320 * 4);
 }
+TEST_CASE("Frame path: GPU output keeps the raw frame and skips the CPU transforms", "[core][frame-path]") {
+    CoreWrapper core;
+    const std::vector<uint32_t> first = brimir::test::MakePatternFrame(320, 224);
+    core.TestInjectFrame(first.data(), 320, 224);
+    const auto* sw = static_cast<const uint32_t*>(core.GetFramebuffer());
+    const std::vector<uint32_t> softwareFrame(sw, sw + 320 * 224);
+    CHECK_FALSE(core.IsGpuOutputActive());
+    CHECK(core.RawFrame() == nullptr);
+
+    core.SetGpuOutputActive(true);
+    CHECK(core.IsGpuOutputActive());
+    CHECK(core.RawFrame() == nullptr); // nothing captured yet
+    core.SetRotation(90);
+    core.SetOverscanCrop(32, 16);
+    const std::vector<uint32_t> second = brimir::test::MakePatternFrame(352, 240);
+    core.TestInjectFrame(second.data(), 352, 240);
+
+    REQUIRE(core.RawFrame() != nullptr);
+    CHECK(core.RawFrameWidth() == 352);
+    CHECK(core.RawFrameHeight() == 240);
+    CHECK(std::equal(second.begin(), second.end(), core.RawFrame())); // native XBGR, untouched
+    CHECK(core.RawFrameSettings().cropH == 32);
+    CHECK(core.RawFrameSettings().cropV == 16);
+    CHECK(core.RawFrameSettings().rotation == 90);
+
+    // The software output is neither converted nor cropped nor rotated while the GPU output is active.
+    CHECK(core.GetFramebufferWidth() == 320);
+    CHECK(core.GetFramebufferHeight() == 224);
+    CHECK(core.GetFramebufferPitch() == 320 * 4);
+    sw = static_cast<const uint32_t*>(core.GetFramebuffer());
+    CHECK(std::equal(softwareFrame.begin(), softwareFrame.end(), sw));
+
+    // Like the software path, settings changed after a frame apply to the next one.
+    core.SetRotation(180);
+    CHECK(core.RawFrameSettings().rotation == 90);
+
+    core.SetGpuOutputActive(false);
+    CHECK(core.RawFrame() == nullptr);
+    core.TestInjectFrame(second.data(), 352, 240);
+    CHECK(core.GetFramebufferWidth() == 352 - 32);
+    CHECK(core.GetFramebufferHeight() == 240 - 16);
+}

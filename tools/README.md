@@ -272,10 +272,45 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--hash` | one line per recorded frame, `frame <i> <w>x<h> <hash>`, the same as `brimir_bench --hash` |
 | `--dump-dir <dir>` | write each recorded frame as `frame_<i>.ppm` |
 | `--verbose` | also log core debug messages, geometry changes and AV info changes |
+| `--vulkan` | act as a Vulkan frontend (below) and select `brimir_renderer=vulkan` (an explicit `--option` wins) |
+| `--refuse-hw` | refuse `SET_HW_RENDER` and the negotiation interface, as RetroArch does on a gl/d3d driver without driver switching (and in a run-ahead second instance) |
+| `--reset-at F` | with `--vulkan`: a video driver reinit before frame F (counted from 0, warmup included): `context_destroy`, the old device destroyed, a new one through the negotiation, `context_reset` |
+| `--reset-in-run F` | the same reinit from inside frame F's `retro_run`, at the core's first environment call, the way RetroArch reinits inside `SET_SYSTEM_AV_INFO` (PAL content). A `SET_SYSTEM_AV_INFO` that changes the frame rate or the maximum geometry while a context is live also triggers one |
+| `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (`retro_unserialize` currently corrupts the heap on BIOS-menu states), so compare against a software run with `--runahead` |
 
 The save directory is always a fresh temporary directory that is removed on exit. Core log messages go to stderr,
-prefixed `[core <level>]`; the Ymir library's own log lines go to stdout, so filter hash output for lines that start
-with `frame `. Exit codes: 0 success, 1 usage error, 2 load or setup failure.
+prefixed `[core <level>]` (`[core#2 ...]` for the run-ahead instance); the Ymir library's own log lines go to stdout,
+so filter hash output for lines that start with `frame `. Exit codes: 0 success, 1 usage error, 2 load or setup
+failure, 3 a check failed (the `vkhost: FAILED:` lines say which), 4 `--vulkan` without a usable Vulkan device.
+
+### Vulkan host (`--vulkan`)
+
+The host creates its own instance and device (`gpu::CreateHeadlessDevice`, validation layer on when installed;
+`BRIMIR_VK_DEVICE` picks the GPU, `BRIMIR_VK_SYNC_VALIDATION=1` adds synchronization validation) before loading the
+core, then plays RetroArch's vulkan driver: `GET_PREFERRED_HW_RENDER` answers Vulkan, `SET_HW_RENDER` (Vulkan) and the
+negotiation interface (v2) are accepted, and after `retro_load_game` it calls `get_application_info` and
+`create_device2` (with a `create_device_wrapper` that creates the device on the host's instance) and then
+`context_reset`. `GET_HW_RENDER_INTERFACE` returns a version 5 `retro_hw_render_interface_vulkan` with a 3-slot sync
+ring (mask `0b111`, the index advancing each displayed frame, `wait_sync_index` waiting for that slot's fence).
+Each `video_refresh(RETRO_HW_FRAME_BUFFER_VALID)` reads back the last `set_image` image (`GENERAL` layout) and
+records it as XRGB8888, so `--hash` lines compare directly with a software run.
+
+The host also checks the core's side of the contract and fails the run (exit 3) on: `vkQueueSubmit` (wrapped
+through the interface's `get_device_proc_addr`/`get_instance_proc_addr`) without `lock_queue` held, any wait
+(`vkWaitForFences`, `vkDeviceWaitIdle`, `vkQueueWaitIdle`, `wait_sync_index`) while holding it, GPU calls or hardware
+frames in frames with video disabled, `set_image` outside `GENERAL`/`VK_QUEUE_FAMILY_IGNORED` or with semaphores,
+features requested through `VkPhysicalDeviceVulkan1xFeatures`, unreadable frames, and validation errors. The
+queue-lock check runs a self-test each time a context is created. The summary line reports context resets, the
+core's submits and each counter.
+
+The host's volk and the core's are separate copies (the core is its own library with its own globals): the core's
+`VulkanDevice::WrapExternal` loads its volk from the host's `vkGetInstanceProcAddr` and instance without touching the
+host's function pointers.
+
+The ctest entry `brimir_vkhost_vulkan` (`tests/vkhost_checks.cmake`) runs the BIOS menu (US BIOS from
+`tests/fixtures`, 60 + 300 frames) in software, `--vulkan`, `--vulkan --refuse-hw`, `--vulkan --reset-at 120`,
+`--vulkan --reset-in-run 150` and `--vulkan --runahead`, and requires identical frame hashes; it is skipped without the
+BIOS or a Vulkan device.
 
 To compare against `brimir_bench` use the same BIOS, game, `--warmup` and `--frames`, and separate scratch system
 directories that each hold a copy of the RTC file (the core rewrites it):
@@ -290,7 +325,8 @@ The `frame ...` lines are identical for the software path.
 Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2`, `GET_VARIABLE`,
 `GET_VARIABLE_UPDATE` (always false), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,
 `GET_SAVE_DIRECTORY`, `SET_SYSTEM_AV_INFO`, `SET_GEOMETRY`, `GET_LOG_INTERFACE`, `GET_INPUT_BITMASKS`,
-`GET_AUDIO_VIDEO_ENABLE`, `GET/SET_DISK_CONTROL_(EXT_)INTERFACE`, and `SET_SUPPORT_NO_GAME`,
+`GET_AUDIO_VIDEO_ENABLE`, `GET/SET_DISK_CONTROL_(EXT_)INTERFACE`, the hardware rendering calls above (with
+`--vulkan`; refused otherwise), and `SET_SUPPORT_NO_GAME`,
 `SET_INPUT_DESCRIPTORS` and `SET_MEMORY_MAPS` (accepted, ignored). Any other call returns false and is logged once
 as `environment call N not supported`. Audio and input are no-ops.
 

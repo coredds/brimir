@@ -56,6 +56,13 @@ enum class ConsoleRegion {
     Unknown,
 };
 
+/// @brief The output transforms the GPU frame output applies to a raw frame (see SetOverscanCrop/SetRotation)
+struct FrameOutputSettings {
+    uint32_t cropH = 0;    ///< total horizontal overscan crop
+    uint32_t cropV = 0;    ///< total vertical overscan crop
+    uint32_t rotation = 0; ///< 0, 90, 180 or 270
+};
+
 /// @brief Wraps the Ymir Saturn emulator for use with libretro
 class CoreWrapper {
 public:
@@ -182,6 +189,19 @@ public:
     /// @brief Get the current framebuffer pitch (bytes per scanline)
     /// @return Pitch in bytes
     unsigned int GetFramebufferPitch() const;
+
+    /// @brief Hand frames to a GPU frame output instead of the CPU path. While active, each completed frame is
+    /// kept as Ymir's native XBGR8888 frame (RawFrame) with the crop/rotation settings current at completion
+    /// (RawFrameSettings), and the CPU convert/crop/rotate is skipped: GetFramebuffer() and its size keep the last
+    /// software frame. Changing the state drops the kept frame.
+    void SetGpuOutputActive(bool active);
+    bool IsGpuOutputActive() const { return m_gpuOutputActive; }
+
+    /// @brief The last frame completed while the GPU output was active (tightly packed XBGR8888), or nullptr
+    const uint32_t* RawFrame() const { return m_rawWidth != 0 ? m_rawFrame.data() : nullptr; }
+    uint32_t RawFrameWidth() const { return m_rawWidth; }
+    uint32_t RawFrameHeight() const { return m_rawHeight; }
+    const FrameOutputSettings& RawFrameSettings() const { return m_rawSettings; }
 
     /// @brief Get audio samples for this frame
     /// @param buffer Buffer to write samples to
@@ -372,6 +392,13 @@ private:
     std::vector<uint32_t> m_framebuffer;  // XRGB8888 converted from Ymir's XBGR
     std::vector<uint32_t> m_displayFramebuffer; // Final output after crop/rotation
     const void* m_displayPointer = nullptr; // Points to final display buffer
+
+    // GPU frame output (SetGpuOutputActive): the raw native frame instead of the CPU transforms
+    bool m_gpuOutputActive = false;
+    std::vector<uint32_t> m_rawFrame;
+    uint32_t m_rawWidth = 0;
+    uint32_t m_rawHeight = 0;
+    FrameOutputSettings m_rawSettings;
 
     // Screen rotation (TATE mode)
     int m_rotation = 0; // 0, 90, 180, 270

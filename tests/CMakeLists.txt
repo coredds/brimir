@@ -109,6 +109,18 @@ if(BRIMIR_JIT_X64_EFFECTIVE)
     set_tests_properties(brimir_tests_jit_ir PROPERTIES ENVIRONMENT "BRIMIR_JIT_BACKEND=ir")
 endif()
 
+# The libretro Vulkan context through brimir_vkhost (tests/vkhost_checks.cmake): BIOS menu frames, software vs
+# Vulkan, refused context, driver reinit, run-ahead. Skipped without the US BIOS fixture or a Vulkan device.
+if(TARGET brimir_vkhost)
+    add_test(NAME brimir_vkhost_vulkan
+        COMMAND ${CMAKE_COMMAND}
+            -DVKHOST=$<TARGET_FILE:brimir_vkhost>
+            -DBIOS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/mpr-17933.bin
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/vkhost_checks.cmake
+    )
+    set_tests_properties(brimir_vkhost_vulkan PROPERTIES SKIP_REGULAR_EXPRESSION "VKHOST_CHECKS_SKIPPED")
+endif()
+
 # Copy test fixtures if they exist
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/fixtures

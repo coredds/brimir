@@ -86,9 +86,12 @@ private:
 
 } // namespace
 
-void RunCore(const HostConfig& config, FrameSink& sink) {
+RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     if (config.corePath.empty()) {
         throw std::runtime_error("no core library given");
+    }
+    if ((config.resetAt >= 0 || config.resetInRun >= 0) && !config.vulkan) {
+        throw std::runtime_error("--reset-at and --reset-in-run need --vulkan");
     }
 
     // Saves always go to a fresh directory, so earlier runs never affect the result (as in brimir_bench).
@@ -128,31 +131,104 @@ void RunCore(const HostConfig& config, FrameSink& sink) {
         }
     }
 
+    if (config.vulkan) {
+        // The renderer option the Vulkan host is for; an explicit --option still wins.
+        effective.options.insert(effective.options.begin(), {"brimir_renderer", "vulkan"});
+    }
+
     LibretroHost host;
     if (!host.Load(effective, systemDir.string(), saveDir.string())) {
         throw std::runtime_error("loading the core failed");
     }
 
-    for (int i = 0; i < config.warmup; ++i) {
-        host.RunFrame(nullptr);
+    // Run-ahead as RetroArch does it for a hardware core, without the state transfers (retro_serialize /
+    // retro_unserialize): unserializing a state taken after the BIOS's first peripheral polls corrupts the heap
+    // (the save state's std::vector members are stored as raw bytes, task-6 report), so the hidden frames are
+    // not rolled back and the comparison is against a software run with the same --runahead pattern.
+    // - Single-instance run-ahead: before each displayed frame the main instance runs one hidden frame with video
+    //   disabled (GET_AUDIO_VIDEO_ENABLE without RETRO_AV_ENABLE_VIDEO): no GPU work may happen in it.
+    // - Second instance: RetroArch refuses SET_HW_RENDER (and the negotiation interface) there, so it runs on
+    //   software; it is a separate copy of the library, and runs one frame with audio and video disabled per
+    //   displayed frame.
+    LibretroHost secondary;
+    if (config.runahead) {
+        fs::path copy = scratch.Path() / ("runahead_" + fs::path(config.corePath).filename().string());
+        std::error_code ec;
+        fs::copy_file(config.corePath, copy, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            throw std::runtime_error("cannot copy the core for the run-ahead instance: " + ec.message());
+        }
+        const fs::path secondSaveDir = scratch.Path() / "save2";
+        fs::create_directories(secondSaveDir);
+        HostConfig second = effective;
+        second.corePath = copy.string();
+        second.vulkan = false;
+        second.refuseHw = true;
+        if (!secondary.Load(second, systemDir.string(), secondSaveDir.string())) {
+            throw std::runtime_error("loading the run-ahead instance failed");
+        }
     }
-    for (int i = 0; i < config.frames; ++i) {
-        host.RunFrame(&sink);
+
+    RunReport report;
+    const int total = config.warmup + config.frames;
+    uint64_t secondaryFrames = 0;
+    for (int i = 0; i < total; ++i) {
+        if (i == config.resetAt) {
+            host.ResetContext();
+        }
+        if (config.runahead) {
+            host.SetAvEnable(RETRO_AV_ENABLE_AUDIO);
+            host.RunFrame(nullptr);
+            host.SetAvEnable(RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO);
+        }
+        host.RunFrame(i >= config.warmup ? &sink : nullptr);
+        if (config.runahead) {
+            secondary.SetAvEnable(0);
+            secondary.RunFrame(nullptr);
+            ++secondaryFrames;
+        }
     }
-    if (host.UnreadableFrames() > 0) {
-        std::fprintf(stderr, "vkhost: %llu frames could not be read\n",
-                     static_cast<unsigned long long>(host.UnreadableFrames()));
+
+    if (config.runahead) {
+        report.secondaryFrames = secondaryFrames;
+        report.secondaryHardwareFrames = secondary.HardwareFrames();
+        report.secondaryHadContext = secondary.HadContext();
+        if (report.secondaryHardwareFrames != 0 || report.secondaryHadContext) {
+            report.problems.push_back("the run-ahead instance got a hardware context or sent hardware frames");
+        }
+        secondary.Unload();
+        RunReport secondaryReport;
+        secondary.FillReport(secondaryReport);
+        report.problems.insert(report.problems.end(), secondaryReport.problems.begin(),
+                               secondaryReport.problems.end());
     }
     host.Unload();
+    host.FillReport(report);
+    if (report.unreadableFrames > 0) {
+        report.problems.push_back(std::to_string(report.unreadableFrames) + " frames could not be read");
+    }
+    if (report.validationErrors > 0) {
+        report.problems.push_back(std::to_string(report.validationErrors) + " Vulkan validation errors");
+    }
+    if (report.lockViolations > 0) {
+        report.problems.push_back(std::to_string(report.lockViolations) + " queue-lock violations");
+    }
+    if (report.hiddenGpuCalls > 0) {
+        report.problems.push_back(std::to_string(report.hiddenGpuCalls) + " GPU calls in frames with video disabled");
+    }
+    return report;
 }
 
-std::vector<HostFrame> RunCore(const HostConfig& config) {
+std::vector<HostFrame> RunCore(const HostConfig& config, RunReport* report) {
     struct VectorSink : FrameSink {
         std::vector<HostFrame> frames;
         void OnFrame(HostFrame&& frame) override { frames.push_back(std::move(frame)); }
     } sink;
     sink.frames.reserve(static_cast<size_t>(std::max(config.frames, 0)));
-    RunCore(config, sink);
+    RunReport result = RunCore(config, sink);
+    if (report) {
+        *report = std::move(result);
+    }
     return std::move(sink.frames);
 }
 

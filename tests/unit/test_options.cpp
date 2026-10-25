@@ -47,6 +47,9 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_sh2_jit",              "disabled" },
         { "brimir_sh2_jit_compile_thread", "auto"   },
         { "brimir_profiling",            "disabled" },
+#ifdef BRIMIR_VULKAN
+        { "brimir_renderer",             "software" },
+#endif
     };
 
     for (const auto& e : expected) {
@@ -195,3 +198,29 @@ TEST_CASE("Deinterlacing option cache defaults match the option definitions", "[
         }
     }
 }
+#ifdef BRIMIR_VULKAN
+TEST_CASE("Core options include the renderer option (Vulkan builds)", "[options][libretro]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+
+    const retro_core_option_v2_definition* found = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_renderer") == 0) {
+            found = &options->definitions[i];
+            break;
+        }
+    }
+
+    REQUIRE(found != nullptr);
+    CHECK(std::strcmp(found->desc, "Renderer (restart required)") == 0);
+    REQUIRE(found->category_key != nullptr);
+    CHECK(std::strcmp(found->category_key, "video") == 0);
+    REQUIRE(found->default_value != nullptr);
+    CHECK(std::strcmp(found->default_value, "software") == 0);
+    REQUIRE(found->values[0].value != nullptr);
+    REQUIRE(found->values[1].value != nullptr);
+    CHECK(std::strcmp(found->values[0].value, "software") == 0);
+    CHECK(std::strcmp(found->values[1].value, "vulkan") == 0);
+    CHECK(found->values[2].value == nullptr);
+}
+#endif

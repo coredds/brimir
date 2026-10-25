@@ -6,6 +6,10 @@
 #include "options.hpp"
 #include "brimir/core_wrapper.hpp"
 
+#ifdef BRIMIR_VULKAN
+#include "libretro_vulkan.hpp"
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -55,6 +59,36 @@ static void reset_frame_state(void) {
     g_lastWidth = 0;
     g_lastHeight = 0;
     g_profileFrameCount = 0;
+}
+
+// Largest frame the core reports (SET_GEOMETRY ignores max_*; changing them through SET_SYSTEM_AV_INFO reinits the
+// frontend's video driver, so they are fixed per content).
+static constexpr unsigned kMaxWidth = 704;
+static constexpr unsigned kMaxHeight = 512;
+
+#ifdef BRIMIR_VULKAN
+// Vulkan frame output (brimir_renderer = vulkan, src/libretro/libretro_vulkan.cpp). g_vulkanRequested: the frontend
+// accepted SET_HW_RENDER for the loaded content. The output is live between context_reset and context_destroy;
+// the frontend calls both after retro_load_game, possibly from inside other libretro calls (driver reinit).
+static bool g_vulkanRequested = false;
+static std::unique_ptr<brimir::libretro::VulkanOutput> g_vulkanOutput;
+static bool g_vulkanPresentErrorLogged = false;
+// The Vulkan output's images are square, so a 90/270 rotation of the largest frame fits.
+static constexpr unsigned kVulkanMaxSize = 704;
+#endif
+
+static unsigned max_geometry_width(void) {
+#ifdef BRIMIR_VULKAN
+    if (g_vulkanRequested) return kVulkanMaxSize;
+#endif
+    return kMaxWidth;
+}
+
+static unsigned max_geometry_height(void) {
+#ifdef BRIMIR_VULKAN
+    if (g_vulkanRequested) return kVulkanMaxSize;
+#endif
+    return kMaxHeight;
 }
 
 // Helper function for logging
@@ -111,6 +145,8 @@ struct OptionCache {
     std::string threaded_vdp2 = "enabled";
     std::string sh2_jit = "disabled";
     std::string sh2_jit_compile_thread = "auto";
+    // Load-time only (read in retro_load_game); kept to report live changes.
+    std::string renderer = "software";
 } g_options;
 
 static void apply_core_options(bool force) {
@@ -153,7 +189,98 @@ static void apply_core_options(bool force) {
     if (const std::string warning = g_core->TakeSH2JitWorkerWarning(); !warning.empty()) {
         brimir_log(RETRO_LOG_WARN, "%s", warning.c_str());
     }
+
+#ifdef BRIMIR_VULKAN
+    // The renderer is chosen at content load; a live change only takes effect with the next content.
+    if (!force) {
+        const char* renderer = get_option_value("brimir_renderer", g_options.renderer.c_str());
+        if (g_options.renderer != renderer) {
+            g_options.renderer = renderer;
+            brimir_log(RETRO_LOG_INFO, "Renderer '%s' applies when content is next loaded", renderer);
+        }
+    }
+#endif
 }
+
+#ifdef BRIMIR_VULKAN
+static void RETRO_CALLCONV vulkan_context_reset(void) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (!g_vulkanRequested) {
+        return;
+    }
+    if (!g_vulkanOutput) {
+        g_vulkanOutput = std::make_unique<brimir::libretro::VulkanOutput>();
+    }
+    std::string reason;
+    const bool live = g_vulkanOutput->ContextReset(environ_cb, reason);
+    if (g_core) {
+        g_core->SetGpuOutputActive(live);
+    }
+    g_vulkanPresentErrorLogged = false;
+    if (live) {
+        brimir_log(RETRO_LOG_INFO, "Vulkan frame output ready");
+    } else {
+        // Too late to fall back (the frontend runs its Vulkan driver now): keep handing over software frames.
+        brimir_log(RETRO_LOG_ERROR, "Vulkan context unusable, presenting software frames: %s", reason.c_str());
+    }
+}
+
+static void RETRO_CALLCONV vulkan_context_destroy(void) {
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (g_core) {
+        g_core->SetGpuOutputActive(false);
+    }
+    if (g_vulkanOutput) {
+        g_vulkanOutput->ContextDestroy();
+    }
+}
+
+// The Vulkan half of retro_run's video output: present the frame RunFrame completed.
+static void present_vulkan_frame(void) {
+    // Run-ahead and fast-forward frames the frontend will not show: no GPU work, no set_image, no video_cb.
+    int av = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av) && !(av & RETRO_AV_ENABLE_VIDEO)) {
+        return;
+    }
+    if (!video_cb) {
+        return;
+    }
+
+    const uint32_t* raw = g_core->RawFrame();
+    unsigned width = 0;
+    unsigned height = 0;
+    std::string error;
+    if (raw) {
+        const brimir::FrameOutputSettings& s = g_core->RawFrameSettings();
+        if (!g_vulkanOutput->Present(raw, g_core->RawFrameWidth(), g_core->RawFrameHeight(),
+                                     {s.cropH, s.cropV, s.rotation}, width, height, error)) {
+            raw = nullptr;
+            if (!g_vulkanPresentErrorLogged) {
+                g_vulkanPresentErrorLogged = true;
+                brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed: %s", error.c_str());
+            }
+        }
+    }
+    if (!raw) {
+        // Nothing new to show: repeat the last frame.
+        video_cb(nullptr, g_lastWidth, g_lastHeight, 0);
+        return;
+    }
+
+    if (environ_cb && (width != g_lastWidth || height != g_lastHeight)) {
+        struct retro_game_geometry geo = {};
+        geo.base_width = width;
+        geo.base_height = height;
+        geo.max_width = max_geometry_width();
+        geo.max_height = max_geometry_height();
+        geo.aspect_ratio = 4.0f / 3.0f;
+        environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
+        g_lastWidth = width;
+        g_lastHeight = height;
+    }
+    video_cb(RETRO_HW_FRAME_BUFFER_VALID, width, height, 0);
+}
+#endif
 
 // Libretro API implementation
 
@@ -295,6 +422,17 @@ RETRO_API void retro_deinit(void) {
     brimir_log(RETRO_LOG_INFO, "Brimir shutting down");
 
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+#ifdef BRIMIR_VULKAN
+    if (g_vulkanOutput) {
+        if (g_vulkanOutput->Live()) {
+            // The frontend never called context_destroy; its device may be gone, so make no Vulkan call.
+            brimir_log(RETRO_LOG_WARN, "Vulkan context still live at deinit; releasing it without cleanup");
+            g_vulkanOutput->Abandon();
+        }
+        g_vulkanOutput.reset();
+    }
+    g_vulkanRequested = false;
+#endif
     if (g_core) {
         // Same rule as retro_unload_game: never let an exception reach the frontend.
         try {
@@ -331,8 +469,8 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
     info->geometry.base_height = 224;
     
     // Saturn max native resolution
-    info->geometry.max_width = 704;
-    info->geometry.max_height = 512;
+    info->geometry.max_width = max_geometry_width();
+    info->geometry.max_height = max_geometry_height();
     info->geometry.aspect_ratio = 4.0f / 3.0f;
 
     // Fallback timing. The actual regional framerate (NTSC/PAL) is set once the
@@ -461,6 +599,11 @@ RETRO_API void retro_run(void) {
     g_core->RunFrame();
     
     // Output video
+#ifdef BRIMIR_VULKAN
+    if (g_vulkanOutput && g_vulkanOutput->Live() && g_core->IsGpuOutputActive()) {
+        present_vulkan_frame();
+    } else
+#endif
     if (video_cb) {
         const void* fb = g_core->GetFramebuffer();
         unsigned int width = g_core->GetFramebufferWidth();
@@ -474,8 +617,8 @@ RETRO_API void retro_run(void) {
             struct retro_game_geometry geo = {};
             geo.base_width = width;
             geo.base_height = height;
-            geo.max_width = 704;
-            geo.max_height = 512;
+            geo.max_width = max_geometry_width();
+            geo.max_height = max_geometry_height();
             geo.aspect_ratio = 4.0f / 3.0f;
             environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
             g_lastWidth = width;
@@ -686,6 +829,23 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // afterwards (otherwise the system would stay at the default Japan area code).
     apply_core_options(true);
 
+#ifdef BRIMIR_VULKAN
+    // The renderer applies at content load. With Vulkan the frontend builds the context after this function
+    // returns (context_reset); the maximum geometry reported below already accounts for it.
+    g_vulkanRequested = false;
+    g_options.renderer = get_option_value("brimir_renderer", "software");
+    if (g_options.renderer == "vulkan") {
+        std::string reason;
+        if (brimir::libretro::RequestVulkanContext(environ_cb, vulkan_context_reset, vulkan_context_destroy, log_cb,
+                                                   reason)) {
+            g_vulkanRequested = true;
+            brimir_log(RETRO_LOG_INFO, "Vulkan renderer requested");
+        } else {
+            brimir_log(RETRO_LOG_WARN, "Vulkan renderer unavailable, falling back to software: %s", reason.c_str());
+        }
+    }
+#endif
+
     update_system_av_info_for_region();
 
     g_core->SetRenderer("software");
@@ -729,6 +889,10 @@ RETRO_API void retro_unload_game(void) {
         brimir_log(RETRO_LOG_ERROR, "Unknown exception while unloading game");
     }
     reset_frame_state();
+#ifdef BRIMIR_VULKAN
+    // The frontend destroys the context (context_destroy) before unloading; nothing GPU-side happens here.
+    g_vulkanRequested = false;
+#endif
 }
 
 // Disk control callbacks

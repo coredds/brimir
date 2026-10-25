@@ -7,15 +7,18 @@ target_link_libraries(brimir_bench PRIVATE brimir_bridge brimir::brimir-core)
 target_compile_features(brimir_bench PRIVATE cxx_std_20)
 
 # Headless libretro host: loads brimir_libretro dynamically and records its frames (tools/README.md). Built with
-# BRIMIR_VULKAN because its Vulkan context provider (hardware frames) lives here.
+# BRIMIR_VULKAN because its Vulkan context provider (hardware frames, --vulkan) lives here.
 if(BRIMIR_VULKAN)
     add_executable(brimir_vkhost
         vkhost/main.cpp
         vkhost/host.cpp
         vkhost/run_core.cpp
+        vkhost/vulkan_provider.cpp
     )
     target_include_directories(brimir_vkhost PRIVATE ${PROJECT_SOURCE_DIR}/include)
     target_compile_features(brimir_vkhost PRIVATE cxx_std_20)
+    # Its own headless device (volkInitialize) for the Vulkan context it hands the core.
+    target_link_libraries(brimir_vkhost PRIVATE brimir-gpu)
     if(UNIX)
         target_link_libraries(brimir_vkhost PRIVATE ${CMAKE_DL_LIBS})
     endif()

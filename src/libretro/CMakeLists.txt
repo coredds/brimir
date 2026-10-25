@@ -14,3 +14,10 @@ target_compile_features(brimir_libretro_api PUBLIC cxx_std_20)
 # Propagate the project version so retro_get_system_info reports the same
 # version as CMake / the .info file.
 target_compile_definitions(brimir_libretro_api PRIVATE BRIMIR_VERSION="${Brimir_VERSION}")
+
+# Vulkan hardware context (brimir_renderer = vulkan); brimir-gpu also brings the vendored Vulkan headers that
+# include/libretro_vulkan.h needs, and defines BRIMIR_VULKAN (the option is only offered in such builds).
+if(BRIMIR_VULKAN)
+    target_sources(brimir_libretro_api PRIVATE libretro_vulkan.cpp)
+    target_link_libraries(brimir_libretro_api PRIVATE brimir-gpu)
+endif()

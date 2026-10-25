@@ -1082,6 +1082,12 @@ unsigned int CoreWrapper::GetFramebufferPitch() const {
     return m_fbPitch;
 }
 
+void CoreWrapper::SetGpuOutputActive(bool active) {
+    m_gpuOutputActive = active;
+    m_rawWidth = 0;
+    m_rawHeight = 0;
+}
+
 
 size_t CoreWrapper::GetAudioSamples(int16_t* buffer, size_t max_samples) {
     if (!m_initialized || !m_saturn || !buffer) {
@@ -1305,6 +1311,22 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
     ScopedTimer timer(m_profiler, "OnFrameComplete_Total");
     
     if (!fb || width == 0 || height == 0) {
+        return;
+    }
+
+    if (m_gpuOutputActive) {
+        // The GPU frame output converts, crops and rotates. Copy the frame: the renderer's buffer may be drawn
+        // into again before it is presented, while a frame that never completes must re-present this one.
+        const size_t pixelCount = static_cast<size_t>(width) * height;
+        if (m_rawFrame.size() < pixelCount) {
+            m_rawFrame.resize(pixelCount);
+        }
+        std::memcpy(m_rawFrame.data(), fb, pixelCount * sizeof(uint32_t));
+        m_rawWidth = width;
+        m_rawHeight = height;
+        m_rawSettings.cropH = static_cast<uint32_t>(m_overscanCropH);
+        m_rawSettings.cropV = static_cast<uint32_t>(m_overscanCropV);
+        m_rawSettings.rotation = static_cast<uint32_t>(m_rotation);
         return;
     }
 
