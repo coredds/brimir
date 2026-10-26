@@ -92,13 +92,9 @@ public:
     // detaching another one first. Call between frames. Returns false (renderer not attached) with error on failure.
     bool AttachRenderer(gpu::VulkanVDPRenderer &renderer, std::string &error);
     // Waits for this output's own submissions and detaches the renderer. No-op without one. Call between frames.
-    void DetachRenderer();
+    // Returns false (and still detaches) when a wait failed, with error set.
+    bool DetachRenderer(std::string &error);
     bool RendererAttached() const;
-
-    // Before the frame runs: re-creates the slots when the sync index mask grew, re-attaching the renderer with the
-    // new count of frame contexts (so the frame about to run is recorded for the new device objects). Returns false
-    // and sets error on failure; Mode() may have changed then, and the renderer may have been detached.
-    bool PrepareFrame(std::string &error);
 
     // Renderer path: presents the renderer's frame of this retro_run (recorded into the slot's command buffer), or
     // re-presents the composite (no VDP2 frame ended in this run) as w x h with the output transforms, in one submit,

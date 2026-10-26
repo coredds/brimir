@@ -130,6 +130,30 @@ function(check_run name hardware)
                    "(allowed ${allowed}), ${hardware} hardware")
 endfunction()
 
+# An operational exception: recorded frame `index` repeats frame index - 1 exactly (a dupe: the frame was lost with
+# its device or output) and every other frame is identical to software; 299 frames come from set_image.
+function(check_one_repeat name index)
+    check_run(${name} 299 ALLOWED 1)
+    math(EXPR previous "${index} - 1")
+    list(GET ${name}_hashes ${index} got)
+    list(GET ${name}_hashes ${previous} before)
+    string(REGEX REPLACE "^frame [0-9]+ " "" got_pixels "${got}")
+    string(REGEX REPLACE "^frame [0-9]+ " "" before_pixels "${before}")
+    if(NOT got_pixels STREQUAL before_pixels)
+        fail(${name} "recorded frame ${index} is not a repeat of frame ${previous} ('${got}' vs '${before}')")
+    endif()
+    foreach(i RANGE 299)
+        if(NOT i EQUAL index)
+            list(GET ${name}_hashes ${i} got)
+            list(GET software_hashes ${i} want)
+            if(NOT got STREQUAL want)
+                fail(${name} "recorded frame ${i} differs from software ('${got}' vs '${want}'); only ${index} may")
+            endif()
+        endif()
+    endforeach()
+    message(STATUS "${name}: frame ${index} repeats frame ${previous}, the other 299 frames identical to software")
+endfunction()
+
 function(check_software_reference name)
     if(NOT "${${name}_code}" STREQUAL "0")
         fail(${name} "brimir_vkhost exited with ${${name}_code}")
@@ -163,13 +187,19 @@ check_vulkan_counters(vulkan)
 check_vdp2_renderer(vulkan)
 require_log(vulkan "device created through create_device2")
 require_log(vulkan "Vulkan frame output ready")
-file(SHA256 "${sw_state}" sw_state_hash)
-file(SHA256 "${vk_state}" vk_state_hash)
-if(sw_state_hash STREQUAL vk_state_hash)
-    message(STATUS "vulkan: the state saved after frame 100 is byte-identical to software's")
-else()
-    message(STATUS "vulkan: the state saved after frame 100 differs from software's (loads are checked below)")
+# The two states' renderer sections may differ only in the line-local fetcher caches on brimir_state_diff's allowlist
+# (tools/state_diff.cpp); anything carried from line to line or frame to frame must match.
+if(NOT STATE_DIFF OR NOT EXISTS "${STATE_DIFF}")
+    fail(vulkan "STATE_DIFF (brimir_state_diff) not found: ${STATE_DIFF}")
 endif()
+execute_process(COMMAND "${STATE_DIFF}" "${sw_state}" "${vk_state}"
+                OUTPUT_VARIABLE state_diff_out ERROR_VARIABLE state_diff_err RESULT_VARIABLE state_diff_code)
+if(NOT state_diff_code EQUAL 0)
+    fail(vulkan "the software- and Vulkan-saved states differ outside the allowlist (exit ${state_diff_code}):\n"
+                "${state_diff_out}${state_diff_err}")
+endif()
+string(REGEX MATCH "[0-9]+ allowed and 0 unexpected" state_diff_summary "${state_diff_out}")
+message(STATUS "vulkan: the state saved after frame 100 matches software's renderer section (${state_diff_summary})")
 
 # A frontend on another video driver refuses SET_HW_RENDER: software, with the fallback logged.
 run_vkhost(refused --vulkan --refuse-hw)
@@ -232,33 +262,56 @@ check_vulkan_counters(reset_in_run)
 check_vdp2_renderer(reset_in_run)
 require_log(reset_in_run "context resets 2,")
 
-# ... after the frame was emulated (VDP2EndFrame) and before it is recorded: the frame is lost with the device, so
-# that one frame repeats the previous one (a dupe); everything after it matches.
+# ... after the frame was emulated (VDP2EndFrame) and before it is recorded. Operational exception: context destroyed
+# during present. The frame is lost with the device, so recorded frame 90 (frame 150) repeats frame 89 exactly (a dupe);
+# every other frame matches software.
 run_vkhost(reset_in_present --vulkan --reset-in-present 150)
-check_run(reset_in_present 299 ALLOWED 1)
+check_one_repeat(reset_in_present 90)
+
+# ... and the new context only allows the copy-only output: the renderer reverts to software (with its state). The
+# frame the renderer emulated is lost, so frame 90 repeats frame 89 rather than uploading the bridge's frame from before
+# the install; the software frames after it match.
+run_vkhost(reset_to_copy_only --vulkan --reset-in-present 150 --fail-compute-on-reset)
+check_one_repeat(reset_to_copy_only 90)
+check_vulkan_counters(reset_to_copy_only)
+require_log(reset_to_copy_only "using copy-only frame output")
+require_log(reset_to_copy_only "Vulkan VDP2 renderer off")
 check_vulkan_counters(reset_in_present)
 check_vdp2_renderer(reset_in_present)
 require_log(reset_in_present "context resets 2,")
 
-# The sync index mask grows mid-run (0b1 -> 0b111): the slots are re-created before the frame runs and the renderer
-# re-attached with the new count of frame contexts.
+# The sync index mask grows mid-run (0b1 -> 0b111): the next shown frame re-creates the slots and the renderer gains
+# frame contexts in place (its composite, the other field when weaving, is kept; scene "weave keeps the other field
+# when the frame contexts grow" checks that on interlaced modes).
 run_vkhost(grow --vulkan --grow-mask 100)
 check_run(grow 300)
 check_vulkan_counters(grow)
 check_vdp2_renderer(grow)
 
-# ... and re-creating the compute output fails: copy-only from then on, the renderer reverted to software (with its
-# state) before that frame runs, so no frame is lost.
+# ... with the mask growing before a hidden frame (run 100 is hidden with --hide-every 2): the growth waits for the next
+# shown frame (no presentation calls in hidden frames).
+run_vkhost(software_hidden_grow --hide-every 2)
+check_software_reference(software_hidden_grow)
+run_vkhost(grow_hidden --vulkan --hide-every 2 --grow-mask 100)
+check_run(grow_hidden 300 REFERENCE software_hidden_grow)
+check_vulkan_counters(grow_hidden)
+check_vdp2_renderer(grow_hidden)
+
+# ... and re-creating the compute output fails: copy-only from then on and the renderer reverted to software (with
+# its state). The frame of the growth was rendered for the lost output, so recorded frame 40 (frame 100) repeats
+# frame 39 (a dupe); the copy-only output never uploads the bridge's stale pre-install frame.
 run_vkhost(grow_fail --vulkan --grow-mask 100 --fail-compute-on-grow)
-check_run(grow_fail 300)
+check_one_repeat(grow_fail 40)
 check_vulkan_counters(grow_fail)
 require_log(grow_fail "Vulkan frame output changed to copy-only")
 require_log(grow_fail "Vulkan VDP2 renderer off")
 
 # Hidden frames (video disabled: run-ahead, fast-forward): the renderer still submits their VDP2 work (no presenter,
-# no set_image). Deinterlacing on (the default) and off (weave keeps the other field from the hidden frame).
-foreach(deinterlacing IN ITEMS enabled disabled)
-    set(hide_args --hide-every 2 --option brimir_deinterlacing=${deinterlacing})
+# no set_image). Deinterlacing on (the default) and off (brimir_deinterlace_mode=none: brimir_deinterlacing=disabled
+# alone is overridden by the mode option). The menu is progressive; weave across hidden frames on interlaced modes is
+# the scene "weave across hidden frames recorded into hidden contexts".
+foreach(deinterlacing IN ITEMS bob none)
+    set(hide_args --hide-every 2 --option brimir_deinterlace_mode=${deinterlacing})
     run_vkhost(software_hidden_${deinterlacing} ${hide_args})
     check_software_reference(software_hidden_${deinterlacing})
     run_vkhost(hidden_${deinterlacing} --vulkan ${hide_args})

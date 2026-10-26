@@ -188,6 +188,12 @@ void Vdp2VulkanBackend::FrameDropped() {
     m_recorded = {};
 }
 
+void Vdp2VulkanBackend::EnsureContexts(uint32_t count) {
+    if (count > m_contexts.size()) {
+        m_contexts.resize(count);
+    }
+}
+
 void Vdp2VulkanBackend::ForceUploadBlockSizeForTest(size_t bytes) {
     m_blockSize = std::max<size_t>(bytes, 4096);
 }

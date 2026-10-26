@@ -543,19 +543,21 @@ VkResult VulkanOutput::Impl::CreateHidden() {
     if (hiddenCreated) {
         return VK_SUCCESS;
     }
-    hiddenCreated = true; // DestroyHidden frees whatever was created
     for (HiddenContext &context : hidden) {
         if (const VkResult result = CreateCommandContext(context.pool, context.cmd, context.fence);
             result != VK_SUCCESS) {
+            DestroyHidden(); // frees whatever was created; hiddenCreated stays false
             return result;
         }
     }
+    hiddenCreated = true;
     nextHidden = 0;
     return VK_SUCCESS;
 }
 
+// Destroys every hidden-context handle that exists (null handles are skipped by Vulkan).
 void VulkanOutput::Impl::DestroyHidden() {
-    if (device && hiddenCreated) {
+    if (device) {
         const auto &vk = device->Table();
         for (HiddenContext &context : hidden) {
             vk.vkDestroyFence(device->Device(), context.fence, nullptr);
@@ -696,16 +698,17 @@ void VulkanOutput::Impl::Abandon() {
 // The frame prologue both modes share: slots sized for the current mask, the sync index, the frontend's and our own
 // wait for the slot, and the slot's command buffer begun. Null (with error) when nothing can be recorded; the mode
 // may have changed then (degraded to copy-only, or None when no output is possible any more).
-// The mask may change (with the device idle); slots only grow so earlier indices stay valid. A renderer is re-attached
-// with the new count of frame contexts (its back half, composite included, starts over). False (with error) when the
-// output is not usable as it was: the mode may have changed (copy-only, or None) and the renderer may be detached.
+// The mask may change (with the device idle); slots only grow so earlier indices stay valid. An attached renderer keeps
+// its back half (the composite holds the other field when weaving) and only gains frame contexts: the hidden contexts
+// move up to the new slot count, which is safe because all of this output's work has completed here. Called only for
+// shown frames (BeginFrame), never in a frame with video disabled. False (with error) when the output is not usable as
+// it was: the mode may have changed (copy-only, or None) and the renderer is then detached.
 bool VulkanOutput::Impl::EnsureSlots(std::string &error) {
     const uint32_t wanted = SlotCountForMask(iface->get_sync_index_mask(iface->handle));
     if (wanted <= slots.size()) {
         return true;
     }
     const VulkanOutputMode current = mode;
-    gpu::VulkanVDPRenderer *const attached = renderer;
     Withdraw(); // the frontend must not keep a pointer into the slots about to be freed
     if (const VkResult result = WaitOwnWork(); result != VK_SUCCESS) {
         error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
@@ -720,11 +723,11 @@ bool VulkanOutput::Impl::EnsureSlots(std::string &error) {
         Abandon();
         return false;
     }
-    DetachRendererIdle();
     DestroySlots();
     VkResult result = CreateSlots(wanted, current);
     if (result != VK_SUCCESS && current == VulkanOutputMode::Compute) {
         DestroySlots();
+        DetachRendererIdle(); // the copy-only output carries no renderer
         if (CreateSlots(wanted, VulkanOutputMode::CopyOnly) == VK_SUCCESS) {
             error = std::string("recreating the compute frame output failed (") + gpu::vk_util::ResultName(result) +
                     "); continuing with copy-only uploads";
@@ -733,11 +736,13 @@ bool VulkanOutput::Impl::EnsureSlots(std::string &error) {
     }
     if (result != VK_SUCCESS) {
         error = std::string("recreating the frame output failed: ") + gpu::vk_util::ResultName(result);
+        DetachRendererIdle();
         DestroySlots();
         return false;
     }
-    if (attached && !AttachRendererTo(*attached, error)) {
-        error = "re-attaching the Vulkan VDP renderer for " + std::to_string(wanted) + " sync slots failed: " + error;
+    if (renderer && !renderer->EnsureFrameContexts(static_cast<uint32_t>(slots.size()) + kHiddenContexts)) {
+        error = "the Vulkan VDP renderer lost its device objects";
+        DetachRendererIdle();
         return false;
     }
     return true;
@@ -1046,26 +1051,23 @@ bool VulkanOutput::AttachRenderer(gpu::VulkanVDPRenderer &renderer, std::string 
     return m.AttachRendererTo(renderer, error);
 }
 
-void VulkanOutput::DetachRenderer() {
+bool VulkanOutput::DetachRenderer(std::string &error) {
     Impl &m = *m_impl;
     if (m.renderer == nullptr) {
-        return;
+        return true;
     }
     // A failed wait means a lost device, whose objects may be destroyed anyway.
-    (void)m.WaitOwnWork();
+    const VkResult result = m.WaitOwnWork();
     m.DetachRendererIdle();
+    if (result != VK_SUCCESS) {
+        error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
+        return false;
+    }
+    return true;
 }
 
 bool VulkanOutput::RendererAttached() const {
     return m_impl->renderer != nullptr && m_impl->renderer->Attached();
-}
-
-bool VulkanOutput::PrepareFrame(std::string &error) {
-    Impl &m = *m_impl;
-    if (m.mode == VulkanOutputMode::None || !m.device) {
-        return true;
-    }
-    return m.EnsureSlots(error);
 }
 
 bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSettings &settings, unsigned &outW,

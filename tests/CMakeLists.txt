@@ -129,6 +129,7 @@ if(TARGET brimir_vkhost)
     add_test(NAME brimir_vkhost_vulkan
         COMMAND ${CMAKE_COMMAND}
             -DVKHOST=$<TARGET_FILE:brimir_vkhost>
+            -DSTATE_DIFF=$<TARGET_FILE:brimir_state_diff>
             -DBIOS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/mpr-17933.bin
             -P ${CMAKE_CURRENT_SOURCE_DIR}/vkhost_checks.cmake
     )

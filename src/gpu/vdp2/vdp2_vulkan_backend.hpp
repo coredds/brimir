@@ -35,6 +35,10 @@ public:
     bool Ok() const { return m_result == VK_SUCCESS; }
     VkResult Result() const { return m_result; }
     uint32_t FrameContexts() const { return static_cast<uint32_t>(m_contexts.size()); }
+    // Grows the number of frame contexts to at least `count` (their upload blocks are allocated at first use); every
+    // other resource, the composite included, is kept. The caller re-maps context indices only after their previous
+    // Records completed.
+    void EnsureContexts(uint32_t count);
 
     // Copies the frame's snapshots into the context's upload blocks and records its uploads, dispatches and barriers
     // into cmd. Afterwards the composite buffer holds the frame (HRes x VRes, pitch HRes) and its writes are visible to

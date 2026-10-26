@@ -44,6 +44,10 @@ public:
     void AttachDevice(VulkanDevice &device, uint32_t frameContexts);
     // Drops the pending frame and destroys the GPU resources. The caller has waited for the device to be idle.
     void DetachDevice();
+    // Grows the back half's frame contexts to at least `frameContexts` in place (a larger sync index mask): the
+    // composite (the other field when weaving), the GPU copies of VRAM/CRAM and the pending frame are kept. The work of
+    // every context whose index changes meaning must have completed. False when detached.
+    bool EnsureFrameContexts(uint32_t frameContexts);
     // Forgets the back half without any Vulkan call (its device may already be gone): leaks its objects.
     void AbandonDevice();
     bool Attached() const { return m_backend != nullptr; }

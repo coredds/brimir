@@ -38,6 +38,14 @@ void VulkanVDPRenderer::DetachDevice() {
     m_backend.reset();
 }
 
+bool VulkanVDPRenderer::EnsureFrameContexts(uint32_t frameContexts) {
+    if (!m_backend) {
+        return false;
+    }
+    m_backend->EnsureContexts(frameContexts);
+    return true;
+}
+
 void VulkanVDPRenderer::AbandonDevice() {
     m_front.ConsumeFrame();
     m_front.MarkAllDirty();

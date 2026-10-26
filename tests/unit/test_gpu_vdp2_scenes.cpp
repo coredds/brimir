@@ -2818,3 +2818,62 @@ TEST_CASE("VulkanVDPRenderer saves and loads the NBG fetchers as software does",
     vulkan->SaveState(*restored);
     CHECK(fetchersEq(*restored, *swSaved));
 }
+
+// =====================================================================================================================
+// Weave across frame-context changes (Task 7): with deinterlacing off on interlaced modes each frame writes one field
+// and the composite keeps the other, as the software framebuffer does. Every frame is compared.
+
+namespace {
+
+// NBG0 over sprites, scrolled by a different amount every frame, so the kept field differs from the new one.
+Vdp2Scene WeaveScene(uint16_t lsmd, uint32_t frames) {
+    Vdp2Scene scene = ResolutionScene(static_cast<uint16_t>(lsmd | 1), false);
+    scene.frames = frames;
+    auto frame = std::make_shared<uint32_t>(0);
+    scene.onLine = [frame](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            w.Reg(SCXIN0, static_cast<uint16_t>(*frame * 13));
+            ++*frame;
+        }
+    };
+    return scene;
+}
+
+} // namespace
+
+TEST_CASE("Scene: weave keeps the other field when the frame contexts grow", "[gpu][vdp2][scene][lavapipe]") {
+    const uint16_t lsmd = GENERATE(kLSMDSingle, kLSMDDouble);
+    CAPTURE(lsmd);
+    // 1 sync slot + 2 hidden contexts, growing to 3 + 2 before frame 4 (a larger sync index mask), as VulkanOutput
+    // does: the back half is kept (the composite holds the other field), the hidden contexts move up.
+    RenderBothOptions options;
+    options.frameContexts = 3;
+    options.contextForFrame = [](uint32_t frame) { return frame < 4 ? 0u : frame % 3; };
+    options.beforeFrame = [](uint32_t frame, gpu::VulkanVDPRenderer &renderer, gpu::VulkanDevice &) {
+        if (frame == 4) {
+            REQUIRE(renderer.EnsureFrameContexts(5));
+            REQUIRE(renderer.Backend()->FrameContexts() == 5);
+        }
+    };
+    options.compareFrame = [](uint32_t) { return true; };
+    const Vdp2Scene scene = WeaveScene(lsmd, 8);
+    auto device = OpenDevice();
+    const SceneResult result = Check(*device, scene, options);
+    CHECK(result.comparedFrames == 8);
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: weave across hidden frames recorded into hidden contexts", "[gpu][vdp2][scene][lavapipe]") {
+    const uint16_t lsmd = GENERATE(kLSMDSingle, kLSMDDouble);
+    CAPTURE(lsmd);
+    // 2 sync slots + 2 hidden contexts; odd frames are hidden (video disabled: recorded into a hidden context, not
+    // presented), shown frames weave against the hidden frames' fields.
+    RenderBothOptions options;
+    options.frameContexts = 4;
+    options.contextForFrame = [](uint32_t frame) { return frame % 2 == 0 ? (frame / 2) % 2 : 2 + (frame / 2) % 2; };
+    options.compareFrame = [](uint32_t frame) { return frame % 2 == 0; };
+    auto device = OpenDevice();
+    const SceneResult result = Check(*device, WeaveScene(lsmd, 10), options);
+    CHECK(result.comparedFrames == 5);
+    CloseAndCheckValidation(device);
+}

@@ -64,6 +64,7 @@ struct HostConfig {
     int growMaskAt = -1;   // --grow-mask F: sync mask 0b1 until frame F, then 0b111
     bool noValidation = false;      // --no-validation: do not load the validation layer (timing runs)
     bool failComputeOnGrow = false; // --fail-compute-on-grow: the core's pipeline creation fails after the growth
+    bool failComputeOnReset = false; // --fail-compute-on-reset: ... from the second context on (a reinit)
 };
 
 // What a run did, for the CLI summary and the checks.

@@ -175,6 +175,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
             m_vulkan->SetSyncSlots(1);
         }
         m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
+        m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
     }
 
     auto api = std::make_unique<Api>();

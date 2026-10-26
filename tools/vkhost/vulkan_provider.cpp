@@ -353,6 +353,10 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
         AddProblem("context created twice");
         return false;
     }
+    if (m_failComputeOnReset && m_contextsCreated > 0) {
+        m_failPipelines = true;
+    }
+    ++m_contextsCreated;
     const VkInstance instance = m_host->Instance();
     VkPhysicalDevice physical = m_host->Physical();
     VkDevice device = VK_NULL_HANDLE;

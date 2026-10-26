@@ -285,6 +285,7 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--fake-api X.Y` | with `--vulkan`: `vkGetPhysicalDeviceProperties` (through the core's `get_instance_proc_addr`) caps `apiVersion` at X.Y; with 1.1 the core uses its copy-only output |
 | `--grow-mask F` | with `--vulkan`: sync index mask `0b1` until frame F, then `0b111` (after waiting for the device) |
 | `--fail-compute-on-grow` | with `--grow-mask`: the core's `vkCreateComputePipelines` fails once the mask has grown (fault injection: the core degrades to copy-only) |
+| `--fail-compute-on-reset` | with `--vulkan`: the core's `vkCreateComputePipelines` fails for every context after the first (a reinit then ends in the copy-only output) |
 | `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (a pre-existing heap corruption in `retro_unserialize` was observed on BIOS-menu states; it may affect any state), so compare against a software run with `--runahead` |
 | `--no-validation` | with `--vulkan` or `--compare`: do not load the Vulkan validation layer (the layer slows the Vulkan run; use it for timing) |
 | `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference or when the Vulkan run was not on the compute output with the Vulkan VDP2 renderer (log line `Vulkan VDP2 renderer active`) for every frame |
@@ -326,11 +327,13 @@ host's function pointers.
 The ctest entry `brimir_vkhost_vulkan` (`tests/vkhost_checks.cmake`) runs the BIOS menu (US BIOS from
 `tests/fixtures`, 60 + 300 frames) in software, `--vulkan` (the Vulkan VDP2 renderer; also with rotation and
 overscan), `--vulkan --refuse-hw`, `--vulkan --reset-at 120`, `--vulkan --reset-in-run 150`,
-`--vulkan --reset-in-present 150` (one repeated frame), `--vulkan --preferred-hw gl`, `--vulkan --fake-api 1.1`
-(software renderer, copy-only output), `--vulkan --grow-mask 100` (with and without `--fail-compute-on-grow`, which
-reverts to software before the frame runs), `--hide-every 2` with deinterlacing on and off, `--state-roundtrip 37`,
-cross-renderer state loads (a software state loaded by Vulkan and a Vulkan state loaded by software, compared from
-recorded frame 2) and `--vulkan --runahead`, plus `--compare` (identical runs pass, also with hidden frames and state
+`--vulkan --reset-in-present 150` (alone and with `--fail-compute-on-reset`: exactly one frame repeats the previous
+one, the operational exception "context destroyed during present"), `--vulkan --preferred-hw gl`,
+`--vulkan --fake-api 1.1` (software renderer, copy-only output), `--vulkan --grow-mask 100` (also around hidden frames,
+and with `--fail-compute-on-grow`: one repeated frame, then software with copy-only), `--hide-every 2` with
+deinterlacing on and off, `--state-roundtrip 37`, cross-renderer state loads (a software state loaded by Vulkan and a
+Vulkan state loaded by software, compared from recorded frame 2; the two states' renderer sections may differ only in
+`brimir_state_diff`'s allowlist of line-local fetcher caches, `tools/state_diff.cpp`) and `--vulkan --runahead`, plus `--compare` (identical runs pass, also with hidden frames and state
 round trips; a Vulkan run rotated 180 degrees exits 3 and names the first differing pixel), and requires identical
 frame hashes, the Vulkan VDP2 renderer active where the context allows it (and not where it does not), the
 validation layer on and zero validation errors, queue-lock violations and hidden-frame presentation calls, and at

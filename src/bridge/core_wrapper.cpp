@@ -967,6 +967,7 @@ void CoreWrapper::RunFrame() {
         m_framesSinceLastSRAMSync = 0;
     }
 
+    m_cpuFrameFromLastRun = false;
     try {
         ScopedTimer timer(m_profiler, "RunFrame_Total");
 
@@ -1338,6 +1339,8 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         m_rawSettings.rotation = static_cast<uint32_t>(m_rotation);
         return;
     }
+
+    m_cpuFrameFromLastRun = true;
 
     // Ymir's software renderer provides the full framebuffer at native resolution
     // No overscan cropping is applied by the VDP - we output the full frame
@@ -1741,6 +1744,8 @@ gpu::VulkanVDPRenderer* CoreWrapper::InstallVulkanRenderer() {
         return nullptr;
     }
     m_vulkanRenderer = created;
+    m_rawWidth = 0; // a kept software frame is older than the renderer's frames
+    m_rawHeight = 0;
     m_vulkanRenderer->LoadState(*carried);
     m_vulkanRenderer->PostLoadStateSync();
     m_deviceFrame = {};
@@ -1773,6 +1778,8 @@ void CoreWrapper::UseSoftwareRenderer() {
     }
     m_vulkanRenderer = nullptr;
     m_deviceFrame = {};
+    m_rawWidth = 0; // the kept software frames predate the Vulkan renderer's
+    m_rawHeight = 0;
     software->LoadState(*carried);
     software->PostLoadStateSync();
 #endif

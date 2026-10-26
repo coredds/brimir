@@ -283,7 +283,8 @@ std::string SceneResult::Describe() const {
         out << "harness error: " << error;
         return out.str();
     }
-    out << width << "x" << height << ", " << distinctColors << " distinct software colours, ";
+    out << "frame " << frame << " (" << comparedFrames << " compared), " << width << "x" << height << ", "
+        << distinctColors << " distinct software colours, ";
     if (identical) {
         out << "identical";
     } else {
@@ -356,6 +357,51 @@ bool RecordWithoutSubmit(gpu::VulkanDevice &device, const std::function<void(VkC
     }
     vk.vkDestroyCommandPool(device.Device(), pool, nullptr);
     return ok;
+}
+
+// Compares the software frame with the composite (RGB) into result. False (result.error set) when the harness failed.
+bool CompareFrame(gpu::VulkanDevice &device, gpu::VulkanVDPRenderer &vulkan, const std::vector<uint32_t> &software,
+                  uint32_t width, uint32_t height, uint32_t gpuWidth, uint32_t gpuHeight, uint32_t frame,
+                  SceneResult &result) {
+    result.frame = frame;
+    if (software.empty() || gpuWidth != width || gpuHeight != height) {
+        result.error = "frame " + std::to_string(frame) + " size mismatch: software " + std::to_string(width) + "x" +
+                       std::to_string(height) + ", gpu " + std::to_string(gpuWidth) + "x" + std::to_string(gpuHeight);
+        return false;
+    }
+    if (!vulkan.Attached()) {
+        result.error = "no device attached after frame " + std::to_string(frame);
+        return false;
+    }
+    result.width = width;
+    result.height = height;
+    result.software = software;
+    result.gpu = ReadbackBuffer(device, vulkan.CompositeBuffer(), width * height);
+    if (result.gpu.size() != result.software.size()) {
+        result.error = "composite readback failed";
+        return false;
+    }
+
+    std::vector<uint32_t> colors;
+    result.diffCount = 0;
+    for (size_t i = 0; i < result.software.size(); ++i) {
+        const uint32_t sw = result.software[i] & 0xFFFFFF;
+        const uint32_t gpu = result.gpu[i] & 0xFFFFFF;
+        if (colors.size() < 64 && std::find(colors.begin(), colors.end(), sw) == colors.end()) {
+            colors.push_back(sw);
+        }
+        if (sw != gpu) {
+            if (result.diffCount++ == 0) {
+                result.diffX = static_cast<uint32_t>(i % width);
+                result.diffY = static_cast<uint32_t>(i / width);
+                result.softwarePixel = result.software[i];
+                result.gpuPixel = result.gpu[i];
+            }
+        }
+    }
+    result.distinctColors = static_cast<uint32_t>(colors.size());
+    result.identical = result.diffCount == 0;
+    return true;
 }
 
 } // namespace
@@ -436,7 +482,8 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         if (vulkan->HasPendingFrame()) {
             vulkan->Backend()->SetPoisonImagesForTest(poisonImages); // the back half may be new (re-attached)
             bool recorded = false;
-            const uint32_t context = frame % std::max(options.frameContexts, 1u);
+            const uint32_t context = options.contextForFrame ? options.contextForFrame(frame)
+                                                             : frame % std::max(options.frameContexts, 1u);
             if (frame == options.dropFrame) {
                 if (!RecordWithoutSubmit(device, [&](VkCommandBuffer cmd) {
                         recorded = vulkan->RecordPendingFrame(context, cmd);
@@ -454,45 +501,23 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 return result;
             }
         }
-    }
-
-    if (capture.pixels.empty() || gpuWidth != capture.width || gpuHeight != capture.height) {
-        result.error = "frame size mismatch: software " + std::to_string(capture.width) + "x" +
-                       std::to_string(capture.height) + ", gpu " + std::to_string(gpuWidth) + "x" +
-                       std::to_string(gpuHeight);
-        return result;
-    }
-    if (!vulkan->Attached()) {
-        result.error = "no device attached after the last frame";
-        return result;
-    }
-    result.width = capture.width;
-    result.height = capture.height;
-    result.software = std::move(capture.pixels);
-    result.gpu = ReadbackBuffer(device, vulkan->CompositeBuffer(), result.width * result.height);
-    if (result.gpu.size() != result.software.size()) {
-        result.error = "composite readback failed";
-        return result;
-    }
-
-    std::vector<uint32_t> colors;
-    for (size_t i = 0; i < result.software.size(); ++i) {
-        const uint32_t sw = result.software[i] & 0xFFFFFF;
-        const uint32_t gpu = result.gpu[i] & 0xFFFFFF;
-        if (colors.size() < 64 && std::find(colors.begin(), colors.end(), sw) == colors.end()) {
-            colors.push_back(sw);
-        }
-        if (sw != gpu) {
-            if (result.diffCount++ == 0) {
-                result.diffX = static_cast<uint32_t>(i % result.width);
-                result.diffY = static_cast<uint32_t>(i / result.width);
-                result.softwarePixel = result.software[i];
-                result.gpuPixel = result.gpu[i];
+        if (options.compareFrame && options.compareFrame(frame)) {
+            if (!CompareFrame(device, *vulkan, capture.pixels, capture.width, capture.height, gpuWidth, gpuHeight,
+                              frame, result)) {
+                return result;
+            }
+            ++result.comparedFrames;
+            if (!result.identical) {
+                return result; // the first differing frame
             }
         }
     }
-    result.distinctColors = static_cast<uint32_t>(colors.size());
-    result.identical = result.diffCount == 0;
+
+    if (!options.compareFrame) {
+        CompareFrame(device, *vulkan, capture.pixels, capture.width, capture.height, gpuWidth, gpuHeight,
+                     scene.frames - 1, result);
+        result.comparedFrames = 1;
+    }
     return result;
 }
 

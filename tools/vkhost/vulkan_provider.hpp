@@ -107,6 +107,9 @@ public:
     void SetSyncSlots(uint32_t count);
     // --fail-compute-on-grow: once the ring grows, vkCreateComputePipelines fails for the core.
     void SetFailComputeOnGrow(bool fail) { m_failComputeOnGrow = fail; }
+    // --fail-compute-on-reset: vkCreateComputePipelines fails for every context after the first (a reinit then ends
+    // in the copy-only output).
+    void SetFailComputeOnReset(bool fail) { m_failComputeOnReset = fail; }
 
     struct RealFunctions; // the unwrapped device functions
     const RealFunctions& Real() const;
@@ -129,6 +132,8 @@ private:
     uint32_t m_fakeApi = 0;
     uint32_t m_syncSlots = 3;
     bool m_failComputeOnGrow = false;
+    bool m_failComputeOnReset = false;
+    uint32_t m_contextsCreated = 0;
     bool m_failPipelines = false;
 
     std::vector<Slot> m_slots;

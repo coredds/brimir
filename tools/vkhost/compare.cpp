@@ -38,13 +38,13 @@ namespace fs = std::filesystem;
 
 // Command line flags that take no value; every other flag consumes the next argument.
 const std::set<std::string> kValueless = {"--hash",        "--verbose", "--vulkan",  "--refuse-hw",
-                                          "--runahead",    "--compare", "--fail-compute-on-grow", "--no-validation"};
+                                          "--runahead",    "--compare", "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation"};
 // Dropped from both children (the compare adds its own).
 const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",       "--dump-dir", "--dump-frame",
                                         "--system-dir", "--frames", "--compare-vulkan-option"};
 // Only valid together with --vulkan: dropped from the software child.
 const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--reset-in-present", "--preferred-hw",
-                                           "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--no-validation"};
+                                           "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation"};
 // Takes a frame number and a file; each child writes its own file (<file>.software, <file>.vulkan).
 const std::string kSaveStateAt = "--save-state-at";
 

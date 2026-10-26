@@ -98,6 +98,8 @@ void PrintUsage(std::FILE* out) {
         "                Vulkan X.Y (for example 1.1: the core's copy-only output)\n"
         "  --grow-mask F  with --vulkan: sync index mask 0b1 until frame F, then 0b111 (device idle)\n"
         "  --fail-compute-on-grow  with --grow-mask: the core's vkCreateComputePipelines fails after the growth\n"
+        "  --fail-compute-on-reset  with --vulkan: the same for every context after the first (a reinit ends in\n"
+        "                copy-only)\n"
         "  --no-validation  with --vulkan/--compare: do not load the validation layer (timing runs)\n"
         "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
@@ -169,6 +171,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--fail-compute-on-grow") {
             args.config.failComputeOnGrow = true;
+            continue;
+        }
+        if (opt == "--fail-compute-on-reset") {
+            args.config.failComputeOnReset = true;
             continue;
         }
         if (opt == "--runahead") {
@@ -297,7 +303,7 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     // With --compare the Vulkan child gets --vulkan and the software child drops the Vulkan-only flags.
     const bool vulkanRun = args.config.vulkan || args.compare;
     if ((args.config.preferGl || args.config.fakeApi != 0 || args.config.growMaskAt >= 0 ||
-         args.config.failComputeOnGrow) &&
+         args.config.failComputeOnGrow || args.config.failComputeOnReset) &&
         !vulkanRun) {
         std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
@@ -312,7 +318,8 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     }
     if (args.compare) {
         // The comparison is only meaningful when the Vulkan run really uses the compute output.
-        if (args.config.refuseHw || args.config.preferGl || args.config.fakeApi != 0 || args.config.failComputeOnGrow) {
+        if (args.config.refuseHw || args.config.preferGl || args.config.fakeApi != 0 || args.config.failComputeOnGrow ||
+            args.config.failComputeOnReset) {
             std::fprintf(stderr, "--compare cannot be combined with --refuse-hw, --preferred-hw, --fake-api or "
                                  "--fail-compute-on-grow (they make the Vulkan run leave the compute output)\n");
             return ParseResult::Error;

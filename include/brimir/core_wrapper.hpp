@@ -201,6 +201,10 @@ public:
     void SetGpuOutputActive(bool active);
     bool IsGpuOutputActive() const { return m_gpuOutputActive; }
 
+    /// @brief The last RunFrame completed a frame on the CPU path (GetFramebuffer() holds it), as opposed to keeping
+    /// an older one (no frame ended, or the frame went to the GPU output or the Vulkan VDP renderer)
+    bool CpuFrameFromLastRun() const { return m_cpuFrameFromLastRun; }
+
     /// @brief The last frame completed while the GPU output was active (tightly packed XBGR8888), or nullptr
     const uint32_t* RawFrame() const { return m_rawWidth != 0 ? m_rawFrame.data() : nullptr; }
     uint32_t RawFrameWidth() const { return m_rawWidth; }
@@ -419,6 +423,8 @@ private:
     std::vector<uint32_t> m_framebuffer;  // XRGB8888 converted from Ymir's XBGR
     std::vector<uint32_t> m_displayFramebuffer; // Final output after crop/rotation
     const void* m_displayPointer = nullptr; // Points to final display buffer
+
+    bool m_cpuFrameFromLastRun = false;
 
     // GPU frame output (SetGpuOutputActive): the raw native frame instead of the CPU transforms
     bool m_gpuOutputActive = false;

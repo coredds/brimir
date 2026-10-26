@@ -123,6 +123,8 @@ struct SceneResult {
     uint32_t diffX = 0, diffY = 0, softwarePixel = 0, gpuPixel = 0;
     uint32_t diffCount = 0;
     uint32_t distinctColors = 0; // in the software frame (RGB)
+    uint32_t frame = 0;          // the compared frame (the last one, or the first differing one with compareFrame)
+    uint32_t comparedFrames = 0;
 
     std::string Describe() const;
 };
@@ -150,6 +152,11 @@ struct RenderBothOptions {
     uint32_t reloadLine = 0;
     // Called before each frame (0-based), after setup, with the Vulkan renderer and the device.
     std::function<void(uint32_t frame, gpu::VulkanVDPRenderer &, gpu::VulkanDevice &)> beforeFrame;
+    // The frame context each frame records into (default frame % frameContexts).
+    std::function<uint32_t(uint32_t frame)> contextForFrame;
+    // Compare every frame for which this returns true (a shown frame), not just the last one; the result describes the
+    // first differing frame (SceneResult::frame).
+    std::function<bool(uint32_t frame)> compareFrame;
 };
 
 /// @brief Runs the scene into a software and a Vulkan renderer pair (separate VDPStates, the same writes), replays each

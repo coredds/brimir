@@ -6,6 +6,12 @@ target_link_libraries(brimir_bench PRIVATE brimir_bridge brimir::brimir-core)
 
 target_compile_features(brimir_bench PRIVATE cxx_std_20)
 
+# Field-level diff of the VDP renderer section of two save states, with the allowlist of fields the renderers may save
+# differently (tools/state_diff.cpp; used by tests/vkhost_checks.cmake).
+add_executable(brimir_state_diff state_diff.cpp)
+target_link_libraries(brimir_state_diff PRIVATE brimir_bridge brimir::brimir-core)
+target_compile_features(brimir_state_diff PRIVATE cxx_std_20)
+
 # Headless libretro host: loads brimir_libretro dynamically and records its frames (tools/README.md). Built with
 # BRIMIR_VULKAN because its Vulkan context provider (hardware frames, --vulkan) lives here.
 if(BRIMIR_VULKAN)

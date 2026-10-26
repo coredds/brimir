@@ -250,8 +250,9 @@ static void sync_vdp_renderer(void) {
                        error.c_str());
         }
     } else if (!(compute && g_vulkanOutput->RendererAttached()) && g_core->GetVulkanRenderer()) {
-        if (g_vulkanOutput) {
-            g_vulkanOutput->DetachRenderer();
+        std::string error;
+        if (g_vulkanOutput && !g_vulkanOutput->DetachRenderer(error)) {
+            brimir_log(RETRO_LOG_ERROR, "Vulkan VDP2 renderer detach: %s", error.c_str());
         }
         g_core->UseSoftwareRenderer();
         brimir_log(RETRO_LOG_INFO, "Vulkan VDP2 renderer off (frame output %s); software renderer",
@@ -288,8 +289,8 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
                    reason.c_str());
         if (environ_cb) {
             static std::string text;
-            text = "Brimir: GPU renderer unavailable on this GPU (" + reason.substr(0, 120) +
-                   "); using the software renderer.";
+            // The reason names the cause: the GPU (version, limits, queue) or the frontend (device not negotiated).
+            text = "Brimir: GPU renderer unavailable (" + reason.substr(0, 120) + "); using the software renderer.";
             retro_message message{text.c_str(), 600};
             environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
         }
@@ -320,16 +321,9 @@ static void log_vulkan_output_change(brimir::libretro::VulkanOutputMode before, 
     }
 }
 
-// Before RunFrame: the output's slots follow the sync index mask (re-attaching the renderer), and the VDP renderer
-// follows the output, so the frame about to run is rendered for the device objects that will present it.
+// Before RunFrame: the VDP renderer follows the output (a context change since the last frame). A sync index mask
+// growth is handled by the next shown frame's BeginFrame, which keeps the renderer's composite.
 static void prepare_vulkan_frame(void) {
-    if (g_vulkanOutput && g_vulkanOutput->Live()) {
-        const brimir::libretro::VulkanOutputMode before = g_vulkanOutput->Mode();
-        std::string error;
-        if (!g_vulkanOutput->PrepareFrame(error)) {
-            log_vulkan_output_change(before, error);
-        }
-    }
     sync_vdp_renderer();
 }
 
@@ -344,7 +338,11 @@ static void present_vulkan_frame(void) {
     const bool hidden =
         environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av) && !(av & RETRO_AV_ENABLE_VIDEO);
     if (!g_vulkanOutput->Live()) {
-        return; // destroyed by a reinit inside the call above, without a new context
+        // Destroyed by a reinit inside the call above, without a new context: nothing to present, repeat.
+        if (!hidden && video_cb) {
+            video_cb(nullptr, g_lastWidth, g_lastHeight, 0);
+        }
+        return;
     }
     const VulkanOutputMode mode = g_vulkanOutput->Mode();
     const bool renderer = mode == VulkanOutputMode::Compute && g_vulkanOutput->RendererAttached();
@@ -375,7 +373,9 @@ static void present_vulkan_frame(void) {
             presented = g_vulkanOutput->Present(raw, g_core->RawFrameWidth(), g_core->RawFrameHeight(),
                                                 {s.cropH, s.cropV, s.rotation}, width, height, error);
         }
-    } else {
+    } else if (g_core->CpuFrameFromLastRun()) {
+        // Only a frame this run completed: after a switch from the Vulkan VDP renderer (a reinit ending in copy-only)
+        // the bridge's frame predates the renderer.
         width = g_core->GetFramebufferWidth();
         height = g_core->GetFramebufferHeight();
         presented = g_vulkanOutput->PresentCopy(g_core->GetFramebuffer(), width, height,
@@ -1022,8 +1022,9 @@ RETRO_API void retro_unload_game(void) {
 #ifdef BRIMIR_VULKAN
             // The next content chooses its renderer again. The frontend has normally destroyed the context already
             // (the renderer is detached then).
-            if (g_vulkanOutput) {
-                g_vulkanOutput->DetachRenderer();
+            std::string error;
+            if (g_vulkanOutput && !g_vulkanOutput->DetachRenderer(error)) {
+                brimir_log(RETRO_LOG_ERROR, "Vulkan VDP2 renderer detach: %s", error.c_str());
             }
             g_core->UseSoftwareRenderer();
 #endif
