@@ -6,7 +6,8 @@
 // tables), which reaches many pixel paths per scene.
 //
 // Known divergences between the ported shaders and the software renderer are tagged [!shouldfail], with their letter
-// from stage1b-port-inventory.md section 4.1 in the name; Task 6 fixes (b)-(g) and removes the tag. The ones Task 5
+// from stage1b-port-inventory.md section 4.1 (or a stage 1B ruling: (v)) in the name; Task 6 fixes (b)-(g) and (v)
+// and removes the tag. The ones Task 5
 // fixed ((a), (i), (k), (l) and (q)-(u) from the Task 3 and 4 reviews) keep their letter in the name, as do the
 // guards (j), (m)-(o). Documented exceptions (software behaviour the GPU path does not reproduce, by a controller
 // ruling) are tagged [!shouldfail] too, named "exception <id>". Any other failure is a bug.
@@ -40,6 +41,7 @@ using brimir::test::OpenDevice;
 using brimir::test::ReadbackBuffer;
 using brimir::test::RenderBoth;
 using brimir::test::RenderBothOptions;
+using brimir::test::RenderSoftware;
 using brimir::test::SceneResult;
 using brimir::test::Vdp2Scene;
 using brimir::test::Vdp2SceneWriter;
@@ -299,6 +301,7 @@ struct Sprites {
     uint16_t tvmr = 0;          // VDP1 TVMR (0 = 16 bpp, 1 = 8 bpp)
     uint32_t transparentPercent = 30;
     uint32_t shadowPercent = 0; // normal shadow pixels
+    uint32_t msbPercent = 0;    // pixels with bit 15 (SD) set, half of them with no colour data (types 2-7)
     uint32_t colorCalcCond = 0; // SPCTL.SPCCCS
     uint32_t colorCalcNum = 7;  // SPCTL.SPCCN
     bool rowConstant = false;   // one value per framebuffer row (insensitive to horizontal readout scaling)
@@ -342,6 +345,12 @@ void SetupSprites(Vdp2SceneWriter &w, const Sprites &sp, std::mt19937 &rng) {
                 value = static_cast<uint16_t>(((value & ~mask) | (mask - 1)) & 0x7FFF);
             } else if (!sp.mixed) {
                 value &= 0x7FFF;
+            }
+            if (sp.msbPercent > 0 && value != 0 && Rand(rng, 100) < sp.msbPercent) {
+                value |= 0x8000;
+                if (Rand(rng, 2)) {
+                    value &= static_cast<uint16_t>(~((1u << bits) - 1)); // transparent, with the shadow bit
+                }
             }
             if (eightBit) {
                 // Two 8-bit pixels; types 8-F read one byte each
@@ -1458,8 +1467,10 @@ TEST_CASE("Scene: (g) character pattern delay", "[gpu][vdp2][scene][!shouldfail]
 namespace {
 
 // VDP1 command table: system clipping, local coordinates, `count` random polygons (every other one a mesh when
-// `meshToo`; every fourth one coloured `meshColor` when it is not 0), end.
-void DrawPolygons(Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t count, bool meshToo, uint16_t meshColor = 0) {
+// `meshToo`; every fourth one coloured `meshColor` when it is not 0; with `meshOnly`, every one a mesh coloured
+// `meshColor`), end.
+void DrawPolygons(Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t count, bool meshToo, uint16_t meshColor = 0,
+                  bool meshOnly = false) {
     uint32_t a = 0;
     const auto cmd = [&](std::array<uint16_t, 16> words) {
         for (uint32_t i = 0; i < 16; ++i) {
@@ -1470,12 +1481,12 @@ void DrawPolygons(Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t count, bool me
     cmd({0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, 511, 255, 0, 0, 0, 0}); // system clipping
     cmd({0x000A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});     // local coordinates 0,0
     for (uint32_t i = 0; i < count; ++i) {
-        const bool mesh = meshToo && (i & 1);
+        const bool mesh = meshOnly || (meshToo && (i & 1));
         const int x = static_cast<int>(Rand(rng, 280)), y = static_cast<int>(Rand(rng, 190));
         const int wd = 20 + static_cast<int>(Rand(rng, 80)), ht = 20 + static_cast<int>(Rand(rng, 60));
         // Type 0 palette data: priority, ratio, colour
         const uint32_t pri = Rand(rng, 4), ratio = Rand(rng, 8), dot = 1 + Rand(rng, 0x7FF);
-        const uint16_t color = meshColor != 0 && (i & 3) == 3 ? meshColor
+        const uint16_t color = meshColor != 0 && (meshOnly || (i & 3) == 3) ? meshColor
                                                                : static_cast<uint16_t>((pri << 14) | (ratio << 11) | dot);
         const uint16_t pmod = static_cast<uint16_t>(mesh ? 0x0100 : 0);
         cmd({0x0004, 0, pmod, color, 0, 0, static_cast<uint16_t>(x), static_cast<uint16_t>(y),
@@ -1570,29 +1581,84 @@ TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2]
 // the ported Ymir shaders, by its letter from stage1b-port-inventory.md section 4.1 ((a)-(o)) or the stage 1B Task 3
 // and 4 reviews ((q)-(u)); (j) and (m)-(o) never diverged and stay as guards.
 
+namespace {
+
+// Pixels (RGB) where the software frames of two scenes differ.
+uint32_t SoftwareDifference(const Vdp2Scene &a, const Vdp2Scene &b) {
+    const std::vector<uint32_t> fa = RenderSoftware(a), fb = RenderSoftware(b);
+    if (fa.size() != fb.size()) {
+        return UINT32_MAX;
+    }
+    uint32_t count = 0;
+    for (size_t i = 0; i < fa.size(); ++i) {
+        count += ((fa[i] ^ fb[i]) & 0xFFFFFF) != 0;
+    }
+    return count;
+}
+
+enum class ShadowBGs { TwoNBGs, FourNBGs, RBG0 };
+
+// Sprites with normal shadows (type 0) or MSB shadows (type 2: SD set on opaque pixels and on transparent ones) over
+// the given backgrounds and the back screen, with SDCTL `sdctl`.
+Vdp2Scene ShadowScene(ShadowBGs bgs, uint16_t sdctl, bool msb) {
+    return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        switch (bgs) {
+        case ShadowBGs::TwoNBGs:
+            TwoNBGs(w, s, rng);
+            WindowRects(w, false);
+            w.Reg(WCTLA, 0x0202); // both NBGs hidden inside W0: the back screen shows there
+            break;
+        case ShadowBGs::FourNBGs:
+            CyclesAll(w);
+            SetupNBG(w, s, {.index = 0, .format = 1, .priority = 2}, rng);
+            SetupNBG(w, s, {.index = 1, .format = 0, .priority = 3}, rng);
+            SetupNBG(w, s, {.index = 2, .format = 1, .priority = 4}, rng);
+            SetupNBG(w, s, {.index = 3, .format = 0, .priority = 5}, rng);
+            break;
+        case ShadowBGs::RBG0: SetupRBG0(w, s, {.priority = 1}, rng); break; // below every sprite
+        }
+        s.sdctl = sdctl;
+        if (msb) {
+            SetupSprites(w, {.type = 2, .msbPercent = 40}, rng);
+        } else {
+            SetupSprites(w, {.type = 0, .shadowPercent = 40}, rng);
+        }
+    });
+}
+
+// The scene matches software, and (with any SDCTL bit set) its shadows reach the software frame.
+void RunShadowScene(ShadowBGs bgs, uint16_t sdctl, bool msb) {
+    RunScene(ShadowScene(bgs, sdctl, msb));
+    if (sdctl != 0) {
+        CHECK(SoftwareDifference(ShadowScene(bgs, sdctl, msb), ShadowScene(bgs, 0, msb)) > 0);
+    }
+}
+
+} // namespace
+
 TEST_CASE("Scene: (a) per-layer shadow enable over NBGs and the back screen", "[gpu][vdp2][scene][lavapipe]") {
-    // SDCTL: bit 0 NBG0, bit 1 NBG1, bit 5 back screen. Normal shadows (type 0) and MSB shadows (type 2).
+    // SDCTL: bit 0 NBG0, bit 1 NBG1, bit 5 back screen.
     const uint16_t sdctl = GENERATE(uint16_t{0x00}, uint16_t{0x01}, uint16_t{0x02}, uint16_t{0x20}, uint16_t{0x23});
     const bool msb = GENERATE(false, true);
     CAPTURE(sdctl, msb);
-    RunScene(Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng);
-        TwoNBGs(w, s, rng);
-        s.sdctl = sdctl;
-        SetupSprites(w, {.type = msb ? 2u : 0u, .shadowPercent = msb ? 0u : 40u}, rng);
-    }));
+    RunShadowScene(ShadowBGs::TwoNBGs, sdctl, msb);
+}
+
+TEST_CASE("Scene: (a) per-layer shadow enable over NBG2 and NBG3", "[gpu][vdp2][scene]") {
+    // SDCTL: bit 2 NBG2, bit 3 NBG3.
+    const uint16_t sdctl = GENERATE(uint16_t{0x04}, uint16_t{0x08}, uint16_t{0x0C});
+    const bool msb = GENERATE(false, true);
+    CAPTURE(sdctl, msb);
+    RunShadowScene(ShadowBGs::FourNBGs, sdctl, msb);
 }
 
 TEST_CASE("Scene: (a) per-layer shadow enable over RBG0", "[gpu][vdp2][scene]") {
-    // SDCTL: bit 4 RBG0, bit 5 back screen. RBG0 at priority 1, below every sprite.
-    const uint16_t sdctl = GENERATE(uint16_t{0x00}, uint16_t{0x10}, uint16_t{0x20});
-    CAPTURE(sdctl);
-    RunScene(Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng);
-        SetupRBG0(w, s, {.priority = 1}, rng);
-        s.sdctl = sdctl;
-        SetupSprites(w, {.type = 0, .shadowPercent = 40}, rng);
-    }));
+    // SDCTL: bit 4 RBG0, bit 5 back screen (RBG0 covers almost all of it; the NBG scene above covers the back screen).
+    const uint16_t sdctl = GENERATE(uint16_t{0x00}, uint16_t{0x10}, uint16_t{0x30});
+    const bool msb = GENERATE(false, true);
+    CAPTURE(sdctl, msb);
+    RunShadowScene(ShadowBGs::RBG0, sdctl, msb);
 }
 
 TEST_CASE("Scene: (i) extended colour calculation with layer 1 special colour calculation", "[gpu][vdp2][scene]") {
@@ -1890,10 +1956,87 @@ TEST_CASE("Scene: (t) LNCL and BACK per line in interlaced modes", "[gpu][vdp2][
 }
 
 TEST_CASE("Scene: (u) mesh alt field in single-density interlace", "[gpu][vdp2][scene][lavapipe]") {
-    // Software reads the alt mesh framebuffer (m_meshFBRAM[1]) for the alt-field rows whenever it deinterlaces
-    // (sw:2690), in single density too, where VDP1 never draws into it (sw:1119): meshes show on the main field rows
-    // only. The renderer captures that slice and the sprite shader reads it.
+    // Software reads the alt mesh framebuffer for the alt-field rows only in double density (m_meshFBRAM[doubleDensity
+    // && altField], master f001c11, stage 1B ruling 11), like the alt sprite framebuffer; the shader and the capture
+    // follow the same rule.
     RunScene(MeshScene(kLSMDSingle, true));
+}
+
+TEST_CASE("Scene: (u) alt sprite slices after a mid-frame switch to double density", "[gpu][vdp2][scene]") {
+    // VDP1 draws in double density with deinterlacing (both fields, sprites and meshes). Every frame then starts in
+    // single density and switches to double density at line 100: the alt slices are read from line 100 only, so the
+    // capture must not decide at line 0. No NBGs: their per-line vertical scroll across the switch is Task 6's.
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | kLSMDDouble));
+            w.Reg(SPCTL, 0x0000);
+            w.Reg(PRISA, 0x0706);
+            w.Reg(PRISB, 0x0402);
+            DrawPolygons(w, rng, 24, true);
+        },
+        {.deinterlace = true, .transparentMeshes = true}, 3);
+    scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            w.Reg(TVMD, static_cast<uint16_t>(kDisp | kLSMDSingle));
+        } else if (y == 100) {
+            w.Reg(TVMD, static_cast<uint16_t>(kDisp | kLSMDDouble));
+        }
+    };
+    RunScene(scene);
+}
+
+TEST_CASE("Scene: mesh colour calculation on the mesh pixel's colour MSB", "[gpu][vdp2][scene][lavapipe]") {
+    // Meshes only (the normal sprite layer is transparent under them, its colour CRAM[0]), sprite colour calculation
+    // condition "colour MSB": the mesh pixel's own MSB decides (master 7d1cb66, stage 1B ruling 14), with CRAM[0]'s MSB
+    // set to the opposite.
+    const bool meshMSB = GENERATE(false, true);
+    CAPTURE(meshMSB);
+    RunScene(Make(
+        [meshMSB](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            w.CRAM16(0x0000, static_cast<uint16_t>((meshMSB ? 0 : 0x8000) | 0x2345));
+            w.CRAM16(0x0020, static_cast<uint16_t>((meshMSB ? 0x8000 : 0) | 0x1234)); // the mesh colour, CRAM[0x10]
+            w.Reg(SPCTL, 0x3000); // colour MSB condition, type 0
+            w.Reg(PRISA, 0x0706);
+            w.Reg(PRISB, 0x0402);
+            w.Reg(CCRSA, 0x0010);
+            w.Reg(CCCTL, 0x0041); // sprite and NBG0 colour calculation
+            DrawPolygons(w, rng, 16, true, 0x0010, true);
+        },
+        {.transparentMeshes = true}));
+}
+
+// Divergence (v) (stage 1B ruling 12): with VDP1 framebuffer rotation in hi-res modes, software computes the sprite
+// coordinates for HRes / 2 pixels (sw:2223-2225, 2333-2346) and the sprite layer reads them at half resolution and
+// doubles each pixel (sw:2672-2727); the shader computes them at full output x. Task 6 fixes it.
+TEST_CASE("Scene: (v) rotated sprites in hi-res modes", "[gpu][vdp2][scene][!shouldfail]") {
+    const uint16_t hreso = GENERATE(uint16_t{2}, uint16_t{3});
+    CAPTURE(hreso);
+    RunScene(Make([hreso](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, static_cast<uint16_t>(kDisp | hreso));
+        SetupRBG0(w, s, {}, rng);
+        SetupSprites(w, {.type = 0, .tvmr = 2}, rng); // TVMR bit 1: framebuffer rotation
+    }));
+}
+
+TEST_CASE("Scene: RBG line colours read the RGB555 table at kVDP2CRAM555TableBase", "[gpu][vdp2][scene]") {
+    // The host places the RGB555 table at entry kVDP2CRAM555TableBase of the CRAM colour buffer, the shader reads it
+    // at kCRAM555TableBase (vdp2_defs.hlsli). In CRAM mode 2 the two halves of the buffer hold different colours for
+    // the same index, and with ratio 0 the RBG0 pixels are the line colours themselves, so any other base fails here.
+    STATIC_CHECK(gpu::vdp2::kVDP2CRAM555TableBase == 2048);
+    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, kDisp, 2);
+        SetupRBG0(w, s, {.transparency = false}, rng);
+        for (uint32_t y = 0; y < 512; ++y) {
+            w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x800)));
+        }
+        w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
+        w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
+        s.lnclen = 0x0010; // RBG0
+        w.Reg(CCCTL, 0x0010);
+        w.Reg(CCRR, 0x0000);
+    }));
 }
 
 // =====================================================================================================================

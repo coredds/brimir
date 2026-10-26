@@ -78,6 +78,7 @@ void VulkanVDPRenderer::Reset(bool hard) {
     m_front.Reset(hard);
     m_HRes = kDefaultResH;
     m_VRes = kDefaultResV;
+    m_exclusiveMonitor = false;
     m_displayEraseSinceCapture = false;
 }
 
@@ -199,6 +200,7 @@ void VulkanVDPRenderer::VDP2SetResolution(uint32_t h, uint32_t v, bool exclusive
     m_front.SetResolution(h, v, exclusive);
     m_HRes = h;
     m_VRes = v;
+    m_exclusiveMonitor = exclusive;
     m_resolutionChanged = true;
 }
 
@@ -209,22 +211,36 @@ void VulkanVDPRenderer::VDP2LatchTVMD() {}
 void VulkanVDPRenderer::VDP2BeginFrame() {
     m_front.BeginFrame();
     m_slicesCaptured = false;
+    m_altSlicesCaptured = false;
 }
 
 void VulkanVDPRenderer::VDP2RenderLine(uint32_t y) {
     m_front.RenderLine(y);
-    if (!m_slicesCaptured && m_backend) {
+    if (!m_backend) {
+        // Without a device the frame is dropped, so nothing is copied.
+        return;
+    }
+    if (!m_slicesCaptured) {
         // The frame's first line (normally y = 0, after the VBlank swap): the display framebuffer is final for the
-        // whole frame (VDP1 draws and the CPU writes into the draw framebuffer; erases happen in blanking). Without a
-        // device the frame is dropped, so nothing is copied.
+        // whole frame (VDP1 draws and the CPU writes into the draw framebuffer; erases happen in blanking).
         CaptureSpriteSlices();
         m_slicesCaptured = true;
+    }
+    // The sprite shader reads the alt slices on the alt field rows of lines rendered in double density with
+    // deinterlacing (outside exclusive monitor modes, which never double rows), deciding per batch from the TVMD those
+    // lines rendered with. TVMD can change mid-frame, so the decision is per line too: the first line that can read
+    // them captures them (the display framebuffer is the same all frame; the slices upload before any batch).
+    if (!m_altSlicesCaptured && m_enhancements.deinterlace && !m_exclusiveMonitor &&
+        m_state.regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity) {
+        CaptureAltSpriteSlices();
+        m_altSlicesCaptured = true;
     }
 }
 
 void VulkanVDPRenderer::VDP2EndFrame() {
     m_front.EndFrame();
     m_slicesCaptured = false;
+    m_altSlicesCaptured = false;
     if (!m_backend) {
         // No device: the record is dropped; AttachDevice uploads everything again.
         m_front.ConsumeFrame();
@@ -243,30 +259,32 @@ void VulkanVDPRenderer::UpdateEnabledLayers() {
     // Debug layer toggles are not supported by the GPU path: the front half renders every layer.
 }
 
-void VulkanVDPRenderer::CaptureSpriteSlices() {
+void VulkanVDPRenderer::SyncDisplayErase() {
     if (m_displayEraseSinceCapture) {
         // An erase of the display framebuffer without a swap may still be running on the VDP1 thread.
         m_vdp1->VDP1SyncFB();
         m_displayEraseSinceCapture = false;
     }
-    const uint8_t display = m_state.fbIndex.display & 1u;
-    const bool doubleDensity = m_state.regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
-    const bool deinterlace = m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced();
-    const bool deinterlaceDD = deinterlace && doubleDensity;
+}
 
-    using Slice = std::span<const uint8_t, vdp2::kSpriteSliceSize>;
-    static_assert(sizeof(SpriteFB) == vdp2::kSpriteSliceSize);
+using Slice = std::span<const uint8_t, vdp2::kSpriteSliceSize>;
+static_assert(sizeof(SpriteFB) == vdp2::kSpriteSliceSize);
+
+void VulkanVDPRenderer::CaptureSpriteSlices() {
+    SyncDisplayErase();
+    const uint8_t display = m_state.fbIndex.display & 1u;
     m_front.AddSpriteSlice(vdp2::kSpriteSliceMain, Slice{m_state.mem1.FBRAM[display]});
-    if (deinterlaceDD) {
-        m_front.AddSpriteSlice(vdp2::kSpriteSliceAlt, Slice{m_vdp1->GetAltFBRAM(display)});
-    }
     if (m_enhancements.transparentMeshes) {
         m_front.AddSpriteSlice(vdp2::kSpriteSliceMesh0, Slice{m_vdp1->GetMeshFBRAM(false, display)});
-        // Brimir: matches software (sw:2690): the alt field reads the alt mesh framebuffer whenever deinterlacing, in
-        // single density too (the alt sprite framebuffer only in double density).
-        if (deinterlace) {
-            m_front.AddSpriteSlice(vdp2::kSpriteSliceMesh1, Slice{m_vdp1->GetMeshFBRAM(true, display)});
-        }
+    }
+}
+
+void VulkanVDPRenderer::CaptureAltSpriteSlices() {
+    SyncDisplayErase();
+    const uint8_t display = m_state.fbIndex.display & 1u;
+    m_front.AddSpriteSlice(vdp2::kSpriteSliceAlt, Slice{m_vdp1->GetAltFBRAM(display)});
+    if (m_enhancements.transparentMeshes) {
+        m_front.AddSpriteSlice(vdp2::kSpriteSliceMesh1, Slice{m_vdp1->GetMeshFBRAM(true, display)});
     }
 }
 

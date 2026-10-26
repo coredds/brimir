@@ -480,17 +480,17 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
 
     SpriteOutput output = { kTransparentPixel, 0, false, false, false };
 
-    // Brimir: matches software (sw:2558-2563, 2685-2690): when deinterlacing, pos.y is (line << 1) | alt field. Both
-    // fields of a line use the line's rotation coordinates (sw:2335, 2697); the alt field reads the alt framebuffer in
-    // double density only, and the alt mesh framebuffer in any interlaced mode. (Ymir indexes the rotation bases by
-    // the doubled row and uses field 0 for rotated sprites and for meshes outside double density.)
+    // Brimir: matches software (sw:2558-2563, 2685-2690): when deinterlacing, pos.y is (line << 1) | alt field (the
+    // front half doubles rows outside exclusive monitor modes only). Both fields of a line use the line's rotation
+    // coordinates (sw:2335, 2697); the alt field reads the alt sprite and mesh framebuffers in double density only.
+    // (Ymir indexes the rotation bases by the doubled row and uses field 0 for rotated sprites.)
     uint fieldLine = pos.y;
     uint altField = 0;
-    if (deinterlace && interlaceMode >= kInterlaceModeSingleDensity) {
+    if (deinterlace && interlaceMode >= kInterlaceModeSingleDensity && !exclusiveMonitor) {
         altField = pos.y & 1;
         fieldLine >>= 1;
     }
-    const uint field = meshLayer || interlaceMode == kInterlaceModeDoubleDensity ? altField : 0;
+    const uint field = interlaceMode == kInterlaceModeDoubleDensity ? altField : 0;
 
     uint2 spritePos;
     if (rotate) {

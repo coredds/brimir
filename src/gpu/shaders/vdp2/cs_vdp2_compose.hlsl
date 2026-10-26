@@ -252,8 +252,8 @@ bool IsLayer1ColorCalcEnabled(uint layer, uint2 pos) {
 }
 
 // Brimir: matches software (sw:4325-4344): the mesh layer's colour calculation uses the sprite enable and condition
-// with the mesh pixel's priority (the MSB condition reads the sprite layer pixel), without the colour calculation
-// window or restricted colour calculation (Ymir tests the kLayerMesh enable bit, which is never set).
+// with the mesh pixel's priority and colour MSB, without the colour calculation window or restricted colour
+// calculation (Ymir tests the kLayerMesh enable bit, which is never set).
 bool IsMeshColorCalcEnabled(uint meshPriority, uint2 pos) {
     if (!BitTest(g_commonParams.spriteParams, 11)) {
         return false;
@@ -268,7 +268,7 @@ bool IsMeshColorCalcEnabled(uint meshPriority, uint2 pos) {
         case kSpriteCCCondPriorityGE:
             return meshPriority >= value;
         case kSpriteCCCondColorMSB:
-            return BitTest(g_spriteAttrsIn[uint3(pos, 0)], kSpriteAttrBitColorMSB);
+            return BitTest(g_spriteAttrsIn[uint3(pos, 1)], kSpriteAttrBitColorMSB);
     }
     return false;
 }

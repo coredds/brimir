@@ -115,7 +115,9 @@ protected:
     void UpdateEnhancements() override;
 
 private:
+    void SyncDisplayErase();
     void CaptureSpriteSlices();
+    void CaptureAltSpriteSlices();
 
     ymir::vdp::VDPState &m_state;
     std::unique_ptr<ymir::vdp::SoftwareVDPRenderer> m_vdp1; // the software VDP1 backend
@@ -124,9 +126,11 @@ private:
 
     uint32_t m_HRes = ymir::vdp::kDefaultResH;
     uint32_t m_VRes = ymir::vdp::kDefaultResV;
+    bool m_exclusiveMonitor = false;
     bool m_resolutionChanged = false;
     bool m_displayEraseSinceCapture = false; // VDP1 erased a framebuffer without a swap since the last capture
-    bool m_slicesCaptured = false;           // the open frame has its sprite slices
+    bool m_slicesCaptured = false;           // the open frame has its main (and mesh0) sprite slices
+    bool m_altSlicesCaptured = false;        // the open frame has its alt (and mesh1) sprite slices
 };
 
 } // namespace brimir::gpu
