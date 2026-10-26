@@ -1,11 +1,37 @@
 #include "vulkan_vdp_renderer.hpp"
 
+#include <chrono>
 #include <span>
 
 namespace brimir::gpu {
 
 using namespace ymir;
 using namespace ymir::vdp;
+
+namespace {
+
+// Adds the scope's duration to `seconds` when `on` (FrameProbe).
+class ProbeTimer {
+public:
+    ProbeTimer(bool on, double &seconds) : m_seconds(on ? &seconds : nullptr) {
+        if (m_seconds != nullptr) {
+            m_start = std::chrono::steady_clock::now();
+        }
+    }
+    ~ProbeTimer() {
+        if (m_seconds != nullptr) {
+            *m_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - m_start).count();
+        }
+    }
+    ProbeTimer(const ProbeTimer &) = delete;
+    ProbeTimer &operator=(const ProbeTimer &) = delete;
+
+private:
+    double *m_seconds;
+    std::chrono::steady_clock::time_point m_start{};
+};
+
+} // namespace
 
 VulkanVDPRenderer::VulkanVDPRenderer(VDPState &state, config::VDP2DebugRender &vdp2DebugRenderOptions,
                                      const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig)
@@ -227,12 +253,15 @@ void VulkanVDPRenderer::VDP2SetField(bool) {}
 void VulkanVDPRenderer::VDP2LatchTVMD() {}
 
 void VulkanVDPRenderer::VDP2BeginFrame() {
+    m_frontSeconds = 0;
+    ProbeTimer timer(FrameProbe != nullptr, m_frontSeconds);
     m_front.BeginFrame();
     m_slicesCaptured = false;
     m_altSlicesCaptured = false;
 }
 
 void VulkanVDPRenderer::VDP2RenderLine(uint32_t y) {
+    ProbeTimer timer(FrameProbe != nullptr, m_frontSeconds);
     m_front.RenderLine(y);
     if (!m_backend) {
         // Without a device the frame is dropped, so nothing is copied.
@@ -256,7 +285,13 @@ void VulkanVDPRenderer::VDP2RenderLine(uint32_t y) {
 }
 
 void VulkanVDPRenderer::VDP2EndFrame() {
-    m_front.EndFrame();
+    {
+        ProbeTimer timer(FrameProbe != nullptr, m_frontSeconds);
+        m_front.EndFrame();
+    }
+    if (FrameProbe) {
+        FrameProbe(m_front.Frame().features, m_frontSeconds);
+    }
     m_slicesCaptured = false;
     m_altSlicesCaptured = false;
     if (!m_backend) {

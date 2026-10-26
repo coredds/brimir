@@ -446,6 +446,36 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
     const char *poison = std::getenv("BRIMIR_VDP2_POISON");
     const bool poisonImages = options.poisonImages || (poison && std::string(poison) == "1");
 
+    // Optional GPU timing: two timestamps per submitted frame.
+    struct QueryPool {
+        const VolkDeviceTable *table = nullptr;
+        VkDevice device = VK_NULL_HANDLE;
+        VkQueryPool pool = VK_NULL_HANDLE;
+        ~QueryPool() {
+            if (pool != VK_NULL_HANDLE) {
+                table->vkDestroyQueryPool(device, pool, nullptr);
+            }
+        }
+    } timestamps;
+    double timestampPeriod = 0;
+    if (options.gpuMilliseconds != nullptr) {
+        uint32_t familyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device.Physical(), &familyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> families(familyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(device.Physical(), &familyCount, families.data());
+        if (device.QueueFamily() < familyCount && families[device.QueueFamily()].timestampValidBits != 0) {
+            VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            info.queryCount = 2;
+            timestamps.table = &device.Table();
+            timestamps.device = device.Device();
+            if (device.Table().vkCreateQueryPool(device.Device(), &info, nullptr, &timestamps.pool) != VK_SUCCESS) {
+                timestamps.pool = VK_NULL_HANDLE;
+            }
+            timestampPeriod = device.Properties().limits.timestampPeriod;
+        }
+    }
+
     Vdp2SceneWriter writer{scene.enhancements};
     writer.Attach(*swState, *software);
     writer.Attach(*vkState, *vulkan);
@@ -494,11 +524,28 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 vulkan->RecordedFrameDropped();
                 continue;
             }
-            const VkResult submit = gpu::vk_util::SubmitOneShot(
-                device, [&](VkCommandBuffer cmd) { recorded = vulkan->RecordPendingFrame(context, cmd); });
+            const VkResult submit = gpu::vk_util::SubmitOneShot(device, [&](VkCommandBuffer cmd) {
+                if (timestamps.pool != VK_NULL_HANDLE) {
+                    device.Table().vkCmdResetQueryPool(cmd, timestamps.pool, 0, 2);
+                    device.Table().vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamps.pool, 0);
+                }
+                recorded = vulkan->RecordPendingFrame(context, cmd);
+                if (timestamps.pool != VK_NULL_HANDLE) {
+                    device.Table().vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamps.pool, 1);
+                }
+            });
             if (submit != VK_SUCCESS || !recorded) {
                 result.error = "frame " + std::to_string(frame) + ": recording or submission failed";
                 return result;
+            }
+            if (timestamps.pool != VK_NULL_HANDLE) {
+                uint64_t ticks[2] = {};
+                if (device.Table().vkGetQueryPoolResults(device.Device(), timestamps.pool, 0, 2, sizeof(ticks), ticks,
+                                          sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) ==
+                    VK_SUCCESS) {
+                    options.gpuMilliseconds->push_back(static_cast<double>(ticks[1] - ticks[0]) * timestampPeriod *
+                                                       1e-6);
+                }
             }
         }
         if (options.compareFrame && options.compareFrame(frame)) {

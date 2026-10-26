@@ -8,6 +8,7 @@
 
 #ifdef BRIMIR_VULKAN
 #include "libretro_vulkan.hpp"
+#include <gpu/vdp/vulkan_vdp_renderer.hpp>
 #endif
 
 #include <cstdio>
@@ -225,6 +226,26 @@ static void sync_gpu_output(void) {
     }
 }
 
+// Diagnostics: with the environment variable BRIMIR_VDP2_PROBE set (brimir_vkhost --probe), the Vulkan VDP renderer
+// logs one debug line per VDP2 frame with the front half's feature counters and CPU time.
+static void set_vdp2_probe(brimir::gpu::VulkanVDPRenderer& renderer) {
+    static const bool requested = [] {
+        const char* env = std::getenv("BRIMIR_VDP2_PROBE");
+        return env != nullptr && *env != '\0' && std::strcmp(env, "0") != 0;
+    }();
+    if (!requested) {
+        return;
+    }
+    renderer.FrameProbe = [](const brimir::gpu::vdp2::Vdp2FeatureCounters& f, double frontSeconds) {
+        brimir_log(RETRO_LOG_DEBUG,
+                   "VDP2 probe: batches %u arena %u copy %u mosaic %u vcell %u chardelay %u ddlinescroll %u "
+                   "extcc %u shadow %u mesh %u crammodes %u front_us %.1f",
+                   f.batches, f.arenaBytes, f.copyBytes, f.mosaicLines, f.vcellLines, f.charPatDelayLines,
+                   f.ddLineScrollLines, f.extendedCCLines, f.shadowLines, f.meshSlices, f.cramModeMask,
+                   frontSeconds * 1e6);
+    };
+}
+
 // The VDP renderer follows the frame output: the Vulkan VDP renderer while the compute output is live, the software
 // renderer otherwise (copy-only output, no context, or the renderer cannot run on the device). Switching carries the
 // renderer state over (CoreWrapper). Call between frames: context_reset, the start of retro_run, or after a frame
@@ -241,6 +262,7 @@ static void sync_vdp_renderer(void) {
         if (renderer == nullptr) {
             error = "installing it failed";
         } else if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
+            set_vdp2_probe(*renderer);
             brimir_log(RETRO_LOG_INFO, "Vulkan VDP2 renderer active");
         }
         if (!g_vulkanOutput->RendererAttached()) {

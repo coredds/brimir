@@ -65,6 +65,23 @@ struct HostConfig {
     bool noValidation = false;      // --no-validation: do not load the validation layer (timing runs)
     bool failComputeOnGrow = false; // --fail-compute-on-grow: the core's pipeline creation fails after the growth
     bool failComputeOnReset = false; // --fail-compute-on-reset: ... from the second context on (a reinit)
+    bool probe = false; // --probe: collect the core's per-frame VDP2 probe lines (BRIMIR_VDP2_PROBE) while recording
+};
+
+// One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).
+struct ProbeFrame {
+    uint32_t batches = 0;
+    uint32_t arenaBytes = 0;
+    uint32_t copyBytes = 0;
+    uint32_t mosaicLines = 0;
+    uint32_t vcellLines = 0;
+    uint32_t charPatDelayLines = 0;
+    uint32_t ddLineScrollLines = 0;
+    uint32_t extendedCCLines = 0;
+    uint32_t shadowLines = 0;
+    uint32_t meshSlices = 0;
+    uint32_t cramModeMask = 0;
+    double frontMicroseconds = 0;
 };
 
 // What a run did, for the CLI summary and the checks.
@@ -86,6 +103,7 @@ struct RunReport {
     double recordSeconds = 0;   // wall time of the recorded frames' retro_run calls (sink time included)
     double sinkSeconds = 0;     // of which in FrameSink::OnFrame (hash, PPM)
     double readbackSeconds = 0; // of which in the host's set_image readback (Vulkan)
+    std::vector<ProbeFrame> probeFrames; // --probe: the VDP2 frames that ended while recording
     std::vector<std::string> problems; // anything that fails the run
 };
 
@@ -132,6 +150,9 @@ public:
 
     // Value of GET_AUDIO_VIDEO_ENABLE (RETRO_AV_ENABLE_* flags); the core sees it on its next query.
     void SetAvEnable(int flags) { m_avEnable = flags; }
+
+    // A "VDP2 probe:" log line (--probe); kept only while recording. False if it does not parse.
+    bool ProbeLine(const char* text);
 
 private:
     struct Api;
@@ -205,6 +226,7 @@ private:
     uint64_t m_duplicate = 0;
     uint64_t m_unreadable = 0;
     double m_readbackSeconds = 0;
+    std::vector<ProbeFrame> m_probeFrames;
 };
 
 // Loads the core per `config`, runs `warmup` unrecorded frames then `frames` recorded ones, and returns the recorded

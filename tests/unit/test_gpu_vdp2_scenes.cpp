@@ -2877,3 +2877,77 @@ TEST_CASE("Scene: weave across hidden frames recorded into hidden contexts", "[g
     CHECK(result.comparedFrames == 5);
     CloseAndCheckValidation(device);
 }
+
+// Bench (hidden, run with "[bench]"): GPU time per frame of NBG1 with character pattern delay and windows, against the
+// same layer without the delay. DrawNBGScrollPixel walks back over windowed pixels to find a delayed pixel's run start
+// (NBGPrevFetch), so a window hiding most of a line costs the pixels after it a walk across the hidden span. Prints the
+// median and maximum of `frames` frames per configuration (timestamps around the frame's commands: uploads, sprite,
+// bgs and compose dispatches); no threshold. Every configuration must still match software.
+TEST_CASE("Bench: character pattern delay with windows", "[gpu][vdp2][bench][.]") {
+    struct Config {
+        const char *name;
+        bool delay;
+        uint16_t wctla;              // NBG1 window control (high byte)
+        uint16_t wpsx0, wpex0;       // W0 horizontal range (in half dots)
+        uint16_t wpsx1, wpex1;       // W1 horizontal range
+    };
+    const Config configs[] = {
+        {"no delay, no window", false, 0, 0, 0, 0, 0},
+        {"delay, no window", true, 0, 0, 0, 0, 0},
+        {"no delay, W0 hides 8-311", false, 0x0200, 8 << 1, 311 << 1, 0, 0},
+        {"delay, W0 hides 8-311", true, 0x0200, 8 << 1, 311 << 1, 0, 0},
+        {"delay, W0 hides 0-318", true, 0x0200, 0, 318 << 1, 0, 0},
+        {"delay, W0 or W1 hide 4-155 and 164-315", true, 0x0A00, 4 << 1, 155 << 1, 164 << 1, 315 << 1},
+    };
+    constexpr uint32_t kFrames = 60;
+    auto device = OpenDevice();
+    for (const bool cell2x2 : {false, true}) {
+        for (const Config &config : configs) {
+            Vdp2Scene scene = Make(
+                [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                    Base(w, s, rng);
+                    SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = cell2x2}, rng);
+                    for (uint32_t reg : {CYCA0L, CYCA1L, CYCB0L, CYCB1L}) {
+                        // As "(g) character pattern delay of 1x1 and 2x2 characters"
+                        w.Reg(reg, config.delay ? 0x5FFF : 0x15FF);
+                        w.Reg(reg + 2, config.delay ? 0xFFF1 : 0xFFFF);
+                    }
+                    if (config.wctla != 0) {
+                        w.Reg(WPSX0, config.wpsx0);
+                        w.Reg(WPEX0, config.wpex0);
+                        w.Reg(WPSY0, 0);
+                        w.Reg(WPEY0, 223);
+                        w.Reg(WPSX1, config.wpsx1);
+                        w.Reg(WPEX1, config.wpex1);
+                        w.Reg(WPSY1, 0);
+                        w.Reg(WPEY1, 223);
+                        w.Reg(WCTLA, config.wctla);
+                    }
+                },
+                {}, kFrames);
+            // A different left edge on every line and frame: every frame re-renders every line.
+            scene.onLine = [frame = 0u](Vdp2SceneWriter &w, uint32_t y) mutable {
+                if (y == 0) {
+                    ++frame;
+                }
+                w.Reg(SCXIN1, static_cast<uint16_t>(y / 3 + frame));
+            };
+            std::vector<double> ms;
+            RenderBothOptions options;
+            options.gpuMilliseconds = &ms;
+            const SceneResult result = Check(*device, scene, options);
+            if (ms.empty()) {
+                WARN("no timestamps on this queue");
+                continue;
+            }
+            // The first frame uploads everything
+            std::vector<double> sorted(ms.begin() + 1, ms.end());
+            std::sort(sorted.begin(), sorted.end());
+            const double median = sorted[sorted.size() / 2];
+            WARN((cell2x2 ? "2x2 " : "1x1 ") << config.name << ": GPU " << median << " ms/frame median, "
+                                              << sorted.back() << " max (" << sorted.size() << " frames"
+                                              << (result.identical ? "" : ", DIFFERS from software") << ")");
+        }
+    }
+    CloseAndCheckValidation(device);
+}

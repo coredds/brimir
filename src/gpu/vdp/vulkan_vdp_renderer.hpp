@@ -63,6 +63,10 @@ public:
 
     // Fired at the end of every VDP2 frame, after Callbacks.VDP2DrawFinished, with the frame's size.
     std::function<void(uint32_t w, uint32_t h)> FrameReady;
+    // Diagnostics (brimir_vkhost --probe): when set, fired at the end of every VDP2 frame, before FrameReady, with the
+    // front half's feature counters and the CPU time the frame took in the front half (VDP2BeginFrame, the lines with
+    // their sprite captures, VDP2EndFrame; register and memory writes, which only mark state dirty, are not timed).
+    std::function<void(const vdp2::Vdp2FeatureCounters &features, double frontSeconds)> FrameProbe;
 
     // A recorded frame waits for RecordPendingFrame (only while attached).
     bool HasPendingFrame() const;
@@ -140,6 +144,7 @@ private:
     bool m_displayEraseSinceCapture = false; // VDP1 erased a framebuffer without a swap since the last capture
     bool m_slicesCaptured = false;           // the open frame has its main (and mesh0) sprite slices
     bool m_altSlicesCaptured = false;        // the open frame has its alt (and mesh1) sprite slices
+    double m_frontSeconds = 0;               // FrameProbe: front-half time of the open frame
 };
 
 } // namespace brimir::gpu

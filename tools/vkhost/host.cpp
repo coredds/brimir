@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -91,16 +92,21 @@ private:
 
 template <int Slot>
 void RETRO_CALLCONV LogCallback(enum retro_log_level level, const char* fmt, ...) {
+    char text[4096];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    // --probe lines are collected, not printed.
+    if (std::strstr(text, "VDP2 probe: ") != nullptr && g_hosts[Slot] != nullptr && g_hosts[Slot]->ProbeLine(text)) {
+        return;
+    }
     if (level == RETRO_LOG_DEBUG && !g_verbose) {
         return;
     }
     static const char* const names[] = {"debug", "info", "warn", "error"};
     const unsigned index = static_cast<unsigned>(level);
-    std::fprintf(stderr, Slot == 0 ? "[core %s] " : "[core#2 %s] ", index < 4 ? names[index] : "?");
-    va_list args;
-    va_start(args, fmt);
-    std::vfprintf(stderr, fmt, args);
-    va_end(args);
+    std::fprintf(stderr, Slot == 0 ? "[core %s] %s" : "[core#2 %s] %s", index < 4 ? names[index] : "?", text);
 }
 
 bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& out) {
@@ -168,6 +174,15 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_resetInRun = config.resetInRun;
     m_resetInPresent = config.resetInPresent;
     m_frameIndex = 0;
+    m_probeFrames.clear();
+    if (config.probe) {
+        // The core reads it when it installs the Vulkan VDP renderer.
+#ifdef _WIN32
+        _putenv_s("BRIMIR_VDP2_PROBE", "1");
+#else
+        setenv("BRIMIR_VDP2_PROBE", "1", 1);
+#endif
+    }
     if (config.vulkan && !config.refuseHw) {
         // Like a frontend's video driver, the instance and device exist before the core is loaded.
         m_vulkan = std::make_unique<VulkanProvider>(config.fakeApi, !config.noValidation);
@@ -389,6 +404,24 @@ bool LibretroHost::Unserialize(const std::vector<uint8_t>& state) {
     return m_api && m_contentLoaded && m_api->unserialize(state.data(), state.size());
 }
 
+bool LibretroHost::ProbeLine(const char* text) {
+    const char* line = std::strstr(text, "VDP2 probe: ");
+    ProbeFrame f;
+    const int n = std::sscanf(line,
+                              "VDP2 probe: batches %u arena %u copy %u mosaic %u vcell %u chardelay %u ddlinescroll %u "
+                              "extcc %u shadow %u mesh %u crammodes %u front_us %lf",
+                              &f.batches, &f.arenaBytes, &f.copyBytes, &f.mosaicLines, &f.vcellLines,
+                              &f.charPatDelayLines, &f.ddLineScrollLines, &f.extendedCCLines, &f.shadowLines,
+                              &f.meshSlices, &f.cramModeMask, &f.frontMicroseconds);
+    if (n != 12) {
+        return false;
+    }
+    if (m_sink != nullptr) {
+        m_probeFrames.push_back(f);
+    }
+    return true;
+}
+
 void LibretroHost::Problem(const std::string& text) {
     // Each kind once; the counters carry the totals.
     if (std::find(m_problems.begin(), m_problems.end(), text) == m_problems.end()) {
@@ -404,6 +437,7 @@ void LibretroHost::FillReport(RunReport& report) const {
     report.unreadableFrames += m_unreadable;
     report.readbackSeconds += m_readbackSeconds;
     report.hiddenGpuCalls += m_hiddenFrames;
+    report.probeFrames.insert(report.probeFrames.end(), m_probeFrames.begin(), m_probeFrames.end());
     report.problems.insert(report.problems.end(), m_problems.begin(), m_problems.end());
     if (m_vulkan) {
         report.coreSubmits += m_vulkan->CoreSubmits();

@@ -101,6 +101,10 @@ void PrintUsage(std::FILE* out) {
         "  --fail-compute-on-reset  with --vulkan: the same for every context after the first (a reinit ends in\n"
         "                copy-only)\n"
         "  --no-validation  with --vulkan/--compare: do not load the validation layer (timing runs)\n"
+        "  --probe       with --vulkan: collect the Vulkan VDP renderer's per-frame feature counters while\n"
+        "                recording (sets BRIMIR_VDP2_PROBE for the core) and print a summary: per feature the\n"
+        "                frames using it, batches, arena and copy bytes per frame (median, maximum) and the\n"
+        "                front half's CPU time per frame\n"
         "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
         "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
@@ -187,6 +191,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--no-validation") {
             args.config.noValidation = true;
+            continue;
+        }
+        if (opt == "--probe") {
+            args.config.probe = true;
             continue;
         }
         if (opt == "--save-state-at") { // two values
@@ -308,6 +316,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
     }
+    if (args.config.probe && (!args.config.vulkan || args.compare)) {
+        std::fprintf(stderr, "--probe needs --vulkan (and no --compare)\n");
+        return ParseResult::Error;
+    }
     if (args.config.noValidation && !vulkanRun) {
         std::fprintf(stderr, "--no-validation needs --vulkan or --compare\n");
         return ParseResult::Error;
@@ -390,6 +402,62 @@ private:
     size_t m_count = 0;
     bool m_failed = false;
 };
+
+// --probe summary: one line per measure.
+void PrintProbeSummary(const std::vector<vkhost::ProbeFrame>& frames) {
+    std::fprintf(stderr, "vkhost: probe: %zu VDP2 frames\n", frames.size());
+    if (frames.empty()) {
+        return;
+    }
+    const auto stats = [&](auto member) {
+        std::vector<double> values;
+        values.reserve(frames.size());
+        for (const vkhost::ProbeFrame& f : frames) {
+            values.push_back(static_cast<double>(f.*member));
+        }
+        std::sort(values.begin(), values.end());
+        double sum = 0;
+        for (double v : values) {
+            sum += v;
+        }
+        struct {
+            double median, max, mean;
+        } s{values[values.size() / 2], values.back(), sum / static_cast<double>(values.size())};
+        return s;
+    };
+    const auto printStats = [&](const char* name, auto member) {
+        const auto s = stats(member);
+        std::fprintf(stderr, "vkhost: probe: %-14s median %.1f max %.1f mean %.1f\n", name, s.median, s.max, s.mean);
+    };
+    printStats("batches", &vkhost::ProbeFrame::batches);
+    printStats("arena_bytes", &vkhost::ProbeFrame::arenaBytes);
+    printStats("copy_bytes", &vkhost::ProbeFrame::copyBytes);
+    printStats("front_us", &vkhost::ProbeFrame::frontMicroseconds);
+    const auto printFeature = [&](const char* name, uint32_t vkhost::ProbeFrame::*member) {
+        size_t usingFrames = 0;
+        uint64_t total = 0;
+        uint32_t most = 0;
+        for (const vkhost::ProbeFrame& f : frames) {
+            usingFrames += f.*member != 0;
+            total += f.*member;
+            most = std::max(most, f.*member);
+        }
+        std::fprintf(stderr, "vkhost: probe: %-14s frames %zu, total %llu, max per frame %u\n", name, usingFrames,
+                     static_cast<unsigned long long>(total), most);
+    };
+    printFeature("mosaic", &vkhost::ProbeFrame::mosaicLines);
+    printFeature("vcell", &vkhost::ProbeFrame::vcellLines);
+    printFeature("chardelay", &vkhost::ProbeFrame::charPatDelayLines);
+    printFeature("ddlinescroll", &vkhost::ProbeFrame::ddLineScrollLines);
+    printFeature("extcc", &vkhost::ProbeFrame::extendedCCLines);
+    printFeature("shadow", &vkhost::ProbeFrame::shadowLines);
+    printFeature("mesh", &vkhost::ProbeFrame::meshSlices);
+    uint32_t cramModes = 0;
+    for (const vkhost::ProbeFrame& f : frames) {
+        cramModes |= f.cramModeMask;
+    }
+    std::fprintf(stderr, "vkhost: probe: cram modes used 0x%x\n", cramModes);
+}
 
 } // namespace
 
@@ -474,6 +542,9 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(report.hiddenGpuCalls), report.validation ? "on" : "off",
                      report.validationErrors, static_cast<unsigned long long>(report.hiddenSubmits),
                      static_cast<unsigned long long>(report.maxRunSubmits));
+    }
+    if (args.config.probe) {
+        PrintProbeSummary(report.probeFrames);
     }
     if (args.config.runahead) {
         std::fprintf(stderr, "vkhost: runahead: second instance ran %llu frames, %llu hardware frames, context %s\n",

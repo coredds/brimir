@@ -288,6 +288,7 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--fail-compute-on-reset` | with `--vulkan`: the core's `vkCreateComputePipelines` fails for every context after the first (a reinit then ends in the copy-only output) |
 | `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (a pre-existing heap corruption in `retro_unserialize` was observed on BIOS-menu states; it may affect any state), so compare against a software run with `--runahead` |
 | `--no-validation` | with `--vulkan` or `--compare`: do not load the Vulkan validation layer (the layer slows the Vulkan run; use it for timing) |
+| `--probe` | with `--vulkan` (not `--compare`): sets `BRIMIR_VDP2_PROBE=1` for the core, whose Vulkan VDP renderer then logs one `VDP2 probe:` debug line per VDP2 frame (the front half's `Vdp2FeatureCounters` and its CPU time for the frame); the host collects the recorded frames' lines instead of printing them and prints a summary (below) |
 | `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference or when the Vulkan run was not on the compute output with the Vulkan VDP2 renderer (log line `Vulkan VDP2 renderer active`) for every frame |
 | `--compare-vulkan-option key=value` | with `--compare`: a core option for the Vulkan run only (repeatable; to check that a difference is reported) |
 | `--dump-frame I` | with `--dump-dir`: write only recorded frame I |
@@ -398,6 +399,14 @@ Each run also prints `vkhost: timing: X ms/frame (Y without the host readback)`:
 every frame (a wait for the GPU, a copy to a host buffer and a conversion; a real frontend presents the image
 instead), Y leaves that out. With the software renderer both are the same. Time Vulkan runs with `--no-validation`:
 the validation layer is on by default and slows the Vulkan run.
+
+With `--probe` the run ends with `vkhost: probe:` lines over the VDP2 frames that ended while recording: batches,
+arena bytes, VRAM/CRAM copy bytes and the front half's CPU time in microseconds per frame (`median`, `max`, `mean`;
+the time covers `VDP2BeginFrame`, the lines with their sprite captures and `VDP2EndFrame`, not the register and memory
+writes, which only mark state dirty), then per feature of `Vdp2FeatureCounters` (mosaic, vertical cell scroll,
+character pattern delay, double-density line scroll, extended colour calculation and shadow lines, mesh slices) the
+frames using it, the total and the most per frame, and the CRAM modes used (bit n: mode n). Probe lines that arrive
+during warmup or hidden frames are dropped.
 
 Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2`, `GET_VARIABLE`,
 `GET_VARIABLE_UPDATE` (always false), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,

@@ -157,6 +157,9 @@ struct RenderBothOptions {
     // Compare every frame for which this returns true (a shown frame), not just the last one; the result describes the
     // first differing frame (SceneResult::frame).
     std::function<bool(uint32_t frame)> compareFrame;
+    // When set, each submitted frame's GPU time in milliseconds (timestamps around RecordPendingFrame's commands) is
+    // appended; nothing is appended when the queue has no timestamps.
+    std::vector<double> *gpuMilliseconds = nullptr;
 };
 
 /// @brief Runs the scene into a software and a Vulkan renderer pair (separate VDPStates, the same writes), replays each
