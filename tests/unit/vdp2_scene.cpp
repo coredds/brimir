@@ -258,6 +258,12 @@ void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint3
     }
 }
 
+void Vdp2SceneWriter::ForEachState(const std::function<void(VDPState &)> &fn) {
+    for (Target &t : m_targets) {
+        fn(*t.state);
+    }
+}
+
 void Vdp2SceneWriter::Run(const Vdp2Scene &scene) {
     if (scene.setup) {
         scene.setup(*this);
@@ -567,6 +573,9 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                     options.gpuMilliseconds->push_back(static_cast<double>(ticks[1] - ticks[0]) * timestampPeriod *
                                                        1e-6);
                 }
+            }
+            if (options.afterFrame) {
+                options.afterFrame(frame, *vulkan, device);
             }
         }
         if (options.compareFrame && options.compareFrame(frame)) {

@@ -208,14 +208,20 @@ uint32_t Vdp2VulkanBackend::UploadBlocksForTest(uint32_t context) const {
     return context < m_contexts.size() ? static_cast<uint32_t>(m_contexts[context].blocks.size()) : 0;
 }
 
+VkDeviceSize Vdp2VulkanBackend::BaseBlockSize(const FrameContext &context) const {
+    return std::max<VkDeviceSize>(m_blockSize, AlignUp(context.highWater, 64 * 1024));
+}
+
 void Vdp2VulkanBackend::ResetContext(FrameContext &context) {
     // The context's previous frame has completed (the caller's fence): overflow blocks go, the base block is reused
-    // unless its size no longer matches.
+    // unless its size no longer matches: the block size, or the context's high-water mark (the total of its last frame
+    // that overflowed) when that is larger.
     while (context.blocks.size() > 1) {
         DestroyBlock(context.blocks.back());
         context.blocks.pop_back();
     }
-    if (!context.blocks.empty() && context.blocks.front().buffer.size != m_blockSize) {
+    const VkDeviceSize baseSize = BaseBlockSize(context);
+    if (!context.blocks.empty() && context.blocks.front().buffer.size != baseSize) {
         DestroyBlock(context.blocks.front());
         context.blocks.clear();
     }
@@ -238,8 +244,15 @@ bool Vdp2VulkanBackend::AddBlock(FrameContext &context, VkDeviceSize size) {
 }
 
 bool Vdp2VulkanBackend::Allocate(FrameContext &context, VkDeviceSize size, VkDeviceSize alignment, Allocation &out) {
-    if (context.blocks.empty() && !AddBlock(context, m_blockSize)) {
-        return false;
+    if (context.blocks.empty() && !AddBlock(context, BaseBlockSize(context))) {
+        // A high-water block that cannot be allocated falls back to the default size (and overflow blocks).
+        if (context.highWater <= m_blockSize) {
+            return false;
+        }
+        context.highWater = 0;
+        if (!AddBlock(context, m_blockSize)) {
+            return false;
+        }
     }
     UploadBlock *block = &context.blocks.back();
     VkDeviceSize offset = AlignUp(block->used, alignment);
@@ -248,6 +261,7 @@ bool Vdp2VulkanBackend::Allocate(FrameContext &context, VkDeviceSize size, VkDev
         if (!AddBlock(context, std::max<VkDeviceSize>(m_blockSize, AlignUp(size, 64 * 1024)))) {
             return false;
         }
+        ++m_overflowBlocks;
         block = &context.blocks.back();
         offset = 0;
     }
@@ -389,11 +403,20 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     // Upload: the per-line arrays, then the arena (parameter snapshots, VRAM/CRAM snapshots, sprite slices) at an
     // offset where every snapshot is a valid dynamic offset.
     Allocation lines, arena;
+    constexpr VkDeviceSize kLinesBytes = kRotBasesBytes + kLnclBackBytes + kNBGLinesBytes;
     const VkDeviceSize arenaSize = std::max<VkDeviceSize>(frame.arena.size(), 4);
-    if (!Allocate(context, kRotBasesBytes + kLnclBackBytes + kNBGLinesBytes, 16, lines) ||
-        !Allocate(context, arenaSize, m_paramAlignment, arena)) {
+    m_overflowBlocks = 0;
+    if (!Allocate(context, kLinesBytes, 16, lines) || !Allocate(context, arenaSize, m_paramAlignment, arena)) {
         return failed();
     }
+    if (m_overflowBlocks > 0) {
+        // The next base block of this context holds a frame this big in one piece.
+        context.highWater = std::max(context.highWater, AlignUp(kLinesBytes, m_paramAlignment) + arenaSize);
+    }
+    RecordStats stats{};
+    stats.uploadBytes = kLinesBytes + frame.arena.size();
+    stats.overflowBlocks = m_overflowBlocks;
+    stats.baseBlockSize = context.blocks.front().buffer.size;
     UploadBlock &linesBlock = context.blocks[lines.block];
     UploadBlock &arenaBlock = context.blocks[arena.block];
     if (arenaBlock.pool == VK_NULL_HANDLE && CreateBlockSets(arenaBlock) != VK_SUCCESS) {
@@ -541,6 +564,7 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
                     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT);
                 }
                 regions[target].push_back({arenaBase + copy.arenaOffset, copy.dstOffset, copy.size});
+                (target == 0 ? stats.vramCopyBytes : stats.cramCopyBytes) += copy.size;
             }
             flushRegions();
             Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, VK_ACCESS_SHADER_READ_BIT);
@@ -578,6 +602,7 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     // The composite is complete: readable by later compute (the presenter) and transfer (readbacks) commands.
     Barrier(cmd, kCompute | kTransfer, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, kCompute | kTransfer,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+    m_lastStats = stats;
     return true;
 }
 

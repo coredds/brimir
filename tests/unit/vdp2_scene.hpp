@@ -81,6 +81,10 @@ public:
     void RunFrame(const std::function<void(Vdp2SceneWriter &, uint32_t)> &onLine = {}, uint32_t firstLine = 0,
                   uint32_t endLine = UINT32_MAX);
 
+    /// @brief Applies `fn` to every attached state, in Attach order (for state no bus write can produce, e.g. derived
+    /// register state the renderers read).
+    void ForEachState(const std::function<void(ymir::vdp::VDPState &)> &fn);
+
     /// @brief Runs a whole scene: setup, then `frames` frames.
     void Run(const Vdp2Scene &scene);
 
@@ -158,6 +162,8 @@ struct RenderBothOptions {
     uint32_t reloadLine = 0;
     // Called before each frame (0-based), after setup, with the Vulkan renderer and the device.
     std::function<void(uint32_t frame, gpu::VulkanVDPRenderer &, gpu::VulkanDevice &)> beforeFrame;
+    // Called after each frame whose GPU frame was recorded and submitted (0-based), before any comparison.
+    std::function<void(uint32_t frame, gpu::VulkanVDPRenderer &, gpu::VulkanDevice &)> afterFrame;
     // The frame context each frame records into (default frame % frameContexts).
     std::function<uint32_t(uint32_t frame)> contextForFrame;
     // Compare every frame for which this returns true (a shown frame), not just the last one; the result describes the

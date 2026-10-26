@@ -3,6 +3,8 @@
 // the character software's fetcher shows there (VRAMFetcher::currChar, sw:5193-5215) as ymir::vdp::Character::u32.
 // Laid out [nbg][row][x], kMaxResV rows of kMaxResH entries per NBG. Host mirror: kNBGCharCount and NBGUsesCharTable in
 // src/gpu/vdp2/vdp2_bindings.hpp. Include after vdp2_defs.hlsli and vdp2_render_params_layer.hlsli.
+// The table is per native pixel: at an internal resolution N > 1, the NBGs that use it are evaluated natively (each
+// sub-pixel shows its native pixel), as the fetcher's state machine is defined only per native fetch.
 #ifndef BRIMIR_VDP2_NBG_CHARS_HLSLI
 #define BRIMIR_VDP2_NBG_CHARS_HLSLI
 

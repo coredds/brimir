@@ -800,15 +800,13 @@ uint4 FetchBitmapPixel(const BaseBGParams params, uint bitmapBaseAddress, uint2 
     return FetchPixel(params, bitmapBaseAddress, dotPos, bitmapSize.x, true, palNum, specColorCalc, specPriority);
 }
 
-// Brimir: where a scroll BG pixel's character is (FetchScrollBGPixel split in two, so that NBG character delays can
-// fetch the character of another position).
+// Brimir: where a scroll BG pixel's character is (FetchScrollBGPixel split in two, so that NBGs using the character
+// table take only the dot and cell from the pixel's own position).
 struct CharLocation {
     uint pageAddress;
     uint charIndex; // within the page, as software's VRAMFetcher::lastCharIndex (sw:5181)
-    uint cellX;     // cell column within a 2x2 character
     uint cellIndex;
     uint2 dotPos;
-    uint bank;      // VRAM bank of the page base address
 };
 
 // Brimir: the page base addresses are read from g_layerRenderParams (nbg[index] or rbg[index] with rotSel) instead of
@@ -853,10 +851,8 @@ CharLocation LocateScrollBGChar(const BaseBGParams params, uint2 scrollPos, uint
     CharLocation loc;
     loc.pageAddress = pageAddress;
     loc.charIndex = charIndex;
-    loc.cellX = cellPos.x;
     loc.cellIndex = cellPos.x + (cellPos.y << 1);
     loc.dotPos = scrollPos & 7;
-    loc.bank = bank;
     return loc;
 }
 

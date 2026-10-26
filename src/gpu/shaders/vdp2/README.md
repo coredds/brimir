@@ -41,7 +41,10 @@ There are two kinds.
 ### 1. Vulkan 1.2 baseline (no behaviour change)
 
 Brimir's GPU baseline: Vulkan 1.2 core, no 64-bit integers in shaders, at most 64 invocations per workgroup (the frame output pass's 8 x 8; the VDP2 shaders use 32; Vulkan guarantees 128), std430
-layouts without `scalarBlockLayout`, storage images only `rgba8ui`/`r32ui`, no robustness features.
+layouts without `scalarBlockLayout`, storage images only `rgba8ui`/`r32ui`, no robustness features. Groupshared
+memory: only the NBG fetch pass uses it, 14208 bytes (`kNBGFetchSharedMemorySize` in `src/gpu/vdp2/vdp2_bindings.hpp`,
+a required limit in `src/gpu/gpu_version.hpp`; Vulkan guarantees 16384); `tests/unit/test_gpu_vdp2_pipelines.cpp`
+checks every module's Workgroup variables against it.
 
 - **Push constants** instead of the D3D12 `b0` root constants (`CommonRenderParams`, 48 bytes); **registers renumbered**
   per `src/gpu/vdp2/vdp2_bindings.hpp` (all three shaders; the NBG fetch pass adds its row count after the block).
@@ -90,7 +93,8 @@ Backgrounds (`cs_vdp2_render_bgs.hlsl`):
   per row with windows, mosaic, the per-fetch bank delay, the 2x2 cell switch rule and the fetcher's `nextChar` at the
   line start, decoded on the CPU); no cell swap for delayed two-word 2x2 characters (g; stage 1C replaced the per-pixel
   walk back over earlier fetches, O(width²) per line with windows);
-- `FetchScrollBGPixel` split into locate + fetch so that NBG character delays can use the located character;
+- `FetchScrollBGPixel` split into locate + fetch so that the NBGs using the character table take only the dot and cell
+  from the pixel's own position;
 - RBG mosaic is applied by `DrawRBG` (scroll RBGs repeat every mosaicH-th pixel, line colour of the repeated pixel;
   software fixed on master in 53bfa4c); bitmap RBGs have no mosaic, as in software (c).
 
@@ -114,4 +118,5 @@ Cases where the GPU output intentionally differs from software (software stale o
 tests, in the design doc (`docs/superpowers/specs/2026-10-24-vulkan-gpu-renderer-design.md`, stage 1): U2 (sprites in
 exclusive-monitor modes), X1 (the alternate field in exclusive-monitor modes under deinterlacing) and W2-W5 (character
 delay / window / mosaic edge cases), each a `[!shouldfail]` scene named
-"exception <id>".
+"exception <id>", with a must-pass companion ("exception <id> is confined ...") that pins the difference to the pixels
+the exception describes.

@@ -271,7 +271,8 @@ static const uint kFetchBitDelay = 13;
 static const uint kFetchBitFetches = 14;
 static const uint kStartBitNew = 16; // gs_start between steps 2 and 3: bits 0-15 prev(x) + 1, bit 16 new
 
-// Per pixel x of the row (shared memory, 5 x 2816 bytes):
+// Per pixel x of the row (shared memory, 5 x 2816 bytes plus the scan totals: kNBGFetchSharedMemorySize in
+// src/gpu/vdp2/vdp2_bindings.hpp, checked against the SPIR-V by tests/unit/test_gpu_vdp2_pipelines.cpp):
 groupshared uint gs_fetch[kMaxResH]; // bits 0-11 charIndex, 12 cellX, 13 delay, 14 fetches
 groupshared uint gs_char[kMaxResH];  // the character at x's location (ymir::vdp::Character::u32)
 groupshared uint gs_start[kMaxResH]; // prev(x) and new (step 2), then for a new fetch the currChar it shows
@@ -341,7 +342,7 @@ void CSMain(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID) {
         // Vertical mosaic: the row repeats another row's output, which has its own characters
         return;
     }
-    const uint hres = outputSize.x;
+    const uint hres = min(outputSize.x, kMaxResH); // the groupshared arrays hold kMaxResH pixels
 
     // Per-line window state (InsideWindows: W0, W1 and the sprite window, combined with AND or OR)
     const LayerWindowParamsS windows = params.base.windowParams;

@@ -3,7 +3,9 @@
 // - The SPIR-V words themselves: only the Shader capability (no Int64), storage images only Rgba8ui/R32ui (sampled
 //   images Unknown), no texel buffers, a LocalSize of at most kMaxWorkgroupInvocations (64, the largest workgroup
 //   the renderer's shaders use), and exactly the bindings vdp2_bindings.hpp lists, all in set 0, each with its table kind and storage-image format; the check rejects
-//   modules altered to break each rule. These run without a Vulkan device ([vdp2]).
+//   modules altered to break each rule. The groupshared (Workgroup storage class) bytes of each module are the ones
+//   vdp2_bindings.hpp states (kNBGFetchSharedMemorySize for the fetch pass, none elsewhere). These run without a Vulkan
+//   device ([vdp2]).
 // - The device limits check (gpu_version.hpp UnmetLimit) against crafted VkPhysicalDeviceLimits ([vdp2][limits],
 //   BRIMIR_VULKAN builds).
 // - The four compute pipelines are created on the headless device (1A baseline, no extra features or extensions)
@@ -22,6 +24,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <set>
@@ -264,6 +267,63 @@ std::vector<std::string> CheckModule(std::span<const uint32_t> words, std::span<
     return errors;
 }
 
+// Bytes of the Workgroup storage class variables (groupshared) a module declares, from their scalar, vector, array and
+// struct types (tightly packed; none of the shaders' groupshared variables needs padding). UINT32_MAX when a type is
+// not understood.
+uint32_t WorkgroupBytes(std::span<const uint32_t> words) {
+    constexpr uint32_t kOpTypeBool = 20, kOpTypeInt = 21, kOpTypeFloat = 22, kOpTypeVector = 23, kOpTypeArray = 28,
+                       kOpTypeStruct = 30, kOpConstant = 43, kStorageClassWorkgroup = 4;
+    std::map<uint32_t, std::vector<uint32_t>> types; // id -> the instruction's words from the opcode
+    std::map<uint32_t, uint32_t> constants;          // id -> first literal word
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> pointers; // id -> (storage class, pointee)
+    std::vector<uint32_t> workgroupVars;                         // pointer type ids
+    for (size_t i = 5; i < words.size() && (words[i] >> 16) != 0; i += words[i] >> 16) {
+        const uint32_t count = words[i] >> 16, op = words[i] & 0xFFFF;
+        const uint32_t *w = &words[i];
+        if (op == kOpTypeBool || op == kOpTypeInt || op == kOpTypeFloat || op == kOpTypeVector || op == kOpTypeArray ||
+            op == kOpTypeStruct) {
+            types[w[1]] = std::vector<uint32_t>(w, w + count);
+        } else if (op == kOpConstant && count >= 4) {
+            constants[w[2]] = w[3];
+        } else if (op == kOpTypePointer && count >= 4) {
+            pointers[w[1]] = {w[2], w[3]};
+        } else if (op == kOpVariable && count >= 4 && w[3] == kStorageClassWorkgroup) {
+            workgroupVars.push_back(w[1]);
+        }
+    }
+    std::function<uint64_t(uint32_t)> size = [&](uint32_t type) -> uint64_t {
+        const auto t = types.find(type);
+        if (t == types.end()) {
+            return UINT32_MAX;
+        }
+        const std::vector<uint32_t> &w = t->second;
+        switch (w[0] & 0xFFFF) {
+        case kOpTypeBool: return 4;
+        case kOpTypeInt:
+        case kOpTypeFloat: return w[2] / 8;
+        case kOpTypeVector: return size(w[2]) * w[3];
+        case kOpTypeArray: {
+            const auto length = constants.find(w[3]);
+            return length == constants.end() ? UINT32_MAX : size(w[2]) * length->second;
+        }
+        case kOpTypeStruct: {
+            uint64_t sum = 0;
+            for (size_t m = 2; m < w.size(); ++m) {
+                sum += size(w[m]);
+            }
+            return sum;
+        }
+        }
+        return UINT32_MAX;
+    };
+    uint64_t total = 0;
+    for (uint32_t pointer : workgroupVars) {
+        const auto p = pointers.find(pointer);
+        total += p == pointers.end() ? UINT32_MAX : size(p->second.second);
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(total, UINT32_MAX));
+}
+
 uint32_t StorageImageVariables(std::span<const uint32_t> words) {
     const SpvModule m = ParseSpirv(words);
     uint32_t count = 0;
@@ -337,6 +397,16 @@ TEST_CASE("NBGUsesCharTable selects delayed scroll NBGs and the vertical cell sc
     CHECK_FALSE(NBGUsesCharTable(v, 2)); // no vertical cell scroll on NBG2/3
     v.base.mosaicEnable = true;
     CHECK_FALSE(NBGUsesCharTable(v, 0));
+}
+
+TEST_CASE("Groupshared memory: the NBG fetch pass declares kNBGFetchSharedMemorySize, the others none",
+          "[vdp2][pipelines]") {
+    CHECK(WorkgroupBytes(sh::kVdp2NbgFetchSpv) == kNBGFetchSharedMemorySize);
+    CHECK(WorkgroupBytes(sh::kVdp2RenderSpriteSpv) == 0);
+    CHECK(WorkgroupBytes(sh::kVdp2RenderBgsSpv) == 0);
+    CHECK(WorkgroupBytes(sh::kVdp2ComposeSpv) == 0);
+    CHECK(WorkgroupBytes(sh::kCsFrameOutputSpv) == 0);
+    STATIC_CHECK(kMaxComputeSharedMemorySize == kNBGFetchSharedMemorySize);
 }
 
 TEST_CASE("The largest workgroup any renderer shader declares is kMaxWorkgroupInvocations", "[vdp2][pipelines]") {
@@ -435,10 +505,11 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
     limits.maxPerStageResources = 11;
     limits.maxComputeWorkGroupInvocations = kMaxWorkgroupInvocations;
     limits.maxPushConstantsSize = 56;
+    limits.maxComputeSharedMemorySize = kNBGFetchSharedMemorySize;
     CHECK(gpu::UnmetLimit(limits).empty());
 
     // Every entry, one below its minimum, fails with its name and both values.
-    REQUIRE(gpu::kRequiredLimits.size() == 6);
+    REQUIRE(gpu::kRequiredLimits.size() == 7);
     for (const gpu::RequiredLimit &limit : gpu::kRequiredLimits) {
         INFO(limit.name);
         VkPhysicalDeviceLimits low = limits;
@@ -451,6 +522,12 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
     VkPhysicalDeviceLimits spec = limits;
     spec.maxPerStageDescriptorStorageBuffers = 4;
     CHECK(gpu::UnmetLimit(spec) == "maxPerStageDescriptorStorageBuffers 4 < 7");
+
+    // The fetch pass's shared memory (14208 bytes) is within the Vulkan-guaranteed 16384.
+    STATIC_CHECK(kNBGFetchSharedMemorySize == 14208);
+    VkPhysicalDeviceLimits shared = limits;
+    shared.maxComputeSharedMemorySize = 16384;
+    CHECK(gpu::UnmetLimit(shared).empty());
 
     STATIC_CHECK(gpu::kRequiredStageStorageBuffers == kMaxStageUsage.storageBuffers);
     STATIC_CHECK(gpu::kRequiredStageResources == kMaxStageUsage.resources);

@@ -588,9 +588,28 @@ TEST_CASE("Vdp2FrontEnd batches reproduce per-line state for random mid-frame wr
     std::vector<int> writes(lines, 0);
     for (uint32_t y = 0; y < lines; ++y) {
         if (rng() % 8 == 0) {
-            writes[y] = 1 + rng() % 7; // bit 0: layer register, bit 1: compose register, bit 2: VRAM
+            // bit 0: layer register, bit 1: compose register, bit 2: VRAM, bit 3: CRAM
+            writes[y] = 1 + rng() % 15;
         }
     }
+    // The CRAM buffers as of each line (CRAMColors, then CRAMCoeffs), and the GPU's copies replayed in batch order.
+    const auto &front = rig.Front();
+    std::vector<std::vector<uint8_t>> cram(lines);
+    const auto cramNow = [&] {
+        std::vector<uint8_t> bytes(kVDP2CRAMColorBufferSize + kVDP2CRAMRotCoeffBufferSize);
+        std::memcpy(bytes.data(), front.ColorCache().data(), sizeof(CRAMColorCache));
+        for (uint32_t i = 0; i < kVDP2CRAMColorCacheEntries; ++i) {
+            const vdp::Color888 c = front.Color555Cache()[i];
+            const uint8_t rgba[4] = {static_cast<uint8_t>(c.r), static_cast<uint8_t>(c.g), static_cast<uint8_t>(c.b),
+                                     static_cast<uint8_t>(c.msb)};
+            std::memcpy(bytes.data() + (kVDP2CRAM555TableBase + i) * 4, rgba, 4);
+        }
+        std::memcpy(bytes.data() + kVDP2CRAMColorBufferSize, &rig.state->mem2.CRAM[vdp::kVDP2CRAMSize / 2],
+                    kVDP2CRAMRotCoeffBufferSize);
+        return bytes;
+    };
+    // The first frame uploaded everything; the GPU's CRAM starts as it was at its end.
+    std::vector<uint8_t> gpuCRAM = cramNow();
     const auto &rec = rig.Run([&](Vdp2SceneWriter &w, uint32_t y) {
         if (writes[y] & 1) {
             curScroll = static_cast<uint16_t>(rng() & 0x7FF);
@@ -604,9 +623,15 @@ TEST_CASE("Vdp2FrontEnd batches reproduce per-line state for random mid-frame wr
             curVram = static_cast<uint16_t>(rng());
             w.VRAM16(0x3000, curVram);
         }
+        if (writes[y] & 8) {
+            for (uint32_t n = rng() % 4; n < 4; ++n) {
+                w.CRAM16(static_cast<uint32_t>(rng() & 0xFFE), static_cast<uint16_t>(rng()));
+            }
+        }
         scroll[y] = curScroll;
         clofen[y] = curClofen;
         vram[y] = curVram;
+        cram[y] = cramNow();
     });
 
     std::vector<uint8_t> gpuVRAM(rig.state->mem2.VRAM.size(), 0);
@@ -616,6 +641,11 @@ TEST_CASE("Vdp2FrontEnd batches reproduce per-line state for random mid-frame wr
             const Vdp2Copy &c = rec.copies[b.firstCopy + i];
             if (c.target == Vdp2Copy::Target::VRAM) {
                 std::memcpy(gpuVRAM.data() + c.dstOffset, rec.arena.data() + c.arenaOffset, c.size);
+            } else {
+                const uint32_t base = c.target == Vdp2Copy::Target::CRAMColors ? 0 : kVDP2CRAMColorBufferSize;
+                REQUIRE(c.dstOffset + c.size <=
+                        (base == 0 ? kVDP2CRAMColorBufferSize : kVDP2CRAMRotCoeffBufferSize));
+                std::memcpy(gpuCRAM.data() + base + c.dstOffset, rec.arena.data() + c.arenaOffset, c.size);
             }
         }
         const VDP2LayerRenderParams layer = ArenaAt<VDP2LayerRenderParams>(rec, b.layerParamsOffset);
@@ -625,6 +655,8 @@ TEST_CASE("Vdp2FrontEnd batches reproduce per-line state for random mid-frame wr
             ++layerCover[row];
             CHECK(layer.nbg[0].scrollAmount.x == (static_cast<uint32_t>(scroll[y]) << 8));
             CHECK(util::ReadBE<uint16_t>(&gpuVRAM[0x3000]) == vram[y]);
+            const bool cramMatches = gpuCRAM == cram[y];
+            CHECK(cramMatches);
         }
         const VDP2ComposeParams compose = ArenaAt<VDP2ComposeParams>(rec, b.composeParamsOffset);
         for (uint32_t row = b.composeStartY; row < b.composeStartY + b.composeLines; ++row) {
@@ -745,14 +777,59 @@ TEST_CASE("Vdp2FrontEnd snapshots CRAM coefficients after a CRAM write with all 
         }
     });
     REQUIRE(rec.batches.size() == 2);
-    REQUIRE(rec.batches[1].copyCount == 2);
-    const Vdp2Copy &colors = rec.copies[rec.batches[1].firstCopy];
-    const Vdp2Copy &coeffs = rec.copies[rec.batches[1].firstCopy + 1];
-    CHECK(colors.target == Vdp2Copy::Target::CRAMColors);
+    // CRAM mode 0 mirrors the write to 0x004: colour cache entries 2 and 1026 and their RGB555 table entries, then the
+    // coefficient word at 0x804.
+    REQUIRE(rec.batches[1].copyCount == 5);
+    const uint32_t first = rec.batches[1].firstCopy;
+    constexpr uint32_t kColorEntries[] = {2, 1026, kVDP2CRAM555TableBase + 2, kVDP2CRAM555TableBase + 1026};
+    for (uint32_t i = 0; i < 4; ++i) {
+        CAPTURE(i);
+        const Vdp2Copy &colors = rec.copies[first + i];
+        CHECK(colors.target == Vdp2Copy::Target::CRAMColors);
+        CHECK(colors.dstOffset == kColorEntries[i] * 4);
+        CHECK(colors.size == 4);
+    }
+    const Vdp2Copy &coeffs = rec.copies[first + 4];
     REQUIRE(coeffs.target == Vdp2Copy::Target::CRAMCoeffs);
-    CHECK(coeffs.size == kVDP2CRAMRotCoeffBufferSize);
-    CHECK(rec.arena[coeffs.arenaOffset + 4] == 0x12);
-    CHECK(rec.arena[coeffs.arenaOffset + 5] == 0x34);
+    CHECK(coeffs.dstOffset == 4);
+    CHECK(coeffs.size == 4);
+    CHECK(rec.arena[coeffs.arenaOffset + 0] == 0x12);
+    CHECK(rec.arena[coeffs.arenaOffset + 1] == 0x34);
+    CHECK(rec.features.copyBytes == 5 * 4);
+}
+
+TEST_CASE("Vdp2FrontEnd uploads all of CRAM once after MarkAllDirty and nothing for an unchanged write",
+          "[vdp2][front]") {
+    FrontRig rig;
+    DisplayOn(rig.writer);
+    rig.Run();
+
+    // Writing the value a word already holds changes no colour; the coefficient word is uploaded again.
+    const uint16_t old = util::ReadBE<uint16_t>(&rig.state->mem2.CRAM[0x810]);
+    const auto &same = rig.Run([&](Vdp2SceneWriter &w, uint32_t line) {
+        if (line == 10) {
+            w.CRAM16(0x810, old);
+        }
+    });
+    uint32_t colorBytes = 0, coeffBytes = 0;
+    const auto count = [&](const Vdp2FrameRecord &rec) {
+        colorBytes = coeffBytes = 0;
+        for (const Vdp2Copy &c : rec.copies) {
+            if (c.target == Vdp2Copy::Target::CRAMColors) {
+                colorBytes += c.size;
+            } else if (c.target == Vdp2Copy::Target::CRAMCoeffs) {
+                coeffBytes += c.size;
+            }
+        }
+    };
+    count(same);
+    CHECK(colorBytes == 0);
+    CHECK(coeffBytes == 4);
+
+    rig.Front().MarkAllDirty();
+    count(rig.Run());
+    CHECK(colorBytes == kVDP2CRAMColorBufferSize);
+    CHECK(coeffBytes == kVDP2CRAMRotCoeffBufferSize);
 }
 
 // -----------------------------------------------------------------------------

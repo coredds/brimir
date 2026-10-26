@@ -5,10 +5,11 @@
 // compute pipelines (section 2.4) and the NBG fetch pass. The frame lands in the persistent composite buffer (packed XBGR, pitch HRes), which
 // FramePresenter::PresentDevice reads.
 //
-// Uploads go through frame contexts: each context owns a host-visible upload block (4 MiB) plus overflow blocks chained
-// on demand; all of a context's blocks are reused (overflow blocks freed) the next time the context records. The caller
-// guarantees that the GPU work of the context's previous Record has finished by then (its slot fence). Record never
-// waits.
+// Uploads go through frame contexts: each context owns a host-visible base upload block (4 MiB) plus overflow blocks
+// chained on demand; the next time the context records, its overflow blocks are freed and its base block is reused, or
+// reallocated to the total of a frame that overflowed (the high-water mark, so a steady frame size stops overflowing).
+// The caller guarantees that the GPU work of the context's previous Record has finished by then (its slot fence).
+// Record never waits.
 
 #include "gpu/vdp2/vdp2_front.hpp"
 #include "gpu/vk_device.hpp"
@@ -56,7 +57,8 @@ public:
     // lost too; the caller makes the front half re-upload everything (Vdp2FrontEnd::MarkAllDirty).
     void FrameDropped();
 
-    // Size of the base upload block of every context (reallocated at each context's next Record).
+    // Size of the base upload block of every context below its high-water mark (reallocated at each context's next
+    // Record).
     void ForceUploadBlockSizeForTest(size_t bytes);
     // Fill the layer, sprite attribute, RBG line colour and colour calculation window images and the NBG character
     // table with 0xA5 bytes at the start of every frame, so reads of texels or entries the frame did not write show up
@@ -66,6 +68,15 @@ public:
     bool CompositeClearPendingForTest() const { return m_pending.clearComposite; }
     // Upload blocks the context used for its last Record (1 = no overflow).
     uint32_t UploadBlocksForTest(uint32_t context) const;
+    // What the last successful Record uploaded.
+    struct RecordStats {
+        VkDeviceSize uploadBytes = 0;    // bytes written into upload blocks (per-line arrays and the arena)
+        VkDeviceSize vramCopyBytes = 0;  // bytes copied into VRAM
+        VkDeviceSize cramCopyBytes = 0;  // bytes copied into the CRAM colour and coefficient buffers
+        uint32_t overflowBlocks = 0;     // overflow blocks created (chained behind the context's base block)
+        VkDeviceSize baseBlockSize = 0;  // size of the context's base block
+    };
+    const RecordStats &LastRecordStatsForTest() const { return m_lastStats; }
 
 private:
     enum Pipeline : uint32_t { kSprite, kBgs, kCompose, kNBGFetch, kPipelineCount };
@@ -78,6 +89,9 @@ private:
     };
     struct FrameContext {
         std::vector<UploadBlock> blocks;
+        // Bytes the context's last Record needed in one block, kept when it overflowed: its next base block is at
+        // least this big, so a steady frame size stops creating overflow blocks.
+        VkDeviceSize highWater = 0;
     };
     struct Allocation {
         size_t block = 0; // index into FrameContext::blocks
@@ -87,6 +101,7 @@ private:
     VkResult Init(uint32_t frameContexts);
     void Destroy();
     void DestroyBlock(UploadBlock &block);
+    VkDeviceSize BaseBlockSize(const FrameContext &context) const;
     void ResetContext(FrameContext &context);
     bool AddBlock(FrameContext &context, VkDeviceSize size);
     bool Allocate(FrameContext &context, VkDeviceSize size, VkDeviceSize alignment, Allocation &out);
@@ -131,6 +146,8 @@ private:
     PendingWork m_pending{.clearComposite = true, .zeroSpriteFB = true};
     PendingWork m_recorded{};
     bool m_poisonImages = false;
+    RecordStats m_lastStats{};
+    uint32_t m_overflowBlocks = 0; // created by the current Record
 
     std::array<VkDescriptorSetLayout, kPipelineCount> m_setLayouts{};
     std::array<VkPipelineLayout, kPipelineCount> m_pipelineLayouts{};

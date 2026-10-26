@@ -16,7 +16,8 @@
 // - compose ranges are in dispatch rows (field line << deinterlace shift, like the layer ranges), and the frame's last
 //   compose covers VRes >> (interlaced && !deinterlace) rows;
 // - a compose-only change splits only compose: compose ranges wait until the layer rows they read are recorded;
-// - the CRAM coefficient half is snapshotted on every CRAM generation change, whatever BGON says;
+// - CRAM flushes snapshot only the words changed since the last flush (colour cache, RGB555 table and coefficient
+//   words), the coefficient half whatever BGON says;
 // - per-line arrays hold 512 rows (exclusive monitor);
 // - NBG scroll, mosaic and fetcher state follow the software renderer's per-line state machine on
 //   state2.nbgLayerStates (one VDP2NBGLine per NBG per row) instead of Ymir's closed-form shader scroll, and rotation
@@ -198,6 +199,10 @@ private:
     std::array<ymir::vdp::Color888, kVDP2CRAMColorCacheEntries> m_cram555Cache{};
     uint64_t m_cramGeneration = 1;
     uint64_t m_flushedCRAMGeneration = 0;
+    // Brimir: what changed since the last CRAM flush, in 4-byte words of the CRAMColors buffer (colour cache entries,
+    // then RGB555 table entries) and of the CRAMCoeffs buffer; each flush snapshots only those words.
+    util::DirtyBitmap<2 * kVDP2CRAMColorCacheEntries> m_cramColorsDirty;
+    util::DirtyBitmap<kVDP2CRAMRotCoeffBufferSize / sizeof(uint32_t)> m_cramCoeffsDirty;
 
     // Parameters: current (packed this line) and flushed (in effect for the open batch)
     VDP2CommonRenderParams m_common{};
@@ -284,10 +289,12 @@ private:
     void FetchNBGChar(const ymir::vdp::BGParams &bgParams, NBGFetcher &fetcher, uint32_t scrollX, uint32_t scrollY);
     void StartRecord();
     void Cache555Color(uint32_t address);
+    void SetCachedColor(uint32_t index, const ymir::vdp::Color888 &color8);
+    void MarkCRAMDirty();
     void StoreLineColorBackScreens(uint32_t y);
     void CountFeatures();
     uint32_t YShift() const;
-    uint32_t AppendArena(const void *data, size_t size, uint32_t alignment = 4);
+    uint32_t AppendArena(const void *data, size_t size, uint32_t alignment = 4); // data == nullptr: reserve only
     uint32_t SnapshotLayerParams();
     uint32_t SnapshotComposeParams();
     void CloseCompose(uint32_t lastY);

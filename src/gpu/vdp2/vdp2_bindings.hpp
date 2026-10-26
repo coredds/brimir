@@ -124,6 +124,13 @@ inline constexpr uint32_t kMaxWorkgroupInvocations =
     std::max(kWorkgroupWidth, kFrameOutputGroupSize * kFrameOutputGroupSize);
 static_assert(kMaxWorkgroupInvocations == 64);
 
+/// @brief Workgroup (groupshared) memory of the NBG fetch pass (cs_vdp2_nbg_fetch.hlsl: five uint[kMaxResH] arrays and
+/// uint[kWorkgroupWidth] scan totals); the other shaders use none. The device limit maxComputeSharedMemorySize must
+/// cover it, and the Vulkan 1.2 guaranteed minimum (16384) does.
+inline constexpr uint32_t kNBGFetchSharedMemorySize = (5 * kMaxResH + kWorkgroupWidth) * sizeof(uint32_t);
+inline constexpr uint32_t kMaxComputeSharedMemorySize = kNBGFetchSharedMemorySize;
+static_assert(kMaxComputeSharedMemorySize <= 16384);
+
 /// @brief Descriptor kinds, mapped to VkDescriptorType by the Vulkan side.
 enum class DescriptorKind : uint8_t { StorageBuffer, StorageBufferDynamic, SampledImage, StorageImage };
 

@@ -1346,8 +1346,12 @@ TEST_CASE("Scene: a VDP reset mid-frame clears the composite and restarts the fr
 // Robustness
 
 TEST_CASE("Scene: upload overflow with 64 KiB upload blocks", "[gpu][vdp2][scene][lavapipe]") {
+    // Everything is uploaded on the first frame (VRAM, CRAM, sprite slices), and the CRAM changes on every line. Each
+    // context's first frame (frames 0 and 1) overflows its 64 KiB base block; the next base block of the context
+    // holds that frame's total (the high-water mark), so frames 2 and 3 create no overflow block.
     auto device = OpenDevice();
     uint32_t blocksAfterFirstFrame = 0;
+    std::vector<gpu::vdp2::Vdp2VulkanBackend::RecordStats> stats;
     RenderBothOptions options;
     options.uploadBlockSize = 64 * 1024;
     options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
@@ -1355,15 +1359,68 @@ TEST_CASE("Scene: upload overflow with 64 KiB upload blocks", "[gpu][vdp2][scene
             blocksAfterFirstFrame = vulkan.Backend()->UploadBlocksForTest(0);
         }
     };
-    // Everything is uploaded on the first frame (VRAM, CRAM, sprite slices), and the CRAM changes on every line.
-    Vdp2Scene scene = Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng);
-        TwoNBGs(w, s, rng);
-        SetupSprites(w, {.type = 1}, rng);
-    });
+    options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        stats.push_back(vulkan.Backend()->LastRecordStatsForTest());
+    };
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            SetupSprites(w, {.type = 1}, rng);
+        },
+        {}, 4);
     scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) { w.CRAM16((y * 2) & 0x7FE, static_cast<uint16_t>(y * 77)); };
     Check(*device, scene, options);
     CHECK(blocksAfterFirstFrame > 1);
+    REQUIRE(stats.size() == 4);
+    for (uint32_t frame = 0; frame < 4; ++frame) {
+        CAPTURE(frame, stats[frame].overflowBlocks, stats[frame].uploadBytes, stats[frame].baseBlockSize);
+        if (frame < 2) {
+            CHECK(stats[frame].overflowBlocks > 0);
+        } else {
+            CHECK(stats[frame].overflowBlocks == 0);
+            CHECK(stats[frame].baseBlockSize >= stats[frame].uploadBytes);
+        }
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: CRAM written on every line uploads the written words", "[gpu][vdp2][scene][lavapipe]") {
+    // One CRAM word per line (CRAM mode 0, so it is mirrored into the coefficient half): every line is a CRAM flush.
+    // Frame 0 uploads everything; afterwards each flush uploads the colour cache and RGB555 table entries of the
+    // written word and its mirror (4 x 4 bytes) and the coefficient word (4 bytes), and no overflow block is created
+    // with the default upload block size.
+    auto device = OpenDevice();
+    std::vector<gpu::vdp2::Vdp2VulkanBackend::RecordStats> stats;
+    RenderBothOptions options;
+    options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        stats.push_back(vulkan.Backend()->LastRecordStatsForTest());
+    };
+    constexpr uint32_t kFrames = 4;
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+        },
+        {}, kFrames);
+    scene.onLine = [frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            ++*frame;
+        }
+        // NBG0 (256 colours, palettes 0-127 * 16) and NBG1 read these words; a different value every frame
+        w.CRAM16((y * 6) & 0x7FE, static_cast<uint16_t>(y * 77 + *frame * 0x0421));
+    };
+    Check(*device, scene, options);
+    REQUIRE(stats.size() == kFrames);
+    for (uint32_t frame = 0; frame < kFrames; ++frame) {
+        const auto &s = stats[frame];
+        CAPTURE(frame, s.overflowBlocks, s.uploadBytes, s.cramCopyBytes, s.vramCopyBytes);
+        CHECK(s.overflowBlocks == 0);
+        if (frame >= 1) {
+            CHECK(s.vramCopyBytes == 0);
+            CHECK(s.cramCopyBytes == 224u * 20u);
+        }
+    }
     CloseAndCheckValidation(device);
 }
 
@@ -2124,6 +2181,112 @@ TEST_CASE("Scene: (f) vertical cell scroll on 2x2 characters with a window", "[g
     });
 }
 
+TEST_CASE("Scene: (g) character pattern delay in one bank across a plane boundary, with windows",
+          "[gpu][vdp2][scene]") {
+    // NBG1's plane A pattern names are in bank B0 (0x48000), plane B's in bank B1 (0x68000), with a delay only in
+    // `delayBank`, so the delay bit changes from fetch to fetch inside a row. CalcAccessPatterns sets the delay in
+    // every bank or none, so the scene sets the derived bgParams.charPatDelay itself before each line, in both
+    // renderers' states, after computing the access patterns as PrepareLine would (which then keeps them: they are
+    // recomputed only after a write that makes them dirty).
+    // Layout 0: zoom 1, scroll X 300 + y / 3: the plane boundary near pixel 212; W0 hides 180-240 across it, W1 40-60.
+    // Layout 1: 2 dots per pixel, scroll X y / 3: W0 hides pixels 31-286 (512 dots), so the fetch at pixel 287 (plane
+    // B) has the index of the fetch at pixel 30 (plane A) on most lines and continues its run. With 2x2 characters, a
+    // run started delayed (delay in plane A's bank) must not switch at plane B's undelayed fetches; a run started
+    // undelayed (delay in plane B's bank) switches at a delayed fetch, which shows the run start's own character, as
+    // before the switch, and sets lastCellX for the runs after it.
+    const bool cell2x2 = GENERATE(false, true);
+    const uint32_t delayBank = GENERATE(2u, 3u);
+    const uint32_t layout = GENERATE(0u, 1u);
+    CAPTURE(cell2x2, delayBank, layout);
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = cell2x2}, rng);
+            for (uint32_t reg : {CYCA0L, CYCA1L, CYCB0L, CYCB1L}) {
+                w.Reg(reg, 0x15FF); // PN1 at T0, CP1 at T1: no delay from the access patterns
+                w.Reg(reg + 2, 0xFFFF);
+            }
+            // Plane B on a page in bank B1 with its own pattern names
+            constexpr uint32_t kPlaneA = kPageBase + kPageStride, kPlaneB = kPlaneA + 0x20000;
+            const uint32_t pageShift = cell2x2 ? 12 : 14;
+            const uint32_t mapA = kPlaneA >> pageShift, mapB = kPlaneB >> pageShift;
+            REQUIRE((mapA >> 6) == (mapB >> 6)); // the same MPOFN bits
+            w.Reg(MPABN0 + 4, static_cast<uint16_t>(((mapB & 0x3F) << 8) | (mapA & 0x3F)));
+            const uint32_t entries = cell2x2 ? 32 * 32 : 64 * 64;
+            for (uint32_t i = 0; i < entries; ++i) {
+                const uint32_t charNum = Rand(rng, 32) * (cell2x2 ? 4 : 1);
+                w.VRAM16(kPlaneB + i * 4, static_cast<uint16_t>((Rand(rng, 4) << 14) | Rand(rng, 128)));
+                w.VRAM16(kPlaneB + i * 4 + 2, static_cast<uint16_t>(charNum));
+            }
+            w.Reg(SCYIN1, 5);
+            if (layout == 0) {
+                w.Reg(WPSX0, 180 << 1);
+                w.Reg(WPEX0, 240 << 1);
+                w.Reg(WPSX1, 40 << 1);
+                w.Reg(WPEX1, 60 << 1);
+                w.Reg(WPSY1, 0);
+                w.Reg(WPEY1, 223);
+                w.Reg(WCTLA, 0x0A00); // NBG1: W0 inside or W1 inside
+            } else {
+                w.Reg(ZMXIN1, 2);
+                w.Reg(WPSX0, 31 << 1);
+                w.Reg(WPEX0, 286 << 1);
+                w.Reg(WCTLA, 0x0200); // NBG1: W0 inside
+            }
+            w.Reg(WPSY0, 0);
+            w.Reg(WPEY0, 223);
+        });
+        scene.onLine = [=](Vdp2SceneWriter &w, uint32_t y) {
+            w.Reg(SCXIN1, static_cast<uint16_t>((layout == 0 ? 300 : 0) + y / 3));
+            w.ForEachState([=](ymir::vdp::VDPState &state) {
+                state.state2.CalcAccessPatterns(state.regs2, ymir::vdp::config::VDP2AccessPatternsConfig{});
+                auto &delay = state.regs2.bgParams[2].charPatDelay; // NBG1
+                delay.fill(false);
+                delay[delayBank] = feature;
+            });
+        };
+        return scene;
+    });
+}
+
+TEST_CASE("Scene: (g) character pattern delay in hi-res and deinterlaced modes, with windows", "[gpu][vdp2][scene]") {
+    // The NBG fetch pass over hi-res rows (640 and 704 pixels, the pass's whole row) and the alternate field's rows
+    // when deinterlacing: 0 640x224, 1 704x224, 2 320x448 double density, 3 704x448 double density, 4 320x448 single
+    // density (2-4 deinterlaced). NBG1 delayed by its access patterns (hi-res: CP1 at T0 before PN1 at T3; normal: CP1
+    // at T0, PN1 at T7), W0 hiding a part of each row, a different left edge on every line.
+    const bool cell2x2 = GENERATE(false, true);
+    const uint32_t mode = GENERATE(0u, 1u, 2u, 3u, 4u);
+    CAPTURE(cell2x2, mode);
+    static constexpr uint16_t kTVMD[] = {2, 3, kLSMDDouble, 3 | kLSMDDouble, kLSMDSingle};
+    const bool hires = (kTVMD[mode] & 2) != 0;
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make(
+            [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                Base(w, s, rng, static_cast<uint16_t>(kDisp | kTVMD[mode]));
+                SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = cell2x2}, rng);
+                for (uint32_t reg : {CYCA0L, CYCA1L, CYCB0L, CYCB1L}) {
+                    if (hires) {
+                        w.Reg(reg, feature ? 0x5FF1 : 0x15FF);
+                        w.Reg(reg + 2, 0xFFFF);
+                    } else {
+                        w.Reg(reg, feature ? 0x5FFF : 0x15FF);
+                        w.Reg(reg + 2, feature ? 0xFFF1 : 0xFFFF);
+                    }
+                }
+                w.Reg(SCYIN1, 5);
+                // Hi-res window coordinates are pixels; normal ones are doubled
+                w.Reg(WPSX0, hires ? 210 : 70 << 1);
+                w.Reg(WPEX0, hires ? 430 : 150 << 1);
+                w.Reg(WPSY0, 0);
+                w.Reg(WPEY0, 511);
+                w.Reg(WCTLA, 0x0200); // NBG1: W0 inside
+            },
+            {.deinterlace = mode >= 2}, 3);
+        scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) { w.Reg(SCXIN1, static_cast<uint16_t>(y / 3)); };
+        return scene;
+    });
+}
+
 TEST_CASE("Scene: save and load of the Vulkan renderer mid-frame continues exactly", "[gpu][vdp2][scene]") {
     // Ruling 16: before line 100 of the last frame the Vulkan renderer's state is saved, lost and loaded again; the
     // frame must still be software's. NBG0 has vertical cell scroll with repeat and delay (the first values of a line
@@ -2237,28 +2400,82 @@ TEST_CASE("Scene: bitmap NBG line scroll and vertical cell scroll", "[gpu][vdp2]
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Documented exceptions (stage 1B Rulings 17 and 18): stale or undefined software behaviour the GPU path does not
-// reproduce. Each scene shows the case; it fails, as expected.
+// reproduce. Each scene shows the case; it fails, as expected. Each also has a must-pass companion ("exception <id>
+// is confined"): the harness and validation are clean, the scene still differs, and every differing pixel is one the
+// exception describes (a mask from the scene's construction), so a broken harness or a wider difference cannot pass
+// as the expected failure.
+
+namespace {
+
+// The companion of a documented exception: see above. `allowed(x, y)` is the exception's mask.
+SceneResult CheckExceptionConfined(gpu::VulkanDevice &device, const Vdp2Scene &scene,
+                                   const std::function<bool(uint32_t x, uint32_t y)> &allowed,
+                                   const RenderBothOptions &options = {}) {
+    SceneResult result = RenderBoth(scene, device, options);
+    INFO(result.Describe());
+    CHECK(result.error.empty());
+    if (!result.error.empty()) {
+        return result;
+    }
+    CHECK(result.distinctColors > 1);
+    CHECK(result.diffCount > 0); // the exception still shows (its [!shouldfail] scene fails)
+    uint32_t outside = 0, firstX = 0, firstY = 0;
+    for (uint32_t y = 0; y < result.height; ++y) {
+        for (uint32_t x = 0; x < result.width; ++x) {
+            const size_t i = static_cast<size_t>(y) * result.width + x;
+            if ((result.software[i] & 0xFFFFFF) != (result.gpu[i] & 0xFFFFFF) && !allowed(x, y) && outside++ == 0) {
+                firstX = x;
+                firstY = y;
+            }
+        }
+    }
+    INFO(outside << " differing pixels outside the exception's mask; first at (" << firstX << ", " << firstY << ")");
+    CHECK(outside == 0);
+    return result;
+}
+
+void RunExceptionConfined(const Vdp2Scene &scene, const std::function<bool(uint32_t x, uint32_t y)> &allowed,
+                          const RenderBothOptions &options = {}) {
+    auto device = OpenDevice();
+    CheckExceptionConfined(*device, scene, allowed, options);
+    CloseAndCheckValidation(device);
+}
+
+// W2: hi-res RBG0 under W0 over pixels 101-404 (odd start and end: hi-res windows use bit 0) of rows 20-180.
+Vdp2Scene ExceptionW2Scene() {
+    return Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, static_cast<uint16_t>(kDisp | 2));
+        SetupRBG0(w, s, {}, rng);
+        w.Reg(WPSX0, 101);
+        w.Reg(WPEX0, 404);
+        w.Reg(WPSY0, 20);
+        w.Reg(WPEY0, 180);
+        w.Reg(WCTLC, 0x0002); // RBG0: W0 inside
+    });
+}
+
+} // namespace
 
 // W2: in hi-res modes, when only one pixel of an RBG dot's pair is inside a window, software leaves that pixel's layer
 // output from the previous line drawn (sw:4763-4779, 4854-4870 set only the unwindowed one); the GPU makes it
 // transparent.
 TEST_CASE("Scene: exception W2: hi-res RBG0 with one pixel of a pair windowed", "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-        Base(w, s, rng, static_cast<uint16_t>(kDisp | 2));
-        SetupRBG0(w, s, {}, rng);
-        w.Reg(WPSX0, 101); // odd start and end: hi-res windows use bit 0
-        w.Reg(WPEX0, 404);
-        w.Reg(WPSY0, 20);
-        w.Reg(WPEY0, 180);
-        w.Reg(WCTLC, 0x0002); // RBG0: W0 inside
-    }));
+    RunScene(ExceptionW2Scene());
+}
+
+TEST_CASE("Scene: exception W2 is confined to the windowed pixel of each split pair", "[gpu][vdp2][scene]") {
+    // The split pairs are (100, 101) and (404, 405): pixels 101 and 404 are windowed, on the window's rows.
+    RunExceptionConfined(ExceptionW2Scene(), [](uint32_t x, uint32_t y) {
+        return (x == 101 || x == 404) && y >= 20 && y <= 180;
+    });
 }
 
 // W3: a vertical mosaic repeat with no line of the NBG drawn yet in the frame (here NBG0 is off at line 0 while the
 // mosaic counter advances) reuses the layer output of the previous frame's last drawn line in software
 // (sw:2889-2892); the GPU's layer images do not survive frames, so the GPU draws the line.
-TEST_CASE("Scene: exception W3: vertical mosaic repeating a line of the previous frame",
-          "[gpu][vdp2][scene][!shouldfail]") {
+namespace {
+
+Vdp2Scene ExceptionW3Scene() {
     Vdp2Scene scene = Make(
         [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng);
@@ -2276,14 +2493,28 @@ TEST_CASE("Scene: exception W3: vertical mosaic repeating a line of the previous
             w.Reg(SCXIN0, 40); // the last lines drawn differ from the first ones
         }
     };
-    RunScene(scene);
+    return scene;
+}
+
+} // namespace
+
+TEST_CASE("Scene: exception W3: vertical mosaic repeating a line of the previous frame",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(ExceptionW3Scene());
+}
+
+TEST_CASE("Scene: exception W3 is confined to the repeats of the first mosaic block", "[gpu][vdp2][scene]") {
+    // Line 0 (mosaic counter 0) does not draw NBG0; lines 1-3 repeat it (counter 1-3 of the 4-line block); line 4
+    // starts a block that is drawn.
+    RunExceptionConfined(ExceptionW3Scene(), [](uint32_t, uint32_t y) { return y >= 1 && y <= 3; });
 }
 
 // W4: on lines prepared with the display latch off (the display enabled mid-frame), software does not reset the
 // fetchers' lastCharIndex and lastCellX (sw:2518-2539), so with a character pattern delay a line can start without a
 // character fetch and show the previous line's current character; the GPU starts every line with a fetch.
-TEST_CASE("Scene: exception W4: character pattern delay on display-latch-off lines",
-          "[gpu][vdp2][scene][!shouldfail]") {
+namespace {
+
+Vdp2Scene ExceptionW4Scene() {
     Vdp2Scene scene = Make(
         [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng);
@@ -2308,7 +2539,20 @@ TEST_CASE("Scene: exception W4: character pattern delay on display-latch-off lin
             w.Reg(TVMD, kDisp);
         }
     };
-    RunScene(scene);
+    return scene;
+}
+
+} // namespace
+
+TEST_CASE("Scene: exception W4: character pattern delay on display-latch-off lines",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(ExceptionW4Scene());
+}
+
+TEST_CASE("Scene: exception W4 is confined to the first character of display-latch-off lines", "[gpu][vdp2][scene]") {
+    // The display comes on at line 100 of the last frame with the latch off. The difference is the line's first
+    // character run: 8 dots from scroll X 3 at 409/256 dots per pixel end before pixel 4 (dot 9.4).
+    RunExceptionConfined(ExceptionW4Scene(), [](uint32_t x, uint32_t y) { return y >= 100 && x < 4; });
 }
 
 // W5: a character is fetched only when the character index changes (sw:5194). When a window hides 512 dots or more of
@@ -2318,9 +2562,10 @@ TEST_CASE("Scene: exception W4: character pattern delay on display-latch-off lin
 // need it otherwise. On the delayed path the pass matches software inside the line, but when such a window reaches the
 // right edge the front half, which does not know windows, decodes the extra tile's character for nextChar, while
 // software keeps the earlier page's, so the next line's left edge can differ (and the saved nextChar).
-TEST_CASE("Scene: exception W5: a window hiding 512 dots between two fetches of one character index",
-          "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+namespace {
+
+Vdp2Scene ExceptionW5Scene() {
+    return Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng, static_cast<uint16_t>(kDisp | 3)); // 704 wide
         CyclesSingle(w, 0);
         SetupNBG(w, s, {.index = 0, .format = 0}, rng);
@@ -2338,7 +2583,19 @@ TEST_CASE("Scene: exception W5: a window hiding 512 dots between two fetches of 
         w.Reg(WPSY0, 0);
         w.Reg(WPEY0, 223);
         w.Reg(WCTLA, 0x0002);
-    }));
+    });
+}
+
+} // namespace
+
+TEST_CASE("Scene: exception W5: a window hiding 512 dots between two fetches of one character index",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(ExceptionW5Scene());
+}
+
+TEST_CASE("Scene: exception W5 is confined to the run after the window", "[gpu][vdp2][scene]") {
+    // The run after the window is pixels 611-615 (dots 611-615, cell column 76 of the line, 12 of plane B).
+    RunExceptionConfined(ExceptionW5Scene(), [](uint32_t x, uint32_t) { return x >= 611 && x <= 615; });
 }
 
 namespace {
@@ -2444,13 +2701,44 @@ TEST_CASE("Scene: transparent meshes in progressive and double-density deinterla
 // Documented exception U2 (stage 1B ruling 8): in exclusive monitor modes software reads framebuffer pixel x / 2 and
 // draws it at even output x only (xOutputShift = 1 without the doubleResH copy to x + 1, sw:2672-2727), leaving odd x
 // transparent; the sprite shader draws every output x from framebuffer x. No known game uses exclusive monitor modes.
-TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+namespace {
+
+Vdp2Scene ExceptionU2Scene() {
+    return Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng, static_cast<uint16_t>(kDisp | 4));
         CyclesSingle(w, 0);
         SetupNBG(w, s, {.index = 0, .format = 0, .priority = 3}, rng);
         SetupSprites(w, {.type = 0}, rng);
-    }));
+    });
+}
+
+} // namespace
+
+TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(ExceptionU2Scene());
+}
+
+TEST_CASE("Scene: exception U2 is confined to the sprite readout", "[gpu][vdp2][scene]") {
+    // Software draws framebuffer pixel x / 2 at even x and nothing at odd x; the GPU draws framebuffer pixel x at x. So
+    // the difference is every odd x, and the even x whose framebuffer words at x and x / 2 differ.
+    const Vdp2Scene scene = ExceptionU2Scene();
+    std::vector<uint8_t> fb;
+    {
+        auto state = std::make_unique<ymir::vdp::VDPState>();
+        ymir::vdp::config::VDP2DebugRender debug{};
+        ymir::vdp::config::VDP2AccessPatternsConfig access{};
+        auto renderer = std::make_unique<ymir::vdp::SoftwareVDPRenderer>(*state, debug, access);
+        Vdp2SceneWriter writer;
+        writer.Attach(*state, *renderer);
+        scene.setup(writer);
+        const auto &display = state->mem1.FBRAM[state->fbIndex.display & 1];
+        fb.assign(display.begin(), display.end());
+    }
+    const auto word = [&](uint32_t x, uint32_t y) {
+        const size_t address = ((static_cast<size_t>(y) * 512 + x) * 2) & (fb.size() - 2);
+        return static_cast<uint16_t>((fb[address] << 8) | fb[address + 1]);
+    };
+    RunExceptionConfined(scene, [&](uint32_t x, uint32_t y) { return (x & 1) != 0 || word(x, y) != word(x >> 1, y); });
 }
 
 // Documented exception X1 (stage 1B ruling 31): with an exclusive monitor mode, double-density interlace and deinterlacing
@@ -2460,16 +2748,44 @@ TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2]
 // exclusive modes (vdp2_front.cpp, vulkan_vdp_renderer.cpp), so row y keeps the field line. Alternate-field output into
 // the same row is not hardware behaviour anyone relies on, and no known game uses exclusive monitor modes. The scene
 // is NBG only, so U2's sprite difference does not mask the reason.
-TEST_CASE("Scene: exception X1: exclusive monitor with interlace and deinterlacing (software overwrites row y with the "
-          "alternate line)",
-          "[gpu][vdp2][scene][!shouldfail]") {
-    RunScene(Make(
+namespace {
+
+Vdp2Scene ExceptionX1Scene(bool deinterlace) {
+    return Make(
         [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng, static_cast<uint16_t>(kDisp | 4 | kLSMDDouble));
             CyclesSingle(w, 0);
             SetupNBG(w, s, {.index = 0, .format = 0, .priority = 3}, rng);
         },
-        {.deinterlace = true}, 3));
+        {.deinterlace = deinterlace}, 3);
+}
+
+} // namespace
+
+TEST_CASE("Scene: exception X1: exclusive monitor with interlace and deinterlacing (software overwrites row y with the "
+          "alternate line)",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(ExceptionX1Scene(true));
+}
+
+TEST_CASE("Scene: exception X1 is confined to the alternate line", "[gpu][vdp2][scene]") {
+    // The difference covers the whole NBG (every row is the other line), so the mask is the frame; what pins it is
+    // that the GPU's rows are exactly the field lines: the same scene without deinterlacing, whose last frame is an
+    // even field (no alternate line, no odd-field scroll offset), is software's frame with the field lines.
+    auto device = OpenDevice();
+    const SceneResult result = CheckExceptionConfined(*device, ExceptionX1Scene(true), [](uint32_t, uint32_t) {
+        return true;
+    });
+    if (result.error.empty()) {
+        const std::vector<uint32_t> fieldLines = RenderSoftware(ExceptionX1Scene(false));
+        REQUIRE(fieldLines.size() == result.gpu.size());
+        uint32_t differ = 0;
+        for (size_t i = 0; i < fieldLines.size(); ++i) {
+            differ += (fieldLines[i] & 0xFFFFFF) != (result.gpu[i] & 0xFFFFFF) ? 1 : 0;
+        }
+        CHECK(differ == 0);
+    }
+    CloseAndCheckValidation(device);
 }
 
 // X1's control: the same exclusive monitor double-density interlaced scene without deinterlacing (and a progressive

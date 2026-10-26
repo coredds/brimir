@@ -50,7 +50,7 @@ static_assert(kRequiredStageStorageBuffers == vdp2::kMaxStageUsage.storageBuffer
                   kRequiredStageResources == vdp2::kMaxStageUsage.resources,
               "the required limits must match the VDP2 binding table");
 
-inline constexpr std::array<RequiredLimit, 6> kRequiredLimits{{
+inline constexpr std::array<RequiredLimit, 7> kRequiredLimits{{
     {"maxPerStageDescriptorStorageBuffers", &VkPhysicalDeviceLimits::maxPerStageDescriptorStorageBuffers,
      kRequiredStageStorageBuffers},
     {"maxPerStageDescriptorStorageImages", &VkPhysicalDeviceLimits::maxPerStageDescriptorStorageImages,
@@ -61,6 +61,9 @@ inline constexpr std::array<RequiredLimit, 6> kRequiredLimits{{
     {"maxComputeWorkGroupInvocations", &VkPhysicalDeviceLimits::maxComputeWorkGroupInvocations,
      vdp2::kMaxWorkgroupInvocations},
     {"maxPushConstantsSize", &VkPhysicalDeviceLimits::maxPushConstantsSize, vdp2::kMaxPushConstantSize},
+    // The NBG fetch pass's groupshared arrays (within the guaranteed 16384)
+    {"maxComputeSharedMemorySize", &VkPhysicalDeviceLimits::maxComputeSharedMemorySize,
+     vdp2::kMaxComputeSharedMemorySize},
 }};
 
 // Empty when `limits` meet kRequiredLimits, else the first unmet one as "<name> <value> < <minimum>".

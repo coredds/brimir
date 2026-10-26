@@ -69,7 +69,7 @@ void Vdp2FrontEnd::Reset(bool hard) {
     }
 
     m_vramDirty.SetAll();
-    ++m_cramGeneration;
+    MarkCRAMDirty();
 
     // Brimir: matches software (sw:109-112, VRAMFetcher::Reset), which resets the first two fetchers of each field.
     for (auto &fetchers : m_nbgFetchers) {
@@ -95,7 +95,7 @@ void Vdp2FrontEnd::PostLoadStateSync() {
     CacheAllCRAMColors();
     UpdateEnabledLayers();
     m_vramDirty.SetAll();
-    ++m_cramGeneration;
+    MarkCRAMDirty();
 
     // Brimir: the loaded state2.rotParamStates are the last computed line's Xst, Yst and KA (the next line continues
     // from them, as software does); lines prepared with the display latch off before the next computed line use them
@@ -164,36 +164,38 @@ void Vdp2FrontEnd::SetEnhancements(const config::Enhancements &enhancements) {
 
 void Vdp2FrontEnd::MarkAllDirty() {
     m_vramDirty.SetAll();
+    MarkCRAMDirty();
+}
+
+// Brimir: every CRAM word is uploaded again at the next flush.
+void Vdp2FrontEnd::MarkCRAMDirty() {
     ++m_cramGeneration;
+    m_cramColorsDirty.SetAll();
+    m_cramCoeffsDirty.SetAll();
 }
 
 // -----------------------------------------------------------------------------
 // CRAM colour cache
 
+// Brimir: stores colour cache entry `index` and marks it for upload when it changed.
+void Vdp2FrontEnd::SetCachedColor(uint32_t index, const Color888 &color8) {
+    const ColorR8G8B8A8 color = ToRGBA8(color8);
+    ColorR8G8B8A8 &entry = m_cramColorCache[index & (kVDP2CRAMColorCacheEntries - 1)];
+    if (Differs(entry, color)) {
+        entry = color;
+        m_cramColorsDirty.Set(index & (kVDP2CRAMColorCacheEntries - 1));
+    }
+}
+
 // Ported from d3d:3447-3486 (VDP2CacheCRAMColor).
 void Vdp2FrontEnd::CacheCRAMColor(uint32_t address) {
-    CRAMColorCache &colorCache = m_cramColorCache;
     switch (m_state.regs2.vramControl.colorRAMMode) {
-    case 0: { // RGB 5:5:5, half CRAM
+    case 0: // RGB 5:5:5, half CRAM
+    case 1: // RGB 5:5:5, full CRAM
+    {
         const auto value = m_state.mem2.ReadCRAM<uint16>(address & ~1u);
         const Color555 color5{.u16 = value};
-        const Color888 color8 = ConvertRGB555to888(color5);
-        ColorR8G8B8A8 &color = colorCache[(address >> 1u) & (kVDP2CRAMColorCacheEntries - 1)];
-        color.r = color8.r;
-        color.g = color8.g;
-        color.b = color8.b;
-        color.a = color8.msb;
-        break;
-    }
-    case 1: { // RGB 5:5:5, full CRAM
-        const auto value = m_state.mem2.ReadCRAM<uint16>(address & ~1u);
-        const Color555 color5{.u16 = value};
-        const Color888 color8 = ConvertRGB555to888(color5);
-        ColorR8G8B8A8 &color = colorCache[(address >> 1u) & (kVDP2CRAMColorCacheEntries - 1)];
-        color.r = color8.r;
-        color.g = color8.g;
-        color.b = color8.b;
-        color.a = color8.msb;
+        SetCachedColor(address >> 1u, ConvertRGB555to888(color5));
         break;
     }
     case 2: [[fallthrough]]; // RGB 8:8:8, full CRAM
@@ -201,12 +203,7 @@ void Vdp2FrontEnd::CacheCRAMColor(uint32_t address) {
     default: {
         address = m_state.mem2.UnmapCRAMAddress<uint8>(address);
         const auto value = m_state.mem2.ReadCRAM<uint32>(address & ~3u);
-        const Color888 color8{.u32 = value};
-        ColorR8G8B8A8 &color = colorCache[(address >> 2u) & (kVDP2CRAMColorCacheEntries - 1)];
-        color.r = color8.r;
-        color.g = color8.g;
-        color.b = color8.b;
-        color.a = color8.msb;
+        SetCachedColor(address >> 2u, Color888{.u32 = value});
         break;
     }
     }
@@ -216,45 +213,34 @@ void Vdp2FrontEnd::CacheCRAMColor(uint32_t address) {
 void Vdp2FrontEnd::Cache555Color(uint32_t address) {
     address &= (kVDP2CRAMSize - 1) & ~1u;
     const Color555 color5{.u16 = util::ReadBE<uint16>(&m_state.mem2.CRAM[address])}; // raw CRAM, as software
-    m_cram555Cache[address / sizeof(uint16)] = ConvertRGB555to888(color5);
+    const Color888 color8 = ConvertRGB555to888(color5);
+    Color888 &entry = m_cram555Cache[address / sizeof(uint16)];
+    if (entry.u32 != color8.u32) {
+        entry = color8;
+        m_cramColorsDirty.Set(kVDP2CRAM555TableBase + address / sizeof(uint16));
+    }
 }
 
 // Ported from d3d:3488-3526 (VDP2CacheAllCRAMColors).
 void Vdp2FrontEnd::CacheAllCRAMColors() {
-    CRAMColorCache &colorCache = m_cramColorCache;
     switch (m_state.regs2.vramControl.colorRAMMode) {
     case 0: // RGB 5:5:5, half CRAM
-        for (uint32 i = 0; i < 1024; ++i) {
-            const auto value = m_state.mem2.ReadCRAM<uint16>(i * sizeof(uint16));
-            const Color555 color5{.u16 = value};
-            const Color888 color8 = ConvertRGB555to888(color5);
-            colorCache[i].r = color8.r;
-            colorCache[i].g = color8.g;
-            colorCache[i].b = color8.b;
-            colorCache[i].a = color8.msb;
-        }
-        break;
     case 1: // RGB 5:5:5, full CRAM
-        for (uint32 i = 0; i < 2048; ++i) {
+    {
+        const uint32 count = m_state.regs2.vramControl.colorRAMMode == 0 ? 1024 : 2048;
+        for (uint32 i = 0; i < count; ++i) {
             const auto value = m_state.mem2.ReadCRAM<uint16>(i * sizeof(uint16));
             const Color555 color5{.u16 = value};
-            const Color888 color8 = ConvertRGB555to888(color5);
-            colorCache[i].r = color8.r;
-            colorCache[i].g = color8.g;
-            colorCache[i].b = color8.b;
-            colorCache[i].a = color8.msb;
+            SetCachedColor(i, ConvertRGB555to888(color5));
         }
         break;
+    }
     case 2: [[fallthrough]]; // RGB 8:8:8, full CRAM
     case 3: [[fallthrough]]; // RGB 8:8:8, full CRAM
     default:
         for (uint32 i = 0; i < 1024; ++i) {
             const auto value = m_state.mem2.ReadCRAM<uint32>(i * sizeof(uint32));
-            const Color888 color8{.u32 = value};
-            colorCache[i].r = color8.r;
-            colorCache[i].g = color8.g;
-            colorCache[i].b = color8.b;
-            colorCache[i].a = color8.msb;
+            SetCachedColor(i, Color888{.u32 = value});
         }
         break;
     }
@@ -273,6 +259,11 @@ void Vdp2FrontEnd::WriteCRAM(uint32_t address) {
     ++m_cramGeneration;
     CacheCRAMColor(address);
     Cache555Color(address); // Brimir: matches software (sw:407-408)
+    // Brimir: the raw word in the coefficient half (the upper 2 KiB)
+    address &= kVDP2CRAMSize - 1;
+    if (address >= kVDP2CRAMSize / 2) {
+        m_cramCoeffsDirty.Set((address - kVDP2CRAMSize / 2) / sizeof(uint32_t));
+    }
 }
 
 // Ported from d3d:3537-3623 (VDP2WriteReg).
@@ -844,7 +835,9 @@ uint32_t Vdp2FrontEnd::AppendArena(const void *data, size_t size, uint32_t align
     std::vector<uint8_t> &arena = m_record.arena;
     const size_t offset = (arena.size() + alignment - 1) & ~static_cast<size_t>(alignment - 1);
     arena.resize(offset + size);
-    std::memcpy(arena.data() + offset, data, size);
+    if (data != nullptr) {
+        std::memcpy(arena.data() + offset, data, size);
+    }
     return static_cast<uint32_t>(offset);
 }
 
@@ -873,22 +866,37 @@ void Vdp2FrontEnd::FlushCRAM() {
     }
     m_flushedCRAMGeneration = m_cramGeneration;
 
-    // Brimir: the mode-dependent cache, then the RGB555 table of every CRAM word for line colours (sw:2653-2654, 2270).
-    std::array<ColorR8G8B8A8, 2 * kVDP2CRAMColorCacheEntries> colors;
-    std::copy(m_cramColorCache.begin(), m_cramColorCache.end(), colors.begin());
-    for (size_t i = 0; i < m_cram555Cache.size(); ++i) {
-        colors[kVDP2CRAM555TableBase + i] = ToRGBA8(m_cram555Cache[i]);
+    // Brimir: Ymir uploads the whole CRAM buffers; here only the words changed since the last flush are snapshotted:
+    // the mode-dependent cache, then the RGB555 table of every CRAM word for line colours (sw:2653-2654, 2270) ...
+    static_assert(sizeof(ColorR8G8B8A8) == sizeof(uint32_t) &&
+                  2 * sizeof(CRAMColorCache) == kVDP2CRAMColorBufferSize);
+    size_t pos, count = 0;
+    for (pos = m_cramColorsDirty.FindNext(count); pos < m_cramColorsDirty.Size();
+         pos = m_cramColorsDirty.FindNext(count, pos + count)) {
+        const uint32_t size = static_cast<uint32_t>(count * sizeof(uint32_t));
+        const uint32_t arenaOffset = AppendArena(nullptr, size);
+        auto *dst = reinterpret_cast<ColorR8G8B8A8 *>(m_record.arena.data() + arenaOffset);
+        for (size_t i = pos; i < pos + count; ++i) {
+            dst[i - pos] = i < kVDP2CRAM555TableBase ? m_cramColorCache[i]
+                                                     : ToRGBA8(m_cram555Cache[i - kVDP2CRAM555TableBase]);
+        }
+        m_record.copies.push_back(
+            {arenaOffset, static_cast<uint32_t>(pos * sizeof(uint32_t)), size, Vdp2Copy::Target::CRAMColors});
+        m_record.features.copyBytes += size;
     }
-    static_assert(sizeof(colors) == kVDP2CRAMColorBufferSize);
-    const uint32_t colorsOffset = AppendArena(colors.data(), sizeof(colors));
-    m_record.copies.push_back({colorsOffset, 0, kVDP2CRAMColorBufferSize, Vdp2Copy::Target::CRAMColors});
+    m_cramColorsDirty.ClearAll();
 
-    // Brimir: Ymir uploads the coefficient half only if an RBG and CRAM coefficients are enabled at this moment, and
-    // never retries after BGON changes (stage1b-port-inventory.md section 3.4d). Snapshot it on every change.
-    const uint32_t coeffsOffset = AppendArena(&m_state.mem2.CRAM[kVDP2CRAMSize / 2], kVDP2CRAMRotCoeffBufferSize);
-    m_record.copies.push_back({coeffsOffset, 0, kVDP2CRAMRotCoeffBufferSize, Vdp2Copy::Target::CRAMCoeffs});
-
-    m_record.features.copyBytes += kVDP2CRAMColorBufferSize + kVDP2CRAMRotCoeffBufferSize;
+    // ... and the coefficient half. Brimir: Ymir uploads it only if an RBG and CRAM coefficients are enabled at this
+    // moment, and never retries after BGON changes (stage1b-port-inventory.md section 3.4d); here every change is.
+    for (pos = m_cramCoeffsDirty.FindNext(count); pos < m_cramCoeffsDirty.Size();
+         pos = m_cramCoeffsDirty.FindNext(count, pos + count)) {
+        const uint32_t offset = static_cast<uint32_t>(pos * sizeof(uint32_t));
+        const uint32_t size = static_cast<uint32_t>(count * sizeof(uint32_t));
+        const uint32_t arenaOffset = AppendArena(&m_state.mem2.CRAM[kVDP2CRAMSize / 2 + offset], size);
+        m_record.copies.push_back({arenaOffset, offset, size, Vdp2Copy::Target::CRAMCoeffs});
+        m_record.features.copyBytes += size;
+    }
+    m_cramCoeffsDirty.ClearAll();
 }
 
 void Vdp2FrontEnd::PackParams() {
