@@ -72,6 +72,8 @@ add_executable(brimir_tests
     unit/test_gpu_vdp2_pipelines.cpp
     # VDP2 front half (parameter packing, CRAM cache, batching, frame records) through the CPU scene harness
     unit/vdp2_scene.cpp
+    # CPU reference of the VDP2 sub-pixel rules at internal resolution N (the coordinate-bitmap scenes)
+    unit/vdp2_subpixel_reference.cpp
     unit/test_vdp2_front.cpp
 )
 

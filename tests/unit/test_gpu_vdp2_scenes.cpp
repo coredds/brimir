@@ -18,12 +18,15 @@
 // [gpu][vdp2][scene]; SKIP without a Vulkan device. Every scene runs on both drivers (the full suite takes ~25 s on the
 // desktop GPU, ~40 s on lavapipe); [lavapipe] marks a quick cross-section for manual runs. BRIMIR_VDP2_POISON=1 runs
 // them with the layer images poisoned every frame (any read of a texel the frame did not write changes the result).
-// BRIMIR_VDP2_SCALE=N (2-4) runs every scene at internal resolution N, the N x composite compared as a nearest upscale
-// of the software frame (vdp2_scene.hpp CompareNearestPixels; [scale] cases pin N).
+// BRIMIR_VDP2_SCALE=N (2-4) runs every scene at internal resolution N, the N x composite compared with the software
+// frame at the sample points outside the excluded lattice (vdp2_scene.hpp CompareSamplePointPixels; [scale] cases pin
+// N, compare scenes without sub-pixel features as a nearest upscale, and check the sub-pixels themselves against
+// vdp2_subpixel_reference.hpp with coordinate bitmaps).
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
 #include "vdp2_scene.hpp"
+#include "vdp2_subpixel_reference.hpp"
 
 #include <gpu/frame_presenter.hpp>
 #include <gpu/vdp/vulkan_vdp_renderer.hpp>
@@ -36,6 +39,8 @@
 #include <functional>
 #include <memory>
 #include <random>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using brimir::test::CloseAndCheckValidation;
@@ -3560,9 +3565,11 @@ TEST_CASE("Scene: operational exception: context reset with deinterlacing off cl
 }
 
 // =====================================================================================================================
-// Internal resolution (stage 1C Task 3): the background layers and the composite at N x, every sub-pixel evaluated at
-// its native pixel, so the N x composite is exactly a nearest upscale of software's frame (CompareNearest). With
-// BRIMIR_VDP2_SCALE=N every scene above runs at N the same way; these cases pin N.
+// Internal resolution (stage 1C Tasks 3 and 4): the background layers and the composite at N x, each background sample
+// evaluated at its own sub-pixel position (Task 4, vdp2_subpixel_reference.hpp), so the N x composite equals software's
+// frame at the sample points (N x, N y) outside the excluded lattice (CompareSamplePoints), and is exactly a nearest
+// upscale of it for scenes without sub-pixel features (CompareNearest). With BRIMIR_VDP2_SCALE=N every scene above
+// runs at N, compared at the sample points; these cases pin N.
 
 namespace {
 
@@ -3571,12 +3578,33 @@ using brimir::test::CompareNearestPixels;
 using brimir::test::CompareSamplePointPixels;
 using brimir::test::CompareSamplePoints;
 using brimir::test::SampleLatticeRow;
+namespace sp = brimir::test::subpixel;
 
-// A cross-section of the pixel paths: NBGs over sprites with colour offset; RBG0 with per-dot coefficients and the
-// line colour screen; colour gradation; extended colour calculation with transparent meshes; vertical NBG mosaic
-// across a batch split (rows of the earlier batch are loaded from the layer image); a delayed NBG under a window (the
-// fetch pass); hi-res double-density interlace with deinterlacing; the shadow of sprites.
-std::vector<std::pair<std::string, Vdp2Scene>> ScaleScenes() {
+constexpr uint32_t SCXDN1 = 0x082, RPRCTL = 0x0B2;
+
+// RBG0 with per-dot coefficients and the line colour screen (coefficient line colour data), in TVMD mode `tvmd`.
+Vdp2Scene RBGLineColorScene(uint16_t tvmd, bool deinterlace) {
+    return Make(
+        [tvmd](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | tvmd), 1);
+            SetupRBG0(w, s, {.coeffTable = true, .coeffLineColor = true}, rng);
+            for (uint32_t y = 0; y < 512; ++y) {
+                w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x800)));
+            }
+            w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
+            w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
+            s.lnclen = 0x0010;
+            w.Reg(CCCTL, 0x0030);
+            w.Reg(CCRR, 0x0008);
+        },
+        {.deinterlace = deinterlace});
+}
+
+// Scenes without a sub-pixel feature: NBGs unzoomed with integer scroll, sprites, windows, colour calculation,
+// gradation, line colour, shadow, meshes, colour offset, mosaic (native at N, also zoomed or rotated) and NBGs using
+// the character table (character pattern delay, vertical cell scroll on 2x2 characters; native at N, also zoomed). Every
+// sub-pixel of their N x frames shows its native pixel.
+std::vector<std::pair<std::string, Vdp2Scene>> NearestScenes() {
     std::vector<std::pair<std::string, Vdp2Scene>> scenes;
     scenes.emplace_back("NBGs, sprites, colour offset", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
                             Base(w, s, rng);
@@ -3585,18 +3613,6 @@ std::vector<std::pair<std::string, Vdp2Scene>> ScaleScenes() {
                             w.Reg(CLOFEN, 0x0021);
                             w.Reg(COAR, 0x0040);
                         }));
-    scenes.emplace_back("RBG0 coefficients and line colour", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
-                            Base(w, s, rng, kDisp, 1);
-                            SetupRBG0(w, s, {.coeffTable = true, .coeffLineColor = true}, rng);
-                            for (uint32_t y = 0; y < 512; ++y) {
-                                w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x800)));
-                            }
-                            w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
-                            w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
-                            s.lnclen = 0x0010;
-                            w.Reg(CCCTL, 0x0030);
-                            w.Reg(CCRR, 0x0008);
-                        }));
     scenes.emplace_back("colour gradation", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
                             Base(w, s, rng);
                             TwoNBGs(w, s, rng);
@@ -3604,35 +3620,173 @@ std::vector<std::pair<std::string, Vdp2Scene>> ScaleScenes() {
                             w.Reg(CCCTL, static_cast<uint16_t>(0x8000 | (0 << 12) | 0x0043));
                             w.Reg(CCRNA, 0x0A14);
                         }));
+    scenes.emplace_back("windows", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            TwoNBGs(w, s, rng);
+                            WindowRects(w, false);
+                            w.Reg(WCTLA, 0x008B);
+                        }));
+    scenes.emplace_back("line colour screen", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng, kDisp, 1);
+                            TwoNBGs(w, s, rng);
+                            BackPerLine(w, rng);
+                            for (uint32_t y = 0; y < 512; ++y) {
+                                w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x800)));
+                            }
+                            w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
+                            w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
+                            s.lnclen = 0x0003;
+                            w.Reg(CCCTL, 0x0023);
+                            w.Reg(CCRLB, 0x0C08);
+                        }));
     scenes.emplace_back("transparent meshes", MeshScene(0, false));
     {
         Vdp2Scene mosaic = Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng);
             TwoNBGs(w, s, rng);
             w.Reg(MZCTL, 0x3203); // NBG0 and NBG1, 3 pixels wide, 4 lines high
+            // Zoomed with a fractional scroll: native under mosaic
+            w.Reg(ZMXDN0, 0xC000);
+            w.Reg(SCXDN0, 0x8000);
+            w.Reg(ZMYDN0, 0xA000);
         });
         mosaic.onLine = [](Vdp2SceneWriter &w, uint32_t y) {
             w.Reg(SCXIN0, static_cast<uint16_t>(y >= 102 ? 9 : 0)); // a new batch at line 102, inside a block
         };
-        scenes.emplace_back("vertical mosaic across a batch split", mosaic);
+        scenes.emplace_back("zoomed NBG mosaic across a batch split", mosaic);
     }
+    scenes.emplace_back("rotated RBG0 mosaic", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            SetupRBG0(w, s, {}, rng);
+                            w.Reg(MZCTL, 0x0310); // RBG0, 4 pixels wide
+                        }));
     scenes.emplace_back("delayed NBG under a window", DelayedNBG1Scene(true, true, [](Vdp2SceneWriter &w, Shadow &,
                                                                                        std::mt19937 &) {
                             WindowRects(w, false);
                             w.Reg(WCTLA, 0x0200);
                         }));
+    scenes.emplace_back("delayed NBG zoomed with a fractional scroll",
+                        DelayedNBG1Scene(true, false, [](Vdp2SceneWriter &w, Shadow &, std::mt19937 &) {
+                            w.Reg(ZMXDN1, 0xC000);
+                            w.Reg(SCXDN1, 0x8000);
+                            w.Reg(ZMYDN1, 0xA000);
+                        }));
+    scenes.emplace_back("vertical cell scroll on zoomed 2x2 characters",
+                        Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = true}, rng);
+                            w.Reg(CYCA0L, 0xFF55);
+                            w.Reg(CYCA0U, 0xFFFF);
+                            w.Reg(CYCB0L, 0xF1FF);
+                            w.Reg(CYCB0U, 0xFFFF);
+                            w.Reg(CYCB1L, 0xFFDF);
+                            w.Reg(CYCB1U, 0xFFFF);
+                            constexpr uint32_t kVCellAddress = 0x7D000;
+                            FillVRAM(w, kVCellAddress, 0x800, rng);
+                            w.Reg(VCSTAU, static_cast<uint16_t>(kVCellAddress >> 17));
+                            w.Reg(VCSTAL, static_cast<uint16_t>((kVCellAddress >> 1) & 0xFFFE));
+                            w.Reg(SCRCTL, 0x0100);
+                            w.Reg(ZMXDN1, 0xC000);
+                            w.Reg(SCXIN1, 13);
+                        }));
     scenes.emplace_back("hi-res double density deinterlaced",
                         ResolutionScene(static_cast<uint16_t>(3 | kLSMDDouble), true));
+    scenes.emplace_back("single density deinterlaced", ResolutionScene(kLSMDSingle, true));
     scenes.emplace_back("sprite MSB shadow", ShadowScene(ShadowBGs::TwoNBGs, 0x23, true));
     return scenes;
 }
 
+// A cross-section with sub-pixel features, compared at the sample points: the nearest scenes, plus zoomed and finely
+// scrolled NBGs (vertical cell scroll, line scroll in double density), rotated RBG0 with coefficients and the line
+// colour screen in progressive, hi-res and deinterlaced double-density modes (the first sub-pixel of each pair's
+// second column or row stores the native line colour), and rotation parameter windows.
+std::vector<std::pair<std::string, Vdp2Scene>> SamplePointScenes() {
+    std::vector<std::pair<std::string, Vdp2Scene>> scenes = NearestScenes();
+    scenes.emplace_back("NBG zoom and fractional scroll", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            TwoNBGs(w, s, rng);
+                            SetupSprites(w, {.type = 1}, rng);
+                            w.Reg(SCXDN0, 0x4500);
+                            w.Reg(SCYDN0, 0x8000);
+                            w.Reg(ZMXDN0, 0xC000);
+                            w.Reg(ZMYDN0, 0xA000);
+                            w.Reg(ZMXIN1, 1);
+                            w.Reg(ZMXDN1, 0x8000);
+                            w.Reg(ZMCTL, 0x0100);
+                        }));
+    scenes.emplace_back("vertical cell scroll with zoom", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            SetupNBG(w, s, {.index = 0, .format = 0}, rng);
+                            w.Reg(CYCA0L, 0x4444);
+                            w.Reg(CYCA0U, 0x4444);
+                            w.Reg(CYCB0L, 0x0CFF);
+                            w.Reg(CYCB0U, 0xFFFF);
+                            constexpr uint32_t kVCellAddress = 0x7D000;
+                            FillVRAM(w, kVCellAddress, 0x400, rng);
+                            w.Reg(VCSTAU, static_cast<uint16_t>(kVCellAddress >> 17));
+                            w.Reg(VCSTAL, static_cast<uint16_t>((kVCellAddress >> 1) & 0xFFFE));
+                            w.Reg(SCRCTL, 0x0001);
+                            w.Reg(ZMXDN0, 0xC000);
+                            w.Reg(SCXDN0, 0x6000);
+                        }));
+    scenes.emplace_back("zoomed line scroll in double density",
+                        Make(
+                            [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                                Base(w, s, rng, static_cast<uint16_t>(kDisp | kLSMDDouble));
+                                CyclesSingle(w, 0);
+                                SetupNBG(w, s, {.index = 0, .format = 1}, rng);
+                                FillVRAM(w, kLineScrollAddress, 0x2000, rng);
+                                w.Reg(LSTA0U, static_cast<uint16_t>(kLineScrollAddress >> 17));
+                                w.Reg(LSTA0L, static_cast<uint16_t>((kLineScrollAddress >> 1) & 0xFFFF));
+                                w.Reg(SCRCTL, 0x0016); // N0LSS = 1, N0LSCY, N0LSCX
+                                w.Reg(ZMXDN0, 0xC000);
+                                w.Reg(ZMYDN0, 0xA000);
+                            },
+                            {.deinterlace = true}, 2));
+    scenes.emplace_back("RBG0 coefficients and line colour", RBGLineColorScene(0, false));
+    scenes.emplace_back("hi-res RBG0 coefficients and line colour", RBGLineColorScene(2, false));
+    scenes.emplace_back("double density RBG0 coefficients and line colour, deinterlaced",
+                        RBGLineColorScene(kLSMDDouble, true));
+    scenes.emplace_back("double density RBG0 coefficients and line colour, woven",
+                        RBGLineColorScene(kLSMDDouble, false));
+    scenes.emplace_back("RBG0 rotation parameter windows", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            SetupRBG0(w, s, {.rpmd = 3}, rng);
+                            WindowRects(w, false);
+                            w.Reg(WCTLD, 0x008B);
+                        }));
+    return scenes;
+}
+
+// The N x frame (n * width x n * height) has blocks that are not one colour (it is not a nearest upscale).
+uint64_t NonConstantBlocks(const std::vector<uint32_t> &scaled, uint32_t width, uint32_t height, uint32_t n) {
+    uint64_t count = 0;
+    if (scaled.size() != static_cast<size_t>(width) * height * n * n) {
+        return 0;
+    }
+    const uint32_t pitch = width * n;
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint32_t first = scaled[static_cast<size_t>(y * n) * pitch + x * n] & 0xFFFFFF;
+            bool constant = true;
+            for (uint32_t j = 0; j < n && constant; ++j) {
+                for (uint32_t i = 0; i < n && constant; ++i) {
+                    constant = (scaled[static_cast<size_t>(y * n + j) * pitch + x * n + i] & 0xFFFFFF) == first;
+                }
+            }
+            count += constant ? 0 : 1;
+        }
+    }
+    return count;
+}
+
 } // namespace
 
-TEST_CASE("Scene: internal resolution N is a nearest upscale of software", "[gpu][vdp2][scene][scale][lavapipe]") {
+TEST_CASE("Scene: internal resolution N is a nearest upscale of software without sub-pixel features",
+          "[gpu][vdp2][scene][scale][lavapipe]") {
     const uint32_t n = GENERATE(2u, 3u, 4u);
     auto device = OpenDevice();
-    for (const auto &[name, scene] : ScaleScenes()) {
+    for (const auto &[name, scene] : NearestScenes()) {
         CAPTURE(n, name);
         const SceneResult result = CompareNearest(scene, *device, n);
         INFO(result.Describe());
@@ -3644,20 +3798,584 @@ TEST_CASE("Scene: internal resolution N is a nearest upscale of software", "[gpu
     CloseAndCheckValidation(device);
 }
 
+TEST_CASE("Scene: internal resolution N matches software at the sample points", "[gpu][vdp2][scene][scale]") {
+    const uint32_t n = GENERATE(2u, 3u, 4u);
+    auto device = OpenDevice();
+    for (const auto &[name, scene] : SamplePointScenes()) {
+        CAPTURE(n, name);
+        const SceneResult result = CompareSamplePoints(scene, *device, n);
+        INFO(result.Describe());
+        CHECK(result.error.empty());
+        CHECK(result.scale == n);
+        CHECK(result.comparedPixels + result.skippedPixels == uint64_t{result.width} * result.height);
+        CHECK(result.identical);
+    }
+    CloseAndCheckValidation(device);
+}
+
 TEST_CASE("Scene: internal resolution N with poisoned images", "[gpu][vdp2][scene][scale]") {
     // Every texel compose or a vertical mosaic load reads at N was written by the frame (both layer images, the
-    // native ones and the character table start as 0xA5 every frame).
+    // native ones and the character table start as 0xA5 every frame): every pixel of the nearest scenes, the sample
+    // points of the others (the coordinate-bitmap scenes check every pixel with poison too).
     const uint32_t n = GENERATE(2u, 4u);
     auto device = OpenDevice();
     RenderBothOptions options;
     options.poisonImages = true;
-    for (const auto &[name, scene] : ScaleScenes()) {
+    for (const auto &[name, scene] : NearestScenes()) {
         CAPTURE(n, name);
         const SceneResult result = CompareNearest(scene, *device, n, options);
         INFO(result.Describe());
         CHECK(result.error.empty());
         CHECK(result.identical);
     }
+    for (const auto &[name, scene] : SamplePointScenes()) {
+        CAPTURE(n, name);
+        const SceneResult result = CompareSamplePoints(scene, *device, n, options);
+        INFO(result.Describe());
+        CHECK(result.error.empty());
+        CHECK(result.identical);
+    }
+    CloseAndCheckValidation(device);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Coordinate bitmaps (stage 1C Task 4): an RGB555 bitmap whose texels encode their own (u, v) (u mod 128 in bits 0-6,
+// v mod 256 in bits 7-14), drawn by NBG0 or RBG0 alone. Every pixel of the N x composite is decoded and compared with
+// the sub-pixel reference (vdp2_subpixel_reference.hpp, int64), and software's 1x frame with the reference at 1x.
+
+namespace {
+
+uint16_t CoordTexel(uint32_t u, uint32_t v) {
+    return static_cast<uint16_t>(0x8000 | (u & 127) | ((v & 255) << 7));
+}
+
+// The 512x256 coordinate bitmap at kCharBase (banks A0 and A1).
+void WriteCoordBitmap(Vdp2SceneWriter &w) {
+    for (uint32_t v = 0; v < 256; ++v) {
+        for (uint32_t u = 0; u < 512; ++u) {
+            w.VRAM16(kCharBase + (v * 512 + u) * 2, CoordTexel(u, v));
+        }
+    }
+}
+
+// The texel coordinates of a composite pixel (XBGR) that shows a coordinate texel (no colour calculation); false when
+// the pixel is not one (low colour bits set).
+bool DecodeCoord(uint32_t pixel, uint32_t &u, uint32_t &v) {
+    const uint32_t r = pixel & 0xFF, g = (pixel >> 8) & 0xFF, b = (pixel >> 16) & 0xFF;
+    if (((r | g | b) & 7) != 0) {
+        return false;
+    }
+    const uint32_t code = (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
+    u = code & 127;
+    v = code >> 7;
+    return true;
+}
+
+using CoordExpect = std::function<sp::Dot(uint32_t n, uint32_t X, uint32_t Y)>;
+
+struct CoordCheck {
+    uint64_t pixels = 0, mismatches = 0;
+    uint32_t x = 0, y = 0, pixel = 0; // the first mismatch
+    int64_t wantU = 0, wantV = 0;
+
+    std::string Describe() const {
+        std::ostringstream out;
+        out << pixels << " pixels decoded, " << mismatches << " differ from the reference";
+        if (mismatches != 0) {
+            uint32_t u = 0, v = 0;
+            const bool decoded = DecodeCoord(pixel, u, v);
+            out << "; first at (" << x << ", " << y << "): reference (" << (wantU & 127) << ", " << (wantV & 255)
+                << "), frame " << (decoded ? "(" + std::to_string(u) + ", " + std::to_string(v) + ")" : "not a texel")
+                << " (0x" << std::hex << (pixel & 0xFFFFFF) << ")";
+        }
+        return out.str();
+    }
+};
+
+// Every pixel of an n x frame (n * width x n * height) against the reference.
+CoordCheck CheckCoords(const std::vector<uint32_t> &frame, uint32_t width, uint32_t height, uint32_t n,
+                       const CoordExpect &expect) {
+    CoordCheck check;
+    if (frame.size() != static_cast<size_t>(width) * height * n * n) {
+        return check;
+    }
+    const uint32_t pitch = width * n;
+    for (uint32_t Y = 0; Y < height * n; ++Y) {
+        for (uint32_t X = 0; X < pitch; ++X) {
+            const uint32_t pixel = frame[static_cast<size_t>(Y) * pitch + X];
+            const sp::Dot want = expect(n, X, Y);
+            uint32_t u = 0, v = 0;
+            ++check.pixels;
+            if (!DecodeCoord(pixel, u, v) || u != (want.u & 127) || v != (want.v & 255)) {
+                if (check.mismatches++ == 0) {
+                    check.x = X;
+                    check.y = Y;
+                    check.pixel = pixel;
+                    check.wantU = want.u;
+                    check.wantV = want.v;
+                }
+            }
+        }
+    }
+    return check;
+}
+
+struct CoordScene {
+    std::string name;
+    Vdp2Scene scene;
+    CoordExpect expect;
+};
+
+sp::Geometry CoordGeometry(uint16_t tvmd, bool deinterlace) {
+    sp::Geometry g;
+    g.hiRes = (tvmd & 2) != 0;
+    const uint16_t lsmd = tvmd & 0x00C0;
+    g.interlace = lsmd == kLSMDDouble   ? sp::Interlace::DoubleDensity
+                  : lsmd == kLSMDSingle ? sp::Interlace::SingleDensity
+                                        : sp::Interlace::None;
+    g.deinterlace = deinterlace;
+    return g;
+}
+
+// NBG0 drawing the coordinate bitmap (RGB555, 512x256, transparency off), with an 11.8 scroll and 3.8 increments.
+struct CoordNBG {
+    uint16_t tvmd = 0;
+    bool deinterlace = false;
+    uint32_t scrollX = 0x12345, scrollY = 0x04580; // 0x123.45, 0x45.80
+    uint32_t incH = 0x100, incV = 0x100;
+    bool lineTable = false;                // line scroll X and line zoom on every line (progressive)
+    uint32_t zoomLine = UINT32_MAX;        // the horizontal increment changes to zoomAfter at this line
+    uint32_t zoomAfter = 0x100;
+};
+
+uint32_t CoordLineScrollX(uint32_t line) {
+    return (line * 0x1D3u) & 0x7FFFF;
+}
+
+uint32_t CoordLineIncH(uint32_t line) {
+    return 0x90 + (line * 13u) % 0x100;
+}
+
+void WriteNBG0Increment(Vdp2SceneWriter &w, uint32_t incH) {
+    w.Reg(ZMXIN0, static_cast<uint16_t>(incH >> 8));
+    w.Reg(ZMXDN0, static_cast<uint16_t>((incH & 0xFF) << 8));
+}
+
+CoordScene CoordNBGScene(std::string name, CoordNBG c) {
+    Vdp2Scene scene = Make(
+        [c](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | c.tvmd));
+            CyclesSingle(w, 0);
+            s.chctla = static_cast<uint16_t>((s.chctla & 0xFF00) | (3 << 4) | (1 << 1)); // RGB555 512x256 bitmap
+            s.bgon |= 0x0101;                                                             // transparency off
+            s.prina = static_cast<uint16_t>((s.prina & 0xFF00) | 4);
+            s.mpofn = static_cast<uint16_t>(s.mpofn & ~7u);
+            WriteCoordBitmap(w);
+            w.Reg(SCXIN0, static_cast<uint16_t>((c.scrollX >> 8) & 0x7FF));
+            w.Reg(SCXDN0, static_cast<uint16_t>((c.scrollX & 0xFF) << 8));
+            w.Reg(SCYIN0, static_cast<uint16_t>((c.scrollY >> 8) & 0x7FF));
+            w.Reg(SCYDN0, static_cast<uint16_t>((c.scrollY & 0xFF) << 8));
+            WriteNBG0Increment(w, c.incH);
+            w.Reg(ZMYIN0, static_cast<uint16_t>(c.incV >> 8));
+            w.Reg(ZMYDN0, static_cast<uint16_t>((c.incV & 0xFF) << 8));
+            const bool reduced = c.incH > 0x100 || c.lineTable || c.zoomAfter > 0x100;
+            w.Reg(ZMCTL, static_cast<uint16_t>(reduced ? 1 : 0));
+            if (c.lineTable) {
+                for (uint32_t line = 0; line < 512; ++line) {
+                    w.VRAM32(kLineScrollAddress + line * 8, CoordLineScrollX(line) << 8);
+                    w.VRAM32(kLineScrollAddress + line * 8 + 4, CoordLineIncH(line) << 8);
+                }
+                w.Reg(LSTA0U, static_cast<uint16_t>(kLineScrollAddress >> 17));
+                w.Reg(LSTA0L, static_cast<uint16_t>((kLineScrollAddress >> 1) & 0xFFFF));
+                w.Reg(SCRCTL, 0x000A); // line scroll X and line zoom, every line
+            }
+        },
+        {.deinterlace = c.deinterlace});
+    if (c.zoomLine != UINT32_MAX) {
+        scene.onLine = [c](Vdp2SceneWriter &w, uint32_t y) {
+            if (y == 0) {
+                WriteNBG0Increment(w, c.incH);
+            } else if (y == c.zoomLine) {
+                WriteNBG0Increment(w, c.zoomAfter);
+            }
+        };
+    }
+
+    sp::NBGFrame frame;
+    frame.geometry = CoordGeometry(c.tvmd, c.deinterlace);
+    frame.scrollX = c.scrollX;
+    frame.scrollY = c.scrollY;
+    frame.incH = c.incH;
+    frame.incV = c.incV;
+    if (c.lineTable) {
+        for (uint32_t line = 0; line < 512; ++line) {
+            frame.lineScrollX.push_back(CoordLineScrollX(line));
+            frame.lineIncH.push_back(CoordLineIncH(line));
+        }
+    } else if (c.zoomLine != UINT32_MAX) {
+        for (uint32_t line = 0; line < 512; ++line) {
+            frame.lineIncH.push_back(line < c.zoomLine ? c.incH : c.zoomAfter);
+        }
+    }
+    CoordExpect expect = [frame](uint32_t n, uint32_t X, uint32_t Y) {
+        sp::NBGFrame f = frame;
+        f.geometry.n = n;
+        return sp::NBGDotAt(f, X, Y);
+    };
+    return {std::move(name), std::move(scene), std::move(expect)};
+}
+
+// A table value as the register holds it: rounded to `one` and sign-extended from `bits` bits.
+int64_t FitFixed(double value, double one, uint32_t bits) {
+    const int64_t raw = static_cast<int64_t>(std::lround(value * one));
+    const int64_t mask = (int64_t{1} << bits) - 1;
+    const int64_t low = raw & mask;
+    return (low & (int64_t{1} << (bits - 1))) != 0 ? low - (int64_t{1} << bits) : low;
+}
+
+// The rotation parameter table WriteRotTable writes, as the hardware reads it.
+sp::RotParams ToRotParams(const RotTable &t) {
+    sp::RotParams p;
+    p.Xst = FitFixed(t.xst, 1024, 23);
+    p.Yst = FitFixed(t.yst, 1024, 23);
+    p.Zst = FitFixed(t.zst, 1024, 23);
+    p.deltaXst = FitFixed(t.dxst, 1024, 13);
+    p.deltaYst = FitFixed(t.dyst, 1024, 13);
+    p.deltaX = FitFixed(t.dx, 1024, 13);
+    p.deltaY = FitFixed(t.dy, 1024, 13);
+    p.A = FitFixed(t.a, 1024, 14);
+    p.B = FitFixed(t.b, 1024, 14);
+    p.C = FitFixed(t.c, 1024, 14);
+    p.D = FitFixed(t.d, 1024, 14);
+    p.E = FitFixed(t.e, 1024, 14);
+    p.F = FitFixed(t.f, 1024, 14);
+    p.Px = FitFixed(t.px, 1, 14);
+    p.Py = FitFixed(t.py, 1, 14);
+    p.Pz = FitFixed(t.pz, 1, 14);
+    p.Cx = FitFixed(t.cx, 1, 14);
+    p.Cy = FitFixed(t.cy, 1, 14);
+    p.Cz = FitFixed(t.cz, 1, 14);
+    p.Mx = FitFixed(t.mx, 1024, 24);
+    p.My = FitFixed(t.my, 1024, 24);
+    p.kx = FitFixed(t.kx, 65536, 24);
+    p.ky = FitFixed(t.ky, 65536, 24);
+    p.KAst = static_cast<int64_t>(std::lround(t.kast * 1024)) & 0x3FFFFFF;
+    p.dKAst = FitFixed(t.dkast, 1024, 20);
+    p.dKAx = FitFixed(t.dkax, 1024, 20);
+    return p;
+}
+
+// Coefficient entry values (8.16, about 0.875 to 1.125), never transparent.
+int64_t CoordCoefficient(uint32_t entry) {
+    return 0x10000 + static_cast<int64_t>((entry * 7919u) % 0x4000u) - 0x2000;
+}
+
+// RBG0 drawing the coordinate bitmap (RGB555, 512x256, screen-over repeat, transparency off) with parameter A.
+struct CoordRBG {
+    uint16_t tvmd = 0;
+    bool deinterlace = false;
+    RotTable table = Rotated(0.3, 0.9);
+    bool coefficients = false; // mode 0 (kx = ky), two words, from VRAM bank B0
+    bool perDot = true;
+    uint32_t reloadLine = UINT32_MAX; // the table becomes `reloaded` here, Xst and Yst re-read (RPRCTL)
+    RotTable reloaded;
+};
+
+CoordScene CoordRBGScene(std::string name, CoordRBG c) {
+    for (RotTable *t : {&c.table, &c.reloaded}) {
+        if (c.coefficients) {
+            t->kast = 0;
+            t->dkast = c.perDot ? 0.25 : 1.0;
+            t->dkax = c.perDot ? 1.0 : 0.0;
+        }
+    }
+    Vdp2Scene scene = Make(
+        [c](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | c.tvmd));
+            // A0 and A1 bitmap, B0 coefficients
+            s.ramctl = static_cast<uint16_t>((s.ramctl & 0x3000) | 0x0300 | 0x000F | (c.coefficients ? 0x0010 : 0));
+            s.chctlb = static_cast<uint16_t>((s.chctlb & 0x00FF) | 0x3200); // RGB555 512x256 bitmap
+            s.bgon |= 0x1010;                                                // transparency off
+            w.Reg(PRIR, 5);
+            w.Reg(PLSZ, 0);
+            w.Reg(MPOFR, 0);
+            WriteCoordBitmap(w);
+            WriteRotTable(w, kRotTableAddress, c.table);
+            w.Reg(RPTAU, static_cast<uint16_t>(kRotTableAddress >> 17));
+            w.Reg(RPTAL, static_cast<uint16_t>((kRotTableAddress >> 1) & 0xFFFE));
+            w.Reg(RPMD, 0);
+            if (c.coefficients) {
+                w.Reg(KTCTL, 0x0001);
+                w.Reg(KTAOF, 0x0101);
+                for (uint32_t i = 0; i < 1024; ++i) {
+                    w.VRAM32(0x40000 + i * 4, static_cast<uint32_t>(CoordCoefficient(i)) & 0xFFFFFF);
+                }
+            }
+        },
+        {.deinterlace = c.deinterlace});
+    if (c.reloadLine != UINT32_MAX) {
+        scene.onLine = [c](Vdp2SceneWriter &w, uint32_t y) {
+            if (y == 0) {
+                WriteRotTable(w, kRotTableAddress, c.table);
+            } else if (y == c.reloadLine) {
+                WriteRotTable(w, kRotTableAddress, c.reloaded);
+                w.Reg(RPRCTL, 0x0003); // re-read Xst and Yst
+            }
+        };
+    }
+
+    sp::RBGFrame frame;
+    frame.geometry = CoordGeometry(c.tvmd, c.deinterlace);
+    frame.table = ToRotParams(c.table);
+    frame.reloadLine = c.reloadLine;
+    frame.reloaded = ToRotParams(c.reloaded);
+    if (c.coefficients) {
+        frame.coefficient = CoordCoefficient;
+    }
+    CoordExpect expect = [frame](uint32_t n, uint32_t X, uint32_t Y) {
+        sp::RBGFrame f = frame;
+        f.geometry.n = n;
+        return sp::RBGDotAt(f, X, Y);
+    };
+    return {std::move(name), std::move(scene), std::move(expect)};
+}
+
+std::vector<CoordScene> CoordScenes() {
+    std::vector<CoordScene> scenes;
+    scenes.push_back(CoordNBGScene("NBG0 zoom 0.5x", {.incH = 0x200}));
+    scenes.push_back(CoordNBGScene("NBG0 zoom 1.25x", {.incH = 0xCD, .incV = 0xCD}));
+    scenes.push_back(CoordNBGScene("NBG0 zoom 2x", {.incH = 0x80, .incV = 0x80}));
+    scenes.push_back(CoordNBGScene("NBG0 line scroll X and line zoom", {.incV = 0xC0, .lineTable = true}));
+    scenes.push_back(CoordNBGScene("NBG0 zoom change at line 100", {.incH = 0xCD, .zoomLine = 100, .zoomAfter = 0x80}));
+    scenes.push_back(CoordNBGScene("NBG0 hi-res zoom", {.tvmd = 2, .incH = 0xCD, .incV = 0xA0}));
+    for (const bool deinterlace : {true, false}) {
+        const std::string mode = deinterlace ? ", deinterlaced" : ", woven";
+        scenes.push_back(CoordNBGScene("NBG0 vertical zoom in double density" + mode,
+                                       {.tvmd = kLSMDDouble, .deinterlace = deinterlace, .incH = 0xCD, .incV = 0xA0}));
+        scenes.push_back(CoordNBGScene("NBG0 vertical zoom in single density" + mode,
+                                       {.tvmd = kLSMDSingle, .deinterlace = deinterlace, .incH = 0xCD, .incV = 0xA0}));
+    }
+
+    scenes.push_back(CoordRBGScene("RBG0 fixed matrix", {}));
+    scenes.push_back(CoordRBGScene("RBG0 per-dot coefficients", {.coefficients = true}));
+    scenes.push_back(CoordRBGScene("RBG0 per-line coefficients", {.coefficients = true, .perDot = false}));
+    scenes.push_back(CoordRBGScene("RBG0 hi-res", {.tvmd = 2}));
+    scenes.push_back(CoordRBGScene("RBG0 hi-res 704 per-dot coefficients", {.tvmd = 3, .coefficients = true}));
+    scenes.push_back(CoordRBGScene("RBG0 double density, deinterlaced", {.tvmd = kLSMDDouble, .deinterlace = true}));
+    scenes.push_back(CoordRBGScene("RBG0 double density, woven", {.tvmd = kLSMDDouble}));
+    scenes.push_back(CoordRBGScene("RBG0 single density, deinterlaced", {.tvmd = kLSMDSingle, .deinterlace = true}));
+    {
+        // Xst, Yst and their increments (and the horizontal increment) reloaded at line 100: the sub-lines of each
+        // line use that line's own increments.
+        RotTable reloaded = Rotated(0.3, 0.9);
+        reloaded.xst = 37.25;
+        reloaded.yst = -12.5;
+        reloaded.dxst = 0.4;
+        reloaded.dyst = 0.7;
+        reloaded.dx = 1.1;
+        scenes.push_back(CoordRBGScene("RBG0 mid-frame Xst reload", {.reloadLine = 100, .reloaded = reloaded}));
+        scenes.push_back(CoordRBGScene("RBG0 mid-frame Xst reload, deinterlaced",
+                                       {.tvmd = kLSMDDouble, .deinterlace = true, .reloadLine = 100,
+                                        .reloaded = reloaded}));
+    }
+    {
+        // Every increment negative or mixed: the truncating divisions of negative offsets.
+        RotTable t = Rotated(2.5, 1.2);
+        t.xst = 50;
+        t.yst = 80;
+        t.dxst = -0.35;
+        t.dyst = -0.9;
+        t.dx = -0.95;
+        t.dy = 0.3;
+        scenes.push_back(CoordRBGScene("RBG0 negative increments", {.table = t}));
+        scenes.push_back(CoordRBGScene("RBG0 negative increments, hi-res deinterlaced",
+                                       {.tvmd = static_cast<uint16_t>(2 | kLSMDDouble), .deinterlace = true,
+                                        .table = t}));
+    }
+    return scenes;
+}
+
+// Software's 1x frame is the reference at 1x; the N x composite matches software at the sample points and the
+// reference at every pixel, and has sub-pixel detail (blocks that are not one colour).
+void CheckCoordScene(gpu::VulkanDevice &device, const CoordScene &c, uint32_t n, const RenderBothOptions &options = {}) {
+    CAPTURE(c.name, n);
+    const SceneResult result = CompareSamplePoints(c.scene, device, n, options);
+    INFO(result.Describe());
+    REQUIRE(result.error.empty());
+    CHECK(result.identical);
+    const CoordCheck native = CheckCoords(result.software, result.width, result.height, 1, c.expect);
+    INFO("software at 1x: " << native.Describe());
+    CHECK(native.pixels == uint64_t{result.width} * result.height);
+    CHECK(native.mismatches == 0);
+    const CoordCheck scaled = CheckCoords(result.gpuScaled, result.width, result.height, n, c.expect);
+    INFO("GPU at " << n << "x: " << scaled.Describe());
+    CHECK(scaled.pixels == uint64_t{result.width} * result.height * n * n);
+    CHECK(scaled.mismatches == 0);
+    CHECK(NonConstantBlocks(result.gpuScaled, result.width, result.height, n) > 0);
+}
+
+} // namespace
+
+TEST_CASE("The sub-pixel reference", "[vdp2][scale]") {
+    // Truncation toward zero, as HLSL int division
+    CHECK(sp::SubOffset(1, -3, 2) == -1);
+    CHECK(sp::SubOffset(1, 3, 2) == 1);
+    CHECK(sp::SubOffset(0, -1000, 4) == 0);
+    // A sample point (i = j = 0) is the native value, wherever the lattice includes it
+    sp::RBGFrame rbg;
+    rbg.table = ToRotParams(Rotated(2.5, 1.2));
+    rbg.table.deltaXst = -300;
+    sp::NBGFrame nbg;
+    nbg.scrollX = 0x12345;
+    nbg.scrollY = 0x4580;
+    nbg.incH = 0xCD;
+    nbg.incV = 0xA0;
+    for (const uint32_t n : {2u, 3u, 4u}) {
+        CAPTURE(n);
+        for (uint32_t y = 0; y < 8; ++y) {
+            for (uint32_t x = 0; x < 8; ++x) {
+                sp::RBGFrame r1 = rbg, rn = rbg;
+                rn.geometry.n = n;
+                CHECK(sp::RBGDotAt(r1, x, y).u == sp::RBGDotAt(rn, x * n, y * n).u);
+                CHECK(sp::RBGDotAt(r1, x, y).v == sp::RBGDotAt(rn, x * n, y * n).v);
+                sp::NBGFrame n1 = nbg, nn = nbg;
+                nn.geometry.n = n;
+                CHECK(sp::NBGDotAt(n1, x, y).u == sp::NBGDotAt(nn, x * n, y * n).u);
+                CHECK(sp::NBGDotAt(n1, x, y).v == sp::NBGDotAt(nn, x * n, y * n).v);
+            }
+        }
+        // Hi-res: the odd column's sample point is half a dot step on (s = N of 2N); deinterlaced: the odd row's is half
+        // a line step on (t = N of 2N), with the line's own (negative) delta.
+        sp::RBGFrame hi1 = rbg;
+        hi1.geometry = {.n = 1, .hiRes = true};
+        CHECK(sp::RBGDotAt(hi1, 1, 0).u == sp::RBGDotAt(hi1, 0, 0).u); // 1x: both columns are the RBG dot
+        sp::RBGFrame de = rbg;
+        de.geometry = {.n = n, .interlace = sp::Interlace::DoubleDensity, .deinterlace = true};
+        sp::RBGFrame half = rbg;
+        half.table.Xst += sp::SubOffset(n, rbg.table.deltaXst, 2 * n);
+        half.table.Yst += sp::SubOffset(n, rbg.table.deltaYst, 2 * n);
+        CHECK(sp::RBGDotAt(de, 0, n).u == sp::RBGDotAt(half, 0, 0).u);
+        CHECK(sp::RBGDotAt(de, 0, n).v == sp::RBGDotAt(half, 0, 0).v);
+        // Single density NBG: monotone across the pair (row 2l + 1 continues row 2l)
+        sp::NBGFrame sd = nbg;
+        sd.geometry = {.n = n, .interlace = sp::Interlace::SingleDensity};
+        int64_t last = sp::NBGDotAt(sd, 0, 0).v;
+        for (uint32_t Y = 1; Y < 8 * n; ++Y) {
+            const int64_t v = sp::NBGDotAt(sd, 0, Y).v;
+            CHECK(v >= last);
+            last = v;
+        }
+    }
+}
+
+TEST_CASE("Scene: coordinate bitmaps at N match the sub-pixel reference", "[gpu][vdp2][scene][scale]") {
+    const uint32_t n = GENERATE(2u, 3u, 4u);
+    auto device = OpenDevice();
+    for (const CoordScene &c : CoordScenes()) {
+        CheckCoordScene(*device, c, n);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: coordinate bitmaps with poisoned images", "[gpu][vdp2][scene][scale]") {
+    const uint32_t n = GENERATE(2u, 4u);
+    auto device = OpenDevice();
+    RenderBothOptions options;
+    options.poisonImages = true;
+    for (const CoordScene &c : CoordScenes()) {
+        CheckCoordScene(*device, c, n, options);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: coordinate bitmaps at 2x, and one at 4x", "[gpu][vdp2][scene][scale][lavapipe]") {
+    // The lavapipe cross-section (the case above covers every scene at 2-4).
+    auto device = OpenDevice();
+    const std::vector<CoordScene> scenes = CoordScenes();
+    for (const CoordScene &c : scenes) {
+        CheckCoordScene(*device, c, 2);
+    }
+    for (const CoordScene &c : scenes) {
+        if (c.name == "RBG0 negative increments, hi-res deinterlaced") {
+            CheckCoordScene(*device, c, 4);
+        }
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: batching at internal resolution N", "[gpu][vdp2][scene][scale]") {
+    // A register, VRAM or CRAM change at line 100 on zoomed, finely scrolled NBGs over rotated RBG0: each batch
+    // renders its lines' sub-pixels with its own state.
+    const uint32_t n = GENERATE(2u, 3u, 4u);
+    const uint32_t change = GENERATE(0u, 1u, 2u);
+    CAPTURE(n, change);
+    Vdp2Scene scene = Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        TwoNBGs(w, s, rng);
+        w.Reg(SCXDN0, 0x4500);
+        w.Reg(SCYDN0, 0x8000);
+        w.Reg(ZMXDN0, 0xC000);
+        w.Reg(ZMYDN0, 0xA000);
+    });
+    scene.onLine = [change](Vdp2SceneWriter &w, uint32_t y) {
+        if (y != 0 && y != 100) {
+            return;
+        }
+        switch (change) {
+        case 0:
+            w.Reg(SCXIN0, static_cast<uint16_t>(y == 0 ? 0 : 37));
+            w.Reg(ZMXDN0, static_cast<uint16_t>(y == 0 ? 0xC000 : 0x9000));
+            break;
+        case 1: {
+            std::mt19937 rng{y + 1};
+            FillVRAM(w, kPageBase, 0x800, rng);
+            FillVRAM(w, kCharBase, 0x400, rng);
+            break;
+        }
+        case 2: {
+            std::mt19937 rng{y + 3};
+            for (uint32_t a = 0; a < 0x400; a += 2) {
+                w.CRAM16(a, static_cast<uint16_t>(rng()));
+            }
+            break;
+        }
+        }
+    };
+    auto device = OpenDevice();
+    const SceneResult result = CompareSamplePoints(scene, *device, n);
+    INFO(result.Describe());
+    CHECK(result.error.empty());
+    CHECK(result.identical);
+    CHECK(NonConstantBlocks(result.gpuScaled, result.width, result.height, n) > 0);
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: single-density interlace with NBGs off on some lines", "[gpu][vdp2][scene][scale]") {
+    // The lattice skips the odd rows of single density per line, from the line's BGON: NBG0 is on above line 100 only,
+    // so below it the odd rows (sprites, the per-line back screen) are compared too.
+    const uint32_t n = GENERATE(2u, 3u, 4u);
+    const bool deinterlace = GENERATE(false, true);
+    CAPTURE(n, deinterlace);
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | kLSMDSingle));
+            CyclesSingle(w, 0);
+            SetupNBG(w, s, {.index = 0, .format = 1, .priority = 3}, rng);
+            SetupSprites(w, {.type = 1}, rng);
+            BackPerLine(w, rng);
+            w.Reg(SCYDN0, 0x8000);
+            w.Reg(ZMYDN0, 0xC000);
+        },
+        {.deinterlace = deinterlace}, 3);
+    scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) { w.Reg(BGON, static_cast<uint16_t>(y < 100 ? 0x0001 : 0)); };
+    auto device = OpenDevice();
+    const SceneResult result = CompareSamplePoints(scene, *device, n);
+    INFO(result.Describe());
+    CHECK(result.error.empty());
+    CHECK(result.identical);
+    REQUIRE(result.height == 448);
+    CHECK(result.skippedPixels == uint64_t{100} * result.width); // odd rows 1-199
+    CHECK(result.comparedPixels == uint64_t{348} * result.width);
     CloseAndCheckValidation(device);
 }
 
@@ -4001,8 +4719,8 @@ TEST_CASE("The sample-point lattice from TVMD and BGON", "[vdp2][scale]") {
     CHECK(rows[1].second.skipRow);
 }
 
-TEST_CASE("Scene: CompareSamplePoints of a nearest-upscaled frame", "[gpu][vdp2][scene][scale]") {
-    // With native evaluation the sample points match too (hi-res RBG0: odd columns skipped).
+TEST_CASE("Scene: CompareSamplePoints skips the odd columns of a hi-res RBG", "[gpu][vdp2][scene][scale]") {
+    // Hi-res RBG0: the odd columns' sample points are half an RBG dot on (skipped), the even ones match.
     auto device = OpenDevice();
     const SceneResult result = CompareSamplePoints(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
                                                        Base(w, s, rng, static_cast<uint16_t>(kDisp | 2));
@@ -4013,6 +4731,54 @@ TEST_CASE("Scene: CompareSamplePoints of a nearest-upscaled frame", "[gpu][vdp2]
     CHECK(result.error.empty());
     CHECK(result.identical);
     CHECK(result.skippedPixels == uint64_t{result.height} * (result.width / 2));
+    CloseAndCheckValidation(device);
+}
+
+// Bench (hidden, run with "[bench]"): GPU time per frame at N = 1-4 of the sub-pixel paths: zoomed, finely scrolled
+// NBG0 and NBG1 over sprites, and RBG0 with per-dot coefficients and the line colour screen (a new Xst every frame).
+// Prints the median of `frames` frames per N; no threshold. Every frame must still match software at the sample points.
+TEST_CASE("Bench: sub-pixel backgrounds at N", "[gpu][vdp2][bench][.]") {
+    constexpr uint32_t kFrames = 30;
+    auto device = OpenDevice();
+    for (const bool rbg : {false, true}) {
+        for (uint32_t n = 1; n <= 4; ++n) {
+            Vdp2Scene scene = rbg ? RBGLineColorScene(0, false) : Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                Base(w, s, rng);
+                TwoNBGs(w, s, rng);
+                SetupSprites(w, {.type = 1}, rng);
+                w.Reg(SCXDN0, 0x4500);
+                w.Reg(ZMXDN0, 0xC000);
+                w.Reg(ZMYDN0, 0xA000);
+            });
+            scene.frames = kFrames;
+            scene.onLine = [rbg, frame = 0u](Vdp2SceneWriter &w, uint32_t y) mutable {
+                if (y == 0) {
+                    ++frame;
+                    if (rbg) {
+                        w.VRAM32(kRotTableAddress, static_cast<uint32_t>(frame * 1024) << 6);
+                    } else {
+                        w.Reg(SCXIN0, static_cast<uint16_t>(frame));
+                    }
+                }
+            };
+            std::vector<double> ms;
+            RenderBothOptions options;
+            options.scale = n;
+            options.gpuMilliseconds = &ms;
+            const SceneResult result = RenderBoth(scene, *device, options);
+            CHECK(result.error.empty());
+            CHECK(result.identical);
+            if (ms.size() < 2) {
+                WARN("no timestamps on this queue");
+                continue;
+            }
+            std::vector<double> sorted(ms.begin() + 1, ms.end());
+            std::sort(sorted.begin(), sorted.end());
+            WARN((rbg ? "RBG0 coefficients and line colour" : "zoomed NBGs and sprites")
+                 << " at " << n << "x: GPU " << sorted[sorted.size() / 2] << " ms/frame median, " << sorted.back()
+                 << " max");
+        }
+    }
     CloseAndCheckValidation(device);
 }
 

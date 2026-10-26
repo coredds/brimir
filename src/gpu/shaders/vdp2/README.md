@@ -81,7 +81,19 @@ checks every module's Workgroup variables against it.
   taps at X - N and X - 2N; the colour calculation window and the RBG line colours are native and written by the
   sub-pixel (0, 0) only; a vertical mosaic load reads the same sub-pixel of the earlier row;
 - the sprite pass and the NBG fetch pass are native; `outputSize` stays the native size everywhere;
-- stage 1C Task 3 evaluates every sub-pixel at its native pixel (the N x composite is a nearest upscale of 1x).
+- bgs evaluates each sample as `native value + (sub-position * step) / span` (integer division; the native value at
+  sub-position 0, so 1x and the sample points (N x, N y) are unchanged; stage1c-upscaling-research.md sections
+  1.2-1.4):
+  - NBGs (`NBGSubPosition`, `NBGScrollPos`): horizontal scroll plus i / N of the line's increment (zoom or line zoom),
+    the vertical cell scroll column at that position, vertical scroll plus j / N of the vertical increment, or t / 2N
+    with t = (composite row & 1) N + j in single-density interlace (both rows of a pair show one line);
+  - RBGs (`RBGSubPosition`, `CalcRotationScreenCoords`): screen coordinates plus s / (S N) of the horizontal increment
+    and Xst/Yst plus t / (R N) of the line's own deltaXst/deltaYst (no interpolation towards the next line); S = 2 in
+    hi-res (s = (x & 1) N + i), R = 2 in interlaced modes (t = (row & 1) N + j when deinterlacing, else t = j); the
+    RBG line colour is stored by sub-pixel (0, 0) with the native screen coordinates;
+  - native: windows, mosaic (the whole layer when MZCTL enables it), coefficient addresses and values, rotation
+    parameter selection, NBGs using the character table (character pattern delay, vertical cell scroll on 2x2
+    characters).
 
 ### 2. Software semantics (Brimir's software renderer is the reference)
 

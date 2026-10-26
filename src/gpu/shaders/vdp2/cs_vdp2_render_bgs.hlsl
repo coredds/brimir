@@ -18,8 +18,12 @@
 //   write nothing and RBG line colours outside their image are dropped;
 // - internal resolution N (CommonRenderParams::renderScale): the dispatch covers N x N threads per native pixel, each
 //   writing its own texel of the N x background layer image (the sprite and mesh layers are in a native image of
-//   their own). In this stage every thread evaluates the native pixel (sub-pixel offsets are 0); the colour
-//   calculation window and the RBG line colours stay native and are written by the first thread of the pixel only.
+//   their own). Each thread evaluates its sample as "native value + (sub-position * step) / span" (NBGSubPosition,
+//   RBGSubPosition; stage1c-upscaling-research.md sections 1.2-1.4), which is the native value at sub-position 0:
+//   NBG scroll, zoom, line zoom, vertical scroll and vertical cell scroll; RBG screen coordinates along the line and
+//   between lines with the line's own increments. Windows, mosaic, coefficient addresses and values, rotation
+//   parameter selection, and NBGs using the character table stay native. The colour calculation window and the RBG
+//   line colours are native and written by the first thread of the pixel only.
 // Where Ymir differs from Brimir's software renderer (the reference), the software semantics are ported, each marked
 // "// Brimir: matches software (sw:<lines>)": RBG line colours read the RGB555 table of CRAM word (address & 0x7FF);
 // NBG scroll, mosaic, vertical cell scroll and character pattern delay; RBG mosaic.
@@ -466,7 +470,9 @@ RotCoefficient ReadRotCoefficient(const uint coeffDataSize, const uint coeffData
 // ---------------------------------------------------------------------------------------------------------------------
 // Rotation parameter calculation
 
-uint2 CalcRotationScreenCoords(uint2 pos, uint index) {
+// Brimir: sub is the sample's sub-position (s, t) within the RBG dot and line, which span (S * N, R * N) samples
+// (RBGSubPosition); (0, 0) is the native position.
+uint2 CalcRotationScreenCoords(uint2 pos, int2 sub, int2 span, uint index) {
     const RotParamBase base = g_rotParamBases[index * kRotParamBaseStride + pos.y]; // Brimir: 512-line stride
     const uint coeffParamsOffset = 6 + index * 5;
     const bool coeffTableEnable = BitTest(g_commonParams.rotParams, coeffParamsOffset + 0);
@@ -483,8 +489,10 @@ uint2 CalcRotationScreenCoords(uint2 pos, uint index) {
     // expand to 10 frac bits
     // 10 - 10 = 10 frac bits
     // 23 - 24 = 24 total bits
-    const int Xst = base.Xst;
-    const int Yst = base.Yst;
+    // Brimir: a sub-line continues the line with the line's own increments (no interpolation towards the next line,
+    // whose base may be a mid-frame reload).
+    const int Xst = base.Xst + (sub.y * t.deltaXst) / span.y;
+    const int Yst = base.Yst + (sub.y * t.deltaYst) / span.y;
     const int Zst = t.Zst;
     Tx = Xst - (t.Px << 10);
     Ty = Yst - (t.Py << 10);
@@ -542,8 +550,9 @@ uint2 CalcRotationScreenCoords(uint2 pos, uint index) {
     }
 
     // Current screen coordinates (18.10)
-    const int scrX = Xsp + pos.x * scrXIncH;
-    const int scrY = Ysp + pos.x * scrYIncH;
+    // Brimir: plus the sample's sub-dot offset; the coefficient address above stays native.
+    const int scrX = Xsp + pos.x * scrXIncH + (sub.x * scrXIncH) / span.x;
+    const int scrY = Ysp + pos.x * scrYIncH + (sub.x * scrYIncH) / span.x;
 
     // Resulting screen coordinates (26.0)
     // (16*10) + 10 = 26 + 10 frac bits
@@ -905,17 +914,24 @@ uint NBGWindowY(uint row) {
     return y;
 }
 
-uint NBGVCellScrollY(const NBGParams params, NBGLine nbgLine, uint index, uint x) {
+// Brimir: the sub-pixel offsets of an NBG sample (NBGSubPosition): sub / span of the line's horizontal increment and of
+// the vertical increment between the rows the sample's row spans; (0, 0) is the native position.
+uint NBGSubOffsetX(NBGLine nbgLine, uint2 sub, uint2 span) {
+    return (sub.x * uint(nbgLine.scrollIncH)) / span.x;
+}
+
+uint NBGVCellScrollY(const NBGParams params, NBGLine nbgLine, uint index, uint x, uint2 sub, uint2 span) {
     if (index > 1 || !params.vcellScrollEnable) {
         return 0;
     }
 
     // Table reads after the line's first one: one per cell column change between consecutive pixels (the increment is
     // below 8 pixels, so at most one per pixel)
+    // Brimir: at the sample's own horizontal position, so that its dot and its vertical cell scroll value agree.
     uint reads = 0;
     if (!params.base.mosaicEnable) {
         const uint fracScrollX = uint(nbgLine.fracScrollX) + params.scrollAmount.x;
-        reads = ((fracScrollX & 0x7FF) + x * uint(nbgLine.scrollIncH)) >> 11;
+        reads = ((fracScrollX & 0x7FF) + x * uint(nbgLine.scrollIncH) + NBGSubOffsetX(nbgLine, sub, span)) >> 11;
     }
 
     int offset = int(reads);
@@ -935,9 +951,12 @@ uint NBGVCellScrollY(const NBGParams params, NBGLine nbgLine, uint index, uint x
     return BitExtract(ReadVRAM32(vcellAddress), 8, 19);
 }
 
-uint2 NBGScrollPos(const NBGParams params, NBGLine nbgLine, uint index, uint x) {
-    const uint fracScrollX = uint(nbgLine.fracScrollX) + params.scrollAmount.x + x * uint(nbgLine.scrollIncH);
-    const uint fracScrollY = uint(nbgLine.fracScrollY) + params.scrollAmount.y + NBGVCellScrollY(params, nbgLine, index, x);
+uint2 NBGScrollPos(const NBGParams params, NBGLine nbgLine, uint index, uint x, uint2 sub, uint2 span) {
+    const uint fracScrollX = uint(nbgLine.fracScrollX) + params.scrollAmount.x + x * uint(nbgLine.scrollIncH) +
+                             NBGSubOffsetX(nbgLine, sub, span);
+    const uint fracScrollY = uint(nbgLine.fracScrollY) + params.scrollAmount.y +
+                             NBGVCellScrollY(params, nbgLine, index, x, sub, span) +
+                             (sub.y * params.scrollInc.y) / span.y;
     return uint2(fracScrollX >> 8, fracScrollY >> 8);
 }
 
@@ -946,8 +965,8 @@ CharLocation LocateNBGChar(const NBGParams params, uint2 scrollPos, uint index) 
     return LocateScrollBGChar(params.base, scrollPos, params.base.pageShift, false, index, 0);
 }
 
-CharLocation LocateNBGCharAt(const NBGParams params, NBGLine nbgLine, uint index, uint x) {
-    return LocateNBGChar(params, NBGScrollPos(params, nbgLine, index, x), index);
+CharLocation LocateNBGCharAt(const NBGParams params, NBGLine nbgLine, uint index, uint x, uint2 sub, uint2 span) {
+    return LocateNBGChar(params, NBGScrollPos(params, nbgLine, index, x, sub, span), index);
 }
 
 // A ymir::vdp::Character::u32 (the two-word pattern name layout) as a Character.
@@ -962,17 +981,38 @@ Character UnpackCharacter(uint value) {
     return ch;
 }
 
-uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, uint row, uint x) {
-    const CharLocation loc = LocateNBGCharAt(params, nbgLine, index, x);
+uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, uint row, uint x, uint2 sub,
+                         uint2 span) {
     if (NBGUsesCharTable(params, index)) {
         // The character the fetcher shows at x, from the fetch pass (cs_vdp2_nbg_fetch.hlsl). The dot and cell are the
-        // pixel's own (sw:5193-5229).
+        // pixel's own (sw:5193-5229). Brimir: native (DrawNBG passes no sub-pixel offset).
+        const CharLocation loc = LocateNBGCharAt(params, nbgLine, index, x, uint2(0, 0), span);
         const Character ch = UnpackCharacter(g_nbgChars[NBGCharIndex(index, row, x)]);
         return FetchCharacterPixel(params.base, ch, loc.dotPos, loc.cellIndex);
     }
+    const CharLocation loc = LocateNBGCharAt(params, nbgLine, index, x, sub, span);
     // A character is fetched when the index changes, and within a run of one index the scroll position moves by less
     // than a page: the character at x, except when a window hides 512 dots or more (exception W5).
     return FetchCharacterPixel(params.base, FetchCharacter(params.base, loc), loc.dotPos, loc.cellIndex);
+}
+
+// Brimir: at internal resolution N, the sub-pixel (i, j) of an NBG sample as the offsets sub / span of the line's
+// horizontal increment and of the vertical increment (stage1c-upscaling-research.md section 1.3): horizontally i / N;
+// vertically j / N of one increment per composite row (progressive and double density, whose consecutive composite rows
+// are one increment apart), except in single-density interlace, where both composite rows of a pair show the same
+// line: t / 2N with t = (composite row & 1) * N + j, monotone across the pair (the second row's sample point is half an
+// increment on, outside the sample-point invariant). Native (0, 0) under mosaic (flat blocks: the block's first sample)
+// and for NBGs whose characters come from the fetch pass (a native fetch sequence).
+uint2 NBGSubPosition(const NBGParams params, uint index, uint row, uint2 sub, out uint2 span) {
+    span = uint2(renderScale, renderScale);
+    if (params.base.mosaicEnable || NBGUsesCharTable(params, index)) {
+        return uint2(0, 0);
+    }
+    if (renderScale > 1 && interlaceMode == kInterlaceModeSingleDensity && !exclusiveMonitor) {
+        span.y = renderScale * 2;
+        return uint2(sub.x, (GetY(row, false) & 1) * renderScale + sub.y);
+    }
+    return sub;
 }
 
 uint4 DrawNBG(uint2 pos, // dispatch coordinates (native)
@@ -1003,10 +1043,15 @@ uint4 DrawNBG(uint2 pos, // dispatch coordinates (native)
         return kTransparentPixel;
     }
 
+    // Brimir: the sample's sub-pixel position. Native (0, 0) under mosaic (flat blocks, the block's first sample) and
+    // for NBGs whose characters come from the fetch pass.
+    uint2 span;
+    const uint2 nbgSub = NBGSubPosition(params, index, pos.y, sub, span);
     if (params.base.bitmap) {
-        return FetchBitmapPixel(params.base, params.base.bitmapBaseAddress, NBGScrollPos(params, nbgLine, index, x));
+        return FetchBitmapPixel(params.base, params.base.bitmapBaseAddress,
+                                NBGScrollPos(params, nbgLine, index, x, nbgSub, span));
     }
-    return DrawNBGScrollPixel(params, nbgLine, index, row, x);
+    return DrawNBGScrollPixel(params, nbgLine, index, row, x, nbgSub, span);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1033,12 +1078,9 @@ uint SelectRotationParameter(const RBGParams params, uint2 pos) {
     return kRotParamA; // shouldn't happen
 }
 
-void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint2 sub, uint index, uint rotSel) {
-    // Brimir: the line colour image is native; at internal resolution N only the first sub-pixel of the native pixel
-    // stores it.
-    if (any(sub != 0)) {
-        return;
-    }
+// Brimir: the line colour image is native; at internal resolution N only the first sub-pixel of the native pixel
+// stores it, with the native pixel's screen coordinates (StoreRBGLineColor).
+void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint index, uint rotSel) {
     const bool lineColorEnabled = BitTest(g_commonParams.layerParams, 12 + index);
     if (!lineColorEnabled) {
         return;
@@ -1096,51 +1138,13 @@ void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint2 sub, uint index, 
     }
 }
 
-// Brimir: linePos is where the pixel's line colour goes (the repeated pixel under mosaic); pos is the pixel drawn.
-uint4 DrawScrollRBG(uint2 pos, uint2 linePos, uint2 sub, uint index, uint rotSel, uint2 scrollPos) {
-    const RBGParams params = g_layerRenderParams[0].rbg[index];
-
-    // Brimir: mosaic is applied by DrawRBG (sw:4713-4733).
-    const uint2 rotPos = pos;
-
-    const RBGParams rotParams = g_layerRenderParams[0].rbg[rotSel];
-    const uint2 pageShift = rotParams.base.pageShift;
-
-    // Determine maximum coordinates and screen over process
-    const uint screenOverProcess = rotParams.screenOverProcess;
-    const bool usingFixed512 = screenOverProcess == kScreenOverProcessFixed512;
-    const bool usingRepeat = screenOverProcess == kScreenOverProcessRepeat;
-    const uint2 scrollSize = usingFixed512
-        ? uint2(512, 512)
-        : uint2(512 * 4, 512 * 4) << pageShift;
-
-    if (all(scrollPos < scrollSize) || usingRepeat) {
-        StoreRotationLineColorData(linePos, rotPos, sub, index, rotSel);
-
-        // Brimir: index and rotSel, not pageBaseAddresses[rotSel]
-        return FetchScrollRBGPixel(params.base, scrollPos, pageShift, index, rotSel);
-    }
-
-    // Out of bounds
-
-    if (screenOverProcess == kScreenOverProcessRepeatChar) {
-        StoreRotationLineColorData(linePos, rotPos, sub, index, rotSel);
-
-        const uint2 dotPos = scrollPos & 7;
-        Character ch = ExtractOneWordCharacter(params.base, rotParams.screenOverPatternName);
-        return FetchCharacterPixel(params.base, ch, dotPos, 0);
-    }
-
-    return kTransparentPixel;
-}
-
-uint4 DrawBitmapRBG(uint2 pos, uint2 sub, uint index, uint rotSel, uint2 scrollPos) {
-    const RBGParams params = g_layerRenderParams[0].rbg[index];
-    const uint screenOverProcess = params.screenOverProcess;
-
-    // Brimir: matches software (sw:4814-4881): bitmap RBGs have no mosaic.
-    const uint2 rotPos = pos;
-
+// Brimir: the screen-over test of a scroll or bitmap RBG pixel at screen coordinates scrollPos (DrawScrollRBG,
+// DrawBitmapRBG): whether it is drawn (and stores its line colour), and whether as the screen-over character.
+bool RBGScreenOverDrawn(uint index, uint rotSel, bool bitmap, uint2 scrollPos, out bool overChar) {
+    overChar = false;
+    // Bitmaps use their own screen-over process, scroll screens the selected parameter's.
+    const uint screenOverProcess = bitmap ? g_layerRenderParams[0].rbg[index].screenOverProcess
+                                          : g_layerRenderParams[0].rbg[rotSel].screenOverProcess;
     const uint2 pageShift = g_layerRenderParams[0].rbg[rotSel].base.pageShift;
 
     // Determine maximum coordinates and screen over process
@@ -1151,12 +1155,73 @@ uint4 DrawBitmapRBG(uint2 pos, uint2 sub, uint index, uint rotSel, uint2 scrollP
         : uint2(512 * 4, 512 * 4) << pageShift;
 
     if (all(scrollPos < scrollSize) || usingRepeat) {
-        StoreRotationLineColorData(pos, rotPos, sub, index, rotSel);
-
-        return FetchBitmapPixel(params.base, g_layerRenderParams[0].rbg[rotSel].base.bitmapBaseAddress, scrollPos);
+        return true;
     }
 
-    return kTransparentPixel;
+    // Out of bounds
+    if (!bitmap && screenOverProcess == kScreenOverProcessRepeatChar) {
+        overChar = true;
+        return true;
+    }
+    return false;
+}
+
+uint4 DrawScrollRBG(uint index, uint rotSel, uint2 scrollPos) {
+    const RBGParams params = g_layerRenderParams[0].rbg[index];
+
+    // Brimir: mosaic is applied by DrawRBG (sw:4713-4733); the line colour is stored by DrawRBG.
+    const RBGParams rotParams = g_layerRenderParams[0].rbg[rotSel];
+    const uint2 pageShift = rotParams.base.pageShift;
+
+    bool overChar;
+    if (!RBGScreenOverDrawn(index, rotSel, false, scrollPos, overChar)) {
+        return kTransparentPixel;
+    }
+    if (!overChar) {
+        // Brimir: index and rotSel, not pageBaseAddresses[rotSel]
+        return FetchScrollRBGPixel(params.base, scrollPos, pageShift, index, rotSel);
+    }
+
+    const uint2 dotPos = scrollPos & 7;
+    Character ch = ExtractOneWordCharacter(params.base, rotParams.screenOverPatternName);
+    return FetchCharacterPixel(params.base, ch, dotPos, 0);
+}
+
+uint4 DrawBitmapRBG(uint index, uint rotSel, uint2 scrollPos) {
+    const RBGParams params = g_layerRenderParams[0].rbg[index];
+
+    // Brimir: matches software (sw:4814-4881): bitmap RBGs have no mosaic. The line colour is stored by DrawRBG.
+    bool overChar;
+    if (!RBGScreenOverDrawn(index, rotSel, true, scrollPos, overChar)) {
+        return kTransparentPixel;
+    }
+    return FetchBitmapPixel(params.base, g_layerRenderParams[0].rbg[rotSel].base.bitmapBaseAddress, scrollPos);
+}
+
+// Brimir: at internal resolution N, the sub-pixel (i, j) of an RBG sample as the sub-position (s, t) within the RBG
+// dot and line, which span (S * N, R * N) samples (stage1c-upscaling-research.md section 1.4). pos is the output pixel
+// (native, before the hi-res and deinterlace halving). S = 2 in hi-res modes (an RBG dot covers two output columns:
+// s = (x & 1) * N + i); R = 2 in interlaced modes (an RBG line covers two composite rows: t = (row & 1) * N + j when
+// deinterlacing, else t = j, each field writing its own row). Both span rules are monotone across the pair; their
+// second column or row is half a step on, outside the sample-point invariant. Native (0, 0) at 1x and for mosaic.
+int2 RBGSubPosition(const RBGParams params, uint2 pos, uint2 sub, out int2 span) {
+    const int n = int(renderScale);
+    span = int2(n, n);
+    if (renderScale == 1 || (params.base.mosaicEnable && !params.base.bitmap)) {
+        return int2(0, 0);
+    }
+    int2 st = int2(sub);
+    if (hiResH) {
+        span.x = n * 2;
+        st.x += int(pos.x & 1) * n;
+    }
+    if (interlaceMode >= kInterlaceModeSingleDensity) {
+        span.y = n * 2;
+        if (deinterlace && !exclusiveMonitor) {
+            st.y += int(pos.y & 1) * n;
+        }
+    }
+    return st;
 }
 
 uint4 DrawRBG(uint2 pos, // pixel coordinates (native)
@@ -1167,6 +1232,9 @@ uint4 DrawRBG(uint2 pos, // pixel coordinates (native)
     if (!params.base.enabled) {
         return kTransparentPixel;
     }
+
+    int2 span;
+    const int2 rbgSub = RBGSubPosition(params, pos, sub, span);
 
     // Brimir: matches software (sw:4713-4733): with mosaic, a scroll RBG repeats every mosaicH-th pixel in RBG
     // coordinates, whole (window and coefficient transparency included); in hi-res modes the repeated output pixels
@@ -1205,10 +1273,22 @@ uint4 DrawRBG(uint2 pos, // pixel coordinates (native)
         return kTransparentPixel;
     }
 
-    const uint2 screenCoords = CalcRotationScreenCoords(pos, rotSel);
+    const uint2 screenCoords = CalcRotationScreenCoords(pos, rbgSub, span, rotSel);
+
+    // Brimir: the native line colour, stored by the first sub-pixel of the native pixel with the native pixel's screen
+    // coordinates (in hi-res and deinterlaced modes the first sub-pixel of the second column or row is not at (0, 0)).
+    if (all(sub == 0)) {
+        const uint2 nativeCoords =
+            any(rbgSub != 0) ? CalcRotationScreenCoords(pos, int2(0, 0), span, rotSel) : screenCoords;
+        bool overChar;
+        if (RBGScreenOverDrawn(index, rotSel, params.base.bitmap, nativeCoords, overChar)) {
+            StoreRotationLineColorData(linePos, pos, index, rotSel);
+        }
+    }
+
     return params.base.bitmap
-        ? DrawBitmapRBG(pos, sub, index, rotSel, screenCoords)
-        : DrawScrollRBG(pos, linePos, sub, index, rotSel, screenCoords);
+        ? DrawBitmapRBG(index, rotSel, screenCoords)
+        : DrawScrollRBG(index, rotSel, screenCoords);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

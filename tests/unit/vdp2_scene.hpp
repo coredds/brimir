@@ -142,8 +142,9 @@ struct SceneResult {
     // Internal resolution N of the compared GPU frame. At N > 1, gpuScaled is the read-back N x composite (pitch
     // N * width) and gpu, software and the diff fields above are native (width x height): a native pixel differs when
     // the comparison (CompareNearestPixels or CompareSamplePointPixels) found a difference there, and gpu holds the
-    // differing GPU pixel (else software's). comparedPixels counts the GPU pixels compared, skippedPixels the sample
-    // points of the excluded lattice.
+    // differing GPU pixel, else software's: in sample-point mode gpu shows software's value at the skipped points of
+    // the excluded lattice too (whatever the GPU drew there; see gpuScaled). comparedPixels counts the GPU pixels
+    // compared, skippedPixels the sample points of the excluded lattice.
     uint32_t scale = 1;
     std::vector<uint32_t> gpuScaled;
     uint64_t comparedPixels = 0;
@@ -163,6 +164,12 @@ struct SampleLatticeRow {
 
 /// @brief The lattice rows a VDP2 line writes, from the line's TVMD and BGON (the frame's resolution from the writer):
 /// calls set(row, flags) for each composite row line y writes (one, or two with deinterlacing in interlaced modes).
+/// The rules are per composite row, from the layers enabled on the line that wrote it: a hi-res line with an RBG
+/// enabled skips its odd columns; in an interlaced mode, the odd row skips when an RBG is enabled with deinterlacing,
+/// or (single density) when any NBG is enabled, the whole row, even where the NBG is transparent or covered (the
+/// lattice does not know which layer is on top). So in single density the odd rows of the lines with every NBG off
+/// are compared (sprites, RBGs without deinterlacing, back screen; the scene "single-density interlace with NBGs off
+/// on some lines").
 void LatticeForLine(const Vdp2SceneWriter &writer, const ymir::vdp::VDPState &state, uint32_t y, bool deinterlace,
                     const std::function<void(uint32_t row, SampleLatticeRow flags)> &set);
 
@@ -200,8 +207,10 @@ struct RenderBothOptions {
     // BRIMIR_VDP2_SCALE (1-4) when set, else 1. beforeFrame may change it; each frame is compared at the renderer's
     // scale then.
     uint32_t scale = 0;
-    // The comparison at N > 1 (BRIMIR_VDP2_SCALE runs: nearest in stage 1C Task 3).
-    ScaleCompare scaleCompare = ScaleCompare::Nearest;
+    // The comparison at N > 1: the sample points (BRIMIR_VDP2_SCALE runs; sub-pixel evaluation makes the other
+    // sub-pixels differ from a nearest upscale wherever a background is zoomed, rotated or finely scrolled), or a
+    // nearest upscale (CompareNearest, for scenes without sub-pixel features).
+    ScaleCompare scaleCompare = ScaleCompare::SamplePoints;
     uint32_t frameContexts = 2;
     size_t uploadBlockSize = 0; // 0 = the backend's default
     bool threadedVDP1 = false;  // the Vulkan renderer's inner software VDP1 runs on its own thread
