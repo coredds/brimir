@@ -73,6 +73,9 @@ static constexpr unsigned kMaxHeight = 512;
 static bool g_vulkanRequested = false;
 static std::unique_ptr<brimir::libretro::VulkanOutput> g_vulkanOutput;
 static bool g_vulkanPresentErrorLogged = false;
+// The Vulkan VDP renderer (VDP2 on the GPU) could not be installed or attached on the current context: software
+// renderer until the next context_reset.
+static bool g_vulkanRendererFailed = false;
 // The Vulkan output's images are square, so a 90/270 rotation of the largest frame fits.
 static constexpr unsigned kVulkanMaxSize = 704;
 #endif
@@ -212,13 +215,49 @@ static const char* vulkan_mode_name(brimir::libretro::VulkanOutputMode mode) {
 }
 
 // The bridge hands raw frames to the GPU only for the compute output; the copy-only output uploads the bridge's
-// own converted frame, so the CPU path stays on.
+// own converted frame, so the CPU path stays on. (While the Vulkan VDP renderer is installed the bridge gets no
+// software frames at all: its frames stay on the device.)
 static void sync_gpu_output(void) {
     const bool compute =
         g_vulkanOutput && g_vulkanOutput->Mode() == brimir::libretro::VulkanOutputMode::Compute;
     if (g_core && g_core->IsGpuOutputActive() != compute) {
         g_core->SetGpuOutputActive(compute);
     }
+}
+
+// The VDP renderer follows the frame output: the Vulkan VDP renderer while the compute output is live, the software
+// renderer otherwise (copy-only output, no context, or the renderer cannot run on the device). Switching carries the
+// renderer state over (CoreWrapper). Call between frames: context_reset, the start of retro_run, or after a frame
+// output change.
+static void sync_vdp_renderer(void) {
+    if (!g_core) {
+        return;
+    }
+    using brimir::libretro::VulkanOutputMode;
+    const bool compute = g_vulkanRequested && g_vulkanOutput && g_vulkanOutput->Mode() == VulkanOutputMode::Compute;
+    if (compute && !g_vulkanRendererFailed && !g_vulkanOutput->RendererAttached()) {
+        std::string error;
+        brimir::gpu::VulkanVDPRenderer* renderer = g_core->InstallVulkanRenderer();
+        if (renderer == nullptr) {
+            error = "installing it failed";
+        } else if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
+            brimir_log(RETRO_LOG_INFO, "Vulkan VDP2 renderer active");
+        }
+        if (!g_vulkanOutput->RendererAttached()) {
+            g_vulkanRendererFailed = true;
+            g_core->UseSoftwareRenderer();
+            brimir_log(RETRO_LOG_WARN, "Vulkan VDP2 renderer unavailable (%s); software renderer with the GPU frame output",
+                       error.c_str());
+        }
+    } else if (!(compute && g_vulkanOutput->RendererAttached()) && g_core->GetVulkanRenderer()) {
+        if (g_vulkanOutput) {
+            g_vulkanOutput->DetachRenderer();
+        }
+        g_core->UseSoftwareRenderer();
+        brimir_log(RETRO_LOG_INFO, "Vulkan VDP2 renderer off (frame output %s); software renderer",
+                   g_vulkanOutput ? vulkan_mode_name(g_vulkanOutput->Mode()) : "none");
+    }
+    sync_gpu_output();
 }
 
 static void RETRO_CALLCONV vulkan_context_reset(void) {
@@ -231,8 +270,8 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
     }
     std::string reason;
     const bool live = g_vulkanOutput->ContextReset(environ_cb, reason);
-    sync_gpu_output();
     g_vulkanPresentErrorLogged = false;
+    g_vulkanRendererFailed = false;
     if (!live) {
         // No usable device at all, and too late to fall back (the frontend runs its Vulkan driver now): keep
         // handing over software frames, which RetroArch's vulkan driver does not show.
@@ -247,38 +286,90 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
     } else if (g_vulkanOutput->Mode() == brimir::libretro::VulkanOutputMode::CopyOnly) {
         brimir_log(RETRO_LOG_WARN, "Vulkan compute frame output unavailable (%s); using copy-only frame output",
                    reason.c_str());
+        if (environ_cb) {
+            static std::string text;
+            text = "Brimir: GPU renderer unavailable on this GPU (" + reason.substr(0, 120) +
+                   "); using the software renderer.";
+            retro_message message{text.c_str(), 600};
+            environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+        }
     } else {
         brimir_log(RETRO_LOG_INFO, "Vulkan frame output ready");
     }
+    // Install (first usable context) or attach the Vulkan VDP renderer; revert to software without the compute output.
+    sync_vdp_renderer();
 }
 
 static void RETRO_CALLCONV vulkan_context_destroy(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    // Waits for the device, detaches the Vulkan VDP renderer (it stays installed for the next context_reset), then
+    // frees the output. Safe between VDP2EndFrame and the frame's recording (a reinit inside retro_run).
     if (g_vulkanOutput) {
         g_vulkanOutput->ContextDestroy();
     }
     sync_gpu_output();
 }
 
+static void log_vulkan_output_change(brimir::libretro::VulkanOutputMode before, const std::string& error) {
+    if (g_vulkanOutput->Mode() != before) {
+        brimir_log(RETRO_LOG_WARN, "Vulkan frame output changed to %s: %s", vulkan_mode_name(g_vulkanOutput->Mode()),
+                   error.c_str());
+    } else if (!error.empty() && !g_vulkanPresentErrorLogged) {
+        g_vulkanPresentErrorLogged = true;
+        brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed: %s", error.c_str());
+    }
+}
+
+// Before RunFrame: the output's slots follow the sync index mask (re-attaching the renderer), and the VDP renderer
+// follows the output, so the frame about to run is rendered for the device objects that will present it.
+static void prepare_vulkan_frame(void) {
+    if (g_vulkanOutput && g_vulkanOutput->Live()) {
+        const brimir::libretro::VulkanOutputMode before = g_vulkanOutput->Mode();
+        std::string error;
+        if (!g_vulkanOutput->PrepareFrame(error)) {
+            log_vulkan_output_change(before, error);
+        }
+    }
+    sync_vdp_renderer();
+}
+
 // The Vulkan half of retro_run's video output: present the frame RunFrame completed.
 static void present_vulkan_frame(void) {
     using brimir::libretro::VulkanOutputMode;
 
-    // Run-ahead and fast-forward frames the frontend will not show: no GPU work, no set_image, no video_cb.
+    // Run-ahead and fast-forward frames the frontend will not show: no presenter, no set_image, no video_cb. The
+    // Vulkan VDP renderer still submits the frame's VDP2 work (its VRAM copy and, when weaving, the other field
+    // must stay current).
     int av = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
-    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av) && !(av & RETRO_AV_ENABLE_VIDEO)) {
-        return;
+    const bool hidden =
+        environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av) && !(av & RETRO_AV_ENABLE_VIDEO);
+    if (!g_vulkanOutput->Live()) {
+        return; // destroyed by a reinit inside the call above, without a new context
     }
-    if (!video_cb) {
+    const VulkanOutputMode mode = g_vulkanOutput->Mode();
+    const bool renderer = mode == VulkanOutputMode::Compute && g_vulkanOutput->RendererAttached();
+    if (hidden || !video_cb) {
+        std::string error;
+        if (renderer && !g_vulkanOutput->SubmitHidden(error) && !g_vulkanPresentErrorLogged) {
+            g_vulkanPresentErrorLogged = true;
+            brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed (hidden frame): %s", error.c_str());
+        }
         return;
     }
 
-    const VulkanOutputMode mode = g_vulkanOutput->Mode();
     unsigned width = 0;
     unsigned height = 0;
     std::string error;
     bool presented = false;
-    if (mode == VulkanOutputMode::Compute) {
+    if (renderer) {
+        // The renderer's frame of this run, or (no VDP2 frame ended) the composite again at the last size.
+        const brimir::CoreWrapper::DeviceFrame& frame = g_core->LastDeviceFrame();
+        if (frame.width != 0) {
+            const brimir::FrameOutputSettings& s = frame.settings;
+            presented = g_vulkanOutput->PresentRenderer(frame.width, frame.height, {s.cropH, s.cropV, s.rotation},
+                                                        width, height, error);
+        }
+    } else if (mode == VulkanOutputMode::Compute) {
         if (const uint32_t* raw = g_core->RawFrame()) {
             const brimir::FrameOutputSettings& s = g_core->RawFrameSettings();
             presented = g_vulkanOutput->Present(raw, g_core->RawFrameWidth(), g_core->RawFrameHeight(),
@@ -292,13 +383,9 @@ static void present_vulkan_frame(void) {
     }
 
     if (!presented) {
-        if (g_vulkanOutput->Mode() != mode) {
-            brimir_log(RETRO_LOG_WARN, "Vulkan frame output changed to %s: %s",
-                       vulkan_mode_name(g_vulkanOutput->Mode()), error.c_str());
-            sync_gpu_output();
-        } else if (!error.empty() && !g_vulkanPresentErrorLogged) {
-            g_vulkanPresentErrorLogged = true;
-            brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed: %s", error.c_str());
+        log_vulkan_output_change(mode, error);
+        if (g_vulkanOutput->Mode() != mode || (renderer && !g_vulkanOutput->RendererAttached())) {
+            sync_vdp_renderer();
         }
         // Nothing new to show: repeat the last frame.
         video_cb(nullptr, g_lastWidth, g_lastHeight, 0);
@@ -633,6 +720,10 @@ RETRO_API void retro_run(void) {
         g_core->SetControllerState(1, buttons_p2);
     }
     
+#ifdef BRIMIR_VULKAN
+    prepare_vulkan_frame();
+#endif
+
     // Run one frame of emulation
     g_core->RunFrame();
     
@@ -928,6 +1019,14 @@ RETRO_API void retro_unload_game(void) {
     try {
         if (g_core) {
             g_core->UnloadGame();
+#ifdef BRIMIR_VULKAN
+            // The next content chooses its renderer again. The frontend has normally destroyed the context already
+            // (the renderer is detached then).
+            if (g_vulkanOutput) {
+                g_vulkanOutput->DetachRenderer();
+            }
+            g_core->UseSoftwareRenderer();
+#endif
         }
     } catch (const std::exception& e) {
         brimir_log(RETRO_LOG_ERROR, "Exception while unloading game: %s", e.what());

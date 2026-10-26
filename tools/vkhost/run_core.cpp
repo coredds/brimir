@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <system_error>
 
@@ -90,8 +92,8 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     if (config.corePath.empty()) {
         throw std::runtime_error("no core library given");
     }
-    if ((config.resetAt >= 0 || config.resetInRun >= 0) && !config.vulkan) {
-        throw std::runtime_error("--reset-at and --reset-in-run need --vulkan");
+    if ((config.resetAt >= 0 || config.resetInRun >= 0 || config.resetInPresent >= 0) && !config.vulkan) {
+        throw std::runtime_error("--reset-at, --reset-in-run and --reset-in-present need --vulkan");
     }
 
     // Saves always go to a fresh directory, so earlier runs never affect the result (as in brimir_bench).
@@ -182,8 +184,32 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     } timedSink(sink);
 
     RunReport report;
+    std::vector<std::string> stateProblems;
+    std::vector<uint8_t> state;
+
+    // --load-state: after the context exists (the renderer is installed), before the first frame.
+    if (!config.loadStatePath.empty()) {
+        std::ifstream in(config.loadStatePath, std::ios::binary);
+        if (!in) {
+            throw std::runtime_error("cannot read the state " + config.loadStatePath);
+        }
+        state.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        if (!host.Unserialize(state)) {
+            throw std::runtime_error("retro_unserialize rejected " + config.loadStatePath);
+        }
+        std::fprintf(stderr, "vkhost: loaded state %s (%zu bytes)\n", config.loadStatePath.c_str(), state.size());
+    }
+
+    const auto runHidden = [&] {
+        host.SetAvEnable(RETRO_AV_ENABLE_AUDIO);
+        host.RunFrame(nullptr);
+        host.SetAvEnable(RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO);
+    };
+
     const int total = config.warmup + config.frames;
     uint64_t secondaryFrames = 0;
+    uint64_t hiddenFrames = 0;
+    uint64_t roundtrips = 0;
     std::chrono::steady_clock::time_point recordStart;
     for (int i = 0; i < total; ++i) {
         if (i == config.warmup) {
@@ -193,9 +219,12 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
             host.ResetContext();
         }
         if (config.runahead) {
-            host.SetAvEnable(RETRO_AV_ENABLE_AUDIO);
-            host.RunFrame(nullptr);
-            host.SetAvEnable(RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO);
+            runHidden();
+            ++hiddenFrames;
+        }
+        if (config.hideEvery > 0 && i % config.hideEvery == config.hideEvery - 1) {
+            runHidden();
+            ++hiddenFrames;
         }
         host.RunFrame(i >= config.warmup ? &timedSink : nullptr);
         if (config.runahead) {
@@ -203,6 +232,31 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
             secondary.RunFrame(nullptr);
             ++secondaryFrames;
         }
+        if (config.stateRoundtrip > 0 && (i + 1) % config.stateRoundtrip == 0) {
+            if (!host.Serialize(state) || !host.Unserialize(state)) {
+                stateProblems.push_back("--state-roundtrip: retro_serialize/retro_unserialize failed after frame " +
+                                        std::to_string(i));
+                break;
+            }
+            ++roundtrips;
+        }
+        if (i == config.saveStateAt) {
+            std::ofstream out(config.saveStatePath, std::ios::binary | std::ios::trunc);
+            if (!host.Serialize(state) ||
+                !out.write(reinterpret_cast<const char*>(state.data()), static_cast<std::streamsize>(state.size()))) {
+                stateProblems.push_back("--save-state-at: cannot save the state to " + config.saveStatePath);
+            } else {
+                std::fprintf(stderr, "vkhost: saved state after frame %d to %s (%zu bytes)\n", i,
+                             config.saveStatePath.c_str(), state.size());
+            }
+        }
+    }
+    if (config.hideEvery > 0 || config.runahead) {
+        std::fprintf(stderr, "vkhost: %llu hidden frames (video disabled)\n",
+                     static_cast<unsigned long long>(hiddenFrames));
+    }
+    if (config.stateRoundtrip > 0) {
+        std::fprintf(stderr, "vkhost: %llu state round trips\n", static_cast<unsigned long long>(roundtrips));
     }
 
     const double recordSeconds =
@@ -222,6 +276,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     }
     host.Unload();
     host.FillReport(report);
+    report.problems.insert(report.problems.end(), stateProblems.begin(), stateProblems.end());
     report.recordSeconds = recordSeconds;
     report.sinkSeconds = timedSink.seconds;
     if (report.unreadableFrames > 0) {

@@ -62,25 +62,38 @@ namespace {
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits,
                                                VkFence fence) {
-    g_provider->CheckQueueUse("vkQueueSubmit");
+    uint32_t commandBuffers = 0;
+    for (uint32_t i = 0; submits != nullptr && i < count; ++i) {
+        commandBuffers += submits[i].commandBufferCount;
+    }
+    g_provider->CheckQueueUse("vkQueueSubmit", commandBuffers);
     return g_provider->Real().queueSubmit(queue, count, submits, fence);
+}
+
+uint32_t CommandBufferCount(uint32_t count, const VkSubmitInfo2* submits) {
+    uint32_t commandBuffers = 0;
+    for (uint32_t i = 0; submits != nullptr && i < count; ++i) {
+        commandBuffers += submits[i].commandBufferInfoCount;
+    }
+    return commandBuffers;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits,
                                                 VkFence fence) {
-    g_provider->CheckQueueUse("vkQueueSubmit2");
+    g_provider->CheckQueueUse("vkQueueSubmit2", CommandBufferCount(count, submits));
     return g_provider->Real().queueSubmit2(queue, count, submits, fence);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit2KHR(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits,
                                                    VkFence fence) {
-    g_provider->CheckQueueUse("vkQueueSubmit2KHR");
+    g_provider->CheckQueueUse("vkQueueSubmit2KHR", CommandBufferCount(count, submits));
     return g_provider->Real().queueSubmit2KHR(queue, count, submits, fence);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueWaitIdle(VkQueue queue) {
     // A queue use (needs the lock) that waits (must not hold it): never allowed.
-    g_provider->CheckQueueUse("vkQueueWaitIdle");
+    g_provider->CheckQueueUse("vkQueueWaitIdle", 0);
+    g_provider->CheckFrameCall("vkQueueWaitIdle");
     g_provider->CheckWait("vkQueueWaitIdle");
     return g_provider->Real().queueWaitIdle(queue);
 }
@@ -369,6 +382,7 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
                 bool ok = neg->create_device2(&context, instance, physical, VK_NULL_HANDLE, &HookGetInstanceProcAddr,
                                               &CreateDeviceWrapper, this);
                 if (!ok) {
+                    AddProblem("create_device2 refused the frontend's GPU");
                     std::fprintf(stderr, "vkhost: vulkan: create_device2 refused the GPU, retrying without one\n");
                     context = {};
                     ok = neg->create_device2(&context, instance, VK_NULL_HANDLE, VK_NULL_HANDLE,
@@ -387,11 +401,10 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
                     m_destroyDevice = neg->destroy_device;
                     std::fprintf(stderr, "vkhost: vulkan: device created through create_device2 (negotiation v%u)\n",
                                  neg->interface_version);
-                } else if (m_fakeApi != 0) {
-                    // Expected: the core rejects a GPU below its baseline; RetroArch then uses its default device.
-                    std::fprintf(stderr, "vkhost: vulkan: create_device2 refused; using the host's default device\n");
                 } else {
-                    AddProblem("create_device2 failed; using the host's default device");
+                    // A refusal after the retry leaves RetroArch master without a GPU: the core must create a
+                    // device even on a GPU below its baseline (and fall back to the copy-only output).
+                    AddProblem("create_device2 refused both times; using the host's default device");
                 }
             } else {
                 std::fprintf(stderr, "vkhost: vulkan: negotiation v%u without create_device2; default device\n",
@@ -546,15 +559,33 @@ const retro_hw_render_interface* VulkanProvider::Interface() const {
     return m_live ? reinterpret_cast<const retro_hw_render_interface*>(m_iface.get()) : nullptr;
 }
 
-void VulkanProvider::CheckQueueUse(const char* function) {
+void VulkanProvider::CheckQueueUse(const char* function, uint32_t commandBuffers) {
     if (!m_selfTest) {
         ++m_coreSubmits;
+        if (commandBuffers > 0) {
+            // Frames with video disabled still submit their VDP2 work (no presentation).
+            if (!m_videoEnabled) {
+                ++m_hiddenSubmits;
+            }
+            if (m_inRun && ++m_runSubmits > 1) {
+                AddProblem("more than one command buffer submit in one retro_run");
+            }
+        }
     }
     if (m_lockOwner.load() != std::this_thread::get_id()) {
         ++m_lockViolations;
         AddProblem(std::string(function) + " without lock_queue held");
     }
-    CheckFrameCall(function);
+}
+
+void VulkanProvider::BeginRun() {
+    m_inRun = true;
+    m_runSubmits = 0;
+}
+
+void VulkanProvider::EndRun() {
+    m_inRun = false;
+    m_maxRunSubmits = std::max(m_maxRunSubmits, m_runSubmits);
 }
 
 void VulkanProvider::CheckWait(const char* function) {

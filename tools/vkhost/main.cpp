@@ -81,6 +81,14 @@ void PrintUsage(std::FILE* out) {
         "  --reset-in-run F  the same reinit from inside frame F's retro_run (at the core's first environment\n"
         "                call), as RetroArch does inside SET_SYSTEM_AV_INFO (PAL content); a SET_SYSTEM_AV_INFO\n"
         "                that changes the frame rate or maximum geometry also triggers one\n"
+        "  --reset-in-present F  the same reinit at frame F's GET_AUDIO_VIDEO_ENABLE: after the core emulated the\n"
+        "                frame and before it records and presents it\n"
+        "  --hide-every N  before every Nth frame (counting warmup frames from 0, frames N-1, 2N-1, ...), one extra\n"
+        "                frame with video disabled (not recorded; compare with a software run with the same N)\n"
+        "  --state-roundtrip N  retro_serialize + retro_unserialize after every Nth frame\n"
+        "  --save-state-at F <file>  retro_serialize after frame F (counting warmup frames from 0) into <file>; with\n"
+        "                --compare each child writes <file>.software or <file>.vulkan\n"
+        "  --load-state <file>  retro_unserialize <file> before the first frame (after the context exists)\n"
         "  --runahead    run-ahead simulation: before each frame one hidden frame (video disabled; not rolled\n"
         "                back, so compare with a software --runahead run), and a second instance of the core\n"
         "                (refused a hardware context) running one frame per frame with audio and video disabled\n"
@@ -95,13 +103,15 @@ void PrintUsage(std::FILE* out) {
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
         "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
         "                kept temporary directory). Exit 3 on any difference, or when the Vulkan run did not use the\n"
-        "                compute frame output for every frame. Other flags go to both runs\n"
+        "                compute frame output and the Vulkan VDP2 renderer for every frame. Other flags go to both\n"
+        "                runs\n"
         "  --compare-vulkan-option key=value  with --compare: core option for the Vulkan run only\n"
         "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
         "  --help, -h    show this help\n"
         "\n"
-        "Exit status: 0 ok, 1 usage, 2 error, 3 a check failed (queue lock, validation, hidden-frame GPU work,\n"
-        "unreadable frames; see the 'problem:' lines), 4 --vulkan without a usable Vulkan device.\n",
+        "Exit status: 0 ok, 1 usage, 2 error, 3 a check failed (queue lock, validation, presentation in a hidden\n"
+        "frame, more than one submit in a retro_run, unreadable frames, state save/load; see the 'problem:' lines),\n"
+        "4 --vulkan without a usable Vulkan device.\n",
         out);
 }
 
@@ -173,6 +183,15 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.config.noValidation = true;
             continue;
         }
+        if (opt == "--save-state-at") { // two values
+            if (i + 2 >= argc || !ParseInt(argv[i + 1], args.config.saveStateAt)) {
+                std::fprintf(stderr, "--save-state-at needs a frame number and a file\n");
+                return ParseResult::Error;
+            }
+            args.config.saveStatePath = argv[i + 2];
+            i += 2;
+            continue;
+        }
         if (i + 1 >= argc) {
             std::fprintf(stderr, "Missing value for %s\n", opt.c_str());
             return ParseResult::Error;
@@ -221,6 +240,23 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 std::fprintf(stderr, "Invalid --reset-in-run value: %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--reset-in-present") {
+            if (!ParseInt(value, args.config.resetInPresent)) {
+                std::fprintf(stderr, "Invalid --reset-in-present value: %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--hide-every") {
+            if (!ParseInt(value, args.config.hideEvery) || args.config.hideEvery == 0) {
+                std::fprintf(stderr, "Invalid --hide-every value (1 or more): %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--state-roundtrip") {
+            if (!ParseInt(value, args.config.stateRoundtrip) || args.config.stateRoundtrip == 0) {
+                std::fprintf(stderr, "Invalid --state-roundtrip value (1 or more): %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--load-state") {
+            args.config.loadStatePath = value;
         } else if (opt == "--grow-mask") {
             if (!ParseInt(value, args.config.growMaskAt)) {
                 std::fprintf(stderr, "Invalid --grow-mask value: %s\n", value);
@@ -288,8 +324,9 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             return ParseResult::Error;
         }
     }
-    if ((args.config.resetAt >= 0 || args.config.resetInRun >= 0) && (!vulkanRun || args.config.refuseHw)) {
-        std::fprintf(stderr, "--reset-at and --reset-in-run need --vulkan (without --refuse-hw)\n");
+    if ((args.config.resetAt >= 0 || args.config.resetInRun >= 0 || args.config.resetInPresent >= 0) &&
+        (!vulkanRun || args.config.refuseHw)) {
+        std::fprintf(stderr, "--reset-at, --reset-in-run and --reset-in-present need --vulkan (without --refuse-hw)\n");
         return ParseResult::Error;
     }
     return ParseResult::Ok;
@@ -422,12 +459,14 @@ int main(int argc, char** argv) {
     if (args.config.vulkan) {
         std::fprintf(stderr,
                      "vkhost: vulkan: context resets %llu, core submits %llu, queue-lock violations %llu, "
-                     "hidden-frame GPU calls %llu, validation %s, validation errors %u\n",
+                     "hidden-frame GPU calls %llu, validation %s, validation errors %u, hidden-frame submits %llu, "
+                     "max submits per retro_run %llu\n",
                      static_cast<unsigned long long>(report.contextResets),
                      static_cast<unsigned long long>(report.coreSubmits),
                      static_cast<unsigned long long>(report.lockViolations),
                      static_cast<unsigned long long>(report.hiddenGpuCalls), report.validation ? "on" : "off",
-                     report.validationErrors);
+                     report.validationErrors, static_cast<unsigned long long>(report.hiddenSubmits),
+                     static_cast<unsigned long long>(report.maxRunSubmits));
     }
     if (args.config.runahead) {
         std::fprintf(stderr, "vkhost: runahead: second instance ran %llu frames, %llu hardware frames, context %s\n",

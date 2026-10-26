@@ -276,13 +276,18 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--refuse-hw` | refuse `SET_HW_RENDER` and the negotiation interface, as RetroArch does on a gl/d3d driver without driver switching (and in a run-ahead second instance) |
 | `--reset-at F` | with `--vulkan`: a video driver reinit before frame F (counted from 0, warmup included): `context_destroy`, the old device destroyed, a new one through the negotiation, `context_reset` |
 | `--reset-in-run F` | the same reinit from inside frame F's `retro_run`, at the core's first environment call, the way RetroArch reinits inside `SET_SYSTEM_AV_INFO` (PAL content). A `SET_SYSTEM_AV_INFO` that changes the frame rate or the maximum geometry while a context is live also triggers one |
+| `--reset-in-present F` | the same reinit at frame F's `GET_AUDIO_VIDEO_ENABLE`, after the core emulated the frame (its VDP2 frame ended) and before it records and presents it: that frame is lost with the device (a dupe) |
+| `--hide-every N` | before every Nth frame (frames N-1, 2N-1, ... counted from 0, warmup included) one extra frame with video disabled, not recorded (fast-forward or run-ahead frames); compare against a software run with the same N |
+| `--state-roundtrip N` | `retro_serialize` + `retro_unserialize` after every Nth frame |
+| `--save-state-at F <file>` | `retro_serialize` after frame F (counted from 0, warmup included) into `<file>`; with `--compare` each child writes `<file>.software` or `<file>.vulkan` |
+| `--load-state <file>` | `retro_unserialize` of `<file>` before the first frame (after `context_reset`, so with the Vulkan renderer installed) |
 | `--preferred-hw gl` | with `--vulkan`: `GET_PREFERRED_HW_RENDER` reports GL (RetroArch on the gl driver with driver switching allowed); `SET_HW_RENDER` would still be accepted. The core must not ask |
 | `--fake-api X.Y` | with `--vulkan`: `vkGetPhysicalDeviceProperties` (through the core's `get_instance_proc_addr`) caps `apiVersion` at X.Y; with 1.1 the core uses its copy-only output |
 | `--grow-mask F` | with `--vulkan`: sync index mask `0b1` until frame F, then `0b111` (after waiting for the device) |
 | `--fail-compute-on-grow` | with `--grow-mask`: the core's `vkCreateComputePipelines` fails once the mask has grown (fault injection: the core degrades to copy-only) |
 | `--runahead` | run-ahead simulation: before each frame the main instance runs one hidden frame (`GET_AUDIO_VIDEO_ENABLE` without video); a second instance (a copy of the library, refused a hardware context) runs one frame per frame with audio and video disabled. Hidden frames are not rolled back (a pre-existing heap corruption in `retro_unserialize` was observed on BIOS-menu states; it may affect any state), so compare against a software run with `--runahead` |
 | `--no-validation` | with `--vulkan` or `--compare`: do not load the Vulkan validation layer (the layer slows the Vulkan run; use it for timing) |
-| `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference or when the Vulkan run was not on the compute output for every frame |
+| `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference or when the Vulkan run was not on the compute output with the Vulkan VDP2 renderer (log line `Vulkan VDP2 renderer active`) for every frame |
 | `--compare-vulkan-option key=value` | with `--compare`: a core option for the Vulkan run only (repeatable; to check that a difference is reported) |
 | `--dump-frame I` | with `--dump-dir`: write only recorded frame I |
 
@@ -305,9 +310,12 @@ records it as XRGB8888, so `--hash` lines compare directly with a software run.
 
 The host also checks the core's side of the contract and fails the run (exit 3) on: `vkQueueSubmit` (wrapped
 through the interface's `get_device_proc_addr`/`get_instance_proc_addr`) without `lock_queue` held, any wait
-(`vkWaitForFences`, `vkDeviceWaitIdle`, `vkQueueWaitIdle`, `wait_sync_index`) while holding it, GPU calls or hardware
-frames in frames with video disabled, `set_image` outside `GENERAL`/`VK_QUEUE_FAMILY_IGNORED` or with semaphores,
-features requested through `VkPhysicalDeviceVulkan1xFeatures`, unreadable frames, and validation errors. The
+(`vkWaitForFences`, `vkDeviceWaitIdle`, `vkQueueWaitIdle`, `wait_sync_index`) while holding it, presentation calls
+(`set_image`, `get_sync_index`, `wait_sync_index`, `vkQueueWaitIdle`) or hardware frames in frames with video disabled
+(submits are allowed there and counted: the Vulkan VDP2 renderer still submits a hidden frame's VDP2 work), more than
+one command-buffer submit in one `retro_run`, `set_image` outside `GENERAL`/`VK_QUEUE_FAMILY_IGNORED` or with
+semaphores, features requested through `VkPhysicalDeviceVulkan1xFeatures`, a `create_device2` refusal (RetroArch may be
+left without a GPU after its retry), unreadable frames, failed state saves/loads and validation errors. The
 queue-lock check runs a self-test each time a context is created. The summary line reports context resets, the
 core's submits and each counter.
 
@@ -316,11 +324,17 @@ The host's volk and the core's are separate copies (the core is its own library 
 host's function pointers.
 
 The ctest entry `brimir_vkhost_vulkan` (`tests/vkhost_checks.cmake`) runs the BIOS menu (US BIOS from
-`tests/fixtures`, 60 + 300 frames) in software, `--vulkan`, `--vulkan --refuse-hw`, `--vulkan --reset-at 120`,
-`--vulkan --reset-in-run 150`, `--vulkan --preferred-hw gl`, `--vulkan --fake-api 1.1` (copy-only output),
-`--vulkan --grow-mask 100` (with and without `--fail-compute-on-grow`, which may repeat one frame) and
-`--vulkan --runahead`, plus `--compare` (identical runs pass; a Vulkan run rotated 180 degrees exits 3 and names the first differing pixel), and requires identical frame hashes, the validation layer on and zero validation errors,
-queue-lock violations and hidden-frame GPU calls. It is skipped without the BIOS or a Vulkan device
+`tests/fixtures`, 60 + 300 frames) in software, `--vulkan` (the Vulkan VDP2 renderer; also with rotation and
+overscan), `--vulkan --refuse-hw`, `--vulkan --reset-at 120`, `--vulkan --reset-in-run 150`,
+`--vulkan --reset-in-present 150` (one repeated frame), `--vulkan --preferred-hw gl`, `--vulkan --fake-api 1.1`
+(software renderer, copy-only output), `--vulkan --grow-mask 100` (with and without `--fail-compute-on-grow`, which
+reverts to software before the frame runs), `--hide-every 2` with deinterlacing on and off, `--state-roundtrip 37`,
+cross-renderer state loads (a software state loaded by Vulkan and a Vulkan state loaded by software, compared from
+recorded frame 2) and `--vulkan --runahead`, plus `--compare` (identical runs pass, also with hidden frames and state
+round trips; a Vulkan run rotated 180 degrees exits 3 and names the first differing pixel), and requires identical
+frame hashes, the Vulkan VDP2 renderer active where the context allows it (and not where it does not), the
+validation layer on and zero validation errors, queue-lock violations and hidden-frame presentation calls, and at
+most one submit per `retro_run`. It is skipped without the BIOS or a Vulkan device
 (`BRIMIR_REQUIRE_VULKAN=1` fails instead; `BRIMIR_VKHOST_ALLOW_NO_VALIDATION=1` only warns without the layer).
 A `video_refresh(NULL)` (dupe) is recorded as a repeat of the last frame.
 

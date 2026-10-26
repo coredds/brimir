@@ -43,8 +43,10 @@ const std::set<std::string> kValueless = {"--hash",        "--verbose", "--vulka
 const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",       "--dump-dir", "--dump-frame",
                                         "--system-dir", "--frames", "--compare-vulkan-option"};
 // Only valid together with --vulkan: dropped from the software child.
-const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--preferred-hw",
+const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--reset-in-present", "--preferred-hw",
                                            "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--no-validation"};
+// Takes a frame number and a file; each child writes its own file (<file>.software, <file>.vulkan).
+const std::string kSaveStateAt = "--save-state-at";
 
 fs::path SelfPath() {
 #ifdef _WIN32
@@ -198,6 +200,13 @@ std::vector<std::string> BuildArgs(const std::vector<std::string>& in, bool vulk
     std::vector<std::string> out;
     for (size_t i = 0; i < in.size(); ++i) {
         const std::string& arg = in[i];
+        if (arg == kSaveStateAt && i + 2 < in.size()) {
+            out.push_back(arg);
+            out.push_back(in[i + 1]);
+            out.push_back(in[i + 2] + (vulkan ? ".vulkan" : ".software"));
+            i += 2;
+            continue;
+        }
         const bool valueless = kValueless.count(arg) != 0;
         const bool drop = kDropped.count(arg) != 0 || (!vulkan && kVulkanOnly.count(arg) != 0);
         if (!drop) {
@@ -239,6 +248,7 @@ private:
 // What the Vulkan child's stderr says about how it ran.
 struct VulkanFacts {
     bool outputReady = false;                    // "Vulkan frame output ready"
+    bool rendererActive = false;                 // "Vulkan VDP2 renderer active"
     std::vector<std::string> degraded;           // log lines that mean software or copy-only output
     long long hardwareFrames = -1;               // "recorded N frames (H hardware)"
     long long submits = -1;                      // "core submits S"
@@ -253,7 +263,9 @@ VulkanFacts ParseVulkanFacts(const fs::path& stderrFile) {
                                             "using copy-only frame output",
                                             "Vulkan frame output changed to",
                                             "Vulkan frame output failed",
-                                            "Vulkan context still live"};
+                                            "Vulkan context still live",
+                                            "Vulkan VDP2 renderer unavailable",
+                                            "Vulkan VDP2 renderer off"};
     VulkanFacts facts;
     std::istringstream lines(ReadAll(stderrFile));
     std::string line;
@@ -263,6 +275,9 @@ VulkanFacts ParseVulkanFacts(const fs::path& stderrFile) {
         }
         if (line.find("Vulkan frame output ready") != std::string::npos) {
             facts.outputReady = true;
+        }
+        if (line.find("Vulkan VDP2 renderer active") != std::string::npos) {
+            facts.rendererActive = true;
         }
         for (const char* needle : kDegraded) {
             if (line.find(needle) != std::string::npos) {
@@ -404,6 +419,9 @@ int RunCompare(const CompareConfig& config) {
     if (!facts.outputReady) {
         fail("no \"Vulkan frame output ready\" in the vulkan run's log: the core did not take the Vulkan path");
     }
+    if (!facts.rendererActive) {
+        fail("no \"Vulkan VDP2 renderer active\" in the vulkan run's log: VDP2 did not run on the GPU");
+    }
     for (const std::string& line : facts.degraded) {
         fail("the vulkan run was not on the compute output: " + line);
     }
@@ -494,7 +512,7 @@ int RunCompare(const CompareConfig& config) {
         std::printf("compare: FAILED (work directory kept: %s)\n", work.string().c_str());
         return 3;
     }
-    std::printf("compare: OK, %zu frames identical (software vs vulkan compute output: %lld hardware frames, "
+    std::printf("compare: OK, %zu frames identical (software vs vulkan VDP2 renderer: %lld hardware frames, "
                 "%lld core submits, validation %s, %lld validation errors)\n",
                 common, facts.hardwareFrames, facts.submits, facts.validationOn ? "on" : "off",
                 facts.validationErrors);

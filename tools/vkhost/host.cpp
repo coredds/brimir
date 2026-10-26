@@ -166,6 +166,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_preferGl = config.preferGl;
     m_growMaskAt = config.growMaskAt;
     m_resetInRun = config.resetInRun;
+    m_resetInPresent = config.resetInPresent;
     m_frameIndex = 0;
     if (config.vulkan && !config.refuseHw) {
         // Like a frontend's video driver, the instance and device exist before the core is loaded.
@@ -322,6 +323,8 @@ void LibretroHost::Unload() {
         m_coreSubmits = m_vulkan->CoreSubmits();
         m_lockViolations = m_vulkan->LockViolations();
         m_hiddenGpuCalls = m_vulkan->HiddenGpuCalls();
+        m_hiddenSubmits = m_vulkan->HiddenSubmits();
+        m_maxRunSubmits = m_vulkan->MaxRunSubmits();
         m_validation = m_vulkan->ValidationEnabled();
         m_problems.insert(m_problems.end(), m_vulkan->Problems().begin(), m_vulkan->Problems().end());
         // Destroying the instance can still report (leaks): read the counter afterwards.
@@ -349,10 +352,21 @@ bool LibretroHost::RunFrame(FrameSink* sink) {
     }
     m_sink = sink;
     m_resetInRunPending = m_frameIndex == m_resetInRun;
+    m_resetInPresentPending = m_frameIndex == m_resetInPresent;
+    if (m_vulkan) {
+        m_vulkan->BeginRun();
+    }
     m_api->run();
+    if (m_vulkan) {
+        m_vulkan->EndRun();
+    }
     if (m_resetInRunPending) {
         m_resetInRunPending = false;
         Problem("--reset-in-run: the core made no environment call in the frame");
+    }
+    if (m_resetInPresentPending) {
+        m_resetInPresentPending = false;
+        Problem("--reset-in-present: the core did not query GET_AUDIO_VIDEO_ENABLE in the frame");
     }
     ++m_frameIndex;
     m_sink = nullptr;
@@ -394,6 +408,8 @@ void LibretroHost::FillReport(RunReport& report) const {
         report.coreSubmits += m_vulkan->CoreSubmits();
         report.lockViolations += m_vulkan->LockViolations();
         report.hiddenGpuCalls += m_vulkan->HiddenGpuCalls();
+        report.hiddenSubmits += m_vulkan->HiddenSubmits();
+        report.maxRunSubmits = std::max(report.maxRunSubmits, m_vulkan->MaxRunSubmits());
         report.validation = report.validation || m_vulkan->ValidationEnabled();
         report.validationErrors += m_vulkan->ValidationErrors();
         report.problems.insert(report.problems.end(), m_vulkan->Problems().begin(), m_vulkan->Problems().end());
@@ -401,6 +417,8 @@ void LibretroHost::FillReport(RunReport& report) const {
         report.coreSubmits += m_coreSubmits;
         report.lockViolations += m_lockViolations;
         report.hiddenGpuCalls += m_hiddenGpuCalls;
+        report.hiddenSubmits += m_hiddenSubmits;
+        report.maxRunSubmits = std::max(report.maxRunSubmits, m_maxRunSubmits);
         report.validation = report.validation || m_validation;
         report.validationErrors += m_validationErrors;
     }
@@ -594,6 +612,12 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
         }
         return true;
     case kEnv(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE):
+        if (m_resetInPresentPending) {
+            // The reinit after the core emulated its frame (its renderer ended the VDP2 frame) and before it
+            // recorded and presented it.
+            m_resetInPresentPending = false;
+            ResetContext();
+        }
         *static_cast<int*>(data) = m_avEnable;
         return true;
     default:

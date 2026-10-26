@@ -44,6 +44,8 @@ public:
     void AttachDevice(VulkanDevice &device, uint32_t frameContexts);
     // Drops the pending frame and destroys the GPU resources. The caller has waited for the device to be idle.
     void DetachDevice();
+    // Forgets the back half without any Vulkan call (its device may already be gone): leaks its objects.
+    void AbandonDevice();
     bool Attached() const { return m_backend != nullptr; }
 
     // The back half, for tests (nullptr while detached).
@@ -52,6 +54,8 @@ public:
     const vdp2::Vdp2FrontEnd &FrontEnd() const { return m_front; }
 
     void EnableThreadedVDP1(bool enable);
+    // The last EnableThreadedVDP1 value (VDP1 starts unthreaded).
+    bool ThreadedVDP1() const { return m_threadedVDP1; }
 
     // Fired at the end of every VDP2 frame, after Callbacks.VDP2DrawFinished, with the frame's size.
     std::function<void(uint32_t w, uint32_t h)> FrameReady;
@@ -127,6 +131,7 @@ private:
     uint32_t m_HRes = ymir::vdp::kDefaultResH;
     uint32_t m_VRes = ymir::vdp::kDefaultResV;
     bool m_exclusiveMonitor = false;
+    bool m_threadedVDP1 = false;
     bool m_resolutionChanged = false;
     bool m_displayEraseSinceCapture = false; // VDP1 erased a framebuffer without a swap since the last capture
     bool m_slicesCaptured = false;           // the open frame has its main (and mesh0) sprite slices

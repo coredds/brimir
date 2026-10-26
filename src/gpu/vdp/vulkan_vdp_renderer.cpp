@@ -38,8 +38,15 @@ void VulkanVDPRenderer::DetachDevice() {
     m_backend.reset();
 }
 
+void VulkanVDPRenderer::AbandonDevice() {
+    m_front.ConsumeFrame();
+    m_front.MarkAllDirty();
+    (void)m_backend.release();
+}
+
 void VulkanVDPRenderer::EnableThreadedVDP1(bool enable) {
     m_vdp1->EnableThreadedVDP1(enable);
+    m_threadedVDP1 = enable;
 }
 
 bool VulkanVDPRenderer::HasPendingFrame() const {

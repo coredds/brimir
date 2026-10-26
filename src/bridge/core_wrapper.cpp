@@ -24,6 +24,10 @@
 
 #include <ymir/sys/backup_ram.hpp>
 
+#ifdef BRIMIR_VULKAN
+#include <gpu/vdp/vulkan_vdp_renderer.hpp>
+#endif
+
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -236,6 +240,8 @@ void CoreWrapper::Shutdown() {
     }
 
     UnloadGame();
+    m_vulkanRenderer = nullptr;
+    m_deviceFrame = {};
     m_saturn.reset();
     m_initialized = false;
 }
@@ -259,6 +265,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         m_saturn->configuration.video.threadedVDP1 = true;
         m_saturn->configuration.video.threadedVDP2 = true;
         // Note: threadedDeinterlacer is controlled by DeinterlaceMode, don't override it here
+        ApplyVulkanRendererThreading();
     } catch (const std::exception& e) {
         m_lastError = std::string("Exception setting threadedVDP: ") + e.what();
         return false;
@@ -539,6 +546,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         m_saturn->configuration.video.threadedVDP1 = true;
         m_saturn->configuration.video.threadedVDP2 = true;
         m_saturn->configuration.video.threadedDeinterlacer = true;
+        ApplyVulkanRendererThreading();
         
         // Region auto-detection (if enabled in configuration)
         const auto& loadedDisc = m_saturn->GetDisc();
@@ -686,6 +694,7 @@ void CoreWrapper::UnloadGame() {
     // synchronously joins the worker threads, so no extra delay is needed.
     m_saturn->configuration.video.threadedVDP1 = false;
     m_saturn->configuration.video.threadedVDP2 = false;
+    ApplyVulkanRendererThreading();
     
     // Save cartridge RAM if present
     if (m_hasCartridge) {
@@ -1684,7 +1693,9 @@ const char* CoreWrapper::GetActiveRenderer() const {
     if (!m_initialized || !m_saturn) {
         return "Unknown";
     }
-    
+    if (m_vulkanRenderer) {
+        return "Vulkan";
+    }
     return "Software";
 }
 
@@ -1693,6 +1704,78 @@ void CoreWrapper::SetThreadedVDP1(bool enable) {
         return;
     }
     m_saturn->configuration.video.threadedVDP1 = enable;
+    ApplyVulkanRendererThreading();
+}
+
+void CoreWrapper::ApplyVulkanRendererThreading() {
+#ifdef BRIMIR_VULKAN
+    if (m_vulkanRenderer && m_saturn) {
+        m_vulkanRenderer->EnableThreadedVDP1(m_saturn->configuration.video.threadedVDP1);
+    }
+#endif
+}
+
+gpu::VulkanVDPRenderer* CoreWrapper::InstallVulkanRenderer() {
+#ifdef BRIMIR_VULKAN
+    if (!m_initialized || !m_saturn) {
+        return nullptr;
+    }
+    if (m_vulkanRenderer) {
+        return m_vulkanRenderer;
+    }
+    auto& vdp = m_saturn->VDP;
+    // Renderer-held state (mesh framebuffers, NBG fetchers) is not part of an install: carry it over as a state
+    // load does. Both renderers use the software renderer's section.
+    auto carried = std::make_unique<ymir::savestate::VDPSaveState::VDPRendererSaveState>();
+    vdp.GetRenderer().PreSaveStateSync();
+    vdp.GetRenderer().SaveState(*carried);
+    gpu::VulkanVDPRenderer* created = nullptr;
+    ymir::vdp::IVDPRenderer* installed = vdp.UseExternalRenderer(
+        [&created](ymir::vdp::VDPState& state, ymir::vdp::config::VDP2DebugRender& debugRender,
+                   const ymir::vdp::config::VDP2AccessPatternsConfig& accessPatterns) {
+            auto renderer = std::make_unique<gpu::VulkanVDPRenderer>(state, debugRender, accessPatterns);
+            created = renderer.get();
+            return renderer;
+        });
+    if (installed == nullptr || installed != created) {
+        return nullptr;
+    }
+    m_vulkanRenderer = created;
+    m_vulkanRenderer->LoadState(*carried);
+    m_vulkanRenderer->PostLoadStateSync();
+    m_deviceFrame = {};
+    m_vulkanRenderer->FrameReady = [this](uint32_t width, uint32_t height) {
+        m_deviceFrame.width = width;
+        m_deviceFrame.height = height;
+        m_deviceFrame.settings.cropH = static_cast<uint32_t>(m_overscanCropH);
+        m_deviceFrame.settings.cropV = static_cast<uint32_t>(m_overscanCropV);
+        m_deviceFrame.settings.rotation = static_cast<uint32_t>(m_rotation);
+    };
+    ApplyVulkanRendererThreading();
+    return m_vulkanRenderer;
+#else
+    return nullptr;
+#endif
+}
+
+void CoreWrapper::UseSoftwareRenderer() {
+#ifdef BRIMIR_VULKAN
+    if (!m_vulkanRenderer || !m_saturn) {
+        return;
+    }
+    auto carried = std::make_unique<ymir::savestate::VDPSaveState::VDPRendererSaveState>();
+    m_vulkanRenderer->PreSaveStateSync();
+    m_vulkanRenderer->SaveState(*carried);
+    // Applies threadedVDP1/VDP2/Deinterlacer from the configuration and the frame callback (OnFrameComplete).
+    ymir::vdp::SoftwareVDPRenderer* software = m_saturn->VDP.UseSoftwareRenderer();
+    if (software == nullptr) {
+        return; // the Vulkan renderer stays installed
+    }
+    m_vulkanRenderer = nullptr;
+    m_deviceFrame = {};
+    software->LoadState(*carried);
+    software->PostLoadStateSync();
+#endif
 }
 
 void CoreWrapper::SetThreadedVDP2(bool enable) {

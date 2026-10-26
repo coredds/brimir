@@ -92,6 +92,8 @@ if(BRIMIR_VULKAN)
         unit/test_gpu_frame_output.cpp
         # VulkanVDPRenderer (GPU VDP2 back half, software VDP1) against the software renderer, scene by scene
         unit/test_gpu_vdp2_scenes.cpp
+        # CoreWrapper with the Vulkan VDP renderer: install, revert, VDP1 threading, device frames (no device needed)
+        unit/test_core_wrapper_vulkan.cpp
     )
     target_link_libraries(brimir_tests PRIVATE brimir-gpu)
 endif()

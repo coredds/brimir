@@ -51,6 +51,13 @@ struct HostConfig {
     bool refuseHw = false; // --refuse-hw: SET_HW_RENDER returns false (a frontend on a gl/d3d driver)
     int resetAt = -1;      // --reset-at F: context_destroy + context_reset (a driver reinit) before frame F
     int resetInRun = -1;   // --reset-in-run F: the same from inside frame F's retro_run (as SET_SYSTEM_AV_INFO)
+    int resetInPresent = -1; // --reset-in-present F: the same at frame F's GET_AUDIO_VIDEO_ENABLE (after the
+                             // emulated frame, before the core records and presents it)
+    int hideEvery = 0;       // --hide-every N: before every Nth frame, one extra frame with video disabled
+    int stateRoundtrip = 0;  // --state-roundtrip N: retro_serialize + retro_unserialize after every Nth frame
+    int saveStateAt = -1;    // --save-state-at F <file>: retro_serialize after frame F into saveStatePath
+    std::string saveStatePath;
+    std::string loadStatePath; // --load-state <file>: retro_unserialize before the first frame
     bool runahead = false; // --runahead: run-ahead simulation (hidden frames, a second instance without context)
     bool preferGl = false; // --preferred-hw gl: GET_PREFERRED_HW_RENDER reports GL (SET_HW_RENDER still accepted)
     uint32_t fakeApi = 0;  // --fake-api X.Y: the core is told the GPU supports only this Vulkan version
@@ -66,7 +73,9 @@ struct RunReport {
     uint64_t contextResets = 0;          // context_reset calls
     uint64_t coreSubmits = 0;            // the core's vkQueueSubmit calls
     uint64_t lockViolations = 0;
-    uint64_t hiddenGpuCalls = 0; // GPU work or hardware frames in frames with video disabled
+    uint64_t hiddenGpuCalls = 0; // presentation calls or hardware frames in frames with video disabled
+    uint64_t hiddenSubmits = 0;  // command buffer submits in frames with video disabled (the core's VDP2 work)
+    uint64_t maxRunSubmits = 0;  // most command buffer submits in one retro_run (must stay at most 1)
     uint64_t unreadableFrames = 0;
     bool validation = false;
     uint32_t validationErrors = 0;
@@ -156,6 +165,8 @@ private:
     HostFrame m_lastFrame; // repeated for video_refresh(NULL)
     int m_resetInRun = -1;
     bool m_resetInRunPending = false;
+    int m_resetInPresent = -1;
+    bool m_resetInPresentPending = false;
     int m_frameIndex = 0;
     bool m_hwAccepted = false;
     retro_hw_render_callback m_hwRender{};
@@ -170,6 +181,8 @@ private:
     uint64_t m_coreSubmits = 0;
     uint64_t m_lockViolations = 0;
     uint64_t m_hiddenGpuCalls = 0;
+    uint64_t m_hiddenSubmits = 0;
+    uint64_t m_maxRunSubmits = 0;
     bool m_validation = false;
     uint32_t m_validationErrors = 0;
     std::vector<std::string> m_problems;

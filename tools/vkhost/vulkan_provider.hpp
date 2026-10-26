@@ -64,8 +64,12 @@ public:
     // For GET_HW_RENDER_INTERFACE; valid while ContextLive().
     const retro_hw_render_interface* Interface() const;
 
-    // GET_AUDIO_VIDEO_ENABLE's video bit for the frame about to run; GPU calls while false are problems.
+    // GET_AUDIO_VIDEO_ENABLE's video bit for the frame about to run. While false, presentation calls (set_image,
+    // get_sync_index, wait_sync_index, vkQueueWaitIdle) are problems; submits are counted (HiddenSubmits).
     void SetVideoEnabled(bool enabled) { m_videoEnabled = enabled; }
+    // Around each retro_run: more than one submit with command buffers in one run is a problem.
+    void BeginRun();
+    void EndRun();
 
     // Reads back the image of the last set_image (top-left w x h) as XRGB8888. Returns false when there is none.
     bool ReadImage(unsigned w, unsigned h, HostFrame& out);
@@ -77,13 +81,16 @@ public:
     uint64_t LockViolations() const { return m_lockViolations; }
     uint64_t HiddenGpuCalls() const { return m_hiddenGpuCalls; }
     uint64_t CoreSubmits() const { return m_coreSubmits; }
+    uint64_t HiddenSubmits() const { return m_hiddenSubmits; }
+    uint64_t MaxRunSubmits() const { return m_maxRunSubmits; }
     bool ValidationEnabled() const;
     uint32_t ValidationErrors() const;
     // Outlives the provider (errors reported while the instance is destroyed count too).
     std::shared_ptr<const std::atomic<uint32_t>> ValidationCounter() const;
 
     // Hooks behind the interface and the wrapped Vulkan functions (one provider per process).
-    void CheckQueueUse(const char* function);
+    // A queue use by the core; commandBuffers: how many command buffers it submits.
+    void CheckQueueUse(const char* function, uint32_t commandBuffers);
     void CheckWait(const char* function);
     void CheckFrameCall(const char* function);
     void OnSetImage(const void* image, uint32_t numSemaphores, uint32_t srcQueueFamily);
@@ -141,6 +148,10 @@ private:
     uint64_t m_lockViolations = 0;
     uint64_t m_hiddenGpuCalls = 0;
     uint64_t m_coreSubmits = 0;
+    uint64_t m_hiddenSubmits = 0;
+    uint64_t m_runSubmits = 0;
+    uint64_t m_maxRunSubmits = 0;
+    bool m_inRun = false;
 };
 
 } // namespace vkhost

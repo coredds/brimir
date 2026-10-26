@@ -16,6 +16,10 @@
 #include <memory>
 #include <string>
 
+namespace brimir::gpu {
+class VulkanVDPRenderer;
+} // namespace brimir::gpu
+
 namespace brimir::libretro {
 
 struct VulkanFrameSettings {
@@ -45,10 +49,16 @@ enum class VulkanOutputMode {
 
 // The GPU frame output on the frontend's device: the FramePresenter with one output image per sync slot, plus
 // a command buffer and fence per slot. Every call must come from the libretro thread (retro_run, context_reset or
-// context_destroy). 1B replaces "present the software frame" with "present the Vulkan VDP renderer's output"
-// behind this class.
+// context_destroy).
+//
+// In compute mode it can carry the Vulkan VDP renderer (VDP2 on the GPU): the renderer gets one frame context per
+// sync slot (guarded by the slot fences) plus kHiddenContexts contexts for frames with video disabled, each with a
+// command buffer and fence of this class, used round-robin. The output owns the device order: the renderer is
+// detached after the device is idle and before the slots and the device go.
 class VulkanOutput {
 public:
+    static constexpr uint32_t kHiddenContexts = 2;
+
     VulkanOutput();
     ~VulkanOutput();
     VulkanOutput(const VulkanOutput &) = delete;
@@ -58,9 +68,11 @@ public:
     // the same device first. Uses the compute output when the device allows it, else the copy-only output (reason
     // then says why). Returns false (Live() stays false) and sets reason when there is no usable device at all.
     bool ContextReset(retro_environment_t environment, std::string &reason);
-    // context_destroy: waits for the device to be idle and destroys everything. Safe to call when not live.
+    // context_destroy: waits for the device to be idle, detaches the renderer and destroys everything. Safe to call
+    // when not live. The renderer stays installed; it is attached again after the next context_reset.
     void ContextDestroy();
-    // Forgets the context without any Vulkan call (its device may already be gone). Leaks the objects.
+    // Forgets the context (and the renderer's device objects) without any Vulkan call (its device may already be
+    // gone). Leaks the objects.
     void Abandon();
 
     bool Live() const;
@@ -75,6 +87,28 @@ public:
                  unsigned &outH, std::string &error);
     // Copy-only mode: the same with the bridge's final XRGB8888 frame (already converted, cropped and rotated).
     bool PresentCopy(const void *xrgb, uint32_t w, uint32_t h, size_t pitch, std::string &error);
+
+    // Compute mode: attaches the Vulkan VDP renderer to the device (sync slots + kHiddenContexts frame contexts),
+    // detaching another one first. Call between frames. Returns false (renderer not attached) with error on failure.
+    bool AttachRenderer(gpu::VulkanVDPRenderer &renderer, std::string &error);
+    // Waits for this output's own submissions and detaches the renderer. No-op without one. Call between frames.
+    void DetachRenderer();
+    bool RendererAttached() const;
+
+    // Before the frame runs: re-creates the slots when the sync index mask grew, re-attaching the renderer with the
+    // new count of frame contexts (so the frame about to run is recorded for the new device objects). Returns false
+    // and sets error on failure; Mode() may have changed then, and the renderer may have been detached.
+    bool PrepareFrame(std::string &error);
+
+    // Renderer path: presents the renderer's frame of this retro_run (recorded into the slot's command buffer), or
+    // re-presents the composite (no VDP2 frame ended in this run) as w x h with the output transforms, in one submit,
+    // and hands the slot's image over. Returns false when nothing was handed over; error is empty when there was just
+    // nothing to show yet (a fresh composite), else says why (Mode() may have changed as with Present).
+    bool PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSettings &settings, unsigned &outW, unsigned &outH,
+                         std::string &error);
+    // Renderer path with video disabled: records the renderer's frame into the next hidden context and submits it
+    // (no presenter, no set_image). True when there was nothing to record.
+    bool SubmitHidden(std::string &error);
 
 private:
     struct Impl;

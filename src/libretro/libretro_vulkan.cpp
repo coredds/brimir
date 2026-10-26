@@ -8,10 +8,12 @@
 #include <gpu/gpu_version.hpp>
 #include <gpu/vk_device.hpp>
 #include <gpu/vk_util.hpp>
+#include <gpu/vdp/vulkan_vdp_renderer.hpp>
 
 #include <libretro_vulkan.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -35,8 +37,11 @@ retro_log_printf_t g_log = nullptr;
 struct NegotiationState {
     // get_application_info was called: the frontend created its instance for kRequiredApiVersion (or higher).
     bool appInfoRequested = false;
-    // The device create_device2 made, with exactly the features gpu_version.hpp lists.
+    // The device create_device2 made.
     VkDevice device = VK_NULL_HANDLE;
+    // It is on a GPU that meets the baseline, with exactly the features and extensions gpu_version.hpp lists. When
+    // no GPU did, create_device2 still made a device (on the frontend's GPU) for the copy-only output.
+    bool baseline = false;
 };
 NegotiationState g_negotiation;
 
@@ -86,8 +91,46 @@ struct InstanceFunctions {
     }
 };
 
-// A queue family with graphics and compute (the frontend presents from the queue it gives the core), and present
-// support when there is a surface. Empty optional and *rejection set when the device does not meet the baseline.
+// A queue family with graphics and compute (the frontend presents from the queue it gives the core), or with graphics
+// only when `compute` is false, and present support when there is a surface.
+std::optional<uint32_t> FindQueueFamily(const InstanceFunctions &fn, VkPhysicalDevice gpu, VkSurfaceKHR surface,
+                                        bool compute) {
+    uint32_t familyCount = 0;
+    fn.getQueueFamilies(gpu, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    fn.getQueueFamilies(gpu, &familyCount, families.data());
+    const VkQueueFlags wanted = VK_QUEUE_GRAPHICS_BIT | (compute ? VK_QUEUE_COMPUTE_BIT : 0);
+    for (uint32_t i = 0; i < familyCount; ++i) {
+        if ((families[i].queueFlags & wanted) != wanted || families[i].queueCount == 0) {
+            continue;
+        }
+        if (surface != VK_NULL_HANDLE) {
+            VkBool32 present = VK_FALSE;
+            if (!fn.getSurfaceSupport || fn.getSurfaceSupport(gpu, i, surface, &present) != VK_SUCCESS || !present) {
+                continue;
+            }
+        }
+        return i;
+    }
+    return std::nullopt;
+}
+
+std::vector<VkExtensionProperties> DeviceExtensions(const InstanceFunctions &fn, VkPhysicalDevice gpu) {
+    uint32_t extensionCount = 0;
+    fn.enumerateExtensions(gpu, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extensionCount);
+    fn.enumerateExtensions(gpu, nullptr, &extensionCount, extensions.data());
+    extensions.resize(extensionCount);
+    return extensions;
+}
+
+bool HasExtension(const std::vector<VkExtensionProperties> &extensions, const char *name) {
+    return std::any_of(extensions.begin(), extensions.end(),
+                       [&](const VkExtensionProperties &ext) { return std::strcmp(ext.extensionName, name) == 0; });
+}
+
+// The queue family for the GPU renderer, or an empty optional and *rejection set when the device does not meet the
+// baseline (gpu_version.hpp).
 std::optional<uint32_t> EvaluateDevice(const InstanceFunctions &fn, VkPhysicalDevice gpu, VkSurfaceKHR surface,
                                        std::string &rejection) {
     VkPhysicalDeviceProperties properties{};
@@ -112,37 +155,16 @@ std::optional<uint32_t> EvaluateDevice(const InstanceFunctions &fn, VkPhysicalDe
         }
     }
 
-    uint32_t extensionCount = 0;
-    fn.enumerateExtensions(gpu, nullptr, &extensionCount, nullptr);
-    std::vector<VkExtensionProperties> extensions(extensionCount);
-    fn.enumerateExtensions(gpu, nullptr, &extensionCount, extensions.data());
-    extensions.resize(extensionCount);
+    const std::vector<VkExtensionProperties> extensions = DeviceExtensions(fn, gpu);
     for (const char *required : gpu::kRequiredDeviceExtensions) {
-        const bool found = std::any_of(extensions.begin(), extensions.end(), [&](const VkExtensionProperties &ext) {
-            return std::strcmp(ext.extensionName, required) == 0;
-        });
-        if (!found) {
+        if (!HasExtension(extensions, required)) {
             rejection = name + ": missing extension " + required;
             return std::nullopt;
         }
     }
 
-    uint32_t familyCount = 0;
-    fn.getQueueFamilies(gpu, &familyCount, nullptr);
-    std::vector<VkQueueFamilyProperties> families(familyCount);
-    fn.getQueueFamilies(gpu, &familyCount, families.data());
-    constexpr VkQueueFlags kWanted = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
-    for (uint32_t i = 0; i < familyCount; ++i) {
-        if ((families[i].queueFlags & kWanted) != kWanted || families[i].queueCount == 0) {
-            continue;
-        }
-        if (surface != VK_NULL_HANDLE) {
-            VkBool32 present = VK_FALSE;
-            if (!fn.getSurfaceSupport || fn.getSurfaceSupport(gpu, i, surface, &present) != VK_SUCCESS || !present) {
-                continue;
-            }
-        }
-        return i;
+    if (const auto family = FindQueueFamily(fn, gpu, surface, true)) {
+        return family;
     }
     rejection = name + (surface != VK_NULL_HANDLE ? ": no graphics + compute queue that can present"
                                                   : ": no graphics + compute queue");
@@ -158,10 +180,14 @@ bool CreateDevice(retro_vulkan_context *, VkInstance, VkPhysicalDevice, VkSurfac
     return false;
 }
 
+// Never refuses for capability reasons: a frontend left without a device after its retry may run with no GPU at all
+// (RetroArch). Without a GPU that meets the baseline, the device goes on the frontend's GPU (or the first that can
+// present) with what it supports, and context_reset falls back to the copy-only output with the reason logged.
 bool CreateDevice2(retro_vulkan_context *context, VkInstance instance, VkPhysicalDevice gpu, VkSurfaceKHR surface,
                    PFN_vkGetInstanceProcAddr getInstanceProcAddr,
                    retro_vulkan_create_device_wrapper_t createDeviceWrapper, void *opaque) {
     g_negotiation.device = VK_NULL_HANDLE;
+    g_negotiation.baseline = false;
     InstanceFunctions fn;
     if (!context || instance == VK_NULL_HANDLE || !getInstanceProcAddr || !createDeviceWrapper ||
         !fn.Load(instance, getInstanceProcAddr)) {
@@ -182,20 +208,40 @@ bool CreateDevice2(retro_vulkan_context *context, VkInstance instance, VkPhysica
 
     VkPhysicalDevice chosen = VK_NULL_HANDLE;
     uint32_t family = 0;
+    bool baseline = false;
     std::string rejections;
     for (VkPhysicalDevice candidate : candidates) {
         std::string rejection;
         if (const auto found = EvaluateDevice(fn, candidate, surface, rejection)) {
             chosen = candidate;
             family = *found;
+            baseline = true;
             break;
         }
         rejections += (rejections.empty() ? "" : "; ") + rejection;
     }
     if (chosen == VK_NULL_HANDLE) {
-        NegotiationLog(RETRO_LOG_WARN, "Vulkan create_device2: no suitable GPU (" +
-                                           (rejections.empty() ? std::string("none offered") : rejections) + ")");
-        return false;
+        for (VkPhysicalDevice candidate : candidates) {
+            auto found = FindQueueFamily(fn, candidate, surface, true);
+            if (!found) {
+                found = FindQueueFamily(fn, candidate, surface, false);
+            }
+            if (found) {
+                chosen = candidate;
+                family = *found;
+                break;
+            }
+        }
+        if (chosen == VK_NULL_HANDLE) {
+            NegotiationLog(RETRO_LOG_ERROR, "Vulkan create_device2: no GPU with a graphics queue that can present (" +
+                                                (rejections.empty() ? std::string("none offered") : rejections) + ")");
+            return false;
+        }
+        VkPhysicalDeviceProperties properties{};
+        fn.getProperties(chosen, &properties);
+        NegotiationLog(RETRO_LOG_WARN, "Vulkan create_device2: no GPU meets the GPU renderer's baseline (" + rejections +
+                                           "); creating the device on " + properties.deviceName +
+                                           " for the copy-only frame output");
     }
 
     const float priority = 1.0f;
@@ -205,13 +251,21 @@ bool CreateDevice2(retro_vulkan_context *context, VkInstance instance, VkPhysica
     queueInfo.pQueuePriorities = &priority;
 
     // Vulkan 1.0 features through pEnabledFeatures; any 1.1+ feature goes into pNext as its own per-feature struct
-    // (never VkPhysicalDeviceVulkan11/12Features: RetroArch's wrapper may add per-feature structs of its own).
+    // (never VkPhysicalDeviceVulkan11/12Features: RetroArch's wrapper may add per-feature structs of its own). A
+    // device below the baseline gets only what it supports.
+    VkPhysicalDeviceFeatures supported{};
+    fn.getFeatures(chosen, &supported);
     VkPhysicalDeviceFeatures features{};
     for (const gpu::CoreFeature &feature : gpu::kRequiredCoreFeatures) {
-        features.*feature.member = VK_TRUE;
+        features.*feature.member = supported.*feature.member;
     }
-    const std::vector<const char *> extensions(gpu::kRequiredDeviceExtensions.begin(),
-                                               gpu::kRequiredDeviceExtensions.end());
+    const std::vector<VkExtensionProperties> available = DeviceExtensions(fn, chosen);
+    std::vector<const char *> extensions;
+    for (const char *required : gpu::kRequiredDeviceExtensions) {
+        if (HasExtension(available, required)) {
+            extensions.push_back(required);
+        }
+    }
 
     VkDeviceCreateInfo info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     info.queueCreateInfoCount = 1;
@@ -248,6 +302,7 @@ bool CreateDevice2(retro_vulkan_context *context, VkInstance instance, VkPhysica
     context->presentation_queue = queue;
     context->presentation_queue_family_index = family;
     g_negotiation.device = device;
+    g_negotiation.baseline = baseline;
     return true;
 }
 
@@ -336,19 +391,42 @@ struct VulkanOutput::Impl {
         retro_vulkan_image image{};
     };
 
+    // A renderer frame context for frames with video disabled (context index slots.size() + i).
+    struct HiddenContext {
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool pending = false; // submitted, fence not waited yet
+    };
+
     const retro_hw_render_interface_vulkan *iface = nullptr;
     std::unique_ptr<gpu::VulkanDevice> device;
     VulkanOutputMode mode = VulkanOutputMode::None;
     std::unique_ptr<gpu::FramePresenter> presenter; // compute mode
     std::vector<Slot> slots;
 
+    // The attached Vulkan VDP renderer (compute mode only), its hidden-frame contexts (created at the first attach)
+    // and whether its composite holds a frame (a fresh back half has none until its first submitted record).
+    gpu::VulkanVDPRenderer *renderer = nullptr;
+    std::array<HiddenContext, kHiddenContexts> hidden{};
+    bool hiddenCreated = false;
+    uint32_t nextHidden = 0;
+    bool compositeValid = false;
+
     VkResult CreateSlots(uint32_t count, VulkanOutputMode wanted);
     void DestroySlots();
     VkResult WaitSlots();
+    VkResult CreateCommandContext(VkCommandPool &pool, VkCommandBuffer &cmd, VkFence &fence);
+    VkResult CreateHidden();
+    void DestroyHidden();
+    VkResult WaitOwnWork();
     VkResult DrainQueue();
+    bool AttachRendererTo(gpu::VulkanVDPRenderer &target, std::string &error);
+    void DetachRendererIdle();
     void Withdraw();
     void Teardown();
     void Abandon();
+    bool EnsureSlots(std::string &error);
     Slot *BeginFrame(uint32_t &index, std::string &error);
     bool SubmitFrame(Slot &slot, std::string &error);
 };
@@ -357,6 +435,29 @@ struct VulkanOutput::Impl {
 // view reads alpha as one (the X byte is 0).
 constexpr VkFormat kCopyFormat = VK_FORMAT_B8G8R8A8_UNORM;
 constexpr uint32_t kCopyMaxSize = gpu::FramePresenter::kMaxOutputSize;
+
+// A transient command pool with one primary command buffer, and an unsignalled fence.
+VkResult VulkanOutput::Impl::CreateCommandContext(VkCommandPool &pool, VkCommandBuffer &cmd, VkFence &fence) {
+    const auto &vk = device->Table();
+    const VkDevice dev = device->Device();
+    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = device->QueueFamily();
+    VkResult result = vk.vkCreateCommandPool(dev, &poolInfo, nullptr, &pool);
+    if (result != VK_SUCCESS) {
+        return result;
+    }
+    VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocInfo.commandPool = pool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    result = vk.vkAllocateCommandBuffers(dev, &allocInfo, &cmd);
+    if (result != VK_SUCCESS) {
+        return result;
+    }
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    return vk.vkCreateFence(dev, &fenceInfo, nullptr, &fence);
+}
 
 VkResult VulkanOutput::Impl::CreateSlots(uint32_t count, VulkanOutputMode wanted) {
     const auto &vk = device->Table();
@@ -370,23 +471,7 @@ VkResult VulkanOutput::Impl::CreateSlots(uint32_t count, VulkanOutputMode wanted
     slots.resize(count);
     for (uint32_t i = 0; i < count; ++i) {
         Slot &slot = slots[i];
-        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-        poolInfo.queueFamilyIndex = device->QueueFamily();
-        VkResult result = vk.vkCreateCommandPool(dev, &poolInfo, nullptr, &slot.pool);
-        if (result != VK_SUCCESS) {
-            return result;
-        }
-        VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        allocInfo.commandPool = slot.pool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
-        result = vk.vkAllocateCommandBuffers(dev, &allocInfo, &slot.cmd);
-        if (result != VK_SUCCESS) {
-            return result;
-        }
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        result = vk.vkCreateFence(dev, &fenceInfo, nullptr, &slot.fence);
+        VkResult result = CreateCommandContext(slot.pool, slot.cmd, slot.fence);
         if (result != VK_SUCCESS) {
             return result;
         }
@@ -454,6 +539,79 @@ VkResult VulkanOutput::Impl::WaitSlots() {
     return VK_SUCCESS;
 }
 
+VkResult VulkanOutput::Impl::CreateHidden() {
+    if (hiddenCreated) {
+        return VK_SUCCESS;
+    }
+    hiddenCreated = true; // DestroyHidden frees whatever was created
+    for (HiddenContext &context : hidden) {
+        if (const VkResult result = CreateCommandContext(context.pool, context.cmd, context.fence);
+            result != VK_SUCCESS) {
+            return result;
+        }
+    }
+    nextHidden = 0;
+    return VK_SUCCESS;
+}
+
+void VulkanOutput::Impl::DestroyHidden() {
+    if (device && hiddenCreated) {
+        const auto &vk = device->Table();
+        for (HiddenContext &context : hidden) {
+            vk.vkDestroyFence(device->Device(), context.fence, nullptr);
+            vk.vkDestroyCommandPool(device->Device(), context.pool, nullptr);
+        }
+    }
+    hidden = {};
+    hiddenCreated = false;
+    nextHidden = 0;
+}
+
+// Waits for every submission of this output (slots and hidden contexts). The frontend's own work is not included:
+// it only samples the slots' output images, never the renderer's resources.
+VkResult VulkanOutput::Impl::WaitOwnWork() {
+    if (const VkResult result = WaitSlots(); result != VK_SUCCESS) {
+        return result;
+    }
+    const auto &vk = device->Table();
+    for (HiddenContext &context : hidden) {
+        if (context.pending) {
+            const VkResult result = vk.vkWaitForFences(device->Device(), 1, &context.fence, VK_TRUE, UINT64_MAX);
+            if (result != VK_SUCCESS) {
+                return result;
+            }
+            context.pending = false;
+        }
+    }
+    return VK_SUCCESS;
+}
+
+// Attaches `target` with the current slot count; the caller has made sure no submission uses a previous back half.
+bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::string &error) {
+    renderer = nullptr;
+    compositeValid = false;
+    if (const VkResult result = CreateHidden(); result != VK_SUCCESS) {
+        error = std::string("creating the hidden-frame command buffers failed: ") + gpu::vk_util::ResultName(result);
+        return false;
+    }
+    target.AttachDevice(*device, static_cast<uint32_t>(slots.size()) + kHiddenContexts);
+    if (!target.Attached()) {
+        error = "creating the VDP2 GPU resources failed";
+        return false;
+    }
+    renderer = &target;
+    return true;
+}
+
+// Detaches the renderer; the device is idle or this output's submissions have completed.
+void VulkanOutput::Impl::DetachRendererIdle() {
+    if (renderer) {
+        renderer->DetachDevice();
+        renderer = nullptr;
+    }
+    compositeValid = false;
+}
+
 // Waits until everything submitted to the frontend's queue so far (its own frames, which may still sample our slots,
 // included) has completed: an empty submit with a fence, in submission order after all earlier work. The queue lock
 // is held only around the submit, never while waiting (the equivalent of vkQueueWaitIdle without a wait under
@@ -504,13 +662,30 @@ void VulkanOutput::Impl::Teardown() {
     if (device) {
         // Allowed in context_destroy: the frontend is idle and holds no reference to the images any more.
         device->Table().vkDeviceWaitIdle(device->Device());
+        for (Slot &slot : slots) {
+            slot.pending = false;
+        }
+        for (HiddenContext &context : hidden) {
+            context.pending = false;
+        }
     }
+    // Wait idle, renderer, slots, device: the renderer's pending frame (possibly ended by VDP2EndFrame but not
+    // recorded yet) is dropped, and the next frame after an attach uploads everything again.
+    DetachRendererIdle();
     DestroySlots();
+    DestroyHidden();
     device.reset();
     iface = nullptr;
 }
 
 void VulkanOutput::Impl::Abandon() {
+    if (renderer) {
+        renderer->AbandonDevice();
+        renderer = nullptr;
+    }
+    compositeValid = false;
+    hidden = {};
+    hiddenCreated = false;
     slots.clear();
     (void)presenter.release();
     (void)device.release();
@@ -521,42 +696,59 @@ void VulkanOutput::Impl::Abandon() {
 // The frame prologue both modes share: slots sized for the current mask, the sync index, the frontend's and our own
 // wait for the slot, and the slot's command buffer begun. Null (with error) when nothing can be recorded; the mode
 // may have changed then (degraded to copy-only, or None when no output is possible any more).
+// The mask may change (with the device idle); slots only grow so earlier indices stay valid. A renderer is re-attached
+// with the new count of frame contexts (its back half, composite included, starts over). False (with error) when the
+// output is not usable as it was: the mode may have changed (copy-only, or None) and the renderer may be detached.
+bool VulkanOutput::Impl::EnsureSlots(std::string &error) {
+    const uint32_t wanted = SlotCountForMask(iface->get_sync_index_mask(iface->handle));
+    if (wanted <= slots.size()) {
+        return true;
+    }
+    const VulkanOutputMode current = mode;
+    gpu::VulkanVDPRenderer *const attached = renderer;
+    Withdraw(); // the frontend must not keep a pointer into the slots about to be freed
+    if (const VkResult result = WaitOwnWork(); result != VK_SUCCESS) {
+        error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
+        DetachRendererIdle();
+        DestroySlots();
+        return false;
+    }
+    // The frontend's own work that still samples the old images.
+    if (const VkResult result = DrainQueue(); result != VK_SUCCESS) {
+        // The slots may still be in use: leak them (and the output) rather than free them under the frontend.
+        error = std::string("waiting for the frontend's queue failed: ") + gpu::vk_util::ResultName(result);
+        Abandon();
+        return false;
+    }
+    DetachRendererIdle();
+    DestroySlots();
+    VkResult result = CreateSlots(wanted, current);
+    if (result != VK_SUCCESS && current == VulkanOutputMode::Compute) {
+        DestroySlots();
+        if (CreateSlots(wanted, VulkanOutputMode::CopyOnly) == VK_SUCCESS) {
+            error = std::string("recreating the compute frame output failed (") + gpu::vk_util::ResultName(result) +
+                    "); continuing with copy-only uploads";
+            return false;
+        }
+    }
+    if (result != VK_SUCCESS) {
+        error = std::string("recreating the frame output failed: ") + gpu::vk_util::ResultName(result);
+        DestroySlots();
+        return false;
+    }
+    if (attached && !AttachRendererTo(*attached, error)) {
+        error = "re-attaching the Vulkan VDP renderer for " + std::to_string(wanted) + " sync slots failed: " + error;
+        return false;
+    }
+    return true;
+}
+
 VulkanOutput::Impl::Slot *VulkanOutput::Impl::BeginFrame(uint32_t &index, std::string &error) {
     const auto &vk = device->Table();
     const VkDevice dev = device->Device();
 
-    // The mask may change (with the device idle); slots only grow so earlier indices stay valid.
-    const uint32_t wanted = SlotCountForMask(iface->get_sync_index_mask(iface->handle));
-    if (wanted > slots.size()) {
-        const VulkanOutputMode current = mode;
-        Withdraw(); // the frontend must not keep a pointer into the slots about to be freed
-        if (const VkResult result = WaitSlots(); result != VK_SUCCESS) {
-            error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
-            DestroySlots();
-            return nullptr;
-        }
-        // The frontend's own work that still samples the old images.
-        if (const VkResult result = DrainQueue(); result != VK_SUCCESS) {
-            // The slots may still be in use: leak them (and the output) rather than free them under the frontend.
-            error = std::string("waiting for the frontend's queue failed: ") + gpu::vk_util::ResultName(result);
-            Abandon();
-            return nullptr;
-        }
-        DestroySlots();
-        VkResult result = CreateSlots(wanted, current);
-        if (result != VK_SUCCESS && current == VulkanOutputMode::Compute) {
-            DestroySlots();
-            if (CreateSlots(wanted, VulkanOutputMode::CopyOnly) == VK_SUCCESS) {
-                error = std::string("recreating the compute frame output failed (") +
-                        gpu::vk_util::ResultName(result) + "); continuing with copy-only uploads";
-                return nullptr;
-            }
-        }
-        if (result != VK_SUCCESS) {
-            error = std::string("recreating the frame output failed: ") + gpu::vk_util::ResultName(result);
-            DestroySlots();
-            return nullptr;
-        }
+    if (!EnsureSlots(error)) {
+        return nullptr;
     }
     index = iface->get_sync_index(iface->handle);
     if (index >= slots.size()) {
@@ -694,7 +886,8 @@ bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &re
     handles.getDeviceProcAddr = iface->get_device_proc_addr;
     handles.apiVersion = instanceVersion;
     const bool negotiated = g_negotiation.device != VK_NULL_HANDLE && g_negotiation.device == iface->device;
-    if (negotiated) {
+    const bool baselineDevice = negotiated && g_negotiation.baseline;
+    if (baselineDevice) {
         for (const gpu::CoreFeature &feature : gpu::kRequiredCoreFeatures) {
             handles.enabledFeatures.*feature.member = VK_TRUE;
         }
@@ -730,9 +923,10 @@ bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &re
         computeIssue = "the frontend's queue does not support compute";
     } else if (const std::string limit = gpu::UnmetLimit(m.device->Properties().limits); !limit.empty()) {
         computeIssue = std::string(m.device->Properties().deviceName) + ": device limit " + limit;
-    } else if (!negotiated && (!gpu::kRequiredCoreFeatures.empty() || !gpu::kRequiredDeviceExtensions.empty())) {
-        computeIssue = "the frontend's device was not created through the negotiation interface, so the required "
-                       "features are not enabled";
+    } else if (!baselineDevice && (!gpu::kRequiredCoreFeatures.empty() || !gpu::kRequiredDeviceExtensions.empty())) {
+        computeIssue = negotiated ? "the negotiated device lacks the required features"
+                                  : "the frontend's device was not created through the negotiation interface, so the "
+                                    "required features are not enabled";
     }
 
     const uint32_t slotCount = SlotCountForMask(iface->get_sync_index_mask(iface->handle));
@@ -830,6 +1024,154 @@ bool VulkanOutput::PresentCopy(const void *xrgb, uint32_t w, uint32_t h, size_t 
                                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT);
     return m.SubmitFrame(*slot, error);
+}
+
+bool VulkanOutput::AttachRenderer(gpu::VulkanVDPRenderer &renderer, std::string &error) {
+    Impl &m = *m_impl;
+    if (m.mode != VulkanOutputMode::Compute) {
+        error = "the compute frame output is not active";
+        return false;
+    }
+    if (m.renderer == &renderer && renderer.Attached()) {
+        return true;
+    }
+    // Another renderer (or a back half of this one) may still be in use by submitted frames.
+    if (m.renderer != nullptr || renderer.Attached()) {
+        if (const VkResult result = m.WaitOwnWork(); result != VK_SUCCESS) {
+            error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
+            return false;
+        }
+        m.DetachRendererIdle();
+    }
+    return m.AttachRendererTo(renderer, error);
+}
+
+void VulkanOutput::DetachRenderer() {
+    Impl &m = *m_impl;
+    if (m.renderer == nullptr) {
+        return;
+    }
+    // A failed wait means a lost device, whose objects may be destroyed anyway.
+    (void)m.WaitOwnWork();
+    m.DetachRendererIdle();
+}
+
+bool VulkanOutput::RendererAttached() const {
+    return m_impl->renderer != nullptr && m_impl->renderer->Attached();
+}
+
+bool VulkanOutput::PrepareFrame(std::string &error) {
+    Impl &m = *m_impl;
+    if (m.mode == VulkanOutputMode::None || !m.device) {
+        return true;
+    }
+    return m.EnsureSlots(error);
+}
+
+bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSettings &settings, unsigned &outW,
+                                   unsigned &outH, std::string &error) {
+    Impl &m = *m_impl;
+    error.clear();
+    if (m.mode != VulkanOutputMode::Compute || !RendererAttached()) {
+        error = "the Vulkan VDP renderer is not attached";
+        return false;
+    }
+    uint32_t index = 0;
+    Impl::Slot *slot = m.BeginFrame(index, error);
+    if (!slot) {
+        return false;
+    }
+    gpu::VulkanVDPRenderer *renderer = m.renderer;
+    if (renderer == nullptr) {
+        // BeginFrame re-created the slots and could not re-attach the renderer.
+        m.device->Table().vkEndCommandBuffer(slot->cmd);
+        error = "the Vulkan VDP renderer was detached";
+        return false;
+    }
+    // This retro_run's VDP2 frame, if one ended; else the composite as it is (the last frame, at the last size).
+    const bool recorded = renderer->HasPendingFrame() && renderer->RecordPendingFrame(index, slot->cmd);
+    if (!recorded && !m.compositeValid) {
+        // A fresh back half: nothing to show until its first frame.
+        m.device->Table().vkEndCommandBuffer(slot->cmd);
+        return false;
+    }
+    const gpu::OutputSettings output{settings.cropH, settings.cropV, settings.rotation};
+    if (!m.presenter->PresentDevice(index, renderer->CompositeBuffer(), w, h, output, slot->cmd)) {
+        m.device->Table().vkEndCommandBuffer(slot->cmd);
+        if (recorded) {
+            renderer->RecordedFrameDropped();
+        }
+        error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
+        return false;
+    }
+    if (!m.SubmitFrame(*slot, error)) {
+        if (recorded) {
+            renderer->RecordedFrameDropped();
+        }
+        return false;
+    }
+    if (recorded) {
+        m.compositeValid = true;
+    }
+    const gpu::OutputSize size = gpu::ComputeOutputSize(w, h, output);
+    outW = size.width;
+    outH = size.height;
+    return true;
+}
+
+bool VulkanOutput::SubmitHidden(std::string &error) {
+    Impl &m = *m_impl;
+    if (m.mode != VulkanOutputMode::Compute || !RendererAttached() || !m.renderer->HasPendingFrame()) {
+        return true;
+    }
+    const auto &vk = m.device->Table();
+    const VkDevice dev = m.device->Device();
+    const uint32_t index = m.nextHidden;
+    Impl::HiddenContext &context = m.hidden[index];
+    // The previous-but-one hidden frame (the only CPU wait of a hidden frame).
+    if (context.pending) {
+        if (const VkResult result = vk.vkWaitForFences(dev, 1, &context.fence, VK_TRUE, UINT64_MAX);
+            result != VK_SUCCESS) {
+            error = std::string("waiting for a hidden frame fence failed: ") + gpu::vk_util::ResultName(result);
+            return false;
+        }
+        context.pending = false;
+    }
+    if (const VkResult result = vk.vkResetCommandPool(dev, context.pool, 0); result != VK_SUCCESS) {
+        error = std::string("vkResetCommandPool failed: ") + gpu::vk_util::ResultName(result);
+        return false;
+    }
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (const VkResult result = vk.vkBeginCommandBuffer(context.cmd, &begin); result != VK_SUCCESS) {
+        error = std::string("vkBeginCommandBuffer failed: ") + gpu::vk_util::ResultName(result);
+        return false;
+    }
+    const uint32_t rendererContext = static_cast<uint32_t>(m.slots.size()) + index;
+    if (!m.renderer->RecordPendingFrame(rendererContext, context.cmd)) {
+        vk.vkEndCommandBuffer(context.cmd);
+        error = "recording a hidden VDP2 frame failed";
+        return false;
+    }
+    VkResult result = vk.vkEndCommandBuffer(context.cmd);
+    if (result == VK_SUCCESS) {
+        result = vk.vkResetFences(dev, 1, &context.fence);
+    }
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &context.cmd;
+        result = m.device->Submit(submit, context.fence);
+    }
+    if (result != VK_SUCCESS) {
+        m.renderer->RecordedFrameDropped();
+        error = std::string("submitting a hidden VDP2 frame failed: ") + gpu::vk_util::ResultName(result);
+        return false;
+    }
+    context.pending = true;
+    m.nextHidden = (index + 1) % kHiddenContexts;
+    m.compositeValid = true;
+    return true;
 }
 
 } // namespace brimir::libretro

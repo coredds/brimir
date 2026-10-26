@@ -42,6 +42,10 @@ enum class Button : uint16_t;
 }
 }
 
+namespace brimir::gpu {
+class VulkanVDPRenderer;
+} // namespace brimir::gpu
+
 namespace brimir::jit {
 class CompileWorker;
 class Executor;
@@ -202,6 +206,29 @@ public:
     uint32_t RawFrameWidth() const { return m_rawWidth; }
     uint32_t RawFrameHeight() const { return m_rawHeight; }
     const FrameOutputSettings& RawFrameSettings() const { return m_rawSettings; }
+
+    /// @brief Installs the Vulkan VDP renderer (VDP2 on the GPU, VDP1 in software; BRIMIR_VULKAN builds) in place of
+    /// the software renderer, carrying the renderer save-state section over, with VDP1 threading as configured. Its
+    /// frames stay on the device (LastDeviceFrame); the caller attaches it to a device. Call between frames. Returns
+    /// the renderer (also when it was installed already), or nullptr with the software renderer kept.
+    gpu::VulkanVDPRenderer* InstallVulkanRenderer();
+
+    /// @brief Switches back from the Vulkan VDP renderer to the software renderer, carrying the renderer save-state
+    /// section over; the software renderer gets the configured threading. The caller has detached the Vulkan
+    /// renderer from its device. No-op when it is not installed. Call between frames.
+    void UseSoftwareRenderer();
+
+    /// @brief The installed Vulkan VDP renderer, or nullptr
+    gpu::VulkanVDPRenderer* GetVulkanRenderer() const { return m_vulkanRenderer; }
+
+    /// @brief A frame the Vulkan VDP renderer completed on the device: its size and the crop/rotation settings
+    /// current at completion (no CPU copy). Width 0 until the first frame after the install.
+    struct DeviceFrame {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        FrameOutputSettings settings;
+    };
+    const DeviceFrame& LastDeviceFrame() const { return m_deviceFrame; }
 
     /// @brief Get audio samples for this frame
     /// @param buffer Buffer to write samples to
@@ -399,6 +426,14 @@ private:
     uint32_t m_rawWidth = 0;
     uint32_t m_rawHeight = 0;
     FrameOutputSettings m_rawSettings;
+
+    // The installed Vulkan VDP renderer (owned by the VDP) and its last frame
+    gpu::VulkanVDPRenderer* m_vulkanRenderer = nullptr;
+    DeviceFrame m_deviceFrame;
+
+    /// @brief Passes the configured VDP1 threading to the Vulkan VDP renderer (the VDP's observers only reach the
+    /// software renderer)
+    void ApplyVulkanRendererThreading();
 
     // Screen rotation (TATE mode)
     int m_rotation = 0; // 0, 90, 180, 270
