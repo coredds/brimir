@@ -1302,12 +1302,15 @@ TEST_CASE("Scene: a mid-frame width change", "[gpu][vdp2][scene][lavapipe]") {
 
 // Virtua Fighter 2's path to F1: an SMPC clock change resets the VDP mid-frame (VDP::Reset: renderer reset, resolution
 // update, line 0 again); the game then selects double-density hi-res with the display still off, so with deinterlacing
-// off only one field's rows are written. Every frame is compared; the last one is the reset frame.
+// off only one field's rows are written. Every frame is compared; the last one is the reset frame. With `content`, the
+// restarted frame turns the display and two NBGs (per-line back colours, BDCLMD) on at line 10, so the restarted lines
+// carry visible content.
 TEST_CASE("Scene: a VDP reset mid-frame clears the composite and restarts the frame", "[gpu][vdp2][scene][lavapipe]") {
     const uint32_t line = GENERATE(1u, 149u);
     const bool doubleDensity = GENERATE(false, true);
     const bool deinterlace = GENERATE(false, true);
-    CAPTURE(line, doubleDensity, deinterlace);
+    const bool content = GENERATE(false, true);
+    CAPTURE(line, doubleDensity, deinterlace, content);
     Vdp2Scene scene = MidFrameScene(kDisp, deinterlace, 3, false,
                                     [=, reset = false](Vdp2SceneWriter &w, uint32_t y) mutable {
                                         if (!reset && y == line) {
@@ -1315,6 +1318,14 @@ TEST_CASE("Scene: a VDP reset mid-frame clears the composite and restarts the fr
                                             reset = true;
                                         } else if (reset && y == 6 && doubleDensity) {
                                             w.Reg(TVMD, static_cast<uint16_t>(kLSMDDouble | kBDCLMD | 3));
+                                        } else if (reset && y == 10 && content) {
+                                            std::mt19937 rng{11};
+                                            Shadow s;
+                                            const uint16_t mode = doubleDensity ? kLSMDDouble | 3 : 0;
+                                            Base(w, s, rng, static_cast<uint16_t>(kDisp | kBDCLMD | mode));
+                                            BackPerLine(w, rng);
+                                            TwoNBGs(w, s, rng);
+                                            Flush(w, s);
                                         }
                                     });
     RenderBothOptions options;
@@ -1324,6 +1335,9 @@ TEST_CASE("Scene: a VDP reset mid-frame clears the composite and restarts the fr
     INFO(result.Describe());
     CHECK(result.error.empty());
     CHECK(result.comparedFrames == 3);
+    if (content) {
+        CHECK(result.distinctColors > 1); // the restarted lines are visible in software
+    }
     CHECK(result.identical);
     CloseAndCheckValidation(device);
 }

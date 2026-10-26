@@ -1046,6 +1046,10 @@ void Vdp2FrontEnd::RenderLine(uint32_t y) {
         CloseRenderedLines();
         m_nextLayerRenderLine = y;
         m_nextComposeLine = y;
+        // Vertical mosaic restarts from lines drawn after the restart, as at the start of a record.
+        for (auto &rows : m_nbgLastDrawnRow) {
+            rows.fill(UINT32_MAX);
+        }
     }
     m_lastLine = y;
 
