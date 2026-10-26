@@ -21,9 +21,9 @@
 //   their own). Each thread evaluates its sample as "native value + (sub-position * step) / span" (NBGSubPosition,
 //   RBGSubPosition; stage1c-upscaling-research.md sections 1.2-1.4), which is the native value at sub-position 0:
 //   NBG scroll, zoom, line zoom, vertical scroll and vertical cell scroll; RBG screen coordinates along the line and
-//   between lines with the line's own increments. Windows, mosaic, coefficient addresses and values, rotation
-//   parameter selection, and NBGs using the character table stay native. The colour calculation window and the RBG
-//   line colours are native and written by the first thread of the pixel only.
+//   between lines with the line's own increments. Windows, mosaic (NBGs per axis), coefficient addresses and values,
+//   rotation parameter selection, and NBGs using the character table stay native. The colour calculation window and
+//   the RBG line colours are native and written by the first thread of the pixel only.
 // Where Ymir differs from Brimir's software renderer (the reference), the software semantics are ported, each marked
 // "// Brimir: matches software (sw:<lines>)": RBG line colours read the RGB555 table of CRAM word (address & 0x7FF);
 // NBG scroll, mosaic, vertical cell scroll and character pattern delay; RBG mosaic.
@@ -1001,12 +1001,21 @@ uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, ui
 // vertically j / N of one increment per composite row (progressive and double density, whose consecutive composite rows
 // are one increment apart), except in single-density interlace, where both composite rows of a pair show the same
 // line: t / 2N with t = (composite row & 1) * N + j, monotone across the pair (the second row's sample point is half an
-// increment on, outside the sample-point invariant). Native (0, 0) under mosaic (flat blocks: the block's first sample)
-// and for NBGs whose characters come from the fetch pass (a native fetch sequence).
+// increment on, outside the sample-point invariant). Mosaic is per axis: i = 0 when the mosaic is wider than one dot,
+// the vertical position native when it is taller than one line (flat blocks: the block's first sample). Native (0, 0)
+// for NBGs whose characters come from the fetch pass (a native fetch sequence).
 uint2 NBGSubPosition(const NBGParams params, uint index, uint row, uint2 sub, out uint2 span) {
     span = uint2(renderScale, renderScale);
-    if (params.base.mosaicEnable || NBGUsesCharTable(params, index)) {
+    if (NBGUsesCharTable(params, index)) {
         return uint2(0, 0);
+    }
+    if (params.base.mosaicEnable) {
+        if (BitExtract(g_commonParams.layerParams, 14, 4) != 0) {
+            sub.x = 0;
+        }
+        if (BitExtract(g_commonParams.layerParams, 18, 4) != 0) {
+            return uint2(sub.x, 0);
+        }
     }
     if (renderScale > 1 && interlaceMode == kInterlaceModeSingleDensity && !exclusiveMonitor) {
         span.y = renderScale * 2;
@@ -1043,8 +1052,8 @@ uint4 DrawNBG(uint2 pos, // dispatch coordinates (native)
         return kTransparentPixel;
     }
 
-    // Brimir: the sample's sub-pixel position. Native (0, 0) under mosaic (flat blocks, the block's first sample) and
-    // for NBGs whose characters come from the fetch pass.
+    // Brimir: the sample's sub-pixel position. Native along each mosaic axis wider than one (flat blocks, the block's
+    // first sample) and (0, 0) for NBGs whose characters come from the fetch pass.
     uint2 span;
     const uint2 nbgSub = NBGSubPosition(params, index, pos.y, sub, span);
     if (params.base.bitmap) {
@@ -1201,9 +1210,11 @@ uint4 DrawBitmapRBG(uint index, uint rotSel, uint2 scrollPos) {
 // Brimir: at internal resolution N, the sub-pixel (i, j) of an RBG sample as the sub-position (s, t) within the RBG
 // dot and line, which span (S * N, R * N) samples (stage1c-upscaling-research.md section 1.4). pos is the output pixel
 // (native, before the hi-res and deinterlace halving). S = 2 in hi-res modes (an RBG dot covers two output columns:
-// s = (x & 1) * N + i); R = 2 in interlaced modes (an RBG line covers two composite rows: t = (row & 1) * N + j when
-// deinterlacing, else t = j, each field writing its own row). Both span rules are monotone across the pair; their
-// second column or row is half a step on, outside the sample-point invariant. Native (0, 0) at 1x and for mosaic.
+// s = (x & 1) * N + i); R = 2 in interlaced modes outside exclusive monitor modes (an RBG line covers two composite
+// rows: t = (composite row & 1) * N + j, the row's parity being the output row's when deinterlacing and the field's
+// when each field writes its own rows; both fields share the line's rotation bases). Exclusive monitor modes never
+// double rows: R = 1. Both span rules are monotone across the pair; their second column or row is half a step on,
+// outside the sample-point invariant. Native (0, 0) at 1x and for mosaic.
 int2 RBGSubPosition(const RBGParams params, uint2 pos, uint2 sub, out int2 span) {
     const int n = int(renderScale);
     span = int2(n, n);
@@ -1215,11 +1226,9 @@ int2 RBGSubPosition(const RBGParams params, uint2 pos, uint2 sub, out int2 span)
         span.x = n * 2;
         st.x += int(pos.x & 1) * n;
     }
-    if (interlaceMode >= kInterlaceModeSingleDensity) {
+    if (interlaceMode >= kInterlaceModeSingleDensity && !exclusiveMonitor) {
         span.y = n * 2;
-        if (deinterlace && !exclusiveMonitor) {
-            st.y += int(pos.y & 1) * n;
-        }
+        st.y += int(deinterlace ? (pos.y & 1) : oddField) * n;
     }
     return st;
 }

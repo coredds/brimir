@@ -3601,9 +3601,10 @@ Vdp2Scene RBGLineColorScene(uint16_t tvmd, bool deinterlace) {
 }
 
 // Scenes without a sub-pixel feature: NBGs unzoomed with integer scroll, sprites, windows, colour calculation,
-// gradation, line colour, shadow, meshes, colour offset, mosaic (native at N, also zoomed or rotated) and NBGs using
-// the character table (character pattern delay, vertical cell scroll on 2x2 characters; native at N, also zoomed). Every
-// sub-pixel of their N x frames shows its native pixel.
+// gradation, line colour, shadow, meshes, colour offset, mosaic (NBG mosaic wider and taller than one and RBG mosaic
+// are native at N, also zoomed or rotated; a vertical-only NBG mosaic keeps its horizontal sub-pixels, a coordinate
+// scene) and NBGs using the character table (character pattern delay, vertical cell scroll on 2x2 characters; native
+// at N, also zoomed). Every sub-pixel of their N x frames shows its native pixel.
 std::vector<std::pair<std::string, Vdp2Scene>> NearestScenes() {
     std::vector<std::pair<std::string, Vdp2Scene>> scenes;
     scenes.emplace_back("NBGs, sprites, colour offset", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
@@ -3645,7 +3646,7 @@ std::vector<std::pair<std::string, Vdp2Scene>> NearestScenes() {
             Base(w, s, rng);
             TwoNBGs(w, s, rng);
             w.Reg(MZCTL, 0x3203); // NBG0 and NBG1, 3 pixels wide, 4 lines high
-            // Zoomed with a fractional scroll: native under mosaic
+            // Zoomed with a fractional scroll: native on both axes under a 3x4 mosaic
             w.Reg(ZMXDN0, 0xC000);
             w.Reg(SCXDN0, 0x8000);
             w.Reg(ZMYDN0, 0xA000);
@@ -3807,6 +3808,7 @@ TEST_CASE("Scene: internal resolution N matches software at the sample points", 
         INFO(result.Describe());
         CHECK(result.error.empty());
         CHECK(result.scale == n);
+        CHECK(result.comparedPixels > 0);
         CHECK(result.comparedPixels + result.skippedPixels == uint64_t{result.width} * result.height);
         CHECK(result.identical);
     }
@@ -3833,6 +3835,7 @@ TEST_CASE("Scene: internal resolution N with poisoned images", "[gpu][vdp2][scen
         const SceneResult result = CompareSamplePoints(scene, *device, n, options);
         INFO(result.Describe());
         CHECK(result.error.empty());
+        CHECK(result.comparedPixels > 0);
         CHECK(result.identical);
     }
     CloseAndCheckValidation(device);
@@ -3924,13 +3927,42 @@ struct CoordScene {
     std::string name;
     Vdp2Scene scene;
     CoordExpect expect;
+    // v never decreases from one N x row to the next (woven interlace: both fields from the same bases)
+    bool monotoneV = false;
 };
+
+// The backward vertical steps of an n x frame: pixels (X, Y + 1) whose decoded v is below that of (X, Y) (mod 256,
+// steps under half the range). `compared` counts the decoded pairs.
+uint64_t BackwardSteps(const std::vector<uint32_t> &frame, uint32_t width, uint32_t height, uint32_t n,
+                       uint64_t &compared) {
+    uint64_t back = 0;
+    compared = 0;
+    if (frame.size() != static_cast<size_t>(width) * height * n * n) {
+        return 0;
+    }
+    const uint32_t pitch = width * n;
+    for (uint32_t Y = 0; Y + 1 < height * n; ++Y) {
+        for (uint32_t X = 0; X < pitch; ++X) {
+            uint32_t u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+            if (!DecodeCoord(frame[static_cast<size_t>(Y) * pitch + X], u0, v0) ||
+                !DecodeCoord(frame[static_cast<size_t>(Y + 1) * pitch + X], u1, v1)) {
+                continue;
+            }
+            ++compared;
+            const uint32_t step = (v1 - v0) & 255;
+            back += step >= 128 ? 1 : 0;
+        }
+    }
+    return back;
+}
 
 sp::Geometry CoordGeometry(uint16_t tvmd, bool deinterlace) {
     sp::Geometry g;
     g.hiRes = (tvmd & 2) != 0;
     const uint16_t lsmd = tvmd & 0x00C0;
-    g.interlace = lsmd == kLSMDDouble   ? sp::Interlace::DoubleDensity
+    // Exclusive monitor modes (HRESO bit 2) never double rows: their composite rows are lines, as progressive
+    g.interlace = (tvmd & 4) != 0       ? sp::Interlace::None
+                  : lsmd == kLSMDDouble ? sp::Interlace::DoubleDensity
                   : lsmd == kLSMDSingle ? sp::Interlace::SingleDensity
                                         : sp::Interlace::None;
     g.deinterlace = deinterlace;
@@ -3946,7 +3978,43 @@ struct CoordNBG {
     bool lineTable = false;                // line scroll X and line zoom on every line (progressive)
     uint32_t zoomLine = UINT32_MAX;        // the horizontal increment changes to zoomAfter at this line
     uint32_t zoomAfter = 0x100;
+    bool cells = false;                    // 1x1 RGB555 characters (WriteCoordCells) instead of the bitmap
+    uint32_t mosaicV = 1;                  // vertical mosaic only (MZCTL), progressive
+    bool vcellScroll = false;              // vertical cell scroll (CoordVCellScroll), progressive
 };
+
+// The coordinate plane in cells: 1x1 RGB555 characters (128 bytes) at kCharBase whose texels encode their plane
+// position (u mod 128, v mod 256: 16 x 32 distinct characters), and one page of two-word pattern names at kPageBase,
+// one plane of one page (512x512 dots) for planes A-D.
+void WriteCoordCells(Vdp2SceneWriter &w) {
+    for (uint32_t c = 0; c < 16 * 32; ++c) {
+        const uint32_t cu = (c % 16) * 8, cv = (c / 16) * 8;
+        for (uint32_t py = 0; py < 8; ++py) {
+            for (uint32_t px = 0; px < 8; ++px) {
+                w.VRAM16(kCharBase + c * 128 + (py * 8 + px) * 2, CoordTexel(cu + px, cv + py));
+            }
+        }
+    }
+    for (uint32_t cy = 0; cy < 64; ++cy) {
+        for (uint32_t cx = 0; cx < 64; ++cx) {
+            const uint32_t c = (cy % 32) * 16 + cx % 16;
+            const uint32_t entry = kPageBase + (cy * 64 + cx) * 4;
+            w.VRAM16(entry, 0);
+            w.VRAM16(entry + 2, static_cast<uint16_t>(c * 4)); // character number in 32-byte units
+        }
+    }
+    w.Reg(PNCN0, 0x0000); // two-word pattern names
+    const uint32_t mapIndex = kPageBase >> 14;
+    const uint16_t mp = static_cast<uint16_t>(((mapIndex & 0x3F) << 8) | (mapIndex & 0x3F));
+    w.Reg(MPABN0, mp);
+    w.Reg(MPABN0 + 2, mp);
+}
+
+// The vertical cell scroll table values (11.8) of the coordinate scenes: distinct, fractional, some negative.
+constexpr uint32_t kCoordVCellAddress = 0x7D000;
+int64_t CoordVCellScroll(uint32_t k) {
+    return static_cast<int64_t>((k * 0x2D7u + 0x31u) % 0x6000u) - 0x1800;
+}
 
 uint32_t CoordLineScrollX(uint32_t line) {
     return (line * 0x1D3u) & 0x7FFFF;
@@ -3966,11 +4034,27 @@ CoordScene CoordNBGScene(std::string name, CoordNBG c) {
         [c](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng, static_cast<uint16_t>(kDisp | c.tvmd));
             CyclesSingle(w, 0);
-            s.chctla = static_cast<uint16_t>((s.chctla & 0xFF00) | (3 << 4) | (1 << 1)); // RGB555 512x256 bitmap
-            s.bgon |= 0x0101;                                                             // transparency off
+            // RGB555 512x256 bitmap, or 1x1 RGB555 characters
+            s.chctla = static_cast<uint16_t>((s.chctla & 0xFF00) | (3 << 4) | (c.cells ? 0 : 1 << 1));
+            s.bgon |= 0x0101; // transparency off
             s.prina = static_cast<uint16_t>((s.prina & 0xFF00) | 4);
             s.mpofn = static_cast<uint16_t>(s.mpofn & ~7u);
-            WriteCoordBitmap(w);
+            if (c.cells) {
+                WriteCoordCells(w);
+            } else {
+                WriteCoordBitmap(w);
+            }
+            if (c.mosaicV > 1) {
+                w.Reg(MZCTL, static_cast<uint16_t>(((c.mosaicV - 1) << 12) | 0x0001)); // NBG0, 1 dot wide
+            }
+            if (c.vcellScroll) {
+                for (uint32_t k = 0; k < 128; ++k) {
+                    w.VRAM32(kCoordVCellAddress + k * 4, static_cast<uint32_t>(CoordVCellScroll(k) & 0x7FFFF) << 8);
+                }
+                w.Reg(CYCB0L, 0x0CFF); // NBG0 pattern names at T0, its vertical cell scroll table at T1
+                w.Reg(VCSTAU, static_cast<uint16_t>(kCoordVCellAddress >> 17));
+                w.Reg(VCSTAL, static_cast<uint16_t>((kCoordVCellAddress >> 1) & 0xFFFE));
+            }
             w.Reg(SCXIN0, static_cast<uint16_t>((c.scrollX >> 8) & 0x7FF));
             w.Reg(SCXDN0, static_cast<uint16_t>((c.scrollX & 0xFF) << 8));
             w.Reg(SCYIN0, static_cast<uint16_t>((c.scrollY >> 8) & 0x7FF));
@@ -3987,8 +4071,9 @@ CoordScene CoordNBGScene(std::string name, CoordNBG c) {
                 }
                 w.Reg(LSTA0U, static_cast<uint16_t>(kLineScrollAddress >> 17));
                 w.Reg(LSTA0L, static_cast<uint16_t>((kLineScrollAddress >> 1) & 0xFFFF));
-                w.Reg(SCRCTL, 0x000A); // line scroll X and line zoom, every line
             }
+            // Line scroll X and line zoom, every line; vertical cell scroll
+            w.Reg(SCRCTL, static_cast<uint16_t>((c.lineTable ? 0x000A : 0) | (c.vcellScroll ? 0x0001 : 0)));
         },
         {.deinterlace = c.deinterlace});
     if (c.zoomLine != UINT32_MAX) {
@@ -4007,6 +4092,12 @@ CoordScene CoordNBGScene(std::string name, CoordNBG c) {
     frame.scrollY = c.scrollY;
     frame.incH = c.incH;
     frame.incV = c.incV;
+    frame.mosaicV = c.mosaicV;
+    if (c.vcellScroll) {
+        for (uint32_t k = 0; k < 128; ++k) {
+            frame.vcellScroll.push_back(CoordVCellScroll(k));
+        }
+    }
     if (c.lineTable) {
         for (uint32_t line = 0; line < 512; ++line) {
             frame.lineScrollX.push_back(CoordLineScrollX(line));
@@ -4152,18 +4243,42 @@ std::vector<CoordScene> CoordScenes() {
         const std::string mode = deinterlace ? ", deinterlaced" : ", woven";
         scenes.push_back(CoordNBGScene("NBG0 vertical zoom in double density" + mode,
                                        {.tvmd = kLSMDDouble, .deinterlace = deinterlace, .incH = 0xCD, .incV = 0xA0}));
+        scenes.back().monotoneV = true;
         scenes.push_back(CoordNBGScene("NBG0 vertical zoom in single density" + mode,
                                        {.tvmd = kLSMDSingle, .deinterlace = deinterlace, .incH = 0xCD, .incV = 0xA0}));
+        scenes.back().monotoneV = true;
     }
+    // Mosaic is per axis: a vertical-only mosaic keeps the horizontal sub-pixels (each row of a block repeats the
+    // block's first line, vertically native).
+    scenes.push_back(CoordNBGScene("NBG0 zoom with a vertical-only mosaic", {.incH = 0xCD, .incV = 0xA0, .mosaicV = 3}));
+    // Tile edges: 1x1 characters (each sub-pixel's character and dot from its own position), zoomed with a fractional
+    // scroll, enlarged and reduced; vertical cell scroll on 1x1 characters (each sub-pixel reads the table entry of
+    // its own cell column).
+    scenes.push_back(CoordNBGScene("NBG0 cells zoom 1.25x", {.incH = 0xCD, .incV = 0xCD, .cells = true}));
+    scenes.push_back(CoordNBGScene("NBG0 cells zoom 0.75x", {.incH = 0x155, .incV = 0x155, .cells = true}));
+    scenes.push_back(CoordNBGScene("NBG0 cells vertical cell scroll",
+                                   {.incH = 0x100, .incV = 0xC0, .cells = true, .vcellScroll = true}));
+    scenes.push_back(CoordNBGScene("NBG0 cells vertical cell scroll with zoom 1.25x",
+                                   {.incH = 0xCD, .incV = 0xC0, .cells = true, .vcellScroll = true}));
 
     scenes.push_back(CoordRBGScene("RBG0 fixed matrix", {}));
     scenes.push_back(CoordRBGScene("RBG0 per-dot coefficients", {.coefficients = true}));
     scenes.push_back(CoordRBGScene("RBG0 per-line coefficients", {.coefficients = true, .perDot = false}));
     scenes.push_back(CoordRBGScene("RBG0 hi-res", {.tvmd = 2}));
     scenes.push_back(CoordRBGScene("RBG0 hi-res 704 per-dot coefficients", {.tvmd = 3, .coefficients = true}));
+    // Interlaced, deinterlaced or woven: both rows of a pair show the RBG line from the same bases, the odd one half
+    // a line on (t = (row & 1) N + j over 2N), so v never steps back (rotation 0.3: v grows with the line).
     scenes.push_back(CoordRBGScene("RBG0 double density, deinterlaced", {.tvmd = kLSMDDouble, .deinterlace = true}));
+    scenes.back().monotoneV = true;
     scenes.push_back(CoordRBGScene("RBG0 double density, woven", {.tvmd = kLSMDDouble}));
+    scenes.back().monotoneV = true;
     scenes.push_back(CoordRBGScene("RBG0 single density, deinterlaced", {.tvmd = kLSMDSingle, .deinterlace = true}));
+    scenes.back().monotoneV = true;
+    scenes.push_back(CoordRBGScene("RBG0 single density, woven", {.tvmd = kLSMDSingle}));
+    scenes.back().monotoneV = true;
+    // Exclusive monitor modes never double rows: one row per RBG line (R = 1), as progressive.
+    scenes.push_back(CoordRBGScene("RBG0 exclusive monitor double density, woven",
+                                   {.tvmd = static_cast<uint16_t>(4 | kLSMDDouble)}));
     {
         // Xst, Yst and their increments (and the horizontal increment) reloaded at line 100: the sub-lines of each
         // line use that line's own increments.
@@ -4212,61 +4327,14 @@ void CheckCoordScene(gpu::VulkanDevice &device, const CoordScene &c, uint32_t n,
     CHECK(scaled.pixels == uint64_t{result.width} * result.height * n * n);
     CHECK(scaled.mismatches == 0);
     CHECK(NonConstantBlocks(result.gpuScaled, result.width, result.height, n) > 0);
+    if (c.monotoneV) {
+        uint64_t compared = 0;
+        CHECK(BackwardSteps(result.gpuScaled, result.width, result.height, n, compared) == 0);
+        CHECK(compared == uint64_t{result.width} * n * (result.height * n - 1));
+    }
 }
 
 } // namespace
-
-TEST_CASE("The sub-pixel reference", "[vdp2][scale]") {
-    // Truncation toward zero, as HLSL int division
-    CHECK(sp::SubOffset(1, -3, 2) == -1);
-    CHECK(sp::SubOffset(1, 3, 2) == 1);
-    CHECK(sp::SubOffset(0, -1000, 4) == 0);
-    // A sample point (i = j = 0) is the native value, wherever the lattice includes it
-    sp::RBGFrame rbg;
-    rbg.table = ToRotParams(Rotated(2.5, 1.2));
-    rbg.table.deltaXst = -300;
-    sp::NBGFrame nbg;
-    nbg.scrollX = 0x12345;
-    nbg.scrollY = 0x4580;
-    nbg.incH = 0xCD;
-    nbg.incV = 0xA0;
-    for (const uint32_t n : {2u, 3u, 4u}) {
-        CAPTURE(n);
-        for (uint32_t y = 0; y < 8; ++y) {
-            for (uint32_t x = 0; x < 8; ++x) {
-                sp::RBGFrame r1 = rbg, rn = rbg;
-                rn.geometry.n = n;
-                CHECK(sp::RBGDotAt(r1, x, y).u == sp::RBGDotAt(rn, x * n, y * n).u);
-                CHECK(sp::RBGDotAt(r1, x, y).v == sp::RBGDotAt(rn, x * n, y * n).v);
-                sp::NBGFrame n1 = nbg, nn = nbg;
-                nn.geometry.n = n;
-                CHECK(sp::NBGDotAt(n1, x, y).u == sp::NBGDotAt(nn, x * n, y * n).u);
-                CHECK(sp::NBGDotAt(n1, x, y).v == sp::NBGDotAt(nn, x * n, y * n).v);
-            }
-        }
-        // Hi-res: the odd column's sample point is half a dot step on (s = N of 2N); deinterlaced: the odd row's is half
-        // a line step on (t = N of 2N), with the line's own (negative) delta.
-        sp::RBGFrame hi1 = rbg;
-        hi1.geometry = {.n = 1, .hiRes = true};
-        CHECK(sp::RBGDotAt(hi1, 1, 0).u == sp::RBGDotAt(hi1, 0, 0).u); // 1x: both columns are the RBG dot
-        sp::RBGFrame de = rbg;
-        de.geometry = {.n = n, .interlace = sp::Interlace::DoubleDensity, .deinterlace = true};
-        sp::RBGFrame half = rbg;
-        half.table.Xst += sp::SubOffset(n, rbg.table.deltaXst, 2 * n);
-        half.table.Yst += sp::SubOffset(n, rbg.table.deltaYst, 2 * n);
-        CHECK(sp::RBGDotAt(de, 0, n).u == sp::RBGDotAt(half, 0, 0).u);
-        CHECK(sp::RBGDotAt(de, 0, n).v == sp::RBGDotAt(half, 0, 0).v);
-        // Single density NBG: monotone across the pair (row 2l + 1 continues row 2l)
-        sp::NBGFrame sd = nbg;
-        sd.geometry = {.n = n, .interlace = sp::Interlace::SingleDensity};
-        int64_t last = sp::NBGDotAt(sd, 0, 0).v;
-        for (uint32_t Y = 1; Y < 8 * n; ++Y) {
-            const int64_t v = sp::NBGDotAt(sd, 0, Y).v;
-            CHECK(v >= last);
-            last = v;
-        }
-    }
-}
 
 TEST_CASE("Scene: coordinate bitmaps at N match the sub-pixel reference", "[gpu][vdp2][scene][scale]") {
     const uint32_t n = GENERATE(2u, 3u, 4u);
@@ -4705,8 +4773,15 @@ TEST_CASE("The sample-point lattice from TVMD and BGON", "[vdp2][scale]") {
     CHECK((rows[1].first == 7 && rows[1].second.skipRow));
     rows = rowsOf(kDisp | kLSMDDouble, 0x01, true, false);
     CHECK_FALSE(rows[1].second.skipRow);
-    // Double density woven, RBG0: the field's row only, nothing excluded.
+    // Double density woven, RBG0: the field's row only, the odd field's excluded (half a line on, as deinterlaced);
+    // with NBGs only: not excluded.
     rows = rowsOf(kDisp | kLSMDDouble, 0x10, false, true);
+    REQUIRE(rows.size() == 1);
+    CHECK((rows[0].first == 7 && rows[0].second.skipRow));
+    rows = rowsOf(kDisp | kLSMDDouble, 0x10, false, false);
+    REQUIRE(rows.size() == 1);
+    CHECK((rows[0].first == 6 && !rows[0].second.skipRow));
+    rows = rowsOf(kDisp | kLSMDDouble, 0x01, false, true);
     REQUIRE(rows.size() == 1);
     CHECK((rows[0].first == 7 && !rows[0].second.skipRow));
     // Single density with an NBG, woven or deinterlaced: the odd row is excluded.

@@ -46,6 +46,13 @@ struct NBGFrame {
     // of that line).
     std::vector<int64_t> lineScrollX;
     std::vector<int64_t> lineIncH;
+    // Vertical mosaic block height (progressive modes only; no horizontal mosaic): line Yc repeats line
+    // Yc - Yc % mosaicV, vertically native (j = 0); horizontal sub-pixels stay.
+    uint32_t mosaicV = 1;
+    // Vertical cell scroll (11.8, when not empty): the value of the k-th table read of the line, k the cell columns
+    // (8 dots) crossed from the line's start at the sample's own horizontal position (no repeat, no delay):
+    //   k = ((fx & 0x7FF) + x * incH + (i * incH) / N) >> 11, added to fy.
+    std::vector<int64_t> vcellScroll;
 };
 
 /// @brief The NBG dot of N x composite pixel (X, Y).
@@ -54,8 +61,8 @@ struct NBGFrame {
 /// one increment apart (both fields, woven or deinterlaced): fy = scrollY + Yc * incV; single density: both rows of a
 /// pair show line Yc / 2: fy = scrollY + (Yc / 2) * incV. Sample (i, j) of native pixel (x, Yc):
 ///   u = (fx + x * incH + (i * incH) / N) >> 8
-///   v = (fy + (j * incV) / N) >> 8, or in single density at N > 1 (t = (Yc & 1) * N + j):
-///   v = (fy + (t * incV) / 2N) >> 8.
+///   v = (fy + vcell + (j * incV) / N) >> 8, or in single density at N > 1 (t = (Yc & 1) * N + j):
+///   v = (fy + vcell + (t * incV) / 2N) >> 8.
 Dot NBGDotAt(const NBGFrame &frame, uint32_t X, uint32_t Y);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -85,8 +92,9 @@ struct RBGFrame {
 /// @brief The RBG dot of N x composite pixel (X, Y).
 ///
 /// RBG dot x = output column (/ 2 in hi-res), sub-position s = i, or (column & 1) * N + i over S = 2 in hi-res; RBG line
-/// l = composite row (/ 2 in interlaced modes), sub-line t = j, or (row & 1) * N + j over R = 2 when deinterlacing an
-/// interlaced mode (R = 2, t = j when each field writes its own rows); s = t = 0 at N = 1. With the table T of line l
+/// l = composite row (/ 2 in interlaced modes), sub-line t = j, or (row & 1) * N + j over R = 2 in an interlaced mode,
+/// deinterlaced or woven (both fields' rows show line l from the same bases); s = t = 0 at N = 1. Exclusive monitor
+/// modes are not modelled. With the table T of line l
 /// and its bases Xst(l), Yst(l) (accumulated per line by deltaXst/deltaYst, re-read at the reload line):
 ///   Xst' = Xst(l) + (t * T.deltaXst) / (R N), Yst' likewise
 ///   Xsp = (A (Xst' - Px 2^10) + B (Yst' - Py 2^10) + C (Zst - Pz 2^10)) >> 10, Ysp with D, E, F

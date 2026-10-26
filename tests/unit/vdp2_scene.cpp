@@ -343,10 +343,10 @@ void LatticeForLine(const Vdp2SceneWriter &writer, const VDPState &state, uint32
         set(y, flags);
         return;
     }
-    // Odd rows: RBGs with deinterlacing (both rows are the RBG line), NBGs in single density (both fields show the
-    // same line, deinterlaced or woven).
+    // Odd rows: RBGs, deinterlaced or woven (both rows are the RBG line, from the same rotation bases), NBGs in single
+    // density (both fields show the same line, deinterlaced or woven).
     SampleLatticeRow odd = flags;
-    odd.skipRow = (rbg && deinterlace) || (nbg && singleDensity);
+    odd.skipRow = rbg || (nbg && singleDensity);
     if (deinterlace) {
         set(y * 2, flags);
         set(y * 2 + 1, odd);
@@ -467,7 +467,7 @@ bool CompareSamplePointPixels(const std::vector<uint32_t> &software, uint32_t wi
     }
     // The lattice excludes at most odd columns and odd rows: three quarters of the frame are compared, or one quarter
     // with both.
-    if (result.comparedPixels * 4 < static_cast<uint64_t>(width) * height) {
+    if (result.comparedPixels == 0 || result.comparedPixels * 4 < static_cast<uint64_t>(width) * height) {
         result.error = "sample-point comparison compared only " + std::to_string(result.comparedPixels) + " of " +
                        std::to_string(static_cast<uint64_t>(width) * height) + " native pixels";
         return false;

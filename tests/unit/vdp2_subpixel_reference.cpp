@@ -10,7 +10,11 @@ Dot NBGDotAt(const NBGFrame &frame, uint32_t X, uint32_t Y) {
     const Geometry &g = frame.geometry;
     const int64_t n = g.n;
     const uint32_t x = X / g.n, i = X % g.n;
-    const uint32_t row = Y / g.n, j = Y % g.n;
+    uint32_t row = Y / g.n, j = Y % g.n;
+    if (frame.mosaicV > 1) {
+        row -= row % frame.mosaicV;
+        j = 0;
+    }
 
     // The VDP line and the vertical position of the composite row's native pixel
     int64_t fy;
@@ -32,8 +36,14 @@ Dot NBGDotAt(const NBGFrame &frame, uint32_t X, uint32_t Y) {
     const int64_t incH = line < frame.lineIncH.size() ? frame.lineIncH[line] : frame.incH;
     const int64_t fx = (line < frame.lineScrollX.size() ? frame.lineScrollX[line] : 0) + frame.scrollX;
 
+    const int64_t sx = int64_t{x} * incH + SubOffset(i, incH, n);
+    if (!frame.vcellScroll.empty()) {
+        const size_t k = static_cast<size_t>(((fx & 0x7FF) + sx) >> 11);
+        fy += k < frame.vcellScroll.size() ? frame.vcellScroll[k] : 0;
+    }
+
     Dot dot;
-    dot.u = (fx + int64_t{x} * incH + SubOffset(i, incH, n)) >> 8;
+    dot.u = (fx + sx) >> 8;
     if (g.interlace == Interlace::SingleDensity && n > 1) {
         const int64_t t = int64_t{row & 1} * n + j;
         dot.v = (fy + SubOffset(t, frame.incV, 2 * n)) >> 8;
@@ -62,10 +72,9 @@ Dot RBGDotAt(const RBGFrame &frame, uint32_t X, uint32_t Y) {
             spanS = 2 * n;
         }
         if (interlaced) {
+            // Deinterlaced or woven: both composite rows of the pair show line l from the same bases
             spanT = 2 * n;
-            if (g.deinterlace) {
-                t += int64_t{row & 1} * n;
-            }
+            t += int64_t{row & 1} * n;
         }
     }
 

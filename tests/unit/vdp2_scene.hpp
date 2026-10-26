@@ -155,8 +155,9 @@ struct SceneResult {
 
 /// @brief Per native composite row: which sample points of an N x frame are excluded from the sample-point invariant
 /// (stage1c-upscaling-research.md section 2; the brief's Global Constraints): odd native columns where an RBG is
-/// enabled in a hi-res mode; the odd row where an RBG is drawn with deinterlacing in an interlaced mode; the second
-/// row of each identical pair for NBGs in single-density interlace.
+/// enabled in a hi-res mode; odd composite rows where an RBG is drawn in an interlaced mode (deinterlaced or woven:
+/// both rows of the pair show the RBG line from the same rotation bases, the odd one half a line on); the second row
+/// of each identical pair for NBGs in single-density interlace.
 struct SampleLatticeRow {
     bool skipOddColumns = false;
     bool skipRow = false;
@@ -165,11 +166,11 @@ struct SampleLatticeRow {
 /// @brief The lattice rows a VDP2 line writes, from the line's TVMD and BGON (the frame's resolution from the writer):
 /// calls set(row, flags) for each composite row line y writes (one, or two with deinterlacing in interlaced modes).
 /// The rules are per composite row, from the layers enabled on the line that wrote it: a hi-res line with an RBG
-/// enabled skips its odd columns; in an interlaced mode, the odd row skips when an RBG is enabled with deinterlacing,
-/// or (single density) when any NBG is enabled, the whole row, even where the NBG is transparent or covered (the
-/// lattice does not know which layer is on top). So in single density the odd rows of the lines with every NBG off
-/// are compared (sprites, RBGs without deinterlacing, back screen; the scene "single-density interlace with NBGs off
-/// on some lines").
+/// enabled skips its odd columns; in an interlaced mode (not exclusive monitor modes), the odd row skips when an RBG
+/// is enabled (deinterlaced or woven), or (single density) when any NBG is enabled, the whole row, even where the
+/// layer is transparent or covered (the lattice does not know which layer is on top). So in single density the odd
+/// rows of the lines with every NBG and RBG off are compared (sprites, back screen; the scene "single-density
+/// interlace with NBGs off on some lines").
 void LatticeForLine(const Vdp2SceneWriter &writer, const ymir::vdp::VDPState &state, uint32_t y, bool deinterlace,
                     const std::function<void(uint32_t row, SampleLatticeRow flags)> &set);
 
@@ -182,8 +183,8 @@ bool CompareNearestPixels(const std::vector<uint32_t> &software, uint32_t width,
 
 /// @brief Sample-point comparison: pixel (n * x, n * y) of `scaled` must equal software(x, y) for every native pixel
 /// outside the excluded lattice (`lattice`, one entry per native row; missing rows exclude nothing). False with
-/// result.error set when the sizes do not match or fewer than a quarter of the native pixels are compared (more than
-/// the lattice can exclude: a vacuous pass).
+/// result.error set when the sizes do not match, or no native pixel or fewer than a quarter of them are compared (more
+/// than the lattice can exclude: a vacuous pass).
 bool CompareSamplePointPixels(const std::vector<uint32_t> &software, uint32_t width, uint32_t height,
                               std::vector<uint32_t> scaled, uint32_t n, const std::vector<SampleLatticeRow> &lattice,
                               SceneResult &result);

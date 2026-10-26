@@ -89,11 +89,12 @@ checks every module's Workgroup variables against it.
     with t = (composite row & 1) N + j in single-density interlace (both rows of a pair show one line);
   - RBGs (`RBGSubPosition`, `CalcRotationScreenCoords`): screen coordinates plus s / (S N) of the horizontal increment
     and Xst/Yst plus t / (R N) of the line's own deltaXst/deltaYst (no interpolation towards the next line); S = 2 in
-    hi-res (s = (x & 1) N + i), R = 2 in interlaced modes (t = (row & 1) N + j when deinterlacing, else t = j); the
+    hi-res (s = (x & 1) N + i), R = 2 in interlaced modes outside exclusive monitor modes (t = (composite row & 1) N
+    + j, deinterlaced or woven: both fields share the line's rotation bases, so the woven pair is monotone too); the
     RBG line colour is stored by sub-pixel (0, 0) with the native screen coordinates;
-  - native: windows, mosaic (the whole layer when MZCTL enables it), coefficient addresses and values, rotation
-    parameter selection, NBGs using the character table (character pattern delay, vertical cell scroll on 2x2
-    characters).
+  - native: windows, NBG mosaic per axis (i = 0 when the mosaic is wider than one dot, the vertical position when it
+    is taller than one line), RBG mosaic (the whole layer), coefficient addresses and values, rotation parameter
+    selection, NBGs using the character table (character pattern delay, vertical cell scroll on 2x2 characters).
 
 ### 2. Software semantics (Brimir's software renderer is the reference)
 
