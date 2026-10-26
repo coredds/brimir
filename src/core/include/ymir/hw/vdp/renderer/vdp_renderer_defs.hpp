@@ -94,6 +94,7 @@ struct VRAMFetcher {
         currChar = {};
         nextChar = {};
         lastCharIndex = 0xFFFFFFFF;
+        lastCellX = 0xFF; // Brimir: was left uninitialized (and saved as-is); 0xFF as at the start of each line
 
         charData.fill(0);
         charDataAddress = 0xFFFFFFFF;

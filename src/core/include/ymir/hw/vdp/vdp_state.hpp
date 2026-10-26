@@ -768,6 +768,12 @@ struct VDP2State {
         uint32 vcellAccessOffset = 0;
         nbgLayerStates[0].vcellScrollOffset = 0;
         nbgLayerStates[1].vcellScrollOffset = 0;
+        // Brimir: the flags below are only set when an access is found; clear them so that they do not keep a value
+        // from an earlier configuration (or from before a state load) when there is none
+        nbgLayerStates[0].vcellScrollDelay = false;
+        nbgLayerStates[0].vcellScrollRepeat = false;
+        nbgLayerStates[1].vcellScrollDelay = false;
+        nbgLayerStates[1].vcellScrollRepeat = false;
 
         // Update cycle accesses
         for (uint32 slotIndex = 0; slotIndex < 8; ++slotIndex) {

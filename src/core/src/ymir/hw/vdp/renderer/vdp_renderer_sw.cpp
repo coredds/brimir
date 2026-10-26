@@ -259,7 +259,8 @@ void SoftwareVDPRenderer::SaveState(savestate::VDPSaveState::VDPRendererSaveStat
 
     auto copyChar = [&](savestate::VDPSaveState::VDPRendererSaveState::CharacterSaveState &dst, const Character &src) {
         dst.charNum = src.charNum;
-        dst.palNum = src.palNum >> 4u;
+        // Brimir: store all 7 bits; 16-colour characters use the low four (upstream saved palNum >> 4)
+        dst.palNum = src.palNum;
         dst.specColorCalc = src.specColorCalc;
         dst.specPriority = src.specPriority;
         dst.flipH = src.flipH;
@@ -291,7 +292,8 @@ void SoftwareVDPRenderer::LoadState(const savestate::VDPSaveState::VDPRendererSa
 
     auto copyChar = [&](Character &dst, const savestate::VDPSaveState::VDPRendererSaveState::CharacterSaveState &src) {
         dst.charNum = src.charNum;
-        dst.palNum = src.palNum << 4u;
+        // Brimir: stored unshifted (see SaveState); the bridge converts older states
+        dst.palNum = src.palNum;
         dst.specColorCalc = src.specColorCalc;
         dst.specPriority = src.specPriority;
         dst.flipH = src.flipH;

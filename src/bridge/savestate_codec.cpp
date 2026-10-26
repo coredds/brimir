@@ -276,4 +276,14 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state) {
     return true;
 }
 
+void UpgradeVersion4SaveState(SaveState& state) {
+    // Character::palNum is 7 bits wide: the old load path shifted the stored value left into it.
+    for (auto& field : state.vdp.renderer.vramFetchers) {
+        for (auto& fetcher : field) {
+            fetcher.currChar.palNum = static_cast<uint8>((fetcher.currChar.palNum << 4u) & 0x7Fu);
+            fetcher.nextChar.palNum = static_cast<uint8>((fetcher.nextChar.palNum << 4u) & 0x7Fu);
+        }
+    }
+}
+
 } // namespace brimir

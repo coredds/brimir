@@ -255,7 +255,7 @@ struct VDPSaveState {
 
         struct CharacterSaveState {
             uint16 charNum;
-            uint8 palNum;
+            uint8 palNum; // Brimir: all 7 bits of Character::palNum (upstream stores palNum >> 4)
             bool specColorCalc;
             bool specPriority;
             bool flipH;

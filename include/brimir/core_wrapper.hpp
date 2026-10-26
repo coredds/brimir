@@ -59,10 +59,14 @@ enum class ConsoleRegion {
 /// @brief Wraps the Ymir Saturn emulator for use with libretro
 class CoreWrapper {
 public:
-    /// @brief Version word in the BRI2 save-state header; states of any other version are rejected, as are
-    /// the older unversioned "BRIM" states. Version 4 serializes the state field by field
-    /// (savestate_codec.hpp); earlier versions held the raw struct, including stale heap pointers.
-    static constexpr uint32_t kSaveStateVersion = 4;
+    /// @brief Version word in the BRI2 save-state header. Version 4 serializes the state field by field
+    /// (savestate_codec.hpp); earlier versions held the raw struct, including stale heap pointers, and are
+    /// rejected, as are the older unversioned "BRIM" states. Version 5 keeps the same layout but stores the
+    /// VDP2 fetchers' palette numbers whole; version 4 states are converted on load.
+    static constexpr uint32_t kSaveStateVersion = 5;
+
+    /// @brief Oldest BRI2 version LoadState accepts
+    static constexpr uint32_t kOldestLoadableSaveStateVersion = 4;
 
     CoreWrapper();
     ~CoreWrapper();

@@ -1222,8 +1222,9 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
         std::memcpy(&magic, in, 4);
 
         // [magic:4][version:4][payloadSize:4][compressedSize:4] followed by the LZ4-compressed payload
-        // (see savestate_codec.hpp). Earlier versions held the raw SaveState struct, whose std::vector
-        // members were stored as heap pointers: they cannot be loaded safely.
+        // (see savestate_codec.hpp). Versions before 4 held the raw SaveState struct, whose std::vector
+        // members were stored as heap pointers: they cannot be loaded safely. Version 4 has the current
+        // layout and is converted after decoding (UpgradeVersion4SaveState).
         if (magic == kNewStateMagic && size >= 16) {
             uint32_t version = 0;
             uint32_t payloadSize = 0;
@@ -1232,7 +1233,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             std::memcpy(&payloadSize, in + 8, 4);
             std::memcpy(&compressedSize, in + 12, 4);
 
-            if (version != kSaveStateVersion) {
+            if (version < kOldestLoadableSaveStateVersion || version > kSaveStateVersion) {
                 return false;
             }
             if (payloadSize > MaxEncodedSaveStateSize(kMaxSaveStateCartDataSize)) {
@@ -1256,6 +1257,9 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             auto& state = Scratch(m_stateScratch);
             if (!DecodeSaveState(m_statePayload, state)) {
                 return false;
+            }
+            if (version == 4) {
+                UpgradeVersion4SaveState(state);
             }
             if (!HasValidCDBlockCursors(state)) {
                 return false;

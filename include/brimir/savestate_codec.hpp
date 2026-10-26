@@ -46,4 +46,10 @@ void ResetSaveState(ymir::savestate::SaveState& state);
 /// cartridge type, bool or INTBACK report offset; state is then partially overwritten
 bool DecodeSaveState(std::span<const uint8_t> payload, ymir::savestate::SaveState& state);
 
+/// @brief Converts a state decoded from a version 4 payload to the current meaning of its fields.
+/// Version 4 stored the VDP2 VRAM fetchers' character palette numbers shifted right by 4, which lost
+/// the low bits of 16-colour characters; version 5 stores them whole. The conversion restores the
+/// value a version 4 state loaded as.
+void UpgradeVersion4SaveState(ymir::savestate::SaveState& state);
+
 } // namespace brimir

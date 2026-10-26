@@ -12,6 +12,7 @@
 #include <fstream>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 using namespace brimir;
@@ -506,13 +507,13 @@ TEST_CASE("Save state version reject", "[core][savestate][unit]") {
     REQUIRE_FALSE(core.LoadState(buf.data(), stateSize));
 }
 
-TEST_CASE("BRI2 state with the previous version is rejected", "[core][savestate][unit][regression]") {
+TEST_CASE("BRI2 state with a version before 4 is rejected", "[core][savestate][unit][regression]") {
     CoreWrapper core;
     REQUIRE(core.Initialize());
 
-    // A real current state, with only the version word patched: pins the version bump independently
-    // of the payload size, so that earlier states (raw SaveState structs holding stale heap pointers)
-    // are rejected cleanly even if their size happens to match.
+    // A real current state, with only the version word patched: pins the oldest loadable version
+    // independently of the payload size, so that states before version 4 (raw SaveState structs
+    // holding stale heap pointers) are rejected cleanly even if their size happens to match.
     const size_t stateSize = core.GetStateSize();
     std::vector<uint8_t> buf(stateSize);
     REQUIRE(core.SaveState(buf.data(), stateSize));
@@ -521,18 +522,118 @@ TEST_CASE("BRI2 state with the previous version is rejected", "[core][savestate]
     std::memcpy(&compressedSize, buf.data() + 12, sizeof(compressedSize));
     const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
 
-    const uint32_t previousVersion = CoreWrapper::kSaveStateVersion - 1;
-    std::memcpy(buf.data() + 4, &previousVersion, sizeof(previousVersion));
-    REQUIRE_FALSE(core.LoadState(buf.data(), savedSize));
+    STATIC_REQUIRE(CoreWrapper::kOldestLoadableSaveStateVersion == 4);
+    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 5);
+
+    for (const uint32_t version : {0u, 1u, 2u, 3u, CoreWrapper::kSaveStateVersion + 1}) {
+        CAPTURE(version);
+        std::memcpy(buf.data() + 4, &version, sizeof(version));
+        REQUIRE_FALSE(core.LoadState(buf.data(), savedSize));
+    }
 
     // The core is unharmed and still runs.
     core.RunFrame();
     REQUIRE(core.GetFramebuffer() != nullptr);
 
-    // Control: the same buffer with the current version loads.
-    const uint32_t currentVersion = CoreWrapper::kSaveStateVersion;
-    std::memcpy(buf.data() + 4, &currentVersion, sizeof(currentVersion));
-    REQUIRE(core.LoadState(buf.data(), savedSize));
+    // Control: the same buffer loads as version 4 (converted) and as the current version.
+    for (const uint32_t version : {4u, CoreWrapper::kSaveStateVersion}) {
+        CAPTURE(version);
+        std::memcpy(buf.data() + 4, &version, sizeof(version));
+        REQUIRE(core.LoadState(buf.data(), savedSize));
+    }
+}
+
+namespace {
+
+// Decodes a BRI2 state saved by the core, patches the decoded SaveState and repacks it with the given version.
+template <typename Patch>
+std::vector<uint8_t> RepackState(const std::vector<uint8_t>& saved, uint32_t version, Patch&& patch) {
+    uint32_t savedPayloadSize = 0;
+    uint32_t savedCompressedSize = 0;
+    std::memcpy(&savedPayloadSize, saved.data() + 8, 4);
+    std::memcpy(&savedCompressedSize, saved.data() + 12, 4);
+
+    std::vector<uint8_t> payload(savedPayloadSize);
+    const int n = LZ4_decompress_safe(reinterpret_cast<const char*>(saved.data() + 16),
+                                      reinterpret_cast<char*>(payload.data()),
+                                      static_cast<int>(savedCompressedSize), static_cast<int>(payload.size()));
+    REQUIRE(n == static_cast<int>(payload.size()));
+    auto state = std::make_unique<ymir::savestate::SaveState>();
+    REQUIRE(DecodeSaveState(payload, *state));
+    patch(*state);
+    REQUIRE(EncodeSaveState(*state, payload));
+
+    std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(payload.size())));
+    const int compressed = LZ4_compress_default(reinterpret_cast<const char*>(payload.data()),
+                                                reinterpret_cast<char*>(buf.data() + 16),
+                                                static_cast<int>(payload.size()), static_cast<int>(buf.size() - 16));
+    REQUIRE(compressed > 0);
+    const uint32_t magic = 0x32524942; // "BRI2" in LE
+    const uint32_t uncompressedSize = static_cast<uint32_t>(payload.size());
+    const uint32_t compressedSize = static_cast<uint32_t>(compressed);
+    std::memcpy(buf.data(), &magic, 4);
+    std::memcpy(buf.data() + 4, &version, 4);
+    std::memcpy(buf.data() + 8, &uncompressedSize, 4);
+    std::memcpy(buf.data() + 12, &compressedSize, 4);
+    buf.resize(16 + static_cast<size_t>(compressed));
+    return buf;
+}
+
+} // namespace
+
+TEST_CASE("Version 4 states have their VDP2 fetcher palette numbers converted on load",
+          "[core][savestate][unit][regression][brimir]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> saved(stateSize);
+    REQUIRE(core.SaveState(saved.data(), stateSize));
+
+    // Version 4 stored Character::palNum >> 4; version 5 stores all 7 bits.
+    const auto patch = [](ymir::savestate::SaveState& s) {
+        for (size_t field = 0; field < 2; ++field) {
+            for (size_t i = 0; i < 6; ++i) {
+                auto& fetcher = s.vdp.renderer.vramFetchers[field][i];
+                fetcher.currChar.palNum = static_cast<uint8_t>((field * 6 + i) & 7);
+                fetcher.nextChar.palNum = static_cast<uint8_t>((field * 6 + i + 3) & 7);
+            }
+        }
+    };
+
+    auto reloadedPalNums = [&](uint32_t version) {
+        const auto buf = RepackState(saved, version, patch);
+        REQUIRE(core.LoadState(buf.data(), buf.size()));
+        std::vector<uint8_t> out(stateSize);
+        REQUIRE(core.SaveState(out.data(), stateSize));
+        std::vector<std::pair<uint8_t, uint8_t>> palNums;
+        RepackState(out, CoreWrapper::kSaveStateVersion, [&](ymir::savestate::SaveState& s) {
+            for (const auto& field : s.vdp.renderer.vramFetchers) {
+                for (const auto& fetcher : field) {
+                    palNums.emplace_back(fetcher.currChar.palNum, fetcher.nextChar.palNum);
+                }
+            }
+        });
+        return palNums;
+    };
+
+    SECTION("version 4: shifted into the upper palette bits, as version 4 loaded them") {
+        const auto palNums = reloadedPalNums(4);
+        for (size_t k = 0; k < palNums.size(); ++k) {
+            CAPTURE(k);
+            CHECK(int{palNums[k].first} == static_cast<int>((k & 7) << 4));
+            CHECK(int{palNums[k].second} == static_cast<int>(((k + 3) & 7) << 4));
+        }
+    }
+
+    SECTION("version 5: kept as stored") {
+        const auto palNums = reloadedPalNums(CoreWrapper::kSaveStateVersion);
+        for (size_t k = 0; k < palNums.size(); ++k) {
+            CAPTURE(k);
+            CHECK(int{palNums[k].first} == static_cast<int>(k & 7));
+            CHECK(int{palNums[k].second} == static_cast<int>((k + 3) & 7));
+        }
+    }
 }
 
 TEST_CASE("Save state writes 16-byte header", "[core][savestate][unit]") {

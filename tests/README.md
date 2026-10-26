@@ -22,6 +22,7 @@ tests/
     ├── test_hw_backports.cpp        # Ymir hardware-layer backport regressions (SMPC, VDP1, VDP2)
     ├── test_vdp_color_calc.cpp      # VDP2 color calculation
     ├── test_vdp_composite.cpp       # VDP2 layer compositing
+    ├── test_vdp_savestate.cpp       # VDP2 renderer state across save/load, vertical cell scroll flags
     ├── test_profiler.cpp            # Profiler
     ├── test_audio_ring_buffer.cpp   # Audio ring buffer
     ├── test_media_loader.cpp        # CUE/CCD loading, compressed audio tracks, sector alignment
