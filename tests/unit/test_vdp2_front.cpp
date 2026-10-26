@@ -62,6 +62,12 @@ public:
     void PostLoadStateSync() override {
         front.PostLoadStateSync();
     }
+    void SaveState(ymir::savestate::VDPSaveState::VDPRendererSaveState &state) override {
+        front.SaveFetchers(state);
+    }
+    void LoadState(const ymir::savestate::VDPSaveState::VDPRendererSaveState &state) override {
+        front.LoadFetchers(state);
+    }
     void VDP2WriteVRAM(uint32_t address, uint8_t) override {
         front.WriteVRAM(address);
     }
@@ -999,6 +1005,152 @@ TEST_CASE("Vdp2FrontEnd computes lineBackLayerState per line as software does", 
 
 namespace {
 
+using RendererSaveState = ymir::savestate::VDPSaveState::VDPRendererSaveState;
+
+// The first difference between a software renderer's and a front half's per-line state: NBG layer states, rotation
+// parameter states (and their read flags) and the NBG fetchers (vramFetchers[field][0-3] of the renderer save state:
+// characters, lastCharIndex, lastCellX, lastVCellScroll); empty if there is none.
+std::string StateMismatch(vdp::VDPState &swState, vdp::SoftwareVDPRenderer &sw, vdp::VDPState &frState,
+                          FrontEndRenderer &fr, RendererSaveState &swSaved, RendererSaveState &frSaved,
+                          bool fetchersOnly = false, uint32_t cellXFields = 2) {
+    std::ostringstream out;
+    const auto cmp = [&](const std::string &what, size_t index, uint64_t a, uint64_t b) {
+        if (a != b && out.tellp() == 0) {
+            out << what << "[" << index << "]: software " << a << ", front half " << b;
+        }
+    };
+    for (size_t i = 0; i < (fetchersOnly ? 0u : 4u); ++i) {
+        const vdp::NBGLayerState &a = swState.state2.nbgLayerStates[i];
+        const vdp::NBGLayerState &b = frState.state2.nbgLayerStates[i];
+        cmp("fracScrollX", i, a.fracScrollX, b.fracScrollX);
+        cmp("fracScrollY", i, a.fracScrollY, b.fracScrollY);
+        cmp("scrollIncH", i, a.scrollIncH, b.scrollIncH);
+        cmp("lineScrollTableAddress", i, a.lineScrollTableAddress, b.lineScrollTableAddress);
+        cmp("vcellScrollOffset", i, a.vcellScrollOffset, b.vcellScrollOffset);
+        cmp("vcellScrollDelay", i, a.vcellScrollDelay, b.vcellScrollDelay);
+        cmp("vcellScrollRepeat", i, a.vcellScrollRepeat, b.vcellScrollRepeat);
+        cmp("mosaicCounterY", i, a.mosaicCounterY, b.mosaicCounterY);
+    }
+    for (size_t i = 0; i < (fetchersOnly ? 0u : 2u); ++i) {
+        const vdp::RotationParamState &a = swState.state2.rotParamStates[i];
+        const vdp::RotationParamState &b = frState.state2.rotParamStates[i];
+        cmp("Xst", i, static_cast<uint32_t>(a.Xst), static_cast<uint32_t>(b.Xst));
+        cmp("Yst", i, static_cast<uint32_t>(a.Yst), static_cast<uint32_t>(b.Yst));
+        cmp("KA", i, a.KA, b.KA);
+        const vdp::RotationParams &ra = swState.regs2.rotParams[i];
+        const vdp::RotationParams &rb = frState.regs2.rotParams[i];
+        cmp("readXst", i, ra.readXst, rb.readXst);
+        cmp("readYst", i, ra.readYst, rb.readYst);
+        cmp("readKAst", i, ra.readKAst, rb.readKAst);
+    }
+    sw.SaveState(swSaved);
+    fr.SaveState(frSaved);
+    const auto charBits = [](const RendererSaveState::CharacterSaveState &c) {
+        return uint64_t{c.charNum} | (uint64_t{c.palNum} << 16) | (uint64_t{c.specColorCalc} << 24) |
+               (uint64_t{c.specPriority} << 25) | (uint64_t{c.flipH} << 26) | (uint64_t{c.flipV} << 27);
+    };
+    for (uint32_t field = 0; field < 2; ++field) {
+        for (uint32_t nbg = 0; nbg < 4; ++nbg) {
+            const auto &a = swSaved.vramFetchers[field][nbg];
+            const auto &b = frSaved.vramFetchers[field][nbg];
+            const std::string prefix = "field " + std::to_string(field) + " NBG fetcher ";
+            cmp(prefix + "lastVCellScroll", nbg, a.lastVCellScroll, b.lastVCellScroll);
+            cmp(prefix + "nextChar", nbg, charBits(a.nextChar), charBits(b.nextChar));
+            cmp(prefix + "currChar", nbg, charBits(a.currChar), charBits(b.currChar));
+            cmp(prefix + "lastCharIndex", nbg, a.lastCharIndex, b.lastCharIndex);
+            // Software's VRAMFetcher::Reset leaves lastCellX indeterminate until a line resets it (sw:2531-2539)
+            if (field < cellXFields) {
+                cmp(prefix + "lastCellX", nbg, a.lastCellX, b.lastCellX);
+            }
+        }
+    }
+    return out.str();
+}
+
+// The scene of the lockstep tests. NBG0 and NBG1: line scroll (X, Y, zoom; the flags and interval change mid-frame),
+// vertical cell scroll with repeat and delay; NBG2 and NBG3: SCYN2/SCYN3 written mid-frame; ZMYIN changes; vertical
+// mosaic switched off and on mid-frame; RBG0 with a rotation table re-read mid-frame (RPRCTL); in the third frame
+// the display goes off and on again (the latch stays off). With `delay`, NBG1 (2x2, 256 colours) has a character
+// pattern delay (PN1 at T7, CP1 at T1-T2). With `still`, nothing is written mid-frame.
+struct NBGStateScene {
+    uint16_t tvmd;
+    uint32_t interval;
+    bool delay;
+    bool still;
+
+    void Setup(Vdp2SceneWriter &w) const {
+        std::mt19937 rng{interval * 31 + tvmd + (delay ? 7 : 0)};
+        w.Reg(TVMD, tvmd);
+        for (uint32_t a = 0x60000; a < 0x80000; a += 2) {
+            w.VRAM16(a, static_cast<uint16_t>(rng()));
+        }
+        for (uint32_t a = 0x00000; a < 0x08000; a += 2) {
+            w.VRAM16(a, static_cast<uint16_t>(rng())); // pattern names (pages at 0) and characters
+        }
+        w.Reg(BGON, 0x001F); // NBG0-3, RBG0
+        if (delay) {
+            w.Reg(CHCTLA, 0x1100); // NBG1 256 colours, 2x2
+            w.Reg(CYCA0L, 0x455F); // CP0 at T0, CP1 at T1-T2 of bank A0
+            w.Reg(CYCA0U, 0x0FF1); // PN0 at T4, PN1 at T7 of bank A0: CP1 is illegal for PN1 at T7
+            w.Reg(CYCB0L, 0xFF23);
+        } else {
+            w.Reg(CYCA0L, 0x4455); // CP0 at T0-T1, CP1 at T2-T3 of bank A0
+            w.Reg(CYCA0U, 0x0123); // PN0-PN3 at T4-T7 of bank A0 (the pages are at 0)
+        }
+        w.Reg(CYCB1L, 0xFFFC); // vertical cell scroll: NBG0 at T3 (repeat and delay), NBG1 at T4 (delay)
+        w.Reg(CYCB1U, 0xDFFF);
+        w.Reg(VCSTAU, 0x0003); // 0x7D000
+        w.Reg(VCSTAL, 0xE800);
+        w.Reg(LSTA0U, 0x0003); // 0x7C000
+        w.Reg(LSTA0L, 0xE000);
+        w.Reg(LSTA1U, 0x0003); // 0x7A000
+        w.Reg(LSTA1L, 0xD000);
+        w.Reg(RPTAU, 0x0003); // 0x7FE00
+        w.Reg(RPTAL, 0xFF00);
+        w.Reg(ZMYIN0, 0);
+        w.Reg(ZMYDN0, 0xC000);
+        w.Reg(SCRCTL, Scrctl());
+        w.Reg(MZCTL, 0x3105); // NBG0 and NBG2, 2 x 4
+        w.Reg(ZMXIN1, 1);
+    }
+
+    uint16_t Scrctl() const {
+        return static_cast<uint16_t>((0x0F | (interval << 4)) | ((0x07 | (interval << 4)) << 8));
+    }
+
+    void OnLine(Vdp2SceneWriter &w, uint32_t frame, uint32_t y) const {
+        if (still) {
+            return;
+        }
+        switch (y) {
+        case 0:
+            w.Reg(SCRCTL, Scrctl());
+            w.Reg(MZCTL, 0x3105);
+            w.Reg(ZMXIN1, 1);
+            w.Reg(TVMD, tvmd);
+            break;
+        case 30: w.Reg(SCYN2, 17); break;
+        case 45: w.Reg(SCYN3, 3); break;
+        case 60: w.Reg(ZMYIN0, 2); break;
+        case 75: w.Reg(SCRCTL, static_cast<uint16_t>(Scrctl() ^ 0x0018)); break; // NBG0: zoom off, interval
+        case 90: w.Reg(MZCTL, 0); break;
+        case 101: w.Reg(MZCTL, 0x2105); break; // 2 x 3, the counters resume
+        case 120: w.Reg(RPRCTL, 0x0707); break; // re-read Xst, Yst and KAst of both parameters
+        case 130: w.Reg(ZMXIN1, 2); break;
+        case 150:
+            if (frame == 2) {
+                w.Reg(TVMD, static_cast<uint16_t>(tvmd & 0x7FFF));
+            }
+            break;
+        case 170:
+            if (frame == 2) {
+                w.Reg(TVMD, tvmd);
+            }
+            break;
+        }
+    }
+};
+
 // The software renderer and the front half on their own states, driven in lockstep by one writer.
 struct LockstepPair {
     vdp::config::VDP2AccessPatternsConfig access{};
@@ -1007,8 +1159,8 @@ struct LockstepPair {
     std::unique_ptr<vdp::SoftwareVDPRenderer> sw = std::make_unique<vdp::SoftwareVDPRenderer>(*swState, debug, access);
     std::unique_ptr<vdp::VDPState> frState = std::make_unique<vdp::VDPState>();
     std::unique_ptr<FrontEndRenderer> fr = std::make_unique<FrontEndRenderer>(*frState, access);
-    std::unique_ptr<ymir::savestate::VDPSaveState::VDPRendererSaveState> swSaved =
-        std::make_unique<ymir::savestate::VDPSaveState::VDPRendererSaveState>();
+    std::unique_ptr<RendererSaveState> swSaved = std::make_unique<RendererSaveState>();
+    std::unique_ptr<RendererSaveState> frSaved = std::make_unique<RendererSaveState>();
     Vdp2SceneWriter writer;
 
     explicit LockstepPair(const vdp::config::Enhancements &enh)
@@ -1017,147 +1169,146 @@ struct LockstepPair {
         writer.Attach(*frState, *fr);
     }
 
-    // The first difference in the NBG layer states, the rotation parameter states (and their read flags) and, with
-    // `fetchers`, the last vertical cell scroll value of each NBG0/NBG1 fetcher (software saves those in the renderer
-    // state); empty if there is none.
-    std::string Mismatch(bool fetchers) {
-        std::ostringstream out;
-        const auto cmp = [&](const char *what, size_t index, uint64_t a, uint64_t b) {
-            if (a != b && out.tellp() == 0) {
-                out << what << "[" << index << "]: software " << a << ", front half " << b;
-            }
-        };
-        for (size_t i = 0; i < 4; ++i) {
-            const vdp::NBGLayerState &a = swState->state2.nbgLayerStates[i];
-            const vdp::NBGLayerState &b = frState->state2.nbgLayerStates[i];
-            cmp("fracScrollX", i, a.fracScrollX, b.fracScrollX);
-            cmp("fracScrollY", i, a.fracScrollY, b.fracScrollY);
-            cmp("scrollIncH", i, a.scrollIncH, b.scrollIncH);
-            cmp("lineScrollTableAddress", i, a.lineScrollTableAddress, b.lineScrollTableAddress);
-            cmp("vcellScrollOffset", i, a.vcellScrollOffset, b.vcellScrollOffset);
-            cmp("vcellScrollDelay", i, a.vcellScrollDelay, b.vcellScrollDelay);
-            cmp("vcellScrollRepeat", i, a.vcellScrollRepeat, b.vcellScrollRepeat);
-            cmp("mosaicCounterY", i, a.mosaicCounterY, b.mosaicCounterY);
-        }
-        for (size_t i = 0; i < 2; ++i) {
-            const vdp::RotationParamState &a = swState->state2.rotParamStates[i];
-            const vdp::RotationParamState &b = frState->state2.rotParamStates[i];
-            cmp("Xst", i, static_cast<uint32_t>(a.Xst), static_cast<uint32_t>(b.Xst));
-            cmp("Yst", i, static_cast<uint32_t>(a.Yst), static_cast<uint32_t>(b.Yst));
-            cmp("KA", i, a.KA, b.KA);
-            const vdp::RotationParams &ra = swState->regs2.rotParams[i];
-            const vdp::RotationParams &rb = frState->regs2.rotParams[i];
-            cmp("readXst", i, ra.readXst, rb.readXst);
-            cmp("readYst", i, ra.readYst, rb.readYst);
-            cmp("readKAst", i, ra.readKAst, rb.readKAst);
-        }
-        if (fetchers) {
-            sw->SaveState(*swSaved);
-            for (uint32_t field = 0; field < 2; ++field) {
-                for (uint32_t nbg = 0; nbg < 2; ++nbg) {
-                    cmp(field == 0 ? "lastVCellScroll field 0 NBG" : "lastVCellScroll field 1 NBG", nbg,
-                        swSaved->vramFetchers[field][nbg].lastVCellScroll, fr->front.LastVCellScroll(field, nbg));
-                }
-            }
-        }
-        return out.str();
+    // Fields whose lastCellX software has set (from the first line on: the alternate field only while deinterlacing)
+    uint32_t cellXFields = 0;
+
+    std::string Mismatch() {
+        return StateMismatch(*swState, *sw, *frState, *fr, *swSaved, *frSaved, false, cellXFields);
     }
+};
+
+// Records the first mismatch of a run, checked before every line and after each frame.
+struct MismatchLog {
+    std::string first;
+    uint32_t checks = 0;
+
+    void Check(uint32_t frame, uint32_t y, const std::string &mismatch) {
+        ++checks;
+        if (first.empty() && !mismatch.empty()) {
+            first = "frame " + std::to_string(frame) + " line " + std::to_string(y) + ": " + mismatch;
+        }
+    }
+};
+
+struct LockstepMode {
+    uint16_t tvmd;
+    bool deinterlace;
 };
 
 } // namespace
 
 TEST_CASE("Vdp2FrontEnd keeps the per-line NBG and rotation state as software does", "[vdp2][front]") {
-    // The software renderer and the front half on their own states, in lockstep. NBG0 and NBG1: line scroll (X, Y,
-    // zoom; the flags and interval change mid-frame), vertical cell scroll with repeat and delay; NBG2 and NBG3:
-    // SCYN2/SCYN3 written mid-frame; ZMYIN changes; vertical mosaic switched off and on mid-frame; RBG0 with a
-    // rotation table re-read mid-frame (RPRCTL); in the third frame the display goes off and on again (the latch stays
-    // off). After every line the NBG layer states, rotation parameter states and (every eighth line and after each
-    // frame) the fetchers' last vertical cell scroll values must be identical (sw:430-438, 2081-2143, 2145-2184,
-    // 2513-2565, 4526-4541).
-    struct Mode {
-        uint16_t tvmd;
-        bool deinterlace;
-    };
-    const Mode mode = GENERATE(Mode{0x8000, false}, Mode{0x80C0, false}, Mode{0x80C0, true}, Mode{0x8080, true},
-                               Mode{0x8001, false});
+    // The software renderer and the front half on their own states, in lockstep, over NBGStateScene (with and without
+    // mid-frame writes, with and without a character pattern delay). Before every line and after each frame the NBG
+    // layer states, rotation parameter states and NBG fetchers must be identical (sw:430-438, 2081-2143, 2145-2184,
+    // 2513-2565, 4526-4541, 5193-5215).
+    const LockstepMode mode =
+        GENERATE(LockstepMode{0x8000, false}, LockstepMode{0x80C0, false}, LockstepMode{0x80C0, true},
+                 LockstepMode{0x8080, false}, LockstepMode{0x8080, true}, LockstepMode{0x8001, false});
     const uint32_t interval = GENERATE(0u, 2u);
-    CAPTURE(mode.tvmd, mode.deinterlace, interval);
+    const bool delay = GENERATE(false, true);
+    const bool still = GENERATE(false, true);
+    CAPTURE(mode.tvmd, mode.deinterlace, interval, delay, still);
 
+    const NBGStateScene scene{mode.tvmd, interval, delay, still};
     LockstepPair pair{{.deinterlace = mode.deinterlace}};
-    Vdp2SceneWriter &w = pair.writer;
-    std::mt19937 rng{interval * 31 + mode.tvmd};
-    w.Reg(TVMD, mode.tvmd);
-    for (uint32_t a = 0x60000; a < 0x80000; a += 2) {
-        w.VRAM16(a, static_cast<uint16_t>(rng()));
-    }
-    w.Reg(BGON, 0x001F); // NBG0-3, RBG0
-    w.Reg(CYCA0L, 0x4455);
-    w.Reg(CYCB0L, 0x0123);
-    w.Reg(CYCB1L, 0xFFFC); // vertical cell scroll: NBG0 at T3 (repeat and delay), NBG1 at T4 (delay)
-    w.Reg(CYCB1U, 0xDFFF);
-    w.Reg(VCSTAU, 0x0003); // 0x7D000
-    w.Reg(VCSTAL, 0xE800);
-    w.Reg(LSTA0U, 0x0003); // 0x7C000
-    w.Reg(LSTA0L, 0xE000);
-    w.Reg(LSTA1U, 0x0003); // 0x7A000
-    w.Reg(LSTA1L, 0xD000);
-    w.Reg(RPTAU, 0x0003); // 0x7FE00
-    w.Reg(RPTAL, 0xFF00);
-    const uint16_t scrctl = static_cast<uint16_t>((0x0F | (interval << 4)) | ((0x07 | (interval << 4)) << 8));
-    w.Reg(ZMYIN0, 0);
-    w.Reg(ZMYDN0, 0xC000);
-
-    uint32_t frame = 0, checks = 0;
-    std::string mismatch;
-    const auto check = [&](bool fetchers) {
-        ++checks;
-        if (mismatch.empty()) {
-            mismatch = pair.Mismatch(fetchers);
-            if (!mismatch.empty()) {
-                mismatch = "frame " + std::to_string(frame) + ": " + mismatch;
+    scene.Setup(pair.writer);
+    MismatchLog log;
+    for (uint32_t frame = 0; frame < 3; ++frame) {
+        pair.writer.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) {
+            if (frame > 0 || y > 0) {
+                pair.cellXFields = mode.deinterlace ? 2 : 1;
             }
-        }
-    };
-    for (frame = 0; frame < 3; ++frame) {
-        w.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) {
-            check(y % 8 == 0);
-            switch (y) {
-            case 0:
-                w.Reg(SCRCTL, scrctl);
-                w.Reg(MZCTL, 0x3105); // NBG0 and NBG2, 2 x 4
-                w.Reg(ZMXIN1, 1);
-                w.Reg(TVMD, mode.tvmd);
-                break;
-            case 30: w.Reg(SCYN2, 17); break;
-            case 45: w.Reg(SCYN3, 3); break;
-            case 60: w.Reg(ZMYIN0, 2); break;
-            case 75: w.Reg(SCRCTL, static_cast<uint16_t>(scrctl ^ 0x0018)); break; // NBG0: zoom off, interval
-            case 90: w.Reg(MZCTL, 0); break;
-            case 101: w.Reg(MZCTL, 0x2105); break; // 2 x 3, the counters resume
-            case 120: w.Reg(RPRCTL, 0x0707); break; // re-read Xst, Yst and KAst of both parameters
-            case 130: w.Reg(ZMXIN1, 2); break;
-            case 150:
-                if (frame == 2) {
-                    w.Reg(TVMD, static_cast<uint16_t>(mode.tvmd & 0x7FFF));
-                }
-                break;
-            case 170:
-                if (frame == 2) {
-                    w.Reg(TVMD, mode.tvmd);
-                }
-                break;
-            }
+            log.Check(frame, y, pair.Mismatch());
+            scene.OnLine(w, frame, y);
         });
-        check(true);
+        log.Check(frame, 9999, pair.Mismatch());
     }
-    INFO(mismatch);
-    CHECK(mismatch.empty());
-    CHECK(checks > 600);
-    // The scene exercises what it checks: line scroll, vertical cell scroll reads and the rotation tables.
+    INFO(log.first);
+    CHECK(log.first.empty());
+    CHECK(log.checks > 600);
+    // The scene exercises what it checks: line scroll, vertical cell scroll reads, the rotation tables, characters.
     CHECK(pair.frState->state2.nbgLayerStates[0].lineScrollTableAddress != 0x7C000);
-    CHECK(pair.fr->front.LastVCellScroll(0, 0) != 0xFFFFFFFF);
+    if (!still) {
+        CHECK(pair.fr->front.LastVCellScroll(0, 0) != 0xFFFFFFFF); // with mosaic and repeat-delay, NBG0 never reads
+    }
     CHECK(pair.fr->front.LastVCellScroll(0, 1) != 0xFFFFFFFF);
     CHECK(pair.frState->state2.rotParamStates[0].Xst != 0);
+    pair.fr->SaveState(*pair.frSaved);
+    CHECK(pair.frSaved->vramFetchers[0][1].nextChar.charNum != 0);
+}
+
+TEST_CASE("Vdp2FrontEnd continues a mid-frame save state of the software renderer and vice versa", "[vdp2][front]") {
+    // One renderer runs NBGStateScene (with a character pattern delay, so every fetcher field matters) to line 100 of
+    // the second frame and is saved there (VDPState and the renderer section). A fresh renderer of the other kind
+    // loads the state, and the two continue in lockstep (the saved one goes on uninterrupted): the per-line state must
+    // match before every line from the load on (Ruling 16).
+    const bool fromSoftware = GENERATE(true, false);
+    const LockstepMode mode = GENERATE(LockstepMode{0x8000, false}, LockstepMode{0x80C0, true});
+    CAPTURE(fromSoftware, mode.tvmd, mode.deinterlace);
+    const NBGStateScene scene{mode.tvmd, 0, true, false};
+    const vdp::config::Enhancements enh{.deinterlace = mode.deinterlace};
+
+    vdp::config::VDP2AccessPatternsConfig access{};
+    vdp::config::VDP2DebugRender debug{};
+    auto swState = std::make_unique<vdp::VDPState>();
+    auto sw = std::make_unique<vdp::SoftwareVDPRenderer>(*swState, debug, access);
+    auto frState = std::make_unique<vdp::VDPState>();
+    auto fr = std::make_unique<FrontEndRenderer>(*frState, access);
+    auto swSaved = std::make_unique<RendererSaveState>();
+    auto frSaved = std::make_unique<RendererSaveState>();
+
+    // The saved renderer runs alone up to the save
+    vdp::VDPState &savedState = fromSoftware ? *swState : *frState;
+    vdp::IVDPRenderer &savedRenderer = fromSoftware ? static_cast<vdp::IVDPRenderer &>(*sw) : *fr;
+    vdp::VDPState &loadedState = fromSoftware ? *frState : *swState;
+    vdp::IVDPRenderer &loadedRenderer = fromSoftware ? static_cast<vdp::IVDPRenderer &>(*fr) : *sw;
+    constexpr uint32_t kSaveLine = 100;
+    Vdp2SceneWriter first{enh};
+    first.Attach(savedState, savedRenderer);
+    scene.Setup(first);
+    first.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) { scene.OnLine(w, 0, y); });
+    first.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) { scene.OnLine(w, 1, y); }, 0, kSaveLine);
+
+    auto saved = std::make_unique<ymir::savestate::VDPSaveState>();
+    savedState.SaveState(*saved);
+    savedRenderer.PreSaveStateSync();
+    savedRenderer.SaveState(saved->renderer);
+
+    // The other renderer loads it, and both continue
+    Vdp2SceneWriter second{enh};
+    second.SetResolution(first.HRes(), first.VRes(), first.ExclusiveMonitor());
+    second.Attach(*swState, *sw);
+    second.Attach(*frState, *fr);
+    loadedState.LoadState(*saved);
+    loadedRenderer.LoadState(saved->renderer);
+    loadedRenderer.PostLoadStateSync();
+
+    // Right after the load the fetchers match; the rest of the state from the first line drawn after the load on
+    // (vcellScrollRepeat is not in VDPState's save state; both renderers recompute it with the access patterns at the
+    // first line, sw:2522-2523).
+    MismatchLog log;
+    log.Check(1, kSaveLine, StateMismatch(*swState, *sw, *frState, *fr, *swSaved, *frSaved, true));
+    second.RunFrame(
+        [&](Vdp2SceneWriter &w, uint32_t y) {
+            if (y > kSaveLine) {
+                log.Check(1, y, StateMismatch(*swState, *sw, *frState, *fr, *swSaved, *frSaved));
+            }
+            scene.OnLine(w, 1, y);
+        },
+        kSaveLine);
+    for (uint32_t frame = 2; frame < 4; ++frame) {
+        second.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) {
+            log.Check(frame, y, StateMismatch(*swState, *sw, *frState, *fr, *swSaved, *frSaved));
+            scene.OnLine(w, frame, y);
+        });
+    }
+    INFO(log.first);
+    CHECK(log.first.empty());
+    CHECK(log.checks > 400);
+    // The fetchers carried across the load are not trivial
+    CHECK(saved->renderer.vramFetchers[0][0].lastVCellScroll != 0xFFFFFFFF);
+    CHECK(saved->renderer.vramFetchers[0][1].nextChar.charNum != 0);
 }
 
 TEST_CASE("Vdp2FrontEnd data access shifts are 0 or 8", "[vdp2][front]") {
@@ -1197,12 +1348,14 @@ TEST_CASE("Vdp2FrontEnd data access shifts are 0 or 8", "[vdp2][front]") {
 
 TEST_CASE("Vdp2FrontEnd records per-line NBG state as software draws it", "[vdp2][front]") {
     // Per-row VDP2NBGLine contents: the scroll state before the line's counters advance (scroll amounts excluded),
-    // the double-density alternate line one vertical increment further, vertical mosaic sources, and the previous
-    // line's last vertical cell scroll value and character fetch position.
+    // the double-density alternate line one vertical increment further, vertical mosaic sources, and the fetcher's
+    // last vertical cell scroll value and nextChar.
     FrontRig rig{{.deinterlace = true}};
     auto &w = rig.writer;
     w.Reg(TVMD, 0x80C0);     // DISP, double density, 320x448
     w.Reg(BGON, 0x0003);     // NBG0, NBG1
+    w.Reg(CYCA0L, 0x15FF);   // NBG1 pattern names at T0 and characters at T1 of bank A0
+    w.Reg(PNCN0 + 2, 0x0000); // NBG1 two-word pattern names
     w.Reg(CYCB1L, 0xFCFF);   // NBG0 vertical cell scroll at T1
     w.Reg(SCRCTL, 0x0001);
     w.Reg(MZCTL, 0x2002);    // NBG1, 1 x 3
@@ -1218,7 +1371,7 @@ TEST_CASE("Vdp2FrontEnd records per-line NBG state as software draws it", "[vdp2
     // The first frame starts from reset fetchers
     const Vdp2FrameRecord &first = rig.Run();
     CHECK(first.nbgLines[0].prevLastVCellScroll == 0xFFFFFFFF);
-    CHECK((first.nbgLines[kMaxResV].flags & kVDP2NBGLinePrevLineEndValid) == 0);
+    CHECK(first.nbgLines[kMaxResV].nextChar == 0);
 
     const auto &rec = rig.Run();
     const auto at = [&](uint32_t nbg, uint32_t row) { return rec.nbgLines[nbg * kMaxResV + row]; };
@@ -1239,10 +1392,9 @@ TEST_CASE("Vdp2FrontEnd records per-line NBG state as software draws it", "[vdp2
     CHECK(at(1, 3).mosaicSrcLine == 1);
     CHECK(at(1, 5).mosaicSrcLine == 1);
     CHECK(at(1, 6).mosaicSrcLine == 6);
-    // The last character fetch of NBG1's line 0 (x = 320, scrolled by 4) is where line 3 (row 6) starts from
-    CHECK((at(1, 6).flags & kVDP2NBGLinePrevLineEndValid) != 0);
-    CHECK(at(1, 6).prevLineEndScrollX == 4 + 320);
-    CHECK((at(1, 0).flags & kVDP2NBGLinePrevLineEndValid) != 0); // the previous frame's last line
+    // The character NBG1's line 0 fetched last (the extra tile at x = 320, scrolled by 4: two-word pattern name 40 of
+    // the page at 0, which is also vertical cell scroll entry 40) is the fetcher's nextChar when line 3 (row 6) starts
+    CHECK(at(1, 6).nextChar == 0x00078900);
 }
 
 // -----------------------------------------------------------------------------

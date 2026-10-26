@@ -502,7 +502,9 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
 
     uint2 spritePos;
     if (rotate) {
-        spritePos = CalcRotationSpriteCoordinates(uint2(outHalfResH ? pos.x >> 1 : pos.x, fieldLine));
+        // Brimir: matches software (sw:2223-2225, 2678-2682, 53bfa4c): in hi-res modes the coordinates are per dot of
+        // half the output width, also when the output is not doubled (8-bit framebuffer).
+        spritePos = CalcRotationSpriteCoordinates(uint2(hiResH ? pos.x >> 1 : pos.x, fieldLine));
         if (any(spritePos >= fbSize)) {
             return output;
         }

@@ -71,7 +71,10 @@ public:
 
     /// @brief Runs one VDP frame from the top border: UpdateResolution, LatchTVMD, VDP2BeginFrame, the active lines
     /// (onLine(y) then VDP2RenderLine(y)), the VBlank IN field switch and VDP2EndFrame, in the order vdp.cpp uses.
-    void RunFrame(const std::function<void(Vdp2SceneWriter &, uint32_t)> &onLine = {});
+    /// With firstLine > 0 the frame is continued from that line (no top border); with endLine below the field's line
+    /// count it stops before that line (no VBlank, no EndFrame).
+    void RunFrame(const std::function<void(Vdp2SceneWriter &, uint32_t)> &onLine = {}, uint32_t firstLine = 0,
+                  uint32_t endLine = UINT32_MAX);
 
     /// @brief Runs a whole scene: setup, then `frames` frames.
     void Run(const Vdp2Scene &scene);
@@ -142,6 +145,9 @@ struct RenderBothOptions {
     bool poisonImages = false;  // Vdp2VulkanBackend::SetPoisonImagesForTest (also with BRIMIR_VDP2_POISON=1)
     // This frame is recorded into a command buffer that is never submitted, then RecordedFrameDropped.
     uint32_t dropFrame = UINT32_MAX;
+    // Before RenderLine(reloadLine) of this frame, the Vulkan renderer's state is saved, lost and loaded again.
+    uint32_t reloadFrame = UINT32_MAX;
+    uint32_t reloadLine = 0;
     // Called before each frame (0-based), after setup, with the Vulkan renderer and the device.
     std::function<void(uint32_t frame, gpu::VulkanVDPRenderer &, gpu::VulkanDevice &)> beforeFrame;
 };

@@ -10,11 +10,9 @@ struct NBGLine {
     int scrollIncH;
     uint mosaicSrcLine;
     uint prevLastVCellScroll;
-    uint prevLineEndScrollX;
-    uint prevLineEndScrollY;
-    uint flags;
+    uint nextChar; // ymir::vdp::Character::u32
+    uint pad0;
+    uint pad1;
 };
-
-static const uint kNBGLinePrevLineEndValid = 1u << 0u;
 
 #endif

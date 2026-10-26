@@ -889,8 +889,9 @@ uint4 FetchScrollRBGPixel(const BaseBGParams params, uint2 scrollPos, uint2 page
 //   repeat and delay rules; reads before the first are the previous line's last value (sw:4526-4574); with mosaic,
 //   the first value applies to the whole line;
 // - character pattern delay: the pixel shows the character of the fetch before its character's first fetch on the
-//   line (the previous line's last fetch at the left edge), and 2x2 characters switch to their own character at their
-//   second cell column as software's fetcher does (sw:5193-5215).
+//   line (at the left edge, the fetcher's nextChar, decoded on the CPU), and 2x2 characters switch to their own character at their
+//   second cell column as software's fetcher does (sw:5193-5215); a character is fetched when the character index
+//   changes, so a run of one index shows the character of its first fetch.
 
 uint NBGWindowY(uint row) {
     uint y = GetY(row, true);
@@ -959,32 +960,62 @@ int NBGPrevFetch(const NBGParams params, int x, uint windowY, uint mosaicH) {
     return -1;
 }
 
-uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, uint x, uint windowY, uint mosaicH) {
-    const CharLocation loc = LocateNBGCharAt(params, nbgLine, index, x);
-    if (!BitTest(params.base.charPatDelay, loc.bank)) {
-        return FetchCharacterPixel(params.base, FetchCharacter(params.base, loc), loc.dotPos, loc.cellIndex);
-    }
+// A ymir::vdp::Character::u32 (the two-word pattern name layout) as a Character.
+Character UnpackCharacter(uint value) {
+    Character ch;
+    ch.charNum = BitExtract(value, 0, 15);
+    ch.palNum = BitExtract(value, 16, 7) << 4;
+    ch.specColorCalc = BitTest(value, 28);
+    ch.specPriority = BitTest(value, 29);
+    ch.flipH = BitTest(value, 30);
+    ch.flipV = BitTest(value, 31);
+    return ch;
+}
 
-    // The fetches since the line start with this character index form a run starting at runStart; the delayed
-    // character is the one fetched before it (sw:5194-5205).
+// The fetcher fetches a character when the character index differs from the previous fetch's (sw:5194-5205): the
+// fetches of the line up to x with x's index form a run starting at the returned fetch; prev is the fetch before it
+// (another index), or -1 at the line start.
+uint NBGRunStart(const NBGParams params, NBGLine nbgLine, uint index, uint x, uint charIndex, uint windowY,
+                 uint mosaicH, out int prev) {
     uint runStart = x;
-    int prev = NBGPrevFetch(params, int(x), windowY, mosaicH);
+    prev = NBGPrevFetch(params, int(x), windowY, mosaicH);
     while (prev >= 0) {
-        const CharLocation prevLoc = LocateNBGCharAt(params, nbgLine, index, uint(prev));
-        if (prevLoc.charIndex != loc.charIndex) {
+        if (LocateNBGCharAt(params, nbgLine, index, uint(prev)).charIndex != charIndex) {
             break;
         }
         runStart = uint(prev);
         prev = NBGPrevFetch(params, prev, windowY, mosaicH);
     }
+    return runStart;
+}
 
-    Character ch = kBlankCharacter;
+uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, uint x, uint windowY, uint mosaicH) {
+    const CharLocation loc = LocateNBGCharAt(params, nbgLine, index, x);
+    int prev;
+    if (!BitTest(params.base.charPatDelay, loc.bank)) {
+        // The character fetched at the start of the run. Within a run the scroll position moves by less than a page,
+        // so it is the character at x, except with vertical cell scroll on 2x2 characters, where the vertical position
+        // changes between the two cell columns of a character (exception W5: windows hiding 512 dots or more).
+        CharLocation charLoc = loc;
+        if (index <= 1 && params.vcellScrollEnable && !params.base.mosaicEnable && params.base.cellSizeShift != 0) {
+            const uint runStart = NBGRunStart(params, nbgLine, index, x, loc.charIndex, windowY, mosaicH, prev);
+            charLoc = LocateNBGCharAt(params, nbgLine, index, runStart);
+        }
+        return FetchCharacterPixel(params.base, FetchCharacter(params.base, charLoc), loc.dotPos, loc.cellIndex);
+    }
+
+    // The delayed character is the one fetched before the run, at the start of the previous run, or the fetcher's
+    // nextChar at the line start (decoded on the CPU from the previous drawn line's last fetch, sw:4596-4617).
+    const uint runStart = NBGRunStart(params, nbgLine, index, x, loc.charIndex, windowY, mosaicH, prev);
+    Character ch;
     if (prev >= 0) {
-        ch = FetchCharacter(params.base, LocateNBGCharAt(params, nbgLine, index, uint(prev)));
-    } else if ((nbgLine.flags & kNBGLinePrevLineEndValid) != 0) {
-        // The fetcher's nextChar at the line start: the previous drawn line's last fetch (sw:4596-4617)
-        const uint2 endPos = uint2(nbgLine.prevLineEndScrollX, nbgLine.prevLineEndScrollY);
-        ch = FetchCharacter(params.base, LocateNBGChar(params, endPos, index));
+        const CharLocation prevLoc = LocateNBGCharAt(params, nbgLine, index, uint(prev));
+        int prevPrev;
+        const uint prevRunStart =
+            NBGRunStart(params, nbgLine, index, uint(prev), prevLoc.charIndex, windowY, mosaicH, prevPrev);
+        ch = FetchCharacter(params.base, LocateNBGCharAt(params, nbgLine, index, prevRunStart));
+    } else {
+        ch = UnpackCharacter(nbgLine.nextChar);
     }
 
     // 2x2 characters: the fetcher switches to the run's own character at the first fetch in the second cell column
@@ -1013,7 +1044,7 @@ uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, ui
             switches = lastCellX != 1;
         }
         if (switches) {
-            ch = FetchCharacter(params.base, loc);
+            ch = FetchCharacter(params.base, LocateNBGCharAt(params, nbgLine, index, runStart));
         }
     }
     return FetchCharacterPixel(params.base, ch, loc.dotPos, loc.cellIndex);

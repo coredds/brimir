@@ -101,6 +101,8 @@ void VulkanVDPRenderer::PostLoadStateSync() {
 
 void VulkanVDPRenderer::SaveState(savestate::VDPSaveState::VDPRendererSaveState &state) {
     m_vdp1->SaveState(state);
+    // The NBG fetchers are the front half's (the inner renderer draws no VDP2 lines).
+    m_front.SaveFetchers(state);
 }
 
 bool VulkanVDPRenderer::ValidateState(const savestate::VDPSaveState::VDPRendererSaveState &state) const {
@@ -109,6 +111,7 @@ bool VulkanVDPRenderer::ValidateState(const savestate::VDPSaveState::VDPRenderer
 
 void VulkanVDPRenderer::LoadState(const savestate::VDPSaveState::VDPRendererSaveState &state) {
     m_vdp1->LoadState(state);
+    m_front.LoadFetchers(state);
 }
 
 // -----------------------------------------------------------------------------

@@ -93,9 +93,9 @@ inline constexpr uint32_t kVdp2RenderBgs_NBGLine_fracScrollY = 4;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_scrollIncH = 8;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_mosaicSrcLine = 12;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_prevLastVCellScroll = 16;
-inline constexpr uint32_t kVdp2RenderBgs_NBGLine_prevLineEndScrollX = 20;
-inline constexpr uint32_t kVdp2RenderBgs_NBGLine_prevLineEndScrollY = 24;
-inline constexpr uint32_t kVdp2RenderBgs_NBGLine_flags = 28;
+inline constexpr uint32_t kVdp2RenderBgs_NBGLine_nextChar = 20;
+inline constexpr uint32_t kVdp2RenderBgs_NBGLine_pad0 = 24;
+inline constexpr uint32_t kVdp2RenderBgs_NBGLine_pad1 = 28;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_size = 32;
 
 // NBGParams

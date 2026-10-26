@@ -712,14 +712,13 @@ static_assert(sizeof(VDP2ComposeParams) == 80);
 //   includes the alternate-line increment of double density deinterlacing, sw:4524, 4628);
 // - mosaicSrcLine: the dispatch row whose layer output the row repeats (vertical mosaic), or the row itself;
 // - prevLastVCellScroll: the field's VRAMFetcher::lastVCellScroll before the row is drawn;
-// - prevLineEndScrollX/Y: the field's last character fetch position of the previous drawn scroll line (the extra tile
-//   past the right edge), whose character is the fetcher's nextChar at the start of the row;
-// - flags: bit 0 set when prevLineEndScrollX/Y is valid (else nextChar is the blank character of a reset fetcher).
+// - nextChar: the field's VRAMFetcher::nextChar before the row is drawn (ymir::vdp::Character::u32, decoded on the CPU
+//   from the character the previous drawn scroll line fetched last, sw:5193-5205), the delayed character at the left
+//   edge.
 struct VDP2NBGLine {
     int32_t fracScrollX, fracScrollY, scrollIncH;
-    uint32_t mosaicSrcLine, prevLastVCellScroll, prevLineEndScrollX, prevLineEndScrollY, flags;
+    uint32_t mosaicSrcLine, prevLastVCellScroll, nextChar, pad0, pad1;
 };
-inline constexpr uint32_t kVDP2NBGLinePrevLineEndValid = 1u << 0u;
 static_assert(sizeof(VDP2NBGLine) == 32);
 
 /// @brief Number of entries in the VDP2 CRAM color cache.

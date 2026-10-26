@@ -24,8 +24,10 @@
 
 #include "gpu/vdp2/vdp2_hw_params.hpp"
 
+#include <ymir/hw/vdp/renderer/vdp_renderer_defs.hpp>
 #include <ymir/hw/vdp/vdp_configs.hpp>
 #include <ymir/hw/vdp/vdp_state.hpp>
+#include <ymir/savestate/savestate_vdp.hpp>
 #include <ymir/util/dirty_bitmap.hpp>
 
 #include <array>
@@ -142,6 +144,11 @@ public:
     /// @brief Device (re)attach: the next frame uploads all of VRAM and CRAM.
     void MarkAllDirty();
 
+    /// @brief Writes the NBG fetchers (vramFetchers[field][0-3]) into a renderer save state, as software saves them.
+    void SaveFetchers(ymir::savestate::VDPSaveState::VDPRendererSaveState &state) const;
+    /// @brief Reads the NBG fetchers from a renderer save state, as software loads them.
+    void LoadFetchers(const ymir::savestate::VDPSaveState::VDPRendererSaveState &state);
+
     /// @brief The last vertical cell scroll value NBG `nbg` read on `field` (software: VRAMFetcher::lastVCellScroll).
     uint32_t LastVCellScroll(uint32_t field, uint32_t nbg) const {
         return m_nbgFetchers[field & 1][nbg & 3].lastVCellScroll;
@@ -196,12 +203,21 @@ private:
     std::array<uint32_t, 2> m_rotTableAddress{};
 
     // Brimir: the parts of the software renderer's VRAMFetchers (m_vramFetchers[field][nbg], saved in the renderer
-    // section of save states) that carry NBG state from one line to the next: the last vertical cell scroll value
-    // read and the position of the last character fetch (whose character is nextChar).
+    // section of save states) that carry NBG state from one line to the next, in software's representation: the
+    // character pipeline and the last vertical cell scroll value read. (charData/charDataAddress, a read cache, are
+    // not kept.)
     struct NBGFetcher {
+        ymir::vdp::Character currChar{};
+        ymir::vdp::Character nextChar{};
+        uint32_t lastCharIndex = 0xFFFFFFFF;
+        uint8_t lastCellX = 0xFF; // software's VRAMFetcher leaves it indeterminate until the first PrepareLine
         uint32_t lastVCellScroll = 0xFFFFFFFF;
-        uint32_t endScrollX = 0, endScrollY = 0;
-        bool endValid = false;
+    };
+    struct NBGCharLocation {
+        uint32_t pageAddress;
+        uint32_t charIndex;
+        uint8_t cellX;
+        uint32_t bank;
     };
     std::array<std::array<NBGFetcher, 4>, 2> m_nbgFetchers{};
     // Dispatch row of the last line each NBG was drawn on in this record, per field (vertical mosaic source)
@@ -248,7 +264,10 @@ private:
     // --- Brimir ------------------------------------------------------------------------------------------------------
     void PrepareLine(uint32_t y);
     void StoreNBGLines(uint32_t y);
-    void DrawNBGFetcher(uint32_t index, VDP2NBGLine &line, NBGFetcher &fetcher);
+    void DrawNBGFetcher(uint32_t index, const VDP2NBGLine &line, NBGFetcher &fetcher);
+    NBGCharLocation LocateNBGChar(const ymir::vdp::BGParams &bgParams, uint32_t scrollX, uint32_t scrollY) const;
+    ymir::vdp::Character FetchNBGCharacter(const ymir::vdp::BGParams &bgParams, const NBGCharLocation &loc) const;
+    void FetchNBGChar(const ymir::vdp::BGParams &bgParams, NBGFetcher &fetcher, uint32_t scrollX, uint32_t scrollY);
     void StartRecord();
     void Cache555Color(uint32_t address);
     void StoreLineColorBackScreens(uint32_t y);

@@ -295,9 +295,9 @@ TEST_CASE("VDP2 host parameter structs match the reflected std430 layouts", "[vd
         CHECK_OFFSET(VDP2NBGLine, scrollIncH, kVdp2RenderBgs_NBGLine_scrollIncH);
         CHECK_OFFSET(VDP2NBGLine, mosaicSrcLine, kVdp2RenderBgs_NBGLine_mosaicSrcLine);
         CHECK_OFFSET(VDP2NBGLine, prevLastVCellScroll, kVdp2RenderBgs_NBGLine_prevLastVCellScroll);
-        CHECK_OFFSET(VDP2NBGLine, prevLineEndScrollX, kVdp2RenderBgs_NBGLine_prevLineEndScrollX);
-        CHECK_OFFSET(VDP2NBGLine, prevLineEndScrollY, kVdp2RenderBgs_NBGLine_prevLineEndScrollY);
-        CHECK_OFFSET(VDP2NBGLine, flags, kVdp2RenderBgs_NBGLine_flags);
+        CHECK_OFFSET(VDP2NBGLine, nextChar, kVdp2RenderBgs_NBGLine_nextChar);
+        CHECK_OFFSET(VDP2NBGLine, pad0, kVdp2RenderBgs_NBGLine_pad0);
+        CHECK_OFFSET(VDP2NBGLine, pad1, kVdp2RenderBgs_NBGLine_pad1);
         CHECK_SIZE(VDP2NBGLine, kVdp2RenderBgs_NBGLine_size);
         STATIC_CHECK(sizeof(VDP2NBGLine) == 32);
     }

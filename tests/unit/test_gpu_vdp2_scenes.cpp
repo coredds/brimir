@@ -1808,6 +1808,262 @@ TEST_CASE("Scene: display enabled mid-frame with RBG0 and NBG0 line scroll", "[g
     });
 }
 
+TEST_CASE("Scene: (g) delayed characters after pattern name rewrites", "[gpu][vdp2][scene]") {
+    // Ruling 18: the delayed character at a line's left edge is the character the previous drawn line fetched last,
+    // decoded with the VRAM and registers of that line. The pattern names are rewritten before line 0 (between
+    // frames) and before line 120, and the supplementary palette bits change at line 60.
+    const bool cell2x2 = GENERATE(false, true);
+    CAPTURE(cell2x2);
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = cell2x2, .twoWord = false}, rng);
+            for (uint32_t reg : {CYCA0L, CYCA1L, CYCB0L, CYCB1L}) {
+                w.Reg(reg, 0x5FFF); // CP1 at T0, PN1 at T7: delayed characters
+                w.Reg(reg + 2, 0xFFF1);
+            }
+            w.Reg(SCYIN1, 5);
+        });
+        scene.onLine = [=, frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
+            w.Reg(SCXIN1, static_cast<uint16_t>(y / 3 + 1));
+            if (y == 0) {
+                ++*frame;
+                w.Reg(PNCN0 + 2, 0x8000); // one word, no supplementary bits
+            }
+            if (!feature) {
+                return;
+            }
+            if (y == 0 || y == 120) {
+                // One-word pattern names of NBG1's page, different every frame and from line 120
+                std::mt19937 rng{*frame * 1000 + y};
+                const uint32_t entries = cell2x2 ? 32 * 32 : 64 * 64;
+                for (uint32_t i = 0; i < entries; ++i) {
+                    const uint32_t cn = Rand(rng, 32); // as SetupNBG: characters 0-31 (2x2: in units of 4 cells)
+                    w.VRAM16(kPageBase + kPageStride + i * 2,
+                             static_cast<uint16_t>((Rand(rng, 16) << 12) | (Rand(rng, 4) << 10) | cn));
+                }
+            } else if (y == 60) {
+                w.Reg(PNCN0 + 2, 0x80E0); // one word, supplementary palette bits
+            }
+        };
+        return scene;
+    });
+}
+
+TEST_CASE("Scene: save and load of the Vulkan renderer mid-frame continues exactly", "[gpu][vdp2][scene]") {
+    // Ruling 16: before line 100 of the last frame the Vulkan renderer's state is saved, lost and loaded again; the
+    // frame must still be software's. NBG0 has vertical cell scroll with repeat and delay (the first values of a line
+    // are the previous line's last value), NBG1 delayed 256-colour 2x2 characters (the left edge shows the fetcher's
+    // nextChar), both carried by the renderer section of the save state.
+    const bool doubleDensity = GENERATE(false, true);
+    CAPTURE(doubleDensity);
+    Vdp2Scene scene = Make(
+        [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | (doubleDensity ? kLSMDDouble : 0)));
+            SetupNBG(w, s, {.index = 0, .format = 0, .priority = 5}, rng);
+            SetupNBG(w, s, {.index = 1, .format = 1, .cell2x2 = true, .priority = 3}, rng);
+            w.Reg(CYCA0L, 0x455F); // CP0 at T0, CP1 at T1-T2 of bank A0
+            w.Reg(CYCA0U, 0xFFFF);
+            w.Reg(CYCB0L, 0xFFFF);
+            w.Reg(CYCB0U, 0x0FF1); // PN0 at T4, PN1 at T7 of bank B0: CP1 is illegal for PN1 at T7
+            w.Reg(CYCB1L, 0xFFFC); // NBG0 vertical cell scroll at T3: repeat and delay
+            w.Reg(CYCB1U, 0xFFFF);
+            constexpr uint32_t kVCellAddress = 0x7D000;
+            FillVRAM(w, kVCellAddress, 0x800, rng);
+            w.Reg(VCSTAU, static_cast<uint16_t>(kVCellAddress >> 17));
+            w.Reg(VCSTAL, static_cast<uint16_t>((kVCellAddress >> 1) & 0xFFFE));
+            w.Reg(SCRCTL, 0x0001);
+            w.Reg(SCXIN0, 3);
+            w.Reg(SCXIN1, 13);
+        },
+        {.deinterlace = doubleDensity}, 3);
+    scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) { w.Reg(SCXIN1, static_cast<uint16_t>(13 + y / 5)); };
+    RunScene(scene, {.reloadFrame = 2, .reloadLine = 100});
+}
+
+TEST_CASE("Scene: (c) RBG mosaic with the line colour screen", "[gpu][vdp2][scene]") {
+    // Ruling 17 (master 53bfa4c): mosaic-repeated RBG dots show the line colour of the dot they repeat, from the line
+    // colour table and from coefficient line colour data.
+    const uint16_t hreso = GENERATE(uint16_t{0}, uint16_t{2});
+    const bool coeffLineColor = GENERATE(false, true);
+    CAPTURE(hreso, coeffLineColor);
+    RunFeatureScene([=](bool feature) {
+        return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | hreso), 1);
+            SetupRBG0(w, s, {.coeffTable = coeffLineColor, .coeffLineColor = coeffLineColor}, rng);
+            for (uint32_t y = 0; y < 512; ++y) {
+                w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x800)));
+            }
+            w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
+            w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
+            s.lnclen = 0x0010; // RBG0
+            w.Reg(CCCTL, 0x0030);
+            w.Reg(CCRR, 0x0008);
+            if (feature) {
+                w.Reg(MZCTL, 0x0310); // RBG0, 4 dots wide
+            }
+        });
+    });
+}
+
+TEST_CASE("Scene: rotated 8-bit sprites in hi-res modes", "[gpu][vdp2][scene]") {
+    // Ruling 17 (master 53bfa4c): with an 8-bit framebuffer the output is not doubled in hi-res modes, and each
+    // pixel reads the rotated coordinates of dot x / 2.
+    const uint16_t hreso = GENERATE(uint16_t{2}, uint16_t{3});
+    CAPTURE(hreso);
+    RunFeatureScene([=](bool feature) {
+        return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | hreso));
+            SetupRBG0(w, s, {}, rng);
+            // TVMR bit 0: 8-bit framebuffer; bit 1: rotation
+            SetupSprites(w, {.type = 8, .tvmr = static_cast<uint16_t>(feature ? 3 : 1)}, rng);
+        });
+    });
+}
+
+TEST_CASE("Scene: bitmap NBG line scroll and vertical cell scroll", "[gpu][vdp2][scene]") {
+    // Bitmap NBGs: in double density deinterlaced, the alternate line is one vertical increment further only without
+    // line scroll Y (sw:4625-4628); vertical cell scroll applies to bitmaps too (sw:4630-4678), here reduced by 1.5.
+    // 0: line scroll X and Y, double density deinterlaced; 1: line scroll X only, double density deinterlaced;
+    // 2: vertical cell scroll with a delay, progressive.
+    const uint32_t variant = GENERATE(0u, 1u, 2u);
+    CAPTURE(variant);
+    RunFeatureScene([=](bool feature) {
+        return Make(
+            [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                Base(w, s, rng, static_cast<uint16_t>(kDisp | (variant < 2 ? kLSMDDouble : 0)));
+                SetupNBG(w, s, {.index = 0, .format = 1, .bitmap = true, .bitmapSize = 1}, rng);
+                w.Reg(CYCA0L, 0x4444);
+                w.Reg(CYCA0U, 0x4444);
+                w.Reg(ZMYIN0, 0);
+                w.Reg(ZMYDN0, 0xA000);
+                if (variant < 2) {
+                    FillVRAM(w, kLineScrollAddress, 0x2000, rng);
+                    w.Reg(LSTA0U, static_cast<uint16_t>(kLineScrollAddress >> 17));
+                    w.Reg(LSTA0L, static_cast<uint16_t>((kLineScrollAddress >> 1) & 0xFFFF));
+                    if (feature) {
+                        w.Reg(SCRCTL, variant == 0 ? 0x0006 : 0x0002);
+                    }
+                } else {
+                    constexpr uint32_t kVCellAddress = 0x7D000;
+                    FillVRAM(w, kVCellAddress, 0x800, rng);
+                    w.Reg(CYCB1L, 0xFFFC); // vertical cell scroll at T3: repeat and delay
+                    w.Reg(VCSTAU, static_cast<uint16_t>(kVCellAddress >> 17));
+                    w.Reg(VCSTAL, static_cast<uint16_t>((kVCellAddress >> 1) & 0xFFFE));
+                    w.Reg(ZMXIN0, 1);
+                    w.Reg(ZMXDN0, 0x8000);
+                    if (feature) {
+                        w.Reg(SCRCTL, 0x0001);
+                    }
+                }
+            },
+            {.deinterlace = variant < 2}, 3);
+    });
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Documented exceptions (stage 1B Rulings 17 and 18): stale or undefined software behaviour the GPU path does not
+// reproduce. Each scene shows the case; it fails, as expected.
+
+// W2: in hi-res modes, when only one pixel of an RBG dot's pair is inside a window, software leaves that pixel's layer
+// output from the previous line drawn (sw:4763-4779, 4854-4870 set only the unwindowed one); the GPU makes it
+// transparent.
+TEST_CASE("Scene: exception W2: hi-res RBG0 with one pixel of a pair windowed", "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, static_cast<uint16_t>(kDisp | 2));
+        SetupRBG0(w, s, {}, rng);
+        w.Reg(WPSX0, 101); // odd start and end: hi-res windows use bit 0
+        w.Reg(WPEX0, 404);
+        w.Reg(WPSY0, 20);
+        w.Reg(WPEY0, 180);
+        w.Reg(WCTLC, 0x0002); // RBG0: W0 inside
+    }));
+}
+
+// W3: a vertical mosaic repeat with no line of the NBG drawn yet in the frame (here NBG0 is off at line 0 while the
+// mosaic counter advances) reuses the layer output of the previous frame's last drawn line in software
+// (sw:2889-2892); the GPU's layer images do not survive frames, so the GPU draws the line.
+TEST_CASE("Scene: exception W3: vertical mosaic repeating a line of the previous frame",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            w.Reg(MZCTL, 0x3001); // NBG0, 1 x 4
+        },
+        {}, 3);
+    scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            w.Reg(BGON, 0x0002); // NBG1 only
+        } else if (y == 1) {
+            w.Reg(BGON, 0x0003);
+            w.Reg(SCXIN0, 0);
+        } else if (y == 150) {
+            w.Reg(SCXIN0, 40); // the last lines drawn differ from the first ones
+        }
+    };
+    RunScene(scene);
+}
+
+// W4: on lines prepared with the display latch off (the display enabled mid-frame), software does not reset the
+// fetchers' lastCharIndex and lastCellX (sw:2518-2539), so with a character pattern delay a line can start without a
+// character fetch and show the previous line's current character; the GPU starts every line with a fetch.
+TEST_CASE("Scene: exception W4: character pattern delay on display-latch-off lines",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            SetupNBG(w, s, {.index = 1, .format = 0}, rng);
+            for (uint32_t reg : {CYCA0L, CYCA1L, CYCB0L, CYCB1L}) {
+                w.Reg(reg, 0x5FFF); // CP1 at T0, PN1 at T7: delayed characters
+                w.Reg(reg + 2, 0xFFF1);
+            }
+            // 409/256 dots per pixel: the extra tile is 511.25 dots from the first pixel, in the same cell column
+            w.Reg(ZMXIN1, 1);
+            w.Reg(ZMXDN1, 0x9900);
+            w.Reg(SCXIN1, 3);
+        },
+        {}, 3);
+    scene.onLine = [frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            ++*frame;
+        }
+        if (*frame == 2 && y == 200) {
+            w.Reg(TVMD, 0);
+        } else if (*frame == 3 && y == 100) {
+            w.Reg(TVMD, kDisp);
+        }
+    };
+    RunScene(scene);
+}
+
+// W5: a character is fetched only when the character index changes (sw:5194). When a window hides 512 dots or more of
+// a line, the next fetch can have the same index on another page, and software keeps the earlier page's character for
+// that run; without a delay the GPU shows the character at the pixel's own position (walking back over windowed
+// pixels for every pixel would cost the common case).
+TEST_CASE("Scene: exception W5: a window hiding 512 dots between two fetches of one character index",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng, static_cast<uint16_t>(kDisp | 3)); // 704 wide
+        CyclesSingle(w, 0);
+        SetupNBG(w, s, {.index = 0, .format = 0}, rng);
+        // Plane B on another page with other pattern names
+        constexpr uint32_t kPlaneB = kPageBase + 0x8000 * 4;
+        const uint32_t mapA = kPageBase >> 14, mapB = kPlaneB >> 14;
+        w.Reg(MPABN0, static_cast<uint16_t>(((mapB & 0x3F) << 8) | (mapA & 0x3F)));
+        for (uint32_t i = 0; i < 64 * 64; ++i) {
+            w.VRAM16(kPlaneB + i * 4, static_cast<uint16_t>(Rand(rng, 128)));
+            w.VRAM16(kPlaneB + i * 4 + 2, static_cast<uint16_t>(Rand(rng, 32)));
+        }
+        // Pixels 100-610 hidden: pixel 99 (dot 99, plane A) and pixel 611 (dot 611, plane B) are in cell column 12
+        w.Reg(WPSX0, 100);
+        w.Reg(WPEX0, 610);
+        w.Reg(WPSY0, 0);
+        w.Reg(WPEY0, 223);
+        w.Reg(WCTLA, 0x0002);
+    }));
+}
+
 namespace {
 
 // VDP1 command table: system clipping, local coordinates, `count` random polygons (every other one a mesh when
@@ -2490,4 +2746,76 @@ TEST_CASE("VulkanVDPRenderer delegates the renderer save state to its software V
     auto roundTrip = std::make_unique<RendererState>();
     vulkan->SaveState(*roundTrip);
     CHECK(roundTrip->vdp1State.meshFBRAM == swSaved->vdp1State.meshFBRAM);
+}
+
+TEST_CASE("VulkanVDPRenderer saves and loads the NBG fetchers as software does", "[vdp2][renderer]") {
+    // Ruling 16: the renderer section's vramFetchers[field][NBG] are the front half's (character pipeline and last
+    // vertical cell scroll value), in software's representation, mid-frame; a load restores them.
+    namespace vdp = ymir::vdp;
+    using RendererState = ymir::savestate::VDPSaveState::VDPRendererSaveState;
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto swState = std::make_unique<vdp::VDPState>();
+    auto vkState = std::make_unique<vdp::VDPState>();
+    auto software = std::make_unique<vdp::SoftwareVDPRenderer>(*swState, debug, access);
+    auto vulkan = std::make_unique<gpu::VulkanVDPRenderer>(*vkState, debug, access);
+
+    Vdp2SceneWriter writer;
+    writer.Attach(*swState, *software);
+    writer.Attach(*vkState, *vulkan);
+    std::mt19937 rng{11};
+    Shadow s;
+    Base(writer, s, rng);
+    SetupNBG(writer, s, {.index = 0, .format = 0}, rng);
+    SetupNBG(writer, s, {.index = 1, .format = 1, .cell2x2 = true}, rng);
+    writer.Reg(CYCA0L, 0x455F);
+    writer.Reg(CYCB0U, 0x0FF1); // NBG1 characters delayed
+    writer.Reg(CYCB1L, 0xFFFC); // NBG0 vertical cell scroll with repeat and delay
+    FillVRAM(writer, 0x7D000, 0x800, rng);
+    writer.Reg(VCSTAU, 0x0003);
+    writer.Reg(VCSTAL, 0xE800);
+    writer.Reg(SCRCTL, 0x0001);
+    Flush(writer, s);
+    writer.RunFrame();
+    writer.RunFrame({}, 0, 77);
+
+    const auto charEq = [](const RendererState::CharacterSaveState &a, const RendererState::CharacterSaveState &b) {
+        return a.charNum == b.charNum && a.palNum == b.palNum && a.specColorCalc == b.specColorCalc &&
+               a.specPriority == b.specPriority && a.flipH == b.flipH && a.flipV == b.flipV;
+    };
+    const auto fetchersEq = [&](const RendererState &a, const RendererState &b) {
+        bool same = true;
+        for (uint32_t field = 0; field < 2; ++field) {
+            for (uint32_t nbg = 0; nbg < 4; ++nbg) {
+                const auto &fa = a.vramFetchers[field][nbg];
+                const auto &fb = b.vramFetchers[field][nbg];
+                same &= charEq(fa.currChar, fb.currChar) && charEq(fa.nextChar, fb.nextChar) &&
+                        fa.lastCharIndex == fb.lastCharIndex &&
+                        // software leaves lastCellX indeterminate on fetchers no line resets (the alternate field
+                        // without deinterlacing)
+                        (field == 1 || fa.lastCellX == fb.lastCellX) &&
+                        fa.lastVCellScroll == fb.lastVCellScroll;
+            }
+        }
+        return same;
+    };
+    auto swSaved = std::make_unique<RendererState>();
+    auto vkSaved = std::make_unique<RendererState>();
+    software->SaveState(*swSaved);
+    vulkan->SaveState(*vkSaved);
+    CHECK(fetchersEq(*swSaved, *vkSaved));
+    CHECK(vkSaved->vramFetchers[0][0].lastVCellScroll != 0xFFFFFFFF);
+    CHECK(vkSaved->vramFetchers[0][1].nextChar.charNum != 0);
+
+    // A blank load loses them; loading the saved state restores them.
+    auto blank = std::make_unique<RendererState>();
+    vulkan->LoadState(*blank);
+    auto lost = std::make_unique<RendererState>();
+    vulkan->SaveState(*lost);
+    CHECK_FALSE(fetchersEq(*lost, *vkSaved));
+    vulkan->LoadState(*swSaved);
+    vulkan->PostLoadStateSync();
+    auto restored = std::make_unique<RendererState>();
+    vulkan->SaveState(*restored);
+    CHECK(fetchersEq(*restored, *swSaved));
 }

@@ -170,23 +170,26 @@ void Vdp2SceneWriter::UpdateResolution() {
     SetResolution(h, v, exclusiveMonitor);
 }
 
-void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint32_t)> &onLine) {
-    // Top border (vdp.cpp:955-965)
-    UpdateResolution();
-    for (Target &t : m_targets) {
-        t.state->regs2.LatchTVMD();
-        t.renderer->VDP2LatchTVMD();
-    }
+void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint32_t)> &onLine, uint32_t firstLine,
+                               uint32_t endLine) {
+    if (firstLine == 0) {
+        // Top border (vdp.cpp:955-965)
+        UpdateResolution();
+        for (Target &t : m_targets) {
+            t.state->regs2.LatchTVMD();
+            t.renderer->VDP2LatchTVMD();
+        }
 
-    // Last line: VBlank OUT (vdp.cpp:967-978)
-    for (Target &t : m_targets) {
-        t.renderer->VDP2BeginFrame();
-        t.state->regs2.TVSTAT.VBLANK = 0;
+        // Last line: VBlank OUT (vdp.cpp:967-978)
+        for (Target &t : m_targets) {
+            t.renderer->VDP2BeginFrame();
+            t.state->regs2.TVSTAT.VBLANK = 0;
+        }
     }
 
     // Active display (vdp.cpp:812-821); writes for line y land between RenderLine(y-1) and RenderLine(y)
     const uint32_t lines = FieldLines();
-    for (uint32_t y = 0; y < lines; ++y) {
+    for (uint32_t y = firstLine; y < std::min(lines, endLine); ++y) {
         for (Target &t : m_targets) {
             t.state->regs2.VCNT = static_cast<uint16>(y);
         }
@@ -196,6 +199,10 @@ void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint3
         for (Target &t : m_targets) {
             t.renderer->VDP2RenderLine(y);
         }
+    }
+
+    if (endLine < lines) {
+        return;
     }
 
     // VBlank IN at the right border of the first bottom-border line switches fields (vdp.cpp:823-853). The frame
@@ -403,7 +410,25 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         if (options.beforeFrame) {
             options.beforeFrame(frame, *vulkan, device);
         }
-        writer.RunFrame(scene.onLine);
+        // Optionally a save and load of the Vulkan renderer between two lines: the VDP state and the renderer section
+        // are saved, a blank renderer section is loaded (the fetcher state is lost), then the saved state is loaded.
+        const auto onLine = [&](Vdp2SceneWriter &w, uint32_t y) {
+            if (scene.onLine) {
+                scene.onLine(w, y);
+            }
+            if (frame == options.reloadFrame && y == options.reloadLine) {
+                auto saved = std::make_unique<ymir::savestate::VDPSaveState>();
+                vkState->SaveState(*saved);
+                vulkan->PreSaveStateSync();
+                vulkan->SaveState(saved->renderer);
+                auto blank = std::make_unique<ymir::savestate::VDPSaveState::VDPRendererSaveState>();
+                vulkan->LoadState(*blank);
+                vkState->LoadState(*saved);
+                vulkan->LoadState(saved->renderer);
+                vulkan->PostLoadStateSync();
+            }
+        };
+        writer.RunFrame(onLine);
         if (frame + 1 == scene.frames && !vulkan->HasPendingFrame()) {
             result.error = "the last frame has no recorded GPU frame";
             return result;
