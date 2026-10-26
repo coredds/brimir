@@ -1,6 +1,7 @@
 #include "vdp2_vulkan_backend.hpp"
 
 #include "gpu/shaders/generated/vdp2_compose.spv.h"
+#include "gpu/shaders/generated/vdp2_nbg_fetch.spv.h"
 #include "gpu/shaders/generated/vdp2_render_bgs.spv.h"
 #include "gpu/shaders/generated/vdp2_render_sprite.spv.h"
 #include "gpu/vdp2/vdp2_bindings.hpp"
@@ -43,7 +44,8 @@ std::span<const Binding> BindingTable(uint32_t pipeline) {
     switch (pipeline) {
     case 0: return kRenderSpriteBindings;
     case 1: return kRenderBgsBindings;
-    default: return kComposeBindings;
+    case 2: return kComposeBindings;
+    default: return kNBGFetchBindings;
     }
 }
 
@@ -89,6 +91,7 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
         {&m_nbgLines, kNBGLinesBytes, kStorageDst},
         {&m_spriteFB, kSpriteFBBufferSize, kStorageDst},
         {&m_composite, kCompositeBufferSize, kStorageDst | VK_BUFFER_USAGE_TRANSFER_SRC_BIT},
+        {&m_nbgChars, kNBGCharBufferSize, kStorageDst}, // TRANSFER_DST for the test-only poison fill
     };
     for (const auto &b : buffers) {
         const VkResult result = vk_util::CreateBuffer(m_device, b.size, b.usage, kDeviceLocal, *b.buffer);
@@ -123,9 +126,11 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
 
     // Pipelines: one set (vdp2_bindings.hpp) and the push-constant block each
     const std::array<std::span<const uint32_t>, kPipelineCount> spirv{
-        shaders::kVdp2RenderSpriteSpv, shaders::kVdp2RenderBgsSpv, shaders::kVdp2ComposeSpv};
-    const VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, kPushConstantSize};
+        shaders::kVdp2RenderSpriteSpv, shaders::kVdp2RenderBgsSpv, shaders::kVdp2ComposeSpv,
+        shaders::kVdp2NbgFetchSpv};
     for (uint32_t p = 0; p < kPipelineCount; ++p) {
+        const VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                            p == kNBGFetch ? kNBGFetchPushConstantSize : kPushConstantSize};
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         for (const Binding &b : BindingTable(p)) {
             bindings.push_back({b.binding, ToVk(b.kind), 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
@@ -168,7 +173,8 @@ void Vdp2VulkanBackend::Destroy() {
         vk_util::DestroyImage(m_device, *image);
     }
     for (vk_util::Buffer *buffer :
-         {&m_vram, &m_cramColors, &m_cramCoeffs, &m_rotBases, &m_lnclBack, &m_nbgLines, &m_spriteFB, &m_composite}) {
+         {&m_vram, &m_cramColors, &m_cramCoeffs, &m_rotBases, &m_lnclBack, &m_nbgLines, &m_spriteFB, &m_composite,
+          &m_nbgChars}) {
         vk_util::DestroyBuffer(m_device, *buffer);
     }
 }
@@ -295,6 +301,8 @@ VkResult Vdp2VulkanBackend::CreateBlockSets(UploadBlock &block) {
             case kBindingNBGLines: bufferInfo.buffer = m_nbgLines.buffer; break;
             case kBindingLnclBack: bufferInfo.buffer = m_lnclBack.buffer; break;
             case kBindingCompositeOut: bufferInfo.buffer = m_composite.buffer; break;
+            case kBindingNBGChars:
+            case kBindingNBGCharsOut: bufferInfo.buffer = m_nbgChars.buffer; break;
             case kBindingSpriteAttrsIn:
             case kBindingSpriteAttrsOut: imageInfo.imageView = m_spriteAttrs.view; break;
             case kBindingLayerIn:
@@ -338,6 +346,22 @@ void Vdp2VulkanBackend::Dispatch(VkCommandBuffer cmd, Pipeline pipeline, const U
                                &block.sets[pipeline], 1, &paramsOffset);
     vk.vkCmdPushConstants(cmd, m_pipelineLayouts[pipeline], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vk.vkCmdDispatch(cmd, groupsX, lines, groupsZ);
+}
+
+void Vdp2VulkanBackend::DispatchNBGFetch(VkCommandBuffer cmd, const UploadBlock &block, uint32_t paramsOffset,
+                                         const VDP2CommonRenderParams &common, uint32_t startY, uint32_t lines,
+                                         uint32_t outputSize) const {
+    const auto &vk = m_device.Table();
+    VDP2NBGFetchPushConstants push{};
+    push.common = common;
+    push.common.startY = startY;
+    push.common.outputSize = outputSize;
+    push.rows = lines;
+    vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines[kNBGFetch]);
+    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayouts[kNBGFetch], 0, 1,
+                               &block.sets[kNBGFetch], 1, &paramsOffset);
+    vk.vkCmdPushConstants(cmd, m_pipelineLayouts[kNBGFetch], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vk.vkCmdDispatch(cmd, lines, 1, kNBGFetchDispatchZ);
 }
 
 bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextIndex, VkCommandBuffer cmd) {
@@ -446,6 +470,9 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
             vk.vkCmdClearColorImage(cmd, image->image, VK_IMAGE_LAYOUT_GENERAL, &poison, 1, &range);
         }
     }
+    if (m_poisonImages) {
+        vk.vkCmdFillBuffer(cmd, m_nbgChars.buffer, 0, VK_WHOLE_SIZE, 0xA5A5A5A5u);
+    }
     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, kShaderRW);
 
     // Composite clears inside the frame, in order between the batches: the compose writes of earlier batches (WAW) come
@@ -524,6 +551,12 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
             Dispatch(cmd, kSprite, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines,
                      groupsX, spriteLayers, outputSize);
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
+            if (batch.needsFetchPass) {
+                // After the sprite pass (the sprite window), before bgs (the character table).
+                DispatchNBGFetch(cmd, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines,
+                                 outputSize);
+                Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
+            }
             Dispatch(cmd, kBgs, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines, groupsX,
                      kBgsDispatchZ, outputSize);
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);

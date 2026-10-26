@@ -12,6 +12,7 @@
 
 #include "vdp2_scene.hpp"
 
+#include <gpu/vdp2/vdp2_bindings.hpp>
 #include <gpu/vdp2/vdp2_front.hpp>
 
 #include <ymir/hw/vdp/renderer/vdp_renderer_null.hpp>
@@ -1590,4 +1591,52 @@ TEST_CASE("Vdp2SceneWriter drives several state and renderer pairs in lockstep",
         CHECK(sa.vcellScrollRepeat == sb.vcellScrollRepeat);
         CHECK(sa.mosaicCounterY == sb.mosaicCounterY);
     }
+}
+
+TEST_CASE("Vdp2FrontEnd flags the batches that need the NBG fetch pass", "[vdp2][front]") {
+    // NBG1 with CP1 at T0 and PN1 at T7 in every bank (delayed characters) until line 100, then PN1 at T0 and CP1 at T1
+    // (no delay); NBG1 off from line 150; from line 180 NBG0 with 2x2 characters and vertical cell scroll.
+    static constexpr uint32_t kCycL[] = {0x010, 0x014, 0x018, 0x01C};
+    FrontRig rig;
+    auto &w = rig.writer;
+    DisplayOn(w);
+    w.Reg(BGON, 0x0002);
+    for (uint32_t reg : kCycL) {
+        w.Reg(reg, 0x5FFF);
+        w.Reg(reg + 2, 0xFFF1);
+    }
+    const auto &rec = rig.Run([](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 100) {
+            for (uint32_t reg : kCycL) {
+                w.Reg(reg, 0x15FF);
+                w.Reg(reg + 2, 0xFFFF);
+            }
+        } else if (y == 150) {
+            w.Reg(BGON, 0x0000);
+        } else if (y == 180) {
+            w.Reg(BGON, 0x0001);
+            w.Reg(CHCTLA, 0x0001); // NBG0 2x2 cells
+            w.Reg(SCRCTL, 0x0001); // NBG0 vertical cell scroll
+        }
+    });
+    std::array<bool, 224> needs{};
+    for (const Vdp2Batch &b : rec.batches) {
+        if (b.layerLines == 0) {
+            continue;
+        }
+        const VDP2LayerRenderParams params = ArenaAt<VDP2LayerRenderParams>(rec, b.layerParamsOffset);
+        bool expected = false;
+        for (uint32_t i = 0; i < 4; ++i) {
+            expected |= NBGUsesCharTable(params.nbg[i], i);
+        }
+        CHECK(b.needsFetchPass == expected);
+        for (uint32_t y = b.layerStartY; y < b.layerStartY + b.layerLines && y < needs.size(); ++y) {
+            needs[y] = b.needsFetchPass;
+        }
+    }
+    CHECK(needs[0]);
+    CHECK(needs[99]);
+    CHECK_FALSE(needs[100]);
+    CHECK_FALSE(needs[160]);
+    CHECK(needs[200]);
 }

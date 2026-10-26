@@ -1,6 +1,6 @@
 # VDP2 compute shaders (GPU stage 1B)
 
-The three compute shaders of the Vulkan VDP2 back half (`src/gpu/vdp2/vdp2_vulkan_backend.*`), replayed per batch of
+The compute shaders of the Vulkan VDP2 back half (`src/gpu/vdp2/vdp2_vulkan_backend.*`), replayed per batch of
 lines from the front half's frame record (`src/gpu/vdp2/vdp2_front.*`):
 
 | Shader | Does | Ymir source |
@@ -8,6 +8,7 @@ lines from the front half's frame record (`src/gpu/vdp2/vdp2_front.*`):
 | `cs_vdp2_render_sprite.hlsl` | VDP1 framebuffer → sprite (and transparent mesh) layer + sprite attributes | `cs_vdp2_render_sprite.hlsl` |
 | `cs_vdp2_render_bgs.hlsl` | NBG0-3, RBG0-1 → layer images, RBG line colours, colour calculation window | `cs_vdp2_render_bgs.hlsl` |
 | `cs_vdp2_compose.hlsl` | layers + LNCL/BACK + sprite attributes → the composite (packed XBGR, as software's framebuffer) | `cs_vdp2_compose.hlsl` |
+| `cs_vdp2_nbg_fetch.hlsl` | the NBG character table: per pixel, the character software's fetcher shows (character pattern delay, vertical cell scroll on 2x2 characters), windows included; runs between sprite and bgs for the batches that need it (stage 1C) | Brimir only |
 
 ## Provenance
 
@@ -22,6 +23,7 @@ its header comment. Ymir is GPL-3.0, as Brimir.
 | `include/vdp2_render_params_layer.hlsli`, `include/vdp2_render_params_rotation.hlsli`, `include/vdp2_window_params.hlsli` | same names, unchanged |
 | `include/util/bit_ops.hlsli`, `include/util/data_ops.hlsli` | `include/util/`, unchanged |
 | `include/vdp2_nbg_line.hlsli` | Brimir only (per-row NBG state from the front half) |
+| `include/vdp2_nbg_chars.hlsli` | Brimir only (the NBG character table's layout and which NBGs use it) |
 | `../include/int64_emu.hlsli` | Brimir only (32-bit emulation of Ymir's 64-bit rotation arithmetic) |
 
 The parameter structs have host mirrors in `src/gpu/vdp2/vdp2_hw_params.hpp`; their offsets are checked against the
@@ -42,7 +44,7 @@ Brimir's GPU baseline: Vulkan 1.2 core, no 64-bit integers in shaders, at most 6
 layouts without `scalarBlockLayout`, storage images only `rgba8ui`/`r32ui`, no robustness features.
 
 - **Push constants** instead of the D3D12 `b0` root constants (`CommonRenderParams`, 48 bytes); **registers renumbered**
-  per `src/gpu/vdp2/vdp2_bindings.hpp` (all three shaders).
+  per `src/gpu/vdp2/vdp2_bindings.hpp` (all three shaders; the NBG fetch pass adds its row count after the block).
 - **No texel buffers:** CRAM colours (all three) and LNCL/BACK (compose) are `StructuredBuffer<uint>` of packed RGBA8
   instead of `Buffer<uint4>`; LNCL/BACK share one buffer, BACK at `kBackScreenOffset` (512) + line (`vdp2_defs.hlsli`).
 - **Explicit storage image formats** (`rgba8ui`, `r32ui`) where DXC would infer `Rgba32ui` (sprite, bgs).
@@ -83,9 +85,11 @@ Backgrounds (`cs_vdp2_render_bgs.hlsl`):
 - NBG scroll, line scroll/zoom, mosaic, vertical cell scroll (with zoom, repeat and delay) and the data access shift use
   the per-row state the front half computes exactly as software (`g_nbgLines`, `vdp2_nbg_line.hlsli`) instead of
   Ymir's closed-form scroll (b, d-f, h);
-- character pattern delay: a pixel shows the character of the fetch before its character's first fetch on the line, the
-  fetcher's `nextChar` at the line start (decoded on the CPU), the 2x2 cell switch rule and no cell swap for delayed
-  two-word 2x2 characters (g);
+- character pattern delay, and vertical cell scroll on 2x2 characters: a pixel shows the character software's fetcher
+  shows there, from the NBG character table (`g_nbgChars`, written by `cs_vdp2_nbg_fetch.hlsl`: the fetcher replayed
+  per row with windows, mosaic, the per-fetch bank delay, the 2x2 cell switch rule and the fetcher's `nextChar` at the
+  line start, decoded on the CPU); no cell swap for delayed two-word 2x2 characters (g; stage 1C replaced the per-pixel
+  walk back over earlier fetches, O(width²) per line with windows);
 - `FetchScrollBGPixel` split into locate + fetch so that NBG character delays can use the located character;
 - RBG mosaic is applied by `DrawRBG` (scroll RBGs repeat every mosaicH-th pixel, line colour of the repeated pixel;
   software fixed on master in 53bfa4c); bitmap RBGs have no mosaic, as in software (c).

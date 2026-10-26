@@ -1986,6 +1986,144 @@ TEST_CASE("Scene: (g) delayed characters after pattern name rewrites", "[gpu][vd
     });
 }
 
+namespace {
+
+// NBG1 with CP1 at T0 and PN1 at T7 in every bank when `delay` (delayed characters of 1x1 and 2x2 cells), else PN1 at
+// T0 and CP1 at T1, as "(g) character pattern delay of 1x1 and 2x2 characters"; a different left edge on every line.
+Vdp2Scene DelayedNBG1Scene(bool delay, bool cell2x2,
+                           std::function<void(Vdp2SceneWriter &, Shadow &, std::mt19937 &)> extra) {
+    Vdp2Scene scene = Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+        Base(w, s, rng);
+        SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = cell2x2}, rng);
+        for (uint32_t reg : {CYCA0L, CYCA1L, CYCB0L, CYCB1L}) {
+            w.Reg(reg, delay ? 0x5FFF : 0x15FF);
+            w.Reg(reg + 2, delay ? 0xFFF1 : 0xFFFF);
+        }
+        w.Reg(SCYIN1, 5);
+        extra(w, s, rng);
+    });
+    scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) { w.Reg(SCXIN1, static_cast<uint16_t>(y / 3)); };
+    return scene;
+}
+
+} // namespace
+
+// Ruling 28: the NBG fetch pass replays the fetcher with windows, so a delayed pixel after windowed pixels shows the
+// character software's fetcher shows there.
+TEST_CASE("Scene: (g) character pattern delay with a sprite window", "[gpu][vdp2][scene]") {
+    // NBG1 window control: 0 the sprite window, 1 the sprite window inverted AND W0, 2 the sprite window AND W0, 3 the
+    // sprite window OR W1 inverted. The sprite window is random per pixel (half the sprite pixels are transparent).
+    const bool cell2x2 = GENERATE(false, true);
+    const uint32_t variant = GENERATE(0u, 1u, 2u, 3u);
+    CAPTURE(cell2x2, variant);
+    static constexpr uint16_t kWCTL[] = {0x20, 0xB2, 0xA2, 0x2D};
+    RunFeatureScene([=](bool feature) {
+        return DelayedNBG1Scene(feature, cell2x2, [=](Vdp2SceneWriter &w, Shadow &, std::mt19937 &rng) {
+            WindowRects(w, false);
+            SetupSprites(w, {.type = 3, .window = true, .transparentPercent = 50}, rng);
+            w.Reg(WCTLA, static_cast<uint16_t>(kWCTL[variant] << 8));
+            w.Reg(WCTLC, 0x0300); // the sprite layer: W0 inverted
+        });
+    });
+}
+
+TEST_CASE("Scene: (g) character pattern delay with W0 hiding most of the line", "[gpu][vdp2][scene]") {
+    // 0: W0 hides 8-311; 1: W0 hides 0-318; 2: W0 inverted, only 8-311 shown; 3: as 0 with horizontal mosaic 3;
+    // 4: as 0, reduced 1.5 (450 dots hidden).
+    const bool cell2x2 = GENERATE(false, true);
+    const uint32_t variant = GENERATE(0u, 1u, 2u, 3u, 4u);
+    CAPTURE(cell2x2, variant);
+    RunFeatureScene([=](bool feature) {
+        return DelayedNBG1Scene(feature, cell2x2, [=](Vdp2SceneWriter &w, Shadow &, std::mt19937 &) {
+            w.Reg(WPSX0, variant == 1 ? 0 : 8 << 1);
+            w.Reg(WPEX0, variant == 1 ? 318 << 1 : 311 << 1);
+            w.Reg(WPSY0, 0);
+            w.Reg(WPEY0, 223);
+            w.Reg(WCTLA, variant == 2 ? 0x0300 : 0x0200);
+            if (variant == 3) {
+                w.Reg(MZCTL, 0x0202); // NBG1, 3 pixels wide
+            } else if (variant == 4) {
+                w.Reg(ZMXIN1, 1);
+                w.Reg(ZMXDN1, 0x8000);
+            }
+        });
+    });
+}
+
+TEST_CASE("Scene: (g) character pattern delay with a line window", "[gpu][vdp2][scene]") {
+    // A random W0 line window per line, alone or ANDed with a W1 line window moving with the line.
+    const bool cell2x2 = GENERATE(false, true);
+    const bool both = GENERATE(false, true);
+    CAPTURE(cell2x2, both);
+    RunFeatureScene([=](bool feature) {
+        return DelayedNBG1Scene(feature, cell2x2, [=](Vdp2SceneWriter &w, Shadow &, std::mt19937 &rng) {
+            WindowRects(w, false);
+            for (uint32_t y = 0; y < 256; ++y) {
+                w.VRAM16(kLineWindowAddress + y * 4, static_cast<uint16_t>(Rand(rng, 0x280)));
+                w.VRAM16(kLineWindowAddress + y * 4 + 2, static_cast<uint16_t>(Rand(rng, 0x280)));
+                w.VRAM16(kLineWindowAddress + 0x800 + y * 4, static_cast<uint16_t>((y * 2) & 0x3FF));
+                w.VRAM16(kLineWindowAddress + 0x800 + y * 4 + 2, static_cast<uint16_t>((y * 2 + 200) & 0x3FF));
+            }
+            w.Reg(LWTA0U, static_cast<uint16_t>(0x8000 | (kLineWindowAddress >> 17)));
+            w.Reg(LWTA0L, static_cast<uint16_t>((kLineWindowAddress >> 1) & 0xFFFF));
+            if (both) {
+                w.Reg(LWTA1U, static_cast<uint16_t>(0x8000 | ((kLineWindowAddress + 0x800) >> 17)));
+                w.Reg(LWTA1L, static_cast<uint16_t>(((kLineWindowAddress + 0x800) >> 1) & 0xFFFF));
+            }
+            w.Reg(WCTLA, both ? 0x8B00 : 0x0200);
+        });
+    });
+}
+
+TEST_CASE("Scene: (f) vertical cell scroll on 2x2 characters with a window", "[gpu][vdp2][scene]") {
+    // No delay: NBG1's 2x2 characters with vertical cell scroll, reduced 1 or 1/2, so a character's two cell columns
+    // read different table values; the character of a run is its first fetch's, windows included. Windows: 0 W0
+    // hiding 8-311, 1 W0 or W1, 2 the sprite window.
+    const uint32_t reduction = GENERATE(1u, 2u);
+    const uint32_t variant = GENERATE(0u, 1u, 2u);
+    CAPTURE(reduction, variant);
+    RunFeatureScene([=](bool feature) {
+        return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = true}, rng);
+            // CP1 T2-T3 in A0; PN1 T1 in B0; vertical cell scroll in B1 at T2 (no delay)
+            w.Reg(CYCA0L, 0xFF55);
+            w.Reg(CYCA0U, 0xFFFF);
+            w.Reg(CYCB0L, 0xF1FF);
+            w.Reg(CYCB0U, 0xFFFF);
+            w.Reg(CYCB1L, 0xFFDF);
+            w.Reg(CYCB1U, 0xFFFF);
+            constexpr uint32_t kVCellAddress = 0x7D000;
+            FillVRAM(w, kVCellAddress, 0x800, rng);
+            w.Reg(VCSTAU, static_cast<uint16_t>(kVCellAddress >> 17));
+            w.Reg(VCSTAL, static_cast<uint16_t>((kVCellAddress >> 1) & 0xFFFE));
+            if (feature) {
+                w.Reg(SCRCTL, 0x0100);
+            }
+            w.Reg(ZMXIN1, static_cast<uint16_t>(reduction));
+            w.Reg(SCXIN1, 13);
+            switch (variant) {
+            case 0:
+                w.Reg(WPSX0, 8 << 1);
+                w.Reg(WPEX0, 311 << 1);
+                w.Reg(WPSY0, 0);
+                w.Reg(WPEY0, 223);
+                w.Reg(WCTLA, 0x0200);
+                break;
+            case 1:
+                WindowRects(w, false);
+                w.Reg(WCTLA, 0x0A00);
+                break;
+            case 2:
+                SetupSprites(w, {.type = 3, .window = true, .transparentPercent = 50}, rng);
+                w.Reg(WCTLA, 0x2000);
+                w.Reg(WCTLC, 0x0300);
+                break;
+            }
+        });
+    });
+}
+
 TEST_CASE("Scene: save and load of the Vulkan renderer mid-frame continues exactly", "[gpu][vdp2][scene]") {
     // Ruling 16: before line 100 of the last frame the Vulkan renderer's state is saved, lost and loaded again; the
     // frame must still be software's. NBG0 has vertical cell scroll with repeat and delay (the first values of a line
@@ -2175,9 +2313,10 @@ TEST_CASE("Scene: exception W4: character pattern delay on display-latch-off lin
 
 // W5: a character is fetched only when the character index changes (sw:5194). When a window hides 512 dots or more of
 // a line, the next fetch can have the same index on another page, and software keeps the earlier page's character for
-// that run; without a delay the GPU shows the character at the pixel's own position (walking back over windowed
-// pixels for every pixel would cost the common case). The same holds on the delayed path when such a window reaches the
-// right edge: the front half, which does not know windows, decodes the extra tile's character for nextChar, while
+// that run; without a delay (and without vertical cell scroll on 2x2 characters) the GPU shows the character at the
+// pixel's own position: the NBG fetch pass, which replays software's fetcher with windows, runs only for the NBGs that
+// need it otherwise. On the delayed path the pass matches software inside the line, but when such a window reaches the
+// right edge the front half, which does not know windows, decodes the extra tile's character for nextChar, while
 // software keeps the earlier page's, so the next line's left edge can differ (and the saved nextChar).
 TEST_CASE("Scene: exception W5: a window hiding 512 dots between two fetches of one character index",
           "[gpu][vdp2][scene][!shouldfail]") {
@@ -3103,10 +3242,11 @@ TEST_CASE("Scene: operational exception: context reset with deinterlacing off cl
 }
 
 // Bench (hidden, run with "[bench]"): GPU time per frame of NBG1 with character pattern delay and windows, against the
-// same layer without the delay. DrawNBGScrollPixel walks back over windowed pixels to find a delayed pixel's run start
-// (NBGPrevFetch), so a window hiding most of a line costs the pixels after it a walk across the hidden span. Prints the
-// median and maximum of `frames` frames per configuration (timestamps around the frame's commands: uploads, sprite,
-// bgs and compose dispatches); no threshold. Every configuration must still match software.
+// same layer without the delay. The delayed layer runs the NBG fetch pass (cs_vdp2_nbg_fetch.hlsl) before bgs in every
+// batch, one batch per line here (stage 1B walked back over windowed pixels per pixel instead: 23-36 ms/frame with a
+// window hiding most of the line on an RX 9060 XT). Prints the median and maximum of `frames` frames per configuration
+// (timestamps around the frame's commands: uploads, sprite, fetch, bgs and compose dispatches) in ms/frame; no
+// threshold (stage 1C target: at most 3 ms). Every configuration must still match software.
 TEST_CASE("Bench: character pattern delay with windows", "[gpu][vdp2][bench][.]") {
     struct Config {
         const char *name;

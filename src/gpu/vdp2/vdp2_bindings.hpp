@@ -1,7 +1,8 @@
 #pragma once
 
-// Descriptor bindings of the three VDP2 compute shaders (src/gpu/shaders/vdp2/cs_vdp2_*.hlsl). Each pipeline has one
-// descriptor set (set 0) and the 48-byte VDP2CommonRenderParams push-constant block. A resource has the same binding
+// Descriptor bindings of the four VDP2 compute shaders (src/gpu/shaders/vdp2/cs_vdp2_*.hlsl). Each pipeline has one
+// descriptor set (set 0) and the 48-byte VDP2CommonRenderParams push-constant block (the NBG fetch pass: followed by
+// its row count, VDP2NBGFetchPushConstants). A resource has the same binding
 // in every shader that uses it. Bindings 0-15 are read-only buffers and sampled images (HLSL t registers, shifted by
 // 0), bindings 16-31 are storage buffers and images (u registers, shifted by 16; tools/shaders/build_shaders.cmake).
 //
@@ -19,14 +20,18 @@
 //       10  t10       g_layerIn                SAMPLED_IMAGE            R8G8B8A8_UINT 704x512, 8 layers  compose
 //       11  t11       g_rbgLineColorIn         SAMPLED_IMAGE            R8G8B8A8_UINT 352x512, 2 layers  compose
 //       12  t12       g_colorCalcWindowIn      SAMPLED_IMAGE            R32_UINT 704x512 (2D)            compose
+//       13  t13       g_nbgChars               STORAGE_BUFFER           uint[4 * 512 * 704]              bgs
 //       16  u0        g_layerOut               STORAGE_IMAGE            R8G8B8A8_UINT 704x512, 8 layers  sprite, bgs
 //       17  u1        g_spriteAttrsOut         STORAGE_IMAGE            R32_UINT 704x512, 2 layers       sprite
 //       18  u2        g_rbgLineColorOut        STORAGE_IMAGE            R8G8B8A8_UINT 352x512, 2 layers  bgs
 //       19  u3        g_colorCalcWindowOut     STORAGE_IMAGE            R32_UINT 704x512 (2D)            bgs
 //       20  u4        g_compositeOut           STORAGE_BUFFER           uint[704 * 512] packed XBGR      compose
+//       21  u5        g_nbgCharsOut            STORAGE_BUFFER           uint[4 * 512 * 704]              nbg_fetch
 //
+// The NBG fetch pass (nbg_fetch) uses bindings 0, 2, 7 and 9 as bgs does.
 // Sampled and storage bindings of the same data (9/17, 10/16, 11/18, 12/19) are views of one image, used in
-// VK_IMAGE_LAYOUT_GENERAL. Image views are 2D arrays except the colour calculation window (2D).
+// VK_IMAGE_LAYOUT_GENERAL. Image views are 2D arrays except the colour calculation window (2D). Bindings 13 and 21 are
+// the same buffer, the NBG character table (vdp2_nbg_chars.hlsli: [nbg][dispatch row][x], ymir::vdp::Character::u32).
 // g_nbgLines holds the per-line NBG state (Vdp2FrameRecord::nbgLines, [nbg * 512 + dispatch row]).
 // No Vulkan header may be included here.
 
@@ -53,15 +58,30 @@ inline constexpr uint32_t kBindingSpriteAttrsIn = 9;
 inline constexpr uint32_t kBindingLayerIn = 10;
 inline constexpr uint32_t kBindingRBGLineColorIn = 11;
 inline constexpr uint32_t kBindingColorCalcWindowIn = 12;
+inline constexpr uint32_t kBindingNBGChars = 13;
 inline constexpr uint32_t kBindingLayerOut = 16;
 inline constexpr uint32_t kBindingSpriteAttrsOut = 17;
 inline constexpr uint32_t kBindingRBGLineColorOut = 18;
 inline constexpr uint32_t kBindingColorCalcWindowOut = 19;
 inline constexpr uint32_t kBindingCompositeOut = 20;
+inline constexpr uint32_t kBindingNBGCharsOut = 21;
 
-/// @brief Size of the push-constant block (VDP2CommonRenderParams) every VDP2 pipeline declares.
+/// @brief Size of the push-constant block (VDP2CommonRenderParams) the sprite, bgs and compose pipelines declare.
 inline constexpr uint32_t kPushConstantSize = sizeof(VDP2CommonRenderParams);
 static_assert(kPushConstantSize == 48);
+
+/// @brief The NBG fetch pass's push constants (cs_vdp2_nbg_fetch.hlsl NBGFetchPushConstants): the common parameters,
+/// then the number of dispatch rows from common.startY.
+struct VDP2NBGFetchPushConstants {
+    VDP2CommonRenderParams common;
+    HLSLuint rows;
+    HLSLuint pad; // std430 tail (the block aligns to 8)
+};
+inline constexpr uint32_t kNBGFetchPushConstantSize = sizeof(VDP2NBGFetchPushConstants);
+static_assert(kNBGFetchPushConstantSize == 56);
+
+/// @brief The largest push-constant block of the VDP2 pipelines (gpu_version.hpp requires it).
+inline constexpr uint32_t kMaxPushConstantSize = std::max(kPushConstantSize, kNBGFetchPushConstantSize);
 
 /// @brief Buffer and image sizes the shaders index without further checks (they mask or guard everything else).
 inline constexpr uint32_t kVRAMBufferSize = 512 * 1024;
@@ -74,11 +94,28 @@ inline constexpr uint32_t kSpriteAttrImageLayers = 2; // sprite, mesh
 inline constexpr uint32_t kRBGLineColorWidth = 352;
 inline constexpr uint32_t kRBGLineColorLayers = 2; // RBG0, RBG1
 inline constexpr uint32_t kCompositeBufferSize = kMaxResH * kMaxResV * sizeof(uint32_t);
+inline constexpr uint32_t kNBGCharCount = 4 * kMaxResV * kMaxResH;
+inline constexpr uint32_t kNBGCharBufferSize = kNBGCharCount * sizeof(uint32_t);
 
 /// @brief Workgroup sizes: sprite and compose dispatch (HRes / 32, lines, sprite: 1 or 2 layers / compose: 1), bgs
-/// dispatches (HRes / 32, lines, kBgsDispatchZ).
+/// dispatches (HRes / 32, lines, kBgsDispatchZ), the NBG fetch pass (lines, 1, kNBGFetchDispatchZ): one workgroup per
+/// row and NBG.
 inline constexpr uint32_t kWorkgroupWidth = 32;
 inline constexpr uint32_t kBgsDispatchZ = 7; // NBG0-3, RBG0-1, colour calculation window
+inline constexpr uint32_t kNBGFetchDispatchZ = 4; // NBG0-3
+
+/// @brief Brimir: whether NBG `index` takes its characters from the NBG character table (vdp2_nbg_chars.hlsli
+/// NBGUsesCharTable, the shaders' copy): an enabled scroll NBG with a character pattern delay in some bank, or NBG0/1
+/// with vertical cell scroll on 2x2 characters without mosaic. A batch needs the fetch pass when one does.
+inline bool NBGUsesCharTable(const NBGParams &params, uint32_t index) {
+    if (!params.base.enabled || params.base.bitmap) {
+        return false;
+    }
+    if (params.base.charPatDelay != 0) {
+        return true;
+    }
+    return index <= 1 && params.vcellScrollEnable && !params.base.mosaicEnable && params.base.cellSizeShift != 0;
+}
 
 /// @brief cs_frame_output.hlsl's [numthreads(8, 8, 1)] (gpu/frame_presenter.cpp), and the largest workgroup any
 /// shader the renderer runs declares, which the device limit maxComputeWorkGroupInvocations must cover.
@@ -110,7 +147,7 @@ inline constexpr std::array<Binding, 7> kRenderSpriteBindings{{
     {kBindingSpriteAttrsOut, DescriptorKind::StorageImage, ImageFormat::R32ui},
 }};
 
-inline constexpr std::array<Binding, 10> kRenderBgsBindings{{
+inline constexpr std::array<Binding, 11> kRenderBgsBindings{{
     {kBindingLayerParams, DescriptorKind::StorageBufferDynamic},
     {kBindingVRAM, DescriptorKind::StorageBuffer},
     {kBindingCRAMColor, DescriptorKind::StorageBuffer},
@@ -118,6 +155,7 @@ inline constexpr std::array<Binding, 10> kRenderBgsBindings{{
     {kBindingRotParamBases, DescriptorKind::StorageBuffer},
     {kBindingNBGLines, DescriptorKind::StorageBuffer},
     {kBindingSpriteAttrsIn, DescriptorKind::SampledImage, ImageFormat::R32ui},
+    {kBindingNBGChars, DescriptorKind::StorageBuffer},
     {kBindingLayerOut, DescriptorKind::StorageImage, ImageFormat::Rgba8ui},
     {kBindingRBGLineColorOut, DescriptorKind::StorageImage, ImageFormat::Rgba8ui},
     {kBindingColorCalcWindowOut, DescriptorKind::StorageImage, ImageFormat::R32ui},
@@ -133,6 +171,14 @@ inline constexpr std::array<Binding, 7> kComposeBindings{{
     {kBindingCompositeOut, DescriptorKind::StorageBuffer},
 }};
 
+inline constexpr std::array<Binding, 5> kNBGFetchBindings{{
+    {kBindingLayerParams, DescriptorKind::StorageBufferDynamic},
+    {kBindingVRAM, DescriptorKind::StorageBuffer},
+    {kBindingNBGLines, DescriptorKind::StorageBuffer},
+    {kBindingSpriteAttrsIn, DescriptorKind::SampledImage, ImageFormat::R32ui},
+    {kBindingNBGCharsOut, DescriptorKind::StorageBuffer},
+}};
+
 /// @brief Descriptors of the given kinds in one pipeline's set (a compute pipeline has one stage).
 constexpr uint32_t CountBindings(std::span<const Binding> bindings, DescriptorKind a, DescriptorKind b) {
     uint32_t count = 0;
@@ -144,7 +190,7 @@ constexpr uint32_t CountBindings(std::span<const Binding> bindings, DescriptorKi
     return count;
 }
 
-/// @brief The largest per-stage use over the three VDP2 pipelines (gpu_version.hpp's device limits match these).
+/// @brief The largest per-stage use over the four VDP2 pipelines (gpu_version.hpp's device limits match these).
 struct StageUsage {
     uint32_t storageBuffers = 0; // STORAGE_BUFFER and STORAGE_BUFFER_DYNAMIC
     uint32_t storageImages = 0;
@@ -156,7 +202,8 @@ constexpr StageUsage MaxStageUsage() {
     StageUsage usage;
     for (std::span<const Binding> bindings : {std::span<const Binding>(kRenderSpriteBindings),
                                               std::span<const Binding>(kRenderBgsBindings),
-                                              std::span<const Binding>(kComposeBindings)}) {
+                                              std::span<const Binding>(kComposeBindings),
+                                              std::span<const Binding>(kNBGFetchBindings)}) {
         const uint32_t storageBuffers =
             CountBindings(bindings, DescriptorKind::StorageBuffer, DescriptorKind::StorageBufferDynamic);
         const uint32_t storageImages =

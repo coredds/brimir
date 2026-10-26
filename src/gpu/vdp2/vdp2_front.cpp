@@ -1,5 +1,7 @@
 #include "gpu/vdp2/vdp2_front.hpp"
 
+#include "gpu/vdp2/vdp2_bindings.hpp"
+
 #include <ymir/hw/vdp/vdp_common_defs.hpp>
 #include <ymir/util/bit_ops.hpp>
 #include <ymir/util/data_ops.hpp>
@@ -1516,6 +1518,15 @@ void Vdp2FrontEnd::EmitBatch(uint32_t layerStartY, uint32_t layerLines, const Pe
     batch.copyCount = static_cast<uint32_t>(m_record.copies.size()) - m_pendingCopiesStart;
     batch.hres = m_HRes;
     batch.vres = m_VRes;
+    batch.needsFetchPass = false;
+    if (batch.layerLines > 0) {
+        // The parameters the batch's shaders read
+        VDP2LayerRenderParams params;
+        std::memcpy(&params, m_record.arena.data() + layerOffset, sizeof(params));
+        for (uint32_t i = 0; i < 4; ++i) {
+            batch.needsFetchPass |= NBGUsesCharTable(params.nbg[i], i);
+        }
+    }
     m_pendingCopiesStart = static_cast<uint32_t>(m_record.copies.size());
     m_record.batches.push_back(batch);
 }

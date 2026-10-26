@@ -9,10 +9,12 @@
 #include "catch_amalgamated.hpp"
 
 #include <gpu/shaders/generated/vdp2_compose.layout.h>
+#include <gpu/shaders/generated/vdp2_nbg_fetch.layout.h>
 #include <gpu/shaders/generated/vdp2_render_bgs.layout.h>
 #include <gpu/shaders/generated/vdp2_render_sprite.layout.h>
 #include <gpu/shaders/generated/test_int64_emu.layout.h>
 #include <gpu/vdp2/int64_emu.hpp>
+#include <gpu/vdp2/vdp2_bindings.hpp>
 #include <gpu/vdp2/vdp2_hw_params.hpp>
 
 #include <array>
@@ -210,7 +212,7 @@ TEST_CASE("RotDotShr10 and RotCoordShr equal the int64_t expressions on 1,000,00
 #define CHECK_OFFSET(type, member, constant) CHECK(offsetof(type, member) == sh::constant)
 #define CHECK_SIZE(type, constant) CHECK(sizeof(type) == sh::constant)
 
-// The push-constant block as each of the three VDP2 shaders declares it.
+// The push-constant block as each of the VDP2 shaders declares it (the NBG fetch pass inside its own block).
 #define CHECK_COMMON_PARAMS(shader)                                                                                    \
     do {                                                                                                               \
         CHECK_OFFSET(VDP2CommonRenderParams, startY, k##shader##_CommonRenderParams_startY);                           \
@@ -233,6 +235,7 @@ TEST_CASE("VDP2 host parameter structs match the reflected std430 layouts", "[vd
         CHECK_COMMON_PARAMS(Vdp2RenderSprite);
         CHECK_COMMON_PARAMS(Vdp2RenderBgs);
         CHECK_COMMON_PARAMS(Vdp2Compose);
+        CHECK_COMMON_PARAMS(Vdp2NbgFetch);
         STATIC_CHECK(offsetof(VDP2CommonRenderParams, borderColorModeLatch) == 20);
         STATIC_CHECK(offsetof(VDP2CommonRenderParams, spritePriosRatios) == 24);
         STATIC_CHECK(offsetof(VDP2CommonRenderParams, outputSize) == 44);
@@ -258,6 +261,21 @@ TEST_CASE("VDP2 host parameter structs match the reflected std430 layouts", "[vd
         CHECK(sh::kVdp2RenderSprite_BaseBGParams_size == sh::kVdp2RenderBgs_BaseBGParams_size);
         CHECK(sh::kVdp2RenderSprite_RotParamBase_size == sh::kVdp2RenderBgs_RotParamBase_size);
         CHECK(sh::kVdp2RenderSprite_RotParamBase_KA == sh::kVdp2RenderBgs_RotParamBase_KA);
+    }
+    SECTION("The NBG fetch pass: its push constants, and the layer parameters and NBG lines as bgs declares them") {
+        CHECK_OFFSET(VDP2NBGFetchPushConstants, common, kVdp2NbgFetch_NBGFetchPushConstants_common);
+        CHECK_OFFSET(VDP2NBGFetchPushConstants, rows, kVdp2NbgFetch_NBGFetchPushConstants_rows);
+        CHECK_SIZE(VDP2NBGFetchPushConstants, kVdp2NbgFetch_NBGFetchPushConstants_size);
+        CHECK(sh::kVdp2NbgFetch_LayerRenderParams_size == sh::kVdp2RenderBgs_LayerRenderParams_size);
+        CHECK(sh::kVdp2NbgFetch_LayerRenderParams_nbg == sh::kVdp2RenderBgs_LayerRenderParams_nbg);
+        CHECK(sh::kVdp2NbgFetch_LayerRenderParams_windows == sh::kVdp2RenderBgs_LayerRenderParams_windows);
+        CHECK(sh::kVdp2NbgFetch_NBGParams_size == sh::kVdp2RenderBgs_NBGParams_size);
+        CHECK(sh::kVdp2NbgFetch_NBGParams_vcellScrollRepeat == sh::kVdp2RenderBgs_NBGParams_vcellScrollRepeat);
+        CHECK(sh::kVdp2NbgFetch_BaseBGParams_size == sh::kVdp2RenderBgs_BaseBGParams_size);
+        CHECK(sh::kVdp2NbgFetch_BaseBGParams_windowParams == sh::kVdp2RenderBgs_BaseBGParams_windowParams);
+        CHECK(sh::kVdp2NbgFetch_GlobalWindowParams_size == sh::kVdp2RenderBgs_GlobalWindowParams_size);
+        CHECK(sh::kVdp2NbgFetch_NBGLine_size == sh::kVdp2RenderBgs_NBGLine_size);
+        CHECK(sh::kVdp2NbgFetch_NBGLine_nextChar == sh::kVdp2RenderBgs_NBGLine_nextChar);
     }
     SECTION("VDP2ComposeParams") {
         CHECK_OFFSET(VDP2ComposeParams, colorCalcEnable, kVdp2Compose_ComposeParams_colorCalcEnable);

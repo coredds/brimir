@@ -38,12 +38,12 @@ struct RequiredLimit {
     uint32_t minimum;
 };
 
-// Per-stage descriptor counts of the VDP2 pipelines (src/gpu/vdp2/vdp2_bindings.hpp). The background shader's six
+// Per-stage descriptor counts of the VDP2 pipelines (src/gpu/vdp2/vdp2_bindings.hpp). The background shader's seven
 // storage buffers exceed the guaranteed maxPerStageDescriptorStorageBuffers (4).
-inline constexpr uint32_t kRequiredStageStorageBuffers = 6;
+inline constexpr uint32_t kRequiredStageStorageBuffers = 7;
 inline constexpr uint32_t kRequiredStageStorageImages = 3;
 inline constexpr uint32_t kRequiredStageSampledImages = 4;
-inline constexpr uint32_t kRequiredStageResources = 10;
+inline constexpr uint32_t kRequiredStageResources = 11;
 static_assert(kRequiredStageStorageBuffers == vdp2::kMaxStageUsage.storageBuffers &&
                   kRequiredStageStorageImages == vdp2::kMaxStageUsage.storageImages &&
                   kRequiredStageSampledImages == vdp2::kMaxStageUsage.sampledImages &&
@@ -60,7 +60,7 @@ inline constexpr std::array<RequiredLimit, 6> kRequiredLimits{{
     {"maxPerStageResources", &VkPhysicalDeviceLimits::maxPerStageResources, kRequiredStageResources},
     {"maxComputeWorkGroupInvocations", &VkPhysicalDeviceLimits::maxComputeWorkGroupInvocations,
      vdp2::kMaxWorkgroupInvocations},
-    {"maxPushConstantsSize", &VkPhysicalDeviceLimits::maxPushConstantsSize, vdp2::kPushConstantSize},
+    {"maxPushConstantsSize", &VkPhysicalDeviceLimits::maxPushConstantsSize, vdp2::kMaxPushConstantSize},
 }};
 
 // Empty when `limits` meet kRequiredLimits, else the first unmet one as "<name> <value> < <minimum>".

@@ -75,6 +75,8 @@ struct Vdp2Batch {
     uint32_t layerParamsOffset, composeParamsOffset; // into Vdp2FrameRecord::arena (kParamSnapshotAlignment)
     uint32_t firstCopy, copyCount;        // into Vdp2FrameRecord::copies; applied before this batch's dispatches
     uint32_t hres, vres;                  // the resolution its lines were rendered at (composite pitch and size)
+    bool needsFetchPass;                  // an NBG of its layer parameters uses the NBG character table
+                                          // (NBGUsesCharTable): the NBG fetch pass runs before bgs
 };
 
 /// @brief A composite clear inside a frame (a resolution change or reset between two lines), applied between batches.

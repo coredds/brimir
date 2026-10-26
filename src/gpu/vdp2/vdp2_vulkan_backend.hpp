@@ -2,7 +2,7 @@
 
 // Vulkan back half of the GPU VDP2 renderer: owns the VDP2 resources on the device (stage1b-port-inventory.md section
 // 2.1) and replays a Vdp2FrameRecord from the front half (vdp2_front.hpp) into a command buffer with the three VDP2
-// compute pipelines (section 2.4). The frame lands in the persistent composite buffer (packed XBGR, pitch HRes), which
+// compute pipelines (section 2.4) and the NBG fetch pass. The frame lands in the persistent composite buffer (packed XBGR, pitch HRes), which
 // FramePresenter::PresentDevice reads.
 //
 // Uploads go through frame contexts: each context owns a host-visible upload block (4 MiB) plus overflow blocks chained
@@ -58,8 +58,9 @@ public:
 
     // Size of the base upload block of every context (reallocated at each context's next Record).
     void ForceUploadBlockSizeForTest(size_t bytes);
-    // Fill the layer, sprite attribute, RBG line colour and colour calculation window images with 0xA5 bytes at the
-    // start of every frame, so reads of texels the frame did not write show up as differences.
+    // Fill the layer, sprite attribute, RBG line colour and colour calculation window images and the NBG character
+    // table with 0xA5 bytes at the start of every frame, so reads of texels or entries the frame did not write show up
+    // as differences.
     void SetPoisonImagesForTest(bool enable) { m_poisonImages = enable; }
     // A composite clear will be recorded by the next Record.
     bool CompositeClearPendingForTest() const { return m_pending.clearComposite; }
@@ -67,7 +68,7 @@ public:
     uint32_t UploadBlocksForTest(uint32_t context) const;
 
 private:
-    enum Pipeline : uint32_t { kSprite, kBgs, kCompose, kPipelineCount };
+    enum Pipeline : uint32_t { kSprite, kBgs, kCompose, kNBGFetch, kPipelineCount };
 
     struct UploadBlock {
         vk_util::Buffer buffer; // host-visible, coherent, persistently mapped
@@ -95,6 +96,10 @@ private:
     void Dispatch(VkCommandBuffer cmd, Pipeline pipeline, const UploadBlock &block, uint32_t paramsOffset,
                   const VDP2CommonRenderParams &common, uint32_t startY, uint32_t lines, uint32_t groupsX,
                   uint32_t groupsZ, uint32_t outputSize) const;
+    // The NBG fetch pass over `lines` dispatch rows from startY (one workgroup per row and NBG).
+    void DispatchNBGFetch(VkCommandBuffer cmd, const UploadBlock &block, uint32_t paramsOffset,
+                          const VDP2CommonRenderParams &common, uint32_t startY, uint32_t lines,
+                          uint32_t outputSize) const;
 
     VulkanDevice &m_device;
     VkResult m_result = VK_ERROR_INITIALIZATION_FAILED;
@@ -110,6 +115,7 @@ private:
     vk_util::Buffer m_nbgLines;
     vk_util::Buffer m_spriteFB;
     vk_util::Buffer m_composite;
+    vk_util::Buffer m_nbgChars;     // uint[4 * 512 * 704], the NBG character table
     vk_util::Image m_layers;        // R8G8B8A8_UINT 704x512, 8 layers
     vk_util::Image m_spriteAttrs;   // R32_UINT 704x512, 2 layers
     vk_util::Image m_rbgLineColor;  // R8G8B8A8_UINT 352x512, 2 layers

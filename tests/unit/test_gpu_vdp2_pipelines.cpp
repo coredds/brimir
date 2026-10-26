@@ -6,13 +6,15 @@
 //   modules altered to break each rule. These run without a Vulkan device ([vdp2]).
 // - The device limits check (gpu_version.hpp UnmetLimit) against crafted VkPhysicalDeviceLimits ([vdp2][limits],
 //   BRIMIR_VULKAN builds).
-// - The three compute pipelines are created on the headless device (1A baseline, no extra features or extensions)
-//   from the descriptor set layouts vdp2_bindings.hpp describes and the 48-byte push-constant range, with zero
+// - The four compute pipelines are created on the headless device (1A baseline, no extra features or extensions)
+//   from the descriptor set layouts vdp2_bindings.hpp describes and their push-constant ranges (48 bytes; the NBG
+//   fetch pass 56), with zero
 //   validation errors ([gpu][vdp2]; SKIP without a device).
 #include "catch_amalgamated.hpp"
 
 #include <gpu/shaders/generated/cs_frame_output.spv.h>
 #include <gpu/shaders/generated/vdp2_compose.spv.h>
+#include <gpu/shaders/generated/vdp2_nbg_fetch.spv.h>
 #include <gpu/shaders/generated/vdp2_render_bgs.spv.h>
 #include <gpu/shaders/generated/vdp2_render_sprite.spv.h>
 #include <gpu/vdp2/vdp2_bindings.hpp>
@@ -43,13 +45,15 @@ struct ShaderCase {
     const char *name;
     std::span<const uint32_t> spirv;
     std::span<const Binding> bindings;
+    uint32_t pushConstantSize;
 };
 
 const std::vector<ShaderCase> &Shaders() {
     static const std::vector<ShaderCase> shaders{
-        {"vdp2_render_sprite", sh::kVdp2RenderSpriteSpv, kRenderSpriteBindings},
-        {"vdp2_render_bgs", sh::kVdp2RenderBgsSpv, kRenderBgsBindings},
-        {"vdp2_compose", sh::kVdp2ComposeSpv, kComposeBindings},
+        {"vdp2_render_sprite", sh::kVdp2RenderSpriteSpv, kRenderSpriteBindings, kPushConstantSize},
+        {"vdp2_render_bgs", sh::kVdp2RenderBgsSpv, kRenderBgsBindings, kPushConstantSize},
+        {"vdp2_compose", sh::kVdp2ComposeSpv, kComposeBindings, kPushConstantSize},
+        {"vdp2_nbg_fetch", sh::kVdp2NbgFetchSpv, kNBGFetchBindings, kNBGFetchPushConstantSize},
     };
     return shaders;
 }
@@ -284,6 +288,55 @@ TEST_CASE("VDP2 shader modules use only the Vulkan 1.2 baseline", "[vdp2][pipeli
     CHECK(StorageImageVariables(sh::kVdp2RenderSpriteSpv) == 2);
     CHECK(StorageImageVariables(sh::kVdp2RenderBgsSpv) == 3);
     CHECK(StorageImageVariables(sh::kVdp2ComposeSpv) == 0);
+    // The NBG fetch pass writes a buffer (the character table), no image.
+    CHECK(StorageImageVariables(sh::kVdp2NbgFetchSpv) == 0);
+}
+
+TEST_CASE("The NBG fetch pass: one 32-thread row group, the character table, its push constants", "[vdp2][pipelines]") {
+    const SpvModule m = ParseSpirv(sh::kVdp2NbgFetchSpv);
+    REQUIRE(m.valid);
+    REQUIRE(m.localSize.size() == 3);
+    CHECK(m.localSize[0] == kWorkgroupWidth);
+    CHECK(m.localSize[1] == 1);
+    CHECK(m.localSize[2] == 1);
+    STATIC_CHECK(kNBGFetchDispatchZ == 4);
+    CHECK(CheckModule(sh::kVdp2NbgFetchSpv, kNBGFetchBindings).empty());
+    // bgs reads the table the fetch pass writes; both are the same buffer, 4 NBGs x 512 rows x 704 pixels.
+    STATIC_CHECK(kNBGCharCount == 4 * 512 * 704);
+    STATIC_CHECK(kNBGCharBufferSize == kNBGCharCount * 4);
+    STATIC_CHECK(kBindingNBGChars < 16);
+    STATIC_CHECK(kBindingNBGCharsOut >= 16);
+    CHECK(std::any_of(kRenderBgsBindings.begin(), kRenderBgsBindings.end(),
+                      [](const Binding &b) { return b.binding == kBindingNBGChars; }));
+    // Push constants: the common block, then the row count
+    STATIC_CHECK(offsetof(VDP2NBGFetchPushConstants, common) == 0);
+    STATIC_CHECK(offsetof(VDP2NBGFetchPushConstants, rows) == kPushConstantSize);
+    STATIC_CHECK(kMaxPushConstantSize == 56);
+}
+
+TEST_CASE("NBGUsesCharTable selects delayed scroll NBGs and the vertical cell scroll 2x2 case", "[vdp2][pipelines]") {
+    NBGParams p{};
+    p.base.enabled = true;
+    CHECK_FALSE(NBGUsesCharTable(p, 1));
+    p.base.charPatDelay = 0x4; // bank B0
+    CHECK(NBGUsesCharTable(p, 1));
+    CHECK(NBGUsesCharTable(p, 3));
+    p.base.bitmap = true;
+    CHECK_FALSE(NBGUsesCharTable(p, 1));
+    p.base.bitmap = false;
+    p.base.enabled = false;
+    CHECK_FALSE(NBGUsesCharTable(p, 1));
+
+    NBGParams v{};
+    v.base.enabled = true;
+    v.vcellScrollEnable = true;
+    CHECK_FALSE(NBGUsesCharTable(v, 0)); // 1x1 cells
+    v.base.cellSizeShift = 1;
+    CHECK(NBGUsesCharTable(v, 0));
+    CHECK(NBGUsesCharTable(v, 1));
+    CHECK_FALSE(NBGUsesCharTable(v, 2)); // no vertical cell scroll on NBG2/3
+    v.base.mosaicEnable = true;
+    CHECK_FALSE(NBGUsesCharTable(v, 0));
 }
 
 TEST_CASE("The largest workgroup any renderer shader declares is kMaxWorkgroupInvocations", "[vdp2][pipelines]") {
@@ -357,12 +410,12 @@ TEST_CASE("VDP2 binding table: read-only bindings 0-15, storage 16-31, parameter
     STATIC_CHECK(kRotParamBaseCount == 2 * 512);
     STATIC_CHECK(kLnclBackCount == 2 * 512);
 
-    // The largest per-stage use, which the device limits in gpu_version.hpp must cover (bgs: 6 storage buffers,
-    // 3 storage images, 10 descriptors; compose: 4 sampled images).
-    STATIC_CHECK(kMaxStageUsage.storageBuffers == 6);
+    // The largest per-stage use, which the device limits in gpu_version.hpp must cover (bgs: 7 storage buffers,
+    // 3 storage images, 11 descriptors; compose: 4 sampled images).
+    STATIC_CHECK(kMaxStageUsage.storageBuffers == 7);
     STATIC_CHECK(kMaxStageUsage.storageImages == 3);
     STATIC_CHECK(kMaxStageUsage.sampledImages == 4);
-    STATIC_CHECK(kMaxStageUsage.resources == 10);
+    STATIC_CHECK(kMaxStageUsage.resources == 11);
 }
 
 TEST_CASE("MakeOutputSize packs HRes and VRes", "[vdp2][pipelines]") {
@@ -376,12 +429,12 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
     namespace gpu = brimir::gpu;
     // A device exactly at the required minimums passes.
     VkPhysicalDeviceLimits limits{};
-    limits.maxPerStageDescriptorStorageBuffers = 6;
+    limits.maxPerStageDescriptorStorageBuffers = 7;
     limits.maxPerStageDescriptorStorageImages = 3;
     limits.maxPerStageDescriptorSampledImages = 4;
-    limits.maxPerStageResources = 10;
+    limits.maxPerStageResources = 11;
     limits.maxComputeWorkGroupInvocations = kMaxWorkgroupInvocations;
-    limits.maxPushConstantsSize = 48;
+    limits.maxPushConstantsSize = 56;
     CHECK(gpu::UnmetLimit(limits).empty());
 
     // Every entry, one below its minimum, fails with its name and both values.
@@ -394,10 +447,10 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
                                           std::to_string(limit.minimum));
     }
 
-    // The Vulkan-guaranteed minimum of 4 storage buffers per stage is not enough (bgs has 6).
+    // The Vulkan-guaranteed minimum of 4 storage buffers per stage is not enough (bgs has 7).
     VkPhysicalDeviceLimits spec = limits;
     spec.maxPerStageDescriptorStorageBuffers = 4;
-    CHECK(gpu::UnmetLimit(spec) == "maxPerStageDescriptorStorageBuffers 4 < 6");
+    CHECK(gpu::UnmetLimit(spec) == "maxPerStageDescriptorStorageBuffers 4 < 7");
 
     STATIC_CHECK(gpu::kRequiredStageStorageBuffers == kMaxStageUsage.storageBuffers);
     STATIC_CHECK(gpu::kRequiredStageResources == kMaxStageUsage.resources);
@@ -430,11 +483,11 @@ TEST_CASE("VDP2 compute pipelines build on the baseline device with clean valida
     STATIC_CHECK(brimir::gpu::kRequiredCoreFeatures.empty());
     STATIC_CHECK(brimir::gpu::kRequiredDeviceExtensions.empty());
 
-    const VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, kPushConstantSize};
-    REQUIRE(pushRange.size <= device->Properties().limits.maxPushConstantsSize);
+    REQUIRE(kMaxPushConstantSize <= device->Properties().limits.maxPushConstantsSize);
 
     for (const ShaderCase &shader : Shaders()) {
         INFO("shader: " << shader.name);
+        const VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, shader.pushConstantSize};
 
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         uint32_t storageBuffers = 0;
