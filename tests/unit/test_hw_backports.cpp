@@ -1320,3 +1320,78 @@ TEST_CASE("Transparent meshes keep both fields in double-density interlace", "[v
     CHECK(rows[2] == kBack);
     CHECK(rows[3] == kBack);
 }
+
+namespace {
+
+// Renders VDP2 line 0 over a black back screen with a transparent-mesh pixel (palette data) whose CRAM colour has the given
+// MSB. The normal sprite pixel is transparent palette data, but the sprite layer still takes the colour of CRAM entry 0,
+// whose MSB is set to normalMsb. Returns the first pixel of the line.
+uint32 RenderMeshMsbPixel(uint16 spctl, uint16 ccctl, bool normalMsb, bool meshMsb) {
+    auto state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    renderer->ConfigureEnhancements({.transparentMeshes = true});
+    FrameCapture capture;
+
+    auto &regs = state->regs2;
+    regs.WriteTVMD(0x8000);
+    regs.LatchTVMD();
+    regs.WriteBGON(0);
+    regs.WriteSPCTL(spctl);
+    regs.WritePRISA(0x0007);
+    regs.WriteCCCTL(ccctl);
+    regs.WriteCCRSA(0x0010);
+    regs.WriteBKTAU(0x0000);
+    regs.WriteBKTAL(0x0080);
+    state->mem2.WriteVRAM<uint16>(0x100, 0x0000);
+    state->mem2.WriteCRAM<uint16>(0 * sizeof(uint16), normalMsb ? 0x8000 : 0x0000);
+    state->mem2.WriteCRAM<uint16>(1 * sizeof(uint16), meshMsb ? 0x83E0 : 0x03E0);
+    state->state1.sysClipH = 319;
+    state->state1.sysClipV = 255;
+    state->state2.layerEnabled[0] = true;
+
+    state->regs1.WriteFBCR(0x0000);
+    state->mem1.WriteVRAM<uint16>(0x100 + 0x00, 0x0006); // draw line
+    state->mem1.WriteVRAM<uint16>(0x100 + 0x04, 0x0100); // CMDPMOD: mesh
+    state->mem1.WriteVRAM<uint16>(0x100 + 0x06, 0x0001); // CMDCOLR: palette data, colour index 1
+    state->mem1.WriteVRAM<uint16>(0x100 + 0x0C, 0);      // XA
+    state->mem1.WriteVRAM<uint16>(0x100 + 0x0E, 0);      // YA
+    state->mem1.WriteVRAM<uint16>(0x100 + 0x10, 7);      // XB
+    state->mem1.WriteVRAM<uint16>(0x100 + 0x12, 0);      // YB
+
+    renderer->PostLoadStateSync();
+    capture.Bind(*renderer);
+    renderer->VDP1BeginFrame();
+    renderer->VDP1ExecuteCommand(0x100, vdp::VDP1Command::Control{.u16 = 0x0006});
+    renderer->VDP1EndFrame();
+    state->fbIndex.Flip();
+
+    renderer->VDP2SetResolution(320, 224, false);
+    renderer->VDP2BeginFrame();
+    renderer->VDP2RenderLine(0);
+    renderer->VDP2EndFrame();
+    REQUIRE(capture.width == 320);
+    return capture.At(0, 0);
+}
+
+} // namespace
+
+TEST_CASE("Transparent mesh colour calculation in colour MSB mode uses the mesh pixel's MSB",
+          "[vdp][vdp2][mesh][brimir]") {
+    // Brimir fix (same in upstream Ymir): the MSB condition read the normal sprite layer, which holds an unrelated colour
+    // wherever the normal sprite pixel is transparent, instead of the mesh pixel.
+    constexpr uint16 kSpriteMixed = 0x0020;
+    constexpr uint16 kCondMsb = 0x3000;
+    constexpr uint16 kCondAlways = 0x0700; // priority <= 7: always true for the mesh priority used here
+    constexpr uint16 kSpriteCCEnable = 0x0040;
+
+    const uint32 withCC = RenderMeshMsbPixel(kSpriteMixed | kCondAlways, kSpriteCCEnable, false, true);
+    const uint32 withoutCC = RenderMeshMsbPixel(kSpriteMixed | kCondAlways, 0, false, true);
+    REQUIRE(withCC != withoutCC);
+
+    // Mesh MSB = 1 over a normal sprite layer MSB = 0: colour calculation applies
+    CHECK(RenderMeshMsbPixel(kSpriteMixed | kCondMsb, kSpriteCCEnable, false, true) == withCC);
+    // Mesh MSB = 0 over a normal sprite layer MSB = 1: colour calculation does not apply
+    CHECK(RenderMeshMsbPixel(kSpriteMixed | kCondMsb, kSpriteCCEnable, true, false) == withoutCC);
+}

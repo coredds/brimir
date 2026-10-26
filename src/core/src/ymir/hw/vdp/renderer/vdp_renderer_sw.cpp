@@ -4339,7 +4339,9 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
                     layer0MeshColorCalcEnabled[x] = pixelPriority >= spriteParams.colorCalcValue;
                     break;
                 case MsbEqualsOne:
-                    layer0MeshColorCalcEnabled[x] = m_layerOutputs[altField][LYR_Sprite].pixels.color[x].msb == 1;
+                    // Brimir: use the mesh pixel's MSB. Upstream reads the normal sprite layer, whose colour is unrelated
+                    // (stale or from palette entry 0) wherever the normal sprite pixel is transparent.
+                    layer0MeshColorCalcEnabled[x] = m_meshLayerOutput[altField].pixels.color[x].msb == 1;
                     break;
                 default: util::unreachable();
                 }
