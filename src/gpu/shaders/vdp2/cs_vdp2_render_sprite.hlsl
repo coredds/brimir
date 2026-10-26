@@ -10,8 +10,8 @@
 //   HRes x VRes and layers beyond the mesh layer write nothing, and framebuffer reads beyond the buffer return 0.
 // Where Ymir's sprite layer differs from Brimir's software renderer (the reference), the software semantics are
 // ported, each marked "// Brimir: matches software (sw:<lines>)": framebuffer offsets wrap within the framebuffer,
-// and under deinterlacing rotated sprites use the line's coordinates and the alt fields read the framebuffers software
-// reads.
+// under deinterlacing rotated sprites use the line's coordinates and the alt fields read the framebuffers software
+// reads, and doubled hi-res output (rotated or not) repeats the even pixel, with rotated coordinates at half x.
 //
 // Bindings (set 0; tools/shaders/build_shaders.cmake shifts t by 0 and u by 16):
 //   0  t0  g_layerRenderParams  StructuredBuffer<LayerRenderParams>  STORAGE_BUFFER_DYNAMIC
@@ -492,9 +492,17 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
     }
     const uint field = interlaceMode == kInterlaceModeDoubleDensity ? altField : 0;
 
+    // Brimir: matches software (sw:2672-2677, 2694-2739): when the output is doubled (hi-res, 16-bit framebuffer, with
+    // or without rotation), each pair of pixels is the even pixel, window included, drawn from half-resolution x.
+    // (Ymir evaluates every pixel and computes rotated coordinates at full resolution.)
+    if (outHalfResH) {
+        pos.x &= ~1u;
+        outPos.x &= ~1u;
+    }
+
     uint2 spritePos;
     if (rotate) {
-        spritePos = CalcRotationSpriteCoordinates(uint2(pos.x, fieldLine));
+        spritePos = CalcRotationSpriteCoordinates(uint2(outHalfResH ? pos.x >> 1 : pos.x, fieldLine));
         if (any(spritePos >= fbSize)) {
             return output;
         }

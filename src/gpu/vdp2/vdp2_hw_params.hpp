@@ -708,10 +708,18 @@ static_assert(sizeof(VDP2ComposeParams) == 80);
 
 // Brimir: per-output-row NBG scroll state, one per NBG per row, computed on the CPU exactly as the software renderer's
 // per-line NBG state machine does (stage1b-port-inventory.md section 4.3).
+// - fracScrollX, fracScrollY, scrollIncH: NBGLayerState as the software renderer draws the row with (fracScrollY
+//   includes the alternate-line increment of double density deinterlacing, sw:4524, 4628);
+// - mosaicSrcLine: the dispatch row whose layer output the row repeats (vertical mosaic), or the row itself;
+// - prevLastVCellScroll: the field's VRAMFetcher::lastVCellScroll before the row is drawn;
+// - prevLineEndScrollX/Y: the field's last character fetch position of the previous drawn scroll line (the extra tile
+//   past the right edge), whose character is the fetcher's nextChar at the start of the row;
+// - flags: bit 0 set when prevLineEndScrollX/Y is valid (else nextChar is the blank character of a reset fetcher).
 struct VDP2NBGLine {
     int32_t fracScrollX, fracScrollY, scrollIncH;
-    uint32_t mosaicSrcLine, prevLastVCellScroll, prevLineEndScrollX, prevLineEndScrollY, pad;
+    uint32_t mosaicSrcLine, prevLastVCellScroll, prevLineEndScrollX, prevLineEndScrollY, flags;
 };
+inline constexpr uint32_t kVDP2NBGLinePrevLineEndValid = 1u << 0u;
 static_assert(sizeof(VDP2NBGLine) == 32);
 
 /// @brief Number of entries in the VDP2 CRAM color cache.

@@ -5,12 +5,11 @@
 // contents are mostly seeded random data (pattern names, characters, bitmaps, CRAM, sprite framebuffers, coefficient
 // tables), which reaches many pixel paths per scene.
 //
-// Known divergences between the ported shaders and the software renderer are tagged [!shouldfail], with their letter
-// from stage1b-port-inventory.md section 4.1 (or a stage 1B ruling: (v)) in the name; Task 6 fixes (b)-(g) and (v)
-// and removes the tag. The ones Task 5
-// fixed ((a), (i), (k), (l) and (q)-(u) from the Task 3 and 4 reviews) keep their letter in the name, as do the
-// guards (j), (m)-(o). Documented exceptions (software behaviour the GPU path does not reproduce, by a controller
-// ruling) are tagged [!shouldfail] too, named "exception <id>". Any other failure is a bug.
+// Scenes of the divergences between Ymir's shaders and the software renderer that stage 1B fixed keep their letter from
+// stage1b-port-inventory.md section 4.1 (or a stage 1B ruling) in the name: (a), (i), (k), (l), (q)-(u) (Task 5),
+// (b)-(h) and (v) (Task 6), and the guards (j), (m)-(o). Feature scenes (RunFeatureScene) also require the feature to
+// change the software frame. Documented exceptions (software behaviour the GPU path does not reproduce, by a
+// controller ruling) are tagged [!shouldfail], named "exception <id>". Any other failure is a bug.
 //
 // Also here: upload overflow (64 KiB upload blocks), detach/attach between frames, and FramePresenter::PresentDevice
 // against FramePresenter::Present of the read-back composite.
@@ -56,7 +55,8 @@ constexpr uint32_t TVMD = 0x000, RAMCTL = 0x00E, CYCA0L = 0x010, CYCA0U = 0x012,
                    SFSEL = 0x024, SFCODE = 0x026, CHCTLA = 0x028, CHCTLB = 0x02A, BMPNA = 0x02C, PNCN0 = 0x030,
                    PNCR = 0x038, PLSZ = 0x03A, MPOFN = 0x03C, MPOFR = 0x03E, MPABN0 = 0x040, MPABRA = 0x050,
                    MPABRB = 0x060, SCXIN0 = 0x070, SCXDN0 = 0x072, SCYIN0 = 0x074, SCYDN0 = 0x076, ZMXIN0 = 0x078,
-                   ZMXDN0 = 0x07A, ZMYIN0 = 0x07C, ZMYDN0 = 0x07E, SCXIN1 = 0x080, SCYIN1 = 0x084, SCXN2 = 0x090,
+                   ZMXDN0 = 0x07A, ZMYIN0 = 0x07C, ZMYDN0 = 0x07E, SCXIN1 = 0x080, SCYIN1 = 0x084, ZMXIN1 = 0x088,
+                   ZMXDN1 = 0x08A, ZMYIN1 = 0x08C, ZMYDN1 = 0x08E, LSTA1U = 0x0A4, LSTA1L = 0x0A6, SCXN2 = 0x090,
                    SCYN2 = 0x092, SCXN3 = 0x094, SCYN3 = 0x096, ZMCTL = 0x098, SCRCTL = 0x09A, VCSTAU = 0x09C,
                    VCSTAL = 0x09E, LSTA0U = 0x0A0, LSTA0L = 0x0A2, LCTAU = 0x0A8, LCTAL = 0x0AA, BKTAU = 0x0AC,
                    BKTAL = 0x0AE, RPMD = 0x0B0, KTCTL = 0x0B4, KTAOF = 0x0B6, OVPNRA = 0x0B8, RPTAU = 0x0BC,
@@ -561,6 +561,14 @@ void RunScene(const Vdp2Scene &scene, const RenderBothOptions &options = {}, boo
     auto device = OpenDevice();
     Check(*device, scene, options, uniformFrame);
     CloseAndCheckValidation(device);
+}
+
+// A scene built with and without the feature under test: the feature must change the software frame (so the scene
+// cannot pass without exercising it), and the scene with the feature must match. The builder is called once per run, so
+// state captured by onLine starts fresh each time.
+void RunFeatureScene(const std::function<Vdp2Scene(bool feature)> &make, const RenderBothOptions &options = {}) {
+    CHECK(brimir::test::RenderSoftware(make(true)) != brimir::test::RenderSoftware(make(false)));
+    RunScene(make(true), options);
 }
 
 Vdp2Scene Make(std::function<void(Vdp2SceneWriter &, Shadow &, std::mt19937 &)> setup,
@@ -1375,10 +1383,10 @@ TEST_CASE("PresentDevice across detach and attach", "[gpu][vdp2][scene][lavapipe
 }
 
 // =====================================================================================================================
-// Known divergences (stage1b-port-inventory.md section 4.1 letters). Each fails today; the task that fixes it removes
-// [!shouldfail].
+// Background parity (stage1b-port-inventory.md section 4.1 (b)-(h)): per-line NBG state, mosaic, line and vertical
+// scroll, vertical cell scroll, character pattern delay, data access shift.
 
-TEST_CASE("Scene: (b) NBG mosaic", "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (b) NBG mosaic", "[gpu][vdp2][scene]") {
     RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng);
         TwoNBGs(w, s, rng);
@@ -1390,7 +1398,7 @@ TEST_CASE("Scene: (b) NBG mosaic", "[gpu][vdp2][scene][!shouldfail]") {
     }));
 }
 
-TEST_CASE("Scene: (c) RBG mosaic", "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (c) RBG mosaic", "[gpu][vdp2][scene]") {
     RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng);
         SetupRBG0(w, s, {}, rng);
@@ -1398,7 +1406,7 @@ TEST_CASE("Scene: (c) RBG mosaic", "[gpu][vdp2][scene][!shouldfail]") {
     }));
 }
 
-TEST_CASE("Scene: (d) line scroll in double density", "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (d) line scroll in double density", "[gpu][vdp2][scene]") {
     RunScene(Make(
         [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng, static_cast<uint16_t>(kDisp | kLSMDDouble));
@@ -1414,7 +1422,7 @@ TEST_CASE("Scene: (d) line scroll in double density", "[gpu][vdp2][scene][!shoul
 }
 
 TEST_CASE("Scene: (e) vertical scroll accumulation across a mid-frame zoom change",
-          "[gpu][vdp2][scene][!shouldfail]") {
+          "[gpu][vdp2][scene]") {
     Vdp2Scene scene = Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng);
         CyclesSingle(w, 0);
@@ -1432,7 +1440,7 @@ TEST_CASE("Scene: (e) vertical scroll accumulation across a mid-frame zoom chang
     RunScene(scene);
 }
 
-TEST_CASE("Scene: (f) vertical cell scroll with horizontal zoom", "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (f) vertical cell scroll with horizontal zoom", "[gpu][vdp2][scene]") {
     RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng);
         SetupNBG(w, s, {.index = 0, .format = 0}, rng);
@@ -1451,7 +1459,7 @@ TEST_CASE("Scene: (f) vertical cell scroll with horizontal zoom", "[gpu][vdp2][s
     }));
 }
 
-TEST_CASE("Scene: (g) character pattern delay", "[gpu][vdp2][scene][!shouldfail]") {
+TEST_CASE("Scene: (g) character pattern delay", "[gpu][vdp2][scene]") {
     RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
         Base(w, s, rng);
         SetupNBG(w, s, {.index = 1, .format = 0}, rng);
@@ -1462,6 +1470,342 @@ TEST_CASE("Scene: (g) character pattern delay", "[gpu][vdp2][scene][!shouldfail]
         }
         w.Reg(SCXIN1, 3);
     }));
+}
+
+namespace {
+
+// NBG n scroll registers (integer parts)
+constexpr uint32_t kSCXIN[4] = {SCXIN0, SCXIN1, SCXN2, SCXN3};
+constexpr uint32_t kSCYIN[4] = {SCYIN0, SCYIN1, SCYN2, SCYN3};
+
+// Interlace modes: progressive, single density, single density deinterlaced, double density, double density
+// deinterlaced.
+struct InterlaceMode {
+    uint16_t lsmd;
+    bool deinterlace;
+};
+constexpr InterlaceMode kInterlaceModes[] = {
+    {0, false}, {kLSMDSingle, false}, {kLSMDSingle, true}, {kLSMDDouble, false}, {kLSMDDouble, true}};
+
+} // namespace
+
+TEST_CASE("Scene: (b) NBG mosaic on each NBG, cells and bitmaps", "[gpu][vdp2][scene]") {
+    // Horizontal and vertical mosaic with a window, scrolled. A layer split at line 101 (a scroll write) makes lines
+    // 101-103 repeat line 100 from an earlier batch, and the mosaic goes off at line 150 and on again at line 170
+    // (the counter keeps its value meanwhile).
+    const auto config = GENERATE(std::pair{0u, false}, std::pair{1u, false}, std::pair{2u, false},
+                                 std::pair{3u, false}, std::pair{0u, true}, std::pair{1u, true});
+    const uint32_t nbg = config.first;
+    const bool bitmap = config.second;
+    CAPTURE(nbg, bitmap);
+    const uint16_t mzctl = static_cast<uint16_t>((1u << nbg) | ((2 + nbg) << 8) | (3u << 12)); // (3+n) x 4
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            CyclesAll(w);
+            SetupNBG(w, s, {.index = nbg, .format = 0, .bitmap = bitmap, .priority = 6}, rng);
+            w.Reg(kSCYIN[nbg], 3);
+            WindowRects(w, false);
+            w.Reg(nbg < 2 ? WCTLA : WCTLB, static_cast<uint16_t>(0x02 << (8 * (nbg & 1)))); // W0 inside
+            if (feature) {
+                w.Reg(MZCTL, mzctl);
+            }
+        });
+        scene.onLine = [=](Vdp2SceneWriter &w, uint32_t y) {
+            if (y == 0) {
+                w.Reg(kSCXIN[nbg], static_cast<uint16_t>(5 + nbg));
+                if (feature) {
+                    w.Reg(MZCTL, mzctl);
+                }
+            } else if (y == 101) {
+                w.Reg(kSCXIN[nbg], static_cast<uint16_t>(9 + nbg));
+            } else if (y == 150 && feature) {
+                w.Reg(MZCTL, 0);
+            } else if (y == 170 && feature) {
+                w.Reg(MZCTL, mzctl);
+            }
+        };
+        return scene;
+    });
+}
+
+TEST_CASE("Scene: (b) NBG vertical mosaic in interlaced modes", "[gpu][vdp2][scene]") {
+    const InterlaceMode mode = GENERATE(from_range(std::begin(kInterlaceModes), std::end(kInterlaceModes)));
+    CAPTURE(mode.lsmd, mode.deinterlace);
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make(
+            [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                Base(w, s, rng, static_cast<uint16_t>(kDisp | mode.lsmd));
+                TwoNBGs(w, s, rng);
+                w.Reg(SCYIN0, 7);
+                w.Reg(ZMYIN0, 0);
+                w.Reg(ZMYDN0, 0xC000);
+                if (feature) {
+                    w.Reg(MZCTL, 0x5103); // NBG0 and NBG1, 2 x 6
+                }
+            },
+            {.deinterlace = mode.deinterlace}, 3);
+        scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) {
+            if (y == 0) {
+                w.Reg(SCXIN1, 0);
+            } else if (y == 64) {
+                w.Reg(SCXIN1, 3); // a layer split inside a mosaic block
+            }
+        };
+        return scene;
+    });
+}
+
+TEST_CASE("Scene: (c) RBG mosaic in normal and hi-res modes", "[gpu][vdp2][scene]") {
+    const uint16_t hreso = GENERATE(uint16_t{0}, uint16_t{2});
+    const bool window = GENERATE(false, true);
+    CAPTURE(hreso, window);
+    RunFeatureScene([=](bool feature) {
+        return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | hreso));
+            SetupRBG0(w, s, {}, rng);
+            if (window) {
+                w.Reg(WPSX0, 41 << 1);
+                w.Reg(WPEX0, 203 << 1);
+                w.Reg(WPSY0, 20);
+                w.Reg(WPEY0, 150);
+                w.Reg(WCTLC, 0x0002);
+            }
+            if (feature) {
+                w.Reg(MZCTL, 0x0410); // RBG0, 5 pixels wide
+            }
+        });
+    });
+}
+
+TEST_CASE("Scene: (d) line scroll X Y and zoom at every interval in every interlace mode", "[gpu][vdp2][scene]") {
+    // NBG0: X, Y and zoom; NBG1: X and Y; NBG0 drops the zoom at line 90 (a mid-frame flag change).
+    const uint32_t interval = GENERATE(0u, 1u, 2u, 3u);
+    const InterlaceMode mode = GENERATE(from_range(std::begin(kInterlaceModes), std::end(kInterlaceModes)));
+    CAPTURE(interval, mode.lsmd, mode.deinterlace);
+    constexpr uint32_t kLineScroll1Address = 0x7A000;
+    const uint16_t scrctl = static_cast<uint16_t>((0x0E | (interval << 4)) | ((0x06 | (interval << 4)) << 8));
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make(
+            [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                Base(w, s, rng, static_cast<uint16_t>(kDisp | mode.lsmd));
+                TwoNBGs(w, s, rng);
+                FillVRAM(w, kLineScrollAddress, 0x2000, rng);
+                FillVRAM(w, kLineScroll1Address, 0x2000, rng);
+                w.Reg(LSTA0U, static_cast<uint16_t>(kLineScrollAddress >> 17));
+                w.Reg(LSTA0L, static_cast<uint16_t>((kLineScrollAddress >> 1) & 0xFFFF));
+                w.Reg(LSTA1U, static_cast<uint16_t>(kLineScroll1Address >> 17));
+                w.Reg(LSTA1L, static_cast<uint16_t>((kLineScroll1Address >> 1) & 0xFFFF));
+                w.Reg(SCYIN0, 9);
+                w.Reg(ZMYIN1, 0);
+                w.Reg(ZMYDN1, 0x8000);
+            },
+            {.deinterlace = mode.deinterlace}, 3);
+        scene.onLine = [=](Vdp2SceneWriter &w, uint32_t y) {
+            if (!feature) {
+                return;
+            }
+            if (y == 0) {
+                w.Reg(SCRCTL, scrctl);
+            } else if (y == 90) {
+                w.Reg(SCRCTL, static_cast<uint16_t>(scrctl & ~0x0008));
+            }
+        };
+        return scene;
+    });
+}
+
+TEST_CASE("Scene: (e) vertical scroll with SCYN2 SCYN3 and ZMYIN writes mid-frame", "[gpu][vdp2][scene]") {
+    const InterlaceMode mode = GENERATE(InterlaceMode{0, false}, InterlaceMode{kLSMDDouble, false},
+                                        InterlaceMode{kLSMDDouble, true});
+    CAPTURE(mode.lsmd, mode.deinterlace);
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make(
+            [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                Base(w, s, rng, static_cast<uint16_t>(kDisp | mode.lsmd));
+                CyclesAll(w);
+                SetupNBG(w, s, {.index = 0, .format = 0, .priority = 2}, rng);
+                SetupNBG(w, s, {.index = 2, .format = 0, .priority = 6}, rng);
+                SetupNBG(w, s, {.index = 3, .format = 0, .cell2x2 = true, .priority = 4}, rng);
+                w.Reg(ZMYIN0, 0);
+                w.Reg(ZMYDN0, 0x8000);
+            },
+            {.deinterlace = mode.deinterlace}, 3);
+        scene.onLine = [=](Vdp2SceneWriter &w, uint32_t y) {
+            if (y == 0) {
+                w.Reg(SCYN2, 0);
+                w.Reg(SCYN3, 0);
+                w.Reg(ZMYIN0, 0);
+                w.Reg(ZMYDN0, 0x8000);
+            }
+            if (!feature) {
+                return;
+            }
+            if (y == 77) {
+                w.Reg(SCYN2, 40); // the counter restarts at line 77
+            } else if (y == 130) {
+                w.Reg(SCYN3, 7);
+            } else if (y == 50) {
+                w.Reg(ZMYIN0, 2);
+            } else if (y == 160) {
+                w.Reg(ZMYIN0, 0);
+                w.Reg(ZMYDN0, 0x4000);
+            }
+        };
+        return scene;
+    });
+}
+
+TEST_CASE("Scene: (f) vertical cell scroll with zoom, repeat and delay", "[gpu][vdp2][scene]") {
+    // NBG0 (1x1) and NBG1 (2x2) with vertical cell scroll, horizontally reduced 1, 1/2 or 1/4. Vertical cell scroll
+    // reads in bank B1 at:
+    //   0: NBG0 T1, NBG1 T2 (no delay)
+    //   1: NBG0 T2 (repeat), NBG1 T3 (delay)
+    //   2: NBG0 T3 (repeat and delay), NBG1 T4 (delay)
+    //   3: NBG0 T5 (repeat and delay) only
+    //   4: as 2, with horizontal mosaic on NBG0 (the line's first value applies to the whole line)
+    // With a delay, the first reads of a line return the previous line's last value (offset -1).
+    const uint32_t reduction = GENERATE(1u, 2u, 4u);
+    const uint32_t variant = GENERATE(0u, 1u, 2u, 3u, 4u);
+    CAPTURE(reduction, variant);
+    static constexpr uint16_t kCYCB1L[] = {0xFCDF, 0xFFCD, 0xFFFC, 0xFFFF, 0xFFFC};
+    static constexpr uint16_t kCYCB1U[] = {0xFFFF, 0xFFFF, 0xDFFF, 0xFCFF, 0xDFFF};
+    RunFeatureScene([=](bool feature) {
+        return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            SetupNBG(w, s, {.index = 0, .format = 0, .priority = 5}, rng);
+            SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = true, .priority = 3}, rng);
+            // CP0 T0-T1, CP1 T2-T3 in A0; PN0 T0, PN1 T1 in B0; vertical cell scroll in B1
+            w.Reg(CYCA0L, 0x4455);
+            w.Reg(CYCA0U, 0xFFFF);
+            w.Reg(CYCB0L, 0x01FF);
+            w.Reg(CYCB0U, 0xFFFF);
+            w.Reg(CYCB1L, kCYCB1L[variant]);
+            w.Reg(CYCB1U, kCYCB1U[variant]);
+            constexpr uint32_t kVCellAddress = 0x7D000;
+            FillVRAM(w, kVCellAddress, 0x800, rng);
+            w.Reg(VCSTAU, static_cast<uint16_t>(kVCellAddress >> 17));
+            w.Reg(VCSTAL, static_cast<uint16_t>((kVCellAddress >> 1) & 0xFFFE));
+            if (feature) {
+                w.Reg(SCRCTL, variant == 3 ? 0x0001 : 0x0101);
+            }
+            w.Reg(SCXIN0, 3);
+            w.Reg(SCXDN0, 0x4000);
+            w.Reg(ZMXIN0, static_cast<uint16_t>(reduction));
+            w.Reg(ZMXIN1, static_cast<uint16_t>(reduction));
+            w.Reg(SCXIN1, 13);
+            if (variant == 4) {
+                w.Reg(MZCTL, 0x0201); // NBG0, 3 pixels wide
+            }
+        });
+    });
+}
+
+TEST_CASE("Scene: (g) character pattern delay of 1x1 and 2x2 characters", "[gpu][vdp2][scene]") {
+    // NBG1 with CP1 at T0 and PN1 at T7 in every bank: an illegal T0-T3 character read, which delays the characters
+    // of 1x1 and 2x2 cells alike. Extras: 0 none, 1 a window, 2 zoomed in 0.75, 3 reduced 1.5, 4 horizontal mosaic,
+    // 5 one-word pattern names.
+    const bool cell2x2 = GENERATE(false, true);
+    const uint32_t extra = GENERATE(0u, 1u, 2u, 3u, 4u, 5u);
+    CAPTURE(cell2x2, extra);
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            SetupNBG(w, s, {.index = 1, .format = 0, .cell2x2 = cell2x2, .twoWord = extra != 5}, rng);
+            for (uint32_t reg : {CYCA0L, CYCA1L, CYCB0L, CYCB1L}) {
+                // Without the feature: PN1 at T0 (no delay check for NBG0/NBG1) and CP1 at T1
+                w.Reg(reg, feature ? 0x5FFF : 0x15FF);
+                w.Reg(reg + 2, feature ? 0xFFF1 : 0xFFFF);
+            }
+            w.Reg(SCYIN1, 5);
+            switch (extra) {
+            case 1:
+                WindowRects(w, false);
+                w.Reg(WCTLA, 0x0A00); // NBG1: W0 inside or W1 inside
+                break;
+            case 2: w.Reg(ZMXIN1, 0), w.Reg(ZMXDN1, 0xC000); break;
+            case 3: w.Reg(ZMXIN1, 1), w.Reg(ZMXDN1, 0x8000); break;
+            case 4: w.Reg(MZCTL, 0x0202); break; // NBG1, 3 pixels wide
+            }
+        });
+        scene.onLine = [](Vdp2SceneWriter &w, uint32_t y) {
+            w.Reg(SCXIN1, static_cast<uint16_t>(y / 3)); // a different left edge on every line
+        };
+        return scene;
+    });
+}
+
+TEST_CASE("Scene: (h) data access shift of scroll and bitmap NBGs", "[gpu][vdp2][scene]") {
+    // 0: NBG2 with PN2 at T0 in bank B0 and its only CP2 at T3 in bank A0, illegal: one character read early, every
+    //    character shifted by 8 dots (vramDataOffset 8 in every bank, sw:5167-5170).
+    // 1: NBG0 bitmap in hi-res with CP0 at T0-T1 in bank A0 and T2-T3 in bank B0: the bank B reads are delayed
+    //    (vramDataOffset 8 in bank B, sw:5370-5372).
+    const uint32_t variant = GENERATE(0u, 1u);
+    CAPTURE(variant);
+    RunFeatureScene([=](bool feature) {
+        return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            if (variant == 0) {
+                Base(w, s, rng);
+                SetupNBG(w, s, {.index = 2, .format = 0}, rng);
+                w.Reg(CYCA0L, feature ? 0xFFF6 : 0xF6FF);
+                w.Reg(CYCA0U, 0xFFFF);
+                w.Reg(CYCB0L, 0x2FFF);
+                w.Reg(CYCB0U, 0xFFFF);
+                w.Reg(SCXN2, 3);
+            } else {
+                Base(w, s, rng, static_cast<uint16_t>(kDisp | 2));
+                SetupNBG(w, s, {.index = 0, .format = 1, .bitmap = true, .bitmapSize = 3}, rng);
+                // The 1024x512 bitmap spans banks A and B
+                FillVRAM(w, 0x40000, 0x40000, rng);
+                w.Reg(CYCA0L, 0x44FF);
+                w.Reg(CYCB0L, feature ? 0xFF44 : 0x44FF);
+                w.Reg(CYCA0U, 0xFFFF);
+                w.Reg(CYCB0U, 0xFFFF);
+                w.Reg(SCYIN0, 256); // rows 256 and below are in bank B
+            }
+        });
+    });
+}
+
+TEST_CASE("Scene: display enabled mid-frame with RBG0 and NBG0 line scroll", "[gpu][vdp2][scene]") {
+    // Ruling 13: the second frame turns the display off at line 200 (the latch goes off), the third turns it on at line
+    // 100: the display latch stays off, so lines 100 and below are drawn with the per-line state of the last line
+    // computed (line 199 of the second frame): RBG0's rotation bases and NBG0's line scroll and zoom do not advance,
+    // while NBG0's vertical scroll counter does (sw:2513-2565).
+    const bool rbg = GENERATE(false, true);
+    CAPTURE(rbg);
+    RunFeatureScene([=](bool feature) {
+        Vdp2Scene scene = Make(
+            [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                Base(w, s, rng);
+                if (rbg) {
+                    RBG r;
+                    r.a = Rotated(0.3, 0.9);
+                    r.a.dxst = feature ? 0.7 : 0.0;
+                    r.a.dyst = feature ? 1.3 : 1.0;
+                    SetupRBG0(w, s, r, rng);
+                } else {
+                    CyclesSingle(w, 0);
+                    SetupNBG(w, s, {.index = 0, .format = 0}, rng);
+                    FillVRAM(w, kLineScrollAddress, 0x2000, rng);
+                    w.Reg(LSTA0U, static_cast<uint16_t>(kLineScrollAddress >> 17));
+                    w.Reg(LSTA0L, static_cast<uint16_t>((kLineScrollAddress >> 1) & 0xFFFF));
+                    w.Reg(SCRCTL, feature ? 0x000E : 0x0000);
+                }
+            },
+            {}, 3);
+        scene.onLine = [frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
+            if (y == 0) {
+                ++*frame;
+            }
+            if (*frame == 2 && y == 200) {
+                w.Reg(TVMD, 0);
+            } else if (*frame == 3 && y == 100) {
+                w.Reg(TVMD, kDisp);
+            }
+        };
+        return scene;
+    });
 }
 
 namespace {
@@ -2009,8 +2353,8 @@ TEST_CASE("Scene: mesh colour calculation on the mesh pixel's colour MSB", "[gpu
 
 // Divergence (v) (stage 1B ruling 12): with VDP1 framebuffer rotation in hi-res modes, software computes the sprite
 // coordinates for HRes / 2 pixels (sw:2223-2225, 2333-2346) and the sprite layer reads them at half resolution and
-// doubles each pixel (sw:2672-2727); the shader computes them at full output x. Task 6 fixes it.
-TEST_CASE("Scene: (v) rotated sprites in hi-res modes", "[gpu][vdp2][scene][!shouldfail]") {
+// doubles each pixel (sw:2672-2727); Ymir's shader computed them at full output x.
+TEST_CASE("Scene: (v) rotated sprites in hi-res modes", "[gpu][vdp2][scene]") {
     const uint16_t hreso = GENERATE(uint16_t{2}, uint16_t{3});
     CAPTURE(hreso);
     RunScene(Make([hreso](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
@@ -2018,6 +2362,27 @@ TEST_CASE("Scene: (v) rotated sprites in hi-res modes", "[gpu][vdp2][scene][!sho
         SetupRBG0(w, s, {}, rng);
         SetupSprites(w, {.type = 0, .tvmr = 2}, rng); // TVMR bit 1: framebuffer rotation
     }));
+}
+
+TEST_CASE("Scene: (v) sprite windows in hi-res modes repeat the even pixel", "[gpu][vdp2][scene]") {
+    // With the output doubled (hi-res, 16-bit framebuffer, rotated or not), software draws each even pixel, its window
+    // included, and copies it to the odd one (sw:2694-2739); W0 starts and ends on odd pixels here.
+    const bool rotate = GENERATE(false, true);
+    CAPTURE(rotate);
+    RunFeatureScene([=](bool feature) {
+        return Make([=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | 2));
+            SetupRBG0(w, s, {}, rng);
+            SetupSprites(w, {.type = 0, .tvmr = static_cast<uint16_t>(rotate ? 2 : 0)}, rng);
+            w.Reg(WPSX0, 101);
+            w.Reg(WPEX0, 403);
+            w.Reg(WPSY0, 20);
+            w.Reg(WPEY0, 180);
+            if (feature) {
+                w.Reg(WCTLC, 0x0200); // sprite layer: W0 inside
+            }
+        });
+    });
 }
 
 TEST_CASE("Scene: RBG line colours read the RGB555 table at kVDP2CRAM555TableBase", "[gpu][vdp2][scene]") {

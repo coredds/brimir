@@ -70,6 +70,12 @@ void Vdp2FrontEnd::Reset(bool hard) {
     m_nextLayerRenderLine = 0;
     m_nextComposeLine = 0;
 
+    // Brimir: matches software (sw:109-112), which resets the first two fetchers of each field.
+    for (auto &fetchers : m_nbgFetchers) {
+        fetchers[0] = {};
+        fetchers[1] = {};
+    }
+
     CacheAllCRAMColors();
     UpdateEnabledLayers();
 }
@@ -84,6 +90,13 @@ void Vdp2FrontEnd::PostLoadStateSync() {
     UpdateEnabledLayers();
     m_vramDirty.SetAll();
     ++m_cramGeneration;
+
+    // Brimir: the loaded state2.rotParamStates are the last computed line's Xst, Yst and KA (the next line continues
+    // from them, as software does); lines prepared with the display latch off before the next computed line use them
+    // with the table address of the loaded registers.
+    for (uint32 i = 0; i < 2; ++i) {
+        m_rotTableAddress[i] = (m_state.regs2.commonRotParams.baseAddress & 0xFFF7C) + i * 0x80;
+    }
 }
 
 // Ported from d3d:2111-2117 (UpdateEnhancements, VDP2 part).
@@ -235,12 +248,13 @@ void Vdp2FrontEnd::WriteReg(uint32_t address, uint16_t value) {
             CacheAllCRAMColors();
         }
 
+        // Brimir: matches software (sw:430-438): the vertical scroll counter restarts at the written scroll value.
         switch (address) {
         case 0x092: // SCYN2
-            m_resetNBGScrollY[0] = true;
+            m_state.state2.nbgLayerStates[2].fracScrollY = 0;
             break;
         case 0x096: // SCYN3
-            m_resetNBGScrollY[1] = true;
+            m_state.state2.nbgLayerStates[3].fracScrollY = 0;
             break;
         }
     }
@@ -264,19 +278,91 @@ void Vdp2FrontEnd::CalcVCellScrollDelay() {
     m_state.state2.CalcVCellScrollDelay(m_state.regs2);
 }
 
-// Ported from d3d:4100-4116 (VDP2InitNBGs).
-void Vdp2FrontEnd::InitNBGs() {
+// Brimir: matches software (sw:2070-2078, VDP2InitFrame), replacing Ymir's VDP2InitNBGs (d3d:4100-4116).
+void Vdp2FrontEnd::InitFrame() {
     const VDP2Regs &regs2 = m_state.regs2;
+    if (!regs2.bgEnabled[5]) {
+        InitNormalBG(0);
+    }
+    InitNormalBG(1);
+    InitNormalBG(2);
+    InitNormalBG(3);
+}
 
+// Brimir: matches software (sw:2081-2097, VDP2InitNormalBG).
+void Vdp2FrontEnd::InitNormalBG(uint32_t index) {
+    const VDP2Regs &regs2 = m_state.regs2;
+    const BGParams &bgParams = regs2.bgParams[index + 1];
+    NBGLayerState &bgState = m_state.state2.nbgLayerStates[index];
+    bgState.fracScrollX = 0;
+    bgState.fracScrollY = 0;
+    if (!m_enhancements.deinterlace && regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity && regs2.TVSTAT.ODD) {
+        bgState.fracScrollY += bgParams.scrollIncV;
+    }
+
+    bgState.mosaicCounterY = 0;
+    if (index < 2) {
+        bgState.lineScrollTableAddress = bgParams.lineScrollTableAddress;
+    }
+}
+
+// Brimir: matches software (sw:2111-2143, VDP2UpdateLineScreenScroll).
+void Vdp2FrontEnd::UpdateLineScreenScroll(uint32_t y, const BGParams &bgParams, NBGLayerState &bgState) {
+    const VDP2Regs &regs2 = m_state.regs2;
+    bgState.scrollIncH = bgParams.scrollIncH;
+
+    if ((y & ((1u << bgParams.lineScrollInterval) - 1)) != 0) {
+        return;
+    }
+
+    uint32 address = bgState.lineScrollTableAddress;
+    auto read = [&] {
+        const uint32 value = m_state.mem2.ReadVRAM<uint32>(address);
+        address += sizeof(uint32);
+        return value;
+    };
+
+    size_t count = 1;
+    if (regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity &&
+        (y > 0 || (!m_enhancements.deinterlace && regs2.TVSTAT.ODD))) {
+        ++count;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (bgParams.lineScrollXEnable) {
+            bgState.fracScrollX = bit::extract<8, 26>(read());
+        }
+        if (bgParams.lineScrollYEnable) {
+            bgState.fracScrollY = bit::extract<8, 26>(read());
+        }
+        if (bgParams.lineZoomEnable) {
+            bgState.scrollIncH = bit::extract<8, 18>(read());
+        }
+    }
+    bgState.lineScrollTableAddress = address;
+}
+
+// Brimir: matches software (sw:2542-2565, VDP2FinishLine).
+void Vdp2FrontEnd::FinishLine() {
+    const VDP2Regs &regs2 = m_state.regs2;
+    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+
+    // Update NBG coordinates
     for (uint32 i = 0; i < 4; ++i) {
         const BGParams &bgParams = regs2.bgParams[i + 1];
-        NBGLayerState &nbgState = m_state.state2.nbgLayerStates[i];
+        NBGLayerState &bgState = m_state.state2.nbgLayerStates[i];
+        bgState.fracScrollY += bgParams.scrollIncV;
+        // Update the vertical scroll coordinate twice in double-density interlaced mode.
+        // If deinterlacing, the second increment is done after rendering the alternate scanline.
+        if (doubleDensity) {
+            bgState.fracScrollY += bgParams.scrollIncV;
+        }
 
-        // NOTE: fracScrollX/Y are computed from scratch in the shader
-        nbgState.scrollIncH = bgParams.scrollIncH;
-
-        if (i < 2) {
-            nbgState.lineScrollTableAddress = bgParams.lineScrollTableAddress;
+        // Increment mosaic counter
+        if (bgParams.mosaicEnable) {
+            ++bgState.mosaicCounterY;
+            if (bgState.mosaicCounterY >= regs2.mosaicV) {
+                bgState.mosaicCounterY = 0;
+            }
         }
     }
 }
@@ -315,9 +401,10 @@ void Vdp2FrontEnd::StoreLineColorBackScreens(uint32_t y) {
     m_lnclBack[kMaxResV + y] = ToRGBA8(state.backColor);
 }
 
-// Ported from d3d:4180-4225 (VDP2UpdateRotationParameterBases). Brimir: kMaxResV rows per parameter; Xst, Yst and KA
-// accumulate from the last computed line, as software's rotParamStates do (sw:2156-2184), so lines skipped with the
-// display latch off or with no RBG enabled continue where software does.
+// Ported from d3d:4180-4225 (VDP2UpdateRotationParameterBases). Brimir: matches software (sw:2145-2184,
+// VDP2CalcRotationParameterTables): Xst, Yst and KA accumulate in state2.rotParamStates, as software maintains them, so
+// lines skipped with the display latch off or with no RBG enabled continue where software does, and save states carry
+// them; kMaxResV rows per parameter.
 void Vdp2FrontEnd::UpdateRotationParameterBases(uint32_t y) {
     VDP2Regs &regs2 = m_state.regs2;
     if (!regs2.bgEnabled[4] && !regs2.bgEnabled[5]) {
@@ -329,33 +416,34 @@ void Vdp2FrontEnd::UpdateRotationParameterBases(uint32_t y) {
 
     const uint32 baseAddress = regs2.commonRotParams.baseAddress & 0xFFF7C; // mask bit 6 (shifted left by 1)
     for (uint32 i = 0; i < 2; ++i) {
-        VDP2RotParamBase &base = m_lastRotParamBases[i];
+        RotationParamState &state = m_state.state2.rotParamStates[i];
         RotationParams &src = regs2.rotParams[i];
 
+        // Brimir: software reads the table from (address & 0x7FFFF) (sw:2163); ReadVRAM masks the same way.
         const uint32 address = baseAddress + i * 0x80;
 
-        base.tableAddress = address;
+        m_rotTableAddress[i] = address;
 
         if (readAll || src.readXst) {
-            base.Xst = bit::extract_signed<6, 28, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x00));
+            state.Xst = bit::extract_signed<6, 28, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x00));
             src.readXst = false;
         } else {
-            base.Xst += bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x0C));
+            state.Xst += bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x0C));
         }
 
         if (readAll || src.readYst) {
-            base.Yst = bit::extract_signed<6, 28, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x04));
+            state.Yst = bit::extract_signed<6, 28, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x04));
             src.readYst = false;
         } else {
-            base.Yst += bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x10));
+            state.Yst += bit::extract_signed<6, 18, sint32>(m_state.mem2.ReadVRAM<uint32>(address + 0x10));
         }
 
         if (readAll || src.readKAst) {
             const uint32 KAst = bit::extract<6, 31>(m_state.mem2.ReadVRAM<uint32>(address + 0x54));
-            base.KA = src.coeffTableAddressOffset + KAst;
+            state.KA = src.coeffTableAddressOffset + KAst;
             src.readKAst = false;
         } else {
-            base.KA += bit::extract_signed<6, 25>(m_state.mem2.ReadVRAM<uint32>(address + 0x58));
+            state.KA += bit::extract_signed<6, 25>(m_state.mem2.ReadVRAM<uint32>(address + 0x58));
         }
     }
 }
@@ -437,9 +525,11 @@ void Vdp2FrontEnd::UpdateCommonRenderParams() {
     params.spriteParams.fbSizeV = std::countr_zero(regs1.tvmr.fbSizeV) - 8;
     params.spriteParams.inHalfResH = false;
     params.spriteParams.outHalfResH = false;
-    if (!regs1.tvmr.hdtvEnable && !regs1.tvmr.fbRotEnable) {
+    // Brimir: matches software (sw:2672-2677): the output is doubled in hi-res modes with rotation too (Ymir clears
+    // both with rotation); the sprite shader uses inHalfResH only without rotation.
+    if (!regs1.tvmr.hdtvEnable) {
         if (regs1.tvmr.pixel8Bits) {
-            params.spriteParams.inHalfResH = (regs2.TVMD.HRESOn & 0b110) == 0b000;
+            params.spriteParams.inHalfResH = !regs1.tvmr.fbRotEnable && (regs2.TVMD.HRESOn & 0b110) == 0b000;
         } else {
             params.spriteParams.outHalfResH = (regs2.TVMD.HRESOn & 0b110) == 0b010;
         }
@@ -486,7 +576,7 @@ void Vdp2FrontEnd::UpdateCommonRenderParams() {
 }
 
 // Ported from d3d:3835-3993 (VDP2UpdateLayerRenderParams, body without the generation gate and the upload tail).
-void Vdp2FrontEnd::UpdateLayerRenderParams(uint32_t y) {
+void Vdp2FrontEnd::UpdateLayerRenderParams() {
     const VDP2Regs &regs2 = m_state.regs2;
 
     // These can be either 0 or 8, but we'll condense them to single bits
@@ -551,14 +641,13 @@ void Vdp2FrontEnd::UpdateLayerRenderParams(uint32_t y) {
         renderParams.lineScrollYEnable = bgParams.lineScrollYEnable;
         renderParams.lineZoomEnable = bgParams.lineZoomEnable;
         renderParams.lineScrollInterval = bgParams.lineScrollInterval;
-        renderParams.lineScrollTableAddress = bgState.lineScrollTableAddress;
+        // Brimir: the line scroll table address and the vertical scroll base are per-line state (VDP2NBGLine, as
+        // software's NBGLayerState); left 0 here so that they do not split batches.
+        renderParams.lineScrollTableAddress = 0;
         renderParams.vcellScrollOffset = bgState.vcellScrollOffset;
         renderParams.vcellScrollDelay = bgState.vcellScrollDelay;
         renderParams.vcellScrollRepeat = bgState.vcellScrollRepeat;
-        if (i >= 2 && m_resetNBGScrollY[i - 2]) {
-            renderParams.scrollYIncBase = y;
-            m_resetNBGScrollY[i - 2] = false;
-        }
+        renderParams.scrollYIncBase = 0;
     }
 
     // RBG0-1 / RotParam A-B
@@ -746,9 +835,9 @@ void Vdp2FrontEnd::FlushCRAM() {
     m_record.features.copyBytes += kVDP2CRAMColorBufferSize + kVDP2CRAMRotCoeffBufferSize;
 }
 
-void Vdp2FrontEnd::PackParams(uint32_t y) {
+void Vdp2FrontEnd::PackParams() {
     UpdateCommonRenderParams();
-    UpdateLayerRenderParams(y);
+    UpdateLayerRenderParams();
     UpdateComposeParams();
 }
 
@@ -818,6 +907,13 @@ uint32_t Vdp2FrontEnd::YShift() const {
 // Ported from d3d:4270-4297 (VDP2BeginFrame, VDP2 part; the VDP1 FBRAM flush and debug sync stay out: VDP1 stays on
 // the CPU and the display framebuffer is added with AddSpriteSlice).
 void Vdp2FrontEnd::BeginFrame() {
+    // Brimir: matches software (sw:544-550): the NBG counters restart at every frame (not at a record started by a
+    // line without BeginFrame).
+    InitFrame();
+    StartRecord();
+}
+
+void Vdp2FrontEnd::StartRecord() {
     // Brimir: a frame that was never consumed (or never ended) is dropped; its snapshots never reached the GPU, so
     // the next frame uploads everything again and keeps any pending composite clear.
     if (m_frameReady || m_inFrame) {
@@ -845,17 +941,13 @@ void Vdp2FrontEnd::BeginFrame() {
     m_pendingCopiesStart = 0;
     m_layerSnapshotOffset = UINT32_MAX;
     m_composeSnapshotOffset = UINT32_MAX;
-
-    // Brimir: matches software (sw:2070-2078, 2522): access patterns are computed per line only, in PrepareLine while
-    // the display latch is on; Ymir also computes them here.
-    InitNBGs();
-
-    // Brimir: Ymir clears scrollYIncBase after UpdateState(0) has uploaded the parameters, so the first batch could
-    // see the previous frame's base. Clear it before packing.
-    for (auto &nbg : m_layer.nbg) {
-        nbg.scrollYIncBase = 0;
+    for (auto &rows : m_nbgLastDrawnRow) {
+        rows.fill(UINT32_MAX);
     }
-    PackParams(0);
+
+    // Brimir: matches software (sw:2522): access patterns are computed per line only, in PrepareLine while the display
+    // latch is on; Ymir also computes them here.
+    PackParams();
     UpdateState();
 }
 
@@ -867,13 +959,16 @@ void Vdp2FrontEnd::RenderLine(uint32_t y) {
     if (!m_inFrame) {
         // Brimir: a line without BeginFrame (power-on, or a state loaded mid-frame) starts a record at this line; the
         // rows above it keep the composite's previous contents, as the software framebuffer does.
-        BeginFrame();
+        StartRecord();
         m_nextLayerRenderLine = y;
         m_nextComposeLine = y;
     }
 
     PrepareLine(y);
-    PackParams(y);
+    // Brimir: matches software (sw:552-566): the NBGs are drawn with the prepared state, then their counters advance.
+    StoreNBGLines(y);
+    FinishLine();
+    PackParams();
 
     // When Y=0, the changes happened during vblank (or, more precisely, between the last Y of the previous frame
     // and the first line of this frame). Otherwise, the changes happened between Y-1 and Y. Therefore, we need to
@@ -930,6 +1025,7 @@ void Vdp2FrontEnd::EndFrame() {
     m_record.exclusive = m_exclusiveMonitor;
 
     m_record.rotBases = m_rotParamBases;
+    m_record.nbgLines = m_nbgLines;
     for (size_t i = 0; i < m_lnclBack.size(); ++i) {
         m_record.lnclBack[i] = std::bit_cast<uint32_t>(m_lnclBack[i]);
     }
@@ -953,12 +1049,123 @@ void Vdp2FrontEnd::PrepareLine(uint32_t y) {
         UpdateRotationParameterBases(y);
         m_state.state2.UpdateRotationPageBaseAddresses(m_state.regs2);
         DrawLineColorBackScreens(y);
+        // Brimir: matches software (sw:2103-2109, VDP2UpdateLineScreenScrollParams).
+        for (uint32 i = 0; i < 2; ++i) {
+            UpdateLineScreenScroll(y, m_state.regs2.bgParams[i + 1], m_state.state2.nbgLayerStates[i]);
+        }
     }
     StoreLineColorBackScreens(y);
     for (uint32 i = 0; i < 2; ++i) {
-        m_rotParamBases[i * kMaxResV + y] = m_lastRotParamBases[i];
+        const RotationParamState &state = m_state.state2.rotParamStates[i];
+        m_rotParamBases[i * kMaxResV + y] = {m_rotTableAddress[i], state.Xst, state.Yst, state.KA};
     }
     CountFeatures();
+}
+
+// Brimir: matches software (sw:2568-2643, 2829-2911): which NBGs software draws on line y and with what state, for
+// each field it draws (the alternate field only while deinterlacing). Each dispatch row gets the NBG state software
+// draws it with; drawing advances the field's fetcher as software's does.
+void Vdp2FrontEnd::StoreNBGLines(uint32_t y) {
+    const VDP2Regs &regs2 = m_state.regs2;
+    const VDP2State &state2 = m_state.state2;
+    const uint32_t yShift = YShift();
+    const bool drawAltField = m_enhancements.deinterlace && regs2.TVMD.IsInterlaced(); // sw:561-563
+    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+    const bool bothRBGs = regs2.bgEnabled[4] && regs2.bgEnabled[5]; // sw:2622-2624
+
+    for (uint32 i = 0; i < 4; ++i) {
+        const BGParams &bgParams = regs2.bgParams[i + 1];
+        const NBGLayerState &bgState = state2.nbgLayerStates[i];
+        // sw:2875-2892
+        const bool drawn = !bothRBGs && state2.layerEnabled[i + 2] && !(i == 0 && regs2.bgEnabled[5]);
+        const bool mosaicRepeat = drawn && bgParams.mosaicEnable && bgState.mosaicCounterY > 0;
+
+        for (uint32 field = 0; field < (drawAltField ? 2u : 1u); ++field) {
+            // sw:4522-4524, 4625-4628: the alternate line of double density is one vertical increment further
+            const bool altLine = field == 1 && doubleDensity && (!bgParams.bitmap || !bgParams.lineScrollYEnable);
+
+            VDP2NBGLine line{};
+            line.fracScrollX = static_cast<int32_t>(bgState.fracScrollX);
+            line.fracScrollY = static_cast<int32_t>(bgState.fracScrollY + (altLine ? bgParams.scrollIncV : 0u));
+            line.scrollIncH = static_cast<int32_t>(bgState.scrollIncH);
+
+            NBGFetcher &fetcher = m_nbgFetchers[field][i];
+            line.prevLastVCellScroll = fetcher.lastVCellScroll;
+            line.prevLineEndScrollX = fetcher.endScrollX;
+            line.prevLineEndScrollY = fetcher.endScrollY;
+            line.flags = fetcher.endValid ? kVDP2NBGLinePrevLineEndValid : 0u;
+
+            // Exclusive monitor modes never double rows: the alternate field has no row of its own.
+            const bool hasRow = field == 0 || yShift != 0;
+            const uint32_t row = (y << yShift) | field;
+            uint32_t &lastDrawnRow = m_nbgLastDrawnRow[field][i];
+            line.mosaicSrcLine = row;
+            if (mosaicRepeat) {
+                // sw:2889-2892: the layer output of the last line drawn is reused. Before any line of this record,
+                // it is the previous frame's, which the GPU no longer has; the row is drawn instead.
+                if (lastDrawnRow != UINT32_MAX) {
+                    line.mosaicSrcLine = lastDrawnRow;
+                }
+            } else if (drawn) {
+                DrawNBGFetcher(i, line, fetcher);
+                if (hasRow) {
+                    lastDrawnRow = row;
+                }
+            }
+
+            if (hasRow && row < kMaxResV) {
+                m_nbgLines[i * kMaxResV + row] = line;
+            }
+        }
+    }
+}
+
+// Brimir: matches software (sw:4518-4618, 4621-4698): the vertical cell scroll reads and the last character fetch of
+// a drawn NBG line, as they leave the field's VRAMFetcher (lastVCellScroll, nextChar). The scroll increment is below
+// 8 pixels (11.8 with a 3-bit integer part), so the cell column advances at most once per pixel.
+void Vdp2FrontEnd::DrawNBGFetcher(uint32_t index, VDP2NBGLine &line, NBGFetcher &fetcher) {
+    const VDP2Regs &regs2 = m_state.regs2;
+    const BGParams &bgParams = regs2.bgParams[index + 1];
+    const NBGLayerState &bgState = m_state.state2.nbgLayerStates[index];
+
+    const uint32 fracScrollX = static_cast<uint32>(line.fracScrollX) + bgParams.scrollAmountH;
+    const uint32 fracScrollY = static_cast<uint32>(line.fracScrollY) + bgParams.scrollAmountV;
+
+    uint32 cellScrollTableAddress = regs2.vcellScrollTableAddress + bgState.vcellScrollOffset;
+    const bool vcellScrollEnable = index <= 1 && bgParams.vcellScrollEnable;
+
+    auto readCellScrollY = [&](bool checkRepeat = false) {
+        if (checkRepeat && bgState.vcellScrollRepeat && bgState.vcellScrollDelay) {
+            return fetcher.lastVCellScroll;
+        }
+        const uint32 value = m_state.mem2.ReadVRAM<uint32>(cellScrollTableAddress);
+        if (!checkRepeat || !bgState.vcellScrollRepeat) {
+            cellScrollTableAddress += regs2.vcellScrollInc;
+        }
+        const uint32 prevValue = fetcher.lastVCellScroll;
+        fetcher.lastVCellScroll = bit::extract<8, 26>(value);
+        return bgState.vcellScrollDelay ? prevValue : fetcher.lastVCellScroll;
+    };
+
+    // Pixels 0 to HRes - 1, plus the extra tile fetched past the right edge for scroll BGs (sw:4596-4617).
+    const uint32 lastX = bgParams.bitmap ? m_HRes - 1 : m_HRes;
+    uint32 vcellScrollY = 0;
+    if (vcellScrollEnable) {
+        vcellScrollY = readCellScrollY(true);
+        if (!bgParams.mosaicEnable) {
+            // One read per cell column change between consecutive pixels (sw:4568-4574, 4600-4606)
+            const uint32 crossings = ((fracScrollX & 0x7FF) + lastX * bgState.scrollIncH) >> 11u;
+            for (uint32 k = 0; k < crossings; ++k) {
+                vcellScrollY = readCellScrollY();
+            }
+        }
+    }
+
+    if (!bgParams.bitmap) {
+        fetcher.endScrollX = (fracScrollX + m_HRes * bgState.scrollIncH) >> 8u;
+        fetcher.endScrollY = (fracScrollY + vcellScrollY) >> 8u;
+        fetcher.endValid = true;
+    }
 }
 
 void Vdp2FrontEnd::CountFeatures() {

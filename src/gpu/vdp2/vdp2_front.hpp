@@ -16,7 +16,10 @@
 //   compose covers VRes >> (interlaced && !deinterlace) rows;
 // - a compose-only change splits only compose: compose ranges wait until the layer rows they read are recorded;
 // - the CRAM coefficient half is snapshotted on every CRAM generation change, whatever BGON says;
-// - per-line arrays hold 512 rows (exclusive monitor).
+// - per-line arrays hold 512 rows (exclusive monitor);
+// - NBG scroll, mosaic and fetcher state follow the software renderer's per-line state machine on
+//   state2.nbgLayerStates (one VDP2NBGLine per NBG per row) instead of Ymir's closed-form shader scroll, and rotation
+//   bases accumulate in state2.rotParamStates, so the save-state fields match software's.
 // No Vulkan header may be included here.
 
 #include "gpu/vdp2/vdp2_hw_params.hpp"
@@ -87,7 +90,7 @@ struct Vdp2FrameRecord {
     // Per-line arrays, final at EndFrame (each batch only reads its own lines).
     std::array<VDP2RotParamBase, 2 * kMaxResV> rotBases; // [param * kMaxResV + field line]
     std::array<uint32_t, 2 * kMaxResV> lnclBack;         // packed RGBA8: LNCL at [y], BACK at [kMaxResV + y]
-    std::array<VDP2NBGLine, 4 * kMaxResV> nbgLines;      // zero until the per-line NBG state is ported (Task 6)
+    std::array<VDP2NBGLine, 4 * kMaxResV> nbgLines;      // [nbg * kMaxResV + dispatch row]
 
     // Display FB sprite slices captured at the frame's first line (UINT32_MAX = not uploaded this frame).
     std::array<uint32_t, 4> spriteSliceOffset;
@@ -139,6 +142,11 @@ public:
     /// @brief Device (re)attach: the next frame uploads all of VRAM and CRAM.
     void MarkAllDirty();
 
+    /// @brief The last vertical cell scroll value NBG `nbg` read on `field` (software: VRAMFetcher::lastVCellScroll).
+    uint32_t LastVCellScroll(uint32_t field, uint32_t nbg) const {
+        return m_nbgFetchers[field & 1][nbg & 3].lastVCellScroll;
+    }
+
     /// @brief The mode-dependent RGBA8 CRAM colour cache (the first half of CRAMColors copies).
     const CRAMColorCache &ColorCache() const {
         return m_cramColorCache;
@@ -170,7 +178,6 @@ private:
     std::array<ymir::vdp::Color888, kVDP2CRAMColorCacheEntries> m_cram555Cache{};
     uint64_t m_cramGeneration = 1;
     uint64_t m_flushedCRAMGeneration = 0;
-    std::array<bool, 2> m_resetNBGScrollY{};
 
     // Parameters: current (packed this line) and flushed (in effect for the open batch)
     VDP2CommonRenderParams m_common{};
@@ -184,7 +191,21 @@ private:
     // as software's)
     std::array<ColorR8G8B8A8, 2 * kMaxResV> m_lnclBack{};
     std::array<VDP2RotParamBase, 2 * kMaxResV> m_rotParamBases{};
-    std::array<VDP2RotParamBase, 2> m_lastRotParamBases{}; // the last computed bases of parameters A and B
+    std::array<VDP2NBGLine, 4 * kMaxResV> m_nbgLines{};
+    // Table address of the last computed rotation parameter line (Xst, Yst and KA are state2.rotParamStates)
+    std::array<uint32_t, 2> m_rotTableAddress{};
+
+    // Brimir: the parts of the software renderer's VRAMFetchers (m_vramFetchers[field][nbg], saved in the renderer
+    // section of save states) that carry NBG state from one line to the next: the last vertical cell scroll value
+    // read and the position of the last character fetch (whose character is nextChar).
+    struct NBGFetcher {
+        uint32_t lastVCellScroll = 0xFFFFFFFF;
+        uint32_t endScrollX = 0, endScrollY = 0;
+        bool endValid = false;
+    };
+    std::array<std::array<NBGFetcher, 4>, 2> m_nbgFetchers{};
+    // Dispatch row of the last line each NBG was drawn on in this record, per field (vertical mosaic source)
+    std::array<std::array<uint32_t, 4>, 2> m_nbgLastDrawnRow{};
 
     // Batching (d3d:586-587)
     uint32_t m_nextLayerRenderLine = 0;
@@ -209,19 +230,26 @@ private:
     void UpdateEnabledLayers();
     void CalcAccessPatterns();
     void CalcVCellScrollDelay();
-    void InitNBGs();
+    void InitFrame();
+    void InitNormalBG(uint32_t index);
+    void UpdateLineScreenScroll(uint32_t y, const ymir::vdp::BGParams &bgParams,
+                                ymir::vdp::NBGLayerState &bgState);
+    void FinishLine();
     void DrawLineColorBackScreens(uint32_t y);
     void UpdateRotationParameterBases(uint32_t y);
     void UpdateCommonRenderParams();
-    void UpdateLayerRenderParams(uint32_t y);
+    void UpdateLayerRenderParams();
     void UpdateComposeParams();
-    void PackParams(uint32_t y);
+    void PackParams();
     void UpdateState();
     void FlushVRAM();
     void FlushCRAM();
 
     // --- Brimir ------------------------------------------------------------------------------------------------------
     void PrepareLine(uint32_t y);
+    void StoreNBGLines(uint32_t y);
+    void DrawNBGFetcher(uint32_t index, VDP2NBGLine &line, NBGFetcher &fetcher);
+    void StartRecord();
     void Cache555Color(uint32_t address);
     void StoreLineColorBackScreens(uint32_t y);
     void CountFeatures();

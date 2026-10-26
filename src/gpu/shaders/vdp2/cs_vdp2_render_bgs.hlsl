@@ -13,11 +13,12 @@
 // - NBG and RBG page base addresses are read straight from the parameters instead of a pbaResized[16] copy;
 // - rotation bases use a 512-line stride per parameter (Vdp2FrameRecord::rotBases), so the RBG line colour image and
 //   the rotation bases cover 512 lines;
-// - the per-line NBG state buffer (g_nbgLines) is declared and bound but not read yet;
+// - NBG scroll state comes per row from g_nbgLines (computed on the CPU as software does), see "NBG drawing";
 // - bounds guards replace D3D12's robust out-of-range accesses (no robustness features): pixels outside HRes x VRes
 //   write nothing and RBG line colours outside their image are dropped.
 // Where Ymir differs from Brimir's software renderer (the reference), the software semantics are ported, each marked
-// "// Brimir: matches software (sw:<lines>)": RBG line colours read the RGB555 table of CRAM word (address & 0x7FF).
+// "// Brimir: matches software (sw:<lines>)": RBG line colours read the RGB555 table of CRAM word (address & 0x7FF);
+// NBG scroll, mosaic, vertical cell scroll and character pattern delay; RBG mosaic.
 //
 // Bindings (set 0; tools/shaders/build_shaders.cmake shifts t by 0 and u by 16):
 //   0  t0  g_layerRenderParams   StructuredBuffer<LayerRenderParams>  STORAGE_BUFFER_DYNAMIC
@@ -53,7 +54,7 @@ ByteAddressBuffer g_vram : register(t2);
 StructuredBuffer<uint> g_cramColor : register(t3);
 ByteAddressBuffer g_cramRotCoeff : register(t4);
 StructuredBuffer<RotParamBase> g_rotParamBases : register(t5);
-// Brimir: per-line NBG state (stage 1B Task 6); declared and bound, not read yet.
+// Brimir: per-line NBG state, [nbg * kMaxResV + dispatch row] (Vdp2FrameRecord::nbgLines).
 StructuredBuffer<NBGLine> g_nbgLines : register(t7);
 Texture2DArray<uint> g_spriteAttrsIn : register(t9);
 
@@ -752,15 +753,12 @@ uint4 FetchPixel(const BaseBGParams params, uint baseAddress, uint2 dotPos, uint
     );
 }
 
+// Brimir: matches software (sw:5298-5335): no cell swap for delayed two-word 2x2 characters (Ymir swaps the cells
+// instead of delaying the character; the delay is DrawNBGScrollPixel's).
 uint4 FetchCharacterPixel(const BaseBGParams params, Character ch, uint2 dotPos, uint cellIndex) {
-    const uint bank = BitExtract(ch.charNum << 5, 17, 2);
     const uint cellSizeShift = params.cellSizeShift;
     const uint colorFormat = params.colorFormat;
-    const bool charPatDelay = BitTest(params.charPatDelay, bank);
 
-    if (params.twoWordChar && charPatDelay && cellSizeShift > 0) {
-        cellIndex ^= 1;
-    }
     if (ch.flipH) {
         dotPos.x ^= 7;
         if (cellSizeShift > 0) {
@@ -798,10 +796,21 @@ uint4 FetchBitmapPixel(const BaseBGParams params, uint bitmapBaseAddress, uint2 
     return FetchPixel(params, bitmapBaseAddress, dotPos, bitmapSize.x, true, palNum, specColorCalc, specPriority);
 }
 
+// Brimir: where a scroll BG pixel's character is (FetchScrollBGPixel split in two, so that NBG character delays can
+// fetch the character of another position).
+struct CharLocation {
+    uint pageAddress;
+    uint charIndex; // within the page, as software's VRAMFetcher::lastCharIndex (sw:5181)
+    uint cellX;     // cell column within a 2x2 character
+    uint cellIndex;
+    uint2 dotPos;
+    uint bank;      // VRAM bank of the page base address
+};
+
 // Brimir: the page base addresses are read from g_layerRenderParams (nbg[index] or rbg[index] with rotSel) instead of
 // a uint[16] argument, which needed a private pbaResized[16] copy for NBGs.
-uint4 FetchScrollBGPixel(const BaseBGParams params, uint2 scrollPos, uint2 pageShift, bool rot, uint index,
-                         uint rotSel) {
+CharLocation LocateScrollBGChar(const BaseBGParams params, uint2 scrollPos, uint2 pageShift, bool rot, uint index,
+                                uint rotSel) {
     const uint planeShift = rot ? 2 : 1;
     const uint planeMask = (1u << planeShift) - 1u;
 
@@ -836,22 +845,29 @@ uint4 FetchScrollBGPixel(const BaseBGParams params, uint2 scrollPos, uint2 pageS
     const uint charIndex = charPatPos.x + (charPatPos.y << (6 - cellSizeShift));
 
     const uint2 cellPos = (scrollPos >> 3) & cellSizeShift;
-    uint cellIndex = cellPos.x + (cellPos.y << 1);
 
-    uint2 dotPos = scrollPos & 7;
-
-    Character ch;
-    if (twoWordChar != 0) {
-        ch = FetchTwoWordCharacter(params, pageAddress, charIndex);
-    } else {
-        ch = FetchOneWordCharacter(params, pageAddress, charIndex);
-    }
-    return FetchCharacterPixel(params, ch, dotPos, cellIndex);
+    CharLocation loc;
+    loc.pageAddress = pageAddress;
+    loc.charIndex = charIndex;
+    loc.cellX = cellPos.x;
+    loc.cellIndex = cellPos.x + (cellPos.y << 1);
+    loc.dotPos = scrollPos & 7;
+    loc.bank = bank;
+    return loc;
 }
 
-// Brimir: NBG `index` instead of its pageBaseAddresses[4] (no pbaResized[16] copy).
-uint4 FetchScrollNBGPixel(const BaseBGParams params, uint2 scrollPos, uint index) {
-    return FetchScrollBGPixel(params, scrollPos, params.pageShift, false, index, 0);
+Character FetchCharacter(const BaseBGParams params, CharLocation loc) {
+    if (params.twoWordChar != 0) {
+        return FetchTwoWordCharacter(params, loc.pageAddress, loc.charIndex);
+    } else {
+        return FetchOneWordCharacter(params, loc.pageAddress, loc.charIndex);
+    }
+}
+
+uint4 FetchScrollBGPixel(const BaseBGParams params, uint2 scrollPos, uint2 pageShift, bool rot, uint index,
+                         uint rotSel) {
+    const CharLocation loc = LocateScrollBGChar(params, scrollPos, pageShift, rot, index, rotSel);
+    return FetchCharacterPixel(params, FetchCharacter(params, loc), loc.dotPos, loc.cellIndex);
 }
 
 // Brimir: RBG `index` and `rotSel` instead of its pageBaseAddresses[rotSel].
@@ -861,8 +877,149 @@ uint4 FetchScrollRBGPixel(const BaseBGParams params, uint2 scrollPos, uint2 page
 
 // ---------------------------------------------------------------------------------------------------------------------
 // NBG drawing
+//
+// Brimir: matches software (sw:2829-2911, 4516-4698, 5152-5219) with the per-line NBG state the front half computes as
+// software does (VDP2NBGLine; Ymir derives the scroll from the parameters here, bgs:889-956):
+// - scroll: fracScrollX/Y and scrollIncH of the row, plus the scroll amounts of the batch (software adds the register
+//   values at draw time);
+// - horizontal mosaic: pixel x is the pixel at x - x % mosaicH, window included (sw:4553-4567, 4657-4671); vertical
+//   mosaic: the row repeats the layer output of mosaicSrcLine, drawn here with that row's state or loaded from the
+//   layer image if an earlier batch drew it (sw:2889-2892);
+// - vertical cell scroll: the value of the k-th table read, k the cell column changes since x = 0, with software's
+//   repeat and delay rules; reads before the first are the previous line's last value (sw:4526-4574); with mosaic,
+//   the first value applies to the whole line;
+// - character pattern delay: the pixel shows the character of the fetch before its character's first fetch on the
+//   line (the previous line's last fetch at the left edge), and 2x2 characters switch to their own character at their
+//   second cell column as software's fetcher does (sw:5193-5215).
 
-uint4 DrawNBG(uint2 pos, // pixel coordinates
+uint NBGWindowY(uint row) {
+    uint y = GetY(row, true);
+    if (deinterlace && interlaceMode == kInterlaceModeSingleDensity) {
+        y >>= 1;
+    }
+    return y;
+}
+
+bool NBGFetches(const NBGParams params, uint x, uint windowY, uint mosaicH) {
+    return x % mosaicH == 0 && !InsideWindows(params.base.windowParams, uint2(x, windowY));
+}
+
+uint NBGVCellScrollY(const NBGParams params, NBGLine nbgLine, uint index, uint x) {
+    if (index > 1 || !params.vcellScrollEnable) {
+        return 0;
+    }
+
+    // Table reads after the line's first one: one per cell column change between consecutive pixels (the increment is
+    // below 8 pixels, so at most one per pixel)
+    uint reads = 0;
+    if (!params.base.mosaicEnable) {
+        const uint fracScrollX = uint(nbgLine.fracScrollX) + params.scrollAmount.x;
+        reads = ((fracScrollX & 0x7FF) + x * uint(nbgLine.scrollIncH)) >> 11;
+    }
+
+    int offset = int(reads);
+    if (params.vcellScrollRepeat && offset > 0) {
+        --offset;
+    }
+    if (params.vcellScrollDelay) {
+        --offset;
+    }
+    if (offset < 0) {
+        return nbgLine.prevLastVCellScroll;
+    }
+
+    const uint vcellScrollTableAddress = BitExtract(g_commonParams.vcellScroll, 0, 19);
+    const uint vcellScrollInc = BitExtract(g_commonParams.vcellScroll, 19, 3) << 2u;
+    const uint vcellAddress = vcellScrollTableAddress + params.vcellScrollOffset + uint(offset) * vcellScrollInc;
+    return BitExtract(ReadVRAM32(vcellAddress), 8, 19);
+}
+
+uint2 NBGScrollPos(const NBGParams params, NBGLine nbgLine, uint index, uint x) {
+    const uint fracScrollX = uint(nbgLine.fracScrollX) + params.scrollAmount.x + x * uint(nbgLine.scrollIncH);
+    const uint fracScrollY = uint(nbgLine.fracScrollY) + params.scrollAmount.y + NBGVCellScrollY(params, nbgLine, index, x);
+    return uint2(fracScrollX >> 8, fracScrollY >> 8);
+}
+
+// Brimir: NBG `index` instead of its pageBaseAddresses[4] (no pbaResized[16] copy).
+CharLocation LocateNBGChar(const NBGParams params, uint2 scrollPos, uint index) {
+    return LocateScrollBGChar(params.base, scrollPos, params.base.pageShift, false, index, 0);
+}
+
+CharLocation LocateNBGCharAt(const NBGParams params, NBGLine nbgLine, uint index, uint x) {
+    return LocateNBGChar(params, NBGScrollPos(params, nbgLine, index, x), index);
+}
+
+// The previous fetching pixel before x on the line, or -1.
+int NBGPrevFetch(const NBGParams params, int x, uint windowY, uint mosaicH) {
+    for (int q = x - int(mosaicH); q >= 0; q -= int(mosaicH)) {
+        if (NBGFetches(params, uint(q), windowY, mosaicH)) {
+            return q;
+        }
+    }
+    return -1;
+}
+
+uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, uint x, uint windowY, uint mosaicH) {
+    const CharLocation loc = LocateNBGCharAt(params, nbgLine, index, x);
+    if (!BitTest(params.base.charPatDelay, loc.bank)) {
+        return FetchCharacterPixel(params.base, FetchCharacter(params.base, loc), loc.dotPos, loc.cellIndex);
+    }
+
+    // The fetches since the line start with this character index form a run starting at runStart; the delayed
+    // character is the one fetched before it (sw:5194-5205).
+    uint runStart = x;
+    int prev = NBGPrevFetch(params, int(x), windowY, mosaicH);
+    while (prev >= 0) {
+        const CharLocation prevLoc = LocateNBGCharAt(params, nbgLine, index, uint(prev));
+        if (prevLoc.charIndex != loc.charIndex) {
+            break;
+        }
+        runStart = uint(prev);
+        prev = NBGPrevFetch(params, prev, windowY, mosaicH);
+    }
+
+    Character ch = kBlankCharacter;
+    if (prev >= 0) {
+        ch = FetchCharacter(params.base, LocateNBGCharAt(params, nbgLine, index, uint(prev)));
+    } else if ((nbgLine.flags & kNBGLinePrevLineEndValid) != 0) {
+        // The fetcher's nextChar at the line start: the previous drawn line's last fetch (sw:4596-4617)
+        const uint2 endPos = uint2(nbgLine.prevLineEndScrollX, nbgLine.prevLineEndScrollY);
+        ch = FetchCharacter(params.base, LocateNBGChar(params, endPos, index));
+    }
+
+    // 2x2 characters: the fetcher switches to the run's own character at the first fetch in the second cell column
+    // whose previous non-first fetch on the line was not in the second cell column (sw:5206-5215).
+    if (params.base.cellSizeShift != 0 && loc.cellX == 1 && runStart != x) {
+        // The run's second fetch (at most x)
+        uint second = runStart + mosaicH;
+        while (!NBGFetches(params, second, windowY, mosaicH)) {
+            second += mosaicH;
+        }
+        bool switches = LocateNBGCharAt(params, nbgLine, index, second).cellX == 0;
+        if (!switches) {
+            // The fetcher's lastCellX before the run: the cell column of the latest fetch that was not the first of
+            // its run, or none (reset at the line start)
+            uint lastCellX = 0xFF;
+            int cur = prev;
+            while (cur >= 0) {
+                const CharLocation curLoc = LocateNBGCharAt(params, nbgLine, index, uint(cur));
+                const int pred = NBGPrevFetch(params, cur, windowY, mosaicH);
+                if (pred >= 0 && LocateNBGCharAt(params, nbgLine, index, uint(pred)).charIndex == curLoc.charIndex) {
+                    lastCellX = curLoc.cellX;
+                    break;
+                }
+                cur = pred;
+            }
+            switches = lastCellX != 1;
+        }
+        if (switches) {
+            ch = FetchCharacter(params.base, loc);
+        }
+    }
+    return FetchCharacterPixel(params.base, ch, loc.dotPos, loc.cellIndex);
+}
+
+uint4 DrawNBG(uint2 pos, // dispatch coordinates
               uint index // NBG index (0 to 3)
              ) {
     const NBGParams params = g_layerRenderParams[0].nbg[index];
@@ -870,126 +1027,28 @@ uint4 DrawNBG(uint2 pos, // pixel coordinates
         return kTransparentPixel;
     }
 
-    pos.y = GetY(pos.y, true);
-    if (deinterlace && interlaceMode == kInterlaceModeSingleDensity) {
-        pos.y >>= 1;
+    uint row = pos.y;
+    NBGLine nbgLine = g_nbgLines[index * kMaxResV + row];
+    if (nbgLine.mosaicSrcLine != row) {
+        // Vertical mosaic: the row repeats an earlier row's layer output
+        row = nbgLine.mosaicSrcLine;
+        if (row < g_commonParams.startY) {
+            return g_layerOut[uint3(pos.x, GetY(row, false), index)];
+        }
+        nbgLine = g_nbgLines[index * kMaxResV + row];
     }
+    const uint windowY = NBGWindowY(row);
 
-    if (InsideWindows(params.base.windowParams, pos)) {
+    const uint mosaicH = params.base.mosaicEnable ? BitExtract(g_commonParams.layerParams, 14, 4) + 1 : 1;
+    const uint x = pos.x - pos.x % mosaicH;
+    if (InsideWindows(params.base.windowParams, uint2(x, windowY))) {
         return kTransparentPixel;
     }
 
-    const uint2 pageShift = params.base.pageShift;
-    const uint twoWordChar = params.base.twoWordChar;
-    const uint cellSizeShift = params.base.cellSizeShift;
-    const uint pageSize = kPageSizes[cellSizeShift][twoWordChar];
-    const bool mosaicEnable = params.base.mosaicEnable;
-    const bool vcellScrollEnable = params.vcellScrollEnable;
-
-    uint2 baseFracScroll = uint2(0, 0);
-    uint2 scrollInc = params.scrollInc;
-
-    // Apply line scroll table effects on NBG0 and NBG1 if enabled
-    if (index <= 1 && (params.lineScrollXEnable || params.lineScrollYEnable || params.lineZoomEnable)) {
-        const uint lineScrollTableAddress = params.lineScrollTableAddress;
-        const uint lineScrollIntervalShift = params.lineScrollInterval;
-        const bool lineScrollXEnable = params.lineScrollXEnable;
-        const bool lineScrollYEnable = params.lineScrollYEnable;
-        const bool lineZoomEnable = params.lineZoomEnable;
-
-        // Determine offsets for each entry and intervals between sets of entries
-        // TODO: make this relative to startY for games that change line scroll table flags mid-frame, if any
-        const uint lineScrollXOffset = 0; // if present, it's always the first entry
-        uint lineScrollYOffset = 0;
-        uint lineZoomOffset = 0;
-        uint lineScrollTableInc = 0;
-        if (lineScrollXEnable) {
-            lineScrollTableInc += 4;
-        }
-        if (lineScrollYEnable) {
-            lineScrollYOffset = lineScrollTableInc;
-            lineScrollTableInc += 4;
-        }
-        if (lineZoomEnable) {
-            lineZoomOffset = lineScrollTableInc;
-            lineScrollTableInc += 4;
-        }
-
-        const uint baseTableAddr = lineScrollTableAddress + (pos.y >> lineScrollIntervalShift) * lineScrollTableInc;
-        if (lineScrollXEnable) {
-            const uint tableAddr = baseTableAddr + lineScrollXOffset;
-            baseFracScroll.x = BitExtract(ReadVRAM32(tableAddr), 8, 19);
-        }
-        if (lineScrollYEnable) {
-            const uint tableAddr = baseTableAddr + lineScrollYOffset;
-            baseFracScroll.y = BitExtract(ReadVRAM32(tableAddr), 8, 19);
-            pos.y &= (1u << lineScrollIntervalShift) - 1u; // reset cumulative scrollIncV increment
-        }
-        if (lineZoomEnable) {
-            const uint tableAddr = baseTableAddr + lineZoomOffset;
-            scrollInc.x = BitExtract(ReadVRAM32(tableAddr), 8, 11);
-        }
+    if (params.base.bitmap) {
+        return FetchBitmapPixel(params.base, params.base.bitmapBaseAddress, NBGScrollPos(params, nbgLine, index, x));
     }
-
-    if (vcellScrollEnable && !mosaicEnable) {
-        const uint vcellScrollOffset = params.vcellScrollOffset;
-        const bool vcellScrollDelay = params.vcellScrollDelay;
-        const bool vcellScrollRepeat = params.vcellScrollRepeat;
-
-        const uint scrollX = baseFracScroll.x >> 8;
-        int offset = (pos.x + (scrollX & 7)) >> 3;
-        if (vcellScrollRepeat && offset > 0) {
-            --offset;
-        }
-        if (vcellScrollDelay) {
-            --offset;
-        }
-
-        // TODO: if offset == -1, read from the end of the previous line (or end of frame if at topmost row of cells)
-        const uint vcellScrollTableAddress = BitExtract(g_commonParams.vcellScroll, 0, 19);
-        const uint vcellScrollInc = BitExtract(g_commonParams.vcellScroll, 19, 3) << 2u;
-        const uint vcellAddress = vcellScrollTableAddress + offset * vcellScrollInc + vcellScrollOffset;
-        const uint vcellScrollY = BitExtract(ReadVRAM32(vcellAddress), 8, 19);
-        baseFracScroll.y += vcellScrollY;
-    }
-
-    const uint2 fracScrollPos = baseFracScroll + params.scrollAmount + scrollInc * (pos - uint2(0, params.scrollYIncBase));
-    uint2 scrollPos = fracScrollPos >> 8;
-    if (mosaicEnable) {
-        const uint2 mosaic = uint2(BitExtract(g_commonParams.layerParams, 14, 4) + 1, BitExtract(g_commonParams.layerParams, 18, 4) + 1);
-        scrollPos -= scrollPos % mosaic;
-    }
-
-    const bool bitmap = params.base.bitmap;
-    if (bitmap) {
-        return FetchBitmapPixel(params.base, params.base.bitmapBaseAddress, scrollPos);
-    } else {
-        const uint2 plane = (scrollPos >> (9u + pageShift)) & 1u;
-        const uint pageBaseAddress = params.pageBaseAddresses[plane.x | (plane.y << 1u)];
-        const uint bank = BitExtract(pageBaseAddress, 17, 2);
-        const bool charPatDelay = BitTest(params.base.charPatDelay, bank);
-        if (charPatDelay) {
-            // Read previous character.
-            // If we're at the start of the line, read last character from previous line.
-            // If at the start of the screen, read last character in the screen.
-            if (pos.x >= 8 - (((baseFracScroll.x + params.scrollAmount.x) >> 8) & 7)) {
-                // Not at left edge of the screen - read character to the left
-                scrollPos.x -= 8;
-            } else {
-                // Left edge of the screen - read rightmost character from previous row
-                scrollPos.x += displayRes.x;
-                if (pos.y >= 8) {
-                    // Not at top edge of the screen - read previous row
-                    scrollPos.y -= 8;
-                } else {
-                    // At top edge of the screen - read last character read the previous screen
-                    // TODO: read character from the previous screen (store on CPU side)
-                    scrollPos.y += displayRes.y;
-                }
-            }
-        }
-        return FetchScrollNBGPixel(params.base, scrollPos, index); // Brimir: index, not pageBaseAddresses
-    }
+    return DrawNBGScrollPixel(params, nbgLine, index, x, windowY, mosaicH);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1074,14 +1133,12 @@ void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint index, uint rotSel
     }
 }
 
-uint4 DrawScrollRBG(uint2 pos, uint index, uint rotSel, uint2 scrollPos) {
+// Brimir: linePos is where the pixel's line colour goes (the repeated pixel under mosaic); pos is the pixel drawn.
+uint4 DrawScrollRBG(uint2 pos, uint2 linePos, uint index, uint rotSel, uint2 scrollPos) {
     const RBGParams params = g_layerRenderParams[0].rbg[index];
 
-    uint2 rotPos = pos;
-    if (params.base.mosaicEnable) {
-        const uint mosaicH = BitExtract(g_commonParams.layerParams, 14, 4) + 1;
-        rotPos.x -= rotPos.x % mosaicH;
-    }
+    // Brimir: mosaic is applied by DrawRBG (sw:4713-4733).
+    const uint2 rotPos = pos;
 
     const RBGParams rotParams = g_layerRenderParams[0].rbg[rotSel];
     const uint2 pageShift = rotParams.base.pageShift;
@@ -1095,7 +1152,7 @@ uint4 DrawScrollRBG(uint2 pos, uint index, uint rotSel, uint2 scrollPos) {
         : uint2(512 * 4, 512 * 4) << pageShift;
 
     if (all(scrollPos < scrollSize) || usingRepeat) {
-        StoreRotationLineColorData(pos, rotPos, index, rotSel);
+        StoreRotationLineColorData(linePos, rotPos, index, rotSel);
 
         // Brimir: index and rotSel, not pageBaseAddresses[rotSel]
         return FetchScrollRBGPixel(params.base, scrollPos, pageShift, index, rotSel);
@@ -1104,7 +1161,7 @@ uint4 DrawScrollRBG(uint2 pos, uint index, uint rotSel, uint2 scrollPos) {
     // Out of bounds
 
     if (screenOverProcess == kScreenOverProcessRepeatChar) {
-        StoreRotationLineColorData(pos, rotPos, index, rotSel);
+        StoreRotationLineColorData(linePos, rotPos, index, rotSel);
 
         const uint2 dotPos = scrollPos & 7;
         Character ch = ExtractOneWordCharacter(params.base, rotParams.screenOverPatternName);
@@ -1118,11 +1175,8 @@ uint4 DrawBitmapRBG(uint2 pos, uint index, uint rotSel, uint2 scrollPos) {
     const RBGParams params = g_layerRenderParams[0].rbg[index];
     const uint screenOverProcess = params.screenOverProcess;
 
-    uint2 rotPos = pos;
-    if (params.base.mosaicEnable) {
-        const uint mosaicH = BitExtract(g_commonParams.layerParams, 14, 4) + 1;
-        rotPos.x -= rotPos.x % mosaicH;
-    }
+    // Brimir: matches software (sw:4814-4881): bitmap RBGs have no mosaic.
+    const uint2 rotPos = pos;
 
     const uint2 pageShift = g_layerRenderParams[0].rbg[rotSel].base.pageShift;
 
@@ -1150,15 +1204,31 @@ uint4 DrawRBG(uint2 pos, // pixel coordinates
         return kTransparentPixel;
     }
 
+    // Brimir: matches software (sw:4713-4733): with mosaic, a scroll RBG repeats every mosaicH-th pixel in RBG
+    // coordinates, whole (window and coefficient transparency included); in hi-res modes the repeated output pixels
+    // copy the odd output pixel of that pixel. (Ymir quantizes only the coefficient position of line colours.) The
+    // repeated pixel's line colour is that pixel's; software keeps the line colour it last stored at the repeated x.
+    uint2 linePos = pos;
+    if (params.base.mosaicEnable && !params.base.bitmap) {
+        const uint mosaicH = BitExtract(g_commonParams.layerParams, 14, 4) + 1;
+        const uint rbgX = hiResH ? pos.x >> 1 : pos.x;
+        const uint baseX = rbgX - rbgX % mosaicH;
+        if (baseX != rbgX) {
+            pos.x = hiResH ? (baseX << 1) | 1 : baseX;
+        }
+    }
+
     if (InsideWindows(params.base.windowParams, uint2(pos.x, GetY(pos.y, false)))) {
         return kTransparentPixel;
     }
 
     if (hiResH) {
         pos.x >>= 1;
+        linePos.x >>= 1;
     }
     if (deinterlace && interlaceMode >= kInterlaceModeSingleDensity) {
         pos.y >>= 1;
+        linePos.y >>= 1;
     }
 
     const uint rotSel = index == 0 ? SelectRotationParameter(params, pos) : kRotParamB;
@@ -1174,7 +1244,7 @@ uint4 DrawRBG(uint2 pos, // pixel coordinates
     const uint2 screenCoords = CalcRotationScreenCoords(pos, rotSel);
     return params.base.bitmap
         ? DrawBitmapRBG(pos, index, rotSel, screenCoords)
-        : DrawScrollRBG(pos, index, rotSel, screenCoords);
+        : DrawScrollRBG(pos, linePos, index, rotSel, screenCoords);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

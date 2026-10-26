@@ -27,7 +27,7 @@
 //
 // Sampled and storage bindings of the same data (9/17, 10/16, 11/18, 12/19) are views of one image, used in
 // VK_IMAGE_LAYOUT_GENERAL. Image views are 2D arrays except the colour calculation window (2D).
-// g_nbgLines is declared and bound but not read yet (per-line NBG state, stage 1B Task 6).
+// g_nbgLines holds the per-line NBG state (Vdp2FrameRecord::nbgLines, [nbg * 512 + dispatch row]).
 // No Vulkan header may be included here.
 
 #include "gpu/vdp2/vdp2_hw_params.hpp"

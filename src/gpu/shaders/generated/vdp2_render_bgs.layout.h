@@ -95,7 +95,7 @@ inline constexpr uint32_t kVdp2RenderBgs_NBGLine_mosaicSrcLine = 12;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_prevLastVCellScroll = 16;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_prevLineEndScrollX = 20;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_prevLineEndScrollY = 24;
-inline constexpr uint32_t kVdp2RenderBgs_NBGLine_pad = 28;
+inline constexpr uint32_t kVdp2RenderBgs_NBGLine_flags = 28;
 inline constexpr uint32_t kVdp2RenderBgs_NBGLine_size = 32;
 
 // NBGParams
