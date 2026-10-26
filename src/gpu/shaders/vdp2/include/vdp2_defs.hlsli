@@ -120,4 +120,12 @@ uint2 UnpackOutputSize(uint outputSize) {
     return min(uint2(outputSize & 0xFFFF, outputSize >> 16), uint2(kMaxResH, kMaxResV));
 }
 
+// Brimir: the internal resolution the back half pushes (CommonRenderParams::renderScale), 1 to kMaxRenderScale (0, the
+// front half's value, reads as 1): the N x images and the composite are allocated for at most that.
+static const uint kMaxRenderScale = 4;
+
+uint UnpackRenderScale(uint renderScale) {
+    return clamp(renderScale, 1u, kMaxRenderScale);
+}
+
 #endif

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace brimir::gpu {
 
@@ -37,8 +38,9 @@ public:
     // -------------------------------------------------------------------------
     // Device
 
-    // Creates the back half on `device` (frameContexts upload contexts, see Vdp2VulkanBackend). The next frame uploads
-    // all of VRAM and CRAM and starts from a cleared composite. Attached() is false if the back half failed. When
+    // Creates the back half on `device` (frameContexts upload contexts, see Vdp2VulkanBackend) at InternalScale() (1,
+    // logged, if that cannot be allocated). The next frame uploads all of VRAM and CRAM and starts from a cleared
+    // composite. Attached() is false if the back half failed. When
     // already attached, the old back half is destroyed immediately: the caller must have waited for the device to be
     // idle first (as for DetachDevice).
     void AttachDevice(VulkanDevice &device, uint32_t frameContexts);
@@ -61,7 +63,7 @@ public:
     // The last EnableThreadedVDP1 value (VDP1 starts unthreaded).
     bool ThreadedVDP1() const { return m_threadedVDP1; }
 
-    // Fired at the end of every VDP2 frame, after Callbacks.VDP2DrawFinished, with the frame's size.
+    // Fired at the end of every VDP2 frame, after Callbacks.VDP2DrawFinished, with the frame's (native) size.
     std::function<void(uint32_t w, uint32_t h)> FrameReady;
     // Diagnostics (brimir_vkhost --probe): when set, fired at the end of every VDP2 frame, before FrameReady, with the
     // front half's feature counters and the CPU time the frame took in the front half (VDP2BeginFrame, the lines with
@@ -77,8 +79,18 @@ public:
     // frame was abandoned): its uploads and one-time work (composite clear) are redone with the next frame. Task 7's
     // caller must call this whenever a recorded command buffer does not reach the queue.
     void RecordedFrameDropped();
-    // The persistent composite (VK_NULL_HANDLE while detached).
+    // The persistent composite (VK_NULL_HANDLE while detached): InternalScale() x the frame size FrameReady reports,
+    // pitch InternalScale() * HRes.
     VkBuffer CompositeBuffer() const;
+
+    // Internal resolution n (1 to 4) of the VDP2 background layers and the composite, from the next recorded frame on
+    // (Vdp2VulkanBackend::SetScale; the caller guarantees that no submitted work uses the renderer's resources). While
+    // detached it is kept for the next AttachDevice. False, with the previous scale kept and the failure logged, when
+    // the resources cannot be allocated; false for an n out of range.
+    bool SetInternalScale(uint32_t n);
+    uint32_t InternalScale() const { return m_internalScale; }
+    // Where the back half logs its allocation failures (stderr when unset); kept across AttachDevice.
+    void SetLog(std::function<void(const std::string &)> log);
 
     // -------------------------------------------------------------------------
     // IVDPRenderer
@@ -140,6 +152,8 @@ private:
     uint32_t m_VRes = ymir::vdp::kDefaultResV;
     bool m_exclusiveMonitor = false;
     bool m_threadedVDP1 = false;
+    uint32_t m_internalScale = 1;
+    std::function<void(const std::string &)> m_log;
     bool m_resolutionChanged = false;
     bool m_displayEraseSinceCapture = false; // VDP1 erased a framebuffer without a swap since the last capture
     bool m_slicesCaptured = false;           // the open frame has its main (and mesh0) sprite slices

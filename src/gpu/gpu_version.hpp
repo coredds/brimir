@@ -42,7 +42,7 @@ struct RequiredLimit {
 // storage buffers exceed the guaranteed maxPerStageDescriptorStorageBuffers (4).
 inline constexpr uint32_t kRequiredStageStorageBuffers = 7;
 inline constexpr uint32_t kRequiredStageStorageImages = 3;
-inline constexpr uint32_t kRequiredStageSampledImages = 4;
+inline constexpr uint32_t kRequiredStageSampledImages = 5;
 inline constexpr uint32_t kRequiredStageResources = 11;
 static_assert(kRequiredStageStorageBuffers == vdp2::kMaxStageUsage.storageBuffers &&
                   kRequiredStageStorageImages == vdp2::kMaxStageUsage.storageImages &&

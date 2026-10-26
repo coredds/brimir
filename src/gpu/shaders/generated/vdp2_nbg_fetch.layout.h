@@ -46,7 +46,8 @@ inline constexpr uint32_t kVdp2NbgFetch_CommonRenderParams_vcellScroll = 32;
 inline constexpr uint32_t kVdp2NbgFetch_CommonRenderParams_windows = 36;
 inline constexpr uint32_t kVdp2NbgFetch_CommonRenderParams_enhancements = 40;
 inline constexpr uint32_t kVdp2NbgFetch_CommonRenderParams_outputSize = 44;
-inline constexpr uint32_t kVdp2NbgFetch_CommonRenderParams_size = 48;
+inline constexpr uint32_t kVdp2NbgFetch_CommonRenderParams_renderScale = 48;
+inline constexpr uint32_t kVdp2NbgFetch_CommonRenderParams_size = 56;
 
 // GlobalWindowParams
 inline constexpr uint32_t kVdp2NbgFetch_GlobalWindowParams_start = 0;
@@ -89,8 +90,8 @@ inline constexpr uint32_t kVdp2NbgFetch_LineBackScreenParams_size = 8;
 
 // NBGFetchPushConstants
 inline constexpr uint32_t kVdp2NbgFetch_NBGFetchPushConstants_common = 0;
-inline constexpr uint32_t kVdp2NbgFetch_NBGFetchPushConstants_rows = 48;
-inline constexpr uint32_t kVdp2NbgFetch_NBGFetchPushConstants_size = 56;
+inline constexpr uint32_t kVdp2NbgFetch_NBGFetchPushConstants_rows = 56;
+inline constexpr uint32_t kVdp2NbgFetch_NBGFetchPushConstants_size = 64;
 
 // NBGLine
 inline constexpr uint32_t kVdp2NbgFetch_NBGLine_fracScrollX = 0;

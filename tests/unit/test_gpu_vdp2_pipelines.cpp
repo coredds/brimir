@@ -9,8 +9,8 @@
 // - The device limits check (gpu_version.hpp UnmetLimit) against crafted VkPhysicalDeviceLimits ([vdp2][limits],
 //   BRIMIR_VULKAN builds).
 // - The four compute pipelines are created on the headless device (1A baseline, no extra features or extensions)
-//   from the descriptor set layouts vdp2_bindings.hpp describes and their push-constant ranges (48 bytes; the NBG
-//   fetch pass 56), with zero
+//   from the descriptor set layouts vdp2_bindings.hpp describes and their push-constant ranges (56 bytes; the NBG
+//   fetch pass 64), with zero
 //   validation errors ([gpu][vdp2]; SKIP without a device).
 #include "catch_amalgamated.hpp"
 
@@ -371,7 +371,8 @@ TEST_CASE("The NBG fetch pass: one 32-thread row group, the character table, its
     // Push constants: the common block, then the row count
     STATIC_CHECK(offsetof(VDP2NBGFetchPushConstants, common) == 0);
     STATIC_CHECK(offsetof(VDP2NBGFetchPushConstants, rows) == kPushConstantSize);
-    STATIC_CHECK(kMaxPushConstantSize == 56);
+    STATIC_CHECK(kNBGFetchPushConstantSize == 64);
+    STATIC_CHECK(kMaxPushConstantSize == 64);
 }
 
 TEST_CASE("NBGUsesCharTable selects delayed scroll NBGs and the vertical cell scroll 2x2 case", "[vdp2][pipelines]") {
@@ -476,16 +477,38 @@ TEST_CASE("VDP2 binding table: read-only bindings 0-15, storage 16-31, parameter
             }
         }
     }
-    STATIC_CHECK(kPushConstantSize == 48);
+    STATIC_CHECK(kPushConstantSize == 56);
     STATIC_CHECK(kRotParamBaseCount == 2 * 512);
     STATIC_CHECK(kLnclBackCount == 2 * 512);
 
     // The largest per-stage use, which the device limits in gpu_version.hpp must cover (bgs: 7 storage buffers,
-    // 3 storage images, 11 descriptors; compose: 4 sampled images).
+    // 3 storage images, 11 descriptors; compose: 5 sampled images, the native sprite layer image included).
     STATIC_CHECK(kMaxStageUsage.storageBuffers == 7);
     STATIC_CHECK(kMaxStageUsage.storageImages == 3);
-    STATIC_CHECK(kMaxStageUsage.sampledImages == 4);
+    STATIC_CHECK(kMaxStageUsage.sampledImages == 5);
     STATIC_CHECK(kMaxStageUsage.resources == 11);
+}
+
+TEST_CASE("Internal resolution: the scaled resources fit the baseline limits", "[vdp2][pipelines]") {
+    // Background layer image (704N x 512N) within the guaranteed maxImageDimension2D (4096), the composite within the
+    // guaranteed maxStorageBufferRange (2^27), dispatch rows (N * 512) within maxComputeWorkGroupCount[1] (65535).
+    STATIC_CHECK(kMaxRenderScale == 4);
+    STATIC_CHECK(ScaledResH(4) == 2816);
+    STATIC_CHECK(ScaledResV(4) == 2048);
+    STATIC_CHECK(CompositeBufferSize(1) == kCompositeBufferSize);
+    STATIC_CHECK(kCompositeBufferSize == 704u * 512u * 4u);
+    STATIC_CHECK(CompositeBufferSize(4) == 2816u * 2048u * 4u);
+    STATIC_CHECK(CompositeBufferSize(4) <= (1u << 27));
+    STATIC_CHECK(kBGLayerImageLayers + kSpriteLayerImageLayers == 8);
+    // The sprite pass writes the native sprite layer image, compose reads it; the background layers stay at 10/16.
+    CHECK(std::any_of(kRenderSpriteBindings.begin(), kRenderSpriteBindings.end(),
+                      [](const Binding &b) { return b.binding == kBindingSpriteLayerOut; }));
+    CHECK(std::none_of(kRenderSpriteBindings.begin(), kRenderSpriteBindings.end(),
+                       [](const Binding &b) { return b.binding == kBindingLayerOut; }));
+    CHECK(std::any_of(kComposeBindings.begin(), kComposeBindings.end(),
+                      [](const Binding &b) { return b.binding == kBindingSpriteLayerIn; }));
+    // renderScale follows outputSize in the push constants; the front half leaves both 0.
+    STATIC_CHECK(offsetof(VDP2CommonRenderParams, renderScale) == 48);
 }
 
 TEST_CASE("MakeOutputSize packs HRes and VRes", "[vdp2][pipelines]") {
@@ -501,10 +524,10 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
     VkPhysicalDeviceLimits limits{};
     limits.maxPerStageDescriptorStorageBuffers = 7;
     limits.maxPerStageDescriptorStorageImages = 3;
-    limits.maxPerStageDescriptorSampledImages = 4;
+    limits.maxPerStageDescriptorSampledImages = 5;
     limits.maxPerStageResources = 11;
     limits.maxComputeWorkGroupInvocations = kMaxWorkgroupInvocations;
-    limits.maxPushConstantsSize = 56;
+    limits.maxPushConstantsSize = 64;
     limits.maxComputeSharedMemorySize = kNBGFetchSharedMemorySize;
     CHECK(gpu::UnmetLimit(limits).empty());
 

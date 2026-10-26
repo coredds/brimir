@@ -15,7 +15,11 @@
 //   the rotation bases cover 512 lines;
 // - NBG scroll state comes per row from g_nbgLines (computed on the CPU as software does), see "NBG drawing";
 // - bounds guards replace D3D12's robust out-of-range accesses (no robustness features): pixels outside HRes x VRes
-//   write nothing and RBG line colours outside their image are dropped.
+//   write nothing and RBG line colours outside their image are dropped;
+// - internal resolution N (CommonRenderParams::renderScale): the dispatch covers N x N threads per native pixel, each
+//   writing its own texel of the N x background layer image (the sprite and mesh layers are in a native image of
+//   their own). In this stage every thread evaluates the native pixel (sub-pixel offsets are 0); the colour
+//   calculation window and the RBG line colours stay native and are written by the first thread of the pixel only.
 // Where Ymir differs from Brimir's software renderer (the reference), the software semantics are ported, each marked
 // "// Brimir: matches software (sw:<lines>)": RBG line colours read the RGB555 table of CRAM word (address & 0x7FF);
 // NBG scroll, mosaic, vertical cell scroll and character pattern delay; RBG mosaic.
@@ -32,7 +36,7 @@
 //  16  u0  g_layerOut            RWTexture2DArray<uint4> rgba8ui      STORAGE_IMAGE
 //  18  u2  g_rbgLineColorOut     RWTexture2DArray<uint4> rgba8ui      STORAGE_IMAGE
 //  19  u3  g_colorCalcWindowOut  RWTexture2D<uint> r32ui              STORAGE_IMAGE
-// Push constants: CommonRenderParams (48 bytes). Dispatch: (HRes / 32, lines, 7).
+// Push constants: CommonRenderParams (56 bytes). Dispatch: (N * HRes / 32, N * lines, 7).
 
 #include "vdp2_common_params.hlsli"
 #include "vdp2_nbg_line.hlsli"
@@ -91,8 +95,9 @@ static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
 static const uint colorRAMMode = BitExtract(g_commonParams.displayParams, 6, 2);
 static const uint kCRAMAddressMask = colorRAMMode == 1 ? 0x7FF : 0x3FF;
 
-// Brimir: the frame's output size (bounds of the outputs).
+// Brimir: the frame's native output size (bounds of the outputs) and the internal resolution.
 static const uint2 outputSize = UnpackOutputSize(g_commonParams.outputSize);
+static const uint renderScale = UnpackRenderScale(g_commonParams.renderScale);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Utilities
@@ -970,7 +975,8 @@ uint4 DrawNBGScrollPixel(const NBGParams params, NBGLine nbgLine, uint index, ui
     return FetchCharacterPixel(params.base, FetchCharacter(params.base, loc), loc.dotPos, loc.cellIndex);
 }
 
-uint4 DrawNBG(uint2 pos, // dispatch coordinates
+uint4 DrawNBG(uint2 pos, // dispatch coordinates (native)
+              uint2 sub, // Brimir: the sub-pixel within the native pixel at internal resolution N (0 to N - 1)
               uint index // NBG index (0 to 3)
              ) {
     const NBGParams params = g_layerRenderParams[0].nbg[index];
@@ -984,7 +990,8 @@ uint4 DrawNBG(uint2 pos, // dispatch coordinates
         // Vertical mosaic: the row repeats an earlier row's layer output
         row = nbgLine.mosaicSrcLine;
         if (row < g_commonParams.startY) {
-            return g_layerOut[uint3(pos.x, GetY(row, false), index)];
+            // Brimir: the same sub-pixel of the earlier row in the N x layer image.
+            return g_layerOut[uint3(pos.x * renderScale + sub.x, GetY(row, false) * renderScale + sub.y, index)];
         }
         nbgLine = g_nbgLines[index * kMaxResV + row];
     }
@@ -1026,7 +1033,12 @@ uint SelectRotationParameter(const RBGParams params, uint2 pos) {
     return kRotParamA; // shouldn't happen
 }
 
-void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint index, uint rotSel) {
+void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint2 sub, uint index, uint rotSel) {
+    // Brimir: the line colour image is native; at internal resolution N only the first sub-pixel of the native pixel
+    // stores it.
+    if (any(sub != 0)) {
+        return;
+    }
     const bool lineColorEnabled = BitTest(g_commonParams.layerParams, 12 + index);
     if (!lineColorEnabled) {
         return;
@@ -1085,7 +1097,7 @@ void StoreRotationLineColorData(uint2 pos, uint2 rotPos, uint index, uint rotSel
 }
 
 // Brimir: linePos is where the pixel's line colour goes (the repeated pixel under mosaic); pos is the pixel drawn.
-uint4 DrawScrollRBG(uint2 pos, uint2 linePos, uint index, uint rotSel, uint2 scrollPos) {
+uint4 DrawScrollRBG(uint2 pos, uint2 linePos, uint2 sub, uint index, uint rotSel, uint2 scrollPos) {
     const RBGParams params = g_layerRenderParams[0].rbg[index];
 
     // Brimir: mosaic is applied by DrawRBG (sw:4713-4733).
@@ -1103,7 +1115,7 @@ uint4 DrawScrollRBG(uint2 pos, uint2 linePos, uint index, uint rotSel, uint2 scr
         : uint2(512 * 4, 512 * 4) << pageShift;
 
     if (all(scrollPos < scrollSize) || usingRepeat) {
-        StoreRotationLineColorData(linePos, rotPos, index, rotSel);
+        StoreRotationLineColorData(linePos, rotPos, sub, index, rotSel);
 
         // Brimir: index and rotSel, not pageBaseAddresses[rotSel]
         return FetchScrollRBGPixel(params.base, scrollPos, pageShift, index, rotSel);
@@ -1112,7 +1124,7 @@ uint4 DrawScrollRBG(uint2 pos, uint2 linePos, uint index, uint rotSel, uint2 scr
     // Out of bounds
 
     if (screenOverProcess == kScreenOverProcessRepeatChar) {
-        StoreRotationLineColorData(linePos, rotPos, index, rotSel);
+        StoreRotationLineColorData(linePos, rotPos, sub, index, rotSel);
 
         const uint2 dotPos = scrollPos & 7;
         Character ch = ExtractOneWordCharacter(params.base, rotParams.screenOverPatternName);
@@ -1122,7 +1134,7 @@ uint4 DrawScrollRBG(uint2 pos, uint2 linePos, uint index, uint rotSel, uint2 scr
     return kTransparentPixel;
 }
 
-uint4 DrawBitmapRBG(uint2 pos, uint index, uint rotSel, uint2 scrollPos) {
+uint4 DrawBitmapRBG(uint2 pos, uint2 sub, uint index, uint rotSel, uint2 scrollPos) {
     const RBGParams params = g_layerRenderParams[0].rbg[index];
     const uint screenOverProcess = params.screenOverProcess;
 
@@ -1139,7 +1151,7 @@ uint4 DrawBitmapRBG(uint2 pos, uint index, uint rotSel, uint2 scrollPos) {
         : uint2(512 * 4, 512 * 4) << pageShift;
 
     if (all(scrollPos < scrollSize) || usingRepeat) {
-        StoreRotationLineColorData(pos, rotPos, index, rotSel);
+        StoreRotationLineColorData(pos, rotPos, sub, index, rotSel);
 
         return FetchBitmapPixel(params.base, g_layerRenderParams[0].rbg[rotSel].base.bitmapBaseAddress, scrollPos);
     }
@@ -1147,7 +1159,8 @@ uint4 DrawBitmapRBG(uint2 pos, uint index, uint rotSel, uint2 scrollPos) {
     return kTransparentPixel;
 }
 
-uint4 DrawRBG(uint2 pos, // pixel coordinates
+uint4 DrawRBG(uint2 pos, // pixel coordinates (native)
+              uint2 sub, // Brimir: the sub-pixel within the native pixel at internal resolution N (0 to N - 1)
               uint index // RBG index (0 to 1)
              ) {
     const RBGParams params = g_layerRenderParams[0].rbg[index];
@@ -1194,8 +1207,8 @@ uint4 DrawRBG(uint2 pos, // pixel coordinates
 
     const uint2 screenCoords = CalcRotationScreenCoords(pos, rotSel);
     return params.base.bitmap
-        ? DrawBitmapRBG(pos, index, rotSel, screenCoords)
-        : DrawScrollRBG(pos, linePos, index, rotSel, screenCoords);
+        ? DrawBitmapRBG(pos, sub, index, rotSel, screenCoords)
+        : DrawScrollRBG(pos, linePos, sub, index, rotSel, screenCoords);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1218,19 +1231,24 @@ bool InsideColorCalcWindow(uint2 pos) {
 // Entrypoint
 
 // Brimir: 32x1x1 (at most 128 invocations per workgroup), dispatched with z = 7; id.z is the layer as before.
+// At internal resolution N, id.xy is the N x pixel: the native pixel (x, row) = (id.x / N, startY + id.y / N) and the
+// sub-pixel (i, j) = id.xy % N, written at (id.x, N * GetY(row) + j).
 [numthreads(32, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
-    const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
-    const uint3 outCoord = uint3(drawCoord.x, GetY(drawCoord.y, false), id.z);
+    const uint2 sub = id.xy % renderScale;
+    const uint2 drawCoord = uint2(id.x / renderScale, id.y / renderScale + g_commonParams.startY);
+    const uint2 nativeOut = uint2(drawCoord.x, GetY(drawCoord.y, false));
     // Brimir: nothing outside the frame (HRes x VRes) is written (no robust access).
-    if (any(outCoord.xy >= outputSize)) {
+    if (any(nativeOut >= outputSize)) {
         return;
     }
+    const uint3 outCoord = uint3(id.x, nativeOut.y * renderScale + sub.y, id.z);
     if (id.z <= 3) {
-        g_layerOut[outCoord] = DrawNBG(drawCoord, id.z);
+        g_layerOut[outCoord] = DrawNBG(drawCoord, sub, id.z);
     } else if (id.z <= 5) {
-        g_layerOut[outCoord] = DrawRBG(drawCoord, id.z - 4);
-    } else if (id.z == 6) {
-        g_colorCalcWindowOut[outCoord.xy] = InsideColorCalcWindow(drawCoord) ? 1u : 0u;
+        g_layerOut[outCoord] = DrawRBG(drawCoord, sub, id.z - 4);
+    } else if (id.z == 6 && all(sub == 0)) {
+        // Brimir: native, written by the first sub-pixel only.
+        g_colorCalcWindowOut[nativeOut] = InsideColorCalcWindow(drawCoord) ? 1u : 0u;
     }
 }

@@ -20,8 +20,11 @@ struct CommonRenderParams {
     uint enhancements;
     // Brimir: the frame's output size (VDP2SetResolution), HRes in bits 0-15 and VRes in bits 16-31: the composite
     // pitch and the bounds every shader checks before touching its outputs. Set per dispatch by the back half, like
-    // startY. Fills the std430 tail (48 bytes, a multiple of the uint2 alignment).
+    // startY.
     uint outputSize;
+    // Brimir: the internal resolution N (1-4) of the bgs and compose dispatches (0 reads as 1); the sprite and NBG
+    // fetch passes are native. The block is 56 bytes with the std430 tail.
+    uint renderScale;
 };
 
 #endif

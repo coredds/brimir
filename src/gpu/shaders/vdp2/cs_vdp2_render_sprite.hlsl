@@ -1,5 +1,5 @@
-// VDP2 sprite layer: renders the VDP1 framebuffer (sprite and transparent-mesh layers) into the layer image and the
-// sprite attribute image.
+// VDP2 sprite layer: renders the VDP1 framebuffer (sprite and transparent-mesh layers) into the sprite layer image and
+// the sprite attribute image.
 //
 // Derived from Ymir libs/ymir-core/res/shaders/src/vdp/cs_vdp2_render_sprite.hlsl at 8cdf0a53. Only what Vulkan 1.2
 // (Brimir's baseline) needs is changed, each change marked "// Brimir:":
@@ -19,9 +19,10 @@
 //   3  t3  g_cramColor          StructuredBuffer<uint>               STORAGE_BUFFER
 //   5  t5  g_rotParamBases      StructuredBuffer<RotParamBase>       STORAGE_BUFFER
 //   6  t6  g_spriteFB           ByteAddressBuffer                    STORAGE_BUFFER
-//  16  u0  g_layerOut           RWTexture2DArray<uint4> rgba8ui      STORAGE_IMAGE
 //  17  u1  g_spriteAttrsOut     RWTexture2DArray<uint> r32ui         STORAGE_IMAGE
-// Push constants: CommonRenderParams (48 bytes). Dispatch: (HRes / 32, lines, 1 + transparent meshes).
+//  22  u6  g_spriteLayerOut     RWTexture2DArray<uint4> rgba8ui      STORAGE_IMAGE
+// Push constants: CommonRenderParams (56 bytes). Dispatch: (HRes / 32, lines, 1 + transparent meshes), native at every
+// internal resolution (renderScale is not used).
 
 #include "vdp2_common_params.hlsli"
 #include "vdp2_render_params_layer.hlsli"
@@ -44,7 +45,9 @@ StructuredBuffer<RotParamBase> g_rotParamBases : register(t5);
 ByteAddressBuffer g_spriteFB : register(t6);
 
 // Brimir: explicit storage formats (DXC would infer Rgba32ui for uint4).
-[[vk::image_format("rgba8ui")]] RWTexture2DArray<uint4> g_layerOut : register(u0);
+// Brimir: the sprite and mesh layers have their own native image (layers 0 and 1; the background layers are N x the
+// native size).
+[[vk::image_format("rgba8ui")]] RWTexture2DArray<uint4> g_spriteLayerOut : register(u6);
 [[vk::image_format("r32ui")]] RWTexture2DArray<uint> g_spriteAttrsOut : register(u1);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -595,7 +598,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z);
-    g_layerOut[uint3(outCoord.xy, id.z + 6)] = output.layer;
+    g_spriteLayerOut[uint3(outCoord.xy, id.z)] = output.layer;
     g_spriteAttrsOut[uint3(outCoord.xy, id.z)] =
         output.colorCalcRatio |
         ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |

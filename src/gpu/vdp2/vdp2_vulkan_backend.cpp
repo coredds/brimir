@@ -7,8 +7,11 @@
 #include "gpu/vdp2/vdp2_bindings.hpp"
 
 #include <algorithm>
+#include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <span>
+#include <string>
 
 namespace brimir::gpu::vdp2 {
 
@@ -53,6 +56,19 @@ VkDeviceSize AlignUp(VkDeviceSize value, VkDeviceSize alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+// The layer images and the colour calculation window: VK_IMAGE_LAYOUT_GENERAL while in use; sampled and storage
+// bindings share one view; TRANSFER_DST for the test-only poison clear.
+constexpr VkImageUsageFlags kImageUsage =
+    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+constexpr VkBufferUsageFlags kStorageDst = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+constexpr VkBufferUsageFlags kCompositeUsage = kStorageDst | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+vk_util::ImageDesc BGLayersDesc(uint32_t n) {
+    return {.width = ScaledResH(n), .height = ScaledResV(n), .format = VK_FORMAT_R8G8B8A8_UINT, .usage = kImageUsage,
+            .arrayLayers = kBGLayerImageLayers};
+}
+
 } // namespace
 
 Vdp2VulkanBackend::Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts) : m_device(device) {
@@ -75,8 +91,7 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
     m_paramAlignment = std::max<VkDeviceSize>(kParamSnapshotAlignment,
                                               m_device.Properties().limits.minStorageBufferOffsetAlignment);
 
-    // Buffers
-    constexpr VkBufferUsageFlags kStorageDst = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    // Buffers (the composite with the scaled resources below)
     constexpr VkMemoryPropertyFlags kDeviceLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     const struct {
         vk_util::Buffer *buffer;
@@ -90,7 +105,6 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
         {&m_lnclBack, kLnclBackBytes, kStorageDst},
         {&m_nbgLines, kNBGLinesBytes, kStorageDst},
         {&m_spriteFB, kSpriteFBBufferSize, kStorageDst},
-        {&m_composite, kCompositeBufferSize, kStorageDst | VK_BUFFER_USAGE_TRANSFER_SRC_BIT},
         {&m_nbgChars, kNBGCharBufferSize, kStorageDst}, // TRANSFER_DST for the test-only poison fill
     };
     for (const auto &b : buffers) {
@@ -100,16 +114,13 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
         }
     }
 
-    // Images (VK_IMAGE_LAYOUT_GENERAL while in use; sampled and storage bindings share one view)
-    // TRANSFER_DST for the test-only poison clear.
-    constexpr VkImageUsageFlags kImageUsage =
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // Native images
     const struct {
         vk_util::Image *image;
         vk_util::ImageDesc desc;
     } images[] = {
-        {&m_layers, {.width = kMaxResH, .height = kMaxResV, .format = VK_FORMAT_R8G8B8A8_UINT, .usage = kImageUsage,
-                     .arrayLayers = kLayerImageLayers}},
+        {&m_spriteLayers, {.width = kMaxResH, .height = kMaxResV, .format = VK_FORMAT_R8G8B8A8_UINT,
+                           .usage = kImageUsage, .arrayLayers = kSpriteLayerImageLayers}},
         {&m_spriteAttrs, {.width = kMaxResH, .height = kMaxResV, .format = VK_FORMAT_R32_UINT, .usage = kImageUsage,
                           .arrayLayers = kSpriteAttrImageLayers}},
         {&m_rbgLineColor, {.width = kRBGLineColorWidth, .height = kMaxResV, .format = VK_FORMAT_R8G8B8A8_UINT,
@@ -122,6 +133,10 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
         if (result != VK_SUCCESS) {
             return result;
         }
+    }
+    // The background layer image and the composite, at internal resolution 1
+    if (const VkResult result = CreateScaledResources(1, m_bgLayers, m_composite); result != VK_SUCCESS) {
+        return result;
     }
 
     // Pipelines: one set (vdp2_bindings.hpp) and the push-constant block each
@@ -169,7 +184,7 @@ void Vdp2VulkanBackend::Destroy() {
         m_pipelineLayouts[p] = VK_NULL_HANDLE;
         m_setLayouts[p] = VK_NULL_HANDLE;
     }
-    for (vk_util::Image *image : {&m_layers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow}) {
+    for (vk_util::Image *image : {&m_bgLayers, &m_spriteLayers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow}) {
         vk_util::DestroyImage(m_device, *image);
     }
     for (vk_util::Buffer *buffer :
@@ -183,6 +198,72 @@ void Vdp2VulkanBackend::DestroyBlock(UploadBlock &block) {
     m_device.Table().vkDestroyDescriptorPool(m_device.Device(), block.pool, nullptr); // frees the sets
     vk_util::DestroyBuffer(m_device, block.buffer);
     block = UploadBlock{};
+}
+
+void Vdp2VulkanBackend::Log(const std::string &text) const {
+    if (m_log) {
+        m_log(text);
+    } else {
+        std::fprintf(stderr, "[vulkan] %s\n", text.c_str());
+    }
+}
+
+VkDeviceSize Vdp2VulkanBackend::ScaledResourceBytes(uint32_t n) {
+    const VkDeviceSize layerBytes = VkDeviceSize{ScaledResH(n)} * ScaledResV(n) * 4 * kBGLayerImageLayers;
+    return layerBytes + CompositeBufferSize(n);
+}
+
+VkResult Vdp2VulkanBackend::CreateScaledResources(uint32_t n, vk_util::Image &bgLayers, vk_util::Buffer &composite) {
+    VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (m_scaleAllocationLimit == 0 || ScaledResourceBytes(n) <= m_scaleAllocationLimit) {
+        result = vk_util::CreateImage2D(m_device, BGLayersDesc(n), bgLayers);
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreateBuffer(m_device, CompositeBufferSize(n), kCompositeUsage,
+                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, composite);
+        }
+    }
+    if (result != VK_SUCCESS) {
+        vk_util::DestroyImage(m_device, bgLayers);
+        vk_util::DestroyBuffer(m_device, composite);
+    }
+    return result;
+}
+
+bool Vdp2VulkanBackend::SetScale(uint32_t n) {
+    if (!Ok() || n < 1 || n > kMaxRenderScale) {
+        return false;
+    }
+    if (n == m_scale) {
+        return true;
+    }
+    vk_util::Image bgLayers;
+    vk_util::Buffer composite;
+    const VkResult result = CreateScaledResources(n, bgLayers, composite);
+    if (result != VK_SUCCESS) {
+        Log("VDP2 internal resolution " + std::to_string(n) + "x: allocating " +
+            std::to_string(ScaledResourceBytes(n) >> 20) + " MiB failed (VkResult " +
+            std::to_string(static_cast<int>(result)) + "); staying at " + std::to_string(m_scale) + "x");
+        return false;
+    }
+    // The device is idle (the caller's guarantee): nothing uses the old resources any more.
+    vk_util::DestroyImage(m_device, m_bgLayers);
+    vk_util::DestroyBuffer(m_device, m_composite);
+    m_bgLayers = bgLayers;
+    m_composite = composite;
+    m_scale = n;
+    for (FrameContext &context : m_contexts) {
+        for (UploadBlock &block : context.blocks) {
+            if (block.pool != VK_NULL_HANDLE) {
+                WriteBlockSets(block);
+            }
+        }
+    }
+    // The new composite starts black, as a new back half's (a pending clear keeps its colour).
+    if (!m_pending.clearComposite) {
+        m_pending.clearComposite = true;
+        m_pending.clearColor = 0xFF000000u;
+    }
+    return true;
 }
 
 void Vdp2VulkanBackend::FrameDropped() {
@@ -208,8 +289,41 @@ uint32_t Vdp2VulkanBackend::UploadBlocksForTest(uint32_t context) const {
     return context < m_contexts.size() ? static_cast<uint32_t>(m_contexts[context].blocks.size()) : 0;
 }
 
+VkDeviceSize Vdp2VulkanBackend::BlockSizeFor(VkDeviceSize bytes) const {
+    return std::max<VkDeviceSize>(m_blockSize, AlignUp(bytes, 64 * 1024));
+}
+
 VkDeviceSize Vdp2VulkanBackend::BaseBlockSize(const FrameContext &context) const {
-    return std::max<VkDeviceSize>(m_blockSize, AlignUp(context.highWater, 64 * 1024));
+    return BlockSizeFor(context.highWater);
+}
+
+void Vdp2VulkanBackend::UpdateHighWater(FrameContext &context, VkDeviceSize bytes, bool overflowed) {
+    if (overflowed) {
+        // The next base block of this context holds a frame this big in one piece, up to the cap; after a high-water
+        // block failed to allocate, never again.
+        if (!m_highWaterFailed && bytes <= kMaxUploadBlockSize) {
+            context.highWater = std::max(context.highWater, bytes);
+        }
+        context.smallRecords = 0;
+        context.smallPeak = 0;
+        return;
+    }
+    if (context.highWater == 0) {
+        return;
+    }
+    const VkDeviceSize size = BlockSizeFor(bytes);
+    if (size >= BaseBlockSize(context)) {
+        context.smallRecords = 0;
+        context.smallPeak = 0;
+        return;
+    }
+    // Decay: after m_highWaterDecayRecords Records in a row that fit a smaller block, the largest of them sets it.
+    context.smallPeak = std::max(context.smallPeak, bytes);
+    if (++context.smallRecords >= m_highWaterDecayRecords) {
+        context.highWater = context.smallPeak <= m_blockSize ? 0 : context.smallPeak;
+        context.smallRecords = 0;
+        context.smallPeak = 0;
+    }
 }
 
 void Vdp2VulkanBackend::ResetContext(FrameContext &context) {
@@ -231,6 +345,9 @@ void Vdp2VulkanBackend::ResetContext(FrameContext &context) {
 }
 
 bool Vdp2VulkanBackend::AddBlock(FrameContext &context, VkDeviceSize size) {
+    if (m_failHighWaterBlocks && context.blocks.empty() && size > m_blockSize) {
+        return false;
+    }
     UploadBlock block;
     const VkResult result = vk_util::CreateBuffer(
         m_device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -245,11 +362,22 @@ bool Vdp2VulkanBackend::AddBlock(FrameContext &context, VkDeviceSize size) {
 
 bool Vdp2VulkanBackend::Allocate(FrameContext &context, VkDeviceSize size, VkDeviceSize alignment, Allocation &out) {
     if (context.blocks.empty() && !AddBlock(context, BaseBlockSize(context))) {
-        // A high-water block that cannot be allocated falls back to the default size (and overflow blocks).
-        if (context.highWater <= m_blockSize) {
+        // A high-water block that cannot be allocated falls back to the default size (and overflow blocks), for every
+        // context from now on: logged once, never retried.
+        if (BaseBlockSize(context) <= m_blockSize) {
             return false;
         }
-        context.highWater = 0;
+        if (!m_highWaterFailed) {
+            Log("VDP2 upload block of " + std::to_string(BaseBlockSize(context) >> 10) +
+                " KiB could not be allocated; upload blocks stay at " + std::to_string(m_blockSize >> 10) +
+                " KiB (larger frames chain overflow blocks)");
+            m_highWaterFailed = true;
+        }
+        for (FrameContext &c : m_contexts) {
+            c.highWater = 0;
+            c.smallRecords = 0;
+            c.smallPeak = 0;
+        }
         if (!AddBlock(context, m_blockSize)) {
             return false;
         }
@@ -299,7 +427,13 @@ VkResult Vdp2VulkanBackend::CreateBlockSets(UploadBlock &block) {
         block.sets = {};
         return result;
     }
+    WriteBlockSets(block);
+    return VK_SUCCESS;
+}
 
+void Vdp2VulkanBackend::WriteBlockSets(UploadBlock &block) {
+    const auto &vk = m_device.Table();
+    const VkDevice dev = m_device.Device();
     for (uint32_t p = 0; p < kPipelineCount; ++p) {
         for (const Binding &b : BindingTable(p)) {
             VkDescriptorBufferInfo bufferInfo{VK_NULL_HANDLE, 0, VK_WHOLE_SIZE};
@@ -320,7 +454,9 @@ VkResult Vdp2VulkanBackend::CreateBlockSets(UploadBlock &block) {
             case kBindingSpriteAttrsIn:
             case kBindingSpriteAttrsOut: imageInfo.imageView = m_spriteAttrs.view; break;
             case kBindingLayerIn:
-            case kBindingLayerOut: imageInfo.imageView = m_layers.view; break;
+            case kBindingLayerOut: imageInfo.imageView = m_bgLayers.view; break;
+            case kBindingSpriteLayerIn:
+            case kBindingSpriteLayerOut: imageInfo.imageView = m_spriteLayers.view; break;
             case kBindingRBGLineColorIn:
             case kBindingRBGLineColorOut: imageInfo.imageView = m_rbgLineColor.view; break;
             case kBindingColorCalcWindowIn:
@@ -340,7 +476,6 @@ VkResult Vdp2VulkanBackend::CreateBlockSets(UploadBlock &block) {
             vk.vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
         }
     }
-    return VK_SUCCESS;
 }
 
 void Vdp2VulkanBackend::Barrier(VkCommandBuffer cmd, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
@@ -350,11 +485,13 @@ void Vdp2VulkanBackend::Barrier(VkCommandBuffer cmd, VkPipelineStageFlags srcSta
 
 void Vdp2VulkanBackend::Dispatch(VkCommandBuffer cmd, Pipeline pipeline, const UploadBlock &block,
                                  uint32_t paramsOffset, const VDP2CommonRenderParams &common, uint32_t startY,
-                                 uint32_t lines, uint32_t groupsX, uint32_t groupsZ, uint32_t outputSize) const {
+                                 uint32_t lines, uint32_t groupsX, uint32_t groupsZ, uint32_t outputSize,
+                                 uint32_t scale) const {
     const auto &vk = m_device.Table();
     VDP2CommonRenderParams push = common;
     push.startY = startY;
     push.outputSize = outputSize;
+    push.renderScale = scale;
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines[pipeline]);
     vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayouts[pipeline], 0, 1,
                                &block.sets[pipeline], 1, &paramsOffset);
@@ -366,10 +503,14 @@ void Vdp2VulkanBackend::DispatchNBGFetch(VkCommandBuffer cmd, const UploadBlock 
                                          const VDP2CommonRenderParams &common, uint32_t startY, uint32_t lines,
                                          uint32_t outputSize) const {
     const auto &vk = m_device.Table();
+    // The pass is native at every internal resolution: a scaled width would be clamped to its kMaxResH-pixel
+    // groupshared rows by the shader without notice.
+    assert((outputSize & 0xFFFFu) <= kMaxResH && (outputSize >> 16) <= kMaxResV);
     VDP2NBGFetchPushConstants push{};
     push.common = common;
     push.common.startY = startY;
     push.common.outputSize = outputSize;
+    push.common.renderScale = 1;
     push.rows = lines;
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines[kNBGFetch]);
     vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayouts[kNBGFetch], 0, 1,
@@ -409,14 +550,13 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     if (!Allocate(context, kLinesBytes, 16, lines) || !Allocate(context, arenaSize, m_paramAlignment, arena)) {
         return failed();
     }
-    if (m_overflowBlocks > 0) {
-        // The next base block of this context holds a frame this big in one piece.
-        context.highWater = std::max(context.highWater, AlignUp(kLinesBytes, m_paramAlignment) + arenaSize);
-    }
+    UpdateHighWater(context, AlignUp(kLinesBytes, m_paramAlignment) + arenaSize, m_overflowBlocks > 0);
     RecordStats stats{};
     stats.uploadBytes = kLinesBytes + frame.arena.size();
     stats.overflowBlocks = m_overflowBlocks;
     stats.baseBlockSize = context.blocks.front().buffer.size;
+    stats.highWater = context.highWater;
+    stats.scale = m_scale;
     UploadBlock &linesBlock = context.blocks[lines.block];
     UploadBlock &arenaBlock = context.blocks[arena.block];
     if (arenaBlock.pool == VK_NULL_HANDLE && CreateBlockSets(arenaBlock) != VK_SUCCESS) {
@@ -481,7 +621,8 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
 
     // The layer images only hold rows of the frame being rendered (every row composed this frame is rendered this
     // frame), so they start from UNDEFINED each frame, independent of what earlier command buffers did.
-    for (const vk_util::Image *image : {&m_layers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow}) {
+    for (const vk_util::Image *image :
+         {&m_bgLayers, &m_spriteLayers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow}) {
         vk_util::ImageBarrier(m_device, cmd, image->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                               kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute | kTransfer,
                               kShaderRW | VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -499,15 +640,17 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, kShaderRW);
 
     // Composite clears inside the frame, in order between the batches: the compose writes of earlier batches (WAW) come
-    // first; later compose writes (WAW) and the frame's readers come after.
+    // first; later compose writes (WAW) and the frame's readers come after. A clear of `words` native words (whole
+    // native rows, pitch HRes) is N^2 times that at internal resolution N (the same rows, pitch N * HRes).
+    const uint32_t scale = m_scale;
     size_t nextClear = 0;
     const auto clearsBefore = [&](size_t batchIndex) {
         for (; nextClear < frame.clears.size() && frame.clears[nextClear].beforeBatch <= batchIndex; ++nextClear) {
             const Vdp2CompositeClear &clear = frame.clears[nextClear];
-            const VkDeviceSize bytes = clear.words == 0
-                                           ? VK_WHOLE_SIZE
-                                           : std::min<VkDeviceSize>(VkDeviceSize{clear.words} * sizeof(uint32_t),
-                                                                    kCompositeBufferSize);
+            const VkDeviceSize bytes =
+                clear.words == 0 ? VK_WHOLE_SIZE
+                                 : std::min<VkDeviceSize>(VkDeviceSize{clear.words} * scale * scale * sizeof(uint32_t),
+                                                          m_composite.size);
             Barrier(cmd, kCompute | kTransfer, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer,
                     VK_ACCESS_TRANSFER_WRITE_BIT);
             vk.vkCmdFillBuffer(cmd, m_composite.buffer, 0, bytes, clear.color);
@@ -523,8 +666,10 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
         clearsBefore(batchIndex);
         const uint32_t hres = std::min(batch.hres, kMaxResH);
         const uint32_t vres = std::min(batch.vres, kMaxResV);
+        // outputSize is native at every internal resolution; bgs and compose cover N x N threads per native pixel.
         const uint32_t outputSize = MakeOutputSize(hres, vres);
         const uint32_t groupsX = (hres + kWorkgroupWidth - 1) / kWorkgroupWidth;
+        const uint32_t scaledGroupsX = (hres * scale + kWorkgroupWidth - 1) / kWorkgroupWidth;
         if (batch.copyCount > 0) {
             // Earlier dispatches' reads of these buffers (WAR) and earlier copies (WAW) come first.
             Barrier(cmd, kCompute | kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -573,23 +718,27 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
             const uint32_t layerOffset = static_cast<uint32_t>(arenaBase) + batch.layerParamsOffset;
             const uint32_t spriteLayers = batch.common.enhancements.transparentMeshes ? 2 : 1;
             Dispatch(cmd, kSprite, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines,
-                     groupsX, spriteLayers, outputSize);
+                     groupsX, spriteLayers, outputSize, 1);
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
             if (batch.needsFetchPass) {
                 // After the sprite pass (the sprite window), before bgs (the character table).
                 DispatchNBGFetch(cmd, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines,
                                  outputSize);
                 Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
+                ++stats.fetchPasses;
+                stats.fetchOutputSize = outputSize;
             }
-            Dispatch(cmd, kBgs, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines, groupsX,
-                     kBgsDispatchZ, outputSize);
+            // The dispatch rows: the y of every row is below 65536 (512 lines x 4).
+            Dispatch(cmd, kBgs, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines * scale,
+                     scaledGroupsX, kBgsDispatchZ, outputSize, scale);
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
         }
         if (batch.composeLines > 0) {
             const uint32_t composeOffset = static_cast<uint32_t>(arenaBase) + batch.composeParamsOffset;
             Dispatch(cmd, kCompose, arenaBlock, composeOffset, batch.common, batch.composeStartY,
-                     batch.composeLines, groupsX, 1, outputSize);
+                     batch.composeLines * scale, scaledGroupsX, 1, outputSize, scale);
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
+            stats.composeOutputSize = outputSize;
         }
     }
     clearsBefore(frame.batches.size());

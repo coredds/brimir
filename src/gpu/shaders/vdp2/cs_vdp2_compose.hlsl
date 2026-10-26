@@ -8,7 +8,12 @@
 // - the output is packed XBGR (r | g << 8 | b << 16 | 0xFF000000, the software framebuffer's order) in a
 //   RWStructuredBuffer<uint> at y * HRes + x instead of a float4 UNORM image;
 // - bounds guards replace D3D12's robust out-of-range accesses (no robustness features): pixels outside HRes x VRes
-//   write nothing and RBG line colour reads outside their image return 0.
+//   write nothing and RBG line colour reads outside their image return 0;
+// - internal resolution N (CommonRenderParams::renderScale): one thread per N x output pixel (X, Y), written at
+//   Y * (N * HRes) + X; the background layers are read at (X, Y) from the N x layer image, every native input (the
+//   sprite and mesh layers, which have a native image of their own, sprite attributes, colour calculation window, RBG
+//   line colours, LNCL/BACK) at the native pixel (X / N, Y / N); colour gradation taps X - N and X - 2N (the native
+//   neighbours' distance).
 // Where Ymir's compositor differs from Brimir's software renderer (the reference), the software semantics are ported,
 // each marked "// Brimir: matches software (sw:<lines>)" (vdp_renderer_sw.cpp; stage1b-port-inventory.md section 4.1):
 // per-layer shadow enable, the extended colour calculation layer-1 enable, the back screen ratio, LNCL/BACK per field
@@ -21,8 +26,9 @@
 //  10  t10  g_layerIn            Texture2DArray<uint4>            SAMPLED_IMAGE
 //  11  t11  g_rbgLineColorIn     Texture2DArray<uint4>            SAMPLED_IMAGE
 //  12  t12  g_colorCalcWindowIn  Texture2D<uint>                  SAMPLED_IMAGE
+//  14  t14  g_spriteLayerIn      Texture2DArray<uint4>            SAMPLED_IMAGE
 //  20  u4   g_compositeOut       RWStructuredBuffer<uint>         STORAGE_BUFFER
-// Push constants: CommonRenderParams (48 bytes). Dispatch: (HRes / 32, lines, 1).
+// Push constants: CommonRenderParams (56 bytes). Dispatch: (N * HRes / 32, N * lines, 1).
 
 #include "vdp2_common_params.hlsli"
 #include "vdp2_compose_params.hlsli"
@@ -37,7 +43,9 @@
 
 // Brimir: registers renumbered per vdp2_bindings.hpp.
 StructuredBuffer<ComposeParams> g_composeParams : register(t1);
+// Brimir: NBG0-3 and RBG0-1 at N x the native size; the sprite and mesh layers in a native image of their own.
 Texture2DArray<uint4> g_layerIn : register(t10);
+Texture2DArray<uint4> g_spriteLayerIn : register(t14);
 // Brimir: StructuredBuffer<uint> of packed RGBA8 instead of Buffer<uint4>.
 StructuredBuffer<uint> g_lnclBackIn : register(t8);
 Texture2DArray<uint4> g_rbgLineColorIn : register(t11);
@@ -90,8 +98,10 @@ static const bool colorGradEnable = BitTest(g_commonParams.layerParams, 28);
 static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
 static const bool transparentMeshes = BitTest(g_commonParams.enhancements, 1);
 
-// Brimir: the frame's output size (bounds and pitch of the composite).
+// Brimir: the frame's native output size (bounds of the composite; its pitch is renderScale * HRes) and the internal
+// resolution.
 static const uint2 outputSize = UnpackOutputSize(g_commonParams.outputSize);
+static const uint renderScale = UnpackRenderScale(g_commonParams.renderScale);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Utilities
@@ -152,6 +162,23 @@ uint GetBGLayerIndex(uint layer) {
     }
 }
 
+// Brimir: the native output pixel of N x output pixel outPos.
+uint2 NativePos(uint2 outPos) {
+    return outPos / renderScale;
+}
+
+// Brimir: layer bgLayer's pixel at N x output pixel outPos: the background layers from the N x layer image, the sprite
+// and mesh layers from their native image at the native pixel, blank for kBGLayerInvalid (D3D12's out-of-bounds read).
+uint4 LoadLayer(uint bgLayer, uint2 outPos) {
+    if (bgLayer < kBGLayerSprite) {
+        return g_layerIn[uint3(outPos, bgLayer)];
+    }
+    if (bgLayer <= kBGLayerMesh) {
+        return g_spriteLayerIn[uint3(NativePos(outPos), bgLayer - kBGLayerSprite)];
+    }
+    return kTransparentPixel;
+}
+
 uint GetColorGradScreenLayerIndex(uint colorGradScreen) {
     switch (colorGradScreen) {
         case kColorGradScreenNBG0_RBG0:
@@ -171,7 +198,9 @@ uint GetColorGradScreenLayerIndex(uint colorGradScreen) {
     }
 }
 
-bool IsColorCalcEnabled(uint layer, uint2 pos) {
+// Brimir: outPos is the N x output pixel (pos, the native pixel, for the native inputs).
+bool IsColorCalcEnabled(uint layer, uint2 outPos) {
+    const uint2 pos = NativePos(outPos);
     const bool enabled = BitTest(g_composeParams[0].colorCalcEnable, layer);
     if (layer >= kLayerBack) {
         // Back and line screen layers use the enable bit alone
@@ -187,7 +216,7 @@ bool IsColorCalcEnabled(uint layer, uint2 pos) {
     const bool restrictedColorCalc = BitTest(g_commonParams.layerParams, 24);
     if (layer == kLayerSprite) {
         // Sprites use condition modes based on priority or color MSB
-        const uint layerAttrs = g_layerIn[uint3(pos, kLayerIndexSprite)].a;
+        const uint layerAttrs = LoadLayer(kLayerIndexSprite, outPos).a;
         if (restrictedColorCalc && BitTest(layerAttrs, kPixelAttrBitSpecColorCalc)) {
             return false;
         }
@@ -209,7 +238,7 @@ bool IsColorCalcEnabled(uint layer, uint2 pos) {
     }
     // BG layers use the per-pixel special color calculation flag
     const uint bgLayer = GetBGLayerIndex(layer);
-    const uint attrs = g_layerIn[uint3(pos.xy, bgLayer)].a;
+    const uint attrs = LoadLayer(bgLayer, outPos).a;
     if (restrictedColorCalc && BitTest(attrs, kPixelAttrBitPaletteFormat)) {
         return false;
     }
@@ -219,14 +248,15 @@ bool IsColorCalcEnabled(uint layer, uint2 pos) {
 // Brimir: matches software (sw:4039-4072, 4227): the extended colour calculation enable of layer 1 checks the layer's
 // enable bit and restricted colour calculation (and the sprite condition), not the colour calculation window or the
 // per-pixel special colour calculation bit (Ymir uses IsColorCalcEnabled).
-bool IsLayer1ColorCalcEnabled(uint layer, uint2 pos) {
+bool IsLayer1ColorCalcEnabled(uint layer, uint2 outPos) {
+    const uint2 pos = NativePos(outPos);
     const bool enabled = BitTest(g_composeParams[0].colorCalcEnable, layer);
     if (!enabled || layer >= kLayerBack) {
         return enabled;
     }
     const bool restrictedColorCalc = BitTest(g_commonParams.layerParams, 24);
     if (layer == kLayerSprite) {
-        const uint layerAttrs = g_layerIn[uint3(pos, kLayerIndexSprite)].a;
+        const uint layerAttrs = LoadLayer(kLayerIndexSprite, outPos).a;
         if (restrictedColorCalc && BitTest(layerAttrs, kPixelAttrBitSpecColorCalc)) {
             return false;
         }
@@ -246,7 +276,7 @@ bool IsLayer1ColorCalcEnabled(uint layer, uint2 pos) {
         }
         return false;
     }
-    const uint attrs = g_layerIn[uint3(pos.xy, GetBGLayerIndex(layer))].a;
+    const uint attrs = LoadLayer(GetBGLayerIndex(layer), outPos).a;
     return !(restrictedColorCalc && BitTest(attrs, kPixelAttrBitPaletteFormat));
 }
 
@@ -276,7 +306,7 @@ bool IsLineColorEnabled(uint layer, uint2 pos) {
     return BitTest(g_composeParams[0].lineColorEnable, layer);
 }
 
-// pos is the output position.
+// pos is the (native) output position.
 uint3 GetLineColor(uint layer, uint2 pos) {
     if (layer == kLayerRBG0 || (layer == kLayerNBG0_RBG1 && IsBGLayerEnabled(kBGLayerRBG1))) {
         const uint y = GetLineIndex(pos.y);
@@ -318,7 +348,9 @@ int3 GetColorOffset(uint layer) {
     return selB ? g_composeParams[0].colorOffsetB : g_composeParams[0].colorOffsetA;
 }
 
-uint4 GetLayerOutput(uint layer, uint2 pos) {
+// Brimir: outPos is the N x output pixel.
+uint4 GetLayerOutput(uint layer, uint2 outPos) {
+    const uint2 pos = NativePos(outPos);
     switch (layer) {
         case kLayerSprite:
         case kLayerMesh:
@@ -327,7 +359,7 @@ uint4 GetLayerOutput(uint layer, uint2 pos) {
         case kLayerNBG1_EXBG:
         case kLayerNBG2:
         case kLayerNBG3:
-            return g_layerIn[uint3(pos.xy, GetBGLayerIndex(layer))];
+            return LoadLayer(GetBGLayerIndex(layer), outPos);
         case kLayerBack:
             // Brimir: packed RGBA8; BACK at kBackScreenOffset (512) + line
             return UnpackRGBA8(g_lnclBackIn[GetLineIndex(pos.y) + kBackScreenOffset]);
@@ -353,8 +385,9 @@ Attributes ToAttributes(uint pixelData) {
 // ---------------------------------------------------------------------------------------------------------------------
 // Compositor
 
-uint3 Compose(uint2 basePos) {
-    const uint2 pos = uint2(basePos.x, GetOutputY(basePos.y));
+// Brimir: outPos is the N x output pixel, pos its native output pixel (Ymir's Compose took the dispatch position).
+uint3 Compose(uint2 outPos) {
+    const uint2 pos = NativePos(outPos);
 
     // Clear screen if display is disabled
     const bool displayEnabled = BitTest(g_commonParams.displayParams, 0);
@@ -379,7 +412,7 @@ uint3 Compose(uint2 basePos) {
             continue;
         }
 
-        const uint4 layerOutput = GetLayerOutput(layer, pos);
+        const uint4 layerOutput = GetLayerOutput(layer, outPos);
         const Attributes attrs = ToAttributes(layerOutput.a);
 
         // Priority zero means transparent pixel
@@ -418,7 +451,7 @@ uint3 Compose(uint2 basePos) {
     uint3 meshPixel;
     uint meshPriority = 0;
     if (transparentMeshes && IsLayerEnabled(kLayerSprite)) {
-        const uint4 meshOutput = GetLayerOutput(kLayerMesh, pos);
+        const uint4 meshOutput = GetLayerOutput(kLayerMesh, outPos);
         meshPixel = meshOutput.rgb;
         const Attributes meshAttrs = ToAttributes(meshOutput.a);
         meshPriority = meshAttrs.priority;
@@ -443,10 +476,10 @@ uint3 Compose(uint2 basePos) {
     const bool layer0LineColorEnabled = !useColorGrad && IsLineColorEnabled(layerStack[0], pos);
     const bool extendedColorCalc = BitTest(g_commonParams.layerParams, 25);
 
-    uint3 layer0Pixel = GetLayerOutput(layerStack[0], pos).rgb;
+    uint3 layer0Pixel = GetLayerOutput(layerStack[0], outPos).rgb;
 
-    if (IsColorCalcEnabled(layerStack[0], pos)) {
-        uint3 layer1Pixel = GetLayerOutput(layerStack[1], pos).rgb;
+    if (IsColorCalcEnabled(layerStack[0], outPos)) {
+        uint3 layer1Pixel = GetLayerOutput(layerStack[1], outPos).rgb;
 
         // Compute layer 1 output
         if (useColorGrad) {
@@ -456,17 +489,22 @@ uint3 Compose(uint2 basePos) {
 
             // Set layer 1 output to the color gradation screen where the designated screen is the topmost two layers
             if (layerStack[0] == colorGradLayer || layerStack[1] == colorGradLayer) {
-                const uint3 input2 = GetLayerOutput(colorGradLayer, uint2(max(int(pos.x) - 2, 0), pos.y)).rgb;
-                const uint3 input1 = GetLayerOutput(colorGradLayer, uint2(max(int(pos.x) - 1, 0), pos.y)).rgb;
-                const uint3 input0 = GetLayerOutput(colorGradLayer, pos).rgb;
+                // Brimir: the taps are the native neighbours' distance apart (X - N, X - 2N) at internal resolution
+                // N.
+                const int tap = int(renderScale);
+                const uint2 tap2 = uint2(max(int(outPos.x) - 2 * tap, 0), outPos.y);
+                const uint2 tap1 = uint2(max(int(outPos.x) - tap, 0), outPos.y);
+                const uint3 input2 = GetLayerOutput(colorGradLayer, tap2).rgb;
+                const uint3 input1 = GetLayerOutput(colorGradLayer, tap1).rgb;
+                const uint3 input0 = GetLayerOutput(colorGradLayer, outPos).rgb;
                 layerStack[1] = colorGradLayer;
                 layer1Pixel = (((input2 + input1) >> 1u) + input0) >> 1u;
             }
         } else if (normalTVMode && extendedColorCalc) {
             // Apply color gradation or extended color calculations to layer 1
             // Brimir: matches software (sw:4227): IsLayer1ColorCalcEnabled
-            if (IsLayer1ColorCalcEnabled(layerStack[1], pos)) {
-                uint3 layer2Pixel = GetLayerOutput(layerStack[2], pos).rgb;
+            if (IsLayer1ColorCalcEnabled(layerStack[1], outPos)) {
+                uint3 layer2Pixel = GetLayerOutput(layerStack[2], outPos).rgb;
 
                 // Blend layer 2 with sprite mesh layer colors
                 // TODO: apply color calculation effects
@@ -479,7 +517,7 @@ uint3 Compose(uint2 basePos) {
 
             if (layer0LineColorEnabled) {
                 const uint3 lineColor = GetLineColor(layerStack[0], pos); // Brimir: the output position
-                if (IsColorCalcEnabled(kLayerLine, pos)) {
+                if (IsColorCalcEnabled(kLayerLine, outPos)) {
                     // Blend line color if top layer uses it
                     layer1Pixel = (layer1Pixel + lineColor) >> 1;
                 } else {
@@ -518,7 +556,7 @@ uint3 Compose(uint2 basePos) {
     }
 
     // Apply sprite shadow if sprite layer has a shadow pixel and is on top of the topmost layer
-    const uint4 spriteOutput = GetLayerOutput(kLayerSprite, pos);
+    const uint4 spriteOutput = GetLayerOutput(kLayerSprite, outPos);
     const uint spritePriority = BitExtract(spriteOutput.a, 0, 3);
     if (spritePriority >= layerPrios[0]) {
         const uint spriteAttrs = g_spriteAttrsIn[uint3(pos, 0)];
@@ -577,17 +615,20 @@ uint3 Compose(uint2 basePos) {
 // TODO: 32 threads might be suboptimal on AMD GPUs
 [numthreads(32, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
-    const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
-    const uint2 outCoord = uint2(drawCoord.x, GetOutputY(drawCoord.y));
-    // Brimir: nothing outside the frame (HRes x VRes) is written (no robust access; the pitch is HRes).
-    if (any(outCoord >= outputSize)) {
+    // Brimir: at internal resolution N, id.xy is the N x pixel: the native row is startY + id.y / N, the output pixel
+    // (id.x, N * GetOutputY(row) + id.y % N).
+    const uint2 drawCoord = uint2(id.x / renderScale, id.y / renderScale + g_commonParams.startY);
+    const uint2 nativeOut = uint2(drawCoord.x, GetOutputY(drawCoord.y));
+    // Brimir: nothing outside the frame (HRes x VRes) is written (no robust access; the pitch is N * HRes).
+    if (any(nativeOut >= outputSize)) {
         return;
     }
-    const uint3 outColor = Compose(drawCoord);
+    const uint2 outCoord = uint2(id.x, nativeOut.y * renderScale + id.y % renderScale);
+    const uint3 outColor = Compose(outCoord);
     // Brimir: packed XBGR (the UNORM store clamped to 1.0; min() keeps that) instead of float4(outColor / 255.0, 1).
     const uint3 c = min(outColor, 255u);
     const uint packed = c.r | (c.g << 8) | (c.b << 16) | 0xFF000000u;
-    g_compositeOut[outCoord.y * outputSize.x + outCoord.x] = packed;
+    g_compositeOut[outCoord.y * (outputSize.x * renderScale) + outCoord.x] = packed;
     // Brimir: Ymir's first-interlaced-frame duplication of the row into the other field is dropped (software clears
     // the composite on a resolution change instead, and the front half never sets displayParams bit 17).
 }

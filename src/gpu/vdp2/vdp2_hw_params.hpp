@@ -323,13 +323,20 @@ struct VDP2CommonRenderParams {
     EnhancementsParams enhancements;
 
     // Brimir: the frame's output size as VDP2SetResolution set it (Vdp2FrameRecord::hres/vres): HRes in bits 0-15,
-    // VRes in bits 16-31. The shaders use it as the composite pitch and as the bounds they check before touching their
-    // outputs (no robustness features). The back half sets it per dispatch with MakeOutputSize, like startY; the front
-    // half leaves it 0.
-    // Fills the std430 tail (the block size is a multiple of the uint2 alignment).
+    // VRes in bits 16-31, always the native size. The shaders use it (times renderScale) as the composite pitch and as
+    // the bounds they check before touching their outputs (no robustness features). The back half sets it per dispatch
+    // with MakeOutputSize, like startY; the front half leaves it 0.
     HLSLuint outputSize;
+
+    // Brimir: the internal resolution N (1-4) of the background and compose dispatches: they run over N x N output
+    // pixels per native pixel, write the background layer image and the composite at N x the native size (pitch
+    // N * HRes), and read the native images (sprite layers and attributes, colour calculation window, RBG line colours)
+    // at the native pixel. outputSize stays native. The sprite and NBG fetch passes are native and ignore it. The back
+    // half sets it per dispatch like startY; the front half leaves it 0, which the shaders read as 1.
+    HLSLuint renderScale;
+    HLSLuint pad; // std430 tail (the block size is a multiple of the uint2 alignment)
 };
-static_assert(sizeof(VDP2CommonRenderParams) == 48);
+static_assert(sizeof(VDP2CommonRenderParams) == 56);
 static_assert(sizeof(VDP2CommonRenderParams) <= 128, "must fit the minimum maxPushConstantsSize");
 
 /// @brief Brimir: packs VDP2CommonRenderParams::outputSize. The size must fit the output images and the composite

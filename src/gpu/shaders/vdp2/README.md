@@ -46,12 +46,12 @@ memory: only the NBG fetch pass uses it, 14208 bytes (`kNBGFetchSharedMemorySize
 a required limit in `src/gpu/gpu_version.hpp`; Vulkan guarantees 16384); `tests/unit/test_gpu_vdp2_pipelines.cpp`
 checks every module's Workgroup variables against it.
 
-- **Push constants** instead of the D3D12 `b0` root constants (`CommonRenderParams`, 48 bytes); **registers renumbered**
+- **Push constants** instead of the D3D12 `b0` root constants (`CommonRenderParams`, 56 bytes); **registers renumbered**
   per `src/gpu/vdp2/vdp2_bindings.hpp` (all three shaders; the NBG fetch pass adds its row count after the block).
 - **No texel buffers:** CRAM colours (all three) and LNCL/BACK (compose) are `StructuredBuffer<uint>` of packed RGBA8
   instead of `Buffer<uint4>`; LNCL/BACK share one buffer, BACK at `kBackScreenOffset` (512) + line (`vdp2_defs.hlsli`).
 - **Explicit storage image formats** (`rgba8ui`, `r32ui`) where DXC would infer `Rgba32ui` (sprite, bgs).
-- **Compose output** is packed XBGR in a `RWStructuredBuffer<uint>` (pitch HRes; the software framebuffer's byte order)
+- **Compose output** is packed XBGR in a `RWStructuredBuffer<uint>` (pitch N * HRes; the software framebuffer's byte order)
   instead of a float4 UNORM image; `min()` keeps the UNORM clamp.
 - **Workgroup size:** bgs is `[numthreads(32, 1, 1)]` dispatched with z = 7 instead of `[numthreads(32, 1, 7)]`
   (224 > 128 invocations); `id.z` is still the layer.
@@ -62,12 +62,26 @@ checks every module's Workgroup variables against it.
   D3D12 does; RBG line colours outside their image are dropped. The output size (`CommonRenderParams::outputSize`) is
   clamped to the images (all three).
 - **Layout:** `vdp2_compose_params.hlsli` follows std430 (int3 aligns to 16; explicit tail padding) and carries the
-  per-layer shadow enables in a former hole; `vdp2_common_params.hlsli` carries the latched TVMD.BDCLMD and the output
-  size.
+  per-layer shadow enables in a former hole; `vdp2_common_params.hlsli` carries the latched TVMD.BDCLMD, the output
+  size and the internal resolution.
 - **Resources:** the VDP1 framebuffer buffer holds eight 256 KiB slices (display FB 0/1 of main, alt, mesh0, mesh1);
   rotation parameter bases use a 512-line stride per parameter (exclusive monitor modes; Ymir indexes 256); NBG/RBG page
   base addresses are read from the layer parameters (`nbg[index]`, `rbg[index]` with `rotSel`) instead of a
   `pbaResized[16]` copy.
+
+### 1b. Internal resolution (stage 1C)
+
+`CommonRenderParams::renderScale` (N = 1-4; 1 is exactly the stage 1B output):
+- the layer image is split: NBG0-3 and RBG0-1 in a background layer image at N x the native size (bindings 10/16),
+  the sprite and mesh layers in a native image of their own (bindings 14/22, sprite pass and compose);
+- bgs and compose are dispatched over N x N threads per native pixel (`(N * HRes / 32, N * lines, z)`), mapping thread
+  (X, Y) to the native pixel (X / N, startY + Y / N) and the sub-pixel (X % N, Y % N); bgs writes the background layer
+  texel (X, N * row + j), compose writes the composite at `Y * (N * HRes) + X` and reads every native input (sprite
+  layers and attributes, colour calculation window, RBG line colours, LNCL/BACK) at the native pixel, colour gradation
+  taps at X - N and X - 2N; the colour calculation window and the RBG line colours are native and written by the
+  sub-pixel (0, 0) only; a vertical mosaic load reads the same sub-pixel of the earlier row;
+- the sprite pass and the NBG fetch pass are native; `outputSize` stays the native size everywhere;
+- stage 1C Task 3 evaluates every sub-pixel at its native pixel (the N x composite is a nearest upscale of 1x).
 
 ### 2. Software semantics (Brimir's software renderer is the reference)
 

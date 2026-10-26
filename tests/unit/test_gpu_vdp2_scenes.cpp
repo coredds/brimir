@@ -18,6 +18,8 @@
 // [gpu][vdp2][scene]; SKIP without a Vulkan device. Every scene runs on both drivers (the full suite takes ~25 s on the
 // desktop GPU, ~40 s on lavapipe); [lavapipe] marks a quick cross-section for manual runs. BRIMIR_VDP2_POISON=1 runs
 // them with the layer images poisoned every frame (any read of a texel the frame did not write changes the result).
+// BRIMIR_VDP2_SCALE=N (2-4) runs every scene at internal resolution N, the N x composite compared as a nearest upscale
+// of the software frame (vdp2_scene.hpp CompareNearestPixels; [scale] cases pin N).
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
@@ -3554,6 +3556,463 @@ TEST_CASE("Scene: operational exception: context reset with deinterlacing off cl
     CHECK(rest.error.empty());
     CHECK(rest.comparedFrames == kAttachFrame + 2);
     CHECK(rest.identical);
+    CloseAndCheckValidation(device);
+}
+
+// =====================================================================================================================
+// Internal resolution (stage 1C Task 3): the background layers and the composite at N x, every sub-pixel evaluated at
+// its native pixel, so the N x composite is exactly a nearest upscale of software's frame (CompareNearest). With
+// BRIMIR_VDP2_SCALE=N every scene above runs at N the same way; these cases pin N.
+
+namespace {
+
+using brimir::test::CompareNearest;
+using brimir::test::CompareNearestPixels;
+using brimir::test::CompareSamplePointPixels;
+using brimir::test::CompareSamplePoints;
+using brimir::test::SampleLatticeRow;
+
+// A cross-section of the pixel paths: NBGs over sprites with colour offset; RBG0 with per-dot coefficients and the
+// line colour screen; colour gradation; extended colour calculation with transparent meshes; vertical NBG mosaic
+// across a batch split (rows of the earlier batch are loaded from the layer image); a delayed NBG under a window (the
+// fetch pass); hi-res double-density interlace with deinterlacing; the shadow of sprites.
+std::vector<std::pair<std::string, Vdp2Scene>> ScaleScenes() {
+    std::vector<std::pair<std::string, Vdp2Scene>> scenes;
+    scenes.emplace_back("NBGs, sprites, colour offset", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            TwoNBGs(w, s, rng);
+                            SetupSprites(w, {.type = 1}, rng);
+                            w.Reg(CLOFEN, 0x0021);
+                            w.Reg(COAR, 0x0040);
+                        }));
+    scenes.emplace_back("RBG0 coefficients and line colour", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng, kDisp, 1);
+                            SetupRBG0(w, s, {.coeffTable = true, .coeffLineColor = true}, rng);
+                            for (uint32_t y = 0; y < 512; ++y) {
+                                w.VRAM16(kLineColorAddress + y * 2, static_cast<uint16_t>(Rand(rng, 0x800)));
+                            }
+                            w.Reg(LCTAU, static_cast<uint16_t>(0x8000 | (kLineColorAddress >> 17)));
+                            w.Reg(LCTAL, static_cast<uint16_t>((kLineColorAddress >> 1) & 0xFFFF));
+                            s.lnclen = 0x0010;
+                            w.Reg(CCCTL, 0x0030);
+                            w.Reg(CCRR, 0x0008);
+                        }));
+    scenes.emplace_back("colour gradation", Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                            Base(w, s, rng);
+                            TwoNBGs(w, s, rng);
+                            SetupSprites(w, {.type = 1}, rng);
+                            w.Reg(CCCTL, static_cast<uint16_t>(0x8000 | (0 << 12) | 0x0043));
+                            w.Reg(CCRNA, 0x0A14);
+                        }));
+    scenes.emplace_back("transparent meshes", MeshScene(0, false));
+    {
+        Vdp2Scene mosaic = Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            w.Reg(MZCTL, 0x3203); // NBG0 and NBG1, 3 pixels wide, 4 lines high
+        });
+        mosaic.onLine = [](Vdp2SceneWriter &w, uint32_t y) {
+            w.Reg(SCXIN0, static_cast<uint16_t>(y >= 102 ? 9 : 0)); // a new batch at line 102, inside a block
+        };
+        scenes.emplace_back("vertical mosaic across a batch split", mosaic);
+    }
+    scenes.emplace_back("delayed NBG under a window", DelayedNBG1Scene(true, true, [](Vdp2SceneWriter &w, Shadow &,
+                                                                                       std::mt19937 &) {
+                            WindowRects(w, false);
+                            w.Reg(WCTLA, 0x0200);
+                        }));
+    scenes.emplace_back("hi-res double density deinterlaced",
+                        ResolutionScene(static_cast<uint16_t>(3 | kLSMDDouble), true));
+    scenes.emplace_back("sprite MSB shadow", ShadowScene(ShadowBGs::TwoNBGs, 0x23, true));
+    return scenes;
+}
+
+} // namespace
+
+TEST_CASE("Scene: internal resolution N is a nearest upscale of software", "[gpu][vdp2][scene][scale][lavapipe]") {
+    const uint32_t n = GENERATE(2u, 3u, 4u);
+    auto device = OpenDevice();
+    for (const auto &[name, scene] : ScaleScenes()) {
+        CAPTURE(n, name);
+        const SceneResult result = CompareNearest(scene, *device, n);
+        INFO(result.Describe());
+        CHECK(result.error.empty());
+        CHECK(result.scale == n);
+        CHECK(result.comparedPixels == uint64_t{result.width} * result.height * n * n);
+        CHECK(result.identical);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: internal resolution N with poisoned images", "[gpu][vdp2][scene][scale]") {
+    // Every texel compose or a vertical mosaic load reads at N was written by the frame (both layer images, the
+    // native ones and the character table start as 0xA5 every frame).
+    const uint32_t n = GENERATE(2u, 4u);
+    auto device = OpenDevice();
+    RenderBothOptions options;
+    options.poisonImages = true;
+    for (const auto &[name, scene] : ScaleScenes()) {
+        CAPTURE(n, name);
+        const SceneResult result = CompareNearest(scene, *device, n, options);
+        INFO(result.Describe());
+        CHECK(result.error.empty());
+        CHECK(result.identical);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: the internal resolution changes between frames", "[gpu][vdp2][scene][scale][lavapipe]") {
+    // 1x, then 3x, then 2x (the device is idle between the harness's frames, as SetInternalScale requires): every frame
+    // matches software at its own scale.
+    auto device = OpenDevice();
+    constexpr uint32_t kScales[] = {1, 3, 2};
+    std::vector<uint32_t> recorded;
+    RenderBothOptions options;
+    options.scale = 1;
+    options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        REQUIRE(vulkan.SetInternalScale(kScales[frame]));
+        CHECK(vulkan.InternalScale() == kScales[frame]);
+    };
+    options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        recorded.push_back(vulkan.Backend()->LastRecordStatsForTest().scale);
+    };
+    options.compareFrame = [](uint32_t) { return true; };
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            SetupSprites(w, {.type = 1}, rng);
+        },
+        {}, 3);
+    scene.onLine = [frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            w.Reg(SCXIN0, static_cast<uint16_t>(++*frame * 11));
+        }
+    };
+    const SceneResult result = Check(*device, scene, options);
+    CHECK(result.comparedFrames == 3);
+    CHECK(result.scale == 2);
+    CHECK(recorded == std::vector<uint32_t>(std::begin(kScales), std::end(kScales)));
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: an internal resolution that cannot be allocated keeps the previous one", "[gpu][vdp2][scene][scale]") {
+    // The allocation limit admits 2x but not 4x: SetInternalScale(4) fails, logs once, and the renderer keeps
+    // rendering at 2x; a later re-attach (a new back half) falls back to 1x when even 2x does not fit.
+    namespace vdp2 = gpu::vdp2;
+    auto device = OpenDevice();
+    std::vector<std::string> logs;
+    bool failed = true;
+    RenderBothOptions options;
+    options.scale = 2;
+    options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (frame == 1) {
+            vulkan.SetLog([&](const std::string &text) { logs.push_back(text); });
+            vulkan.Backend()->SetScaleAllocationLimitForTest(vdp2::Vdp2VulkanBackend::ScaledResourceBytes(2));
+            failed = !vulkan.SetInternalScale(4);
+            CHECK(vulkan.InternalScale() == 2);
+            CHECK(vulkan.Backend()->Scale() == 2);
+            CHECK_FALSE(vulkan.SetInternalScale(0));
+            CHECK_FALSE(vulkan.SetInternalScale(5));
+        }
+    };
+    options.compareFrame = [](uint32_t) { return true; };
+    const SceneResult result = Check(*device, Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                                         Base(w, s, rng);
+                                         TwoNBGs(w, s, rng);
+                                     }, {}, 3),
+                                     options);
+    CHECK(failed);
+    CHECK(result.scale == 2);
+    CHECK(result.comparedFrames == 3);
+    REQUIRE(logs.size() == 1);
+    CHECK(logs[0].find("4x") != std::string::npos);
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Vdp2VulkanBackend: scale resources per N and a failed allocation at attach", "[gpu][vdp2][scale]") {
+    namespace vdp2 = gpu::vdp2;
+    // Background layers (6 x 4 bytes) and the composite (4 bytes) per N x pixel of 704 x 512.
+    for (uint32_t n = 1; n <= 4; ++n) {
+        CAPTURE(n);
+        CHECK(vdp2::Vdp2VulkanBackend::ScaledResourceBytes(n) == uint64_t{704 * n} * (512 * n) * 28);
+    }
+    auto device = OpenDevice();
+    {
+        vdp2::Vdp2VulkanBackend backend(*device, 1);
+        REQUIRE(backend.Ok());
+        CHECK(backend.Scale() == 1);
+        std::vector<std::string> logs;
+        backend.SetLog([&](const std::string &text) { logs.push_back(text); });
+        backend.SetScaleAllocationLimitForTest(1);
+        CHECK_FALSE(backend.SetScale(3));
+        CHECK(backend.Scale() == 1);
+        CHECK(logs.size() == 1);
+        backend.SetScaleAllocationLimitForTest(0);
+        for (uint32_t n : {4u, 2u, 3u, 1u}) {
+            CHECK(backend.SetScale(n));
+            CHECK(backend.Scale() == n);
+        }
+        CHECK(logs.size() == 1);
+    }
+    {
+        // A renderer asked for 4x that cannot get it at attach falls back to 1x (logged by the back half).
+        namespace vdp = ymir::vdp;
+        auto state = std::make_unique<vdp::VDPState>();
+        vdp::config::VDP2DebugRender debug{};
+        vdp::config::VDP2AccessPatternsConfig access{};
+        auto vulkan = std::make_unique<gpu::VulkanVDPRenderer>(*state, debug, access);
+        CHECK(vulkan->SetInternalScale(4)); // detached: kept for the attach
+        CHECK(vulkan->InternalScale() == 4);
+        vulkan->AttachDevice(*device, 1);
+        REQUIRE(vulkan->Attached());
+        CHECK(vulkan->Backend()->Scale() == 4);
+        vulkan->DetachDevice();
+        CHECK(vulkan->InternalScale() == 4);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: the NBG fetch pass and compose get the native output size at N", "[gpu][vdp2][scene][scale]") {
+    // The fetch pass is native at every N (its groupshared rows hold kMaxResH pixels: a scaled width would be clamped
+    // without notice); compose gets the native size too and scales the pitch itself.
+    const uint32_t n = GENERATE(2u, 4u);
+    CAPTURE(n);
+    auto device = OpenDevice();
+    std::vector<gpu::vdp2::Vdp2VulkanBackend::RecordStats> stats;
+    RenderBothOptions options;
+    options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        stats.push_back(vulkan.Backend()->LastRecordStatsForTest());
+    };
+    const SceneResult result =
+        CompareNearest(DelayedNBG1Scene(true, false, [](Vdp2SceneWriter &, Shadow &, std::mt19937 &) {}), *device, n,
+                       options);
+    INFO(result.Describe());
+    CHECK(result.error.empty());
+    CHECK(result.identical);
+    REQUIRE_FALSE(stats.empty());
+    for (const auto &s : stats) {
+        CHECK(s.scale == n);
+        CHECK(s.fetchPasses > 0);
+        CHECK(s.fetchOutputSize == gpu::vdp2::MakeOutputSize(320, 224));
+        CHECK(s.composeOutputSize == gpu::vdp2::MakeOutputSize(320, 224));
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: the upload high-water mark decays after frames that fit a smaller block", "[gpu][vdp2][scene]") {
+    // 512 KiB blocks: frame 0 (one context) uploads everything and overflows, setting the high-water mark; the later
+    // frames change nothing (the per-line arrays and parameters only). After 4 Records that fit the default block (the decay length here), the mark is
+    // gone and the base block is back at 512 KiB.
+    constexpr uint32_t kBlock = 512 * 1024;
+    auto device = OpenDevice();
+    std::vector<gpu::vdp2::Vdp2VulkanBackend::RecordStats> stats;
+    RenderBothOptions options;
+    options.frameContexts = 1;
+    options.uploadBlockSize = kBlock;
+    options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (frame == 0) {
+            vulkan.Backend()->SetHighWaterDecayRecordsForTest(4);
+        }
+    };
+    options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        stats.push_back(vulkan.Backend()->LastRecordStatsForTest());
+    };
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+        },
+        {}, 8);
+    Check(*device, scene, options);
+    REQUIRE(stats.size() == 8);
+    CHECK(stats[0].overflowBlocks > 0);
+    CHECK(stats[0].highWater > kBlock);
+    for (uint32_t frame = 1; frame < 8; ++frame) {
+        CAPTURE(frame, stats[frame].uploadBytes, stats[frame].baseBlockSize, stats[frame].highWater);
+        CHECK(stats[frame].overflowBlocks == 0);
+        CHECK(stats[frame].uploadBytes < kBlock);
+        // Frames 1-4 still use the high-water block; the 4th small Record (frame 4) drops the mark, so frame 5 has the
+        // default block again.
+        CHECK(stats[frame].highWater == (frame < 4 ? stats[0].highWater : 0));
+        CHECK(stats[frame].baseBlockSize == (frame <= 4 ? stats[1].baseBlockSize : kBlock));
+    }
+    CHECK(stats[1].baseBlockSize > kBlock);
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: a high-water upload block that cannot be allocated is logged once and not retried",
+          "[gpu][vdp2][scene]") {
+    // 64 KiB blocks and every larger base block failing: each context's first frame overflows; its next Record cannot
+    // get the high-water block, logs (once for the backend), falls back to 64 KiB plus overflow blocks, and no context
+    // asks for a high-water block again. Every frame still matches software.
+    auto device = OpenDevice();
+    std::vector<std::string> logs;
+    std::vector<gpu::vdp2::Vdp2VulkanBackend::RecordStats> stats;
+    RenderBothOptions options;
+    options.uploadBlockSize = 64 * 1024;
+    options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (frame == 0) {
+            vulkan.SetLog([&](const std::string &text) { logs.push_back(text); });
+            vulkan.Backend()->FailHighWaterBlocksForTest(true);
+        }
+    };
+    options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        stats.push_back(vulkan.Backend()->LastRecordStatsForTest());
+    };
+    options.compareFrame = [](uint32_t) { return true; };
+    Vdp2Scene scene = Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng);
+            TwoNBGs(w, s, rng);
+            SetupSprites(w, {.type = 1}, rng);
+        },
+        {}, 6);
+    // Every frame uploads more than 64 KiB (the per-line arrays alone, and a CRAM word per line).
+    scene.onLine = [frame = std::make_shared<uint32_t>(0)](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 0) {
+            ++*frame;
+        }
+        w.CRAM16((y * 2) & 0x7FE, static_cast<uint16_t>(y * 77 + *frame));
+    };
+    const SceneResult result = Check(*device, scene, options);
+    CHECK(result.comparedFrames == 6);
+    REQUIRE(stats.size() == 6);
+    for (uint32_t frame = 0; frame < 6; ++frame) {
+        CAPTURE(frame, stats[frame].uploadBytes, stats[frame].baseBlockSize, stats[frame].highWater);
+        CHECK(stats[frame].uploadBytes > 64 * 1024);
+        CHECK(stats[frame].overflowBlocks > 0);
+        CHECK(stats[frame].baseBlockSize == 64 * 1024);
+        // Contexts 0 and 1 overflow first (a mark each); from frame 2 on, after the failure, no mark is kept.
+        if (frame < 2) {
+            CHECK(stats[frame].highWater > 64 * 1024);
+        } else {
+            CHECK(stats[frame].highWater == 0);
+        }
+    }
+    CHECK(logs.size() == 1);
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("CompareNearestPixels and CompareSamplePointPixels", "[vdp2][scale]") {
+    // A 4x2 software frame and its 2x nearest upscale.
+    const std::vector<uint32_t> sw{1, 2, 3, 4, 5, 6, 7, 8};
+    std::vector<uint32_t> up(4 * 2 * 4);
+    for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+            up[y * 8 + x] = sw[(y / 2) * 4 + x / 2] | 0xFF000000u;
+        }
+    }
+    SceneResult r;
+    REQUIRE(CompareNearestPixels(sw, 4, 2, up, 2, r));
+    CHECK(r.identical);
+    CHECK(r.comparedPixels == 32);
+    CHECK(r.gpu == sw);
+
+    // One sub-pixel off: nearest finds it (native pixel (3, 1)), the sample points do not.
+    std::vector<uint32_t> off = up;
+    off[3 * 8 + 7] = 0x99;
+    REQUIRE(CompareNearestPixels(sw, 4, 2, off, 2, r));
+    CHECK_FALSE(r.identical);
+    CHECK(r.diffCount == 1);
+    CHECK(r.diffX == 3);
+    CHECK(r.diffY == 1);
+    CHECK(r.gpu[7] == 0x99);
+    REQUIRE(CompareSamplePointPixels(sw, 4, 2, off, 2, {}, r));
+    CHECK(r.identical);
+    CHECK(r.comparedPixels == 8);
+
+    // A sample point off: found, unless the lattice excludes it.
+    off = up;
+    off[2 * 8 + 2] = 0x99; // native (1, 1)
+    REQUIRE(CompareSamplePointPixels(sw, 4, 2, off, 2, {}, r));
+    CHECK(r.diffCount == 1);
+    REQUIRE(CompareSamplePointPixels(sw, 4, 2, off, 2, {{}, {.skipOddColumns = true}}, r));
+    CHECK(r.identical);
+    CHECK(r.skippedPixels == 2);
+    REQUIRE(CompareSamplePointPixels(sw, 4, 2, off, 2, {{}, {.skipRow = true}}, r));
+    CHECK(r.identical);
+    CHECK(r.skippedPixels == 4);
+
+    // Vacuous comparisons are refused: wrong sizes, nothing left to compare.
+    SceneResult bad;
+    CHECK_FALSE(CompareNearestPixels(sw, 4, 2, std::vector<uint32_t>(31), 2, bad));
+    CHECK_FALSE(bad.error.empty());
+    bad = {};
+    CHECK_FALSE(CompareNearestPixels({}, 0, 0, {}, 2, bad));
+    bad = {};
+    CHECK_FALSE(CompareSamplePointPixels(sw, 4, 2, up, 2, {{.skipRow = true}, {.skipRow = true}}, bad));
+    CHECK_FALSE(bad.error.empty());
+}
+
+TEST_CASE("The sample-point lattice from TVMD and BGON", "[vdp2][scale]") {
+    namespace vdp = ymir::vdp;
+    // Records the lattice rows of line 3 in each mode.
+    const auto rowsOf = [](uint16_t tvmd, uint16_t bgon, bool deinterlace, bool odd) {
+        auto state = std::make_unique<vdp::VDPState>();
+        vdp::config::VDP2DebugRender debug{};
+        vdp::config::VDP2AccessPatternsConfig access{};
+        auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+        Vdp2SceneWriter writer{{.deinterlace = deinterlace}};
+        writer.Attach(*state, *renderer);
+        writer.Reg(TVMD, tvmd);
+        writer.Reg(BGON, bgon);
+        std::vector<std::pair<uint32_t, SampleLatticeRow>> rows;
+        writer.lineObserver = [&](const Vdp2SceneWriter &w, const vdp::VDPState &s, uint32_t y) {
+            if (y == 3) {
+                brimir::test::LatticeForLine(w, s, y, deinterlace, [&](uint32_t row, SampleLatticeRow flags) {
+                    rows.emplace_back(row, flags);
+                });
+            }
+        };
+        writer.Field(odd);
+        writer.RunFrame();
+        return rows;
+    };
+    // Progressive normal width, RBG0 and NBG0: nothing excluded.
+    auto rows = rowsOf(kDisp, 0x11, false, false);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].first == 3);
+    CHECK_FALSE(rows[0].second.skipOddColumns);
+    CHECK_FALSE(rows[0].second.skipRow);
+    // Hi-res with RBG0: odd columns; without an RBG: nothing.
+    rows = rowsOf(kDisp | 2, 0x10, false, false);
+    CHECK(rows[0].second.skipOddColumns);
+    rows = rowsOf(kDisp | 2, 0x01, false, false);
+    CHECK_FALSE(rows[0].second.skipOddColumns);
+    // Double density deinterlaced with RBG0: rows 6 and 7, the odd one excluded; with NBGs only: neither.
+    rows = rowsOf(kDisp | kLSMDDouble, 0x10, true, false);
+    REQUIRE(rows.size() == 2);
+    CHECK((rows[0].first == 6 && !rows[0].second.skipRow));
+    CHECK((rows[1].first == 7 && rows[1].second.skipRow));
+    rows = rowsOf(kDisp | kLSMDDouble, 0x01, true, false);
+    CHECK_FALSE(rows[1].second.skipRow);
+    // Double density woven, RBG0: the field's row only, nothing excluded.
+    rows = rowsOf(kDisp | kLSMDDouble, 0x10, false, true);
+    REQUIRE(rows.size() == 1);
+    CHECK((rows[0].first == 7 && !rows[0].second.skipRow));
+    // Single density with an NBG, woven or deinterlaced: the odd row is excluded.
+    rows = rowsOf(kDisp | kLSMDSingle, 0x01, false, true);
+    CHECK((rows[0].first == 7 && rows[0].second.skipRow));
+    rows = rowsOf(kDisp | kLSMDSingle, 0x01, false, false);
+    CHECK((rows[0].first == 6 && !rows[0].second.skipRow));
+    rows = rowsOf(kDisp | kLSMDSingle, 0x01, true, false);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[1].second.skipRow);
+}
+
+TEST_CASE("Scene: CompareSamplePoints of a nearest-upscaled frame", "[gpu][vdp2][scene][scale]") {
+    // With native evaluation the sample points match too (hi-res RBG0: odd columns skipped).
+    auto device = OpenDevice();
+    const SceneResult result = CompareSamplePoints(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                                                       Base(w, s, rng, static_cast<uint16_t>(kDisp | 2));
+                                                       SetupRBG0(w, s, {}, rng);
+                                                   }),
+                                                   *device, 2);
+    INFO(result.Describe());
+    CHECK(result.error.empty());
+    CHECK(result.identical);
+    CHECK(result.skippedPixels == uint64_t{result.height} * (result.width / 2));
     CloseAndCheckValidation(device);
 }
 

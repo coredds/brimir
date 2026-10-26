@@ -217,6 +217,9 @@ void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint3
                 t.state->regs2.VCNT = 0;
             }
         }
+        if (lineObserver && !m_targets.empty()) {
+            lineObserver(*this, *m_targets[0].state, y);
+        }
         for (Target &t : m_targets) {
             t.renderer->VDP2RenderLine(y);
         }
@@ -312,6 +315,10 @@ std::string SceneResult::Describe() const {
     }
     out << "frame " << frame << " (" << comparedFrames << " compared), " << width << "x" << height << ", "
         << distinctColors << " distinct software colours, ";
+    if (scale > 1) {
+        out << "internal resolution " << scale << "x (" << comparedPixels << " GPU pixels compared, " << skippedPixels
+            << " sample points skipped), ";
+    }
     if (identical) {
         out << "identical";
     } else {
@@ -320,6 +327,153 @@ std::string SceneResult::Describe() const {
             << (gpuPixel & 0xFFFFFF) << " (XBGR)";
     }
     return out.str();
+}
+
+void LatticeForLine(const Vdp2SceneWriter &writer, const VDPState &state, uint32_t y, bool deinterlace,
+                    const std::function<void(uint32_t row, SampleLatticeRow flags)> &set) {
+    const VDP2Regs &regs2 = state.regs2;
+    const bool rbg = regs2.bgEnabled[4] || regs2.bgEnabled[5];
+    const bool nbg = regs2.bgEnabled[0] || regs2.bgEnabled[1] || regs2.bgEnabled[2] || regs2.bgEnabled[3];
+    const bool hiRes = writer.HRes() >= 640;
+    // The composite doubles the rows in interlaced modes (not in exclusive monitor modes), as FieldLines.
+    const bool interlaced = !writer.ExclusiveMonitor() && writer.VRes() > kMaxNormalResV;
+    const bool singleDensity = regs2.TVMD.LSMDn == InterlaceMode::SingleDensity;
+    SampleLatticeRow flags{.skipOddColumns = rbg && hiRes};
+    if (!interlaced) {
+        set(y, flags);
+        return;
+    }
+    // Odd rows: RBGs with deinterlacing (both rows are the RBG line), NBGs in single density (both fields show the
+    // same line, deinterlaced or woven).
+    SampleLatticeRow odd = flags;
+    odd.skipRow = (rbg && deinterlace) || (nbg && singleDensity);
+    if (deinterlace) {
+        set(y * 2, flags);
+        set(y * 2 + 1, odd);
+    } else if (regs2.TVSTAT.ODD) {
+        set(y * 2 + 1, odd);
+    } else {
+        set(y * 2, flags);
+    }
+}
+
+namespace {
+
+// The software frame's distinct RGB colours (up to 64).
+uint32_t DistinctColors(const std::vector<uint32_t> &software) {
+    std::vector<uint32_t> colors;
+    for (const uint32_t pixel : software) {
+        const uint32_t sw = pixel & 0xFFFFFF;
+        if (colors.size() < 64 && std::find(colors.begin(), colors.end(), sw) == colors.end()) {
+            colors.push_back(sw);
+        }
+    }
+    return static_cast<uint32_t>(colors.size());
+}
+
+bool CheckScaledSizes(const std::vector<uint32_t> &software, uint32_t width, uint32_t height,
+                      const std::vector<uint32_t> &scaled, uint32_t n, SceneResult &result) {
+    if (n < 1 || width == 0 || height == 0 || software.size() != static_cast<size_t>(width) * height ||
+        scaled.size() != static_cast<size_t>(width) * height * n * n) {
+        result.error = "scaled comparison: " + std::to_string(software.size()) + " software pixels (" +
+                       std::to_string(width) + "x" + std::to_string(height) + "), " + std::to_string(scaled.size()) +
+                       " GPU pixels at " + std::to_string(n) + "x";
+        return false;
+    }
+    return true;
+}
+
+// Records native pixel (x, y) as differing (gpu: the differing GPU pixel).
+void MarkDiff(SceneResult &result, uint32_t x, uint32_t y, uint32_t gpu) {
+    const size_t i = static_cast<size_t>(y) * result.width + x;
+    result.gpu[i] = gpu;
+    if (result.diffCount++ == 0) {
+        result.diffX = x;
+        result.diffY = y;
+        result.softwarePixel = result.software[i];
+        result.gpuPixel = gpu;
+    }
+}
+
+void StartScaled(const std::vector<uint32_t> &software, uint32_t width, uint32_t height,
+                 std::vector<uint32_t> &&scaled, uint32_t n, SceneResult &result) {
+    result.width = width;
+    result.height = height;
+    result.scale = n;
+    result.software = software;
+    result.gpu = software; // differing pixels are replaced
+    result.gpuScaled = std::move(scaled);
+    result.diffCount = 0;
+    result.comparedPixels = 0;
+    result.skippedPixels = 0;
+    result.distinctColors = DistinctColors(software);
+}
+
+} // namespace
+
+bool CompareNearestPixels(const std::vector<uint32_t> &software, uint32_t width, uint32_t height,
+                          std::vector<uint32_t> scaled, uint32_t n, SceneResult &result) {
+    if (!CheckScaledSizes(software, width, height, scaled, n, result)) {
+        return false;
+    }
+    StartScaled(software, width, height, std::move(scaled), n, result);
+    const uint32_t pitch = width * n;
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint32_t sw = software[static_cast<size_t>(y) * width + x] & 0xFFFFFF;
+            bool differs = false;
+            for (uint32_t j = 0; j < n; ++j) {
+                for (uint32_t i = 0; i < n; ++i) {
+                    const uint32_t gpu = result.gpuScaled[static_cast<size_t>(y * n + j) * pitch + x * n + i];
+                    ++result.comparedPixels;
+                    if (!differs && (gpu & 0xFFFFFF) != sw) {
+                        differs = true;
+                        MarkDiff(result, x, y, gpu);
+                    }
+                }
+            }
+        }
+    }
+    if (result.comparedPixels != static_cast<uint64_t>(width) * height * n * n) {
+        result.error = "nearest comparison compared " + std::to_string(result.comparedPixels) + " pixels";
+        return false;
+    }
+    result.identical = result.diffCount == 0;
+    return true;
+}
+
+bool CompareSamplePointPixels(const std::vector<uint32_t> &software, uint32_t width, uint32_t height,
+                              std::vector<uint32_t> scaled, uint32_t n, const std::vector<SampleLatticeRow> &lattice,
+                              SceneResult &result) {
+    if (!CheckScaledSizes(software, width, height, scaled, n, result)) {
+        return false;
+    }
+    StartScaled(software, width, height, std::move(scaled), n, result);
+    const uint32_t pitch = width * n;
+    for (uint32_t y = 0; y < height; ++y) {
+        const SampleLatticeRow row = y < lattice.size() ? lattice[y] : SampleLatticeRow{};
+        for (uint32_t x = 0; x < width; ++x) {
+            if (row.skipRow || (row.skipOddColumns && (x & 1) != 0)) {
+                ++result.skippedPixels;
+                continue;
+            }
+            const size_t i = static_cast<size_t>(y) * width + x;
+            const uint32_t gpu = result.gpuScaled[static_cast<size_t>(y * n) * pitch + x * n];
+            ++result.comparedPixels;
+            if ((gpu & 0xFFFFFF) != (software[i] & 0xFFFFFF)) {
+                MarkDiff(result, x, y, gpu);
+            }
+        }
+    }
+    // The lattice excludes at most odd columns and odd rows: three quarters of the frame are compared, or one quarter
+    // with both.
+    if (result.comparedPixels * 4 < static_cast<uint64_t>(width) * height) {
+        result.error = "sample-point comparison compared only " + std::to_string(result.comparedPixels) + " of " +
+                       std::to_string(static_cast<uint64_t>(width) * height) + " native pixels";
+        return false;
+    }
+    result.identical = result.diffCount == 0;
+    return true;
 }
 
 } // namespace brimir::test
@@ -386,10 +540,11 @@ bool RecordWithoutSubmit(gpu::VulkanDevice &device, const std::function<void(VkC
     return ok;
 }
 
-// Compares the software frame with the composite (RGB) into result. False (result.error set) when the harness failed.
+// Compares the software frame with the composite (RGB) into result, at the renderer's internal resolution (N > 1:
+// `compare` with `lattice`). False (result.error set) when the harness failed.
 bool CompareFrame(gpu::VulkanDevice &device, gpu::VulkanVDPRenderer &vulkan, const std::vector<uint32_t> &software,
                   uint32_t width, uint32_t height, uint32_t gpuWidth, uint32_t gpuHeight, uint32_t frame,
-                  SceneResult &result) {
+                  ScaleCompare compare, const std::vector<SampleLatticeRow> &lattice, SceneResult &result) {
     result.frame = frame;
     if (software.empty() || gpuWidth != width || gpuHeight != height) {
         result.error = "frame " + std::to_string(frame) + " size mismatch: software " + std::to_string(width) + "x" +
@@ -400,6 +555,22 @@ bool CompareFrame(gpu::VulkanDevice &device, gpu::VulkanVDPRenderer &vulkan, con
         result.error = "no device attached after frame " + std::to_string(frame);
         return false;
     }
+    const uint32_t n = vulkan.InternalScale();
+    if (vulkan.Backend()->Scale() != n) {
+        result.error = "frame " + std::to_string(frame) + ": the back half renders at " +
+                       std::to_string(vulkan.Backend()->Scale()) + "x, the renderer reports " + std::to_string(n) + "x";
+        return false;
+    }
+    if (n > 1) {
+        std::vector<uint32_t> scaled = ReadbackBuffer(device, vulkan.CompositeBuffer(), width * height * n * n);
+        return compare == ScaleCompare::Nearest
+                   ? CompareNearestPixels(software, width, height, std::move(scaled), n, result)
+                   : CompareSamplePointPixels(software, width, height, std::move(scaled), n, lattice, result);
+    }
+    result.scale = 1;
+    result.gpuScaled.clear();
+    result.comparedPixels = static_cast<uint64_t>(width) * height;
+    result.skippedPixels = 0;
     result.width = width;
     result.height = height;
     result.software = software;
@@ -465,6 +636,12 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         result.error = "AttachDevice failed";
         return result;
     }
+    // BRIMIR_VDP2_SCALE=N runs every scene at internal resolution N.
+    const uint32_t scale = options.scale != 0 ? options.scale : EnvScale();
+    if (!vulkan->SetInternalScale(scale)) {
+        result.error = "SetInternalScale(" + std::to_string(scale) + ") failed";
+        return result;
+    }
     if (options.uploadBlockSize != 0) {
         vulkan->Backend()->ForceUploadBlockSizeForTest(options.uploadBlockSize);
     }
@@ -506,6 +683,18 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
     Vdp2SceneWriter writer{scene.enhancements};
     writer.Attach(*swState, *software);
     writer.Attach(*vkState, *vulkan);
+    // The excluded sample-point lattice of the composite rows, from the lines that last wrote them.
+    std::vector<SampleLatticeRow> lattice;
+    writer.lineObserver = [&](const Vdp2SceneWriter &w, const VDPState &state, uint32_t y) {
+        if (lattice.size() != w.VRes()) {
+            lattice.assign(w.VRes(), SampleLatticeRow{});
+        }
+        LatticeForLine(w, state, y, scene.enhancements.deinterlace, [&](uint32_t row, SampleLatticeRow flags) {
+            if (row < lattice.size()) {
+                lattice[row] = flags;
+            }
+        });
+    };
     if (scene.setup) {
         scene.setup(writer);
     }
@@ -565,6 +754,12 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 result.error = "frame " + std::to_string(frame) + ": recording or submission failed";
                 return result;
             }
+            if (vulkan->Backend()->LastRecordStatsForTest().scale != vulkan->InternalScale()) {
+                result.error = "frame " + std::to_string(frame) + " recorded at " +
+                               std::to_string(vulkan->Backend()->LastRecordStatsForTest().scale) + "x, expected " +
+                               std::to_string(vulkan->InternalScale()) + "x";
+                return result;
+            }
             if (timestamps.pool != VK_NULL_HANDLE) {
                 uint64_t ticks[2] = {};
                 if (device.Table().vkGetQueryPoolResults(device.Device(), timestamps.pool, 0, 2, sizeof(ticks), ticks,
@@ -580,7 +775,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         }
         if (options.compareFrame && options.compareFrame(frame)) {
             if (!CompareFrame(device, *vulkan, capture.pixels, capture.width, capture.height, gpuWidth, gpuHeight,
-                              frame, result)) {
+                              frame, options.scaleCompare, lattice, result)) {
                 return result;
             }
             ++result.comparedFrames;
@@ -592,10 +787,53 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
 
     if (!options.compareFrame) {
         CompareFrame(device, *vulkan, capture.pixels, capture.width, capture.height, gpuWidth, gpuHeight,
-                     scene.frames - 1, result);
+                     scene.frames - 1, options.scaleCompare, lattice, result);
         result.comparedFrames = 1;
     }
     return result;
+}
+
+uint32_t EnvScale() {
+    const char *value = std::getenv("BRIMIR_VDP2_SCALE");
+    if (value == nullptr) {
+        return 1;
+    }
+    const int n = std::atoi(value);
+    return n >= 1 && n <= 4 ? static_cast<uint32_t>(n) : 1;
+}
+
+namespace {
+
+SceneResult CompareScaled(const Vdp2Scene &scene, gpu::VulkanDevice &device, uint32_t n, RenderBothOptions options,
+                          ScaleCompare compare) {
+    options.scale = n;
+    options.scaleCompare = compare;
+    SceneResult result = RenderBoth(scene, device, options);
+    if (!result.error.empty()) {
+        result.identical = false;
+        return result;
+    }
+    // Not vacuous: a non-trivial software frame, compared at n.
+    if (result.distinctColors < 2) {
+        result.error = "the software frame has " + std::to_string(result.distinctColors) + " colour(s)";
+    } else if (result.scale != n) {
+        result.error = "compared at " + std::to_string(result.scale) + "x, not " + std::to_string(n) + "x";
+    }
+    if (!result.error.empty()) {
+        result.identical = false;
+    }
+    return result;
+}
+
+} // namespace
+
+SceneResult CompareNearest(const Vdp2Scene &scene, gpu::VulkanDevice &device, uint32_t n, RenderBothOptions options) {
+    return CompareScaled(scene, device, n, std::move(options), ScaleCompare::Nearest);
+}
+
+SceneResult CompareSamplePoints(const Vdp2Scene &scene, gpu::VulkanDevice &device, uint32_t n,
+                                RenderBothOptions options) {
+    return CompareScaled(scene, device, n, std::move(options), ScaleCompare::SamplePoints);
 }
 
 } // namespace brimir::test

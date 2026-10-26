@@ -17,7 +17,8 @@ inline constexpr uint32_t kVdp2Compose_CommonRenderParams_vcellScroll = 32;
 inline constexpr uint32_t kVdp2Compose_CommonRenderParams_windows = 36;
 inline constexpr uint32_t kVdp2Compose_CommonRenderParams_enhancements = 40;
 inline constexpr uint32_t kVdp2Compose_CommonRenderParams_outputSize = 44;
-inline constexpr uint32_t kVdp2Compose_CommonRenderParams_size = 48;
+inline constexpr uint32_t kVdp2Compose_CommonRenderParams_renderScale = 48;
+inline constexpr uint32_t kVdp2Compose_CommonRenderParams_size = 56;
 
 // ComposeParams
 inline constexpr uint32_t kVdp2Compose_ComposeParams_colorCalcEnable = 0;

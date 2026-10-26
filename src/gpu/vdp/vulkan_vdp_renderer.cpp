@@ -1,5 +1,7 @@
 #include "vulkan_vdp_renderer.hpp"
 
+#include "gpu/vdp2/vdp2_bindings.hpp"
+
 #include <chrono>
 #include <span>
 
@@ -50,6 +52,12 @@ void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContext
     auto backend = std::make_unique<vdp2::Vdp2VulkanBackend>(device, frameContexts);
     if (!backend->Ok()) {
         return;
+    }
+    if (m_log) {
+        backend->SetLog(m_log);
+    }
+    if (!backend->SetScale(m_internalScale)) {
+        m_internalScale = backend->Scale(); // logged by the back half
     }
     m_backend = std::move(backend);
     // A new back half has none of the state: everything is uploaded with the next frame, and its composite starts
@@ -109,6 +117,26 @@ void VulkanVDPRenderer::RecordedFrameDropped() {
 
 VkBuffer VulkanVDPRenderer::CompositeBuffer() const {
     return m_backend ? m_backend->CompositeBuffer() : VK_NULL_HANDLE;
+}
+
+bool VulkanVDPRenderer::SetInternalScale(uint32_t n) {
+    if (n < 1 || n > vdp2::kMaxRenderScale) {
+        return false;
+    }
+    if (m_backend) {
+        if (!m_backend->SetScale(n)) {
+            return false;
+        }
+    }
+    m_internalScale = n;
+    return true;
+}
+
+void VulkanVDPRenderer::SetLog(std::function<void(const std::string &)> log) {
+    m_log = std::move(log);
+    if (m_backend) {
+        m_backend->SetLog(m_log);
+    }
 }
 
 // -----------------------------------------------------------------------------
