@@ -80,6 +80,13 @@ inline constexpr uint32_t kCompositeBufferSize = kMaxResH * kMaxResV * sizeof(ui
 inline constexpr uint32_t kWorkgroupWidth = 32;
 inline constexpr uint32_t kBgsDispatchZ = 7; // NBG0-3, RBG0-1, colour calculation window
 
+/// @brief cs_frame_output.hlsl's [numthreads(8, 8, 1)] (gpu/frame_presenter.cpp), and the largest workgroup any
+/// shader the renderer runs declares, which the device limit maxComputeWorkGroupInvocations must cover.
+inline constexpr uint32_t kFrameOutputGroupSize = 8;
+inline constexpr uint32_t kMaxWorkgroupInvocations =
+    std::max(kWorkgroupWidth, kFrameOutputGroupSize * kFrameOutputGroupSize);
+static_assert(kMaxWorkgroupInvocations == 64);
+
 /// @brief Descriptor kinds, mapped to VkDescriptorType by the Vulkan side.
 enum class DescriptorKind : uint8_t { StorageBuffer, StorageBufferDynamic, SampledImage, StorageImage };
 

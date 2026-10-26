@@ -17,9 +17,6 @@ namespace brimir::gpu {
 
 inline constexpr uint32_t kRequiredApiVersion = VK_API_VERSION_1_2;
 
-// Compute workgroups never exceed this many invocations (the guaranteed maxComputeWorkGroupInvocations is 128).
-inline constexpr uint32_t kMaxWorkgroupInvocations = 128;
-
 // Device extensions beyond core 1.2. None so far.
 inline constexpr std::array<const char *, 0> kRequiredDeviceExtensions{};
 
@@ -61,7 +58,8 @@ inline constexpr std::array<RequiredLimit, 6> kRequiredLimits{{
     {"maxPerStageDescriptorSampledImages", &VkPhysicalDeviceLimits::maxPerStageDescriptorSampledImages,
      kRequiredStageSampledImages},
     {"maxPerStageResources", &VkPhysicalDeviceLimits::maxPerStageResources, kRequiredStageResources},
-    {"maxComputeWorkGroupInvocations", &VkPhysicalDeviceLimits::maxComputeWorkGroupInvocations, 64},
+    {"maxComputeWorkGroupInvocations", &VkPhysicalDeviceLimits::maxComputeWorkGroupInvocations,
+     vdp2::kMaxWorkgroupInvocations},
     {"maxPushConstantsSize", &VkPhysicalDeviceLimits::maxPushConstantsSize, vdp2::kPushConstantSize},
 }};
 

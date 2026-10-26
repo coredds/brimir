@@ -8,8 +8,8 @@
 // Scenes of the divergences between Ymir's shaders and the software renderer that stage 1B fixed keep their letter from
 // stage1b-port-inventory.md section 4.1 (or a stage 1B ruling) in the name: (a), (i), (k), (l), (q)-(u) (Task 5),
 // (b)-(h) and (v) (Task 6), and the guards (j), (m)-(o). Feature scenes (RunFeatureScene) also require the feature to
-// change the software frame. Documented exceptions (software behaviour the GPU path does not reproduce, by a
-// controller ruling) are tagged [!shouldfail], named "exception <id>". Any other failure is a bug.
+// change the software frame. Documented exceptions (U2, X1, W2-W5; software behaviour the GPU path does not reproduce,
+// by a controller ruling) are tagged [!shouldfail], named "exception <id>". Any other failure is a bug.
 //
 // Also here: resolution changes and VDP resets inside a frame (finding F1), upload overflow (64 KiB upload blocks),
 // detach/attach between frames, and FramePresenter::PresentDevice against FramePresenter::Present of the read-back
@@ -2312,6 +2312,39 @@ TEST_CASE("Scene: exception U2: sprites in exclusive monitor mode", "[gpu][vdp2]
         SetupNBG(w, s, {.index = 0, .format = 0, .priority = 3}, rng);
         SetupSprites(w, {.type = 0}, rng);
     }));
+}
+
+// Documented exception X1 (stage 1B ruling 31): with an exclusive monitor mode, double-density interlace and deinterlacing
+// on, software draws the alternate field's line as well (sw:560-565, VDP2GetY at sw:5666-5671 returns the same row y for
+// both fields in exclusive modes), so the visible row y is the alternate line (one scrollIncV further in double density,
+// plus the alternate-field sprite framebuffer) and overwrites the field line. The GPU never draws the alternate field in
+// exclusive modes (vdp2_front.cpp, vulkan_vdp_renderer.cpp), so row y keeps the field line. Alternate-field output into
+// the same row is not hardware behaviour anyone relies on, and no known game uses exclusive monitor modes. The scene
+// is NBG only, so U2's sprite difference does not mask the reason.
+TEST_CASE("Scene: exception X1: exclusive monitor with interlace and deinterlacing (software overwrites row y with the "
+          "alternate line)",
+          "[gpu][vdp2][scene][!shouldfail]") {
+    RunScene(Make(
+        [](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | 4 | kLSMDDouble));
+            CyclesSingle(w, 0);
+            SetupNBG(w, s, {.index = 0, .format = 0, .priority = 3}, rng);
+        },
+        {.deinterlace = true}, 3));
+}
+
+// X1's control: the same exclusive monitor double-density interlaced scene without deinterlacing (and a progressive
+// exclusive one) matches software, so X1 is the alternate-field draw and nothing else.
+TEST_CASE("Scene: exclusive monitor with interlace, deinterlacing off", "[gpu][vdp2][scene]") {
+    const uint16_t lsmd = GENERATE(uint16_t{0}, kLSMDSingle, kLSMDDouble);
+    CAPTURE(lsmd);
+    RunScene(Make(
+        [lsmd](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, static_cast<uint16_t>(kDisp | 4 | lsmd));
+            CyclesSingle(w, 0);
+            SetupNBG(w, s, {.index = 0, .format = 0, .priority = 3}, rng);
+        },
+        {.deinterlace = false}, 3));
 }
 
 // =====================================================================================================================

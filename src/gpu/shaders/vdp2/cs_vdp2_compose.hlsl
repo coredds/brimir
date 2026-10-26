@@ -84,7 +84,6 @@ static const bool exclusiveMonitor = BitTest(g_commonParams.displayParams, 5);
 static const uint cramMode = BitExtract(g_commonParams.displayParams, 6, 2);
 static const bool hiResH = BitExtract(g_commonParams.displayParams, 10, 3) & 2;
 static const bool normalTVMode = BitExtract(g_commonParams.displayParams, 10, 3) < 2;
-static const bool firstInterlacedFrame = BitTest(g_commonParams.displayParams, 17);
 
 static const bool colorGradEnable = BitTest(g_commonParams.layerParams, 28);
 
@@ -589,11 +588,6 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint3 c = min(outColor, 255u);
     const uint packed = c.r | (c.g << 8) | (c.b << 16) | 0xFF000000u;
     g_compositeOut[outCoord.y * outputSize.x + outCoord.x] = packed;
-    if (firstInterlacedFrame && !deinterlace && IsInterlaced()) {
-        // Brimir: the other field's row only when it is inside the frame.
-        const uint otherY = outCoord.y ^ 1u;
-        if (otherY < outputSize.y) {
-            g_compositeOut[otherY * outputSize.x + outCoord.x] = packed;
-        }
-    }
+    // Brimir: Ymir's first-interlaced-frame duplication of the row into the other field is dropped (software clears
+    // the composite on a resolution change instead, and the front half never sets displayParams bit 17).
 }

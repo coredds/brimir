@@ -38,7 +38,7 @@ There are two kinds.
 
 ### 1. Vulkan 1.2 baseline (no behaviour change)
 
-Brimir's GPU baseline: Vulkan 1.2 core, no 64-bit integers in shaders, at most 128 invocations per workgroup, std430
+Brimir's GPU baseline: Vulkan 1.2 core, no 64-bit integers in shaders, at most 64 invocations per workgroup (the frame output pass's 8 x 8; the VDP2 shaders use 32; Vulkan guarantees 128), std430
 layouts without `scalarBlockLayout`, storage images only `rgba8ui`/`r32ui`, no robustness features.
 
 - **Push constants** instead of the D3D12 `b0` root constants (`CommonRenderParams`, 48 bytes); **registers renumbered**
@@ -99,11 +99,15 @@ Compose (`cs_vdp2_compose.hlsl`):
 - line colour screen reads use the output position;
 - transparent meshes: only normal mesh pixels are inserted; the mesh layer's colour calculation uses the sprite enable
   and condition with the mesh pixel's own colour MSB (l; software fixed on master in 7d1cb66);
-- the sprite layer's colour offset enable and select as software.
+- the sprite layer's colour offset enable and select as software;
+- no first-interlaced-frame duplication: Ymir's irstInterlacedFrame (copying the row into the other field on the first
+  frame after switching to interlace with deinterlacing off) is removed, since software clears the composite on a
+  resolution change instead and the front half never sets the bit.
 
 ## Documented exceptions
 
 Cases where the GPU output intentionally differs from software (software stale or ambiguous) are listed, with their
 tests, in the design doc (`docs/superpowers/specs/2026-10-24-vulkan-gpu-renderer-design.md`, stage 1): U2 (sprites in
-exclusive-monitor modes) and W2-W5 (character delay / window / mosaic edge cases), each a `[!shouldfail]` scene named
+exclusive-monitor modes), X1 (the alternate field in exclusive-monitor modes under deinterlacing) and W2-W5 (character
+delay / window / mosaic edge cases), each a `[!shouldfail]` scene named
 "exception <id>".

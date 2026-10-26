@@ -1,8 +1,8 @@
 // VDP2 compute shaders ported to the Vulkan 1.2 baseline (src/gpu/shaders/vdp2/cs_vdp2_*.hlsl, generated headers in
 // src/gpu/shaders/generated/vdp2_*.spv.h, bindings in src/gpu/vdp2/vdp2_bindings.hpp).
 // - The SPIR-V words themselves: only the Shader capability (no Int64), storage images only Rgba8ui/R32ui (sampled
-//   images Unknown), no texel buffers, a LocalSize of at most 128 invocations, and exactly the bindings
-//   vdp2_bindings.hpp lists, all in set 0, each with its table kind and storage-image format; the check rejects
+//   images Unknown), no texel buffers, a LocalSize of at most kMaxWorkgroupInvocations (64, the largest workgroup
+//   the renderer's shaders use), and exactly the bindings vdp2_bindings.hpp lists, all in set 0, each with its table kind and storage-image format; the check rejects
 //   modules altered to break each rule. These run without a Vulkan device ([vdp2]).
 // - The device limits check (gpu_version.hpp UnmetLimit) against crafted VkPhysicalDeviceLimits ([vdp2][limits],
 //   BRIMIR_VULKAN builds).
@@ -11,6 +11,7 @@
 //   validation errors ([gpu][vdp2]; SKIP without a device).
 #include "catch_amalgamated.hpp"
 
+#include <gpu/shaders/generated/cs_frame_output.spv.h>
 #include <gpu/shaders/generated/vdp2_compose.spv.h>
 #include <gpu/shaders/generated/vdp2_render_bgs.spv.h>
 #include <gpu/shaders/generated/vdp2_render_sprite.spv.h>
@@ -201,11 +202,11 @@ std::vector<std::string> CheckModule(std::span<const uint32_t> words, std::span<
         }
     }
 
-    // Workgroup size: at most 128 invocations (the guaranteed maxComputeWorkGroupInvocations), 32 x 1 x 1 as the
+    // Workgroup size: at most kMaxWorkgroupInvocations (the device limit gpu_version.hpp requires), 32 x 1 x 1 as the
     // dispatches in vdp2_bindings.hpp assume.
     if (m.localSize.size() != 3) {
         fail("no LocalSize");
-    } else if (m.localSize[0] * m.localSize[1] * m.localSize[2] > 128 || m.localSize[0] != kWorkgroupWidth ||
+    } else if (m.localSize[0] * m.localSize[1] * m.localSize[2] > kMaxWorkgroupInvocations || m.localSize[0] != kWorkgroupWidth ||
                m.localSize[1] != 1 || m.localSize[2] != 1) {
         fail("LocalSize " + std::to_string(m.localSize[0]) + "x" + std::to_string(m.localSize[1]) + "x" +
              std::to_string(m.localSize[2]));
@@ -285,6 +286,23 @@ TEST_CASE("VDP2 shader modules use only the Vulkan 1.2 baseline", "[vdp2][pipeli
     CHECK(StorageImageVariables(sh::kVdp2ComposeSpv) == 0);
 }
 
+TEST_CASE("The largest workgroup any renderer shader declares is kMaxWorkgroupInvocations", "[vdp2][pipelines]") {
+    uint32_t largest = 0;
+    for (const ShaderCase &shader : Shaders()) {
+        const SpvModule m = ParseSpirv(shader.spirv);
+        REQUIRE(m.localSize.size() == 3);
+        largest = std::max(largest, m.localSize[0] * m.localSize[1] * m.localSize[2]);
+    }
+    // The frame output pass (gpu/frame_presenter.cpp) is not a VDP2 shader: 8 x 8 x 1.
+    const SpvModule output = ParseSpirv(sh::kCsFrameOutputSpv);
+    REQUIRE(output.localSize.size() == 3);
+    CHECK(output.localSize[0] == kFrameOutputGroupSize);
+    CHECK(output.localSize[1] == kFrameOutputGroupSize);
+    CHECK(output.localSize[2] == 1);
+    largest = std::max(largest, output.localSize[0] * output.localSize[1] * output.localSize[2]);
+    CHECK(largest == kMaxWorkgroupInvocations);
+}
+
 TEST_CASE("The VDP2 SPIR-V check rejects a module that departs from its binding table", "[vdp2][pipelines]") {
     const std::vector<uint32_t> bgs(std::begin(sh::kVdp2RenderBgsSpv), std::end(sh::kVdp2RenderBgsSpv));
 
@@ -362,7 +380,7 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
     limits.maxPerStageDescriptorStorageImages = 3;
     limits.maxPerStageDescriptorSampledImages = 4;
     limits.maxPerStageResources = 10;
-    limits.maxComputeWorkGroupInvocations = 64;
+    limits.maxComputeWorkGroupInvocations = kMaxWorkgroupInvocations;
     limits.maxPushConstantsSize = 48;
     CHECK(gpu::UnmetLimit(limits).empty());
 

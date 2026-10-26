@@ -1,6 +1,7 @@
 #include "frame_presenter.hpp"
 
 #include "shaders/generated/cs_frame_output.spv.h"
+#include "vdp2/vdp2_bindings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,7 +16,7 @@ constexpr VkFormat kOutputFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat kStorageViewFormat = VK_FORMAT_R32_UINT;
 constexpr uint32_t kSourceBinding = 0;  // t0
 constexpr uint32_t kOutputBinding = 16; // u0
-constexpr uint32_t kGroupSize = 8;
+constexpr uint32_t kGroupSize = vdp2::kFrameOutputGroupSize; // cs_frame_output.hlsl numthreads
 constexpr VkDeviceSize kSourceBytes =
     VkDeviceSize{FramePresenter::kMaxSourceWidth} * FramePresenter::kMaxSourceHeight * sizeof(uint32_t);
 
