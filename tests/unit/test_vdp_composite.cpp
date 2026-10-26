@@ -335,3 +335,138 @@ TEST_CASE("VDP layered line selection and extended averages match scalar RGB", "
         CHECK(frame.line[x] == expected);
     }
 }
+
+namespace {
+
+void WriteRotParamTableForSprites(VDPState &state, uint32 address) {
+    constexpr uint32 kOne10 = (1u << 10) << 6; // 1.0 in x.10 fixed point, stored from bit 6
+    state.mem2.WriteVRAM<uint32>(address + 0x10, kOne10); // deltaYst
+    state.mem2.WriteVRAM<uint32>(address + 0x14, kOne10); // deltaX
+    state.mem2.WriteVRAM<uint32>(address + 0x1C, kOne10); // A
+    state.mem2.WriteVRAM<uint32>(address + 0x2C, kOne10); // E
+    state.mem2.WriteVRAM<uint32>(address + 0x4C, 1u << 16);
+    state.mem2.WriteVRAM<uint32>(address + 0x50, 1u << 16);
+}
+
+uint16 LineColorEntry(uint32 i) {
+    return static_cast<uint16>(((i * 5) & 31) | (((i * 3 + 1) & 31) << 5) | (((i * 7 + 2) & 31) << 10));
+}
+
+uint32 Expand555(uint16 color) {
+    uint32 out = 0xFF000000u;
+    for (uint32 channel = 0; channel < 3; ++channel) {
+        out |= (((color >> (channel * 5)) & 31) * 8) << (channel * 8);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("RBG0 horizontal mosaic repeats the line color of the base pixel",
+          "[vdp][composite][rbg][mosaic][regression][brimir]") {
+    const uint32 mode = GENERATE(0u, 1u, 2u, 3u);
+    constexpr std::array<uint32, 4> widths{320, 352, 640, 704};
+    const uint32 width = widths[mode];
+    const uint32 scale = mode < 2 ? 1 : 2;
+    const uint32 mosaicH = GENERATE(2u, 3u, 4u, 7u);
+    CAPTURE(width, mosaicH);
+
+    auto state = std::make_unique<VDPState>();
+    config::VDP2DebugRender debug{};
+    config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<SoftwareVDPRenderer>(*state, debug, access);
+    auto &regs = state->regs2;
+    regs.WriteTVMD(static_cast<uint16>(0x8000 | mode));
+    regs.LatchTVMD();
+    // VRAM-A partitioned: A0 holds the RBG0 pattern names, A1 its characters; coefficient table in color RAM (mode 1)
+    regs.WriteRAMCTL(0x910E);
+    regs.WriteBGON(0x0010);   // RBG0
+    regs.WriteCHCTLB(0x3000); // RBG0 cells (not a bitmap; only cell mode applies the horizontal mosaic), 1x1, RGB555
+    regs.WritePNCR(0x8004);   // One-word pattern names; character number bits 14-10 = 4: all characters at 0x20000
+    regs.WritePRIR(0x0007);
+    regs.WriteRPTAU(0x0000);
+    regs.WriteRPTAL(0x8000); // Rotation parameter table at 0x10000
+    regs.WriteKTCTL(0x0011); // Coefficient table A: enabled, two words, kx/ky, with line color data
+    regs.WriteCCCTL(0x0010); // RBG0 color calculation
+    regs.WriteCCRR(31);      // Ratio zero exposes the second screen, which is replaced by the line color
+    regs.WriteLNCLEN(0x0010);
+    regs.WriteLCTAU(0);
+    regs.WriteLCTAL(0x0100); // Line color table at 0x200 (entry 0: line color data bits 10-7 = 0)
+
+    WriteRotParamTableForSprites(*state, 0x10000);
+    state->mem2.WriteVRAM<uint32>(0x1005C, (1u << 10) << 6); // dKAx = 1.0: one coefficient per RBG0 dot
+
+    constexpr uint32 kLineColors = 100;
+    for (uint32 i = 0; i < kLineColors; ++i) {
+        state->mem2.WriteCRAM<uint16>(i * 2, LineColorEntry(i));
+    }
+    const auto lineColorData = [](uint32 x) { return 1 + (x * 7 + x / 3) % (kLineColors - 1); };
+    for (uint32 x = 0; x < width / scale; ++x) {
+        // Two-word coefficients in color RAM: line color data (bits 30-24), kx = ky = 1.0
+        const uint32 coeff = (lineColorData(x) << 24) | 0x10000u;
+        state->mem2.WriteCRAM<uint16>(0x800 + x * 4, static_cast<uint16>(coeff >> 16));
+        state->mem2.WriteCRAM<uint16>(0x800 + x * 4 + 2, static_cast<uint16>(coeff));
+    }
+    for (uint32 i = 0; i < 64; ++i) {
+        state->mem2.WriteVRAM<uint16>(0x20000 + i * 2, 0xFFFF); // Opaque dots
+    }
+
+    // The first frame has no mosaic and leaves each dot's own line color in the renderer's line buffer.
+    CompositeFrame frame;
+    frame.Render(*renderer, width);
+    for (uint32 x = 0; x < width; ++x) {
+        CAPTURE(x);
+        REQUIRE(frame.line[x] == Expand555(LineColorEntry(lineColorData(x / scale))));
+    }
+
+    regs.WriteMZCTL(static_cast<uint16>(0x0010 | ((mosaicH - 1) << 8)));
+    frame.Render(*renderer, width);
+    for (uint32 x = 0; x < width; ++x) {
+        CAPTURE(x);
+        const uint32 dot = x / scale;
+        const uint32 baseDot = dot - dot % mosaicH;
+        CHECK(frame.line[x] == Expand555(LineColorEntry(lineColorData(baseDot))));
+    }
+}
+
+TEST_CASE("Rotated 8-bit sprite framebuffer in hi-res reads one coordinate per two output pixels",
+          "[vdp][composite][sprite][rotate][regression][brimir]") {
+    const uint32 mode = GENERATE(2u, 3u);
+    const uint32 width = mode == 2 ? 640 : 704;
+    CAPTURE(width);
+
+    auto state = std::make_unique<VDPState>();
+    config::VDP2DebugRender debug{};
+    config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<SoftwareVDPRenderer>(*state, debug, access);
+    auto &regs = state->regs2;
+    regs.WriteTVMD(static_cast<uint16>(0x8000 | mode));
+    regs.LatchTVMD();
+    state->regs1.tvmr.Write(0x3); // Framebuffer rotation + 8-bit pixels: 512x512
+    REQUIRE(state->regs1.tvmr.fbSizeH == 512);
+    regs.WriteBGON(0x0010); // RBG0 (transparent) enables the rotation parameter tables used for sprite coordinates
+    regs.WriteSPCTL(0x000B);
+    regs.WritePRISA(0x0007);
+    regs.WriteRPTAU(0x0000);
+    regs.WriteRPTAL(0x0000);
+    WriteRotParamTableForSprites(*state, 0);
+
+    constexpr uint32 kColors = 60;
+    const auto colorIndex = [](uint32 k) { return 1 + k % kColors; };
+    for (uint32 i = 1; i <= kColors; ++i) {
+        state->mem2.WriteCRAM<uint16>(i * 2, LineColorEntry(i));
+    }
+    for (uint32 k = 0; k < width / 2; ++k) {
+        state->mem1.FBRAM[state->fbIndex.display][k] = static_cast<uint8>(colorIndex(k));
+    }
+
+    CompositeFrame frame;
+    frame.Render(*renderer, width);
+
+    // The sprite coordinates are computed per dot of half the output width, so output pixels 2k and 2k+1 show
+    // framebuffer pixel k (the same mapping as the 16-bit doubled path).
+    for (uint32 x = 0; x < width; ++x) {
+        CAPTURE(x);
+        CHECK(frame.line[x] == Expand555(LineColorEntry(colorIndex(x / 2))));
+    }
+}

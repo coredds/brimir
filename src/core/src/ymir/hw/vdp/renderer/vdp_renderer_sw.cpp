@@ -2675,6 +2675,11 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs
     const uint32 xOutputShift = doubleResH || exclMon ? 1 : 0;
     const uint32 xReadoutShift = halfResH ? 1 : 0;
     const uint32 maxX = m_HRes >> xOutputShift;
+    // Brimir: sprite coordinates are computed per dot of half the output width in hi-res modes (see
+    // VDP2CalcRotationParameterTables), and the array holds kMaxNormalResH of them. The 16-bit path already loops over
+    // half the pixels in hi-res; the 8-bit path loops over all of them, so it must index by x >> 1. Upstream indexes by
+    // x and reads past the array for x >= kMaxNormalResH.
+    [[maybe_unused]] const uint32 xCoordShift = (m_HRes > kMaxNormalResH && xOutputShift == 0) ? 1 : 0;
 
     const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
 
@@ -2697,7 +2702,7 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs
         uint32 fbramOffset;
         if constexpr (rotate) {
             const auto &rotParamOut = m_rotParamLineOutputs[0];
-            const auto &coord = rotParamOut.spriteCoords[x];
+            const auto &coord = rotParamOut.spriteCoords[x >> xCoordShift];
             if (coord.x() < 0 || coord.x() >= tvmr.fbSizeH || coord.y() < 0 || coord.y() >= tvmr.fbSizeV) {
                 layerOut.pixels.priority[xx] = 0;
                 layerAttrs.shadowOrWindow[xx] = false;
@@ -4728,6 +4733,10 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawRotationScrollBG(const VDP2Regs &reg
                 if (doubleResH) {
                     layerOut.pixels.CopyPixel(xx, xx + 1);
                 }
+                // Brimir: the line color buffer is indexed by dot (x), not output pixel. Upstream skips it here, so
+                // mosaic-repeated dots kept the line color left by an earlier line or frame. Copy the previous dot's
+                // (which is the base dot's, as the copies chain) so every dot has the line color of the pixel it shows.
+                m_rbgLineColors[bgIndex][x] = m_rbgLineColors[bgIndex][x - 1];
                 continue;
             }
         }
