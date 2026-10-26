@@ -101,8 +101,7 @@ struct OptionCache {
     std::string cd_speed = "2";
     std::string sh2_overclock = "100";
     std::string autodetect_region = "enabled";
-    std::string deinterlacing = "enabled";
-    std::string deinterlace_mode = "bob";
+    BrimirDeinterlaceOptions deinterlace;
     std::string audio_volume = "100";
     std::string rotation = "0";
     std::string overscan = "0";
@@ -129,8 +128,15 @@ static void apply_core_options(bool force) {
     apply("brimir_cd_speed",                g_options.cd_speed,         [](const char* v){ g_core->SetCDReadSpeed(static_cast<uint8_t>(atoi(v))); });
     apply("brimir_sh2_overclock",           g_options.sh2_overclock,    [](const char* v){ g_core->SetSH2OverclockFactor(static_cast<uint32_t>(atoi(v))); });
     apply("brimir_autodetect_region",       g_options.autodetect_region,[](const char* v){ g_core->SetAutodetectRegion(strcmp(v, "enabled") == 0); });
-    apply("brimir_deinterlacing",           g_options.deinterlacing,    [](const char* v){ g_core->SetDeinterlacing(strcmp(v, "enabled") == 0); });
-    apply("brimir_deinterlace_mode",        g_options.deinterlace_mode, [](const char* v){ g_core->SetDeinterlacingMode(v); });
+    // Both options drive one flag, so it is derived from both values together.
+    {
+        const char* deinterlacing = get_option_value("brimir_deinterlacing", g_options.deinterlace.deinterlacing.c_str());
+        const char* mode = get_option_value("brimir_deinterlace_mode", g_options.deinterlace.mode.c_str());
+        bool effective = true;
+        if (brimir_update_deinterlace(g_options.deinterlace, deinterlacing, mode, force, effective)) {
+            g_core->SetDeinterlacing(effective);
+        }
+    }
     apply("brimir_audio_volume",            g_options.audio_volume,     [](const char* v){ g_core->SetAudioVolume(atoi(v)); });
     apply("brimir_rotation",                g_options.rotation,         [](const char* v){ g_core->SetRotation(atoi(v)); });
     apply("brimir_overscan",                g_options.overscan,         [](const char* v){

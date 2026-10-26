@@ -1752,20 +1752,6 @@ void CoreWrapper::DropSH2JitExecutors() {
     m_jitWorker.reset();
 }
 
-void CoreWrapper::SetDeinterlacingMode(const char* mode) {
-    if (!m_initialized || !m_saturn || !mode) {
-        return;
-    }
-
-    // Ymir only supports enable/disable deinterlacing via Enhancements
-    // The specific modes (blend/weave/bob/current) were Brimir enhancements
-    // For now, just toggle deinterlacing on/off
-    bool enable = (strcmp(mode, "none") != 0);
-    m_saturn->VDP.ModifyEnhancements([enable](ymir::vdp::config::Enhancements& enh) {
-        enh.deinterlace = enable;
-    });
-}
-
 void CoreWrapper::SetAudioVolume(int percent) {
     if (percent < 0) percent = 0;
     if (percent > 200) percent = 200;

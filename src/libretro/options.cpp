@@ -2,7 +2,7 @@
 // Copyright (C) 2025 coredds
 // Licensed under GPL-3.0
 
-#include "libretro.h"
+#include "options.hpp"
 #include <cstring>
 
 // Core option definitions using libretro API v2
@@ -56,7 +56,8 @@ static struct retro_core_option_v2_definition option_defs[] = {
         nullptr,
         "Enable deinterlacing for interlaced video modes. Many games use interlaced high-res modes for menus. "
         "Uses optimized single-field rendering for 60 FPS with no scanlines. "
-        "Disable only for progressive-only games to skip post-processing.",
+        "Disable only for progressive-only games to skip post-processing. "
+        "OFF turns deinterlacing off whatever Deinterlacing Mode is set to.",
         nullptr,
         "video",
         {
@@ -70,12 +71,9 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_deinterlace_mode",
         "Deinterlacing Mode",
         nullptr,
-        "Method for deinterlacing interlaced video modes. "
-        "Bob: Duplicates current field to both lines (60 FPS, no scanlines, smooth). "
-        "Weave: Shows alternating fields (60 FPS, CRT-style with scanlines). "
-        "Blend: Blends both fields (60 FPS, may show ghosting). "
-        "Current: Legacy dual-field renderer (more accurate but slower, ~45 FPS). "
-        "None: No deinterlacing (native interlaced output).",
+        "Bob, Weave, Blend and Current currently behave the same: the frame is fully deinterlaced. "
+        "None: No deinterlacing (native interlaced output), same as turning Deinterlacing OFF. "
+        "Only used while Deinterlacing is ON.",
         nullptr,
         "video",
         {
@@ -317,6 +315,23 @@ static struct retro_core_option_v2_definition option_defs[] = {
     },
     { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr }
 };
+
+bool brimir_deinterlace_effective(const char* deinterlacing, const char* mode) {
+    const bool enabled = deinterlacing && std::strcmp(deinterlacing, "enabled") == 0;
+    const bool modeOff = mode && std::strcmp(mode, "none") == 0;
+    return enabled && !modeOff;
+}
+
+bool brimir_update_deinterlace(BrimirDeinterlaceOptions& cache, const char* deinterlacing, const char* mode,
+                               bool force, bool& effective) {
+    const char* newDeinterlacing = deinterlacing ? deinterlacing : cache.deinterlacing.c_str();
+    const char* newMode = mode ? mode : cache.mode.c_str();
+    const bool changed = cache.deinterlacing != newDeinterlacing || cache.mode != newMode;
+    cache.deinterlacing = newDeinterlacing;
+    cache.mode = newMode;
+    effective = brimir_deinterlace_effective(cache.deinterlacing.c_str(), cache.mode.c_str());
+    return force || changed;
+}
 
 const struct retro_core_options_v2* brimir_get_core_options_v2(void) {
     static struct retro_core_options_v2 options = {

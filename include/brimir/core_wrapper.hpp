@@ -286,10 +286,6 @@ public:
     /// @brief Set deinterlacing enable
     void SetDeinterlacing(bool enable);
 
-    /// @brief Set deinterlacing mode
-    /// @param mode Mode string: "bob", "weave", "blend", "current", "none"
-    void SetDeinterlacingMode(const char* mode);
-
     /// @brief Set audio volume percentage
     /// @param percent Volume percentage (0-200)
     void SetAudioVolume(int percent);
