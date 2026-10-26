@@ -11,8 +11,9 @@
 // change the software frame. Documented exceptions (software behaviour the GPU path does not reproduce, by a
 // controller ruling) are tagged [!shouldfail], named "exception <id>". Any other failure is a bug.
 //
-// Also here: upload overflow (64 KiB upload blocks), detach/attach between frames, and FramePresenter::PresentDevice
-// against FramePresenter::Present of the read-back composite.
+// Also here: resolution changes and VDP resets inside a frame (finding F1), upload overflow (64 KiB upload blocks),
+// detach/attach between frames, and FramePresenter::PresentDevice against FramePresenter::Present of the read-back
+// composite.
 //
 // [gpu][vdp2][scene]; SKIP without a Vulkan device. Every scene runs on both drivers (the full suite takes ~25 s on the
 // desktop GPU, ~40 s on lavapipe); [lavapipe] marks a quick cross-section for manual runs. BRIMIR_VDP2_POISON=1 runs
@@ -1204,6 +1205,127 @@ TEST_CASE("Scene: batching with compose-only and layer-only changes on alternati
             w.Reg(SCXIN1, static_cast<uint16_t>(y / 5)); // layers only
         }
     }));
+}
+
+// =====================================================================================================================
+// Resolution changes inside a frame (stage 1B finding F1, Ruling 27): software clears its framebuffer the moment the
+// resolution changes (VDP2UpdateResolution) or the VDP resets, so the rows composed before it in the frame are cleared
+// and the later rows are drawn with the new resolution. The change comes in the last frame, so no top-border
+// resolution update follows it.
+
+namespace {
+
+// Two NBGs; `change(w, y)` runs before each line of the last frame (`frames` frames).
+Vdp2Scene MidFrameScene(uint16_t tvmd, bool deinterlace, uint32_t frames, bool backPerLine,
+                        std::function<void(Vdp2SceneWriter &, uint32_t)> change) {
+    Vdp2Scene scene = Make(
+        [=](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, tvmd);
+            if (backPerLine) {
+                BackPerLine(w, rng);
+            }
+            TwoNBGs(w, s, rng);
+        },
+        {.deinterlace = deinterlace}, frames);
+    scene.onLine = [change = std::move(change), frames, frame = 0u](Vdp2SceneWriter &w, uint32_t y) mutable {
+        if (y == 0) {
+            ++frame;
+        }
+        if (frame == frames) {
+            change(w, y);
+        }
+    };
+    return scene;
+}
+
+} // namespace
+
+// The reproducer of F1 (Virtua Fighter 2 with deinterlacing off), optionally followed by a switch to double density.
+TEST_CASE("Scene: F1 a mid-frame resolution change clears the composite at that line",
+          "[gpu][vdp2][scene][lavapipe]") {
+    const uint32_t line = GENERATE(1u, 100u);
+    const bool doubleDensity = GENERATE(false, true);
+    const bool deinterlace = GENERATE(false, true);
+    CAPTURE(line, doubleDensity, deinterlace);
+    RunScene(MidFrameScene(kDisp, deinterlace, 2, false, [=](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == line) {
+            w.SetResolution(320, 224, false);
+            if (doubleDensity) {
+                w.Reg(TVMD, static_cast<uint16_t>(kDisp | kLSMDDouble));
+            }
+        }
+    }));
+}
+
+// BDCLMD=1: the clear colour is the back colour of the last line prepared (a different one on every line).
+TEST_CASE("Scene: a mid-frame resolution change clears to the back colour with BDCLMD", "[gpu][vdp2][scene]") {
+    const uint32_t line = GENERATE(1u, 100u);
+    const bool deinterlace = GENERATE(false, true);
+    CAPTURE(line, deinterlace);
+    RunScene(MidFrameScene(static_cast<uint16_t>(kDisp | kBDCLMD), deinterlace, 2, true,
+                           [=](Vdp2SceneWriter &w, uint32_t y) {
+                               if (y == line) {
+                                   w.SetResolution(320, 224, false);
+                               }
+                           }));
+}
+
+TEST_CASE("Scene: a mid-frame switch from progressive to interlaced and back", "[gpu][vdp2][scene]") {
+    const bool deinterlace = GENERATE(false, true);
+    const uint16_t lsmd = GENERATE(kLSMDSingle, kLSMDDouble);
+    CAPTURE(deinterlace, lsmd);
+    RunScene(MidFrameScene(kDisp, deinterlace, 2, false, [=](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 60) {
+            w.Reg(TVMD, static_cast<uint16_t>(kDisp | lsmd));
+            w.SetResolution(320, 448, false);
+        } else if (y == 150) {
+            w.Reg(TVMD, kDisp);
+            w.SetResolution(320, 224, false);
+        }
+    }));
+}
+
+// Software indexes its framebuffer with the new HRes from the change on: rows before it were written with the old
+// pitch, then cleared.
+TEST_CASE("Scene: a mid-frame width change", "[gpu][vdp2][scene][lavapipe]") {
+    const auto [from, to] = GENERATE(std::pair{uint16_t{0}, uint16_t{1}}, std::pair{uint16_t{1}, uint16_t{0}});
+    const bool deinterlace = GENERATE(false, true);
+    CAPTURE(from, to, deinterlace);
+    RunScene(MidFrameScene(static_cast<uint16_t>(kDisp | from), deinterlace, 2, false,
+                           [to](Vdp2SceneWriter &w, uint32_t y) {
+                               if (y == 100) {
+                                   w.Reg(TVMD, static_cast<uint16_t>(kDisp | to));
+                                   w.SetResolution(to ? 352 : 320, 224, false);
+                               }
+                           }));
+}
+
+// Virtua Fighter 2's path to F1: an SMPC clock change resets the VDP mid-frame (VDP::Reset: renderer reset, resolution
+// update, line 0 again); the game then selects double-density hi-res with the display still off, so with deinterlacing
+// off only one field's rows are written. Every frame is compared; the last one is the reset frame.
+TEST_CASE("Scene: a VDP reset mid-frame clears the composite and restarts the frame", "[gpu][vdp2][scene][lavapipe]") {
+    const uint32_t line = GENERATE(1u, 149u);
+    const bool doubleDensity = GENERATE(false, true);
+    const bool deinterlace = GENERATE(false, true);
+    CAPTURE(line, doubleDensity, deinterlace);
+    Vdp2Scene scene = MidFrameScene(kDisp, deinterlace, 3, false,
+                                    [=, reset = false](Vdp2SceneWriter &w, uint32_t y) mutable {
+                                        if (!reset && y == line) {
+                                            w.ResetVDP();
+                                            reset = true;
+                                        } else if (reset && y == 6 && doubleDensity) {
+                                            w.Reg(TVMD, static_cast<uint16_t>(kLSMDDouble | kBDCLMD | 3));
+                                        }
+                                    });
+    RenderBothOptions options;
+    options.compareFrame = [](uint32_t) { return true; };
+    auto device = OpenDevice();
+    const SceneResult result = RenderBoth(scene, *device, options);
+    INFO(result.Describe());
+    CHECK(result.error.empty());
+    CHECK(result.comparedFrames == 3);
+    CHECK(result.identical);
+    CloseAndCheckValidation(device);
 }
 
 // =====================================================================================================================
@@ -2875,6 +2997,61 @@ TEST_CASE("Scene: weave across hidden frames recorded into hidden contexts", "[g
     auto device = OpenDevice();
     const SceneResult result = Check(*device, WeaveScene(lsmd, 10), options);
     CHECK(result.comparedFrames == 5);
+    CloseAndCheckValidation(device);
+}
+
+// Pre-approved operational exception (Ruling 29): a context reset with deinterlacing off clears the other field for one
+// frame. The new back half starts with a cleared composite, so the first weave frame after the attach has black rows
+// where software still shows the field of the frame before; that frame's own field and every later frame match. (The
+// BIOS menu, the content of the vkhost checks, is progressive, so this is a scene.)
+TEST_CASE("Scene: operational exception: context reset with deinterlacing off clears the other field for one frame",
+          "[gpu][vdp2][scene][lavapipe]") {
+    const uint16_t lsmd = GENERATE(kLSMDSingle, kLSMDDouble);
+    CAPTURE(lsmd);
+    static constexpr uint32_t kAttachFrame = 3;
+    RenderBothOptions options;
+    options.beforeFrame = [](uint32_t frame, gpu::VulkanVDPRenderer &renderer, gpu::VulkanDevice &dev) {
+        if (frame == kAttachFrame) {
+            // context_destroy then context_reset between two shown frames
+            renderer.DetachDevice();
+            renderer.AttachDevice(dev, 2);
+        }
+    };
+    auto device = OpenDevice();
+
+    // The first frame after the attach: one field identical, the other black on the GPU and not black in software.
+    const SceneResult first = RenderBoth(WeaveScene(lsmd, kAttachFrame + 1), *device, options);
+    INFO(first.Describe());
+    REQUIRE(first.error.empty());
+    REQUIRE(first.height == 448);
+    std::array<uint32_t, 2> sameRows{}, clearedRows{}, softwareBlackRows{};
+    for (uint32_t y = 0; y < first.height; ++y) {
+        bool same = true, gpuBlack = true, swBlack = true;
+        for (uint32_t x = 0; x < first.width; ++x) {
+            const uint32_t sw = first.software[y * first.width + x] & 0xFFFFFF;
+            const uint32_t gpu = first.gpu[y * first.width + x] & 0xFFFFFF;
+            same &= sw == gpu;
+            gpuBlack &= gpu == 0;
+            swBlack &= sw == 0;
+        }
+        sameRows[y & 1] += same;
+        clearedRows[y & 1] += gpuBlack;
+        softwareBlackRows[y & 1] += swBlack;
+    }
+    const uint32_t fieldRows = first.height / 2;
+    const uint32_t written = sameRows[0] == fieldRows ? 0 : 1; // the field the frame rendered
+    CHECK(sameRows[written] == fieldRows);
+    CHECK(clearedRows[written ^ 1] == fieldRows);   // exactly the other field is cleared...
+    CHECK(softwareBlackRows[written ^ 1] == 0);     // ...where software still shows the previous frame's field
+    CHECK(sameRows[written ^ 1] == 0);
+
+    // Every other frame, before and after, is identical to software.
+    options.compareFrame = [](uint32_t frame) { return frame != kAttachFrame; };
+    const SceneResult rest = RenderBoth(WeaveScene(lsmd, kAttachFrame + 3), *device, options);
+    INFO(rest.Describe());
+    CHECK(rest.error.empty());
+    CHECK(rest.comparedFrames == kAttachFrame + 2);
+    CHECK(rest.identical);
     CloseAndCheckValidation(device);
 }
 

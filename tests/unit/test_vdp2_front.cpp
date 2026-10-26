@@ -4,7 +4,8 @@
 // - the batching rule at its boundaries (frame setup, first and last line), memcmp dirtiness, compose-only splits,
 //   VRAM chunk snapshots, deinterlace row doubling and the weave line count;
 // - the CRAM colour cache in modes 0-2 and the unconditional coefficient snapshot;
-// - the resolution clear against the software renderer; sprite slices; feature counters; dropped frames;
+// - the resolution clear against the software renderer, between frames and mid-frame, and the restart after a VDP
+//   reset mid-frame; sprite slices; feature counters; dropped frames;
 // - the scene writer driving two (state, renderer) pairs in lockstep.
 // GPU-free: tagged [vdp2], so it also runs in BRIMIR_VULKAN=OFF builds.
 #include "catch_amalgamated.hpp"
@@ -794,6 +795,68 @@ TEST_CASE("Vdp2FrontEnd clears the composite on a resolution change as software 
     front.BeginFrame();
     front.EndFrame();
     CHECK_FALSE(front.Frame().clearComposite);
+}
+
+TEST_CASE("Vdp2FrontEnd clears the composite at the line of a mid-frame resolution change", "[vdp2][front]") {
+    FrontRig rig;
+    DisplayOn(rig.writer);
+    rig.Run();
+    const Vdp2FrameRecord &rec = rig.Run([](Vdp2SceneWriter &w, uint32_t y) {
+        if (y == 100) {
+            w.SetResolution(352, 224, false);
+        }
+    });
+    CHECK_FALSE(rec.clearComposite);
+    REQUIRE(rec.batches.size() == 2);
+    // The lines before the change are recorded with the old resolution, then the clear, then the rest.
+    CheckSpan(rec.batches[0], 0, 100, 0, 100);
+    CHECK(rec.batches[0].hres == 320);
+    CheckSpan(rec.batches[1], 100, 124, 100, 124);
+    CHECK(rec.batches[1].hres == 352);
+    CHECK(rec.batches[1].vres == 224);
+    REQUIRE(rec.clears.size() == 1);
+    CHECK(rec.clears[0].beforeBatch == 1);
+    CHECK(rec.clears[0].color == 0xFF000000u);
+    CHECK(rec.clears[0].words == 352u * 224u);
+    CHECK(rec.hres == 352);
+
+    // The next frame has none.
+    CHECK(rig.Run().clears.empty());
+}
+
+TEST_CASE("Vdp2FrontEnd restarts the batching after a VDP reset mid-frame", "[vdp2][front]") {
+    FrontRig rig;
+    DisplayOn(rig.writer);
+    rig.Run();
+    const Vdp2FrameRecord &rec = rig.Run([reset = false](Vdp2SceneWriter &w, uint32_t y) mutable {
+        if (!reset && y == 150) {
+            w.ResetVDP();
+            reset = true;
+        }
+    });
+    REQUIRE(rec.batches.size() >= 2);
+    CheckSpan(rec.batches[0], 0, 150, 0, 150);
+    // The reset's whole-composite clear, then the resolution update's.
+    REQUIRE(rec.clears.size() == 2);
+    CHECK(rec.clears[0].beforeBatch == 1);
+    CHECK(rec.clears[0].words == 0);
+    CHECK(rec.clears[1].beforeBatch == 1);
+    CHECK(rec.clears[1].words == 320u * 224u);
+    // Every line is recorded again after the clears.
+    uint32_t nextLayer = 0, nextCompose = 0;
+    for (size_t i = 1; i < rec.batches.size(); ++i) {
+        const Vdp2Batch &b = rec.batches[i];
+        if (b.layerLines > 0) {
+            CHECK(b.layerStartY == nextLayer);
+            nextLayer = b.layerStartY + b.layerLines;
+        }
+        if (b.composeLines > 0) {
+            CHECK(b.composeStartY == nextCompose);
+            nextCompose = b.composeStartY + b.composeLines;
+        }
+    }
+    CHECK(nextLayer == 224);
+    CHECK(nextCompose == 224);
 }
 
 TEST_CASE("Vdp2FrontEnd copies sprite slices into the frame arena", "[vdp2][front]") {

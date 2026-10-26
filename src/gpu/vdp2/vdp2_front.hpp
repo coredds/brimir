@@ -10,8 +10,9 @@
 // names its source range. Changes from Ymir, each marked "// Brimir:" where it applies:
 // - parameter dirtiness: the three parameter structs are rebuilt every line and memcmp'd against the last flushed
 //   copies, instead of generation counters fed by register writes (CRAM keeps its generation);
-// - no firstInterlacedFrame: SetResolution schedules a composite clear exactly as the software renderer clears its
-//   framebuffer (and Reset clears to black, as software does);
+// - no firstInterlacedFrame: SetResolution clears the composite exactly as the software renderer clears its
+//   framebuffer, at that point of the frame (and Reset clears it to black, as software does): inside a record the
+//   lines rendered so far are recorded first, then the clear, then the later lines;
 // - compose ranges are in dispatch rows (field line << deinterlace shift, like the layer ranges), and the frame's last
 //   compose covers VRes >> (interlaced && !deinterlace) rows;
 // - a compose-only change splits only compose: compose ranges wait until the layer rows they read are recorded;
@@ -73,6 +74,14 @@ struct Vdp2Batch {
     VDP2CommonRenderParams common;        // push constants; startY is 0, the back half sets it per dispatch
     uint32_t layerParamsOffset, composeParamsOffset; // into Vdp2FrameRecord::arena (kParamSnapshotAlignment)
     uint32_t firstCopy, copyCount;        // into Vdp2FrameRecord::copies; applied before this batch's dispatches
+    uint32_t hres, vres;                  // the resolution its lines were rendered at (composite pitch and size)
+};
+
+/// @brief A composite clear inside a frame (a resolution change or reset between two lines), applied between batches.
+struct Vdp2CompositeClear {
+    uint32_t beforeBatch; // applied before Vdp2FrameRecord::batches[beforeBatch] (batches.size(): after the last)
+    uint32_t color;       // packed XBGR, as the software framebuffer
+    uint32_t words;       // composite words cleared from the start (0 = the whole buffer)
 };
 
 /// @brief A buffer upload from the arena (a snapshot taken when the front half flushed).
@@ -88,6 +97,7 @@ struct Vdp2FrameRecord {
     std::vector<uint8_t> arena; // param snapshots, VRAM chunks, CRAM snapshots, sprite slices; 4-byte aligned
     std::vector<Vdp2Batch> batches;
     std::vector<Vdp2Copy> copies;
+    std::vector<Vdp2CompositeClear> clears; // in batch order
 
     // Per-line arrays, final at EndFrame (each batch only reads its own lines).
     std::array<VDP2RotParamBase, 2 * kMaxResV> rotBases; // [param * kMaxResV + field line]
@@ -102,7 +112,8 @@ struct Vdp2FrameRecord {
     uint32_t fieldLines;          // lines rendered per field (VRes, or VRes / 2 in normal interlaced modes)
     bool interlaced, deinterlace; // as of BeginFrame (batches use the TVMD in effect when they were recorded)
     bool exclusive;
-    bool clearComposite;          // clear the composite to clearColor before this frame's dispatches
+    bool clearComposite;          // clear the composite to clearColor before this frame's dispatches (a resolution
+                                  // change or reset between frames; those inside the frame are in clears)
     uint32_t clearColor;          // packed XBGR, as the software framebuffer
 
     Vdp2FeatureCounters features;
@@ -234,6 +245,7 @@ private:
     uint32_t m_pendingCopiesStart = 0;
     uint32_t m_layerSnapshotOffset = UINT32_MAX;
     uint32_t m_composeSnapshotOffset = UINT32_MAX;
+    uint32_t m_lastLine = UINT32_MAX; // the last line rendered in this record (UINT32_MAX = none yet)
 
     // Frame record
     Vdp2FrameRecord m_record{};
@@ -278,6 +290,8 @@ private:
     uint32_t SnapshotComposeParams();
     void CloseCompose(uint32_t lastY);
     void RenderLayerLines(uint32_t lastY);
+    void CloseRenderedLines();
+    void ClearComposite(uint32_t color, uint32_t words);
     void EmitBatch(uint32_t layerStartY, uint32_t layerLines, const PendingCompose *compose, uint32_t layerOffset);
 };
 

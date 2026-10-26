@@ -52,12 +52,14 @@ Vdp2FrontEnd::Vdp2FrontEnd(VDPState &state, const config::VDP2AccessPatternsConf
 
 // Ported from d3d:2057-2076 (Reset, VDP2 part).
 void Vdp2FrontEnd::Reset(bool hard) {
-    // Brimir: resolution and framebuffer as SoftwareVDPRenderer::Reset (sw:91-106), which fills its framebuffer black.
+    // Brimir: resolution and framebuffer as SoftwareVDPRenderer::Reset (sw:91-106), which fills its whole framebuffer
+    // black at once. Inside a frame (VDP::Reset from an SMPC clock change), the lines rendered so far are recorded with
+    // the old resolution before the clear; the lines the VDP renders again follow it (RenderLine).
+    CloseRenderedLines();
     m_HRes = kDefaultResH;
     m_VRes = kDefaultResV;
     m_exclusiveMonitor = false;
-    m_pendingClear = true;
-    m_pendingClearColor = 0xFF000000u;
+    ClearComposite(0xFF000000u, 0);
     if (hard) {
         m_cramColorCache.fill({});
         // Brimir: matches software (sw:96-98)
@@ -66,9 +68,6 @@ void Vdp2FrontEnd::Reset(bool hard) {
 
     m_vramDirty.SetAll();
     ++m_cramGeneration;
-
-    m_nextLayerRenderLine = 0;
-    m_nextComposeLine = 0;
 
     // Brimir: matches software (sw:109-112, VRAMFetcher::Reset), which resets the first two fetchers of each field.
     for (auto &fetchers : m_nbgFetchers) {
@@ -939,8 +938,11 @@ void Vdp2FrontEnd::AddSpriteSlice(uint32_t index, std::span<const uint8_t, kSpri
 // Resolution and frame flow
 
 // Ported from d3d:4263-4268 (VDP2SetResolution). Brimir: resChangedToInterlaced/firstInterlacedFrame are dropped; the
-// composite is cleared like the software framebuffer (sw:518-530), with the colour computed now, as software does.
+// composite is cleared like the software framebuffer (sw:520-532): at once, HRes x VRes words of the new resolution,
+// with the colour computed now. Inside a frame, the lines rendered so far are recorded first (with the old
+// resolution), so the clear covers them, and the later lines are rendered after it with the new resolution.
 void Vdp2FrontEnd::SetResolution(uint32_t h, uint32_t v, bool exclusive) {
+    CloseRenderedLines();
     m_HRes = h;
     m_VRes = v;
     m_exclusiveMonitor = exclusive;
@@ -949,8 +951,27 @@ void Vdp2FrontEnd::SetResolution(uint32_t h, uint32_t v, bool exclusive) {
     if (m_state.regs2.TVMD.BDCLMD) {
         color |= m_state.state2.lineBackLayerState.backColor.u32;
     }
-    m_pendingClear = true;
-    m_pendingClearColor = color;
+    ClearComposite(color, h * v);
+}
+
+// Brimir: records every line rendered in this record so far (the batching rule's split, for a change that is not a
+// parameter: a composite clear, a resolution change, a restarted frame).
+void Vdp2FrontEnd::CloseRenderedLines() {
+    if (m_inFrame && m_lastLine != UINT32_MAX) {
+        CloseCompose(m_lastLine);
+        RenderLayerLines(m_lastLine);
+    }
+}
+
+// Brimir: a clear inside a record goes between its batches; between records, the next record starts with it (a newer
+// clear replaces an older one, which it covers).
+void Vdp2FrontEnd::ClearComposite(uint32_t color, uint32_t words) {
+    if (m_inFrame) {
+        m_record.clears.push_back({static_cast<uint32_t>(m_record.batches.size()), color, words});
+    } else {
+        m_pendingClear = true;
+        m_pendingClearColor = color;
+    }
 }
 
 uint32_t Vdp2FrontEnd::YShift() const {
@@ -970,12 +991,12 @@ void Vdp2FrontEnd::BeginFrame() {
 
 void Vdp2FrontEnd::StartRecord() {
     // Brimir: a frame that was never consumed (or never ended) is dropped; its snapshots never reached the GPU, so
-    // the next frame uploads everything again and keeps any pending composite clear.
+    // the next frame uploads everything again and keeps any pending composite clear (the last one of the frame).
     if (m_frameReady || m_inFrame) {
         MarkAllDirty();
-        if (m_record.clearComposite && !m_pendingClear) {
+        if ((m_record.clearComposite || !m_record.clears.empty()) && !m_pendingClear) {
             m_pendingClear = true;
-            m_pendingClearColor = m_record.clearColor;
+            m_pendingClearColor = m_record.clears.empty() ? m_record.clearColor : m_record.clears.back().color;
         }
         m_frameReady = false;
     }
@@ -983,6 +1004,7 @@ void Vdp2FrontEnd::StartRecord() {
     m_record.arena.clear();
     m_record.batches.clear();
     m_record.copies.clear();
+    m_record.clears.clear();
     m_record.spriteSliceOffset.fill(UINT32_MAX);
     m_record.features = {};
     m_record.clearComposite = m_pendingClear;
@@ -996,6 +1018,7 @@ void Vdp2FrontEnd::StartRecord() {
     m_pendingCopiesStart = 0;
     m_layerSnapshotOffset = UINT32_MAX;
     m_composeSnapshotOffset = UINT32_MAX;
+    m_lastLine = UINT32_MAX;
     for (auto &rows : m_nbgLastDrawnRow) {
         rows.fill(UINT32_MAX);
     }
@@ -1017,7 +1040,14 @@ void Vdp2FrontEnd::RenderLine(uint32_t y) {
         StartRecord();
         m_nextLayerRenderLine = y;
         m_nextComposeLine = y;
+    } else if (m_lastLine != UINT32_MAX && y <= m_lastLine) {
+        // Brimir: the frame restarted (VDP::Reset inside a frame renders line 0 again, without VBlank): the lines
+        // rendered so far are recorded, and the batching starts over at this line, as software draws the lines again.
+        CloseRenderedLines();
+        m_nextLayerRenderLine = y;
+        m_nextComposeLine = y;
     }
+    m_lastLine = y;
 
     PrepareLine(y);
     // Brimir: matches software (sw:552-566): the NBGs are drawn with the prepared state, then their counters advance.
@@ -1480,6 +1510,8 @@ void Vdp2FrontEnd::EmitBatch(uint32_t layerStartY, uint32_t layerLines, const Pe
     batch.layerParamsOffset = layerOffset;
     batch.firstCopy = m_pendingCopiesStart;
     batch.copyCount = static_cast<uint32_t>(m_record.copies.size()) - m_pendingCopiesStart;
+    batch.hres = m_HRes;
+    batch.vres = m_VRes;
     m_pendingCopiesStart = static_cast<uint32_t>(m_record.copies.size());
     m_record.batches.push_back(batch);
 }

@@ -52,6 +52,11 @@ public:
     /// @brief Forces a resolution, as VDP::UpdateResolution reports it (normally derived from TVMD at the top border).
     void SetResolution(uint32_t h, uint32_t v, bool exclusive);
 
+    /// @brief A soft VDP reset, as VDP::Reset(false) does it (e.g. on an SMPC clock change): the state and the
+    /// renderers reset, then the resolution update. Called from onLine(y), RunFrame then renders line 0 again instead
+    /// of line y (VDP::Reset restarts the active display at VCNT 0) and continues the frame from there.
+    void ResetVDP();
+
     /// @brief Sets TVSTAT.ODD and notifies the renderers, as the VDP does at VBlank IN.
     void Field(bool odd);
 
@@ -107,6 +112,7 @@ private:
     uint32_t m_HRes = ymir::vdp::kDefaultResH;
     uint32_t m_VRes = ymir::vdp::kDefaultResV;
     bool m_exclusiveMonitor = false;
+    bool m_restartFrame = false; // ResetVDP was called: RunFrame continues at line 0
 };
 
 /// @brief Renders the scene with a SoftwareVDPRenderer and returns the last frame (XBGR, HRes x VRes).

@@ -85,6 +85,19 @@ void Vdp2SceneWriter::SetResolution(uint32_t h, uint32_t v, bool exclusive) {
     }
 }
 
+void Vdp2SceneWriter::ResetVDP() {
+    // VDP::Reset (vdp.cpp:83-100), soft
+    for (Target &t : m_targets) {
+        t.state->Reset(false);
+        t.renderer->Reset(false);
+    }
+    m_HRes = kDefaultResH;
+    m_VRes = kDefaultResV;
+    m_exclusiveMonitor = false;
+    UpdateResolution();
+    m_restartFrame = true;
+}
+
 void Vdp2SceneWriter::Field(bool odd) {
     for (Target &t : m_targets) {
         t.state->regs2.TVSTAT.ODD = odd;
@@ -195,6 +208,14 @@ void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint3
         }
         if (onLine) {
             onLine(*this, y);
+        }
+        if (m_restartFrame) {
+            // VDP::Reset renders line 0 at once (BeginHPhaseActiveDisplay with VCNT 0)
+            m_restartFrame = false;
+            y = 0;
+            for (Target &t : m_targets) {
+                t.state->regs2.VCNT = 0;
+            }
         }
         for (Target &t : m_targets) {
             t.renderer->VDP2RenderLine(y);

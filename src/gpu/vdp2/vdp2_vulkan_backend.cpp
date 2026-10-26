@@ -350,6 +350,14 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
         m_pending.clearComposite = true;
         m_pending.clearColor = frame.clearColor;
     }
+    // ... and so does the last clear inside it (as a whole-composite clear).
+    const auto failed = [&] {
+        if (!frame.clears.empty()) {
+            m_pending.clearComposite = true;
+            m_pending.clearColor = frame.clears.back().color;
+        }
+        return false;
+    };
     const auto &vk = m_device.Table();
     FrameContext &context = m_contexts[contextIndex];
     ResetContext(context);
@@ -360,12 +368,12 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     const VkDeviceSize arenaSize = std::max<VkDeviceSize>(frame.arena.size(), 4);
     if (!Allocate(context, kRotBasesBytes + kLnclBackBytes + kNBGLinesBytes, 16, lines) ||
         !Allocate(context, arenaSize, m_paramAlignment, arena)) {
-        return false;
+        return failed();
     }
     UploadBlock &linesBlock = context.blocks[lines.block];
     UploadBlock &arenaBlock = context.blocks[arena.block];
     if (arenaBlock.pool == VK_NULL_HANDLE && CreateBlockSets(arenaBlock) != VK_SUCCESS) {
-        return false;
+        return failed();
     }
     {
         auto *dst = static_cast<uint8_t *>(linesBlock.buffer.mapped) + lines.offset;
@@ -440,13 +448,33 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     }
     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, kShaderRW);
 
-    // Batches in record order: copies, then sprite and backgrounds over the layer rows, then compose.
-    const uint32_t hres = std::min(frame.hres, kMaxResH);
-    const uint32_t vres = std::min(frame.vres, kMaxResV);
-    const uint32_t outputSize = MakeOutputSize(hres, vres);
-    const uint32_t groupsX = (hres + kWorkgroupWidth - 1) / kWorkgroupWidth;
+    // Composite clears inside the frame, in order between the batches: the compose writes of earlier batches (WAW) come
+    // first; later compose writes (WAW) and the frame's readers come after.
+    size_t nextClear = 0;
+    const auto clearsBefore = [&](size_t batchIndex) {
+        for (; nextClear < frame.clears.size() && frame.clears[nextClear].beforeBatch <= batchIndex; ++nextClear) {
+            const Vdp2CompositeClear &clear = frame.clears[nextClear];
+            const VkDeviceSize bytes = clear.words == 0
+                                           ? VK_WHOLE_SIZE
+                                           : std::min<VkDeviceSize>(VkDeviceSize{clear.words} * sizeof(uint32_t),
+                                                                    kCompositeBufferSize);
+            Barrier(cmd, kCompute | kTransfer, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer,
+                    VK_ACCESS_TRANSFER_WRITE_BIT);
+            vk.vkCmdFillBuffer(cmd, m_composite.buffer, 0, bytes, clear.color);
+            Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, kShaderRW);
+        }
+    };
+
+    // Batches in record order: clears, copies, then sprite and backgrounds over the layer rows, then compose, each
+    // with the resolution its lines were rendered at.
     std::vector<VkBufferCopy> regions[3];
-    for (const Vdp2Batch &batch : frame.batches) {
+    for (size_t batchIndex = 0; batchIndex < frame.batches.size(); ++batchIndex) {
+        const Vdp2Batch &batch = frame.batches[batchIndex];
+        clearsBefore(batchIndex);
+        const uint32_t hres = std::min(batch.hres, kMaxResH);
+        const uint32_t vres = std::min(batch.vres, kMaxResV);
+        const uint32_t outputSize = MakeOutputSize(hres, vres);
+        const uint32_t groupsX = (hres + kWorkgroupWidth - 1) / kWorkgroupWidth;
         if (batch.copyCount > 0) {
             // Earlier dispatches' reads of these buffers (WAR) and earlier copies (WAW) come first.
             Barrier(cmd, kCompute | kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -507,9 +535,15 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
         }
     }
+    clearsBefore(frame.batches.size());
+    if (!frame.clears.empty()) {
+        // A dropped command buffer re-arms the frame's last clear (as a whole-composite clear at the next Record).
+        m_recorded.clearComposite = true;
+        m_recorded.clearColor = frame.clears.back().color;
+    }
 
     // The composite is complete: readable by later compute (the presenter) and transfer (readbacks) commands.
-    Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute | kTransfer,
+    Barrier(cmd, kCompute | kTransfer, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, kCompute | kTransfer,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
     return true;
 }
