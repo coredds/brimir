@@ -2040,7 +2040,9 @@ TEST_CASE("Scene: exception W4: character pattern delay on display-latch-off lin
 // W5: a character is fetched only when the character index changes (sw:5194). When a window hides 512 dots or more of
 // a line, the next fetch can have the same index on another page, and software keeps the earlier page's character for
 // that run; without a delay the GPU shows the character at the pixel's own position (walking back over windowed
-// pixels for every pixel would cost the common case).
+// pixels for every pixel would cost the common case). The same holds on the delayed path when such a window reaches the
+// right edge: the front half, which does not know windows, decodes the extra tile's character for nextChar, while
+// software keeps the earlier page's, so the next line's left edge can differ (and the saved nextChar).
 TEST_CASE("Scene: exception W5: a window hiding 512 dots between two fetches of one character index",
           "[gpu][vdp2][scene][!shouldfail]") {
     RunScene(Make([](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
@@ -2790,10 +2792,7 @@ TEST_CASE("VulkanVDPRenderer saves and loads the NBG fetchers as software does",
                 const auto &fa = a.vramFetchers[field][nbg];
                 const auto &fb = b.vramFetchers[field][nbg];
                 same &= charEq(fa.currChar, fb.currChar) && charEq(fa.nextChar, fb.nextChar) &&
-                        fa.lastCharIndex == fb.lastCharIndex &&
-                        // software leaves lastCellX indeterminate on fetchers no line resets (the alternate field
-                        // without deinterlacing)
-                        (field == 1 || fa.lastCellX == fb.lastCellX) &&
+                        fa.lastCharIndex == fb.lastCharIndex && fa.lastCellX == fb.lastCellX &&
                         fa.lastVCellScroll == fb.lastVCellScroll;
             }
         }

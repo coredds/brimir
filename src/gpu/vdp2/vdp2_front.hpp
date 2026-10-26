@@ -210,7 +210,7 @@ private:
         ymir::vdp::Character currChar{};
         ymir::vdp::Character nextChar{};
         uint32_t lastCharIndex = 0xFFFFFFFF;
-        uint8_t lastCellX = 0xFF; // software's VRAMFetcher leaves it indeterminate until the first PrepareLine
+        uint8_t lastCellX = 0xFF; // as software's VRAMFetcher::Reset (f92da96)
         uint32_t lastVCellScroll = 0xFFFFFFFF;
     };
     struct NBGCharLocation {

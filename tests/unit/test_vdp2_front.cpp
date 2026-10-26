@@ -44,7 +44,7 @@ constexpr uint32_t TVMD = 0x000, RAMCTL = 0x00E, BGON = 0x020, MZCTL = 0x022, CH
                    PRISD = 0x0F6, PRINA = 0x0F8, CCRSA = 0x100, CCRSB = 0x102, CLOFEN = 0x110, CLOFSL = 0x112,
                    COAR = 0x114, COAG = 0x116, COAB = 0x118, COBR = 0x11A, COBG = 0x11C, COBB = 0x11E;
 constexpr uint32_t CYCA0L = 0x010, CYCA0U = 0x012, CYCB0L = 0x018, CYCB0U = 0x01A, CYCB1L = 0x01C, CYCB1U = 0x01E,
-                   CHCTLB = 0x02A, SCYIN0 = 0x074, ZMYIN0 = 0x07C, ZMYDN0 = 0x07E, SCXIN1 = 0x080, ZMXIN1 = 0x088,
+                   CHCTLB = 0x02A, SCYIN0 = 0x074, ZMYIN0 = 0x07C, ZMYDN0 = 0x07E, SCXIN1 = 0x080, ZMXIN1 = 0x088, ZMXDN1 = 0x08A,
                    SCYN3 = 0x096, SCRCTL = 0x09A, VCSTAU = 0x09C, VCSTAL = 0x09E, LSTA0U = 0x0A0, LSTA0L = 0x0A2,
                    LSTA1U = 0x0A4, LSTA1L = 0x0A6, RPRCTL = 0x0B2, RPTAU = 0x0BC, RPTAL = 0x0BE;
 
@@ -1012,7 +1012,7 @@ using RendererSaveState = ymir::savestate::VDPSaveState::VDPRendererSaveState;
 // characters, lastCharIndex, lastCellX, lastVCellScroll); empty if there is none.
 std::string StateMismatch(vdp::VDPState &swState, vdp::SoftwareVDPRenderer &sw, vdp::VDPState &frState,
                           FrontEndRenderer &fr, RendererSaveState &swSaved, RendererSaveState &frSaved,
-                          bool fetchersOnly = false, uint32_t cellXFields = 2) {
+                          bool fetchersOnly = false) {
     std::ostringstream out;
     const auto cmp = [&](const std::string &what, size_t index, uint64_t a, uint64_t b) {
         if (a != b && out.tellp() == 0) {
@@ -1058,10 +1058,7 @@ std::string StateMismatch(vdp::VDPState &swState, vdp::SoftwareVDPRenderer &sw, 
             cmp(prefix + "nextChar", nbg, charBits(a.nextChar), charBits(b.nextChar));
             cmp(prefix + "currChar", nbg, charBits(a.currChar), charBits(b.currChar));
             cmp(prefix + "lastCharIndex", nbg, a.lastCharIndex, b.lastCharIndex);
-            // Software's VRAMFetcher::Reset leaves lastCellX indeterminate until a line resets it (sw:2531-2539)
-            if (field < cellXFields) {
-                cmp(prefix + "lastCellX", nbg, a.lastCellX, b.lastCellX);
-            }
+            cmp(prefix + "lastCellX", nbg, a.lastCellX, b.lastCellX);
         }
     }
     return out.str();
@@ -1071,12 +1068,15 @@ std::string StateMismatch(vdp::VDPState &swState, vdp::SoftwareVDPRenderer &sw, 
 // vertical cell scroll with repeat and delay; NBG2 and NBG3: SCYN2/SCYN3 written mid-frame; ZMYIN changes; vertical
 // mosaic switched off and on mid-frame; RBG0 with a rotation table re-read mid-frame (RPRCTL); in the third frame
 // the display goes off and on again (the latch stays off). With `delay`, NBG1 (2x2, 256 colours) has a character
-// pattern delay (PN1 at T7, CP1 at T1-T2). With `still`, nothing is written mid-frame.
+// pattern delay (PN1 at T7, CP1 at T1-T2). With `still`, nothing is written mid-frame. With `lateDelay`, NBG1 (2x2,
+// 256 colours, 409/256 dots per pixel: each line spans more than 512 dots, so the extra tile's index can repeat the
+// first pixel's) gets the delay from line 80 of each frame on, after undelayed lines.
 struct NBGStateScene {
     uint16_t tvmd;
     uint32_t interval;
     bool delay;
     bool still;
+    bool lateDelay = false;
 
     void Setup(Vdp2SceneWriter &w) const {
         std::mt19937 rng{interval * 31 + tvmd + (delay ? 7 : 0)};
@@ -1088,15 +1088,13 @@ struct NBGStateScene {
             w.VRAM16(a, static_cast<uint16_t>(rng())); // pattern names (pages at 0) and characters
         }
         w.Reg(BGON, 0x001F); // NBG0-3, RBG0
-        if (delay) {
+        if (delay || lateDelay) {
             w.Reg(CHCTLA, 0x1100); // NBG1 256 colours, 2x2
-            w.Reg(CYCA0L, 0x455F); // CP0 at T0, CP1 at T1-T2 of bank A0
-            w.Reg(CYCA0U, 0x0FF1); // PN0 at T4, PN1 at T7 of bank A0: CP1 is illegal for PN1 at T7
-            w.Reg(CYCB0L, 0xFF23);
-        } else {
-            w.Reg(CYCA0L, 0x4455); // CP0 at T0-T1, CP1 at T2-T3 of bank A0
-            w.Reg(CYCA0U, 0x0123); // PN0-PN3 at T4-T7 of bank A0 (the pages are at 0)
         }
+        if (lateDelay) {
+            w.Reg(0x044, 0x0100); // MPABN1: plane B of NBG1 on the next page (0x1000), other pattern names
+        }
+        Cycles(w, delay);
         w.Reg(CYCB1L, 0xFFFC); // vertical cell scroll: NBG0 at T3 (repeat and delay), NBG1 at T4 (delay)
         w.Reg(CYCB1U, 0xDFFF);
         w.Reg(VCSTAU, 0x0003); // 0x7D000
@@ -1111,7 +1109,24 @@ struct NBGStateScene {
         w.Reg(ZMYDN0, 0xC000);
         w.Reg(SCRCTL, Scrctl());
         w.Reg(MZCTL, 0x3105); // NBG0 and NBG2, 2 x 4
+        Zoom1(w);
+    }
+
+    static void Cycles(Vdp2SceneWriter &w, bool delayed) {
+        if (delayed) {
+            w.Reg(CYCA0L, 0x455F); // CP0 at T0, CP1 at T1-T2 of bank A0
+            w.Reg(CYCA0U, 0x0FF1); // PN0 at T4, PN1 at T7 of bank A0: CP1 is illegal for PN1 at T7
+            w.Reg(CYCB0L, 0xFF23);
+        } else {
+            w.Reg(CYCA0L, 0x4455); // CP0 at T0-T1, CP1 at T2-T3 of bank A0
+            w.Reg(CYCA0U, 0x0123); // PN0-PN3 at T4-T7 of bank A0 (the pages are at 0)
+            w.Reg(CYCB0L, 0xFFFF);
+        }
+    }
+
+    void Zoom1(Vdp2SceneWriter &w) const {
         w.Reg(ZMXIN1, 1);
+        w.Reg(ZMXDN1, lateDelay ? 0x9900 : 0x0000);
     }
 
     uint16_t Scrctl() const {
@@ -1126,8 +1141,16 @@ struct NBGStateScene {
         case 0:
             w.Reg(SCRCTL, Scrctl());
             w.Reg(MZCTL, 0x3105);
-            w.Reg(ZMXIN1, 1);
+            Zoom1(w);
             w.Reg(TVMD, tvmd);
+            if (lateDelay) {
+                Cycles(w, false);
+            }
+            break;
+        case 80:
+            if (lateDelay) {
+                Cycles(w, true);
+            }
             break;
         case 30: w.Reg(SCYN2, 17); break;
         case 45: w.Reg(SCYN3, 3); break;
@@ -1136,7 +1159,11 @@ struct NBGStateScene {
         case 90: w.Reg(MZCTL, 0); break;
         case 101: w.Reg(MZCTL, 0x2105); break; // 2 x 3, the counters resume
         case 120: w.Reg(RPRCTL, 0x0707); break; // re-read Xst, Yst and KAst of both parameters
-        case 130: w.Reg(ZMXIN1, 2); break;
+        case 130:
+            if (!lateDelay) {
+                w.Reg(ZMXIN1, 2);
+            }
+            break;
         case 150:
             if (frame == 2) {
                 w.Reg(TVMD, static_cast<uint16_t>(tvmd & 0x7FFF));
@@ -1169,11 +1196,8 @@ struct LockstepPair {
         writer.Attach(*frState, *fr);
     }
 
-    // Fields whose lastCellX software has set (from the first line on: the alternate field only while deinterlacing)
-    uint32_t cellXFields = 0;
-
     std::string Mismatch() {
-        return StateMismatch(*swState, *sw, *frState, *fr, *swSaved, *frSaved, false, cellXFields);
+        return StateMismatch(*swState, *sw, *frState, *fr, *swSaved, *frSaved);
     }
 };
 
@@ -1216,9 +1240,6 @@ TEST_CASE("Vdp2FrontEnd keeps the per-line NBG and rotation state as software do
     MismatchLog log;
     for (uint32_t frame = 0; frame < 3; ++frame) {
         pair.writer.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) {
-            if (frame > 0 || y > 0) {
-                pair.cellXFields = mode.deinterlace ? 2 : 1;
-            }
             log.Check(frame, y, pair.Mismatch());
             scene.OnLine(w, frame, y);
         });
@@ -1238,6 +1259,31 @@ TEST_CASE("Vdp2FrontEnd keeps the per-line NBG and rotation state as software do
     CHECK(pair.frSaved->vramFetchers[0][1].nextChar.charNum != 0);
 }
 
+TEST_CASE("Vdp2FrontEnd keeps the fetchers when a delay starts after lines spanning more than 512 dots", "[vdp2][front]") {
+    // NBG1 at 409/256 dots per pixel: the extra tile past the right edge is 511.25 dots from the first pixel, so it can
+    // have the first pixel's character index after the line crossed other characters; software then fetches it again
+    // (another page), and that character is nextChar when the delay starts at line 80 (the undelayed shortcut must
+    // see the crossing).
+    const LockstepMode mode = GENERATE(LockstepMode{0x8000, false}, LockstepMode{0x80C0, true});
+    const uint32_t scroll = GENERATE(0u, 3u, 5u);
+    CAPTURE(mode.tvmd, mode.deinterlace, scroll);
+
+    const NBGStateScene scene{mode.tvmd, 0, false, false, true};
+    LockstepPair pair{{.deinterlace = mode.deinterlace}};
+    scene.Setup(pair.writer);
+    MismatchLog log;
+    for (uint32_t frame = 0; frame < 3; ++frame) {
+        pair.writer.RunFrame([&](Vdp2SceneWriter &w, uint32_t y) {
+            log.Check(frame, y, pair.Mismatch());
+            scene.OnLine(w, frame, y);
+            w.Reg(SCXIN1, static_cast<uint16_t>(scroll + y % 7));
+        });
+        log.Check(frame, 9999, pair.Mismatch());
+    }
+    INFO(log.first);
+    CHECK(log.first.empty());
+    CHECK(log.checks > 600);
+}
 TEST_CASE("Vdp2FrontEnd continues a mid-frame save state of the software renderer and vice versa", "[vdp2][front]") {
     // One renderer runs NBGStateScene (with a character pattern delay, so every fetcher field matters) to line 100 of
     // the second frame and is saved there (VDPState and the renderer section). A fresh renderer of the other kind

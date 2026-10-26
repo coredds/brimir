@@ -15,8 +15,8 @@
 #include <fstream>
 #include <memory>
 #include <span>
-#include <utility>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace brimir;
@@ -1077,6 +1077,7 @@ TEST_CASE("Save state size covers the cartridge image", "[core][savestate][unit]
     REQUIRE(core.LoadState(buf.data(), buf.size()));
     REQUIRE(core.GetStateSize() == withCart);
 }
+
 // ============================================================
 // Software frame path characterization: XBGR->XRGB, overscan crop, rotation
 // ============================================================

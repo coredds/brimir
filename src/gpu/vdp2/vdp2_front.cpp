@@ -70,13 +70,13 @@ void Vdp2FrontEnd::Reset(bool hard) {
     m_nextLayerRenderLine = 0;
     m_nextComposeLine = 0;
 
-    // Brimir: matches software (sw:109-112, VRAMFetcher::Reset), which resets the first two fetchers of each field
-    // (lastCellX is left as it is).
+    // Brimir: matches software (sw:109-112, VRAMFetcher::Reset), which resets the first two fetchers of each field.
     for (auto &fetchers : m_nbgFetchers) {
         for (uint32 i = 0; i < 2; ++i) {
             fetchers[i].currChar = {};
             fetchers[i].nextChar = {};
             fetchers[i].lastCharIndex = 0xFFFFFFFF;
+            fetchers[i].lastCellX = 0xFF;
             fetchers[i].lastVCellScroll = 0xFFFFFFFF;
         }
     }
@@ -109,11 +109,11 @@ void Vdp2FrontEnd::PostLoadStateSync() {
 }
 
 // Brimir: matches software (sw:256-282, 288-314): the NBG fetchers in the renderer section of save states, in
-// software's representation (Character palette numbers are saved >> 4 and loaded << 4, as software does).
+// software's representation (save-state version 5: palette numbers unshifted, as software, f92da96).
 void Vdp2FrontEnd::SaveFetchers(savestate::VDPSaveState::VDPRendererSaveState &state) const {
     auto copyChar = [](savestate::VDPSaveState::VDPRendererSaveState::CharacterSaveState &dst, const Character &src) {
         dst.charNum = src.charNum;
-        dst.palNum = src.palNum >> 4u;
+        dst.palNum = src.palNum;
         dst.specColorCalc = src.specColorCalc;
         dst.specPriority = src.specPriority;
         dst.flipH = src.flipH;
@@ -135,7 +135,7 @@ void Vdp2FrontEnd::SaveFetchers(savestate::VDPSaveState::VDPRendererSaveState &s
 void Vdp2FrontEnd::LoadFetchers(const savestate::VDPSaveState::VDPRendererSaveState &state) {
     auto copyChar = [](Character &dst, const savestate::VDPSaveState::VDPRendererSaveState::CharacterSaveState &src) {
         dst.charNum = src.charNum;
-        dst.palNum = src.palNum << 4u;
+        dst.palNum = src.palNum;
         dst.specColorCalc = src.specColorCalc;
         dst.specPriority = src.specPriority;
         dst.flipH = src.flipH;
@@ -1289,9 +1289,10 @@ void Vdp2FrontEnd::FetchNBGChar(const BGParams &bgParams, NBGFetcher &fetcher, u
 // Brimir: matches software (sw:4518-4618, 4621-4698): the fetcher state a drawn NBG line leaves (VRAMFetcher's
 // lastVCellScroll, and for scroll BGs currChar, nextChar, lastCharIndex and lastCellX). The scroll increment is below
 // 8 pixels (11.8 with a 3-bit integer part), so the cell column advances at most once per pixel.
-// Windows are not known here: fetches are simulated as if no pixel were windowed. The vertical cell scroll reads,
-// nextChar and lastCharIndex do not depend on windows (the extra tile past the right edge is always fetched, and a
-// character index is fetched once while it repeats); with a character pattern delay, currChar and lastCellX can.
+// Windows are not known here: fetches are simulated as if no pixel were windowed. The vertical cell scroll reads and
+// lastCharIndex do not depend on windows (the extra tile past the right edge is always fetched). nextChar does not
+// either, except when a window hides 512 dots or more up to the right edge (the extra tile's index can then equal an
+// earlier fetch's on another page, exception W5); with a character pattern delay, currChar and lastCellX can.
 void Vdp2FrontEnd::DrawNBGFetcher(uint32_t index, const VDP2NBGLine &line, NBGFetcher &fetcher) {
     const VDP2Regs &regs2 = m_state.regs2;
     const BGParams &bgParams = regs2.bgParams[index + 1];
@@ -1350,25 +1351,52 @@ void Vdp2FrontEnd::DrawNBGFetcher(uint32_t index, const VDP2NBGLine &line, NBGFe
     } else {
         // Pixels 0 to HRes - 1, plus the extra tile for scroll BGs: one read per cell column change between
         // consecutive pixels (sw:4568-4574, 4600-4606). Without a delay, the fetcher's characters are those of the
-        // last fetch whose index differed from the one before; the first pixel (always fetched, as if unwindowed)
-        // and the extra tile stand for the line.
-        const uint32 lastX = bgParams.bitmap ? m_HRes - 1 : m_HRes;
-        if (!bgParams.bitmap) {
-            FetchNBGChar(bgParams, fetcher, fracScrollX >> 8u, (fracScrollY + vcellScrollY) >> 8u);
+        // last fetch whose index differed from the one before: the line's first fetch, its last pixel's fetch when
+        // the line crossed characters in between (in the same character as the last pixel's fetch from its run's
+        // start on), and the extra tile stand for the line.
+        if (bgParams.bitmap) {
+            if (vcellScrollEnable && !bgParams.mosaicEnable) {
+                const uint32 crossings = ((fracScrollX & 0x7FF) + (m_HRes - 1) * scrollIncH) >> 11u;
+                for (uint32 k = 0; k < crossings; ++k) {
+                    vcellScrollY = readCellScrollY();
+                }
+            }
+            return;
         }
+        const uint32 firstX = fracScrollX;
+        FetchNBGChar(bgParams, fetcher, firstX >> 8u, (fracScrollY + vcellScrollY) >> 8u);
+
+        // The last fetching pixel (the last mosaic block's first pixel with mosaic)
+        const uint32 mosaicH = bgParams.mosaicEnable ? m_state.regs2.mosaicH : 1u;
+        const uint32 lastX = (m_HRes - 1) - (m_HRes - 1) % mosaicH;
+        const auto readsUpTo = [&](uint32 x) { return ((firstX & 0x7FF) + x * scrollIncH) >> 11u; };
+        uint32 reads = 0;
         if (vcellScrollEnable && !bgParams.mosaicEnable) {
-            const uint32 crossings = ((fracScrollX & 0x7FF) + lastX * scrollIncH) >> 11u;
-            for (uint32 k = 0; k < crossings; ++k) {
+            for (; reads < readsUpTo(lastX); ++reads) {
                 vcellScrollY = readCellScrollY();
             }
         }
-        if (!bgParams.bitmap) {
-            fracScrollX += m_HRes * scrollIncH;
-            FetchNBGChar(bgParams, fetcher, fracScrollX >> 8u, (fracScrollY + vcellScrollY) >> 8u);
+        const uint32 lastFracScrollX = firstX + lastX * scrollIncH;
+        const uint32 charShift = 8u + 3u + (bgParams.cellSizeShift ? 1u : 0u);
+        const uint64_t firstColumn = firstX >> charShift;
+        const uint64_t lastColumn = (uint64_t{firstX} + uint64_t{lastX} * scrollIncH) >> charShift;
+        const uint32 lastScrollY = (fracScrollY + vcellScrollY) >> 8u;
+        const NBGCharLocation lastLoc = LocateNBGChar(bgParams, lastFracScrollX >> 8u, lastScrollY);
+        if (firstColumn != lastColumn || lastLoc.charIndex != fetcher.lastCharIndex) {
+            // The line crossed characters: the last pixel's run fetched its own character
+            fetcher.lastCharIndex = 0xFFFFFFFF;
+            FetchNBGChar(bgParams, fetcher, lastFracScrollX >> 8u, lastScrollY);
         }
+
+        if (vcellScrollEnable && !bgParams.mosaicEnable) {
+            for (; reads < readsUpTo(m_HRes); ++reads) {
+                vcellScrollY = readCellScrollY();
+            }
+        }
+        fracScrollX = firstX + m_HRes * scrollIncH;
+        FetchNBGChar(bgParams, fetcher, fracScrollX >> 8u, (fracScrollY + vcellScrollY) >> 8u);
         return;
     }
-
     // The extra tile fetched past the right edge (sw:4596-4617)
     if (!bgParams.mosaicEnable && vcellScrollEnable) {
         if ((fracScrollX >> (8u + 3u)) != vcellScrollX) {
