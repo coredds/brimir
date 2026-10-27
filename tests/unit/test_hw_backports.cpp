@@ -1,6 +1,7 @@
 #include "catch_amalgamated.hpp"
 
 #include <ymir/hw/scsp/scsp_slot.hpp>
+#include <ymir/hw/vdp/renderer/common/vdp1_clip.hpp>
 #include <ymir/hw/vdp/renderer/common/vdp1_steppers.hpp>
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/savestate/savestate.hpp>
@@ -10,6 +11,8 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
+#include <initializer_list>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -1618,4 +1621,663 @@ TEST_CASE("VDP1 end codes in a system-clipped prefix still count", "[vdp][vdp1][
         CHECK(f.Pixel(x, 31) == 0x0000);
         CHECK(f.Pixel(x, 32) == static_cast<uint16>(0x8000 | (2 << 8) | (8 + x)));
     }
+}
+
+// -----------------------------------------------------------------------------
+// VDP1 quad termination (Brimir: stop only when no remaining line can reach the system clip area, vdp1_clip.hpp)
+
+namespace {
+
+// splitmix64; deterministic on every platform (the std distributions are not)
+struct TestRng {
+    uint64 s;
+    explicit TestRng(uint64 seed)
+        : s(seed) {}
+    uint64 Next() {
+        uint64 z = (s += 0x9E3779B97F4A7C15ull);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    }
+    sint32 Range(sint32 lo, sint32 hi) {
+        return lo + static_cast<sint32>(Next() % static_cast<uint64>(hi - lo + 1));
+    }
+    bool Chance(uint32 percent) {
+        return Next() % 100 < percent;
+    }
+};
+
+// A VDP1 frame for the unthreaded software renderer: registers, the first 128 KiB of VDP1 VRAM and the commands to
+// execute (addresses into that VRAM; command 0x00..0x7FF, Gouraud tables 0x800..0xFFF, textures from 0x2000).
+struct VDP1Scene {
+    static constexpr uint32 kVRAMSize = 0x20000;
+    static constexpr uint32 kGouraudBase = 0x800;
+    static constexpr uint32 kTextureBase = 0x2000;
+
+    uint16 tvmd = 0x8000;
+    uint16 tvmr = 0x0000;
+    uint16 fbcr = 0x0000;
+    bool deinterlace = false;
+    bool transparentMeshes = false;
+    uint16 sysClipH = 319;
+    uint16 sysClipV = 223;
+    uint16 userClipX0 = 0, userClipY0 = 0, userClipX1 = 319, userClipY1 = 223;
+    sint32 localX = 0, localY = 0;
+    std::vector<uint8> vram = std::vector<uint8>(kVRAMSize, 0);
+    std::vector<uint32> commands;
+    std::vector<uint8> fbFill; // tiled over both framebuffers before drawing; empty = zero
+
+    uint32 nextCommand = 0;
+    uint32 nextGouraud = kGouraudBase;
+    uint32 nextTexture = kTextureBase;
+
+    void Write16(uint32 address, uint16 value) {
+        vram[address] = static_cast<uint8>(value >> 8);
+        vram[address + 1] = static_cast<uint8>(value);
+    }
+
+    // CMDCTRL, CMDLINK, CMDPMOD, CMDCOLR, CMDSRCA, CMDSIZE, XA, YA, XB, YB, XC, YC, XD, YD, CMDGRDA, unused
+    void AddCommand(const std::array<uint16, 16> &words) {
+        REQUIRE(nextCommand < kGouraudBase);
+        for (uint32 i = 0; i < 16; ++i) {
+            Write16(nextCommand + i * 2, words[i]);
+        }
+        commands.push_back(nextCommand);
+        nextCommand += 0x20;
+    }
+
+    // Returns CMDSRCA (address / 8), 32-byte aligned
+    uint16 AddTexture(const std::vector<uint8> &bytes) {
+        const uint32 address = nextTexture;
+        REQUIRE(address + bytes.size() <= kVRAMSize);
+        std::copy(bytes.begin(), bytes.end(), vram.begin() + address);
+        nextTexture = (address + static_cast<uint32>(bytes.size()) + 31) & ~31u;
+        return static_cast<uint16>(address / 8);
+    }
+
+    // Returns CMDGRDA (address / 8)
+    uint16 AddGouraud(std::array<uint16, 4> colors) {
+        const uint32 address = nextGouraud;
+        REQUIRE(address < kTextureBase);
+        for (uint32 i = 0; i < 4; ++i) {
+            Write16(address + i * 2, colors[i]);
+        }
+        nextGouraud += 8;
+        return static_cast<uint16>(address / 8);
+    }
+
+    void Polygon(uint16 pmod, uint16 color, vdp::CoordS32 a, vdp::CoordS32 b, vdp::CoordS32 c, vdp::CoordS32 d,
+                 uint16 grda = 0) {
+        AddCommand({0x0004, 0, pmod, color, 0, 0, U(a.x()), U(a.y()), U(b.x()), U(b.y()), U(c.x()), U(c.y()), U(d.x()),
+                    U(d.y()), grda, 0});
+    }
+
+    void Distorted(uint16 ctrlFlags, uint16 pmod, uint16 color, uint16 srca, uint16 size, vdp::CoordS32 a,
+                   vdp::CoordS32 b, vdp::CoordS32 c, vdp::CoordS32 d, uint16 grda = 0) {
+        AddCommand({static_cast<uint16>(0x0002 | ctrlFlags), 0, pmod, color, srca, size, U(a.x()), U(a.y()), U(b.x()),
+                    U(b.y()), U(c.x()), U(c.y()), U(d.x()), U(d.y()), grda, 0});
+    }
+
+    void Normal(uint16 ctrlFlags, uint16 pmod, uint16 color, uint16 srca, uint16 size, sint32 x, sint32 y,
+                uint16 grda = 0) {
+        AddCommand({static_cast<uint16>(0x0000 | ctrlFlags), 0, pmod, color, srca, size, U(x), U(y), 0, 0, 0, 0, 0, 0,
+                    grda, 0});
+    }
+
+    static uint16 U(sint32 v) {
+        return static_cast<uint16>(v);
+    }
+};
+
+struct VDP1SceneResult {
+    std::vector<uint8> fb; // both main framebuffers
+    std::string extra; // alt and mesh framebuffers, as DumpExtraVDP1Framebuffers writes them
+    uint64 terminations = 0;
+
+    bool SameFramebuffers(const VDP1SceneResult &rhs) const {
+        return fb == rhs.fb && extra == rhs.extra;
+    }
+};
+
+VDP1SceneResult DrawScene(const VDP1Scene &scene, bool quadTermination) {
+    auto state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    renderer->ConfigureEnhancements({.deinterlace = scene.deinterlace, .transparentMeshes = scene.transparentMeshes});
+    renderer->SetVDP1QuadTerminationForTesting(quadTermination);
+
+    state->regs2.WriteTVMD(scene.tvmd);
+    state->regs2.LatchTVMD();
+    state->regs1.WriteTVMR(scene.tvmr);
+    state->regs1.WriteFBCR(scene.fbcr);
+    auto &ctx = state->state1;
+    ctx.sysClipH = scene.sysClipH;
+    ctx.sysClipV = scene.sysClipV;
+    ctx.userClipX0 = scene.userClipX0;
+    ctx.userClipY0 = scene.userClipY0;
+    ctx.userClipX1 = scene.userClipX1;
+    ctx.userClipY1 = scene.userClipY1;
+    ctx.localCoordX = scene.localX;
+    ctx.localCoordY = scene.localY;
+    state->state2.layerEnabled[0] = true;
+    std::copy(scene.vram.begin(), scene.vram.end(), state->mem1.VRAM.begin());
+    if (!scene.fbFill.empty()) {
+        for (auto &fb : state->mem1.FBRAM) {
+            for (size_t i = 0; i < fb.size(); ++i) {
+                fb[i] = scene.fbFill[i % scene.fbFill.size()];
+            }
+        }
+    }
+
+    renderer->PostLoadStateSync();
+    renderer->VDP1BeginFrame();
+    for (const uint32 address : scene.commands) {
+        const uint16 control = util::ReadBE<uint16>(&state->mem1.VRAM[address]);
+        renderer->VDP1ExecuteCommand(address, vdp::VDP1Command::Control{.u16 = control});
+    }
+    renderer->VDP1EndFrame();
+
+    VDP1SceneResult result;
+    result.fb.assign(state->mem1.FBRAM[0].begin(), state->mem1.FBRAM[0].end());
+    result.fb.insert(result.fb.end(), state->mem1.FBRAM[1].begin(), state->mem1.FBRAM[1].end());
+    std::ostringstream extra;
+    renderer->DumpExtraVDP1Framebuffers(extra);
+    result.extra = extra.str();
+    result.terminations = renderer->GetVDP1QuadTerminationsForTesting();
+    return result;
+}
+
+// Draws the scene with and without quad termination; the framebuffers (main, alt, mesh) must be identical.
+// Returns the number of quads that stopped early.
+uint64 CheckTerminationIsPure(const VDP1Scene &scene) {
+    const VDP1SceneResult terminated = DrawScene(scene, true);
+    const VDP1SceneResult full = DrawScene(scene, false);
+    CHECK(full.terminations == 0);
+    CHECK(terminated.SameFramebuffers(full));
+    return terminated.terminations;
+}
+
+constexpr uint16 kPModRGB = 0x0028;          // colour mode 5 (16 bpp RGB)
+constexpr uint16 kPModEndCodeDisable = 0x0080;
+constexpr uint16 kPModClipMode1 = 0x0200;    // user clipping mode: draw outside
+constexpr uint16 kPModUserClip = 0x0400;     // user clipping enable
+
+// A W x H RGB texture; texel (x, y) = 0x8000 | (y << 8) | x, except fully transparent rows (0x0000)
+std::vector<uint8> RGBTexture(uint32 w, uint32 h, std::initializer_list<uint32> transparentRows = {}) {
+    std::vector<uint8> bytes(w * h * 2);
+    for (uint32 y = 0; y < h; ++y) {
+        const bool transparent = std::find(transparentRows.begin(), transparentRows.end(), y) != transparentRows.end();
+        for (uint32 x = 0; x < w; ++x) {
+            const uint16 texel = transparent ? 0x0000 : static_cast<uint16>(0x8000 | (y << 8) | x);
+            bytes[(y * w + x) * 2] = static_cast<uint8>(texel >> 8);
+            bytes[(y * w + x) * 2 + 1] = static_cast<uint8>(texel);
+        }
+    }
+    return bytes;
+}
+
+uint16 ReadFB16(const VDP1SceneResult &r, uint32 x, uint32 y) {
+    return util::ReadBE<uint16>(&r.fb[(y * 512 + x) * 2]);
+}
+
+// Random scene generator: register variants, clip and local coordinate commands, sprites and polygons with random
+// (convex, concave, self-intersecting, degenerate and far off-screen) shapes, modes and textures.
+vdp::CoordS32 RandomPoint(TestRng &rng, sint32 w, sint32 h) {
+    auto axis = [&](sint32 limit) {
+        const uint32 r = static_cast<uint32>(rng.Range(0, 99));
+        if (r < 60) {
+            return rng.Range(-48, limit + 48);
+        } else if (r < 85) {
+            return rng.Range(-400, limit + 400);
+        } else if (r < 95) {
+            return rng.Range(-1100, limit + 1100);
+        }
+        return rng.Range(-4096, 4095);
+    };
+    return {axis(w), axis(h)};
+}
+
+std::vector<uint8> RandomTexture(TestRng &rng, uint32 bytesPerRow, uint32 rows, uint32 colorMode) {
+    std::vector<uint8> bytes(bytesPerRow * rows);
+    for (uint32 y = 0; y < rows; ++y) {
+        const uint32 kind = static_cast<uint32>(rng.Range(0, 99));
+        for (uint32 i = 0; i < bytesPerRow; ++i) {
+            uint8 v;
+            if (kind < 20) {
+                v = 0x00; // transparent row
+            } else if (kind < 25 && i < 4) {
+                v = colorMode == 5 ? (i % 2 == 0 ? 0x7F : 0xFF) : 0xFF; // row starting with end codes
+            } else {
+                const uint32 r = static_cast<uint32>(rng.Range(0, 99));
+                v = r < 25 ? 0x00 : r < 32 ? 0xFF : static_cast<uint8>(rng.Next());
+            }
+            bytes[y * bytesPerRow + i] = v;
+        }
+        if (colorMode == 5) {
+            for (uint32 i = 0; i + 1 < bytesPerRow; i += 2) {
+                if (rng.Chance(4)) {
+                    bytes[y * bytesPerRow + i] = 0x7F; // end code
+                    bytes[y * bytesPerRow + i + 1] = 0xFF;
+                }
+            }
+        }
+    }
+    return bytes;
+}
+
+VDP1Scene RandomScene(uint64 seed) {
+    TestRng rng{seed};
+    VDP1Scene s;
+    static constexpr uint16 kTVMD[] = {0x8000, 0x8000, 0x80C0, 0x80D0, 0x8080, 0x8001};
+    s.tvmd = kTVMD[rng.Range(0, 5)];
+    s.tvmr = rng.Chance(70) ? 0 : rng.Chance(70) ? 1 : static_cast<uint16>(rng.Range(0, 3));
+    s.fbcr = static_cast<uint16>(rng.Range(0, 7) << 2); // DIL, DIE, EOS
+    s.deinterlace = rng.Chance(50);
+    s.transparentMeshes = rng.Chance(50);
+    auto randomSysClip = [&](uint16 &h, uint16 &v) {
+        const uint32 r = static_cast<uint32>(rng.Range(0, 99));
+        if (r < 40) {
+            h = 319;
+            v = 223;
+        } else if (r < 80) {
+            h = static_cast<uint16>(rng.Range(0, 400));
+            v = static_cast<uint16>(rng.Range(0, 300));
+        } else {
+            h = static_cast<uint16>(rng.Range(0, 40));
+            v = static_cast<uint16>(rng.Range(0, 40));
+        }
+    };
+    randomSysClip(s.sysClipH, s.sysClipV);
+    s.userClipX0 = static_cast<uint16>(rng.Range(-8, 330));
+    s.userClipY0 = static_cast<uint16>(rng.Range(-8, 250));
+    s.userClipX1 = static_cast<uint16>(rng.Chance(80) ? rng.Range(s.userClipX0, 340) : rng.Range(-8, 340));
+    s.userClipY1 = static_cast<uint16>(rng.Chance(80) ? rng.Range(s.userClipY0, 260) : rng.Range(-8, 260));
+    if (rng.Chance(30)) {
+        s.localX = rng.Range(-60, 60);
+        s.localY = rng.Range(-60, 60);
+    }
+    if (rng.Chance(30)) {
+        s.fbFill.resize(4096);
+        for (auto &b : s.fbFill) {
+            b = static_cast<uint8>(rng.Next());
+        }
+    }
+
+    const sint32 w = s.sysClipH;
+    const sint32 h = s.sysClipV;
+    const uint32 count = static_cast<uint32>(rng.Range(1, 12));
+    for (uint32 n = 0; n < count; ++n) {
+        const uint32 kind = static_cast<uint32>(rng.Range(0, 99));
+        if (kind < 8) {
+            uint16 ch, cv;
+            randomSysClip(ch, cv);
+            s.AddCommand({0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, ch, cv, 0, 0, 0, 0});
+            continue;
+        }
+        if (kind < 16) {
+            const auto a = RandomPoint(rng, w, h);
+            const auto b = RandomPoint(rng, w, h);
+            s.AddCommand({0x0008, 0, 0, 0, 0, 0, VDP1Scene::U(a.x()), VDP1Scene::U(a.y()), 0, 0, VDP1Scene::U(b.x()),
+                          VDP1Scene::U(b.y()), 0, 0, 0, 0});
+            continue;
+        }
+        if (kind < 20) {
+            s.AddCommand({0x000A, 0, 0, 0, 0, 0, VDP1Scene::U(rng.Range(-80, 80)), VDP1Scene::U(rng.Range(-80, 80)), 0,
+                          0, 0, 0, 0, 0, 0, 0});
+            continue;
+        }
+
+        // Draw command
+        uint16 pmod = static_cast<uint16>(rng.Next() & 0x9FFF);
+        while (((pmod >> 3) & 7) > 5) {
+            pmod = static_cast<uint16>((pmod & ~0x0038) | (rng.Range(0, 5) << 3));
+        }
+        if (!rng.Chance(15)) {
+            pmod &= ~0x1000; // high-speed shrink mostly off
+        }
+        if (!rng.Chance(10)) {
+            pmod &= ~0x8000; // MSB on mostly off
+        }
+        const uint16 color = static_cast<uint16>(rng.Next());
+        const uint16 grda = s.AddGouraud({static_cast<uint16>(rng.Next()), static_cast<uint16>(rng.Next()),
+                                          static_cast<uint16>(rng.Next()), static_cast<uint16>(rng.Next())});
+        const uint32 sizeH = rng.Chance(5) ? 0 : static_cast<uint32>(rng.Range(1, 8)); // x8 pixels
+        const uint32 sizeV = rng.Chance(5) ? 0 : static_cast<uint32>(rng.Range(1, 40));
+        const uint32 colorMode = (pmod >> 3) & 7;
+        const uint32 bytesPerRow = colorMode <= 1 ? sizeH * 4 : colorMode == 5 ? sizeH * 16 : sizeH * 8;
+        const uint16 srca = s.AddTexture(RandomTexture(rng, std::max(bytesPerRow, 16u), std::max(sizeV, 1u), colorMode));
+        const uint16 size = static_cast<uint16>((sizeH << 8) | sizeV);
+        const uint16 flags = static_cast<uint16>((rng.Range(0, 3) << 4) | (rng.Range(0, 15) << 8)); // flip, zoom point
+
+        // Quad shapes: random (convex, concave or bowtie), triangles, regular and rotated rectangles
+        auto a = RandomPoint(rng, w, h);
+        auto b = RandomPoint(rng, w, h);
+        auto c = RandomPoint(rng, w, h);
+        auto d = RandomPoint(rng, w, h);
+        const uint32 shape = static_cast<uint32>(rng.Range(0, 99));
+        if (shape < 15) {
+            switch (rng.Range(0, 3)) {
+            case 0: b = a; break;
+            case 1: c = b; break;
+            case 2: d = c; break;
+            default: a = d; break;
+            }
+        } else if (shape < 30) {
+            b = {c.x(), a.y()};
+            d = {a.x(), c.y()};
+        } else if (shape < 50) {
+            const sint32 ux = rng.Range(-12, 12), uy = rng.Range(-12, 12);
+            const sint32 ka = rng.Range(1, 30), kb = rng.Range(1, 30);
+            b = {a.x() + ux * ka, a.y() + uy * ka};
+            c = {b.x() - uy * kb, b.y() + ux * kb};
+            d = {a.x() - uy * kb, a.y() + ux * kb};
+        } else if (shape < 60) {
+            // small quads straddling a corner or an edge of the system clip area
+            const sint32 cx = rng.Chance(50) ? 0 : w, cy = rng.Chance(50) ? 0 : h;
+            a = {cx + rng.Range(-20, 20), cy + rng.Range(-20, 20)};
+            b = {cx + rng.Range(-20, 20), cy + rng.Range(-20, 20)};
+            c = {cx + rng.Range(-20, 20), cy + rng.Range(-20, 20)};
+            d = {cx + rng.Range(-20, 20), cy + rng.Range(-20, 20)};
+        }
+
+        const uint32 type = static_cast<uint32>(rng.Range(0, 99));
+        if (type < 20) {
+            s.Normal(flags, pmod, color, srca, size, a.x(), a.y(), grda);
+        } else if (type < 40) {
+            // Scaled sprite: XA/YA, XB/YB (zoom point width/height) and XC/YC (opposite corner)
+            s.AddCommand({static_cast<uint16>(0x0001 | flags), 0, pmod, color, srca, size, VDP1Scene::U(a.x()),
+                          VDP1Scene::U(a.y()), VDP1Scene::U(rng.Range(-60, 400)), VDP1Scene::U(rng.Range(-60, 300)),
+                          VDP1Scene::U(c.x()), VDP1Scene::U(c.y()), 0, 0, grda, 0});
+        } else if (type < 65) {
+            s.Distorted(flags, pmod, color, srca, size, a, b, c, d, grda);
+        } else if (type < 90) {
+            s.Polygon(pmod, color, a, b, c, d, grda);
+        } else if (type < 95) {
+            s.AddCommand({0x0005, 0, pmod, color, 0, 0, VDP1Scene::U(a.x()), VDP1Scene::U(a.y()), VDP1Scene::U(b.x()),
+                          VDP1Scene::U(b.y()), VDP1Scene::U(c.x()), VDP1Scene::U(c.y()), VDP1Scene::U(d.x()),
+                          VDP1Scene::U(d.y()), grda, 0});
+        } else {
+            s.AddCommand({0x0006, 0, pmod, color, 0, 0, VDP1Scene::U(a.x()), VDP1Scene::U(a.y()), VDP1Scene::U(b.x()),
+                          VDP1Scene::U(b.y()), 0, 0, 0, 0, grda, 0});
+        }
+    }
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("VDP1 quad termination never changes the framebuffers on random command tables",
+          "[vdp][vdp1][quad-termination][brimir]") {
+    // Brimir fix: the quad loops stop only when no remaining line can reach the system clip area (vdp1_clip.hpp). Over
+    // seeded random command tables the
+    // framebuffers (main, alt and mesh) must equal those drawn with termination disabled, so it is a pure optimisation.
+    constexpr uint64 kTables = 10'000;
+    uint64 mismatches = 0;
+    uint64 firstMismatch = ~0ull;
+    uint64 terminations = 0;
+    uint64 quadTables = 0;
+    for (uint64 seed = 1; seed <= kTables; ++seed) {
+        const VDP1Scene scene = RandomScene(seed);
+        const VDP1SceneResult terminated = DrawScene(scene, true);
+        const VDP1SceneResult full = DrawScene(scene, false);
+        if (!terminated.SameFramebuffers(full)) {
+            ++mismatches;
+            firstMismatch = std::min(firstMismatch, seed);
+        }
+        terminations += terminated.terminations;
+        quadTables += terminated.terminations != 0;
+    }
+    CAPTURE(firstMismatch, terminations, quadTables);
+    CHECK(mismatches == 0);
+    // The tables exercise the termination: most stop at least one quad early
+    CHECK(quadTables > kTables / 2);
+}
+
+TEST_CASE("VDP1 quad termination never changes the framebuffers on targeted quads",
+          "[vdp][vdp1][quad-termination][brimir]") {
+    // Each scene is drawn in every mode combination below: polygon and distorted sprite (RGB texture with a transparent
+    // row), clipping modes 0 and 1 with and without user clipping, plain and deinterlaced double density.
+    struct Shape {
+        const char *name;
+        vdp::CoordS32 a, b, c, d;
+    };
+    std::vector<Shape> shapes = {
+        {"convex crossing the bottom right", {200, 120}, {420, 180}, {380, 330}, {150, 280}},
+        {"convex crossing the top left", {-80, -40}, {120, -90}, {150, 60}, {-30, 100}},
+        {"convex rotated across all edges", {160, -120}, {460, 112}, {160, 344}, {-140, 112}},
+        {"concave crossing the right edge", {250, 40}, {420, 60}, {300, 110}, {380, 200}},
+        {"concave crossing the bottom", {60, 150}, {200, 160}, {120, 190}, {90, 300}},
+        {"bowtie at the top right corner", {300, 10}, {340, -20}, {315, 20}, {330, -30}},
+        {"bowtie at the top right corner, mirrored", {315, 20}, {330, -30}, {300, 10}, {340, -20}},
+        {"bowtie with lobes on both sides of the left edge", {-40, 50}, {40, 150}, {-40, 150}, {40, 50}},
+        {"bowtie across the bottom edge", {100, 200}, {200, 260}, {100, 260}, {200, 200}},
+        {"triangle (A = B) crossing the bottom", {160, 300}, {160, 300}, {300, 100}, {20, 100}},
+        {"triangle (C = D) crossing the left edge", {-60, 40}, {100, 20}, {120, 180}, {120, 180}},
+        {"triangle (B = C) apex outside the right edge", {100, 50}, {500, 120}, {500, 120}, {100, 200}},
+        // cases upstream's and a line-touch predicate got wrong: corner grazes, second lobes, 13-bit wrapped deltas
+        {"convex quad grazing the clip area on exit", {411, -98}, {150, 490}, {673, -115}, {532, -117}},
+        {"bowtie at the top right corner, doubled", {296, 36}, {340, -40}, {307, 32}, {330, -60}},
+        {"convex quad with 13-bit wrapped edge deltas", {-2865, 435}, {216, 158}, {3, 98}, {-906, 174}},
+        {"quad wider than 4096", {-3000, 100}, {2000, 50}, {2100, 150}, {-2900, 200}},
+        {"quad taller than 4096 (dmaj mask)", {100, -2100}, {200, -2100}, {220, 2100}, {80, 2100}},
+        {"far off-screen quad", {-4000, -4000}, {-3900, -4000}, {-3900, -3900}, {-4000, -3900}},
+    };
+    // Sweep the bowtie and corner cases over small offsets
+    for (sint32 dx = -12; dx <= 12; dx += 4) {
+        for (sint32 dy = -12; dy <= 12; dy += 4) {
+            shapes.push_back({"bowtie sweep", {300 + dx, 10 + dy}, {340, -20}, {315 - dy, 20 + dx}, {330, -30}});
+            shapes.push_back({"corner sweep", {-20 + dx, -20}, {30, -10 + dy}, {20 - dx, 30}, {-10, 20 - dy}});
+        }
+    }
+
+    const std::vector<uint8> texture = RGBTexture(16, 16, {5, 6});
+    uint64 terminations = 0;
+    uint64 scenes = 0;
+    for (const Shape &shape : shapes) {
+        for (uint16 clip : {uint16{0}, kPModUserClip, kPModClipMode1, uint16(kPModUserClip | kPModClipMode1)}) {
+            for (bool doubleDensity : {false, true}) {
+                for (bool textured : {false, true}) {
+                    CAPTURE(shape.name, shape.a.x(), shape.a.y(), shape.b.x(), shape.b.y(), shape.c.x(), shape.c.y(),
+                            shape.d.x(), shape.d.y(), clip, doubleDensity, textured);
+                    VDP1Scene s;
+                    if (doubleDensity) {
+                        s.tvmd = 0x80C0;
+                        s.deinterlace = true;
+                        s.transparentMeshes = true;
+                    }
+                    s.userClipX0 = 100;
+                    s.userClipY0 = 60;
+                    s.userClipX1 = 220;
+                    s.userClipY1 = 160;
+                    const uint16 pmod = static_cast<uint16>(kPModRGB | kPModEndCodeDisable | clip);
+                    if (textured) {
+                        const uint16 srca = s.AddTexture(texture);
+                        s.Distorted(0, pmod, 0, srca, 0x0210, shape.a, shape.b, shape.c, shape.d);
+                    } else {
+                        s.Polygon(pmod, 0x83E0, shape.a, shape.b, shape.c, shape.d);
+                    }
+                    terminations += CheckTerminationIsPure(s);
+                    ++scenes;
+                }
+            }
+        }
+    }
+    CAPTURE(scenes);
+    CHECK(terminations > 0);
+}
+
+TEST_CASE("VDP1 quad termination never changes the framebuffers on rotated quads re-entering the user clip",
+          "[vdp][vdp1][quad-termination][brimir]") {
+    // A small user clip area and rotated rectangles and quads swept around it, in clipping modes 0 and 1: lines leave
+    // and re-enter the user clip area, which upstream's predicate treated as the end of the quad in clipping mode 0.
+    uint64 terminations = 0;
+    for (sint32 ux = -12; ux <= 12; ux += 3) {
+        for (sint32 uy = -12; uy <= 12; uy += 3) {
+            if (ux == 0 && uy == 0) {
+                continue;
+            }
+            for (uint16 clip : {kPModUserClip, uint16(kPModUserClip | kPModClipMode1)}) {
+                for (bool textured : {false, true}) {
+                    CAPTURE(ux, uy, clip, textured);
+                    VDP1Scene s;
+                    s.userClipX0 = 140;
+                    s.userClipY0 = 90;
+                    s.userClipX1 = 170;
+                    s.userClipY1 = 120;
+                    // rotated rectangle centred near the user clip area, crossing the system clip area's edges
+                    const vdp::CoordS32 a{150 - ux * 14, 100 - uy * 14};
+                    const vdp::CoordS32 b{a.x() + ux * 30, a.y() + uy * 30};
+                    const vdp::CoordS32 c{b.x() - uy * 25, b.y() + ux * 25};
+                    const vdp::CoordS32 d{a.x() - uy * 25, a.y() + ux * 25};
+                    // and a quad whose lines fan around the user clip area
+                    const vdp::CoordS32 e{a.x() + uy * 8, a.y() - ux * 8};
+                    const uint16 pmod = static_cast<uint16>(kPModRGB | kPModEndCodeDisable | clip);
+                    if (textured) {
+                        const uint16 srca = s.AddTexture(RGBTexture(16, 16, {7}));
+                        s.Distorted(0, pmod, 0, srca, 0x0210, a, b, c, d);
+                        s.Distorted(0, pmod, 0, srca, 0x0210, e, b, c, a);
+                    } else {
+                        s.Polygon(pmod, 0x83E0, a, b, c, d);
+                        s.Polygon(pmod, 0x83E0, e, b, c, a);
+                    }
+                    terminations += CheckTerminationIsPure(s);
+                }
+            }
+        }
+    }
+    CHECK(terminations > 0);
+}
+
+TEST_CASE("VDP1 sprite rows after a transparent row are drawn in clipping mode 1",
+          "[vdp][vdp1][quad-termination][brimir]") {
+    // Brimir fix of an upstream bug: with the user clipping mode bit set ("draw outside"), transparent pixels did not
+    // count as plotted, so a fully transparent sprite row ended the quad and every row below it was dropped. The same
+    // happened to a row that starts with two end codes. (Upstream allows a second run of plotted lines for the quads
+    // QuadStepper::IsDegenerate() reports, which includes this clockwise sprite, so it takes two such rows.)
+    for (const bool endCodes : {false, true}) {
+        for (const uint16 userClip : {uint16{0}, kPModUserClip}) {
+            CAPTURE(endCodes, userClip);
+            VDP1Scene s;
+            // user clip area away from the sprite, so with clipping mode 1 the sprite is drawn
+            s.userClipX0 = 200;
+            s.userClipY0 = 150;
+            s.userClipX1 = 250;
+            s.userClipY1 = 200;
+            std::vector<uint8> texture = endCodes ? RGBTexture(16, 8) : RGBTexture(16, 8, {2, 5});
+            if (endCodes) {
+                for (uint32 row : {2u, 5u}) {
+                    for (uint32 x = 0; x < 2; ++x) {
+                        texture[(row * 16 + x) * 2] = 0x7F;
+                        texture[(row * 16 + x) * 2 + 1] = 0xFF;
+                    }
+                }
+            }
+            const uint16 srca = s.AddTexture(texture);
+            const uint16 pmod = static_cast<uint16>(kPModRGB | kPModClipMode1 | userClip | (endCodes ? 0 : kPModEndCodeDisable));
+            s.Normal(0, pmod, 0, srca, 0x0208, 40, 20); // 16x8 at (40, 20)
+
+            const VDP1SceneResult r = DrawScene(s, true);
+            for (uint32 y = 0; y < 8; ++y) {
+                for (uint32 x = 0; x < 16; ++x) {
+                    CAPTURE(x, y);
+                    const uint16 expected = (y == 2 || y == 5) ? 0x0000 : static_cast<uint16>(0x8000 | (y << 8) | x);
+                    CHECK(ReadFB16(r, 40 + x, 20 + y) == expected);
+                }
+            }
+            CHECK(r.SameFramebuffers(DrawScene(s, false)));
+        }
+    }
+}
+
+TEST_CASE("VDP1 edge steppers move monotonically towards their final position", "[vdp][vdp1][quad-termination][brimir]") {
+    // vdp1_clip.hpp relies on it: every remaining position of an edge lies in the box of its current and final
+    // positions, also with 13-bit wrapped deltas and the 4095 step mask.
+    TestRng rng{7};
+    for (int i = 0; i < 20000; ++i) {
+        vdp::CoordS32 p[4];
+        for (auto &q : p) {
+            q = rng.Chance(70) ? vdp::CoordS32{rng.Range(-500, 800), rng.Range(-500, 700)}
+                               : vdp::CoordS32{rng.Range(-4096, 4095), rng.Range(-4096, 4095)};
+        }
+        vdp::QuadStepper quad{p[0], p[1], p[2], p[3]};
+        std::vector<vdp::CoordS32> left, right;
+        for (; quad.CanStep(); quad.Step()) {
+            left.push_back(quad.LeftEdge().Coord());
+            right.push_back(quad.RightEdge().Coord());
+        }
+        for (const auto *edge : {&left, &right}) {
+            sint32 dirX = 0, dirY = 0;
+            bool ok = true;
+            for (size_t k = 1; k < edge->size(); ++k) {
+                const sint32 dx = (*edge)[k].x() - (*edge)[k - 1].x();
+                const sint32 dy = (*edge)[k].y() - (*edge)[k - 1].y();
+                ok = ok && std::abs(dx) <= 1 && std::abs(dy) <= 1 && dx * dirX >= 0 && dy * dirY >= 0;
+                dirX = dx != 0 ? dx : dirX;
+                dirY = dy != 0 ? dy : dirY;
+            }
+            if (!ok) {
+                CAPTURE(p[0].x(), p[0].y(), p[1].x(), p[1].y(), p[2].x(), p[2].y(), p[3].x(), p[3].y());
+                FAIL("edge not monotonic");
+            }
+        }
+    }
+}
+
+namespace {
+
+// Whether every pixel the line plotters visit (main and antialias, after an optional SystemClip) lies in the box of
+// the end points grown by one pixel
+bool LinePixelsInEndPointBox(vdp::CoordS32 a, vdp::CoordS32 b, bool antiAlias, sint32 clipW, sint32 clipH) {
+    vdp::LineStepper line{a, b, antiAlias};
+    if (clipW >= 0) {
+        line.SystemClip(clipW, clipH);
+    }
+    const sint32 minX = std::min(a.x(), b.x()) - 1, maxX = std::max(a.x(), b.x()) + 1;
+    const sint32 minY = std::min(a.y(), b.y()) - 1, maxY = std::max(a.y(), b.y()) + 1;
+    auto inside = [&](vdp::CoordS32 c) { return c.x() >= minX && c.x() <= maxX && c.y() >= minY && c.y() <= maxY; };
+    bool aa = false;
+    for (line.Step(); line.CanStep(); aa = line.Step()) {
+        if (!inside(line.Coord()) || (aa && !inside(line.AACoord()))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("VDP1 line pixels stay in the end point box", "[vdp][vdp1][quad-termination][brimir]") {
+    // vdp1_clip.hpp relies on it for lines up to kMaxLineDelta long on both axes.
+    constexpr sint32 kMax = vdp::VDP1QuadTermination::kMaxLineDelta;
+    TestRng rng{11};
+    uint64 failures = 0;
+    for (sint32 dx = -24; dx <= 24; ++dx) {
+        for (sint32 dy = -24; dy <= 24; ++dy) {
+            for (bool antiAlias : {false, true}) {
+                failures += !LinePixelsInEndPointBox({100, 100}, {100 + dx, 100 + dy}, antiAlias, -1, 0);
+            }
+        }
+    }
+    for (int i = 0; i < 300000; ++i) {
+        const vdp::CoordS32 a{rng.Range(-2000, 2000), rng.Range(-2000, 2000)};
+        const sint32 range = rng.Chance(50) ? kMax : 64;
+        const vdp::CoordS32 b{a.x() + rng.Range(-range, range), a.y() + rng.Range(-range, range)};
+        const bool clip = rng.Chance(50);
+        const bool ok = LinePixelsInEndPointBox(a, b, rng.Chance(50), clip ? rng.Range(0, 704) : -1, rng.Range(0, 512));
+        if (!ok) {
+            CAPTURE(a.x(), a.y(), b.x(), b.y());
+            ++failures;
+        }
+    }
+    CHECK(failures == 0);
+
+    // Longer lines wrap the 13-bit accumulators and leave the box, which is why the termination has a size limit
+    uint64 escapes = 0;
+    for (int i = 0; i < 20000; ++i) {
+        const vdp::CoordS32 a{rng.Range(-4000, 0), rng.Range(-4000, 4000)};
+        const vdp::CoordS32 b{a.x() + rng.Range(2048, 4000), a.y() + rng.Range(-4000, 4000)};
+        escapes += !LinePixelsInEndPointBox(a, b, true, -1, 0);
+    }
+    CHECK(escapes > 0);
 }

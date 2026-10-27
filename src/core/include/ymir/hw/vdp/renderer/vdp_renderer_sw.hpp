@@ -161,6 +161,16 @@ public:
 
     void DumpExtraVDP1Framebuffers(std::ostream &out) const override;
 
+    // Brimir: test hooks. Disables the quad loops' early termination (vdp1_clip.hpp) so tests can show that it never
+    // changes the framebuffers, and counts the quads it stopped early. Not exposed as an option. Call between frames on
+    // the emulator thread (unthreaded VDP1).
+    void SetVDP1QuadTerminationForTesting(bool enabled) {
+        m_VDP1QuadTermination = enabled;
+    }
+    uint64 GetVDP1QuadTerminationsForTesting() const {
+        return m_VDP1QuadTerminations;
+    }
+
 private:
     VDPState &m_state;
     config::VDP2DebugRender &m_vdp2DebugRenderOptions;
@@ -651,6 +661,8 @@ private:
     // VDP1
 
     uint16 m_VDP1doubleV;
+    bool m_VDP1QuadTermination = true;   // Brimir: SetVDP1QuadTerminationForTesting
+    uint64 m_VDP1QuadTerminations = 0; // Brimir: GetVDP1QuadTerminationsForTesting
 
     struct VDP1PixelParams {
         VDP1Command::DrawMode mode;

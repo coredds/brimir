@@ -1,5 +1,7 @@
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 
+#include <ymir/hw/vdp/renderer/common/vdp1_clip.hpp> // Brimir: quad termination
+
 #include <ymir/util/constexpr_for.hpp>
 #include <ymir/util/dev_log.hpp>
 #include <ymir/util/inline.hpp>
@@ -1515,30 +1517,11 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1PlotTexturedQuad(uint32 cmdAddress, V
     const bool flipV = control.flipV;
     quad.SetupTexture(lineParams.texVStepper, charSizeH == 0 ? 1 : charSizeV, flipV);
 
-    // Optimization for the case where the quad goes outside the system clipping area.
-    // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
-    // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
-    // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
-    // can be plotted because they all sit outside the system clip area.
-    //
-    // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
-    // poking into the screen area in a configuration similar to this:
-    //
-    //                       D
-    //                        B
-    //   +-----------------+
-    //   |            A    |
-    //   |               C |
-    //   |                 |
-    //   |                 |
-    //   |                 |
-    //   +-----------------+
-    //
-    // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
-    // need to check for two sequences of plotted lines rather than one.
-    bool linePlotted = false;
-    int plottedSegmentsCount = 0;
-    const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
+    // Brimir: stop the quad only once no remaining line can reach the system clip area (vdp1_clip.hpp). Upstream
+    // stopped after the first line that plotted nothing once a run of lines had plotted (two runs if
+    // quad.IsDegenerate()), which dropped visible lines.
+    const VDP1QuadTermination termination{quad, m_state.state1.sysClipH,
+                                          (m_state.state1.sysClipV << m_VDP1doubleV) | m_VDP1doubleV};
 
     const VDP1Regs &regs1 = VDP1GetRegs();
     const VDP2Regs &regs2 = VDP2GetRegs();
@@ -1546,6 +1529,11 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1PlotTexturedQuad(uint32 cmdAddress, V
 
     // Interpolate linearly over edges A-D and B-C
     for (; quad.CanStep(); quad.Step()) {
+        if (termination.Done(quad) && m_VDP1QuadTermination) { // Brimir
+            ++m_VDP1QuadTerminations;
+            break;
+        }
+
         // Plot lines between the interpolated points
         const CoordS32 coordL = quad.LeftEdge().Coord();
         const CoordS32 coordR = quad.RightEdge().Coord();
@@ -1560,17 +1548,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1PlotTexturedQuad(uint32 cmdAddress, V
             lineParams.gouraudRight = &quad.RightEdge().Gouraud();
         }
 
-        if (VDP1PlotTexturedLine<deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
-            if (!linePlotted) {
-                linePlotted = true;
-                ++plottedSegmentsCount;
-            }
-        } else if (plottedSegmentsCount >= plottedSegmentsMax) {
-            // No more lines can be drawn past this point
-            break;
-        } else {
-            linePlotted = false;
-        }
+        VDP1PlotTexturedLine<deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity);
     }
 }
 
@@ -1825,30 +1803,11 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
         quad.SetupGouraud(colorA, colorB, colorC, colorD);
     }
 
-    // Optimization for the case where the quad goes outside the system clipping area.
-    // Skip rendering the rest of the quad when a line is clipped after plotting at least one line.
-    // The first few lines of the quad could also be clipped; that is accounted for by requiring at least one
-    // plotted line. The point is to skip the calculations once the quad iterator reaches a point where no more lines
-    // can be plotted because they all sit outside the system clip area.
-    //
-    // This also handles a degenerate case with a bowtie quad sitting outside the corner of the screen with two points
-    // poking into the screen area in a configuration similar to this:
-    //
-    //                       D
-    //                        B
-    //   +-----------------+
-    //   |            A    |
-    //   |               C |
-    //   |                 |
-    //   |                 |
-    //   |                 |
-    //   +-----------------+
-    //
-    // In this case, the line gets fully clipped partway through the quad, but comes back into view at the end, so we
-    // need to check for two sequences of plotted lines rather than one.
-    bool linePlotted = false;
-    int plottedSegmentsCount = 0;
-    const int plottedSegmentsMax = quad.IsDegenerate() ? 2 : 1;
+    // Brimir: stop the quad only once no remaining line can reach the system clip area (vdp1_clip.hpp). Upstream
+    // stopped after the first line that plotted nothing once a run of lines had plotted (two runs if
+    // quad.IsDegenerate()), which dropped visible lines.
+    const VDP1QuadTermination termination{quad, m_state.state1.sysClipH,
+                                          (m_state.state1.sysClipV << m_VDP1doubleV) | m_VDP1doubleV};
 
     const VDP1Regs &regs1 = VDP1GetRegs();
     const VDP2Regs &regs2 = VDP2GetRegs();
@@ -1856,6 +1815,11 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
 
     // Interpolate linearly over edges A-D and B-C
     for (; quad.CanStep(); quad.Step()) {
+        if (termination.Done(quad) && m_VDP1QuadTermination) { // Brimir
+            ++m_VDP1QuadTerminations;
+            break;
+        }
+
         // Plot lines between the interpolated points
         const CoordS32 coordL = quad.LeftEdge().Coord();
         const CoordS32 coordR = quad.RightEdge().Coord();
@@ -1865,17 +1829,7 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
             lineParams.gouraudRight = quad.RightEdge().GouraudValue();
         }
 
-        if (VDP1PlotLine<true, deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity)) {
-            if (!linePlotted) {
-                linePlotted = true;
-                ++plottedSegmentsCount;
-            }
-        } else if (plottedSegmentsCount >= plottedSegmentsMax) {
-            // No more lines can be drawn past this point
-            break;
-        } else {
-            linePlotted = false;
-        }
+        VDP1PlotLine<true, deinterlace, transparentMeshes>(coordL, coordR, lineParams, regs1, doubleDensity);
     }
 }
 
