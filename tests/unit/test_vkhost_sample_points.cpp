@@ -10,6 +10,7 @@
 
 using vkhost::ComputeSharpness;
 using vkhost::Region;
+using vkhost::SampledPointCount;
 using vkhost::SampleImage;
 
 namespace {
@@ -107,6 +108,12 @@ TEST_CASE("vkhost sample points: the excluded lattice and sizes that are not a m
     const std::vector<uint32_t> tallSamples = SampleImage(tallFrame.data(), 4, 448, 1, 0);
     CHECK(tallSamples[4] == 0u);
     CHECK(tallSamples[8] == tall[8]);
+    // The count behind the "sampled P of Q points" summary.
+    CHECK(SampledPointCount(320, 224, 0) == 320u * 224u);
+    CHECK(SampledPointCount(w, h, 0) == (w / 2) * h);
+    CHECK(SampledPointCount(704, 448, 0) == 352u * 224u);
+    CHECK(SampledPointCount(448, 704, 90) == 352u * 224u);
+    CHECK(SampledPointCount(4, 448, 0) == 4u * 224u);
     CHECK(SampleImage(frame.data(), w * n - 1, h * n, n, 0).empty());
     CHECK_FALSE(ComputeSharpness(frame.data(), w * n, h * n - 1, n, 0).valid);
 }

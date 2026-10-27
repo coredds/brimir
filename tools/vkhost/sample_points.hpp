@@ -79,6 +79,19 @@ inline std::vector<uint32_t> SampleImage(const uint32_t *xrgb, uint32_t W, uint3
     return native;
 }
 
+// How many of the w x h native output pixels of a frame are compared by SampleImage (the others are the excluded
+// lattice).
+inline uint64_t SampledPointCount(uint32_t w, uint32_t h, uint32_t rotation) {
+    uint64_t count = 0;
+    for (uint32_t oy = 0; oy < h; ++oy) {
+        for (uint32_t ox = 0; ox < w; ++ox) {
+            const SamplePoint s = MapSample(1, rotation, w, h, ox, oy);
+            count += SampleExcluded(s, rotation, w, h) ? 0 : 1;
+        }
+    }
+    return count;
+}
+
 struct Sharpness {
     bool valid = false; // W and H are multiples of n
     uint32_t x0 = 0, y0 = 0, w = 0, h = 0; // the region, clamped to the frame (native output pixels)

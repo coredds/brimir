@@ -72,11 +72,13 @@ function(check_vulkan_counters name)
     require_log(${name} "hidden-frame GPU calls 0,")
     require_log(${name} "validation errors 0,")
     require_log(${name} "max submits per retro_run [01]([^0-9]|$)")
+    require_log(${name} "core device memory: [0-9.]+ MiB after the last frame, peak [0-9.]+ MiB, [0-9]+ allocations")
 endfunction()
 
 # VDP2 ran on the GPU for the whole run (the Vulkan VDP2 renderer attached at every context, never reverted).
 function(check_vdp2_renderer name)
     require_log(${name} "Vulkan VDP2 renderer active")
+    require_log(${name} "peak [0-9.]*[1-9][0-9.]* MiB, [1-9][0-9]* allocations")
     forbid_log(${name} "Vulkan VDP2 renderer (unavailable|off)")
     forbid_log(${name} "Vulkan frame output failed")
 endfunction()
@@ -376,6 +378,7 @@ require_log(scale2 "Internal resolution: frames at 2x")
 require_log(scale2 "SET_GEOMETRY 640x448 \\(max 2816x2816, aspect 1.3333\\)")
 forbid_log(scale2 "SET_GEOMETRY 320x224")
 require_log(scale2 "SET_SYSTEM_AV_INFO calls 0,")
+require_log(scale2 "hash-sample: sampled 21504000 of 21504000 points over 300 frames \\(100.0%\\)")
 require_log(scale2 "sharpness: 300 frames \\(300 at more than 1x\\), mean non-constant blocks 0.00%, mean abs diff 0.0000")
 # ... rotated and cropped: the presenter's crop (decided natively, offsets N * (crop / 2)) and rotation at 2x, the
 # sample points mapped through the rotation by --hash-sample.

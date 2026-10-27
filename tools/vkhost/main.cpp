@@ -505,6 +505,18 @@ public:
     size_t Count() const { return m_count; }
     bool Failed() const { return m_failed; }
 
+    // --hash-sample: how much of the frames the hashes covered (the rest is the excluded lattice).
+    void PrintSampleSummary() const {
+        if (m_sampleFrames == 0) {
+            return;
+        }
+        std::fprintf(stderr, "vkhost: hash-sample: sampled %llu of %llu points over %zu frames (%.1f%%)\n",
+                     static_cast<unsigned long long>(m_sampledPoints), static_cast<unsigned long long>(m_samplePoints),
+                     m_sampleFrames,
+                     m_samplePoints != 0 ? 100.0 * static_cast<double>(m_sampledPoints) / static_cast<double>(m_samplePoints)
+                                         : 0.0);
+    }
+
     void PrintSharpnessSummary() const {
         if (m_sharpness == 0) {
             return;
@@ -534,6 +546,9 @@ private:
         const std::vector<uint32_t> native = vkhost::SampleImage(frame.xrgb.data(), frame.w, frame.h, n, m_rotation);
         const uint64_t hash = brimir_tools::HashFrame(w, h, native.data(), size_t{w} * 4);
         std::printf("frame %zu %ux%u %016llx\n", m_count, w, h, static_cast<unsigned long long>(hash));
+        ++m_sampleFrames;
+        m_sampledPoints += vkhost::SampledPointCount(w, h, m_rotation);
+        m_samplePoints += uint64_t{w} * h;
     }
 
     // vkhost::ComputeSharpness (sample_points.hpp) over the region.
@@ -589,6 +604,9 @@ private:
     uint32_t m_sharpness = 0;
     uint32_t m_rotation = 0;
     Region m_region;
+    size_t m_sampleFrames = 0;
+    uint64_t m_sampledPoints = 0;
+    uint64_t m_samplePoints = 0;
     size_t m_sharpFrames = 0;
     size_t m_sharpScaledFrames = 0;
     double m_sumNonConstant = 0;
@@ -740,6 +758,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "vkhost: av: SET_SYSTEM_AV_INFO calls %llu, SET_GEOMETRY calls %llu\n",
                  static_cast<unsigned long long>(report.systemAvInfoCalls),
                  static_cast<unsigned long long>(report.geometryCalls));
+    sink.PrintSampleSummary();
     sink.PrintSharpnessSummary();
     if (args.config.probe) {
         PrintProbeSummary(report.probeFrames);

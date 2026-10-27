@@ -102,10 +102,15 @@ where the span rules above deliberately move the sample point (correct by design
 `tests/unit/vdp2_scene.*` and, conservatively from the frame size alone, in `brimir_vkhost --hash-sample`): odd native
 columns where an RBG is enabled in a hi-res mode; odd composite rows where an RBG is drawn in an interlaced mode
 (deinterlaced or woven); the second row of each identical pair for NBGs in single-density interlace. Known limits:
-- a perspective floor whose depth comes from per-line coefficients gains detail mostly along x: the coefficient is
-  native, so the sub-lines of a line only step by the line's deltaXst/deltaYst (stage 1C validation: on the dumped
-  frames 0.07-8% of the blocks of Virtua Fighter 2's and Panzer Dragoon II Zwei's floors have vertical sub-pixel
-  detail, against 34-55% on Panzer Dragoon II's zoomed sky);
+- a perspective floor whose depth comes from per-line coefficients gains detail mostly along x, and stays vertically
+  stepped at N > 1. This is accepted (design Ruling 11): the design keeps per-line tables, the coefficient tables that
+  give floors their perspective included, per native line, so the sub-lines of a line only step by the line's own
+  deltaXst/deltaYst (stage 1C validation: on the dumped frames 0.07-8% of the blocks of Virtua Fighter 2's and Panzer
+  Dragoon II Zwei's floors have vertical sub-pixel detail, against 34-55% on Panzer Dragoon II's zoomed sky; the
+  plan's 25% figure was an estimate, and the magnified texels near the camera are content, not a rule). 1C still meets
+  "visibly sharper on VDP2 layers" (horizontal detail, rotation, zoomed NBGs, sky). Follow-up, a design change:
+  sub-line coefficient interpolation (scale-mode coefficients between KA(l) and KA(l) + dKAst when both entries are
+  non-transparent) would make floors vertically smoother;
 - a double-density bitmap NBG with vertical line scroll (alternate-line off) can show a sub-row sawtooth at N > 1
   (parked; the sample points are unchanged);
 - exception W5 is unchanged at N (its NBG does not use the character table).

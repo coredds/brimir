@@ -332,7 +332,8 @@ core's submits and each counter. A second line, `vkhost: vulkan: core device mem
 Y MiB, N allocations`, sums the core's device memory (its `vkAllocateMemory` / `vkFreeMemory` calls, wrapped like
 `vkQueueSubmit`; the host's own readback memory is not counted): X is what is live after the last recorded frame, Y
 the most that was live at once over the run (every context; a live internal-resolution change briefly holds the old
-and the new resources).
+and the new resources), N the number of successful `vkAllocateMemory` calls over the whole run, freed ones included
+(a count of calls, not of live allocations; it grows with every context reset and live resolution change).
 
 The host's volk and the core's are separate copies (the core is its own library with its own globals): the core's
 `VulkanDevice::WrapExternal` loads its volk from the host's `vkGetInstanceProcAddr` and instance without touching the
@@ -455,7 +456,10 @@ most 352), and odd pre-rotation native rows when the height is above 300 (448/48
 most 256). The line is `frame <i> <W/M>x<H/M> <hash>` (the same FNV-1a as `--hash`). With M = 1 and a low-res
 progressive frame nothing is excluded and the hash equals `--hash`'s. A frame whose size is not a multiple of M fails
 the run (exit 2). So `--compare --internal-resolution N --hash-sample N` compares the Vulkan run at N with software at 1x
-through the sample-point invariant.
+through the sample-point invariant. At the end of the run `vkhost: hash-sample: sampled P of Q points over F frames
+(X%)` says how much of the frames the hashes covered: Q is every native pixel of the F frames, P those not in the
+excluded lattice (100% on the low-res progressive BIOS menu, 25% on hi-res interlaced screens such as Virtua Fighter 2's
+704x448 ones, where only the even columns of even rows are compared).
 
 `--sharpness`: for each recorded frame at scale M (from the log line; frames at 1x give 0 and are counted
 separately), over the native output pixels of `--region` (default the whole frame): for each native pixel, its M x M
