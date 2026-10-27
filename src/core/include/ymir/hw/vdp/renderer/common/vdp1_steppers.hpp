@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace ymir::vdp {
@@ -357,6 +358,8 @@ struct LineStepper {
         const sint32 end = xmajor ? xe : ye;
         const sint32 maxLen = xmajor ? width : height;
 
+        const sint32 startAccum = m_accum; // Brimir: with xs and ys, the start state for ClipByStepping()
+
         // Clip from the start
         uint32 startClip = 0u;
         if (inc > 0 && start < -kPadding) {
@@ -372,6 +375,12 @@ struct LineStepper {
                 m_accum = WrapSub(m_accum, m_num); // Brimir: explicit wrapping, also below
                 if (m_den != 0) {
                     while (m_accum <= m_accumTarget) {
+                        if (MinorStepsNeverEnd(m_accum)) { // Brimir
+                            m_x = xs;
+                            m_y = ys;
+                            m_accum = startAccum;
+                            return ClipByStepping(-kPadding, width, height);
+                        }
                         m_accum = WrapAdd(m_accum, m_den);
                         m_x += m_xMinInc;
                         m_y += m_yMinInc;
@@ -401,6 +410,14 @@ struct LineStepper {
                 tempAccum = WrapSub(tempAccum, m_num); // Brimir: explicit wrapping, also below
                 if (m_den != 0) {
                     while (tempAccum <= m_accumTarget) {
+                        if (MinorStepsNeverEnd(tempAccum)) { // Brimir
+                            m_x = xs;
+                            m_y = ys;
+                            m_accum = startAccum;
+                            m_xEnd = xe;
+                            m_yEnd = ye;
+                            return ClipByStepping(-kPadding, width, height);
+                        }
                         tempAccum = WrapAdd(tempAccum, m_den);
                         m_xEnd += m_xMinInc;
                         m_yEnd += m_yMinInc;
@@ -476,6 +493,74 @@ struct LineStepper {
     }
 
 private:
+    // Brimir: SystemClip()'s minor-step loops ("while (accum <= accumTarget) accum += den") never end for some lines,
+    // which froze the emulator (upstream Ymir has the same loops).
+    //
+    // The counters are multiples of 2^(32 - t_bits) and wrap at 2^32, so adding den walks the accumulator around a
+    // cycle of the values congruent to it modulo gcd(den, 2^32). den = (2 * major) << (32 - t_bits) is 0 (no loop) or
+    // a multiple of 2^(33 - t_bits); unless it is exactly 2^31 the cycle has a step of at most 2^30 and must pass
+    // through (accumTarget, 2^31), since accumTarget <= 2^(32 - t_bits), so the loop ends. den = 2^31 (with 13 bits:
+    // major = 2048 mod 4096) alternates the accumulator between v and v + 2^31: one of the two is negative, the other
+    // one, w >= 0, ends the loop only if w > accumTarget. Antialiased lines have accumTarget < 0 and always end.
+    // Without antialiasing the accumulator is an odd multiple of 2^(32 - t_bits) (it starts at major + 1 + num, and
+    // num and den are even), so w = 0 cannot happen, and w = 2^(32 - t_bits) loops forever when accumTarget is
+    // 2^(32 - t_bits), i.e. when the line runs towards negative coordinates on its major axis.
+    //
+    // MinorStepsNeverEnd() detects exactly that case when the loop is entered (accum <= accumTarget). Every other line
+    // takes the unchanged clip loops, so lines that ended before give the same skipped prefix and the same pixels.
+    FORCE_INLINE bool MinorStepsNeverEnd(sint32 accum) const {
+        return m_den == std::numeric_limits<sint32>::min() && WrapAdd(accum, m_den) <= m_accumTarget;
+    }
+
+    // Brimir: SystemClip() for the lines whose clip loops never end, called with the stepper at its start. There is no
+    // clipped-loop result to follow for these lines, so the clip falls back to the stepping rule the plotters use
+    // (Step()): it steps a copy over the whole line (DMajor() + 1 pixels, main and antialias). If no pixel lies in the
+    // padded clip area [minCoord, maxX] x [minCoord, maxY], the line is fully clipped like a line outside the area.
+    // Otherwise the stepper skips to the first such pixel (the return value is the number of skipped pixels, for the
+    // texture and gouraud steppers) and Length() ends at the last one. The plotted pixels are those of the unclipped
+    // line from the first pixel to the last pixel in the padded area, and the pixels left out are outside the system
+    // clip area, so the result is the one an unclipped line would draw (nothing outside the padded area is visible).
+    // Only lines without antialiasing get here (see MinorStepsNeverEnd), so the first plotted step, whose antialias
+    // pixel the plotters do not draw, loses nothing.
+    uint32 ClipByStepping(sint32 minCoord, sint32 maxX, sint32 maxY) {
+        auto inside = [&](sint32 x, sint32 y) { return x >= minCoord && x <= maxX && y >= minCoord && y <= maxY; };
+
+        LineStepper probe = *this;
+        bool found = false;
+        uint32 first = 0u;
+        uint32 last = 0u;
+        sint32 lastX = 0;
+        sint32 lastY = 0;
+        for (uint32 i = 0; i <= m_dmaj; ++i) {
+            const bool aa = probe.Step();
+            if (inside(probe.m_x, probe.m_y) || (aa && inside(probe.AAX(), probe.AAY()))) {
+                if (!found) {
+                    found = true;
+                    first = i;
+                }
+                last = i;
+                lastX = probe.m_x;
+                lastY = probe.m_y;
+            }
+        }
+
+        if (!found) {
+            m_x = m_xEnd;
+            m_y = m_yEnd;
+            m_length = 0u;
+            return 0u;
+        }
+
+        for (uint32 i = 0; i < first; ++i) {
+            Step();
+        }
+        m_step = 0u;
+        m_length = last - first + 1u;
+        m_xEnd = lastX;
+        m_yEnd = lastY;
+        return first;
+    }
+
     sint32 m_num;
     sint32 m_den;
     sint32 m_accum;
