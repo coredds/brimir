@@ -63,8 +63,9 @@ public:
     void EnsureContexts(uint32_t count);
 
     // Copies the frame's snapshots into the context's upload blocks and records its uploads, dispatches and barriers
-    // into cmd. Afterwards the composite buffer holds the frame (HRes x VRes, pitch HRes) and its writes are visible to
-    // compute shader and transfer reads recorded later. The context's previous Record must have completed on the GPU.
+    // into cmd. Afterwards the composite buffer holds the frame (N*HRes x N*VRes, pitch N*HRes at internal resolution
+    // N) and its writes are visible to compute shader and transfer reads recorded later. The context's previous Record
+    // must have completed on the GPU.
     // Returns false and records nothing when the backend failed to initialize, context is out of range or an upload
     // block cannot be allocated (the caller then re-uploads everything with the next frame; the frame's composite clear
     // stays pending for the next Record).

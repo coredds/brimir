@@ -794,6 +794,9 @@ void VulkanProvider::SetSyncSlots(uint32_t count) {
     if (count > m_syncSlots && m_failComputeOnGrow) {
         m_failPipelines = true;
     }
+    if (count > m_syncSlots && m_failOutputImagesOnGrow != 0) {
+        m_failOutputImagesAbove = m_failOutputImagesOnGrow;
+    }
     m_syncSlots = count;
     m_syncIndex = 0;
     std::fprintf(stderr, "vkhost: vulkan: sync index mask now 0x%x\n", (1u << count) - 1);

@@ -738,6 +738,13 @@ bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::s
     target.AttachDevice(*device, static_cast<uint32_t>(slots.size()) + kHiddenContexts, presenter->Scale());
     if (!target.Attached()) {
         error = "creating the VDP2 GPU resources failed";
+        if (presenter->Scale() > 1) {
+            // The software renderer's frames are native: no N x images for them (kept if 1x cannot be created).
+            std::string presenterError;
+            if (auto created = CreatePresenter(1, presenterError)) {
+                InstallPresenter(std::move(created));
+            }
+        }
         return false;
     }
     renderer = &target;
@@ -937,6 +944,30 @@ bool VulkanOutput::Impl::EnsureSlots(std::string &error) {
     }
     DestroySlots();
     VkResult result = CreateSlots(wanted, current);
+    // Above 1x, smaller output images before the compute output is given up: the renderer falls back to their scale
+    // (it never renders more than can be presented; its composite is rescaled by the next record).
+    const uint32_t grownScale = presenterScale;
+    while (result != VK_SUCCESS && current == VulkanOutputMode::Compute && presenterScale > 1) {
+        DestroySlots();
+        --presenterScale;
+        result = CreateSlots(wanted, current);
+    }
+    if (result == VK_SUCCESS && presenterScale != grownScale) {
+        bool fits = renderer == nullptr || renderer->InternalScale() <= presenterScale;
+        for (uint32_t n = presenterScale; !fits && n >= 1; --n) {
+            fits = renderer->FallBackInternalScale(n);
+        }
+        if (fits) {
+            compositeValid = false;
+            NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(grownScale) +
+                                               "x: recreating the output images for the new sync index mask failed; "
+                                               "using " +
+                                               std::to_string(renderer ? renderer->InternalScale() : presenterScale) +
+                                               "x");
+        } else {
+            result = VK_ERROR_OUT_OF_DEVICE_MEMORY; // the renderer cannot get down to the output's scale
+        }
+    }
     if (result != VK_SUCCESS && current == VulkanOutputMode::Compute) {
         DestroySlots();
         DetachRendererIdle(); // the copy-only output carries no renderer

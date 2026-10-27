@@ -38,7 +38,8 @@ namespace fs = std::filesystem;
 
 // Command line flags that take no value; every other flag consumes the next argument.
 const std::set<std::string> kValueless = {"--hash",        "--verbose", "--vulkan",  "--refuse-hw",
-                                          "--runahead",    "--compare", "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation"};
+                                          "--runahead",    "--compare", "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",
+                                          "--fail-output-images-on-grow"};
 // Dropped from both children (the compare adds its own).
 const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",       "--dump-dir", "--dump-frame",
                                         "--system-dir", "--frames", "--compare-vulkan-option"};
@@ -47,7 +48,7 @@ const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--
                                            "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",
                                            "--sharpness",  "--region",       "--fail-alloc-above",
                                            "--fail-output-images-above", "--defer-image-read", "--fail-submit-at",
-                                           "--fail-submits"};
+                                           "--fail-submits", "--fail-output-images-on-grow"};
 // Takes a frame number and a file; each child writes its own file (<file>.software, <file>.vulkan).
 const std::string kSaveStateAt = "--save-state-at";
 // Takes a frame number and key=value; both children get it.

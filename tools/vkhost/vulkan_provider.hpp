@@ -181,6 +181,8 @@ public:
     }
     void SetFailOutputImagesAbove(uint32_t scale) { m_failOutputImagesAbove = scale; }
     uint32_t FailOutputImagesAbove() const { return m_failOutputImagesAbove; }
+    // --fail-output-images-on-grow: the --fail-output-images-above limit takes effect once the ring grows.
+    void SetFailOutputImagesOnGrow(uint32_t scale) { m_failOutputImagesOnGrow = scale; }
 
     struct RealFunctions; // the unwrapped device functions
     const RealFunctions& Real() const;
@@ -214,6 +216,7 @@ private:
     uint64_t m_memoryPeak = 0;
     uint64_t m_memoryAllocations = 0;
     uint32_t m_failOutputImagesAbove = 0;
+    uint32_t m_failOutputImagesOnGrow = 0;
     int m_failSubmitFirst = -1;
     int m_failSubmitCount = 1;
     bool m_failSubmitArmed = false;

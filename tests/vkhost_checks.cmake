@@ -486,6 +486,42 @@ string(REGEX MATCHALL "frames at [0-9]x" load_scales "${output_images_fail_load_
 if(NOT "${load_scales}" STREQUAL "frames at 1x")
     fail(output_images_fail_load "presented scales '${load_scales}', expected 1x")
 endif()
+# ... and when the sync index mask grows at 4x (the output images are re-created for the larger ring, now at most 2x
+# wide): the output steps down to 2x (3x is refused too) and the renderer falls back to it, instead of the copy-only
+# output; the sample points stay identical to software, under synchronization validation.
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(output_images_fail_grow --vulkan --internal-resolution 4 --hash-sample 4 --grow-mask 100
+           --fail-output-images-above 2 --fail-output-images-on-grow)
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(output_images_fail_grow 300)
+check_vulkan_counters(output_images_fail_grow)
+check_vdp2_renderer(output_images_fail_grow)
+require_log(output_images_fail_grow "vkCreateImage of a 2112x2112 output image refused")
+require_log(output_images_fail_grow
+    "Internal resolution 4x: recreating the output images for the new sync index mask failed; using 2x")
+forbid_log(output_images_fail_grow "copy-only")
+string(REGEX MATCHALL "frames at [0-9]x" grow_scales "${output_images_fail_grow_err}")
+if(NOT "${grow_scales}" STREQUAL "frames at 4x;frames at 2x")
+    fail(output_images_fail_grow "presented scales '${grow_scales}', expected 4x then 2x")
+endif()
+
+# The renderer cannot be attached at any scale (allocations above 8 MiB fail: the 2x output images, 7.6 MiB each, are
+# created, the renderer's resources at 2x and at 1x are not): software renderer with the GPU output, and the output
+# images shrink back to 1x for its native frames (the memory left equals a 1x request's under the same limit).
+run_vkhost(attach_fail --vulkan --internal-resolution 2 --fail-alloc-above 8)
+check_run(attach_fail 300)
+check_vulkan_counters(attach_fail)
+check_software_renderer(attach_fail)
+require_log(attach_fail "creating the VDP2 GPU resources failed")
+forbid_log(attach_fail "creating the 1408 px output images failed")
+run_vkhost(attach_fail_native --vulkan --internal-resolution 1 --fail-alloc-above 8)
+check_run(attach_fail_native 300)
+require_log(attach_fail_native "creating the VDP2 GPU resources failed")
+string(REGEX MATCH "core device memory: [0-9.]+ MiB after the last frame" attach_memory "${attach_fail_err}")
+string(REGEX MATCH "core device memory: [0-9.]+ MiB after the last frame" native_memory "${attach_fail_native_err}")
+if(attach_memory STREQUAL "" OR NOT attach_memory STREQUAL native_memory)
+    fail(attach_fail "'${attach_memory}' after a failed attach at 2x, '${native_memory}' at 1x: the 2x output images were kept")
+endif()
 
 # A frontend that reads each image two displayed frames after set_image (RetroArch's threaded video path keeps the
 # published images; the latest legal read is before the core's next wait_sync_index for that sync index): live changes

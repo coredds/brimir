@@ -139,6 +139,8 @@ void PrintUsage(std::FILE* out) {
         "                injection: a GPU short of memory)\n"
         "  --fail-output-images-above N  with --vulkan: the core's vkCreateImage fails for its output images\n"
         "                (MUTABLE_FORMAT) wider than 704 x N\n"
+        "  --fail-output-images-on-grow  with --grow-mask and --fail-output-images-above: the limit applies only\n"
+        "                once the mask has grown\n"
         "  --fail-submit-at F [--fail-submits N]  with --vulkan: the core's frame submit fails in runs F .. F+N-1\n"
         "                (counting warmup frames from 0; N defaults to 1): the core repeats the frontend's image\n"
         "  --defer-image-read N  with --vulkan: read each set_image image N (1-2) displayed frames later, as a\n"
@@ -206,6 +208,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--fail-compute-on-grow") {
             args.config.failComputeOnGrow = true;
+            continue;
+        }
+        if (opt == "--fail-output-images-on-grow") {
+            args.config.failOutputImagesOnGrow = true;
             continue;
         }
         if (opt == "--fail-compute-on-reset") {
@@ -415,6 +421,11 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         !vulkanRun) {
         std::fprintf(stderr, "--fail-alloc-above, --fail-output-images-above, --fail-submit-at and "
                              "--defer-image-read need --vulkan or --compare\n");
+        return ParseResult::Error;
+    }
+    if (args.config.failOutputImagesOnGrow &&
+        (args.config.growMaskAt < 0 || args.config.failOutputImagesAbove == 0)) {
+        std::fprintf(stderr, "--fail-output-images-on-grow needs --grow-mask and --fail-output-images-above\n");
         return ParseResult::Error;
     }
     if (args.config.deferImageRead != 0 && args.config.growMaskAt >= 0) {

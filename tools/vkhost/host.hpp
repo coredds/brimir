@@ -81,6 +81,8 @@ struct HostConfig {
     uint64_t failAllocAboveMiB = 0;
     // --fail-output-images-above N: with --vulkan, the core's output images (set_image) wider than 704 * N fail.
     uint32_t failOutputImagesAbove = 0;
+    // --fail-output-images-on-grow: with --grow-mask, that limit applies only once the mask has grown.
+    bool failOutputImagesOnGrow = false;
     // --defer-image-read N: with --vulkan, each set_image image is read N displayed frames later (1 or 2: before the
     // core's next wait_sync_index for its sync index, the latest a frontend may read it), as a threaded frontend does.
     int deferImageRead = 0;

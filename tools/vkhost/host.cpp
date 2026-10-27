@@ -195,7 +195,11 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
         m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
         m_vulkan->SetFailAllocAbove(config.failAllocAboveMiB << 20);
-        m_vulkan->SetFailOutputImagesAbove(config.failOutputImagesAbove);
+        if (config.failOutputImagesOnGrow) {
+            m_vulkan->SetFailOutputImagesOnGrow(config.failOutputImagesAbove);
+        } else {
+            m_vulkan->SetFailOutputImagesAbove(config.failOutputImagesAbove);
+        }
         m_vulkan->SetFailSubmits(config.failSubmitAt, config.failSubmits);
     }
     m_haveCaptured = false;
