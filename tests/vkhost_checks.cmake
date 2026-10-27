@@ -459,6 +459,58 @@ if(NOT "${alloc_scales}" STREQUAL "frames at 1x;frames at 2x")
     fail(alloc_fail "presented scales '${alloc_scales}', expected 1x then 2x")
 endif()
 
+# The output images (the ones handed to set_image) cannot be created above 3x: a live 2x -> 4x keeps the renderer and the
+# output at 2x (the images are created before the renderer changes, so the two never differ); a live 3x then works.
+run_vkhost(output_images_fail --vulkan --internal-resolution 2 --hash-sample 2 --fail-output-images-above 3
+           --set-option-at 150 brimir_internal_resolution=4 --set-option-at 200 brimir_internal_resolution=3)
+check_run(output_images_fail 300)
+check_vulkan_counters(output_images_fail)
+check_vdp2_renderer(output_images_fail)
+require_log(output_images_fail "vkCreateImage of a 2816x2816 output image refused")
+require_log(output_images_fail
+    "Internal resolution 4x: creating the 2816 px output images failed: VK_ERROR_OUT_OF_DEVICE_MEMORY; staying at 2x")
+string(REGEX MATCHALL "frames at [0-9]x" output_scales "${output_images_fail_err}")
+if(NOT "${output_scales}" STREQUAL "frames at 2x;frames at 3x")
+    fail(output_images_fail "presented scales '${output_scales}', expected 2x then 3x")
+endif()
+# ... and at load (4x requested, output images at most 2x wide): the renderer is attached at the output's scale.
+run_vkhost(output_images_fail_load --vulkan --internal-resolution 4 --hash-sample 4 --fail-output-images-above 2)
+check_run(output_images_fail_load 300)
+check_vulkan_counters(output_images_fail_load)
+check_vdp2_renderer(output_images_fail_load)
+require_log(output_images_fail_load "VDP2 internal resolution: requested 4x, using 1x")
+string(REGEX MATCHALL "frames at [0-9]x" load_scales "${output_images_fail_load_err}")
+if(NOT "${load_scales}" STREQUAL "frames at 1x")
+    fail(output_images_fail_load "presented scales '${load_scales}', expected 1x")
+endif()
+
+# A frontend that reads each image two displayed frames after set_image (RetroArch's threaded video path keeps the
+# published images; the latest legal read is before the core's next wait_sync_index for that sync index): live changes
+# 1x -> 4x -> 2x under synchronization validation. The replaced output images must stay alive until then (the run fails
+# if the core destroys an image or view before its read), and every frame read late is still the right one. Also with
+# weave and hidden frames, and across a reinit from inside retro_run.
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+set(deferred_changes --set-option-at 100 brimir_internal_resolution=4 --set-option-at 160 brimir_internal_resolution=2)
+run_vkhost(deferred_live --vulkan --defer-image-read 2 --hash-sample 1 ${deferred_changes})
+check_run(deferred_live 300)
+run_vkhost(deferred_hidden --vulkan --defer-image-read 2 --hash-sample 1 ${deferred_changes} --hide-every 2
+           --option brimir_deinterlace_mode=none)
+check_run(deferred_hidden 300 REFERENCE software_hidden_none)
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+run_vkhost(deferred_reset --vulkan --defer-image-read 1 --internal-resolution 2 --hash-sample 2 --reset-in-run 150)
+check_run(deferred_reset 300)
+require_log(deferred_reset "context resets 2,")
+foreach(name IN ITEMS deferred_live deferred_hidden deferred_reset)
+    check_vulkan_counters(${name})
+    check_vdp2_renderer(${name})
+endforeach()
+foreach(name IN ITEMS deferred_live deferred_hidden)
+    string(REGEX MATCHALL "frames at [0-9]x" deferred_scales "${${name}_err}")
+    if(NOT "${deferred_scales}" STREQUAL "frames at 1x;frames at 4x;frames at 2x")
+        fail(${name} "presented scales '${deferred_scales}', expected 1x, 4x, 2x")
+    endif()
+endforeach()
+
 file(REMOVE_RECURSE "${state_dir}")
 
 # --compare: software and Vulkan in two child processes. Identical content passes; a Vulkan run that is rotated 180

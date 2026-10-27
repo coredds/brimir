@@ -195,7 +195,10 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
         m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
         m_vulkan->SetFailAllocAbove(config.failAllocAboveMiB << 20);
+        m_vulkan->SetFailOutputImagesAbove(config.failOutputImagesAbove);
     }
+    m_deferImageRead = m_vulkan ? config.deferImageRead : 0;
+    m_deferred.clear();
     m_frameScale = 0;
     m_optionsUpdated = false;
     m_systemAvInfoCalls = 0;
@@ -313,6 +316,7 @@ bool LibretroHost::ResetContext() {
         return false;
     }
     std::fprintf(stderr, "vkhost: vulkan: driver reinit (context_destroy, new device, context_reset)\n");
+    ProcessDeferred(0); // the frontend finishes its frames before it tears the driver down
     if (m_hwRender.context_destroy != nullptr) {
         m_hwRender.context_destroy();
     }
@@ -326,6 +330,7 @@ void LibretroHost::Unload() {
         // RetroArch's order: context_destroy, retro_unload_game, then the video driver frees the device
         // (destroy_device, vkDestroyDevice).
         if (m_contextLive) {
+            ProcessDeferred(0);
             if (m_hwRender.context_destroy != nullptr) {
                 m_hwRender.context_destroy();
             }
@@ -373,6 +378,7 @@ bool LibretroHost::RunFrame(FrameSink* sink) {
         m_vulkan->SetVideoEnabled(video);
     }
     if (m_vulkan && m_frameIndex == m_growMaskAt) {
+        ProcessDeferred(0); // a mask change: the device is idle, the frontend done with every image
         m_vulkan->SetSyncSlots(3);
     }
     m_sink = sink;
@@ -688,7 +694,70 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
     }
 }
 
+void LibretroHost::ProcessDeferred(size_t keep) {
+    while (m_deferred.size() > keep) {
+        DeferredFrame entry = m_deferred.front();
+        m_deferred.erase(m_deferred.begin());
+        if (entry.dupe) {
+            if (entry.sink != nullptr && m_lastFrame.w != 0) {
+                ++m_recordedFrames;
+                HostFrame frame = m_lastFrame;
+                entry.sink->OnFrame(std::move(frame));
+            }
+            continue;
+        }
+        HostFrame frame;
+        const auto readStart = std::chrono::steady_clock::now();
+        const bool readOk = m_vulkan && m_vulkan->ReadDeferred(entry.image, frame);
+        m_readbackSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - readStart).count();
+        if (!readOk) {
+            ++m_unreadable;
+            Problem("--defer-image-read: a set_image image could not be read when the frontend got to it");
+            continue;
+        }
+        frame.scale = entry.scale;
+        m_lastFrame = frame;
+        if (entry.sink != nullptr) {
+            ++m_recordedFrames;
+            ++m_recordedHardware;
+            entry.sink->OnFrame(std::move(frame));
+        }
+    }
+}
+
 void LibretroHost::Video(const void* data, unsigned width, unsigned height, size_t pitch) {
+    if (data == nullptr && m_deferImageRead > 0 && m_contextLive) {
+        ++m_duplicate;
+        DeferredFrame entry;
+        entry.dupe = true;
+        entry.sink = m_sink;
+        m_deferred.push_back(entry);
+        ProcessDeferred(static_cast<size_t>(m_deferImageRead));
+        return;
+    }
+    if (data == RETRO_HW_FRAME_BUFFER_VALID && m_deferImageRead > 0 && m_vulkan && m_contextLive) {
+        if ((m_avEnable & RETRO_AV_ENABLE_VIDEO) == 0) {
+            ++m_hiddenFrames;
+            Problem("hardware frame in a frame with video disabled");
+        }
+        ++m_displayed;
+        ++m_hardwareFrames;
+        // Kept as a threaded frontend keeps it (the handles copied) and read N displayed frames later.
+        DeferredFrame entry;
+        entry.sink = m_sink;
+        entry.scale = m_frameScale;
+        if (!m_vulkan->CaptureImage(width, height, entry.image)) {
+            ++m_unreadable;
+            Problem("hardware frame without a readable set_image image");
+            return;
+        }
+        m_deferred.push_back(entry);
+        ProcessDeferred(static_cast<size_t>(m_deferImageRead));
+        return;
+    }
+    if (data != nullptr) {
+        ProcessDeferred(0); // a software frame: everything handed over before it is shown first
+    }
     if (data == nullptr) {
         ++m_duplicate; // the core asks the frontend to repeat the last frame
         if (m_sink != nullptr && m_lastFrame.w != 0) {

@@ -79,6 +79,11 @@ struct HostConfig {
     // --fail-alloc-above MiB: with --vulkan, the core's vkAllocateMemory fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for
     // allocations above this size (0: never).
     uint64_t failAllocAboveMiB = 0;
+    // --fail-output-images-above N: with --vulkan, the core's output images (set_image) wider than 704 * N fail.
+    uint32_t failOutputImagesAbove = 0;
+    // --defer-image-read N: with --vulkan, each set_image image is read N displayed frames later (1 or 2: before the
+    // core's next wait_sync_index for its sync index, the latest a frontend may read it), as a threaded frontend does.
+    int deferImageRead = 0;
 };
 
 // One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).
@@ -194,6 +199,9 @@ private:
     void StoreOptionDefaults(const retro_core_options_v2& options);
     bool StartContext();
     void Problem(const std::string& text);
+    // --defer-image-read: reads (and delivers) the oldest deferred frames until at most `keep` are left.
+    void ProcessDeferred(size_t keep);
+    void DeliverFrame(HostFrame&& frame, FrameSink* sink, bool hardware);
 
     std::unique_ptr<Api> m_api;
     int m_slot = -1;
@@ -207,6 +215,14 @@ private:
     bool m_preferGl = false;
     int m_growMaskAt = -1;
     HostFrame m_lastFrame; // repeated for video_refresh(NULL)
+    struct DeferredFrame {
+        VulkanProvider::DeferredImage image;
+        bool dupe = false;  // video_refresh(NULL): repeat the frame before it
+        FrameSink* sink = nullptr; // where it goes (null during warmup and hidden frames)
+        uint32_t scale = 0;
+    };
+    std::vector<DeferredFrame> m_deferred; // oldest first
+    int m_deferImageRead = 0;
     int m_resetInRun = -1;
     bool m_resetInRunPending = false;
     int m_resetInPresent = -1;

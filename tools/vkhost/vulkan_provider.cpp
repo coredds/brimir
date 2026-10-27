@@ -46,6 +46,9 @@ struct VulkanProvider::RealFunctions {
     PFN_vkGetPhysicalDeviceProperties getPhysicalDeviceProperties = nullptr;
     PFN_vkCreateComputePipelines createComputePipelines = nullptr;
     PFN_vkAllocateMemory allocateMemory = nullptr;
+    PFN_vkCreateImage createImage = nullptr;
+    PFN_vkDestroyImage destroyImage = nullptr;
+    PFN_vkDestroyImageView destroyImageView = nullptr;
 };
 
 struct VulkanProvider::Slot {
@@ -137,6 +140,54 @@ VKAPI_ATTR VkResult VKAPI_CALL HookAllocateMemory(VkDevice device, const VkMemor
     return g_provider->Real().allocateMemory(device, info, allocator, memory);
 }
 
+// --fail-output-images-above: the images the core hands to set_image (MUTABLE_FORMAT, which libretro_vulkan.h
+// requires for them) fail to be created above 704 * N px.
+VKAPI_ATTR VkResult VKAPI_CALL HookCreateImage(VkDevice device, const VkImageCreateInfo* info,
+                                               const VkAllocationCallbacks* allocator, VkImage* image) {
+    const uint32_t scale = g_provider->FailOutputImagesAbove();
+    if (scale != 0 && info != nullptr && (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0 &&
+        info->extent.width > 704 * scale) {
+        g_provider->CountFailedAllocation();
+        std::fprintf(stderr, "vkhost: vulkan: vkCreateImage of a %ux%u output image refused (--fail-output-images-above)\n",
+                     info->extent.width, info->extent.height);
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return g_provider->Real().createImage(device, info, allocator, image);
+}
+
+template <typename Handle>
+uint64_t HandleValue(Handle handle) {
+    if constexpr (std::is_pointer_v<Handle>) {
+        return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));
+    } else {
+        return static_cast<uint64_t>(handle);
+    }
+}
+
+template <typename Handle>
+Handle HandleFrom(uint64_t value) {
+    if constexpr (std::is_pointer_v<Handle>) {
+        return reinterpret_cast<Handle>(static_cast<uintptr_t>(value));
+    } else {
+        return static_cast<Handle>(value);
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL HookDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator) {
+    if (image != VK_NULL_HANDLE) {
+        g_provider->OnDestroy(HandleValue(image), "image");
+    }
+    g_provider->Real().destroyImage(device, image, allocator);
+}
+
+VKAPI_ATTR void VKAPI_CALL HookDestroyImageView(VkDevice device, VkImageView view,
+                                                const VkAllocationCallbacks* allocator) {
+    if (view != VK_NULL_HANDLE) {
+        g_provider->OnDestroy(HandleValue(view), "image view");
+    }
+    g_provider->Real().destroyImageView(device, view, allocator);
+}
+
 PFN_vkVoidFunction Intercept(const char* name) {
     const VulkanProvider::RealFunctions& real = g_provider->Real();
     if (std::strcmp(name, "vkQueueSubmit") == 0) {
@@ -162,6 +213,15 @@ PFN_vkVoidFunction Intercept(const char* name) {
     }
     if (std::strcmp(name, "vkAllocateMemory") == 0 && real.allocateMemory) {
         return reinterpret_cast<PFN_vkVoidFunction>(&HookAllocateMemory);
+    }
+    if (std::strcmp(name, "vkCreateImage") == 0 && real.createImage) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&HookCreateImage);
+    }
+    if (std::strcmp(name, "vkDestroyImage") == 0 && real.destroyImage) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&HookDestroyImage);
+    }
+    if (std::strcmp(name, "vkDestroyImageView") == 0 && real.destroyImageView) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&HookDestroyImageView);
     }
     return nullptr;
 }
@@ -475,6 +535,10 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
     load(m_real->deviceWaitIdle, "vkDeviceWaitIdle");
     load(m_real->createComputePipelines, "vkCreateComputePipelines");
     load(m_real->allocateMemory, "vkAllocateMemory");
+    load(m_real->createImage, "vkCreateImage");
+    load(m_real->destroyImage, "vkDestroyImage");
+    load(m_real->destroyImageView, "vkDestroyImageView");
+    m_pinned.clear();
 
     m_slots.assign(kSyncSlots, Slot{});
     for (Slot& slot : m_slots) {
@@ -735,10 +799,59 @@ void VulkanProvider::EndFrame() {
 
 bool VulkanProvider::ReadImage(unsigned w, unsigned h, HostFrame& out) {
     const auto* image = static_cast<const retro_vulkan_image*>(m_image);
-    if (!m_live || image == nullptr || w == 0 || h == 0 || w > 4096 || h > 4096) {
+    if (!m_live || image == nullptr) {
         return false;
     }
-    const VkFormat format = image->create_info.format;
+    const VkImageSubresourceRange& range = image->create_info.subresourceRange;
+    return ReadHandles(HandleValue(image->create_info.image), image->create_info.format, range.baseMipLevel,
+                       range.baseArrayLayer, w, h, out);
+}
+
+bool VulkanProvider::CaptureImage(unsigned w, unsigned h, DeferredImage& out) {
+    const auto* image = static_cast<const retro_vulkan_image*>(m_image);
+    if (!m_live || image == nullptr) {
+        return false;
+    }
+    out.image = HandleValue(image->create_info.image);
+    out.view = HandleValue(image->image_view);
+    out.format = image->create_info.format;
+    out.baseMip = image->create_info.subresourceRange.baseMipLevel;
+    out.baseLayer = image->create_info.subresourceRange.baseArrayLayer;
+    out.w = w;
+    out.h = h;
+    m_pinned.insert(out.image);
+    m_pinned.insert(out.view);
+    return true;
+}
+
+bool VulkanProvider::ReadDeferred(const DeferredImage& image, HostFrame& out) {
+    const bool ok = m_live && m_pinned.count(image.image) != 0 &&
+                    ReadHandles(image.image, image.format, image.baseMip, image.baseLayer, image.w, image.h, out);
+    for (uint64_t handle : {image.image, image.view}) {
+        if (const auto it = m_pinned.find(handle); it != m_pinned.end()) {
+            m_pinned.erase(it);
+        }
+    }
+    return ok;
+}
+
+void VulkanProvider::OnDestroy(uint64_t handle, const char* what) {
+    if (const auto it = m_pinned.find(handle); it != m_pinned.end()) {
+        AddProblem(std::string("the core destroyed an ") + what + " it handed over with set_image before the " +
+                   "frontend read it (wait_sync_index for its sync index had not returned)");
+        // Not read any more: the handle may be reused.
+        while (m_pinned.count(handle) != 0) {
+            m_pinned.erase(m_pinned.find(handle));
+        }
+    }
+}
+
+bool VulkanProvider::ReadHandles(uint64_t imageHandle, int formatValue, uint32_t baseMip, uint32_t baseLayer,
+                                 unsigned w, unsigned h, HostFrame& out) {
+    if (!m_live || imageHandle == 0 || w == 0 || h == 0 || w > 4096 || h > 4096) {
+        return false;
+    }
+    const VkFormat format = static_cast<VkFormat>(formatValue);
     bool bgra = false;
     if (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB) {
         bgra = true;
@@ -762,8 +875,8 @@ bool VulkanProvider::ReadImage(unsigned w, unsigned h, HostFrame& out) {
         }
     }
 
-    const VkImage vkImage = image->create_info.image;
-    const VkImageSubresourceRange& range = image->create_info.subresourceRange;
+    const VkImage vkImage = HandleFrom<VkImage>(imageHandle);
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, baseMip, 1, baseLayer, 1};
     const VkResult result = gpu::vk_util::SubmitOneShot(*m_ctx, [&](VkCommandBuffer cmd) {
         // GENERAL: the frontend reads the image in the layout the core left it in, without a transition.
         gpu::vk_util::ImageBarrier(*m_ctx, cmd, vkImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,

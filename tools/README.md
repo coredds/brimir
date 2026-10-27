@@ -298,6 +298,8 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--sharpness N` | print, per recorded frame and as a summary, how much the N x frame differs from a nearest upscale (below) |
 | `--region x,y,w,h` | with `--sharpness`: only these native output pixels (after crop and rotation; clamped to the frame) |
 | `--fail-alloc-above MiB` | with `--vulkan`: the core's `vkAllocateMemory` fails (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) for allocations above MiB (fault injection: a GPU short of memory); the summary counts the refused allocations |
+| `--fail-output-images-above N` | with `--vulkan`: the core's `vkCreateImage` fails (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) for its output images (created `MUTABLE_FORMAT`, which `libretro_vulkan.h` requires for `set_image` images; its internal images do not use it) wider than 704 x N (N = 1-3): the output images of an internal resolution fail while the renderer's resources do not |
+| `--defer-image-read N` | with `--vulkan` (not with `--grow-mask`): read each `set_image` image N (1-2) displayed frames later, from the handles copied at `video_refresh` as RetroArch's threaded video path keeps them (the latest legal read: before the core's next `wait_sync_index` for that sync index on the 3-slot ring). The core destroying such an image or its view before the read (wrapped `vkDestroyImage` / `vkDestroyImageView`) fails the run; reads still pending are done before a reinit, a sync-mask change and at the end. Dupes repeat the frame before them, in order |
 
 The save directory is always a fresh temporary directory that is removed on exit. Core log messages go to stderr,
 prefixed `[core <level>]` (`[core#2 ...]` for the run-ahead instance); the Ymir library's own log lines go to stdout,
@@ -345,7 +347,10 @@ round trips; a Vulkan run rotated 180 degrees exits 3 and names the first differ
 (2x from the start, also rotated and cropped, with `--sharpness 2` all-constant on the menu; live changes 1x -> 2x -> 4x
 -> 1x with deinterlacing on and off under synchronization validation: SET_GEOMETRY N x native, no SET_SYSTEM_AV_INFO;
 `--hide-every 2` and `--reset-in-run 150` at 2x; the copy-only output at 4x stays native; `--fail-alloc-above 64` at 4x
-falls back to 1x, a live 2x works, a live 4x stays at 2x; `--compare --internal-resolution 2 --hash-sample 2`; every
+falls back to 1x, a live 2x works, a live 4x stays at 2x; `--fail-output-images-above 3` with a live 2x -> 4x stays at
+2x, a live 3x works, and at load 4x with `--fail-output-images-above 2` attaches at 1x; `--defer-image-read` with live
+1x -> 4x -> 2x, also with hidden frames and weave, and across a reinit;
+`--compare --internal-resolution 2 --hash-sample 2`; every
 Vulkan run at N compared with software through `--hash-sample`), and requires identical
 frame hashes, the Vulkan VDP2 renderer active where the context allows it (and not where it does not), the
 validation layer on and zero validation errors, queue-lock violations and hidden-frame presentation calls, and at
@@ -462,6 +467,12 @@ mean over the frames):
 
 The reference at an excluded lattice point (an odd column of a hi-res RBG, ...) is the N x frame's own pixel there, not
 the software 1x pixel, so the metric is relative to the N x frame's sample points, not to a 1x run.
+
+The sample-point mapping and the metric are header-only (`tools/vkhost/sample_points.hpp`) and unit-tested
+(`tests/unit/test_vkhost_sample_points.cpp`, tag `[vkhost]`): a nearest upscale gives 0 non-constant blocks and a mean
+difference of 0 and samples back to the 1x image in every rotation; detail in one sub-pixel of every 4th block gives
+exactly 25% and the expected mean difference; the excluded lattice is 0. On content: the BIOS menu at 2x is 0% (no
+sub-pixel features), Virtua Fighter 2's attract fight at 2x about 17%.
 
 Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2`, `GET_VARIABLE`,
 `GET_VARIABLE_UPDATE` (true once after a `--set-option-at` change), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,

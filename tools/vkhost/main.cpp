@@ -7,6 +7,7 @@
 
 #include "compare.hpp"
 #include "host.hpp"
+#include "sample_points.hpp"
 
 #include "../frame_hash.hpp"
 
@@ -39,9 +40,7 @@ namespace fs = std::filesystem;
 
 enum class ParseResult { Ok, Help, Error };
 
-struct Region {
-    uint32_t x = 0, y = 0, w = UINT32_MAX, h = UINT32_MAX; // native output coordinates
-};
+using vkhost::Region;
 
 struct CliArgs {
     vkhost::HostConfig config;
@@ -138,6 +137,11 @@ void PrintUsage(std::FILE* out) {
         "  --region x,y,w,h  with --sharpness: only these native output pixels\n"
         "  --fail-alloc-above MiB  with --vulkan: the core's vkAllocateMemory fails for larger allocations (fault\n"
         "                injection: a GPU short of memory)\n"
+        "  --fail-output-images-above N  with --vulkan: the core's vkCreateImage fails for its output images\n"
+        "                (MUTABLE_FORMAT) wider than 704 x N\n"
+        "  --defer-image-read N  with --vulkan: read each set_image image N (1-2) displayed frames later, as a\n"
+        "                threaded frontend does (before the core's next wait_sync_index for its sync index); the core\n"
+        "                destroying such an image or its view before the read fails the run\n"
         "  --help, -h    show this help\n"
         "\n"
         "Exit status: 0 ok, 1 usage, 2 error, 3 a check failed (queue lock, validation, presentation in a hidden\n"
@@ -352,6 +356,19 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             }
             args.region = {x, y, w, h};
             args.hasRegion = true;
+        } else if (opt == "--defer-image-read") {
+            if (!ParseInt(value, args.config.deferImageRead) || args.config.deferImageRead < 1 ||
+                args.config.deferImageRead > 2) {
+                std::fprintf(stderr, "Invalid --defer-image-read value (1 or 2): %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--fail-output-images-above") {
+            int n = 0;
+            if (!ParseInt(value, n) || n < 1 || n > 3) {
+                std::fprintf(stderr, "Invalid --fail-output-images-above value (1-3): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.config.failOutputImagesAbove = static_cast<uint32_t>(n);
         } else if (opt == "--fail-alloc-above") {
             int mib = 0;
             if (!ParseInt(value, mib) || mib == 0) {
@@ -384,8 +401,16 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
     }
-    if (args.config.failAllocAboveMiB != 0 && !vulkanRun) {
-        std::fprintf(stderr, "--fail-alloc-above needs --vulkan or --compare\n");
+    if ((args.config.failAllocAboveMiB != 0 || args.config.failOutputImagesAbove != 0 ||
+         args.config.deferImageRead != 0) &&
+        !vulkanRun) {
+        std::fprintf(stderr, "--fail-alloc-above, --fail-output-images-above and --defer-image-read need --vulkan or "
+                             "--compare\n");
+        return ParseResult::Error;
+    }
+    if (args.config.deferImageRead != 0 && args.config.growMaskAt >= 0) {
+        // The ring starts at one slot: a frontend could not keep any image past the next frame.
+        std::fprintf(stderr, "--defer-image-read cannot be combined with --grow-mask\n");
         return ParseResult::Error;
     }
     if (args.hasRegion && args.sharpness == 0) {
@@ -435,47 +460,6 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         return ParseResult::Error;
     }
     return ParseResult::Ok;
-}
-
-// The sample point of native output pixel (ox, oy) in an N x frame of the native output size w x h, through the
-// output rotation: the pre-rotation native pixel (px, py) the presenter reads for it (cs_frame_output.hlsl's inverse
-// rotation at 1x; the crop only offsets it by an even amount, 8 px per overscan step), then the N x output pixel
-// (X, Y) that shows the N x source pixel (N px, N py).
-struct SamplePoint {
-    uint32_t X, Y;   // in the N x frame
-    uint32_t px, py; // pre-rotation native pixel
-};
-
-SamplePoint MapSample(uint32_t n, uint32_t rotation, uint32_t w, uint32_t h, uint32_t ox, uint32_t oy) {
-    const bool swap = rotation == 90 || rotation == 270;
-    const uint32_t pw = swap ? h : w; // pre-rotation native width
-    SamplePoint s{};
-    switch (rotation) {
-    case 90: s.px = oy, s.py = w - 1 - ox; break;
-    case 180: s.px = w - 1 - ox, s.py = h - 1 - oy; break;
-    case 270: s.px = pw - 1 - oy, s.py = ox; break;
-    default: s.px = ox, s.py = oy; break;
-    }
-    const uint32_t sx = n * s.px;
-    const uint32_t sy = n * s.py;
-    switch (rotation) {
-    case 90: s.X = n * w - 1 - sy, s.Y = sx; break;
-    case 180: s.X = n * w - 1 - sx, s.Y = n * h - 1 - sy; break;
-    case 270: s.X = sy, s.Y = n * pw - 1 - sx; break;
-    default: s.X = sx, s.Y = sy; break;
-    }
-    return s;
-}
-
-// Ruling 2's host-side lattice: hi-res frames (pre-rotation native width above 400 px: 640/704 minus at most 48 px of
-// overscan crop, against at most 352 for the low-res widths) skip odd native columns, interlaced frames (height above
-// 300: 448/480/512 minus the crop, against at most 256) odd native rows. The crop offsets are even, so the parities are
-// those of the uncropped frame.
-bool SampleExcluded(const SamplePoint& s, uint32_t rotation, uint32_t w, uint32_t h) {
-    const bool swap = rotation == 90 || rotation == 270;
-    const uint32_t pw = swap ? h : w;
-    const uint32_t ph = swap ? w : h;
-    return (pw > 400 && (s.px & 1) != 0) || (ph > 300 && (s.py & 1) != 0);
 }
 
 // Prints hashes and writes PPMs as the frames arrive, so long runs do not keep every frame in memory.
@@ -538,72 +522,30 @@ private:
         }
         const uint32_t w = frame.w / n;
         const uint32_t h = frame.h / n;
-        std::vector<uint32_t> native(static_cast<size_t>(w) * h);
-        for (uint32_t oy = 0; oy < h; ++oy) {
-            for (uint32_t ox = 0; ox < w; ++ox) {
-                const SamplePoint s = MapSample(n, m_rotation, w, h, ox, oy);
-                native[static_cast<size_t>(oy) * w + ox] =
-                    SampleExcluded(s, m_rotation, w, h) ? 0 : frame.xrgb[static_cast<size_t>(s.Y) * frame.w + s.X];
-            }
-        }
+        const std::vector<uint32_t> native = vkhost::SampleImage(frame.xrgb.data(), frame.w, frame.h, n, m_rotation);
         const uint64_t hash = brimir_tools::HashFrame(w, h, native.data(), size_t{w} * 4);
         std::printf("frame %zu %ux%u %016llx\n", m_count, w, h, static_cast<unsigned long long>(hash));
     }
 
-    // Per N x N block of native output pixel (ox, oy) in the region: the block is not constant when one of its pixels
-    // differs from the block's sample point (nearest(img1) at the block, by the sample-point invariant); the mean
-    // absolute difference is over every pixel of the region's blocks and the R, G and B channels (0-255).
+    // vkhost::ComputeSharpness (sample_points.hpp) over the region.
     void Sharpness(const vkhost::HostFrame& frame) {
         const uint32_t n = FrameScale(frame, m_sharpness);
-        if (frame.w % n != 0 || frame.h % n != 0) {
+        const vkhost::Sharpness s = vkhost::ComputeSharpness(frame.xrgb.data(), frame.w, frame.h, n, m_rotation, m_region);
+        if (!s.valid) {
             std::fprintf(stderr, "vkhost: FAILED: --sharpness: frame %zu (%ux%u) is not a multiple of %ux\n", m_count,
                          frame.w, frame.h, n);
             m_failed = true;
             return;
         }
-        const uint32_t w = frame.w / n;
-        const uint32_t h = frame.h / n;
-        const uint32_t x0 = std::min(m_region.x, w);
-        const uint32_t y0 = std::min(m_region.y, h);
-        const uint32_t x1 = m_region.w > w - x0 ? w : x0 + m_region.w;
-        const uint32_t y1 = m_region.h > h - y0 ? h : y0 + m_region.h;
-        uint64_t blocks = 0;
-        uint64_t nonConstant = 0;
-        uint64_t diff = 0;
-        for (uint32_t oy = y0; oy < y1; ++oy) {
-            for (uint32_t ox = x0; ox < x1; ++ox) {
-                const SamplePoint s = MapSample(n, m_rotation, w, h, ox, oy);
-                const uint32_t ref = frame.xrgb[static_cast<size_t>(s.Y) * frame.w + s.X];
-                bool constant = true;
-                for (uint32_t Y = oy * n; Y < (oy + 1) * n; ++Y) {
-                    for (uint32_t X = ox * n; X < (ox + 1) * n; ++X) {
-                        const uint32_t px = frame.xrgb[static_cast<size_t>(Y) * frame.w + X];
-                        if ((px & 0xFFFFFFu) != (ref & 0xFFFFFFu)) {
-                            constant = false;
-                        }
-                        for (uint32_t shift : {0u, 8u, 16u}) {
-                            const int a = static_cast<int>((px >> shift) & 0xFF);
-                            const int b = static_cast<int>((ref >> shift) & 0xFF);
-                            diff += static_cast<uint64_t>(a > b ? a - b : b - a);
-                        }
-                    }
-                }
-                ++blocks;
-                nonConstant += constant ? 0 : 1;
-            }
-        }
-        const double fraction = blocks != 0 ? static_cast<double>(nonConstant) / static_cast<double>(blocks) : 0;
-        const double meanDiff =
-            blocks != 0 ? static_cast<double>(diff) / (static_cast<double>(blocks) * n * n * 3.0) : 0;
         std::fprintf(stderr,
                      "vkhost: sharpness: frame %zu %ux region %u,%u %ux%u: blocks %llu, non-constant %llu (%.2f%%), mean "
                      "abs diff %.4f\n",
-                     m_count, n, x0, y0, x1 - x0, y1 - y0, static_cast<unsigned long long>(blocks),
-                     static_cast<unsigned long long>(nonConstant), fraction * 100.0, meanDiff);
+                     m_count, n, s.x0, s.y0, s.w, s.h, static_cast<unsigned long long>(s.blocks),
+                     static_cast<unsigned long long>(s.nonConstant), s.nonConstantFraction * 100.0, s.meanAbsDiff);
         ++m_sharpFrames;
         m_sharpScaledFrames += n > 1 ? 1 : 0;
-        m_sumNonConstant += fraction;
-        m_sumMeanDiff += meanDiff;
+        m_sumNonConstant += s.nonConstantFraction;
+        m_sumMeanDiff += s.meanAbsDiff;
     }
 
     bool WritePpm(const vkhost::HostFrame& frame) const {

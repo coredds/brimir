@@ -4650,6 +4650,18 @@ TEST_CASE("Vdp2VulkanBackend: scale resources per N, and the renderer's requeste
         CHECK(tooBig.Scale() == 1);
         REQUIRE(logs.size() == 1);
         CHECK(logs[0].find("4x") != std::string::npos);
+        CHECK(logs[0].find("trying 1x") != std::string::npos);
+        // ... or to a fallback scale that fits, allocated directly (one failure logged, never 1x first).
+        logs.clear();
+        vdp2::Vdp2VulkanBackend fallback(*device, 1, 4, vdp2::Vdp2VulkanBackend::ScaledResourceBytes(2),
+                                         [&](const std::string &text) { logs.push_back(text); }, 2);
+        REQUIRE(fallback.Ok());
+        CHECK(fallback.Scale() == 2);
+        REQUIRE(logs.size() == 1);
+        CHECK(logs[0].find("trying 2x") != std::string::npos);
+        // A fallback above the scale is ignored.
+        vdp2::Vdp2VulkanBackend ignored(*device, 1, 2, 0, {}, 3);
+        CHECK(ignored.Scale() == 2);
     }
     {
         // A renderer asked for 4x gets 4x at attach; with the allocation limited (the renderer's test hook, applied to
@@ -4688,12 +4700,25 @@ TEST_CASE("Vdp2VulkanBackend: scale resources per N, and the renderer's requeste
         CHECK_FALSE(vulkan->SetInternalScale(4));
         CHECK(vulkan->InternalScale() == 2);
         CHECK(vulkan->RequestedInternalScale() == 4);
-        // A re-attach (context reset) under the limit falls back to the previous effective 2x, not 1x.
+        // A re-attach (context reset) under the limit falls back to the previous effective 2x, not 1x: 4x fails, 2x is
+        // allocated directly (the back half logs the one failure, the renderer the effective scale).
         vulkan->DetachDevice();
+        logs.clear();
         vulkan->AttachDevice(*device, 1);
         REQUIRE(vulkan->Attached());
         CHECK(vulkan->Backend()->Scale() == 2);
         CHECK(vulkan->InternalScale() == 2);
+        REQUIRE(logs.size() == 2);
+        CHECK(logs[0].find("trying 2x") != std::string::npos);
+        CHECK(logs[1].find("requested 4x, using 2x") != std::string::npos);
+        // A cap (what the output can present) below the request: attached at the cap, the request kept.
+        vulkan->DetachDevice();
+        vulkan->SetScaleAllocationLimitForTest(0);
+        vulkan->AttachDevice(*device, 1, 3);
+        REQUIRE(vulkan->Attached());
+        CHECK(vulkan->InternalScale() == 3);
+        CHECK(vulkan->RequestedInternalScale() == 4);
+        vulkan->SetScaleAllocationLimitForTest(vdp2::Vdp2VulkanBackend::ScaledResourceBytes(2));
         vulkan->DetachDevice();
         vulkan->SetScaleAllocationLimitForTest(0);
         vulkan->AttachDevice(*device, 1);

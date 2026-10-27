@@ -108,14 +108,16 @@ public:
     bool SubmitHidden(std::string &error);
 
     // Internal resolution n (1-4, brimir_internal_resolution) for the Vulkan VDP renderer. Kept across contexts: each
-    // attach allocates it directly (the renderer falls back, logged, when it cannot). A change applies at the next
-    // shown frame that has a VDP2 frame to record (PresentRenderer), before it is recorded: wait for this output's slot
-    // and
-    // hidden-context fences (and the frontend's queue when it may still sample the output images), the renderer's
-    // SetInternalScale (its composite is rescaled into the new one by that frame, so a woven field survives), the
-    // output images re-created at 704 n (the sync-mask growth path's Withdraw / wait / re-create), then the frame is
-    // recorded and presented at n. A failed allocation keeps the previous n (logged). Without the renderer (software
-    // renderer, copy-only output) it has no effect: those frames are native.
+    // attach creates output images for it first and attaches the renderer at most at their scale (the renderer tries
+    // n, its previous effective scale, then 1; logged). A change applies at the next shown frame that has a VDP2 frame
+    // to record (PresentRenderer), before it is recorded: wait for this output's slot and hidden-context fences (a
+    // failed wait keeps the change pending), output images of 704 n created, the renderer's SetInternalScale (its
+    // composite is rescaled into the new one by that frame, so a woven field survives), then the new images replace
+    // the old ones, which are retired, not destroyed: each goes only after wait_sync_index (and this output's fence)
+    // has returned for the sync index it was handed at, and never while it is the frontend's current image (its dupes
+    // stay valid even if this frame's record fails). Either allocation failing keeps both at the previous n (logged);
+    // the renderer's scale never exceeds the output images'. Without the renderer (software renderer, copy-only
+    // output) it has no effect: those frames are native.
     void SetInternalScale(uint32_t n);
     // The internal resolution of the attached renderer (1 without one).
     uint32_t InternalScale() const;

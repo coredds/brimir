@@ -39,12 +39,13 @@ public:
     // Device
 
     // Creates the back half on `device` (frameContexts upload contexts, see Vdp2VulkanBackend) at the requested
-    // internal resolution (RequestedInternalScale), allocated for it directly. When that cannot be allocated it falls
-    // back to the previous effective scale, else 1, and logs the effective one; the request is kept (the next attach
-    // tries it again). The next frame uploads all of VRAM and CRAM and starts from a cleared composite. Attached() is false if
+    // internal resolution (RequestedInternalScale, at most maxScale: what the caller can present), allocated for it
+    // directly. When that cannot be allocated it tries the previous effective scale (if lower), then 1, each allocated
+    // directly (never 1 then another), and logs the effective one; the request is kept (the next attach tries it
+    // again). The next frame uploads all of VRAM and CRAM and starts from a cleared composite. Attached() is false if
     // the back half failed. When already attached, the old back half is destroyed immediately: the caller must have
     // waited for the device to be idle first (as for DetachDevice).
-    void AttachDevice(VulkanDevice &device, uint32_t frameContexts);
+    void AttachDevice(VulkanDevice &device, uint32_t frameContexts, uint32_t maxScale = 4);
     // Drops the pending frame and destroys the GPU resources. The caller has waited for the device to be idle.
     void DetachDevice();
     // Grows the back half's frame contexts to at least `frameContexts` in place (a larger sync index mask): the

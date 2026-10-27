@@ -2,6 +2,7 @@
 
 #include "gpu/vdp2/vdp2_bindings.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <span>
@@ -48,17 +49,17 @@ VulkanVDPRenderer::~VulkanVDPRenderer() = default;
 // -----------------------------------------------------------------------------
 // Device
 
-void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContexts) {
+void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContexts, uint32_t maxScale) {
     m_backend.reset();
-    // The requested scale directly (the back half falls back to 1 itself, logged), then the previous effective one if
-    // that is in between.
-    auto backend = std::make_unique<vdp2::Vdp2VulkanBackend>(device, frameContexts, m_requestedScale,
-                                                             m_scaleAllocationLimit, m_log);
+    // The requested scale (capped), else the previous effective one, else 1: the back half tries them in that order,
+    // each allocated directly (failures logged by it).
+    const uint32_t cap = std::clamp<uint32_t>(maxScale, 1, vdp2::kMaxRenderScale);
+    const uint32_t wanted = std::min(m_requestedScale, cap);
+    const uint32_t previous = std::min(m_internalScale, cap);
+    auto backend = std::make_unique<vdp2::Vdp2VulkanBackend>(device, frameContexts, wanted, m_scaleAllocationLimit,
+                                                             m_log, previous < wanted ? previous : 1);
     if (!backend->Ok()) {
         return;
-    }
-    if (backend->Scale() != m_requestedScale && m_internalScale > 1 && m_internalScale < m_requestedScale) {
-        backend->SetScale(m_internalScale); // a failure is logged; it stays at 1
     }
     m_internalScale = backend->Scale();
     if (m_internalScale != m_requestedScale) {

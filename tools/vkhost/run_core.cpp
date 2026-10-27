@@ -281,10 +281,11 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     }
     host.Unload();
     host.FillReport(report);
-    if (config.failAllocAboveMiB != 0) {
-        std::fprintf(stderr, "vkhost: vulkan: %llu allocations refused (--fail-alloc-above %llu)\n",
+    if (config.failAllocAboveMiB != 0 || config.failOutputImagesAbove != 0) {
+        std::fprintf(stderr, "vkhost: vulkan: %llu allocations refused (--fail-alloc-above %llu, "
+                             "--fail-output-images-above %u)\n",
                      static_cast<unsigned long long>(host.FailedAllocations()),
-                     static_cast<unsigned long long>(config.failAllocAboveMiB));
+                     static_cast<unsigned long long>(config.failAllocAboveMiB), config.failOutputImagesAbove);
     }
     report.problems.insert(report.problems.end(), stateProblems.begin(), stateProblems.end());
     report.recordSeconds = recordSeconds;

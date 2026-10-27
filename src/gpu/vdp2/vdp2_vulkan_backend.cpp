@@ -74,9 +74,9 @@ vk_util::ImageDesc BGLayersDesc(uint32_t n) {
 
 Vdp2VulkanBackend::Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts, uint32_t scale,
                                      VkDeviceSize scaleAllocationLimitForTest,
-                                     std::function<void(const std::string &)> log)
+                                     std::function<void(const std::string &)> log, uint32_t fallbackScale)
     : m_device(device), m_log(std::move(log)), m_scaleAllocationLimit(scaleAllocationLimitForTest) {
-    m_result = Init(frameContexts, std::clamp<uint32_t>(scale, 1, kMaxRenderScale));
+    m_result = Init(frameContexts, std::clamp<uint32_t>(scale, 1, kMaxRenderScale), fallbackScale);
     if (m_result != VK_SUCCESS) {
         Destroy();
     }
@@ -86,7 +86,7 @@ Vdp2VulkanBackend::~Vdp2VulkanBackend() {
     Destroy();
 }
 
-VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts, uint32_t scale) {
+VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts, uint32_t scale, uint32_t fallbackScale) {
     if (frameContexts == 0) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -138,19 +138,32 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts, uint32_t scale) {
             return result;
         }
     }
-    // The background layer image and the composite, at the requested internal resolution, else 1
-    if (const VkResult result = CreateScaledResources(scale, m_bgLayers, m_composite); result == VK_SUCCESS) {
-        m_scale = scale;
-    } else if (scale > 1) {
-        Log("VDP2 internal resolution " + std::to_string(scale) + "x: allocating " +
-            std::to_string(ScaledResourceBytes(scale) >> 20) + " MiB failed (VkResult " +
-            std::to_string(static_cast<int>(result)) + "); using 1x");
-        if (const VkResult fallback = CreateScaledResources(1, m_bgLayers, m_composite); fallback != VK_SUCCESS) {
-            return fallback;
+    // The background layer image and the composite at the requested internal resolution, else the fallback, else 1:
+    // each candidate allocated directly.
+    {
+        std::vector<uint32_t> candidates{scale};
+        if (fallbackScale > 1 && fallbackScale < scale) {
+            candidates.push_back(fallbackScale);
         }
-        m_scale = 1;
-    } else {
-        return result;
+        if (scale > 1) {
+            candidates.push_back(1);
+        }
+        VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            result = CreateScaledResources(candidates[i], m_bgLayers, m_composite);
+            if (result == VK_SUCCESS) {
+                m_scale = candidates[i];
+                break;
+            }
+            if (i + 1 < candidates.size()) {
+                Log("VDP2 internal resolution " + std::to_string(candidates[i]) + "x: allocating " +
+                    std::to_string(ScaledResourceBytes(candidates[i]) >> 20) + " MiB failed (VkResult " +
+                    std::to_string(static_cast<int>(result)) + "); trying " + std::to_string(candidates[i + 1]) + "x");
+            }
+        }
+        if (result != VK_SUCCESS) {
+            return result;
+        }
     }
 
     // The rescale pass: its own set (previous composite -> composite), written by SetScale.

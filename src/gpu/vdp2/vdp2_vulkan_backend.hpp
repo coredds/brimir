@@ -43,11 +43,12 @@ public:
 
     // Creates every resource and pipeline, at internal resolution `scale` (1 to kMaxRenderScale): the resources that
     // scale are allocated for it directly; when they cannot be, the failure is logged (to `log`, stderr when empty)
-    // and the back half is created at 1 (Scale() says which). scaleAllocationLimitForTest: see
-    // SetScaleAllocationLimitForTest, applied from the start. Check Ok() afterwards.
+    // and `fallbackScale` (when between 1 and scale), then 1 are tried, each allocated directly (Scale() says which
+    // one it got). scaleAllocationLimitForTest: see SetScaleAllocationLimitForTest, applied from the start. Check Ok()
+    // afterwards.
     Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts, uint32_t scale = 1,
                       VkDeviceSize scaleAllocationLimitForTest = 0,
-                      std::function<void(const std::string &)> log = {});
+                      std::function<void(const std::string &)> log = {}, uint32_t fallbackScale = 1);
     // Destroys everything immediately: the GPU must be done with all of it (e.g. after vkDeviceWaitIdle).
     ~Vdp2VulkanBackend();
     Vdp2VulkanBackend(const Vdp2VulkanBackend &) = delete;
@@ -165,7 +166,7 @@ private:
         VkDeviceSize offset = 0;
     };
 
-    VkResult Init(uint32_t frameContexts, uint32_t scale);
+    VkResult Init(uint32_t frameContexts, uint32_t scale, uint32_t fallbackScale);
     void Destroy();
     void DestroyBlock(UploadBlock &block);
     void Log(const std::string &text) const;

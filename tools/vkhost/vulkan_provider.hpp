@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -73,6 +74,22 @@ public:
 
     // Reads back the image of the last set_image (top-left w x h) as XRGB8888. Returns false when there is none.
     bool ReadImage(unsigned w, unsigned h, HostFrame& out);
+
+    // --defer-image-read: the image of the last set_image as a frontend keeps it to read later (the handles copied
+    // from the struct, as RetroArch's threaded video path does), pinned: destroying the image or its view before
+    // ReadDeferred is a problem (the core must keep it until wait_sync_index for its sync index has returned).
+    struct DeferredImage {
+        uint64_t image = 0; // VkImage
+        uint64_t view = 0;  // VkImageView
+        int format = 0;     // VkFormat
+        uint32_t baseMip = 0, baseLayer = 0;
+        unsigned w = 0, h = 0;
+    };
+    bool CaptureImage(unsigned w, unsigned h, DeferredImage& out);
+    // Reads a captured image back (as ReadImage) and unpins it.
+    bool ReadDeferred(const DeferredImage& image, HostFrame& out);
+    // The core destroyed an image or image view (wrapped vkDestroyImage / vkDestroyImageView).
+    void OnDestroy(uint64_t handle, const char* what);
     // The frontend's end of a displayed frame: fences the current sync slot and advances the sync index.
     void EndFrame();
 
@@ -116,6 +133,11 @@ public:
     uint64_t FailAllocAbove() const { return m_failAllocAbove; }
     void CountFailedAllocation() { ++m_failedAllocations; }
     uint64_t FailedAllocations() const { return m_failedAllocations; }
+    // --fail-output-images-above N: the core's vkCreateImage fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for images created
+    // MUTABLE_FORMAT (the images it hands to set_image; libretro_vulkan.h requires the bit, its internal images do not
+    // use it) wider than 704 * N (0: never).
+    void SetFailOutputImagesAbove(uint32_t scale) { m_failOutputImagesAbove = scale; }
+    uint32_t FailOutputImagesAbove() const { return m_failOutputImagesAbove; }
 
     struct RealFunctions; // the unwrapped device functions
     const RealFunctions& Real() const;
@@ -143,6 +165,11 @@ private:
     bool m_failPipelines = false;
     uint64_t m_failAllocAbove = 0;
     uint64_t m_failedAllocations = 0;
+    uint32_t m_failOutputImagesAbove = 0;
+    std::multiset<uint64_t> m_pinned; // handles of captured images and views not read yet
+
+    bool ReadHandles(uint64_t image, int format, uint32_t baseMip, uint32_t baseLayer, unsigned w, unsigned h,
+                     HostFrame& out);
 
     std::vector<Slot> m_slots;
     uint32_t m_syncIndex = 0;
