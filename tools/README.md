@@ -292,6 +292,12 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--compare` | run the content on the software and on the Vulkan renderer in two child processes and compare the frame hashes (below). Exit 3 on any difference or when the Vulkan run was not on the compute output with the Vulkan VDP2 renderer (log line `Vulkan VDP2 renderer active`) for every frame |
 | `--compare-vulkan-option key=value` | with `--compare`: a core option for the Vulkan run only (repeatable; to check that a difference is reported) |
 | `--dump-frame I` | with `--dump-dir`: write only recorded frame I |
+| `--internal-resolution N` | the same as `--option brimir_internal_resolution=N` (1-4) |
+| `--set-option-at F key=value` | a live option change before frame F (counting warmup frames from 0, as `--reset-at`), reported to the core by the next `GET_VARIABLE_UPDATE` (repeatable); with `--compare` both runs get it |
+| `--hash-sample N` | with `--hash`: hash the sample points instead of the frame (below). With `--compare` the software run gets `--hash-sample 1` |
+| `--sharpness N` | print, per recorded frame and as a summary, how much the N x frame differs from a nearest upscale (below) |
+| `--region x,y,w,h` | with `--sharpness`: only these native output pixels (after crop and rotation; clamped to the frame) |
+| `--fail-alloc-above MiB` | with `--vulkan`: the core's `vkAllocateMemory` fails (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) for allocations above MiB (fault injection: a GPU short of memory); the summary counts the refused allocations |
 
 The save directory is always a fresh temporary directory that is removed on exit. Core log messages go to stderr,
 prefixed `[core <level>]` (`[core#2 ...]` for the run-ahead instance); the Ymir library's own log lines go to stdout,
@@ -335,7 +341,12 @@ and with `--fail-compute-on-grow`: one repeated frame, then software with copy-o
 deinterlacing on and off, `--state-roundtrip 37`, cross-renderer state loads (a software state loaded by Vulkan and a
 Vulkan state loaded by software, compared from recorded frame 2; the two states' renderer sections may differ only in
 `brimir_state_diff`'s allowlist of line-local fetcher caches, `tools/state_diff.cpp`) and `--vulkan --runahead`, plus `--compare` (identical runs pass, also with hidden frames and state
-round trips; a Vulkan run rotated 180 degrees exits 3 and names the first differing pixel), and requires identical
+round trips; a Vulkan run rotated 180 degrees exits 3 and names the first differing pixel), the internal resolution
+(2x from the start, also rotated and cropped, with `--sharpness 2` all-constant on the menu; live changes 1x -> 2x -> 4x
+-> 1x with deinterlacing on and off under synchronization validation: SET_GEOMETRY N x native, no SET_SYSTEM_AV_INFO;
+`--hide-every 2` and `--reset-in-run 150` at 2x; the copy-only output at 4x stays native; `--fail-alloc-above 64` at 4x
+falls back to 1x, a live 2x works, a live 4x stays at 2x; `--compare --internal-resolution 2 --hash-sample 2`; every
+Vulkan run at N compared with software through `--hash-sample`), and requires identical
 frame hashes, the Vulkan VDP2 renderer active where the context allows it (and not where it does not), the
 validation layer on and zero validation errors, queue-lock violations and hidden-frame presentation calls, and at
 most one submit per `retro_run`. It is skipped without the BIOS or a Vulkan device
@@ -408,8 +419,52 @@ character pattern delay, double-density line scroll, extended colour calculation
 frames using it, the total and the most per frame, and the CRAM modes used (bit n: mode n). Probe lines that arrive
 during warmup or hidden frames are dropped.
 
+### Internal resolution (`--hash-sample`, `--sharpness`)
+
+With `brimir_internal_resolution` N > 1 the Vulkan VDP2 renderer hands over N x the native frame (after crop and
+rotation). The core logs `Internal resolution: frames at Mx (requested Nx)` before the first frame and whenever the
+scale of the frames it hands over changes (M is 1 for the software renderer and the copy-only output, and after an
+allocation fallback the effective scale); the host follows that line, so a frame's scale M is known even across live
+changes (`--set-option-at`) and fallbacks. The N given to `--hash-sample` / `--sharpness` is only used until the core
+logs a scale (the software renderer without a Vulkan output logs none). Each SET_GEOMETRY and SET_SYSTEM_AV_INFO is
+printed (`vkhost: geometry: ...`) and the summary counts them (`vkhost: av: SET_SYSTEM_AV_INFO calls A, SET_GEOMETRY
+calls G`): a change of the internal resolution must be a SET_GEOMETRY of M x the native size, never a
+SET_SYSTEM_AV_INFO.
+
+The sample point of native output pixel (x, y) of a frame at scale M (native output size W/M x H/M) is the N x pixel
+that shows N x source pixel (M px, M py), where (px, py) is the pre-rotation native pixel the presenter reads for (x,
+y): rotation 0 (px, py) = (x, y) and output (M px, M py); 90: (y, w-1-x), output (M w-1-M py, M px); 180: (w-1-x,
+h-1-y), output (M w-1-M px, M h-1-M py); 270: (pw-1-y, x), output (M py, M pw-1-M px), with w x h the native output
+size and pw the pre-rotation native width (`brimir_rotation` is taken from `--option`; a live change of it is not
+followed). The overscan crop only offsets the frame by 8 px per step, so it does not change parities.
+
+`--hash-sample`: the hashed image is the W/M x H/M native image of the sample points, with these points set to 0 in
+every frame (a conservative host-side form of the brief's excluded lattice, Ruling 2): odd pre-rotation native columns
+when the pre-rotation native width is above 400 (the hi-res widths 640/704 minus at most 48 px of crop; low-res is at
+most 352), and odd pre-rotation native rows when the height is above 300 (448/480/512 minus the crop; progressive is at
+most 256). The line is `frame <i> <W/M>x<H/M> <hash>` (the same FNV-1a as `--hash`). With M = 1 and a low-res
+progressive frame nothing is excluded and the hash equals `--hash`'s. A frame whose size is not a multiple of M fails
+the run (exit 2). So `--compare --internal-resolution N --hash-sample N` compares the Vulkan run at N with software at 1x
+through the sample-point invariant.
+
+`--sharpness`: for each recorded frame at scale M (from the log line; frames at 1x give 0 and are counted
+separately), over the native output pixels of `--region` (default the whole frame): for each native pixel, its M x M
+block of the frame (output pixels [M x, M x + M) x [M y, M y + M)) and its reference, the frame's sample point of that
+pixel (above; by the invariant this is the 1x image, so the reference image is nearest(img1) without a second run).
+Printed per frame (`vkhost: sharpness: frame i Mx region x,y wxh: blocks B, non-constant K (P%), mean abs diff D`) and
+at the end (`vkhost: sharpness: F frames (S at more than 1x), mean non-constant blocks P%, mean abs diff D`, both the
+mean over the frames):
+
+- non-constant block fraction K / B: the share of blocks with a pixel whose RGB differs from the reference (a nearest
+  upscale has 0);
+- mean abs diff D: the mean over every pixel of the region's blocks and its R, G and B channels of |pixel - reference|
+  (0-255).
+
+The reference at an excluded lattice point (an odd column of a hi-res RBG, ...) is the N x frame's own pixel there, not
+the software 1x pixel, so the metric is relative to the N x frame's sample points, not to a 1x run.
+
 Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2`, `GET_VARIABLE`,
-`GET_VARIABLE_UPDATE` (always false), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,
+`GET_VARIABLE_UPDATE` (true once after a `--set-option-at` change), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,
 `GET_SAVE_DIRECTORY`, `SET_SYSTEM_AV_INFO`, `SET_GEOMETRY`, `GET_LOG_INTERFACE`, `GET_INPUT_BITMASKS`,
 `GET_AUDIO_VIDEO_ENABLE`, `GET/SET_DISK_CONTROL_(EXT_)INTERFACE`, the hardware rendering calls above (with
 `--vulkan`; refused otherwise), and `SET_SUPPORT_NO_GAME`,

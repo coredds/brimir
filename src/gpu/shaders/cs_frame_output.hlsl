@@ -3,9 +3,11 @@
 // 1-pixel border right of and below the frame (a frontend sampling bilinearly at the edge reads it).
 // Bindings (tools/shaders/build_shaders.cmake shifts t by 0, u by 16): t0 -> binding 0, u0 -> binding 16.
 
+// At internal resolution N (device frames) every field is N x the native value: the host scales them (the crop guard
+// and the crop / 2 rounding stay native), the shader is unchanged.
 struct Params {
-    uint srcWidth;  // native frame width (= pitch)
-    uint cropLeft;  // first native column and row of the cropped frame
+    uint srcWidth;  // source frame width (= pitch)
+    uint cropLeft;  // first source column and row of the cropped frame
     uint cropTop;
     uint cropWidth; // cropped (pre-rotation) frame width
     uint outWidth;  // output (post-rotation) size

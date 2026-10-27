@@ -38,11 +38,12 @@ public:
     // -------------------------------------------------------------------------
     // Device
 
-    // Creates the back half on `device` (frameContexts upload contexts, see Vdp2VulkanBackend) at InternalScale() (1,
-    // logged, if that cannot be allocated). The next frame uploads all of VRAM and CRAM and starts from a cleared
-    // composite. Attached() is false if the back half failed. When
-    // already attached, the old back half is destroyed immediately: the caller must have waited for the device to be
-    // idle first (as for DetachDevice).
+    // Creates the back half on `device` (frameContexts upload contexts, see Vdp2VulkanBackend) at the requested
+    // internal resolution (RequestedInternalScale), allocated for it directly. When that cannot be allocated it falls
+    // back to the previous effective scale, else 1, and logs the effective one; the request is kept (the next attach
+    // tries it again). The next frame uploads all of VRAM and CRAM and starts from a cleared composite. Attached() is false if
+    // the back half failed. When already attached, the old back half is destroyed immediately: the caller must have
+    // waited for the device to be idle first (as for DetachDevice).
     void AttachDevice(VulkanDevice &device, uint32_t frameContexts);
     // Drops the pending frame and destroys the GPU resources. The caller has waited for the device to be idle.
     void DetachDevice();
@@ -83,14 +84,30 @@ public:
     // pitch InternalScale() * HRes.
     VkBuffer CompositeBuffer() const;
 
-    // Internal resolution n (1 to 4) of the VDP2 background layers and the composite, from the next recorded frame on
-    // (Vdp2VulkanBackend::SetScale; the caller guarantees that no submitted work uses the renderer's resources). While
-    // detached it is kept for the next AttachDevice. False, with the previous scale kept and the failure logged, when
-    // the resources cannot be allocated; false for an n out of range.
+    // Requests internal resolution n (1 to 4) of the VDP2 background layers and the composite, from the next recorded
+    // frame on (Vdp2VulkanBackend::SetScale: the previous composite is rescaled into the new one by that frame, so a
+    // woven field survives). Contract while attached: every submitted command buffer that used the renderer's resources
+    // has completed (the caller waited for their fences) and no command buffer recorded by RecordPendingFrame is
+    // still waiting to be submitted (report a dropped one with RecordedFrameDropped first): the descriptor sets are
+    // rewritten and the old resources destroyed here. While detached it is kept for the next AttachDevice. The request
+    // is remembered either way; false, with the previous effective scale kept and the failure logged, when the
+    // resources cannot be allocated; false (nothing changes) for an n out of range.
     bool SetInternalScale(uint32_t n);
+    // The effective internal resolution (the back half's while attached; while detached the last effective one, or
+    // the request made while detached).
     uint32_t InternalScale() const { return m_internalScale; }
-    // Where the back half logs its allocation failures (stderr when unset); kept across AttachDevice.
+    // The last internal resolution requested with SetInternalScale (1 until then).
+    uint32_t RequestedInternalScale() const { return m_requestedScale; }
+    // Changes the effective internal resolution only (as SetInternalScale, same contract), keeping the request: for a
+    // caller that cannot present the requested one (its output images could not be allocated).
+    bool FallBackInternalScale(uint32_t n);
+    // Where the back half logs its allocation failures and the renderer the effective scale after a fallback (stderr
+    // when unset); kept across AttachDevice.
     void SetLog(std::function<void(const std::string &)> log);
+    // Test hook: every back half this renderer creates (and SetInternalScale) fails to allocate the resources of an
+    // internal resolution that need more than `bytes` (0: no limit), as
+    // Vdp2VulkanBackend::SetScaleAllocationLimitForTest.
+    void SetScaleAllocationLimitForTest(VkDeviceSize bytes);
 
     // -------------------------------------------------------------------------
     // IVDPRenderer
@@ -139,6 +156,7 @@ protected:
     void UpdateEnhancements() override;
 
 private:
+    void Log(const std::string &text) const;
     void SyncDisplayErase();
     void CaptureSpriteSlices();
     void CaptureAltSpriteSlices();
@@ -153,6 +171,8 @@ private:
     bool m_exclusiveMonitor = false;
     bool m_threadedVDP1 = false;
     uint32_t m_internalScale = 1;
+    uint32_t m_requestedScale = 1;
+    VkDeviceSize m_scaleAllocationLimit = 0;
     std::function<void(const std::string &)> m_log;
     bool m_resolutionChanged = false;
     bool m_displayEraseSinceCapture = false; // VDP1 erased a framebuffer without a swap since the last capture

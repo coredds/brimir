@@ -39,12 +39,21 @@ namespace fs = std::filesystem;
 
 enum class ParseResult { Ok, Help, Error };
 
+struct Region {
+    uint32_t x = 0, y = 0, w = UINT32_MAX, h = UINT32_MAX; // native output coordinates
+};
+
 struct CliArgs {
     vkhost::HostConfig config;
     bool hash = false;
     bool compare = false;
     int dumpFrame = -1; // --dump-frame I: with --dump-dir, write only recorded frame I
     std::vector<std::pair<std::string, std::string>> compareVulkanOptions;
+    int hashSample = 0;  // --hash-sample N (0: off)
+    int sharpness = 0;   // --sharpness N (0: off)
+    Region region;       // --region x,y,w,h
+    bool hasRegion = false;
+    uint32_t rotation = 0; // brimir_rotation from --option (for the sample-point mapping)
 };
 
 void PrintUsage(std::FILE* out) {
@@ -113,6 +122,22 @@ void PrintUsage(std::FILE* out) {
         "                runs\n"
         "  --compare-vulkan-option key=value  with --compare: core option for the Vulkan run only\n"
         "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
+        "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"
+        "  --set-option-at F key=value  a live option change before frame F (counting warmup frames from 0), reported\n"
+        "                to the core by GET_VARIABLE_UPDATE (repeatable)\n"
+        "  --hash-sample N  with --hash: hash the native image of the sample points instead of the frame. Frames are at\n"
+        "                internal resolution N until the core logs another (\"Internal resolution: frames at Mx\"); the\n"
+        "                sample point of native output pixel (x, y) is mapped through the rotation (brimir_rotation\n"
+        "                from --option) to the N x frame. Conservatively excluded (hashed as 0), every frame: odd native\n"
+        "                columns of hi-res frames and odd native rows of interlaced frames (see tools/README.md). The\n"
+        "                line is 'frame <i> <native w>x<native h> <hash>'. With --compare the software run gets\n"
+        "                --hash-sample 1 (the same exclusions), so Vulkan at N is compared with software at 1x\n"
+        "  --sharpness N  per recorded frame (internal resolution as for --hash-sample), print the share of the N x N\n"
+        "                blocks that are not constant and the mean absolute difference from the nearest upscale of\n"
+        "                the sample points (tools/README.md), and a summary\n"
+        "  --region x,y,w,h  with --sharpness: only these native output pixels\n"
+        "  --fail-alloc-above MiB  with --vulkan: the core's vkAllocateMemory fails for larger allocations (fault\n"
+        "                injection: a GPU short of memory)\n"
         "  --help, -h    show this help\n"
         "\n"
         "Exit status: 0 ok, 1 usage, 2 error, 3 a check failed (queue lock, validation, presentation in a hidden\n"
@@ -206,6 +231,20 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             i += 2;
             continue;
         }
+        if (opt == "--set-option-at") { // two values
+            vkhost::HostConfig::OptionChange change;
+            const std::string text = i + 2 < argc ? argv[i + 2] : "";
+            const size_t eq = text.find('=');
+            if (i + 2 >= argc || !ParseInt(argv[i + 1], change.frame) || eq == std::string::npos || eq == 0) {
+                std::fprintf(stderr, "--set-option-at needs a frame number and key=value\n");
+                return ParseResult::Error;
+            }
+            change.key = text.substr(0, eq);
+            change.value = text.substr(eq + 1);
+            args.config.optionChanges.push_back(change);
+            i += 2;
+            continue;
+        }
         if (i + 1 >= argc) {
             std::fprintf(stderr, "Missing value for %s\n", opt.c_str());
             return ParseResult::Error;
@@ -291,6 +330,35 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 return ParseResult::Error;
             }
             args.config.fakeApi = (major << 22) | (minor << 12); // VK_MAKE_API_VERSION(0, major, minor, 0)
+        } else if (opt == "--internal-resolution") {
+            int n = 0;
+            if (!ParseInt(value, n) || n < 1 || n > 4) {
+                std::fprintf(stderr, "Invalid --internal-resolution value (1-4): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.config.options.emplace_back("brimir_internal_resolution", std::to_string(n));
+        } else if (opt == "--hash-sample" || opt == "--sharpness") {
+            int n = 0;
+            if (!ParseInt(value, n) || n < 1 || n > 4) {
+                std::fprintf(stderr, "Invalid %s value (1-4): %s\n", opt.c_str(), value);
+                return ParseResult::Error;
+            }
+            (opt == "--hash-sample" ? args.hashSample : args.sharpness) = n;
+        } else if (opt == "--region") {
+            unsigned x = 0, y = 0, w = 0, h = 0;
+            if (std::sscanf(value, "%u,%u,%u,%u", &x, &y, &w, &h) != 4 || w == 0 || h == 0) {
+                std::fprintf(stderr, "Invalid --region value (x,y,w,h with w, h > 0): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.region = {x, y, w, h};
+            args.hasRegion = true;
+        } else if (opt == "--fail-alloc-above") {
+            int mib = 0;
+            if (!ParseInt(value, mib) || mib == 0) {
+                std::fprintf(stderr, "Invalid --fail-alloc-above value (MiB, 1 or more): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.config.failAllocAboveMiB = static_cast<uint64_t>(mib);
         } else if (opt == "--option") {
             const std::string text = value;
             const size_t eq = text.find('=');
@@ -315,6 +383,24 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         !vulkanRun) {
         std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
+    }
+    if (args.config.failAllocAboveMiB != 0 && !vulkanRun) {
+        std::fprintf(stderr, "--fail-alloc-above needs --vulkan or --compare\n");
+        return ParseResult::Error;
+    }
+    if (args.hasRegion && args.sharpness == 0) {
+        std::fprintf(stderr, "--region needs --sharpness\n");
+        return ParseResult::Error;
+    }
+    if (args.hashSample != 0 && !args.hash && !args.compare) {
+        std::fprintf(stderr, "--hash-sample needs --hash (or --compare)\n");
+        return ParseResult::Error;
+    }
+    for (const auto& [key, value] : args.config.options) {
+        if (key == "brimir_rotation") {
+            const int degrees = std::atoi(value.c_str());
+            args.rotation = degrees == 90 || degrees == 180 || degrees == 270 ? static_cast<uint32_t>(degrees) : 0;
+        }
     }
     if (args.config.probe && (!args.config.vulkan || args.compare)) {
         std::fprintf(stderr, "--probe needs --vulkan (and no --compare)\n");
@@ -351,16 +437,70 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     return ParseResult::Ok;
 }
 
+// The sample point of native output pixel (ox, oy) in an N x frame of the native output size w x h, through the
+// output rotation: the pre-rotation native pixel (px, py) the presenter reads for it (cs_frame_output.hlsl's inverse
+// rotation at 1x; the crop only offsets it by an even amount, 8 px per overscan step), then the N x output pixel
+// (X, Y) that shows the N x source pixel (N px, N py).
+struct SamplePoint {
+    uint32_t X, Y;   // in the N x frame
+    uint32_t px, py; // pre-rotation native pixel
+};
+
+SamplePoint MapSample(uint32_t n, uint32_t rotation, uint32_t w, uint32_t h, uint32_t ox, uint32_t oy) {
+    const bool swap = rotation == 90 || rotation == 270;
+    const uint32_t pw = swap ? h : w; // pre-rotation native width
+    SamplePoint s{};
+    switch (rotation) {
+    case 90: s.px = oy, s.py = w - 1 - ox; break;
+    case 180: s.px = w - 1 - ox, s.py = h - 1 - oy; break;
+    case 270: s.px = pw - 1 - oy, s.py = ox; break;
+    default: s.px = ox, s.py = oy; break;
+    }
+    const uint32_t sx = n * s.px;
+    const uint32_t sy = n * s.py;
+    switch (rotation) {
+    case 90: s.X = n * w - 1 - sy, s.Y = sx; break;
+    case 180: s.X = n * w - 1 - sx, s.Y = n * h - 1 - sy; break;
+    case 270: s.X = sy, s.Y = n * pw - 1 - sx; break;
+    default: s.X = sx, s.Y = sy; break;
+    }
+    return s;
+}
+
+// Ruling 2's host-side lattice: hi-res frames (pre-rotation native width above 400 px: 640/704 minus at most 48 px of
+// overscan crop, against at most 352 for the low-res widths) skip odd native columns, interlaced frames (height above
+// 300: 448/480/512 minus the crop, against at most 256) odd native rows. The crop offsets are even, so the parities are
+// those of the uncropped frame.
+bool SampleExcluded(const SamplePoint& s, uint32_t rotation, uint32_t w, uint32_t h) {
+    const bool swap = rotation == 90 || rotation == 270;
+    const uint32_t pw = swap ? h : w;
+    const uint32_t ph = swap ? w : h;
+    return (pw > 400 && (s.px & 1) != 0) || (ph > 300 && (s.py & 1) != 0);
+}
+
 // Prints hashes and writes PPMs as the frames arrive, so long runs do not keep every frame in memory.
 class CliSink : public vkhost::FrameSink {
 public:
     CliSink(bool hash, fs::path dumpDir, int dumpFrame)
         : m_hash(hash), m_dumpDir(std::move(dumpDir)), m_dumpFrame(dumpFrame) {}
 
+    // --hash-sample / --sharpness: the internal resolution assumed until the core logs one, the output rotation.
+    void SetSampling(uint32_t hashSample, uint32_t sharpness, uint32_t rotation, Region region) {
+        m_hashSample = hashSample;
+        m_sharpness = sharpness;
+        m_rotation = rotation;
+        m_region = region;
+    }
+
     void OnFrame(vkhost::HostFrame&& frame) override {
-        if (m_hash) {
+        if (m_hash && m_hashSample != 0) {
+            HashSamples(frame);
+        } else if (m_hash) {
             const uint64_t hash = brimir_tools::HashFrame(frame.w, frame.h, frame.xrgb.data(), size_t{frame.w} * 4);
             std::printf("frame %zu %ux%u %016llx\n", m_count, frame.w, frame.h, static_cast<unsigned long long>(hash));
+        }
+        if (m_sharpness != 0) {
+            Sharpness(frame);
         }
         if (!m_dumpDir.empty() && (m_dumpFrame < 0 || static_cast<size_t>(m_dumpFrame) == m_count) &&
             !WritePpm(frame)) {
@@ -372,7 +512,100 @@ public:
     size_t Count() const { return m_count; }
     bool Failed() const { return m_failed; }
 
+    void PrintSharpnessSummary() const {
+        if (m_sharpness == 0) {
+            return;
+        }
+        const double frames = static_cast<double>(std::max<size_t>(m_sharpFrames, 1));
+        std::fprintf(stderr,
+                     "vkhost: sharpness: %zu frames (%zu at more than 1x), mean non-constant blocks %.2f%%, mean abs "
+                     "diff %.4f\n",
+                     m_sharpFrames, m_sharpScaledFrames, m_sumNonConstant * 100.0 / frames, m_sumMeanDiff / frames);
+    }
+
 private:
+    uint32_t FrameScale(const vkhost::HostFrame& frame, uint32_t fallback) const {
+        return frame.scale != 0 ? frame.scale : fallback;
+    }
+
+    void HashSamples(const vkhost::HostFrame& frame) {
+        const uint32_t n = FrameScale(frame, m_hashSample);
+        if (frame.w % n != 0 || frame.h % n != 0) {
+            std::fprintf(stderr, "vkhost: FAILED: --hash-sample: frame %zu (%ux%u) is not a multiple of %ux\n", m_count,
+                         frame.w, frame.h, n);
+            m_failed = true;
+            return;
+        }
+        const uint32_t w = frame.w / n;
+        const uint32_t h = frame.h / n;
+        std::vector<uint32_t> native(static_cast<size_t>(w) * h);
+        for (uint32_t oy = 0; oy < h; ++oy) {
+            for (uint32_t ox = 0; ox < w; ++ox) {
+                const SamplePoint s = MapSample(n, m_rotation, w, h, ox, oy);
+                native[static_cast<size_t>(oy) * w + ox] =
+                    SampleExcluded(s, m_rotation, w, h) ? 0 : frame.xrgb[static_cast<size_t>(s.Y) * frame.w + s.X];
+            }
+        }
+        const uint64_t hash = brimir_tools::HashFrame(w, h, native.data(), size_t{w} * 4);
+        std::printf("frame %zu %ux%u %016llx\n", m_count, w, h, static_cast<unsigned long long>(hash));
+    }
+
+    // Per N x N block of native output pixel (ox, oy) in the region: the block is not constant when one of its pixels
+    // differs from the block's sample point (nearest(img1) at the block, by the sample-point invariant); the mean
+    // absolute difference is over every pixel of the region's blocks and the R, G and B channels (0-255).
+    void Sharpness(const vkhost::HostFrame& frame) {
+        const uint32_t n = FrameScale(frame, m_sharpness);
+        if (frame.w % n != 0 || frame.h % n != 0) {
+            std::fprintf(stderr, "vkhost: FAILED: --sharpness: frame %zu (%ux%u) is not a multiple of %ux\n", m_count,
+                         frame.w, frame.h, n);
+            m_failed = true;
+            return;
+        }
+        const uint32_t w = frame.w / n;
+        const uint32_t h = frame.h / n;
+        const uint32_t x0 = std::min(m_region.x, w);
+        const uint32_t y0 = std::min(m_region.y, h);
+        const uint32_t x1 = m_region.w > w - x0 ? w : x0 + m_region.w;
+        const uint32_t y1 = m_region.h > h - y0 ? h : y0 + m_region.h;
+        uint64_t blocks = 0;
+        uint64_t nonConstant = 0;
+        uint64_t diff = 0;
+        for (uint32_t oy = y0; oy < y1; ++oy) {
+            for (uint32_t ox = x0; ox < x1; ++ox) {
+                const SamplePoint s = MapSample(n, m_rotation, w, h, ox, oy);
+                const uint32_t ref = frame.xrgb[static_cast<size_t>(s.Y) * frame.w + s.X];
+                bool constant = true;
+                for (uint32_t Y = oy * n; Y < (oy + 1) * n; ++Y) {
+                    for (uint32_t X = ox * n; X < (ox + 1) * n; ++X) {
+                        const uint32_t px = frame.xrgb[static_cast<size_t>(Y) * frame.w + X];
+                        if ((px & 0xFFFFFFu) != (ref & 0xFFFFFFu)) {
+                            constant = false;
+                        }
+                        for (uint32_t shift : {0u, 8u, 16u}) {
+                            const int a = static_cast<int>((px >> shift) & 0xFF);
+                            const int b = static_cast<int>((ref >> shift) & 0xFF);
+                            diff += static_cast<uint64_t>(a > b ? a - b : b - a);
+                        }
+                    }
+                }
+                ++blocks;
+                nonConstant += constant ? 0 : 1;
+            }
+        }
+        const double fraction = blocks != 0 ? static_cast<double>(nonConstant) / static_cast<double>(blocks) : 0;
+        const double meanDiff =
+            blocks != 0 ? static_cast<double>(diff) / (static_cast<double>(blocks) * n * n * 3.0) : 0;
+        std::fprintf(stderr,
+                     "vkhost: sharpness: frame %zu %ux region %u,%u %ux%u: blocks %llu, non-constant %llu (%.2f%%), mean "
+                     "abs diff %.4f\n",
+                     m_count, n, x0, y0, x1 - x0, y1 - y0, static_cast<unsigned long long>(blocks),
+                     static_cast<unsigned long long>(nonConstant), fraction * 100.0, meanDiff);
+        ++m_sharpFrames;
+        m_sharpScaledFrames += n > 1 ? 1 : 0;
+        m_sumNonConstant += fraction;
+        m_sumMeanDiff += meanDiff;
+    }
+
     bool WritePpm(const vkhost::HostFrame& frame) const {
         char name[32];
         std::snprintf(name, sizeof(name), "frame_%05zu.ppm", m_count);
@@ -401,6 +634,14 @@ private:
     int m_dumpFrame;
     size_t m_count = 0;
     bool m_failed = false;
+    uint32_t m_hashSample = 0;
+    uint32_t m_sharpness = 0;
+    uint32_t m_rotation = 0;
+    Region m_region;
+    size_t m_sharpFrames = 0;
+    size_t m_sharpScaledFrames = 0;
+    double m_sumNonConstant = 0;
+    double m_sumMeanDiff = 0;
 };
 
 // --probe summary: one line per measure.
@@ -509,6 +750,8 @@ int main(int argc, char** argv) {
     }
 
     CliSink sink(args.hash, args.config.dumpDir, args.dumpFrame);
+    sink.SetSampling(static_cast<uint32_t>(args.hashSample), static_cast<uint32_t>(args.sharpness), args.rotation,
+                     args.region);
     vkhost::RunReport report;
     try {
         report = vkhost::RunCore(args.config, sink);
@@ -543,6 +786,10 @@ int main(int argc, char** argv) {
                      report.validationErrors, static_cast<unsigned long long>(report.hiddenSubmits),
                      static_cast<unsigned long long>(report.maxRunSubmits));
     }
+    std::fprintf(stderr, "vkhost: av: SET_SYSTEM_AV_INFO calls %llu, SET_GEOMETRY calls %llu\n",
+                 static_cast<unsigned long long>(report.systemAvInfoCalls),
+                 static_cast<unsigned long long>(report.geometryCalls));
+    sink.PrintSharpnessSummary();
     if (args.config.probe) {
         PrintProbeSummary(report.probeFrames);
     }

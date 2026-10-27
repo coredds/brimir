@@ -60,16 +60,16 @@ OutputSize ComputeOutputSize(uint32_t w, uint32_t h, const OutputSettings &setti
     if (rotation == 90 || rotation == 270) {
         size = {size.height, size.width};
     }
-    return size;
+    const uint32_t scale = std::max<uint32_t>(settings.scale, 1);
+    return {size.width * scale, size.height * scale};
 }
 
-OutputSize WrittenSize(OutputSize size) {
-    return {std::min(size.width + 1, FramePresenter::kMaxOutputSize),
-            std::min(size.height + 1, FramePresenter::kMaxOutputSize)};
+OutputSize WrittenSize(OutputSize size, uint32_t maxSize) {
+    return {std::min(size.width + 1, maxSize), std::min(size.height + 1, maxSize)};
 }
 
-FramePresenter::FramePresenter(VulkanDevice &device, uint32_t slotCount) : m_device(device) {
-    m_result = Init(slotCount);
+FramePresenter::FramePresenter(VulkanDevice &device, uint32_t slotCount, uint32_t scale) : m_device(device) {
+    m_result = scale >= 1 && scale <= kMaxScale ? Init(slotCount, scale) : VK_ERROR_INITIALIZATION_FAILED;
     if (m_result != VK_SUCCESS) {
         Destroy();
     }
@@ -79,10 +79,11 @@ FramePresenter::~FramePresenter() {
     Destroy();
 }
 
-VkResult FramePresenter::Init(uint32_t slotCount) {
+VkResult FramePresenter::Init(uint32_t slotCount, uint32_t scale) {
     if (slotCount == 0) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    m_scale = scale;
 
     const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
         {kSourceBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
@@ -113,8 +114,8 @@ VkResult FramePresenter::Init(uint32_t slotCount) {
 
     // libretro output images: MUTABLE_FORMAT, SAMPLED | TRANSFER_SRC | STORAGE (stage1-libretro-vulkan.md).
     const vk_util::ImageDesc imageDesc{
-        .width = kMaxOutputSize,
-        .height = kMaxOutputSize,
+        .width = MaxOutputSize(),
+        .height = MaxOutputSize(),
         .format = kOutputFormat,
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
@@ -186,7 +187,7 @@ void FramePresenter::Destroy() {
 bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t w, uint32_t h,
                              const OutputSettings &settings, VkCommandBuffer cmd) {
     if (!Ok() || slotIndex >= m_slots.size() || xbgr == nullptr || w == 0 || h == 0 || w > kMaxSourceWidth ||
-        h > kMaxSourceHeight) {
+        h > kMaxSourceHeight || std::max<uint32_t>(settings.scale, 1) != 1) {
         return false;
     }
     const auto &vk = m_device.Table();
@@ -221,7 +222,7 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
 bool FramePresenter::PresentDevice(uint32_t slotIndex, VkBuffer source, uint32_t w, uint32_t h,
                                    const OutputSettings &settings, VkCommandBuffer cmd) {
     if (!Ok() || slotIndex >= m_slots.size() || source == VK_NULL_HANDLE || w == 0 || h == 0 ||
-        w > kMaxSourceWidth || h > kMaxSourceHeight) {
+        w > kMaxSourceWidth || h > kMaxSourceHeight || settings.scale > m_scale) {
         return false;
     }
     Slot &slot = m_slots[slotIndex];
@@ -256,14 +257,16 @@ void FramePresenter::RecordConversion(Slot &slot, VkDescriptorSet set, uint32_t 
                           VK_ACCESS_SHADER_WRITE_BIT);
     slot.presented = true;
 
+    // At internal resolution N every quantity is N x the native one; the crop guard is native.
+    const uint32_t n = std::max<uint32_t>(settings.scale, 1);
     const OutputSize size = ComputeOutputSize(w, h, settings);
-    const OutputSize written = WrittenSize(size);
+    const OutputSize written = WrittenSize(size, MaxOutputSize());
     const bool crop = CropApplies(w, h, settings);
     const PushConstants push{
-        .srcWidth = w,
-        .cropLeft = crop ? settings.cropH / 2 : 0,
-        .cropTop = crop ? settings.cropV / 2 : 0,
-        .cropWidth = crop ? w - settings.cropH : w,
+        .srcWidth = n * w,
+        .cropLeft = crop ? n * (settings.cropH / 2) : 0,
+        .cropTop = crop ? n * (settings.cropV / 2) : 0,
+        .cropWidth = n * (crop ? w - settings.cropH : w),
         .outWidth = size.width,
         .outHeight = size.height,
         .rotation = EffectiveRotation(settings.rotation),
@@ -293,7 +296,7 @@ VkImageView FramePresenter::OutputView(uint32_t slot) const {
 std::vector<uint32_t> FramePresenter::ReadbackXRGB(uint32_t slotIndex, OutputSize size) {
     std::vector<uint32_t> pixels;
     if (!Ok() || slotIndex >= m_slots.size() || !m_slots[slotIndex].presented || size.width == 0 || size.height == 0 ||
-        size.width > kMaxOutputSize || size.height > kMaxOutputSize) {
+        size.width > MaxOutputSize() || size.height > MaxOutputSize()) {
         return pixels;
     }
     const auto &vk = m_device.Table();
@@ -303,7 +306,7 @@ std::vector<uint32_t> FramePresenter::ReadbackXRGB(uint32_t slotIndex, OutputSiz
     // device has such memory: CPU reads from uncached (write-combined) memory are very slow.
     vk_util::Buffer &readback = m_readback;
     if (readback.buffer == VK_NULL_HANDLE) {
-        const VkDeviceSize maxBytes = VkDeviceSize{kMaxOutputSize} * kMaxOutputSize * sizeof(uint32_t);
+        const VkDeviceSize maxBytes = VkDeviceSize{MaxOutputSize()} * MaxOutputSize() * sizeof(uint32_t);
         constexpr VkMemoryPropertyFlags coherent =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         if (vk_util::CreateBuffer(m_device, maxBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,

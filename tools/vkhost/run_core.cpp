@@ -218,6 +218,11 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         if (i == config.resetAt) {
             host.ResetContext();
         }
+        for (const HostConfig::OptionChange& change : config.optionChanges) {
+            if (change.frame == i) {
+                host.SetOption(change.key, change.value);
+            }
+        }
         if (config.runahead) {
             runHidden();
             ++hiddenFrames;
@@ -276,6 +281,11 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     }
     host.Unload();
     host.FillReport(report);
+    if (config.failAllocAboveMiB != 0) {
+        std::fprintf(stderr, "vkhost: vulkan: %llu allocations refused (--fail-alloc-above %llu)\n",
+                     static_cast<unsigned long long>(host.FailedAllocations()),
+                     static_cast<unsigned long long>(config.failAllocAboveMiB));
+    }
     report.problems.insert(report.problems.end(), stateProblems.begin(), stateProblems.end());
     report.recordSeconds = recordSeconds;
     report.sinkSeconds = timedSink.seconds;

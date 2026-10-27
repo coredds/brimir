@@ -101,6 +101,9 @@ void RETRO_CALLCONV LogCallback(enum retro_log_level level, const char* fmt, ...
     if (std::strstr(text, "VDP2 probe: ") != nullptr && g_hosts[Slot] != nullptr && g_hosts[Slot]->ProbeLine(text)) {
         return;
     }
+    if (g_hosts[Slot] != nullptr) {
+        g_hosts[Slot]->CoreLogLine(text);
+    }
     if (level == RETRO_LOG_DEBUG && !g_verbose) {
         return;
     }
@@ -191,7 +194,12 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         }
         m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
         m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
+        m_vulkan->SetFailAllocAbove(config.failAllocAboveMiB << 20);
     }
+    m_frameScale = 0;
+    m_optionsUpdated = false;
+    m_systemAvInfoCalls = 0;
+    m_geometryCalls = 0;
 
     auto api = std::make_unique<Api>();
     std::string error;
@@ -341,6 +349,7 @@ void LibretroHost::Unload() {
         m_hiddenGpuCalls = m_vulkan->HiddenGpuCalls();
         m_hiddenSubmits = m_vulkan->HiddenSubmits();
         m_maxRunSubmits = m_vulkan->MaxRunSubmits();
+        m_failedAllocations = m_vulkan->FailedAllocations();
         m_validation = m_vulkan->ValidationEnabled();
         m_problems.insert(m_problems.end(), m_vulkan->Problems().begin(), m_vulkan->Problems().end());
         // Destroying the instance can still report (leaks): read the counter afterwards.
@@ -404,6 +413,21 @@ bool LibretroHost::Unserialize(const std::vector<uint8_t>& state) {
     return m_api && m_contentLoaded && m_api->unserialize(state.data(), state.size());
 }
 
+void LibretroHost::CoreLogLine(const char* text) {
+    if (const char* line = std::strstr(text, "Internal resolution: frames at ")) {
+        unsigned scale = 0;
+        if (std::sscanf(line, "Internal resolution: frames at %ux", &scale) == 1 && scale >= 1 && scale <= 4) {
+            m_frameScale = scale;
+        }
+    }
+}
+
+void LibretroHost::SetOption(const std::string& key, const std::string& value) {
+    m_overrides[key] = value;
+    m_optionsUpdated = true;
+    std::fprintf(stderr, "vkhost: option %s=%s (live change)\n", key.c_str(), value.c_str());
+}
+
 bool LibretroHost::ProbeLine(const char* text) {
     const char* line = std::strstr(text, "VDP2 probe: ");
     ProbeFrame f;
@@ -436,6 +460,8 @@ void LibretroHost::FillReport(RunReport& report) const {
     report.contextResets += m_contextResets;
     report.unreadableFrames += m_unreadable;
     report.readbackSeconds += m_readbackSeconds;
+    report.systemAvInfoCalls += m_systemAvInfoCalls;
+    report.geometryCalls += m_geometryCalls;
     report.hiddenGpuCalls += m_hiddenFrames;
     report.probeFrames.insert(report.probeFrames.end(), m_probeFrames.begin(), m_probeFrames.end());
     report.problems.insert(report.problems.end(), m_problems.begin(), m_problems.end());
@@ -530,7 +556,8 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
         return false;
     }
     case kEnv(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE):
-        *static_cast<bool*>(data) = false;
+        *static_cast<bool*>(data) = m_optionsUpdated;
+        m_optionsUpdated = false;
         if (m_resetInRunPending) {
             // A driver reinit from inside retro_run, the way RetroArch runs one inside SET_SYSTEM_AV_INFO: the
             // core gets context_destroy and context_reset while its own call is still in progress.
@@ -629,10 +656,10 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
                                               info.timing.fps != m_avInfo.timing.fps);
         m_avInfo = info;
         m_geometry = m_avInfo.geometry;
-        if (m_verbose) {
-            std::fprintf(stderr, "vkhost: SET_SYSTEM_AV_INFO %ux%u (max %ux%u) %.2f fps\n", m_geometry.base_width,
-                         m_geometry.base_height, m_geometry.max_width, m_geometry.max_height, m_avInfo.timing.fps);
-        }
+        ++m_systemAvInfoCalls;
+        std::fprintf(stderr, "vkhost: geometry: SET_SYSTEM_AV_INFO %ux%u (max %ux%u) %.2f fps\n",
+                     m_geometry.base_width, m_geometry.base_height, m_geometry.max_width, m_geometry.max_height,
+                     m_avInfo.timing.fps);
         if (reinit) {
             ResetContext();
         }
@@ -641,10 +668,10 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
     case kEnv(RETRO_ENVIRONMENT_SET_GEOMETRY):
         m_geometry = *static_cast<const retro_game_geometry*>(data);
         m_avInfo.geometry = m_geometry;
-        if (m_verbose) {
-            std::fprintf(stderr, "vkhost: SET_GEOMETRY %ux%u (max %ux%u)\n", m_geometry.base_width,
-                         m_geometry.base_height, m_geometry.max_width, m_geometry.max_height);
-        }
+        ++m_geometryCalls;
+        std::fprintf(stderr, "vkhost: geometry: SET_GEOMETRY %ux%u (max %ux%u, aspect %.4f)\n", m_geometry.base_width,
+                     m_geometry.base_height, m_geometry.max_width, m_geometry.max_height,
+                     static_cast<double>(m_geometry.aspect_ratio));
         return true;
     case kEnv(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE):
         if (m_resetInPresentPending) {
@@ -699,6 +726,7 @@ void LibretroHost::Video(const void* data, unsigned width, unsigned height, size
         }
         ++m_recordedFrames;
         ++m_recordedHardware;
+        frame.scale = m_frameScale;
         m_lastFrame = frame;
         m_sink->OnFrame(std::move(frame));
         return;
@@ -717,6 +745,7 @@ void LibretroHost::Video(const void* data, unsigned width, unsigned height, size
         std::memcpy(&frame.xrgb[static_cast<size_t>(y) * width], rows + static_cast<size_t>(y) * pitch,
                     static_cast<size_t>(width) * sizeof(uint32_t));
     }
+    frame.scale = m_frameScale;
     m_lastFrame = frame;
     m_sink->OnFrame(std::move(frame));
 }

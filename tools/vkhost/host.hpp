@@ -26,6 +26,9 @@ struct HostFrame {
     uint32_t w = 0;
     uint32_t h = 0;
     std::vector<uint32_t> xrgb;
+    // Internal resolution of the frame as the core last logged it ("Internal resolution: frames at Nx"); 0 when the
+    // core has not said (the software renderer without a Vulkan output).
+    uint32_t scale = 0;
 };
 
 // Receives the frames the core displays while recording is on (after the warmup).
@@ -66,6 +69,16 @@ struct HostConfig {
     bool failComputeOnGrow = false; // --fail-compute-on-grow: the core's pipeline creation fails after the growth
     bool failComputeOnReset = false; // --fail-compute-on-reset: ... from the second context on (a reinit)
     bool probe = false; // --probe: collect the core's per-frame VDP2 probe lines (BRIMIR_VDP2_PROBE) while recording
+    // --set-option-at F key=value: the option changes before frame F (counting warmup frames from 0, as --reset-at),
+    // reported to the core through GET_VARIABLE_UPDATE (a live change, as RetroArch's Quick Menu).
+    struct OptionChange {
+        int frame = 0;
+        std::string key, value;
+    };
+    std::vector<OptionChange> optionChanges;
+    // --fail-alloc-above MiB: with --vulkan, the core's vkAllocateMemory fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for
+    // allocations above this size (0: never).
+    uint64_t failAllocAboveMiB = 0;
 };
 
 // One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).
@@ -103,6 +116,8 @@ struct RunReport {
     double recordSeconds = 0;   // wall time of the recorded frames' retro_run calls (sink time included)
     double sinkSeconds = 0;     // of which in FrameSink::OnFrame (hash, PPM)
     double readbackSeconds = 0; // of which in the host's set_image readback (Vulkan)
+    uint64_t systemAvInfoCalls = 0; // SET_SYSTEM_AV_INFO (a frontend may reinit its video driver)
+    uint64_t geometryCalls = 0;     // SET_GEOMETRY
     std::vector<ProbeFrame> probeFrames; // --probe: the VDP2 frames that ended while recording
     std::vector<std::string> problems; // anything that fails the run
 };
@@ -139,6 +154,8 @@ public:
     uint64_t UnreadableFrames() const { return m_unreadable; }
     uint64_t HardwareFrames() const { return m_hardwareFrames; }
     double ReadbackSeconds() const { return m_readbackSeconds; }
+    // --fail-alloc-above: the core's allocations refused (complete after Unload).
+    uint64_t FailedAllocations() const { return m_vulkan ? m_vulkan->FailedAllocations() : m_failedAllocations; }
     bool HadContext() const { return m_contextResets > 0; }
 
     // Adds this instance's counters and problems (Vulkan ones too; complete after Unload).
@@ -153,6 +170,11 @@ public:
 
     // A "VDP2 probe:" log line (--probe); kept only while recording. False if it does not parse.
     bool ProbeLine(const char* text);
+    // A core log line; follows "Internal resolution: frames at Nx" (HostFrame::scale).
+    void CoreLogLine(const char* text);
+
+    // --set-option-at: a live option change, reported by the next GET_VARIABLE_UPDATE.
+    void SetOption(const std::string& key, const std::string& value);
 
 private:
     struct Api;
@@ -205,6 +227,7 @@ private:
     uint64_t m_hiddenGpuCalls = 0;
     uint64_t m_hiddenSubmits = 0;
     uint64_t m_maxRunSubmits = 0;
+    uint64_t m_failedAllocations = 0;
     bool m_validation = false;
     uint32_t m_validationErrors = 0;
     std::vector<std::string> m_problems;
@@ -212,7 +235,11 @@ private:
     std::string m_systemDir;
     std::string m_saveDir;
     std::map<std::string, std::string> m_defaults;  // from SET_CORE_OPTIONS_V2
-    std::map<std::string, std::string> m_overrides; // --option
+    std::map<std::string, std::string> m_overrides; // --option, --set-option-at
+    bool m_optionsUpdated = false;                  // GET_VARIABLE_UPDATE reports true once
+    uint32_t m_frameScale = 0;                      // "Internal resolution: frames at Nx"
+    uint64_t m_systemAvInfoCalls = 0;
+    uint64_t m_geometryCalls = 0;
     std::set<unsigned> m_unsupportedLogged;
     bool m_verbose = false;
 

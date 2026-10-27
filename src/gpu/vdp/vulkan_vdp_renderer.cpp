@@ -3,6 +3,7 @@
 #include "gpu/vdp2/vdp2_bindings.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <span>
 
 namespace brimir::gpu {
@@ -49,15 +50,20 @@ VulkanVDPRenderer::~VulkanVDPRenderer() = default;
 
 void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContexts) {
     m_backend.reset();
-    auto backend = std::make_unique<vdp2::Vdp2VulkanBackend>(device, frameContexts);
+    // The requested scale directly (the back half falls back to 1 itself, logged), then the previous effective one if
+    // that is in between.
+    auto backend = std::make_unique<vdp2::Vdp2VulkanBackend>(device, frameContexts, m_requestedScale,
+                                                             m_scaleAllocationLimit, m_log);
     if (!backend->Ok()) {
         return;
     }
-    if (m_log) {
-        backend->SetLog(m_log);
+    if (backend->Scale() != m_requestedScale && m_internalScale > 1 && m_internalScale < m_requestedScale) {
+        backend->SetScale(m_internalScale); // a failure is logged; it stays at 1
     }
-    if (!backend->SetScale(m_internalScale)) {
-        m_internalScale = backend->Scale(); // logged by the back half
+    m_internalScale = backend->Scale();
+    if (m_internalScale != m_requestedScale) {
+        Log("VDP2 internal resolution: requested " + std::to_string(m_requestedScale) + "x, using " +
+            std::to_string(m_internalScale) + "x");
     }
     m_backend = std::move(backend);
     // A new back half has none of the state: everything is uploaded with the next frame, and its composite starts
@@ -123,9 +129,17 @@ bool VulkanVDPRenderer::SetInternalScale(uint32_t n) {
     if (n < 1 || n > vdp2::kMaxRenderScale) {
         return false;
     }
+    m_requestedScale = n;
+    return FallBackInternalScale(n);
+}
+
+bool VulkanVDPRenderer::FallBackInternalScale(uint32_t n) {
+    if (n < 1 || n > vdp2::kMaxRenderScale) {
+        return false;
+    }
     if (m_backend) {
         if (!m_backend->SetScale(n)) {
-            return false;
+            return false; // logged by the back half, which keeps its scale
         }
     }
     m_internalScale = n;
@@ -136,6 +150,21 @@ void VulkanVDPRenderer::SetLog(std::function<void(const std::string &)> log) {
     m_log = std::move(log);
     if (m_backend) {
         m_backend->SetLog(m_log);
+    }
+}
+
+void VulkanVDPRenderer::SetScaleAllocationLimitForTest(VkDeviceSize bytes) {
+    m_scaleAllocationLimit = bytes;
+    if (m_backend) {
+        m_backend->SetScaleAllocationLimitForTest(bytes);
+    }
+}
+
+void VulkanVDPRenderer::Log(const std::string &text) const {
+    if (m_log) {
+        m_log(text);
+    } else {
+        std::fprintf(stderr, "[vulkan] %s\n", text.c_str());
     }
 }
 

@@ -41,8 +41,13 @@ public:
     // Records of a context in a row that fit a smaller base block before its high-water mark decays.
     static constexpr uint32_t kHighWaterDecayRecords = 120;
 
-    // Creates every resource and pipeline, at internal resolution 1. Check Ok() afterwards.
-    Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts);
+    // Creates every resource and pipeline, at internal resolution `scale` (1 to kMaxRenderScale): the resources that
+    // scale are allocated for it directly; when they cannot be, the failure is logged (to `log`, stderr when empty)
+    // and the back half is created at 1 (Scale() says which). scaleAllocationLimitForTest: see
+    // SetScaleAllocationLimitForTest, applied from the start. Check Ok() afterwards.
+    Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts, uint32_t scale = 1,
+                      VkDeviceSize scaleAllocationLimitForTest = 0,
+                      std::function<void(const std::string &)> log = {});
     // Destroys everything immediately: the GPU must be done with all of it (e.g. after vkDeviceWaitIdle).
     ~Vdp2VulkanBackend();
     Vdp2VulkanBackend(const Vdp2VulkanBackend &) = delete;
@@ -69,9 +74,17 @@ public:
     VkBuffer CompositeBuffer() const { return m_composite.buffer; }
 
     // Internal resolution n (1 to kMaxRenderScale) from the next Record on. The resources that scale (the background
-    // layer image and the composite) are reallocated here for n only; the caller guarantees that no submitted work
-    // uses them (the device is idle). The new composite is cleared to black by the next Record (the old one's content
-    // is gone). When they cannot be allocated, the previous resources and scale are kept, the failure is logged and
+    // layer image and the composite) are reallocated here for n only, the new ones before the old ones go. The caller
+    // guarantees that no work uses the old ones any more: every submitted command buffer that uses them has completed,
+    // and no command buffer recorded by Record is still waiting to be submitted (its descriptor sets are rewritten
+    // here; a recorded command buffer that will not be submitted must be reported with FrameDropped first).
+    // The old composite is kept until the next Record, which first rescales it into the new one (nearest: the sample
+    // points (n x, n y) keep the old (m x, m y)), so a woven field survives the change; that rescale replaces the
+    // clear a new composite would get, and the frame's own clears come after it. Without anything recorded yet, or
+    // with a clear already pending, there is nothing to keep and the new composite is cleared (to black, or the
+    // pending colour) instead. A second SetScale before that Record keeps rescaling from the composite of the last
+    // Record.
+    // When the new resources cannot be allocated, the previous resources and scale are kept, the failure is logged and
     // false is returned. Also false (nothing changes) for an n out of range or a backend that failed to initialize.
     bool SetScale(uint32_t n);
     uint32_t Scale() const { return m_scale; }
@@ -82,7 +95,8 @@ public:
     void SetLog(std::function<void(const std::string &)> log) { m_log = std::move(log); }
 
     // The command buffer of the last successful Record will not be submitted (or was discarded): the one-time work it
-    // carried (a composite clear, zeroing the sprite framebuffer) is pending again for the next Record. Its uploads are
+    // carried (a composite clear or rescale, zeroing the sprite framebuffer) is pending again for the next Record (the
+    // rescale's previous composite is kept for it). Its uploads are
     // lost too; the caller makes the front half re-upload everything (Vdp2FrontEnd::MarkAllDirty).
     void FrameDropped();
 
@@ -102,6 +116,11 @@ public:
     void SetPoisonImagesForTest(bool enable) { m_poisonImages = enable; }
     // A composite clear will be recorded by the next Record.
     bool CompositeClearPendingForTest() const { return m_pending.clearComposite; }
+    // A rescale of the previous composite will be recorded by the next Record.
+    bool RescalePendingForTest() const { return m_pending.rescale; }
+    // The native frame size the composite holds (the last batch of the last successful Record; 0 before any).
+    uint32_t CompositeWidthForTest() const { return m_compositeWidth; }
+    uint32_t CompositeHeightForTest() const { return m_compositeHeight; }
     // Upload blocks the context used for its last Record (1 = no overflow).
     uint32_t UploadBlocksForTest(uint32_t context) const;
     // What the last successful Record uploaded.
@@ -120,7 +139,8 @@ public:
     const RecordStats &LastRecordStatsForTest() const { return m_lastStats; }
 
 private:
-    enum Pipeline : uint32_t { kSprite, kBgs, kCompose, kNBGFetch, kPipelineCount };
+    // The rescale pipeline (kRescale) has its own descriptor set (m_rescaleSet), not one per upload block.
+    enum Pipeline : uint32_t { kSprite, kBgs, kCompose, kNBGFetch, kPipelineCount, kRescale = kPipelineCount };
 
     struct UploadBlock {
         vk_util::Buffer buffer; // host-visible, coherent, persistently mapped
@@ -136,13 +156,16 @@ private:
         // Records in a row whose block size (BlockSizeFor) was below the high-water block, and the largest of them.
         uint32_t smallRecords = 0;
         VkDeviceSize smallPeak = 0;
+        // A previous composite the context's last Record rescaled from: freed when the context records again (its
+        // work has completed then).
+        vk_util::Buffer retiredComposite;
     };
     struct Allocation {
         size_t block = 0; // index into FrameContext::blocks
         VkDeviceSize offset = 0;
     };
 
-    VkResult Init(uint32_t frameContexts);
+    VkResult Init(uint32_t frameContexts, uint32_t scale);
     void Destroy();
     void DestroyBlock(UploadBlock &block);
     void Log(const std::string &text) const;
@@ -200,14 +223,32 @@ private:
     vk_util::Image m_colorCalcWindow; // R32_UINT 704x512
 
     // One-time work for the next Record (a new back half clears its composite to black and zeroes the sprite
-    // framebuffer), and what the last successful Record recorded (re-armed by FrameDropped).
+    // framebuffer; after a scale change the previous composite is rescaled into the new one, before any clear), and
+    // what the last successful Record recorded (re-armed by FrameDropped).
     struct PendingWork {
         bool clearComposite = false;
         uint32_t clearColor = 0xFF000000u;
         bool zeroSpriteFB = false;
+        bool rescale = false;
     };
     PendingWork m_pending{.clearComposite = true, .zeroSpriteFB = true};
     PendingWork m_recorded{};
+    uint32_t m_lastContext = 0; // the context of the last successful Record
+
+    // The previous composite while a rescale is pending: its scale and the native frame size it holds.
+    struct RescaleSource {
+        vk_util::Buffer composite;
+        uint32_t scale = 1;
+        uint32_t width = 0, height = 0;
+    };
+    RescaleSource m_rescaleSource;
+    // The native frame size the composite holds.
+    uint32_t m_compositeWidth = 0, m_compositeHeight = 0;
+    VkDescriptorSetLayout m_rescaleSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_rescalePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_rescalePipeline = VK_NULL_HANDLE;
+    VkDescriptorPool m_rescalePool = VK_NULL_HANDLE;
+    VkDescriptorSet m_rescaleSet = VK_NULL_HANDLE;
     bool m_poisonImages = false;
     RecordStats m_lastStats{};
     uint32_t m_overflowBlocks = 0; // created by the current Record

@@ -45,6 +45,7 @@ struct VulkanProvider::RealFunctions {
     PFN_vkDeviceWaitIdle deviceWaitIdle = nullptr;
     PFN_vkGetPhysicalDeviceProperties getPhysicalDeviceProperties = nullptr;
     PFN_vkCreateComputePipelines createComputePipelines = nullptr;
+    PFN_vkAllocateMemory allocateMemory = nullptr;
 };
 
 struct VulkanProvider::Slot {
@@ -123,6 +124,19 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateComputePipelines(VkDevice device, VkPip
     return g_provider->Real().createComputePipelines(device, cache, count, infos, allocator, pipelines);
 }
 
+// --fail-alloc-above: large allocations fail as on a GPU short of memory (fault injection).
+VKAPI_ATTR VkResult VKAPI_CALL HookAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info,
+                                                  const VkAllocationCallbacks* allocator, VkDeviceMemory* memory) {
+    const uint64_t limit = g_provider->FailAllocAbove();
+    if (limit != 0 && info != nullptr && info->allocationSize > limit) {
+        g_provider->CountFailedAllocation();
+        std::fprintf(stderr, "vkhost: vulkan: vkAllocateMemory of %llu MiB refused (--fail-alloc-above)\n",
+                     static_cast<unsigned long long>(info->allocationSize >> 20));
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return g_provider->Real().allocateMemory(device, info, allocator, memory);
+}
+
 PFN_vkVoidFunction Intercept(const char* name) {
     const VulkanProvider::RealFunctions& real = g_provider->Real();
     if (std::strcmp(name, "vkQueueSubmit") == 0) {
@@ -145,6 +159,9 @@ PFN_vkVoidFunction Intercept(const char* name) {
     }
     if (std::strcmp(name, "vkCreateComputePipelines") == 0) {
         return reinterpret_cast<PFN_vkVoidFunction>(&HookCreateComputePipelines);
+    }
+    if (std::strcmp(name, "vkAllocateMemory") == 0 && real.allocateMemory) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&HookAllocateMemory);
     }
     return nullptr;
 }
@@ -457,6 +474,7 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
     load(m_real->waitForFences, "vkWaitForFences");
     load(m_real->deviceWaitIdle, "vkDeviceWaitIdle");
     load(m_real->createComputePipelines, "vkCreateComputePipelines");
+    load(m_real->allocateMemory, "vkAllocateMemory");
 
     m_slots.assign(kSyncSlots, Slot{});
     for (Slot& slot : m_slots) {

@@ -110,6 +110,12 @@ public:
     // --fail-compute-on-reset: vkCreateComputePipelines fails for every context after the first (a reinit then ends
     // in the copy-only output).
     void SetFailComputeOnReset(bool fail) { m_failComputeOnReset = fail; }
+    // --fail-alloc-above: the core's vkAllocateMemory fails with VK_ERROR_OUT_OF_DEVICE_MEMORY for allocations larger
+    // than `bytes` (0: never); FailedAllocations() counts them.
+    void SetFailAllocAbove(uint64_t bytes) { m_failAllocAbove = bytes; }
+    uint64_t FailAllocAbove() const { return m_failAllocAbove; }
+    void CountFailedAllocation() { ++m_failedAllocations; }
+    uint64_t FailedAllocations() const { return m_failedAllocations; }
 
     struct RealFunctions; // the unwrapped device functions
     const RealFunctions& Real() const;
@@ -135,6 +141,8 @@ private:
     bool m_failComputeOnReset = false;
     uint32_t m_contextsCreated = 0;
     bool m_failPipelines = false;
+    uint64_t m_failAllocAbove = 0;
+    uint64_t m_failedAllocations = 0;
 
     std::vector<Slot> m_slots;
     uint32_t m_syncIndex = 0;

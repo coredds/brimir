@@ -44,9 +44,14 @@ const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",    
                                         "--system-dir", "--frames", "--compare-vulkan-option"};
 // Only valid together with --vulkan: dropped from the software child.
 const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--reset-in-present", "--preferred-hw",
-                                           "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation"};
+                                           "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",
+                                           "--sharpness",  "--region",       "--fail-alloc-above"};
 // Takes a frame number and a file; each child writes its own file (<file>.software, <file>.vulkan).
 const std::string kSaveStateAt = "--save-state-at";
+// Takes a frame number and key=value; both children get it.
+const std::string kSetOptionAt = "--set-option-at";
+// The software child samples its 1x frames (the same excluded lattice); the Vulkan child the given N.
+const std::string kHashSample = "--hash-sample";
 
 fs::path SelfPath() {
 #ifdef _WIN32
@@ -205,6 +210,16 @@ std::vector<std::string> BuildArgs(const std::vector<std::string>& in, bool vulk
             out.push_back(in[i + 1]);
             out.push_back(in[i + 2] + (vulkan ? ".vulkan" : ".software"));
             i += 2;
+            continue;
+        }
+        if (arg == kSetOptionAt && i + 2 < in.size()) {
+            out.insert(out.end(), {arg, in[i + 1], in[i + 2]});
+            i += 2;
+            continue;
+        }
+        if (arg == kHashSample && i + 1 < in.size()) {
+            out.insert(out.end(), {arg, vulkan ? in[i + 1] : std::string("1")});
+            i += 1;
             continue;
         }
         const bool valueless = kValueless.count(arg) != 0;

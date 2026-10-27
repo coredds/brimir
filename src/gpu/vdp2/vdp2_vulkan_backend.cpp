@@ -4,6 +4,7 @@
 #include "gpu/shaders/generated/vdp2_nbg_fetch.spv.h"
 #include "gpu/shaders/generated/vdp2_render_bgs.spv.h"
 #include "gpu/shaders/generated/vdp2_render_sprite.spv.h"
+#include "gpu/shaders/generated/vdp2_rescale.spv.h"
 #include "gpu/vdp2/vdp2_bindings.hpp"
 
 #include <algorithm>
@@ -71,8 +72,11 @@ vk_util::ImageDesc BGLayersDesc(uint32_t n) {
 
 } // namespace
 
-Vdp2VulkanBackend::Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts) : m_device(device) {
-    m_result = Init(frameContexts);
+Vdp2VulkanBackend::Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts, uint32_t scale,
+                                     VkDeviceSize scaleAllocationLimitForTest,
+                                     std::function<void(const std::string &)> log)
+    : m_device(device), m_log(std::move(log)), m_scaleAllocationLimit(scaleAllocationLimitForTest) {
+    m_result = Init(frameContexts, std::clamp<uint32_t>(scale, 1, kMaxRenderScale));
     if (m_result != VK_SUCCESS) {
         Destroy();
     }
@@ -82,7 +86,7 @@ Vdp2VulkanBackend::~Vdp2VulkanBackend() {
     Destroy();
 }
 
-VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
+VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts, uint32_t scale) {
     if (frameContexts == 0) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -134,9 +138,47 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts) {
             return result;
         }
     }
-    // The background layer image and the composite, at internal resolution 1
-    if (const VkResult result = CreateScaledResources(1, m_bgLayers, m_composite); result != VK_SUCCESS) {
+    // The background layer image and the composite, at the requested internal resolution, else 1
+    if (const VkResult result = CreateScaledResources(scale, m_bgLayers, m_composite); result == VK_SUCCESS) {
+        m_scale = scale;
+    } else if (scale > 1) {
+        Log("VDP2 internal resolution " + std::to_string(scale) + "x: allocating " +
+            std::to_string(ScaledResourceBytes(scale) >> 20) + " MiB failed (VkResult " +
+            std::to_string(static_cast<int>(result)) + "); using 1x");
+        if (const VkResult fallback = CreateScaledResources(1, m_bgLayers, m_composite); fallback != VK_SUCCESS) {
+            return fallback;
+        }
+        m_scale = 1;
+    } else {
         return result;
+    }
+
+    // The rescale pass: its own set (previous composite -> composite), written by SetScale.
+    {
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        for (const Binding &b : kRescaleBindings) {
+            bindings.push_back({b.binding, ToVk(b.kind), 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        }
+        const VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, kRescalePushConstantSize};
+        const std::array<VkDescriptorPoolSize, 1> sizes{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2}}};
+        VkResult result = vk_util::CreateDescriptorSetLayout(m_device, bindings, m_rescaleSetLayout);
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreatePipelineLayout(m_device, {&m_rescaleSetLayout, 1}, {&pushRange, 1},
+                                                   m_rescalePipelineLayout);
+        }
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreateComputePipeline(m_device, shaders::kVdp2RescaleSpv, m_rescalePipelineLayout,
+                                                    m_rescalePipeline);
+        }
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreateDescriptorPool(m_device, sizes, 1, m_rescalePool);
+        }
+        if (result == VK_SUCCESS) {
+            result = vk_util::AllocateDescriptorSet(m_device, m_rescalePool, m_rescaleSetLayout, m_rescaleSet);
+        }
+        if (result != VK_SUCCESS) {
+            return result;
+        }
     }
 
     // Pipelines: one set (vdp2_bindings.hpp) and the push-constant block each
@@ -174,8 +216,19 @@ void Vdp2VulkanBackend::Destroy() {
         for (UploadBlock &block : context.blocks) {
             DestroyBlock(block);
         }
+        vk_util::DestroyBuffer(m_device, context.retiredComposite);
     }
     m_contexts.clear();
+    vk_util::DestroyBuffer(m_device, m_rescaleSource.composite);
+    vk.vkDestroyPipeline(dev, m_rescalePipeline, nullptr);
+    vk.vkDestroyPipelineLayout(dev, m_rescalePipelineLayout, nullptr);
+    vk.vkDestroyDescriptorPool(dev, m_rescalePool, nullptr); // frees the set
+    vk.vkDestroyDescriptorSetLayout(dev, m_rescaleSetLayout, nullptr);
+    m_rescalePipeline = VK_NULL_HANDLE;
+    m_rescalePipelineLayout = VK_NULL_HANDLE;
+    m_rescalePool = VK_NULL_HANDLE;
+    m_rescaleSet = VK_NULL_HANDLE;
+    m_rescaleSetLayout = VK_NULL_HANDLE;
     for (uint32_t p = 0; p < kPipelineCount; ++p) {
         vk.vkDestroyPipeline(dev, m_pipelines[p], nullptr);
         vk.vkDestroyPipelineLayout(dev, m_pipelineLayouts[p], nullptr);
@@ -245,10 +298,24 @@ bool Vdp2VulkanBackend::SetScale(uint32_t n) {
             std::to_string(static_cast<int>(result)) + "); staying at " + std::to_string(m_scale) + "x");
         return false;
     }
-    // The device is idle (the caller's guarantee): nothing uses the old resources any more.
+    // Nothing uses the old resources any more (the caller's guarantee).
     vk_util::DestroyImage(m_device, m_bgLayers);
-    vk_util::DestroyBuffer(m_device, m_composite);
     m_bgLayers = bgLayers;
+    if (m_pending.rescale) {
+        // The current composite was never written: keep rescaling from the composite of the last Record.
+        vk_util::DestroyBuffer(m_device, m_composite);
+    } else if (!m_pending.clearComposite && m_compositeWidth != 0 && m_compositeHeight != 0) {
+        // The composite holds a frame (the other field when weaving): the next Record rescales it into the new one.
+        m_rescaleSource = {m_composite, m_scale, m_compositeWidth, m_compositeHeight};
+        m_pending.rescale = true;
+    } else {
+        // Nothing to keep: the new composite starts black, as a new back half's (a pending clear keeps its colour).
+        vk_util::DestroyBuffer(m_device, m_composite);
+        if (!m_pending.clearComposite) {
+            m_pending.clearComposite = true;
+            m_pending.clearColor = 0xFF000000u;
+        }
+    }
     m_composite = composite;
     m_scale = n;
     for (FrameContext &context : m_contexts) {
@@ -258,10 +325,19 @@ bool Vdp2VulkanBackend::SetScale(uint32_t n) {
             }
         }
     }
-    // The new composite starts black, as a new back half's (a pending clear keeps its colour).
-    if (!m_pending.clearComposite) {
-        m_pending.clearComposite = true;
-        m_pending.clearColor = 0xFF000000u;
+    if (m_pending.rescale) {
+        const VkDescriptorBufferInfo infos[2] = {{m_rescaleSource.composite.buffer, 0, VK_WHOLE_SIZE},
+                                                 {m_composite.buffer, 0, VK_WHOLE_SIZE}};
+        VkWriteDescriptorSet writes[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[i].dstSet = m_rescaleSet;
+            writes[i].dstBinding = kRescaleBindings[i].binding;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &infos[i];
+        }
+        m_device.Table().vkUpdateDescriptorSets(m_device.Device(), 2, writes, 0, nullptr);
     }
     return true;
 }
@@ -272,6 +348,16 @@ void Vdp2VulkanBackend::FrameDropped() {
         m_pending.clearColor = m_recorded.clearColor;
     }
     m_pending.zeroSpriteFB |= m_recorded.zeroSpriteFB;
+    if (m_recorded.rescale && !m_pending.rescale && m_lastContext < m_contexts.size()) {
+        // The rescale never ran: its source is still the previous composite (kept by the context until it records
+        // again), and the descriptor set still points at it.
+        FrameContext &context = m_contexts[m_lastContext];
+        if (context.retiredComposite.buffer != VK_NULL_HANDLE) {
+            m_rescaleSource.composite = context.retiredComposite;
+            context.retiredComposite = {};
+            m_pending.rescale = true;
+        }
+    }
     m_recorded = {};
 }
 
@@ -330,6 +416,7 @@ void Vdp2VulkanBackend::ResetContext(FrameContext &context) {
     // The context's previous frame has completed (the caller's fence): overflow blocks go, the base block is reused
     // unless its size no longer matches: the block size, or the context's high-water mark (the total of its last frame
     // that overflowed) when that is larger.
+    vk_util::DestroyBuffer(m_device, context.retiredComposite);
     while (context.blocks.size() > 1) {
         DestroyBlock(context.blocks.back());
         context.blocks.pop_back();
@@ -585,6 +672,25 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     // are never uploaded read zeros. Recorded here, it stays recorded unless the caller reports the command buffer
     // dropped (FrameDropped).
     m_recorded = m_pending;
+    if (m_pending.rescale) {
+        // First the previous composite into the new one (a woven field survives a scale change), so the clears below
+        // (pending, or the frame's own) and the frame's compose writes come after it. The previous composite stays
+        // alive until this context records again.
+        const RescaleSource &source = m_rescaleSource;
+        const VDP2RescalePushConstants push{source.width, source.height, source.scale, m_scale};
+        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rescalePipeline);
+        vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rescalePipelineLayout, 0, 1, &m_rescaleSet, 0,
+                                   nullptr);
+        vk.vkCmdPushConstants(cmd, m_rescalePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vk.vkCmdDispatch(cmd, (source.width * m_scale + kWorkgroupWidth - 1) / kWorkgroupWidth, source.height * m_scale,
+                         1);
+        Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute | kTransfer,
+                kShaderRW | VK_ACCESS_TRANSFER_WRITE_BIT);
+        context.retiredComposite = m_rescaleSource.composite;
+        m_rescaleSource.composite = {};
+        m_compositeWidth = source.width;
+        m_compositeHeight = source.height;
+    }
     if (m_pending.clearComposite) {
         vk.vkCmdFillBuffer(cmd, m_composite.buffer, 0, VK_WHOLE_SIZE, m_pending.clearColor);
     }
@@ -742,6 +848,11 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
         }
     }
     clearsBefore(frame.batches.size());
+    if (!frame.batches.empty()) {
+        m_compositeWidth = std::min(frame.batches.back().hres, kMaxResH);
+        m_compositeHeight = std::min(frame.batches.back().vres, kMaxResV);
+    }
+    m_lastContext = contextIndex;
     if (!frame.clears.empty()) {
         // A dropped command buffer re-arms the frame's last clear (as a whole-composite clear at the next Record).
         m_recorded.clearComposite = true;

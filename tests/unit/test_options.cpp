@@ -49,6 +49,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_profiling",            "disabled" },
 #ifdef BRIMIR_VULKAN
         { "brimir_renderer",             "software" },
+        { "brimir_internal_resolution",  "1"        },
 #endif
     };
 
@@ -222,5 +223,43 @@ TEST_CASE("Core options include the renderer option (Vulkan builds)", "[options]
     CHECK(std::strcmp(found->values[0].value, "software") == 0);
     CHECK(std::strcmp(found->values[1].value, "vulkan") == 0);
     CHECK(found->values[2].value == nullptr);
+}
+
+TEST_CASE("Core options include the internal resolution option (Vulkan builds)", "[options][libretro]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+
+    const retro_core_option_v2_definition* found = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_internal_resolution") == 0) {
+            found = &options->definitions[i];
+            break;
+        }
+    }
+
+    REQUIRE(found != nullptr);
+    CHECK(std::strcmp(found->desc, "Internal Resolution (Vulkan)") == 0);
+    REQUIRE(found->category_key != nullptr);
+    CHECK(std::strcmp(found->category_key, "video") == 0);
+    REQUIRE(found->default_value != nullptr);
+    CHECK(std::strcmp(found->default_value, "1") == 0);
+    const char* const values[] = {"1", "2", "3", "4"};
+    const char* const labels[] = {"1x (Native)", "2x", "3x", "4x"};
+    for (int i = 0; i < 4; ++i) {
+        INFO("value " << i);
+        REQUIRE(found->values[i].value != nullptr);
+        REQUIRE(found->values[i].label != nullptr);
+        CHECK(std::strcmp(found->values[i].value, values[i]) == 0);
+        CHECK(std::strcmp(found->values[i].label, labels[i]) == 0);
+    }
+    CHECK(found->values[4].value == nullptr);
+}
+#else
+TEST_CASE("Core options have no internal resolution option without Vulkan", "[options][libretro]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        CHECK(std::strcmp(options->definitions[i].key, "brimir_internal_resolution") != 0);
+    }
 }
 #endif

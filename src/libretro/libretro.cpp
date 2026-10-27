@@ -56,11 +56,7 @@ static unsigned int g_lastWidth = 0;
 static unsigned int g_lastHeight = 0;
 static size_t g_profileFrameCount = 0;
 
-static void reset_frame_state(void) {
-    g_lastWidth = 0;
-    g_lastHeight = 0;
-    g_profileFrameCount = 0;
-}
+static void reset_frame_state(void);
 
 // Largest frame the core reports (SET_GEOMETRY ignores max_*; changing them through SET_SYSTEM_AV_INFO reinits the
 // frontend's video driver, so they are fixed per content).
@@ -77,9 +73,27 @@ static bool g_vulkanPresentErrorLogged = false;
 // The Vulkan VDP renderer (VDP2 on the GPU) could not be installed or attached on the current context: software
 // renderer until the next context_reset.
 static bool g_vulkanRendererFailed = false;
-// The Vulkan output's images are square, so a 90/270 rotation of the largest frame fits.
-static constexpr unsigned kVulkanMaxSize = 704;
+// Declared at content load whenever Vulkan is requested, whatever brimir_internal_resolution is: 704 x 4 (the largest
+// frame at 4x), square so a 90/270 rotation fits. A later change of the option is then a base-size change only
+// (SET_GEOMETRY); a larger maximum would need SET_SYSTEM_AV_INFO, which reinits the frontend's video driver.
+static constexpr unsigned kVulkanMaxSize = 704 * 4;
+// Internal resolution of the last frame handed over (0: none yet), for the log line vkhost --hash-sample follows.
+static unsigned g_presentedScale = 0;
+// brimir_internal_resolution above 1 without the Vulkan VDP2 renderer has no effect: said once per content.
+static bool g_internalResolutionNoopLogged = false;
+// retro_load_game is applying the options before it knows whether Vulkan is requested.
+static bool g_loadingContent = false;
 #endif
+
+static void reset_frame_state(void) {
+    g_lastWidth = 0;
+    g_lastHeight = 0;
+    g_profileFrameCount = 0;
+#ifdef BRIMIR_VULKAN
+    g_presentedScale = 0;
+    g_internalResolutionNoopLogged = false;
+#endif
+}
 
 static unsigned max_geometry_width(void) {
 #ifdef BRIMIR_VULKAN
@@ -151,7 +165,18 @@ struct OptionCache {
     std::string sh2_jit_compile_thread = "auto";
     // Load-time only (read in retro_load_game); kept to report live changes.
     std::string renderer = "software";
+    // Live (Vulkan VDP2 renderer only): applied at the next shown frame.
+    std::string internal_resolution = "1";
 } g_options;
+
+#ifdef BRIMIR_VULKAN
+static unsigned requested_internal_resolution(void) {
+    const int n = atoi(g_options.internal_resolution.c_str());
+    return n < 1 ? 1u : (n > 4 ? 4u : static_cast<unsigned>(n));
+}
+
+static void note_internal_resolution(void);
+#endif
 
 static void apply_core_options(bool force) {
     if (!g_core) return;
@@ -203,6 +228,12 @@ static void apply_core_options(bool force) {
             brimir_log(RETRO_LOG_INFO, "Renderer '%s' applies when content is next loaded", renderer);
         }
     }
+    apply("brimir_internal_resolution", g_options.internal_resolution, [](const char*) {
+        if (g_vulkanOutput) {
+            g_vulkanOutput->SetInternalScale(requested_internal_resolution());
+        }
+        note_internal_resolution();
+    });
 #endif
 }
 
@@ -259,6 +290,10 @@ static void sync_vdp_renderer(void) {
     if (compute && !g_vulkanRendererFailed && !g_vulkanOutput->RendererAttached()) {
         std::string error;
         brimir::gpu::VulkanVDPRenderer* renderer = g_core->InstallVulkanRenderer();
+        if (renderer != nullptr) {
+            // Allocation failures (internal resolution) and the effective scale after a fallback.
+            renderer->SetLog([](const std::string& text) { brimir_log(RETRO_LOG_WARN, "%s", text.c_str()); });
+        }
         if (renderer == nullptr) {
             error = "installing it failed";
         } else if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
@@ -283,6 +318,30 @@ static void sync_vdp_renderer(void) {
     sync_gpu_output();
 }
 
+// brimir_internal_resolution above 1 only applies with the Vulkan VDP2 renderer on the compute output: with the
+// software renderer, the copy-only output or a renderer that could not be installed the frames stay native (said once
+// per content). Unknown (and silent) between the Vulkan request and the first context_reset.
+static void note_internal_resolution(void) {
+    const unsigned n = requested_internal_resolution();
+    if (n <= 1 || g_internalResolutionNoopLogged || g_loadingContent) {
+        return;
+    }
+    using brimir::libretro::VulkanOutputMode;
+    const char* reason = nullptr;
+    if (!g_vulkanRequested) {
+        reason = "the software renderer";
+    } else if (g_vulkanOutput && g_vulkanOutput->Live() && g_vulkanOutput->Mode() != VulkanOutputMode::Compute) {
+        reason = "the copy-only frame output";
+    } else if (g_vulkanRendererFailed) {
+        reason = "the software renderer (the Vulkan VDP2 renderer is unavailable)";
+    }
+    if (reason != nullptr) {
+        g_internalResolutionNoopLogged = true;
+        brimir_log(RETRO_LOG_INFO, "Internal resolution %ux needs the Vulkan VDP2 renderer; frames stay native with %s",
+                   n, reason);
+    }
+}
+
 static void RETRO_CALLCONV vulkan_context_reset(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_vulkanRequested) {
@@ -291,6 +350,7 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
     if (!g_vulkanOutput) {
         g_vulkanOutput = std::make_unique<brimir::libretro::VulkanOutput>();
     }
+    g_vulkanOutput->SetInternalScale(requested_internal_resolution());
     std::string reason;
     const bool live = g_vulkanOutput->ContextReset(environ_cb, reason);
     g_vulkanPresentErrorLogged = false;
@@ -321,6 +381,7 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
     }
     // Install (first usable context) or attach the Vulkan VDP renderer; revert to software without the compute output.
     sync_vdp_renderer();
+    note_internal_resolution();
 }
 
 static void RETRO_CALLCONV vulkan_context_destroy(void) {
@@ -414,6 +475,15 @@ static void present_vulkan_frame(void) {
         return;
     }
 
+    // The scale of the frames handed over (brimir_vkhost --hash-sample and --sharpness follow this line), logged when it
+    // changes: N x the native size with the Vulkan VDP2 renderer, native otherwise.
+    if (const unsigned scale = g_vulkanOutput->PresentedScale(); scale != g_presentedScale) {
+        g_presentedScale = scale;
+        brimir_log(RETRO_LOG_INFO, "Internal resolution: frames at %ux (requested %ux)", scale,
+                   requested_internal_resolution());
+    }
+    // A change of the internal resolution is a base-size change: N x the native output, within the maximum declared at
+    // load (SET_GEOMETRY only, never SET_SYSTEM_AV_INFO).
     if (environ_cb && (width != g_lastWidth || height != g_lastHeight)) {
         struct retro_game_geometry geo = {};
         geo.base_width = width;
@@ -978,9 +1048,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // Apply core options after the disc is loaded. Region autodetection happens
     // during disc loading, so options that disable it must not be applied until
     // afterwards (otherwise the system would stay at the default Japan area code).
+#ifdef BRIMIR_VULKAN
+    g_loadingContent = true;
+#endif
     apply_core_options(true);
 
 #ifdef BRIMIR_VULKAN
+    g_loadingContent = false;
     // The renderer applies at content load. With Vulkan the frontend builds the context after this function
     // returns (context_reset); the maximum geometry reported below already accounts for it.
     g_vulkanRequested = false;
@@ -1003,6 +1077,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             break;
         }
     }
+    note_internal_resolution(); // the software renderer: native frames
 #endif
 
     update_system_av_info_for_region();

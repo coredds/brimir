@@ -9,6 +9,7 @@ lines from the front half's frame record (`src/gpu/vdp2/vdp2_front.*`):
 | `cs_vdp2_render_bgs.hlsl` | NBG0-3, RBG0-1 → layer images, RBG line colours, colour calculation window | `cs_vdp2_render_bgs.hlsl` |
 | `cs_vdp2_compose.hlsl` | layers + LNCL/BACK + sprite attributes → the composite (packed XBGR, as software's framebuffer) | `cs_vdp2_compose.hlsl` |
 | `cs_vdp2_nbg_fetch.hlsl` | the NBG character table: per pixel, the character software's fetcher shows (character pattern delay, vertical cell scroll on 2x2 characters), windows included; runs between sprite and bgs for the batches that need it (stage 1C) | Brimir only |
+| `cs_vdp2_rescale.hlsl` | one-shot nearest rescale of the previous composite into the new one after an internal resolution change (the sample points keep their values, so a woven field survives; stage 1C) | Brimir only |
 
 ## Provenance
 

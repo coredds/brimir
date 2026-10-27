@@ -19,6 +19,8 @@
 #include <gpu/shaders/generated/vdp2_nbg_fetch.spv.h>
 #include <gpu/shaders/generated/vdp2_render_bgs.spv.h>
 #include <gpu/shaders/generated/vdp2_render_sprite.spv.h>
+#include <gpu/shaders/generated/vdp2_rescale.layout.h>
+#include <gpu/shaders/generated/vdp2_rescale.spv.h>
 #include <gpu/vdp2/vdp2_bindings.hpp>
 
 #include <algorithm>
@@ -57,6 +59,7 @@ const std::vector<ShaderCase> &Shaders() {
         {"vdp2_render_bgs", sh::kVdp2RenderBgsSpv, kRenderBgsBindings, kPushConstantSize},
         {"vdp2_compose", sh::kVdp2ComposeSpv, kComposeBindings, kPushConstantSize},
         {"vdp2_nbg_fetch", sh::kVdp2NbgFetchSpv, kNBGFetchBindings, kNBGFetchPushConstantSize},
+        {"vdp2_rescale", sh::kVdp2RescaleSpv, kRescaleBindings, kRescalePushConstantSize},
     };
     return shaders;
 }
@@ -348,8 +351,27 @@ TEST_CASE("VDP2 shader modules use only the Vulkan 1.2 baseline", "[vdp2][pipeli
     CHECK(StorageImageVariables(sh::kVdp2RenderSpriteSpv) == 2);
     CHECK(StorageImageVariables(sh::kVdp2RenderBgsSpv) == 3);
     CHECK(StorageImageVariables(sh::kVdp2ComposeSpv) == 0);
-    // The NBG fetch pass writes a buffer (the character table), no image.
+    // The NBG fetch pass writes a buffer (the character table), no image; so does the rescale pass (the composite).
     CHECK(StorageImageVariables(sh::kVdp2NbgFetchSpv) == 0);
+    CHECK(StorageImageVariables(sh::kVdp2RescaleSpv) == 0);
+}
+
+TEST_CASE("The rescale pass: 32-thread rows, the composite, its push constants", "[vdp2][pipelines]") {
+    const SpvModule m = ParseSpirv(sh::kVdp2RescaleSpv);
+    REQUIRE(m.valid);
+    REQUIRE(m.localSize.size() == 3);
+    CHECK(m.localSize[0] == kWorkgroupWidth);
+    CHECK(m.localSize[1] == 1);
+    CHECK(m.localSize[2] == 1);
+    CHECK(WorkgroupBytes(sh::kVdp2RescaleSpv) == 0);
+    STATIC_CHECK(offsetof(VDP2RescalePushConstants, width) == sh::kVdp2Rescale_RescaleParams_width);
+    STATIC_CHECK(offsetof(VDP2RescalePushConstants, height) == sh::kVdp2Rescale_RescaleParams_height);
+    STATIC_CHECK(offsetof(VDP2RescalePushConstants, srcScale) == sh::kVdp2Rescale_RescaleParams_srcScale);
+    STATIC_CHECK(offsetof(VDP2RescalePushConstants, dstScale) == sh::kVdp2Rescale_RescaleParams_dstScale);
+    STATIC_CHECK(kRescalePushConstantSize == sh::kVdp2Rescale_RescaleParams_size);
+    // It writes the composite through compose's binding.
+    CHECK(std::any_of(kComposeBindings.begin(), kComposeBindings.end(),
+                      [](const Binding &b) { return b.binding == kBindingCompositeOut; }));
 }
 
 TEST_CASE("The NBG fetch pass: one 32-thread row group, the character table, its push constants", "[vdp2][pipelines]") {

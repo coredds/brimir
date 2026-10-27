@@ -4482,6 +4482,103 @@ TEST_CASE("Scene: the internal resolution changes between frames", "[gpu][vdp2][
     CloseAndCheckValidation(device);
 }
 
+TEST_CASE("Scene: a live internal resolution change keeps the woven field (nearest rescale)",
+          "[gpu][vdp2][scene][scale][lavapipe]") {
+    // Deinterlacing off on an interlaced mode: each frame writes one field, the composite keeps the other. A scale
+    // change between two frames rescales the old composite into the new one (nearest: N x pixel X of a native pixel x
+    // reads x * from + (X % to) * from / to), so the next frame weaves against the previous field, not a black one:
+    // every frame matches software at the sample points, and the kept field of the first frame at the new scale is
+    // exactly the nearest rescale of the previous composite.
+    const uint16_t lsmd = GENERATE(kLSMDSingle, kLSMDDouble);
+    const auto [from, to] = GENERATE(std::pair{1u, 2u}, std::pair{2u, 4u}, std::pair{4u, 1u}, std::pair{3u, 2u});
+    CAPTURE(lsmd, from, to);
+    constexpr uint32_t kChange = 3;
+    auto device = OpenDevice();
+    std::vector<uint32_t> before;
+    std::vector<uint32_t> after;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    RenderBothOptions options;
+    options.scale = from;
+    options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (frame == kChange) {
+            REQUIRE(vulkan.SetInternalScale(to));
+            // The rescale replaces the clear a new composite gets.
+            CHECK(vulkan.Backend()->RescalePendingForTest());
+            CHECK_FALSE(vulkan.Backend()->CompositeClearPendingForTest());
+        }
+    };
+    options.afterFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &dev) {
+        width = vulkan.Backend()->CompositeWidthForTest();
+        height = vulkan.Backend()->CompositeHeightForTest();
+        const uint32_t n = vulkan.InternalScale();
+        if (frame == kChange - 1) {
+            before = ReadbackBuffer(dev, vulkan.CompositeBuffer(), width * height * n * n);
+        } else if (frame == kChange) {
+            CHECK_FALSE(vulkan.Backend()->RescalePendingForTest());
+            after = ReadbackBuffer(dev, vulkan.CompositeBuffer(), width * height * n * n);
+        }
+    };
+    options.compareFrame = [](uint32_t) { return true; };
+    const SceneResult result = Check(*device, WeaveScene(lsmd, 6), options);
+    CHECK(result.comparedFrames == 6);
+    CHECK(result.scale == to);
+    REQUIRE(width != 0);
+    REQUIRE(before.size() == size_t{width} * height * from * from);
+    REQUIRE(after.size() == size_t{width} * height * to * to);
+    // Rows of each native parity that equal the nearest rescale of the previous composite.
+    const auto rescaled = [&](uint32_t X, uint32_t Y) {
+        const uint32_t sx = (X / to) * from + (X % to) * from / to;
+        const uint32_t sy = (Y / to) * from + (Y % to) * from / to;
+        return before[size_t{sy} * width * from + sx];
+    };
+    uint32_t keptRows[2] = {0, 0};
+    for (uint32_t y = 0; y < height; ++y) {
+        bool kept = true;
+        for (uint32_t Y = y * to; Y < (y + 1) * to && kept; ++Y) {
+            for (uint32_t X = 0; X < width * to; ++X) {
+                if (after[size_t{Y} * width * to + X] != rescaled(X, Y)) {
+                    kept = false;
+                    break;
+                }
+            }
+        }
+        keptRows[y & 1] += kept ? 1 : 0;
+    }
+    CAPTURE(keptRows[0], keptRows[1], height);
+    // One field is kept entirely, the other was drawn anew (it scrolled).
+    CHECK(((keptRows[0] == height / 2 && keptRows[1] < height / 2) ||
+           (keptRows[1] == height / 2 && keptRows[0] < height / 2)));
+    // ... and it is not black.
+    CHECK(std::any_of(before.begin(), before.end(), [](uint32_t px) { return (px & 0xFFFFFFu) != 0; }));
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Scene: a dropped frame re-arms the rescale of a scale change", "[gpu][vdp2][scene][scale][lavapipe]") {
+    // The frame recorded right after the scale change (it carries the rescale) is never submitted: the rescale is
+    // pending again for the next frame, which rescales the previous composite (still alive). That frame lacks the
+    // dropped frame's field, as any dropped weave frame does; from the frame after it on, every frame matches.
+    constexpr uint32_t kChange = 3;
+    auto device = OpenDevice();
+    bool pendingAgain = false;
+    RenderBothOptions options;
+    options.scale = 1;
+    options.dropFrame = kChange;
+    options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (frame == kChange) {
+            REQUIRE(vulkan.SetInternalScale(2));
+        } else if (frame == kChange + 1) {
+            pendingAgain = vulkan.Backend()->RescalePendingForTest();
+        }
+    };
+    options.compareFrame = [](uint32_t frame) { return frame < kChange || frame > kChange + 1; };
+    const SceneResult result = Check(*device, WeaveScene(kLSMDDouble, 7), options);
+    CHECK(pendingAgain);
+    CHECK(result.comparedFrames == 5);
+    CHECK(result.scale == 2);
+    CloseAndCheckValidation(device);
+}
+
 TEST_CASE("Scene: an internal resolution that cannot be allocated keeps the previous one", "[gpu][vdp2][scene][scale]") {
     // The allocation limit admits 2x but not 4x: SetInternalScale(4) fails, logs once, and the renderer keeps
     // rendering at 2x; a later re-attach (a new back half) falls back to 1x when even 2x does not fit.
@@ -4516,7 +4613,7 @@ TEST_CASE("Scene: an internal resolution that cannot be allocated keeps the prev
     CloseAndCheckValidation(device);
 }
 
-TEST_CASE("Vdp2VulkanBackend: scale resources per N and a failed allocation at attach", "[gpu][vdp2][scale]") {
+TEST_CASE("Vdp2VulkanBackend: scale resources per N, and the renderer's requested N at attach", "[gpu][vdp2][scale]") {
     namespace vdp2 = gpu::vdp2;
     // Background layers (6 x 4 bytes) and the composite (4 bytes) per N x pixel of 704 x 512.
     for (uint32_t n = 1; n <= 4; ++n) {
@@ -4542,19 +4639,68 @@ TEST_CASE("Vdp2VulkanBackend: scale resources per N and a failed allocation at a
         CHECK(logs.size() == 1);
     }
     {
-        // A renderer asked for 4x that cannot get it at attach falls back to 1x (logged by the back half).
+        // A back half created at N allocates N directly (no 1x first), or falls back to 1x when N does not fit.
+        vdp2::Vdp2VulkanBackend at3(*device, 1, 3);
+        REQUIRE(at3.Ok());
+        CHECK(at3.Scale() == 3);
+        std::vector<std::string> logs;
+        vdp2::Vdp2VulkanBackend tooBig(*device, 1, 4, vdp2::Vdp2VulkanBackend::ScaledResourceBytes(2),
+                                       [&](const std::string &text) { logs.push_back(text); });
+        REQUIRE(tooBig.Ok());
+        CHECK(tooBig.Scale() == 1);
+        REQUIRE(logs.size() == 1);
+        CHECK(logs[0].find("4x") != std::string::npos);
+    }
+    {
+        // A renderer asked for 4x gets 4x at attach; with the allocation limited (the renderer's test hook, applied to
+        // every back half it creates) the attach falls back to 1x, logged with the effective scale, keeps the request,
+        // and the next attach that can allocate it gets 4x again.
         namespace vdp = ymir::vdp;
         auto state = std::make_unique<vdp::VDPState>();
         vdp::config::VDP2DebugRender debug{};
         vdp::config::VDP2AccessPatternsConfig access{};
         auto vulkan = std::make_unique<gpu::VulkanVDPRenderer>(*state, debug, access);
+        std::vector<std::string> logs;
+        vulkan->SetLog([&](const std::string &text) { logs.push_back(text); });
         CHECK(vulkan->SetInternalScale(4)); // detached: kept for the attach
         CHECK(vulkan->InternalScale() == 4);
+        CHECK(vulkan->RequestedInternalScale() == 4);
         vulkan->AttachDevice(*device, 1);
         REQUIRE(vulkan->Attached());
         CHECK(vulkan->Backend()->Scale() == 4);
+        CHECK(logs.empty());
         vulkan->DetachDevice();
         CHECK(vulkan->InternalScale() == 4);
+
+        vulkan->SetScaleAllocationLimitForTest(vdp2::Vdp2VulkanBackend::ScaledResourceBytes(2));
+        vulkan->AttachDevice(*device, 1);
+        REQUIRE(vulkan->Attached());
+        CHECK(vulkan->Backend()->Scale() == 1);
+        CHECK(vulkan->InternalScale() == 1);
+        CHECK(vulkan->RequestedInternalScale() == 4);
+        REQUIRE(logs.size() == 2); // the back half's allocation failure, the renderer's effective scale
+        CHECK(logs[1].find("requested 4x") != std::string::npos);
+        CHECK(logs[1].find("using 1x") != std::string::npos);
+        // 2x fits: a live change to it works and is the request now.
+        CHECK(vulkan->SetInternalScale(2));
+        CHECK(vulkan->InternalScale() == 2);
+        CHECK(vulkan->RequestedInternalScale() == 2);
+        CHECK_FALSE(vulkan->SetInternalScale(4));
+        CHECK(vulkan->InternalScale() == 2);
+        CHECK(vulkan->RequestedInternalScale() == 4);
+        // A re-attach (context reset) under the limit falls back to the previous effective 2x, not 1x.
+        vulkan->DetachDevice();
+        vulkan->AttachDevice(*device, 1);
+        REQUIRE(vulkan->Attached());
+        CHECK(vulkan->Backend()->Scale() == 2);
+        CHECK(vulkan->InternalScale() == 2);
+        vulkan->DetachDevice();
+        vulkan->SetScaleAllocationLimitForTest(0);
+        vulkan->AttachDevice(*device, 1);
+        REQUIRE(vulkan->Attached());
+        CHECK(vulkan->Backend()->Scale() == 4);
+        CHECK(vulkan->InternalScale() == 4);
+        vulkan->DetachDevice();
     }
     CloseAndCheckValidation(device);
 }

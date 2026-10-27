@@ -357,6 +357,108 @@ check_vulkan_counters(runahead)
 check_vdp2_renderer(runahead)
 require_log(runahead "second instance ran 360 frames, 0 hardware frames, context none")
 
+# Internal resolution (brimir_internal_resolution). The Vulkan runs hash the sample points (--hash-sample: the native
+# image of the N x frame's sample points, the scale followed from the core's "frames at Nx" log line); the menu is
+# low-res and progressive, so no point is excluded and --hash-sample 1 of a software run is its plain hash.
+run_vkhost(software_sampled --hash-sample 1)
+check_software_reference(software_sampled)
+if(NOT "${software_sampled_hashes}" STREQUAL "${software_hashes}")
+    fail(software_sampled "--hash-sample 1 of the menu is not the plain hash")
+endif()
+
+# 2x from the start: N x the native size reported with SET_GEOMETRY (the maximum, 2816 square, declared at load). The
+# menu has no sub-pixel content (no zoom, rotation or fine scroll), so --sharpness finds every 2 x 2 block constant.
+run_vkhost(scale2 --vulkan --internal-resolution 2 --hash-sample 2 --sharpness 2)
+check_run(scale2 300)
+check_vulkan_counters(scale2)
+check_vdp2_renderer(scale2)
+require_log(scale2 "Internal resolution: frames at 2x")
+require_log(scale2 "SET_GEOMETRY 640x448 \\(max 2816x2816, aspect 1.3333\\)")
+forbid_log(scale2 "SET_GEOMETRY 320x224")
+require_log(scale2 "SET_SYSTEM_AV_INFO calls 0,")
+require_log(scale2 "sharpness: 300 frames \\(300 at more than 1x\\), mean non-constant blocks 0.00%, mean abs diff 0.0000")
+# ... rotated and cropped: the presenter's crop (decided natively, offsets N * (crop / 2)) and rotation at 2x, the
+# sample points mapped through the rotation by --hash-sample.
+run_vkhost(scale2_transformed --vulkan --internal-resolution 2 --hash-sample 2 ${transform_options})
+check_run(scale2_transformed 300 REFERENCE software_transformed)
+check_vulkan_counters(scale2_transformed)
+check_vdp2_renderer(scale2_transformed)
+require_log(scale2_transformed "SET_GEOMETRY 384x576")
+
+# Live changes 1x -> 2x -> 4x -> 1x (as from RetroArch's Quick Menu), with synchronization validation: each frame at its
+# scale, only SET_GEOMETRY (never SET_SYSTEM_AV_INFO, which would reinit the frontend's video driver), one submit per
+# retro_run. Deinterlacing on (the default) and off (weave: the composite keeps the other field through the rescale; the
+# menu is progressive, the interlaced case is the scene "a live internal resolution change keeps the woven field").
+run_vkhost(software_weave --option brimir_deinterlace_mode=none)
+check_software_reference(software_weave)
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+foreach(deinterlacing IN ITEMS bob none)
+    set(name live_${deinterlacing})
+    set(reference software)
+    if(deinterlacing STREQUAL "none")
+        set(reference software_weave)
+    endif()
+    run_vkhost(${name} --vulkan --hash-sample 1 --option brimir_deinterlace_mode=${deinterlacing}
+               --set-option-at 100 brimir_internal_resolution=2 --set-option-at 160 brimir_internal_resolution=4
+               --set-option-at 220 brimir_internal_resolution=1)
+    check_run(${name} 300 REFERENCE ${reference})
+    check_vulkan_counters(${name})
+    check_vdp2_renderer(${name})
+    require_log(${name} "SET_SYSTEM_AV_INFO calls 0, SET_GEOMETRY calls 4")
+    string(REGEX MATCHALL "SET_GEOMETRY [0-9]+x[0-9]+" geometries "${${name}_err}")
+    if(NOT "${geometries}" STREQUAL "SET_GEOMETRY 320x224;SET_GEOMETRY 640x448;SET_GEOMETRY 1280x896;SET_GEOMETRY 320x224")
+        fail(${name} "SET_GEOMETRY sequence '${geometries}', expected 320x224, 640x448, 1280x896, 320x224")
+    endif()
+    string(REGEX MATCHALL "frames at [0-9]x" scales "${${name}_err}")
+    if(NOT "${scales}" STREQUAL "frames at 1x;frames at 2x;frames at 4x;frames at 1x")
+        fail(${name} "presented scales '${scales}', expected 1x, 2x, 4x, 1x")
+    endif()
+    message(STATUS "${name}: live 1x -> 2x -> 4x -> 1x, SET_GEOMETRY N x native, no SET_SYSTEM_AV_INFO")
+endforeach()
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+
+# Hidden frames (video disabled) at 2x: recorded at the current scale (the next shown frame weaves against them).
+run_vkhost(hidden_scale2 --vulkan --internal-resolution 2 --hash-sample 2 --hide-every 2
+           --option brimir_deinterlace_mode=none)
+check_run(hidden_scale2 300 REFERENCE software_hidden_none)
+check_vulkan_counters(hidden_scale2)
+check_vdp2_renderer(hidden_scale2)
+require_log(hidden_scale2 "180 hidden frames")
+require_log(hidden_scale2 "Internal resolution: frames at 2x")
+
+# A driver reinit from inside retro_run at 2x: the requested scale is allocated again on the new device.
+run_vkhost(reset_in_run_scale2 --vulkan --internal-resolution 2 --hash-sample 2 --reset-in-run 150)
+check_run(reset_in_run_scale2 300)
+check_vulkan_counters(reset_in_run_scale2)
+check_vdp2_renderer(reset_in_run_scale2)
+require_log(reset_in_run_scale2 "context resets 2,")
+forbid_log(reset_in_run_scale2 "frames at 1x")
+
+# The copy-only output ignores the option: native frames, identical to software.
+run_vkhost(copy_only_scale4 --vulkan --fake-api 1.1 --internal-resolution 4 --hash-sample 4)
+check_run(copy_only_scale4 300)
+check_vulkan_counters(copy_only_scale4)
+check_software_renderer(copy_only_scale4)
+require_log(copy_only_scale4 "using copy-only frame output")
+require_log(copy_only_scale4 "Internal resolution 4x needs the Vulkan VDP2 renderer; frames stay native")
+require_log(copy_only_scale4 "Internal resolution: frames at 1x")
+forbid_log(copy_only_scale4 "frames at [2-4]x")
+
+# A GPU short of memory (the core's allocations above 64 MiB fail: 4x needs 154 MiB of layers and composite, 2x 39):
+# 4x at load falls back to 1x, a live change to 2x works, a live change back to 4x keeps 2x; the frames stay correct.
+run_vkhost(alloc_fail --vulkan --internal-resolution 4 --hash-sample 4 --fail-alloc-above 64
+           --set-option-at 150 brimir_internal_resolution=2 --set-option-at 200 brimir_internal_resolution=4)
+check_run(alloc_fail 300)
+check_vulkan_counters(alloc_fail)
+check_vdp2_renderer(alloc_fail)
+require_log(alloc_fail "VDP2 internal resolution: requested 4x, using 1x")
+require_log(alloc_fail "Internal resolution 4x could not be allocated; staying at 2x")
+require_log(alloc_fail "SET_SYSTEM_AV_INFO calls 0,")
+string(REGEX MATCHALL "frames at [0-9]x" alloc_scales "${alloc_fail_err}")
+if(NOT "${alloc_scales}" STREQUAL "frames at 1x;frames at 2x")
+    fail(alloc_fail "presented scales '${alloc_scales}', expected 1x then 2x")
+endif()
+
 file(REMOVE_RECURSE "${state_dir}")
 
 # --compare: software and Vulkan in two child processes. Identical content passes; a Vulkan run that is rotated 180
@@ -386,8 +488,16 @@ if(NOT compare_code EQUAL 3 OR NOT compare_out MATCHES "first at frame 0" OR
    NOT compare_out MATCHES "first differing pixel \\([0-9]+,[0-9]+\\): software 0x[0-9A-F]+, vulkan 0x[0-9A-F]+")
     message(FATAL_ERROR "--compare of different runs: exit ${compare_code}\n${compare_out}\n${compare_err}")
 endif()
-message(STATUS "--compare: identical runs pass (also with hidden frames and state round trips), a difference is "
-               "reported (exit 3, first pixel)")
+# ... at internal resolution 2 against software at 1x, through the sample points.
+execute_process(
+    COMMAND "${VKHOST}" ${common_args} --compare --internal-resolution 2 --hash-sample 2
+    OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
+if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 300 frames identical" OR
+   NOT compare_out MATCHES "vulkan: geometry: SET_GEOMETRY 640x448")
+    message(FATAL_ERROR "--compare --internal-resolution 2 --hash-sample 2: exit ${compare_code}\n${compare_out}\n${compare_err}")
+endif()
+message(STATUS "--compare: identical runs pass (also with hidden frames and state round trips, and at 2x through the "
+               "sample points), a difference is reported (exit 3, first pixel)")
 
 # --compare must not pass when the Vulkan run silently stayed on software or the copy-only output (the comparison
 # would be vacuous). The environment hook adds arguments to the Vulkan child only.

@@ -69,6 +69,26 @@ static struct retro_core_option_v2_definition option_defs[] = {
         },
         "software"
     },
+    {
+        // Live: applies at the next frame (libretro.cpp, VulkanOutput::SetInternalScale).
+        "brimir_internal_resolution",
+        "Internal Resolution (Vulkan)",
+        nullptr,
+        "Renders the VDP2 backgrounds at a multiple of the Saturn resolution: rotating and zoomed backgrounds get "
+        "sharper. Sprites (VDP1) stay at native resolution for now. Only used with Renderer = Vulkan on the GPU "
+        "renderer; ignored by the software renderer and the copy-only output. Applies immediately. 3x and 4x of "
+        "high-resolution modes exceed 1080p.",
+        nullptr,
+        "video",
+        {
+            { "1", "1x (Native)" },
+            { "2", "2x" },
+            { "3", "3x" },
+            { "4", "4x" },
+            { nullptr, nullptr }
+        },
+        "1"
+    },
 #endif
     {
         "brimir_deinterlacing",

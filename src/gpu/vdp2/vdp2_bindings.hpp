@@ -1,9 +1,9 @@
 #pragma once
 
-// Descriptor bindings of the four VDP2 compute shaders (src/gpu/shaders/vdp2/cs_vdp2_*.hlsl). Each pipeline has one
+// Descriptor bindings of the five VDP2 compute shaders (src/gpu/shaders/vdp2/cs_vdp2_*.hlsl). Each pipeline has one
 // descriptor set (set 0) and the 56-byte VDP2CommonRenderParams push-constant block (the NBG fetch pass: followed by
-// its row count, VDP2NBGFetchPushConstants). A resource has the same binding
-// in every shader that uses it. Bindings 0-15 are read-only buffers and sampled images (HLSL t registers, shifted by
+// its row count, VDP2NBGFetchPushConstants; the rescale pass: VDP2RescalePushConstants). A resource has the same
+// binding in every shader that uses it. Bindings 0-15 are read-only buffers and sampled images (HLSL t registers, shifted by
 // 0), bindings 16-31 are storage buffers and images (u registers, shifted by 16; tools/shaders/build_shaders.cmake).
 // N is the internal resolution (VDP2CommonRenderParams::renderScale, 1-4): only the background layers and the
 // composite are N x the native size; everything else is native at every N.
@@ -24,6 +24,7 @@
 //       12  t12       g_colorCalcWindowIn      SAMPLED_IMAGE            R32_UINT 704x512 (2D)                  compose
 //       13  t13       g_nbgChars               STORAGE_BUFFER           uint[4 * 512 * 704]                    bgs
 //       14  t14       g_spriteLayerIn          SAMPLED_IMAGE            R8G8B8A8_UINT 704x512, 2 layers        compose
+//       15  t15       g_rescaleSource          STORAGE_BUFFER           the previous composite (old N)         rescale
 //       16  u0        g_layerOut               STORAGE_IMAGE            R8G8B8A8_UINT 704Nx512N, 6 layers      bgs
 //       17  u1        g_spriteAttrsOut         STORAGE_IMAGE            R32_UINT 704x512, 2 layers             sprite
 //       18  u2        g_rbgLineColorOut        STORAGE_IMAGE            R8G8B8A8_UINT 352x512, 2 layers        bgs
@@ -32,7 +33,9 @@
 //       21  u5        g_nbgCharsOut            STORAGE_BUFFER           uint[4 * 512 * 704]                    nbg_fetch
 //       22  u6        g_spriteLayerOut         STORAGE_IMAGE            R8G8B8A8_UINT 704x512, 2 layers        sprite
 //
-// The NBG fetch pass (nbg_fetch) uses bindings 0, 2, 7 and 9 as bgs does.
+// The NBG fetch pass (nbg_fetch) uses bindings 0, 2, 7 and 9 as bgs does. The rescale pass (cs_vdp2_rescale.hlsl, run
+// once after an internal resolution change) copies the previous composite (15) into the new one (20); its push
+// constants are VDP2RescalePushConstants.
 // Sampled and storage bindings of the same data (9/17, 10/16, 11/18, 12/19, 14/22) are views of one image, used in
 // VK_IMAGE_LAYOUT_GENERAL. The background layer image (10/16) holds NBG0-3 and RBG0-1, the sprite layer image (14/22)
 // the sprite and mesh layers. Image views are 2D arrays except the colour calculation window (2D). Bindings 13 and 21
@@ -66,6 +69,7 @@ inline constexpr uint32_t kBindingRBGLineColorIn = 11;
 inline constexpr uint32_t kBindingColorCalcWindowIn = 12;
 inline constexpr uint32_t kBindingNBGChars = 13;
 inline constexpr uint32_t kBindingSpriteLayerIn = 14;
+inline constexpr uint32_t kBindingRescaleSource = 15;
 inline constexpr uint32_t kBindingLayerOut = 16;
 inline constexpr uint32_t kBindingSpriteAttrsOut = 17;
 inline constexpr uint32_t kBindingRBGLineColorOut = 18;
@@ -87,6 +91,16 @@ struct VDP2NBGFetchPushConstants {
 };
 inline constexpr uint32_t kNBGFetchPushConstantSize = sizeof(VDP2NBGFetchPushConstants);
 static_assert(kNBGFetchPushConstantSize == 64);
+
+/// @brief The rescale pass's push constants (cs_vdp2_rescale.hlsl RescaleParams).
+struct VDP2RescalePushConstants {
+    HLSLuint width;    // native frame size the previous composite holds
+    HLSLuint height;
+    HLSLuint srcScale; // its internal resolution
+    HLSLuint dstScale; // the new composite's
+};
+inline constexpr uint32_t kRescalePushConstantSize = sizeof(VDP2RescalePushConstants);
+static_assert(kRescalePushConstantSize == 16);
 
 /// @brief The largest push-constant block of the VDP2 pipelines (gpu_version.hpp requires it).
 inline constexpr uint32_t kMaxPushConstantSize = std::max(kPushConstantSize, kNBGFetchPushConstantSize);
@@ -214,6 +228,11 @@ inline constexpr std::array<Binding, 5> kNBGFetchBindings{{
     {kBindingNBGCharsOut, DescriptorKind::StorageBuffer},
 }};
 
+inline constexpr std::array<Binding, 2> kRescaleBindings{{
+    {kBindingRescaleSource, DescriptorKind::StorageBuffer},
+    {kBindingCompositeOut, DescriptorKind::StorageBuffer},
+}};
+
 /// @brief Descriptors of the given kinds in one pipeline's set (a compute pipeline has one stage).
 constexpr uint32_t CountBindings(std::span<const Binding> bindings, DescriptorKind a, DescriptorKind b) {
     uint32_t count = 0;
@@ -238,7 +257,8 @@ constexpr StageUsage MaxStageUsage() {
     for (std::span<const Binding> bindings : {std::span<const Binding>(kRenderSpriteBindings),
                                               std::span<const Binding>(kRenderBgsBindings),
                                               std::span<const Binding>(kComposeBindings),
-                                              std::span<const Binding>(kNBGFetchBindings)}) {
+                                              std::span<const Binding>(kNBGFetchBindings),
+                                              std::span<const Binding>(kRescaleBindings)}) {
         const uint32_t storageBuffers =
             CountBindings(bindings, DescriptorKind::StorageBuffer, DescriptorKind::StorageBufferDynamic);
         const uint32_t storageImages =
