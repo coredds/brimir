@@ -11,6 +11,8 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -1394,4 +1396,226 @@ TEST_CASE("Transparent mesh colour calculation in colour MSB mode uses the mesh 
     CHECK(RenderMeshMsbPixel(kSpriteMixed | kCondMsb, kSpriteCCEnable, false, true) == withCC);
     // Mesh MSB = 0 over a normal sprite layer MSB = 1: colour calculation does not apply
     CHECK(RenderMeshMsbPixel(kSpriteMixed | kCondMsb, kSpriteCCEnable, true, false) == withoutCC);
+}
+
+// -----------------------------------------------------------------------------
+// VDP1 software renderer characterization (GPU stage 2: behaviours the GPU VDP1 must reproduce exactly)
+
+namespace {
+
+// The unthreaded software renderer with a VDP1 command list in VRAM (commands at 0x100 + i * 0x20).
+struct VDP1CharFixture {
+    std::unique_ptr<vdp::VDPState> state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    std::unique_ptr<vdp::SoftwareVDPRenderer> renderer;
+    uint32 commandCount = 0;
+
+    explicit VDP1CharFixture(vdp::config::Enhancements enhancements = {}, uint16 tvmd = 0x8000) {
+        renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+        renderer->ConfigureEnhancements(enhancements);
+        state->regs2.WriteTVMD(tvmd);
+        state->regs2.LatchTVMD();
+        state->state1.sysClipH = 319;
+        state->state1.sysClipV = 255;
+        state->state2.layerEnabled[0] = true;
+        renderer->VDP2SetResolution(320, (tvmd & 0xC0) == 0xC0 ? 448 : 224, false);
+    }
+
+    // CMDCTRL, CMDLINK, CMDPMOD, CMDCOLR, CMDSRCA, CMDSIZE, XA, YA, XB, YB, XC, YC, XD, YD, CMDGRDA, unused
+    void Command(const std::array<uint16, 16> &words) {
+        const uint32 address = 0x100 + commandCount++ * 0x20;
+        for (uint32 i = 0; i < 16; ++i) {
+            state->mem1.WriteVRAM<uint16>(address + i * 2, words[i]);
+        }
+    }
+
+    void Line(uint16 pmod, uint16 color, sint32 x0, sint32 y0, sint32 x1, sint32 y1) {
+        Command({0x0006, 0, pmod, color, 0, 0, U(x0), U(y0), U(x1), U(y1), 0, 0, 0, 0, 0, 0});
+    }
+
+    // Executes the queued commands as one VDP1 frame and clears the list
+    void Draw() {
+        renderer->PostLoadStateSync();
+        renderer->VDP1BeginFrame();
+        for (uint32 i = 0; i < commandCount; ++i) {
+            const uint32 address = 0x100 + i * 0x20;
+            renderer->VDP1ExecuteCommand(address, vdp::VDP1Command::Control{.u16 = state->mem1.ReadVRAM<uint16>(address)});
+        }
+        renderer->VDP1EndFrame();
+        commandCount = 0;
+    }
+
+    vdp::SpriteFB &DrawFB() {
+        return state->mem1.FBRAM[state->fbIndex.draw];
+    }
+
+    uint16 Pixel(uint32 x, uint32 y) {
+        return util::ReadBE<uint16>(&DrawFB()[(y * 512 + x) * 2]);
+    }
+
+    // DumpExtraVDP1Framebuffers: alt[draw], alt[display] (deinterlace), mesh[0][draw], mesh[0][display], mesh[1][draw],
+    // mesh[1][display] (transparent meshes)
+    std::string Extra() const {
+        std::ostringstream out;
+        renderer->DumpExtraVDP1Framebuffers(out);
+        return out.str();
+    }
+
+    static uint16 U(sint32 v) {
+        return static_cast<uint16>(v);
+    }
+};
+
+uint16 Read16(const std::string &bytes, size_t offset) {
+    return static_cast<uint16>((static_cast<uint8>(bytes[offset]) << 8) | static_cast<uint8>(bytes[offset + 1]));
+}
+
+} // namespace
+
+TEST_CASE("VDP1 erase covers x1 <= x < x3 and y1 <= y <= y3", "[vdp][vdp1][characterization]") {
+    // Software: x3 is exclusive, y3 inclusive, so y1 == y3 erases one row and x1 == x3 erases nothing.
+    // (Ymir's D3D12 renderer skips y1 == y3 and treats x3 as inclusive.)
+    for (const auto [x1, x3, y1, y3] : {std::array<uint16, 4>{4, 12, 10, 10}, std::array<uint16, 4>{4, 12, 10, 13},
+                                        std::array<uint16, 4>{4, 4, 10, 12}}) {
+        CAPTURE(x1, x3, y1, y3);
+        VDP1CharFixture f;
+        auto &fb = f.state->mem1.FBRAM[f.state->fbIndex.display];
+        for (uint32 i = 0; i < fb.size(); i += 2) {
+            util::WriteBE<uint16>(&fb[i], 0x1111);
+        }
+        auto &regs1 = f.state->regs1;
+        regs1.eraseWriteValueLatch = 0xABCD;
+        regs1.eraseX1Latch = x1;
+        regs1.eraseX3Latch = x3;
+        regs1.eraseY1Latch = y1;
+        regs1.eraseY3Latch = y3;
+        f.renderer->VDP1EraseFramebuffer(0);
+        for (uint32 y = 8; y < 16; ++y) {
+            for (uint32 x = 0; x < 16; ++x) {
+                CAPTURE(x, y);
+                const bool inside = x >= x1 && x < x3 && y >= y1 && y <= y3;
+                CHECK(util::ReadBE<uint16>(&fb[(y * 512 + x) * 2]) == (inside ? 0xABCD : 0x1111));
+            }
+        }
+    }
+}
+
+TEST_CASE("VDP1 clipping commands use the raw 16-bit coordinates", "[vdp][vdp1][characterization]") {
+    // Software stores CMDXC/CMDYC (system clip) and CMDXA..CMDYC (user clip) unmasked. (Ymir's D3D12 renderer masks
+    // them to 10/9 bits.)
+    SECTION("system clip 0x1140 does not clip at 0x140") {
+        VDP1CharFixture f;
+        f.Command({0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1140, 0x10FF, 0, 0, 0, 0});
+        f.Line(0, 0x83E0, 310, 20, 340, 20);
+        f.Draw();
+        CHECK(f.state->state1.sysClipH == 0x1140);
+        CHECK(f.Pixel(330, 20) == 0x83E0);
+        CHECK(f.Pixel(340, 20) == 0x83E0);
+    }
+    SECTION("user clip X0 = 0xFC00 rejects everything inside mode") {
+        VDP1CharFixture f;
+        f.Command({0x0008, 0, 0, 0, 0, 0, 0xFC00, 0, 0, 0, 300, 200, 0, 0, 0, 0});
+        f.Line(0x0400, 0x83E0, 10, 20, 40, 20); // user clipping on, draw inside
+        f.Draw();
+        CHECK(f.state->state1.userClipX0 == 0xFC00);
+        for (uint32 x = 10; x <= 40; ++x) {
+            CAPTURE(x);
+            CHECK(f.Pixel(x, 20) == 0x0000);
+        }
+    }
+}
+
+TEST_CASE("VDP1 Draw Line is vertically doubled without the field offset", "[vdp][vdp1][characterization]") {
+    // Deinterlaced double density (FBCR.DIE clear): lines use y << 1 and land on the even field only, while a sprite's
+    // bottom edge gets the +1 so one sprite row covers both fields. (Ymir's D3D12 renderer does not double lines.)
+    VDP1CharFixture f({.deinterlace = true}, 0x80C0);
+    f.Line(0, 0x83E0, 0, 40, 7, 40);
+    // one-row normal sprite at y = 50: 8x1 RGB texture, transparent pixels and end codes disabled
+    for (uint32 i = 0; i < 8; ++i) {
+        f.state->mem1.WriteVRAM<uint16>(0x2000 + i * 2, 0xFC00);
+    }
+    f.Command({0x0000, 0, 0x00E8, 0, 0x2000 / 8, 0x0101, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0});
+    f.Draw();
+
+    const std::string extra = f.Extra(); // alt[draw] first
+    const auto alt = [&](uint32 x, uint32 y) { return Read16(extra, (y * 512 + x) * 2); };
+    for (uint32 x = 0; x < 8; ++x) {
+        CAPTURE(x);
+        CHECK(f.Pixel(x, 40) == 0x83E0); // y = 80, even field, row 40
+        CHECK(alt(x, 40) == 0x0000);
+        CHECK(f.Pixel(x, 20) == 0x0000); // not undoubled
+        CHECK(f.Pixel(x, 50) == 0xFC00); // sprite rows 100 and 101
+        CHECK(alt(x, 50) == 0xFC00);
+    }
+}
+
+TEST_CASE("VDP1 CPU framebuffer writes mirror to the alternate field when interlaced and leave meshes alone",
+          "[vdp][vdp1][characterization]") {
+    // Software: with deinterlacing, a CPU write to the draw framebuffer is mirrored to the alternate-field framebuffer
+    // whenever TVMD is interlaced (single or double density), and never touches the mesh framebuffers. (Ymir's D3D12
+    // renderer mirrors only in double density and clears the mesh.)
+    for (const uint16 tvmd : {uint16{0x8080}, uint16{0x80C0}, uint16{0x8000}}) {
+        CAPTURE(tvmd);
+        VDP1CharFixture f({.deinterlace = true, .transparentMeshes = true}, tvmd);
+        // a mesh pixel at (4, 2) of the draw framebuffer
+        f.Line(0x0100, 0x83E0, 4, 2, 4, 2);
+        f.Draw();
+        const size_t kFB = vdp::kVDP1FBRAMSize;
+        const std::string before = f.Extra();
+        const uint32 address = (2 * 512 + 4) * 2;
+        const size_t meshOffset = 2 * kFB; // mesh[0][draw]
+        REQUIRE(Read16(before, meshOffset + address) == 0x83E0);
+
+        f.state->VDP1WriteFB<uint16>(address, 0x1234, [&](uint32 a, uint16 v) { f.renderer->VDP1WriteFB(a, v); });
+        f.state->VDP1WriteFB<uint8>(address + 3, 0x56, [&](uint32 a, uint8 v) { f.renderer->VDP1WriteFB(a, v); });
+        const std::string after = f.Extra();
+        CHECK(f.Pixel(4, 2) == 0x1234);
+        const bool interlaced = tvmd != 0x8000;
+        CHECK(Read16(after, address) == (interlaced ? 0x1234 : 0x0000)); // alt[draw]
+        CHECK(static_cast<uint8>(after[address + 3]) == (interlaced ? 0x56 : 0x00));
+        CHECK(after.substr(2 * kFB) == before.substr(2 * kFB)); // meshes untouched
+        CHECK(after.substr(kFB, kFB) == before.substr(kFB, kFB)); // alt[display] untouched
+    }
+}
+
+TEST_CASE("VDP1 MSB-on sets bit 7 of the even byte in 8-bpp framebuffers", "[vdp][vdp1][characterization]") {
+    // Software: MSB-on ORs 0x80 into the byte at fbOffset & ~1, so in 8-bpp mode both pixels of a 16-bit word share
+    // it and the odd pixel's own byte is untouched.
+    for (const uint32 x : {2u, 3u}) {
+        CAPTURE(x);
+        VDP1CharFixture f;
+        f.state->regs1.WriteTVMR(0x0001); // 8 bpp, 1024 wide
+        f.DrawFB().fill(0x11);
+        f.Line(0x8000, 0x00FF, x, 10, x, 10);
+        f.Draw();
+        const uint32 offset = 10 * 1024 + x;
+        CHECK(f.DrawFB()[offset & ~1u] == 0x91);
+        CHECK(f.DrawFB()[offset | 1u] == 0x11);
+        CHECK(f.DrawFB()[offset - 2] == 0x11);
+    }
+}
+
+TEST_CASE("VDP1 end codes in a system-clipped prefix still count", "[vdp][vdp1][characterization]") {
+    // Software reads every texel from u = start through the catch-up loop after LineStepper::SystemClip, so end codes
+    // left of the screen count towards the two that end the line. A 16x3 RGB sprite at x = -8: row 0 has end codes at
+    // texels 1 and 12 (the line ends at x = 4), row 1 at texels 0 and 3 (nothing is drawn), row 2 has none.
+    VDP1CharFixture f;
+    for (uint32 y = 0; y < 3; ++y) {
+        for (uint32 i = 0; i < 16; ++i) {
+            uint16 texel = static_cast<uint16>(0x8000 | (y << 8) | i);
+            if ((y == 0 && (i == 1 || i == 12)) || (y == 1 && (i == 0 || i == 3))) {
+                texel = 0x7FFF;
+            }
+            f.state->mem1.WriteVRAM<uint16>(0x2000 + (y * 16 + i) * 2, texel);
+        }
+    }
+    f.Command({0x0000, 0, 0x0028, 0, 0x2000 / 8, 0x0203, f.U(-8), 30, 0, 0, 0, 0, 0, 0, 0, 0});
+    f.Draw();
+    for (uint32 x = 0; x < 8; ++x) {
+        CAPTURE(x);
+        CHECK(f.Pixel(x, 30) == (x < 4 ? static_cast<uint16>(0x8000 | (8 + x)) : 0x0000));
+        CHECK(f.Pixel(x, 31) == 0x0000);
+        CHECK(f.Pixel(x, 32) == static_cast<uint16>(0x8000 | (2 << 8) | (8 + x)));
+    }
 }
