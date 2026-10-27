@@ -279,6 +279,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         report.problems.insert(report.problems.end(), secondaryReport.problems.begin(),
                                secondaryReport.problems.end());
     }
+    const uint64_t coreMemoryAtEnd = host.CoreMemoryLive();
     host.Unload();
     host.FillReport(report);
     if (config.failAllocAboveMiB != 0 || config.failOutputImagesAbove != 0) {
@@ -286,6 +287,14 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
                              "--fail-output-images-above %u)\n",
                      static_cast<unsigned long long>(host.FailedAllocations()),
                      static_cast<unsigned long long>(config.failAllocAboveMiB), config.failOutputImagesAbove);
+    }
+    if (config.vulkan) {
+        std::fprintf(stderr,
+                     "vkhost: vulkan: core device memory: %.1f MiB after the last frame, peak %.1f MiB, "
+                     "%llu allocations\n",
+                     static_cast<double>(coreMemoryAtEnd) / (1024.0 * 1024.0),
+                     static_cast<double>(host.CoreMemoryPeak()) / (1024.0 * 1024.0),
+                     static_cast<unsigned long long>(host.CoreMemoryAllocations()));
     }
     report.problems.insert(report.problems.end(), stateProblems.begin(), stateProblems.end());
     report.recordSeconds = recordSeconds;

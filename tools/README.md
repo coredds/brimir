@@ -328,7 +328,11 @@ one command-buffer submit in one `retro_run`, `set_image` outside `GENERAL`/`VK_
 semaphores, features requested through `VkPhysicalDeviceVulkan1xFeatures`, a `create_device2` refusal (RetroArch may be
 left without a GPU after its retry), unreadable frames, failed state saves/loads and validation errors. The
 queue-lock check runs a self-test each time a context is created. The summary line reports context resets, the
-core's submits and each counter.
+core's submits and each counter. A second line, `vkhost: vulkan: core device memory: X MiB after the last frame, peak
+Y MiB, N allocations`, sums the core's device memory (its `vkAllocateMemory` / `vkFreeMemory` calls, wrapped like
+`vkQueueSubmit`; the host's own readback memory is not counted): X is what is live after the last recorded frame, Y
+the most that was live at once over the run (every context; a live internal-resolution change briefly holds the old
+and the new resources).
 
 The host's volk and the core's are separate copies (the core is its own library with its own globals): the core's
 `VulkanDevice::WrapExternal` loads its volk from the host's `vkGetInstanceProcAddr` and instance without touching the

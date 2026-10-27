@@ -46,6 +46,7 @@ struct VulkanProvider::RealFunctions {
     PFN_vkGetPhysicalDeviceProperties getPhysicalDeviceProperties = nullptr;
     PFN_vkCreateComputePipelines createComputePipelines = nullptr;
     PFN_vkAllocateMemory allocateMemory = nullptr;
+    PFN_vkFreeMemory freeMemory = nullptr;
     PFN_vkCreateImage createImage = nullptr;
     PFN_vkDestroyImage destroyImage = nullptr;
     PFN_vkDestroyImageView destroyImageView = nullptr;
@@ -132,34 +133,6 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateComputePipelines(VkDevice device, VkPip
     return g_provider->Real().createComputePipelines(device, cache, count, infos, allocator, pipelines);
 }
 
-// --fail-alloc-above: large allocations fail as on a GPU short of memory (fault injection).
-VKAPI_ATTR VkResult VKAPI_CALL HookAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info,
-                                                  const VkAllocationCallbacks* allocator, VkDeviceMemory* memory) {
-    const uint64_t limit = g_provider->FailAllocAbove();
-    if (limit != 0 && info != nullptr && info->allocationSize > limit) {
-        g_provider->CountFailedAllocation();
-        std::fprintf(stderr, "vkhost: vulkan: vkAllocateMemory of %llu MiB refused (--fail-alloc-above)\n",
-                     static_cast<unsigned long long>(info->allocationSize >> 20));
-        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    }
-    return g_provider->Real().allocateMemory(device, info, allocator, memory);
-}
-
-// --fail-output-images-above: the images the core hands to set_image (MUTABLE_FORMAT, which libretro_vulkan.h
-// requires for them) fail to be created above 704 * N px.
-VKAPI_ATTR VkResult VKAPI_CALL HookCreateImage(VkDevice device, const VkImageCreateInfo* info,
-                                               const VkAllocationCallbacks* allocator, VkImage* image) {
-    const uint32_t scale = g_provider->FailOutputImagesAbove();
-    if (scale != 0 && info != nullptr && (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0 &&
-        info->extent.width > 704 * scale) {
-        g_provider->CountFailedAllocation();
-        std::fprintf(stderr, "vkhost: vulkan: vkCreateImage of a %ux%u output image refused (--fail-output-images-above)\n",
-                     info->extent.width, info->extent.height);
-        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    }
-    return g_provider->Real().createImage(device, info, allocator, image);
-}
-
 template <typename Handle>
 uint64_t HandleValue(Handle handle) {
     if constexpr (std::is_pointer_v<Handle>) {
@@ -176,6 +149,47 @@ Handle HandleFrom(uint64_t value) {
     } else {
         return static_cast<Handle>(value);
     }
+}
+
+// --fail-alloc-above: large allocations fail as on a GPU short of memory (fault injection). Successful allocations
+// are tracked for the core device memory summary (OnAllocateMemory / OnFreeMemory).
+VKAPI_ATTR VkResult VKAPI_CALL HookAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info,
+                                                  const VkAllocationCallbacks* allocator, VkDeviceMemory* memory) {
+    const uint64_t limit = g_provider->FailAllocAbove();
+    if (limit != 0 && info != nullptr && info->allocationSize > limit) {
+        g_provider->CountFailedAllocation();
+        std::fprintf(stderr, "vkhost: vulkan: vkAllocateMemory of %llu MiB refused (--fail-alloc-above)\n",
+                     static_cast<unsigned long long>(info->allocationSize >> 20));
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    const VkResult result = g_provider->Real().allocateMemory(device, info, allocator, memory);
+    if (result == VK_SUCCESS && info != nullptr && memory != nullptr) {
+        g_provider->OnAllocateMemory(HandleValue(*memory), info->allocationSize);
+    }
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL HookFreeMemory(VkDevice device, VkDeviceMemory memory,
+                                          const VkAllocationCallbacks* allocator) {
+    if (memory != VK_NULL_HANDLE) {
+        g_provider->OnFreeMemory(HandleValue(memory));
+    }
+    g_provider->Real().freeMemory(device, memory, allocator);
+}
+
+// --fail-output-images-above: the images the core hands to set_image (MUTABLE_FORMAT, which libretro_vulkan.h
+// requires for them) fail to be created above 704 * N px.
+VKAPI_ATTR VkResult VKAPI_CALL HookCreateImage(VkDevice device, const VkImageCreateInfo* info,
+                                               const VkAllocationCallbacks* allocator, VkImage* image) {
+    const uint32_t scale = g_provider->FailOutputImagesAbove();
+    if (scale != 0 && info != nullptr && (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0 &&
+        info->extent.width > 704 * scale) {
+        g_provider->CountFailedAllocation();
+        std::fprintf(stderr, "vkhost: vulkan: vkCreateImage of a %ux%u output image refused (--fail-output-images-above)\n",
+                     info->extent.width, info->extent.height);
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return g_provider->Real().createImage(device, info, allocator, image);
 }
 
 VKAPI_ATTR void VKAPI_CALL HookDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator) {
@@ -218,6 +232,9 @@ PFN_vkVoidFunction Intercept(const char* name) {
     }
     if (std::strcmp(name, "vkAllocateMemory") == 0 && real.allocateMemory) {
         return reinterpret_cast<PFN_vkVoidFunction>(&HookAllocateMemory);
+    }
+    if (std::strcmp(name, "vkFreeMemory") == 0 && real.freeMemory) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&HookFreeMemory);
     }
     if (std::strcmp(name, "vkCreateImage") == 0 && real.createImage) {
         return reinterpret_cast<PFN_vkVoidFunction>(&HookCreateImage);
@@ -540,6 +557,7 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
     load(m_real->deviceWaitIdle, "vkDeviceWaitIdle");
     load(m_real->createComputePipelines, "vkCreateComputePipelines");
     load(m_real->allocateMemory, "vkAllocateMemory");
+    load(m_real->freeMemory, "vkFreeMemory");
     load(m_real->createImage, "vkCreateImage");
     load(m_real->destroyImage, "vkDestroyImage");
     load(m_real->destroyImageView, "vkDestroyImageView");

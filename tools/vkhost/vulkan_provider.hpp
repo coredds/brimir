@@ -17,6 +17,7 @@
 
 #include <libretro.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -25,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 struct retro_hw_render_interface_vulkan;
@@ -133,6 +135,28 @@ public:
     uint64_t FailAllocAbove() const { return m_failAllocAbove; }
     void CountFailedAllocation() { ++m_failedAllocations; }
     uint64_t FailedAllocations() const { return m_failedAllocations; }
+    // The core's device memory (wrapped vkAllocateMemory / vkFreeMemory): live bytes, the peak and the number of
+    // successful allocations, over every context of the run.
+    void OnAllocateMemory(uint64_t memory, uint64_t bytes) {
+        std::lock_guard lock(m_memoryMutex);
+        m_memory[memory] = bytes;
+        m_memoryBytes += bytes;
+        m_memoryPeak = std::max(m_memoryPeak, m_memoryBytes);
+        ++m_memoryAllocations;
+    }
+    void OnFreeMemory(uint64_t memory) {
+        std::lock_guard lock(m_memoryMutex);
+        if (const auto it = m_memory.find(memory); it != m_memory.end()) {
+            m_memoryBytes -= it->second;
+            m_memory.erase(it);
+        }
+    }
+    uint64_t CoreMemoryPeak() const { return m_memoryPeak; }
+    uint64_t CoreMemoryLive() {
+        std::lock_guard lock(m_memoryMutex);
+        return m_memoryBytes;
+    }
+    uint64_t CoreMemoryAllocations() const { return m_memoryAllocations; }
     // --fail-output-images-above N: the core's vkCreateImage fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for images created
     // MUTABLE_FORMAT (the images it hands to set_image; libretro_vulkan.h requires the bit, its internal images do not
     // use it) wider than 704 * N (0: never).
@@ -184,6 +208,11 @@ private:
     bool m_failPipelines = false;
     uint64_t m_failAllocAbove = 0;
     uint64_t m_failedAllocations = 0;
+    std::mutex m_memoryMutex;
+    std::unordered_map<uint64_t, uint64_t> m_memory; // live core allocations: VkDeviceMemory -> bytes
+    uint64_t m_memoryBytes = 0;
+    uint64_t m_memoryPeak = 0;
+    uint64_t m_memoryAllocations = 0;
     uint32_t m_failOutputImagesAbove = 0;
     int m_failSubmitFirst = -1;
     int m_failSubmitCount = 1;

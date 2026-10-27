@@ -1,4 +1,4 @@
-# VDP2 compute shaders (GPU stage 1B)
+# VDP2 compute shaders (GPU stages 1B and 1C)
 
 The compute shaders of the Vulkan VDP2 back half (`src/gpu/vdp2/vdp2_vulkan_backend.*`), replayed per batch of
 lines from the front half's frame record (`src/gpu/vdp2/vdp2_front.*`):
@@ -96,6 +96,19 @@ checks every module's Workgroup variables against it.
   - native: windows, NBG mosaic per axis (i = 0 when the mosaic is wider than one dot, the vertical position when it
     is taller than one line), RBG mosaic (the whole layer), coefficient addresses and values, rotation parameter
     selection, NBGs using the character table (character pattern delay, vertical cell scroll on 2x2 characters).
+
+Sample points: at N = 2-4 the composite at (N x, N y) equals the 1x output at (x, y) for every native pixel, except
+where the span rules above deliberately move the sample point (correct by design, excluded from the comparisons in
+`tests/unit/vdp2_scene.*` and, conservatively from the frame size alone, in `brimir_vkhost --hash-sample`): odd native
+columns where an RBG is enabled in a hi-res mode; odd composite rows where an RBG is drawn in an interlaced mode
+(deinterlaced or woven); the second row of each identical pair for NBGs in single-density interlace. Known limits:
+- a perspective floor whose depth comes from per-line coefficients gains detail mostly along x: the coefficient is
+  native, so the sub-lines of a line only step by the line's deltaXst/deltaYst (stage 1C validation: on the dumped
+  frames 0.07-8% of the blocks of Virtua Fighter 2's and Panzer Dragoon II Zwei's floors have vertical sub-pixel
+  detail, against 34-55% on Panzer Dragoon II's zoomed sky);
+- a double-density bitmap NBG with vertical line scroll (alternate-line off) can show a sub-row sawtooth at N > 1
+  (parked; the sample points are unchanged);
+- exception W5 is unchanged at N (its NBG does not use the character table).
 
 ### 2. Software semantics (Brimir's software renderer is the reference)
 

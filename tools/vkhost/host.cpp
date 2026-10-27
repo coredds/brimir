@@ -357,6 +357,8 @@ void LibretroHost::Unload() {
         m_hiddenSubmits = m_vulkan->HiddenSubmits();
         m_maxRunSubmits = m_vulkan->MaxRunSubmits();
         m_failedAllocations = m_vulkan->FailedAllocations();
+        m_coreMemoryPeak = m_vulkan->CoreMemoryPeak();
+        m_coreMemoryAllocations = m_vulkan->CoreMemoryAllocations();
         m_validation = m_vulkan->ValidationEnabled();
         m_problems.insert(m_problems.end(), m_vulkan->Problems().begin(), m_vulkan->Problems().end());
         // Destroying the instance can still report (leaks): read the counter afterwards.

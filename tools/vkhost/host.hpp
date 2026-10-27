@@ -165,6 +165,14 @@ public:
     double ReadbackSeconds() const { return m_readbackSeconds; }
     // --fail-alloc-above: the core's allocations refused (complete after Unload).
     uint64_t FailedAllocations() const { return m_vulkan ? m_vulkan->FailedAllocations() : m_failedAllocations; }
+    // With --vulkan: the peak of the core's live device memory and its successful allocations (complete after
+    // Unload).
+    uint64_t CoreMemoryPeak() const { return m_vulkan ? m_vulkan->CoreMemoryPeak() : m_coreMemoryPeak; }
+    // The core's live device memory now (0 after Unload).
+    uint64_t CoreMemoryLive() const { return m_vulkan ? m_vulkan->CoreMemoryLive() : 0; }
+    uint64_t CoreMemoryAllocations() const {
+        return m_vulkan ? m_vulkan->CoreMemoryAllocations() : m_coreMemoryAllocations;
+    }
     bool HadContext() const { return m_contextResets > 0; }
 
     // Adds this instance's counters and problems (Vulkan ones too; complete after Unload).
@@ -251,6 +259,8 @@ private:
     uint64_t m_hiddenSubmits = 0;
     uint64_t m_maxRunSubmits = 0;
     uint64_t m_failedAllocations = 0;
+    uint64_t m_coreMemoryPeak = 0;
+    uint64_t m_coreMemoryAllocations = 0;
     bool m_validation = false;
     uint32_t m_validationErrors = 0;
     std::vector<std::string> m_problems;
