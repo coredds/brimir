@@ -101,6 +101,10 @@ void RETRO_CALLCONV LogCallback(enum retro_log_level level, const char* fmt, ...
     if (std::strstr(text, "VDP2 probe: ") != nullptr && g_hosts[Slot] != nullptr && g_hosts[Slot]->ProbeLine(text)) {
         return;
     }
+    if (std::strstr(text, "VDP1 probe: ") != nullptr && g_hosts[Slot] != nullptr &&
+        g_hosts[Slot]->Vdp1ProbeLine(text)) {
+        return;
+    }
     if (g_hosts[Slot] != nullptr) {
         g_hosts[Slot]->CoreLogLine(text);
     }
@@ -178,12 +182,16 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_resetInPresent = config.resetInPresent;
     m_frameIndex = 0;
     m_probeFrames.clear();
+    m_vdp1ProbeFrames.clear();
     if (config.probe) {
-        // The core reads it when it installs the Vulkan VDP renderer.
+        // The core reads BRIMIR_VDP2_PROBE when it installs the Vulkan VDP renderer, BRIMIR_VDP1_PROBE on its first
+        // retro_run (only cores built with BRIMIR_VDP1_PROBE=ON count VDP1 work).
 #ifdef _WIN32
         _putenv_s("BRIMIR_VDP2_PROBE", "1");
+        _putenv_s("BRIMIR_VDP1_PROBE", "1");
 #else
         setenv("BRIMIR_VDP2_PROBE", "1", 1);
+        setenv("BRIMIR_VDP1_PROBE", "1", 1);
 #endif
     }
     if (config.vulkan && !config.refuseHw) {
@@ -461,6 +469,22 @@ bool LibretroHost::ProbeLine(const char* text) {
     return true;
 }
 
+bool LibretroHost::Vdp1ProbeLine(const char* text) {
+    const char* line = std::strstr(text, "VDP1 probe: ");
+    unsigned long long v[7] = {};
+    const int n = std::sscanf(line,
+                              "VDP1 probe: commands %llu lines %llu pixels %llu syncs %llu dirtysyncs %llu fbwrites %llu "
+                              "erases %llu",
+                              &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
+    if (n != 7) {
+        return false;
+    }
+    if (m_sink != nullptr) {
+        m_vdp1ProbeFrames.push_back({v[0], v[1], v[2], v[3], v[4], v[5], v[6]});
+    }
+    return true;
+}
+
 void LibretroHost::Problem(const std::string& text) {
     // Each kind once; the counters carry the totals.
     if (std::find(m_problems.begin(), m_problems.end(), text) == m_problems.end()) {
@@ -479,6 +503,7 @@ void LibretroHost::FillReport(RunReport& report) const {
     report.geometryCalls += m_geometryCalls;
     report.hiddenGpuCalls += m_hiddenFrames;
     report.probeFrames.insert(report.probeFrames.end(), m_probeFrames.begin(), m_probeFrames.end());
+    report.vdp1ProbeFrames.insert(report.vdp1ProbeFrames.end(), m_vdp1ProbeFrames.begin(), m_vdp1ProbeFrames.end());
     report.problems.insert(report.problems.end(), m_problems.begin(), m_problems.end());
     if (m_vulkan) {
         report.coreSubmits += m_vulkan->CoreSubmits();

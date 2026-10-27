@@ -1,6 +1,7 @@
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 
 #include <ymir/hw/vdp/renderer/common/vdp1_clip.hpp> // Brimir: quad termination
+#include <ymir/hw/vdp/renderer/vdp1_probe.hpp> // Brimir: VDP1 probe counters (no-ops unless BRIMIR_VDP1_PROBE)
 
 #include <ymir/util/constexpr_for.hpp>
 #include <ymir/util/dev_log.hpp>
@@ -374,6 +375,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1WriteVRAMImpl(uint32 address, T value
 }
 
 void SoftwareVDPRenderer::VDP1SyncFB() {
+    BRIMIR_VDP1_PROBE_SYNC(); // Brimir: probe
     if (m_threadedVDP1Rendering) {
         auto &ctx = m_vdp1RenderingContext;
         ctx.FlushPendingEvents();
@@ -399,6 +401,7 @@ void SoftwareVDPRenderer::VDP1WriteFB(uint32 address, uint16 value) {
 
 template <mem_primitive_16 T>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1WriteFBImpl(uint32 address, T value) {
+    BRIMIR_VDP1_PROBE_COUNT(fbWrites); // Brimir: probe
     if (m_threadedVDP1Rendering) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::FBRAMWrite<T>(address, value));
     } else {
@@ -486,6 +489,8 @@ void SoftwareVDPRenderer::VDP2WriteReg(uint32 address, uint16 value) {
 // Rendering process
 
 void SoftwareVDPRenderer::VDP1EraseFramebuffer(uint64 cycles) {
+    BRIMIR_VDP1_PROBE_COUNT(erases); // Brimir: probe
+    BRIMIR_VDP1_PROBE_DRAWN();
     if (m_threadedVDP2Rendering) {
         m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::VDP1EraseFramebuffer());
         m_vdp2RenderingContext.eraseFramebufferReadySignal.Wait();
@@ -533,6 +538,11 @@ void SoftwareVDPRenderer::VDP1BeginFrame() {
 }
 
 void SoftwareVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Control control) {
+    // Brimir: probe; command types 0x0-0x7 draw
+    BRIMIR_VDP1_PROBE_COUNT(commands);
+    if (static_cast<uint16>(control.command) <= 0x7) {
+        BRIMIR_VDP1_PROBE_DRAWN();
+    }
     if (m_threadedVDP1Rendering) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::Command(cmdAddress, control));
     } else {
@@ -1201,6 +1211,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotPixel(CoordS32 coord, const VDP1P
 
     const auto fbIndex = m_state.fbIndex.draw;
     auto &drawFB = VDP1GetRendererFBRAM(altFB, fbIndex);
+    BRIMIR_VDP1_PROBE_COUNT(pixels); // Brimir: probe
     if (pixelParams.mode.msbOn) {
         // TODO: check correctness -- does it write only when (x&1)==0 or is it force-aligned like this?
         drawFB[fbOffset & ~1u] |= 0x80;
@@ -1284,6 +1295,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotLine(CoordS32 coord1, CoordS32 co
         return false;
     }
 
+    BRIMIR_VDP1_PROBE_COUNT(lines); // Brimir: probe
     LineStepper line{coord1, coord2, antiAlias};
     auto &ctx = m_state.state1;
     const uint32 skipSteps = line.SystemClip(ctx.sysClipH, (ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV);
@@ -1343,6 +1355,7 @@ FORCE_INLINE bool SoftwareVDPRenderer::VDP1PlotTexturedLine(CoordS32 coord1, Coo
 
     const uint32 v = lineParams.texVStepper.Value();
 
+    BRIMIR_VDP1_PROBE_COUNT(lines); // Brimir: probe
     LineStepper line{coord1, coord2, true};
     const uint32 skipSteps = line.SystemClip(ctx.sysClipH, (ctx.sysClipV << m_VDP1doubleV) | m_VDP1doubleV);
 

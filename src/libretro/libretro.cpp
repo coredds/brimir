@@ -11,6 +11,10 @@
 #include <gpu/vdp/vulkan_vdp_renderer.hpp>
 #endif
 
+#if BRIMIR_VDP1_PROBE
+#include <ymir/hw/vdp/renderer/vdp1_probe.hpp>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -725,6 +729,28 @@ RETRO_API void retro_reset(void) {
     }
 }
 
+// Diagnostics: in builds configured with BRIMIR_VDP1_PROBE=ON and with the environment variable BRIMIR_VDP1_PROBE set
+// (brimir_vkhost --probe), one debug line per retro_run with the VDP1 work counted by the software renderer
+// (ymir/hw/vdp/renderer/vdp1_probe.hpp). Other builds compile this to nothing.
+static void log_vdp1_probe(void) {
+#if BRIMIR_VDP1_PROBE
+    static const bool requested = [] {
+        const char* env = std::getenv("BRIMIR_VDP1_PROBE");
+        return env != nullptr && *env != '\0' && std::strcmp(env, "0") != 0;
+    }();
+    const ymir::vdp::probe::VDP1Snapshot s = ymir::vdp::probe::VDP1ProbeTake();
+    if (requested) {
+        brimir_log(RETRO_LOG_DEBUG,
+                   "VDP1 probe: commands %llu lines %llu pixels %llu syncs %llu dirtysyncs %llu fbwrites %llu "
+                   "erases %llu",
+                   static_cast<unsigned long long>(s.commands), static_cast<unsigned long long>(s.lines),
+                   static_cast<unsigned long long>(s.pixels), static_cast<unsigned long long>(s.syncs),
+                   static_cast<unsigned long long>(s.dirtySyncs), static_cast<unsigned long long>(s.fbWrites),
+                   static_cast<unsigned long long>(s.erases));
+    }
+#endif
+}
+
 RETRO_API void retro_run(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
@@ -818,6 +844,7 @@ RETRO_API void retro_run(void) {
 
     // Run one frame of emulation
     g_core->RunFrame();
+    log_vdp1_probe();
     
     // Output video
 #ifdef BRIMIR_VULKAN

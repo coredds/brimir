@@ -68,7 +68,9 @@ struct HostConfig {
     bool noValidation = false;      // --no-validation: do not load the validation layer (timing runs)
     bool failComputeOnGrow = false; // --fail-compute-on-grow: the core's pipeline creation fails after the growth
     bool failComputeOnReset = false; // --fail-compute-on-reset: ... from the second context on (a reinit)
-    bool probe = false; // --probe: collect the core's per-frame VDP2 probe lines (BRIMIR_VDP2_PROBE) while recording
+    // --probe: collect the core's per-frame VDP2 probe lines (BRIMIR_VDP2_PROBE) and per-retro_run VDP1 probe lines
+    // (BRIMIR_VDP1_PROBE) while recording
+    bool probe = false;
     // --set-option-at F key=value: the option changes before frame F (counting warmup frames from 0, as --reset-at),
     // reported to the core through GET_VARIABLE_UPDATE (a live change, as RetroArch's Quick Menu).
     struct OptionChange {
@@ -108,6 +110,18 @@ struct ProbeFrame {
     double frontMicroseconds = 0;
 };
 
+// One retro_run's "VDP1 probe:" line: the VDP1 work the software renderer counted (cores built with
+// BRIMIR_VDP1_PROBE=ON; src/core/include/ymir/hw/vdp/renderer/vdp1_probe.hpp).
+struct Vdp1ProbeFrame {
+    uint64_t commands = 0;
+    uint64_t lines = 0;
+    uint64_t pixels = 0;
+    uint64_t syncs = 0;
+    uint64_t dirtySyncs = 0;
+    uint64_t fbWrites = 0;
+    uint64_t erases = 0;
+};
+
 // What a run did, for the CLI summary and the checks.
 struct RunReport {
     uint64_t recordedFrames = 0;
@@ -130,6 +144,7 @@ struct RunReport {
     uint64_t systemAvInfoCalls = 0; // SET_SYSTEM_AV_INFO (a frontend may reinit its video driver)
     uint64_t geometryCalls = 0;     // SET_GEOMETRY
     std::vector<ProbeFrame> probeFrames; // --probe: the VDP2 frames that ended while recording
+    std::vector<Vdp1ProbeFrame> vdp1ProbeFrames; // --probe: the recorded retro_run calls' VDP1 counters
     std::vector<std::string> problems; // anything that fails the run
 };
 
@@ -189,6 +204,8 @@ public:
 
     // A "VDP2 probe:" log line (--probe); kept only while recording. False if it does not parse.
     bool ProbeLine(const char* text);
+    // A "VDP1 probe:" log line (--probe); kept only while recording. False if it does not parse.
+    bool Vdp1ProbeLine(const char* text);
     // A core log line; follows "Internal resolution: frames at Nx" (HostFrame::scale).
     void CoreLogLine(const char* text);
 
@@ -289,6 +306,7 @@ private:
     uint64_t m_unreadable = 0;
     double m_readbackSeconds = 0;
     std::vector<ProbeFrame> m_probeFrames;
+    std::vector<Vdp1ProbeFrame> m_vdp1ProbeFrames;
 };
 
 // Loads the core per `config`, runs `warmup` unrecorded frames then `frames` recorded ones, and returns the recorded

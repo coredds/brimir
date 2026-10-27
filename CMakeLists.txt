@@ -27,6 +27,7 @@ option(Brimir_EXTRA_INLINING "Enable more aggressive inlining (slower build)" OF
 option(Brimir_DISABLE_FORCE_INLINE "Disable force-inline macros" OFF)
 option(Brimir_ENABLE_IPO "Enable IPO/LTO for brimir-core" ${BRIMIR_LTO})
 option(BRIMIR_JIT_X64 "Build the SH-2 JIT x64 native backend (asmjit; x86-64 targets only)" ON)
+option(BRIMIR_VDP1_PROBE "Count VDP1 work per frame for brimir_vkhost --probe (diagnostic builds only)" OFF)
 
 # Vulkan GPU renderer (src/gpu). Default ON on the desktop release targets: Windows x64, Linux x64/arm64, macOS arm64.
 set(brimir_vulkan_default OFF)

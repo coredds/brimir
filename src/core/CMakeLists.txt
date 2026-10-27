@@ -130,6 +130,8 @@ target_compile_definitions(brimir-core PUBLIC "BRIMIR_ENABLE_DEVLOG=$<BOOL:${Bri
 target_compile_definitions(brimir-core PUBLIC "BRIMIR_DEV_ASSERTIONS=$<BOOL:${Brimir_ENABLE_DEV_ASSERTIONS}>")
 target_compile_definitions(brimir-core PUBLIC "BRIMIR_DEV_BUILD=$<BOOL:${Brimir_DEV_BUILD}>")
 target_compile_definitions(brimir-core PUBLIC "BRIMIR_EXTRA_INLINING=$<BOOL:${Brimir_EXTRA_INLINING}>")
+# Brimir: VDP1 probe counters for brimir_vkhost --probe (ymir/hw/vdp/renderer/vdp1_probe.hpp)
+target_compile_definitions(brimir-core PUBLIC "BRIMIR_VDP1_PROBE=$<BOOL:${BRIMIR_VDP1_PROBE}>")
 
 target_compile_definitions(brimir-core PUBLIC "Ymir_ENABLE_DEVLOG=$<BOOL:${Brimir_ENABLE_DEVLOG}>")
 target_compile_definitions(brimir-core PUBLIC "Ymir_DEV_ASSERTIONS=$<BOOL:${Brimir_ENABLE_DEV_ASSERTIONS}>")

@@ -109,10 +109,13 @@ void PrintUsage(std::FILE* out) {
         "  --fail-compute-on-reset  with --vulkan: the same for every context after the first (a reinit ends in\n"
         "                copy-only)\n"
         "  --no-validation  with --vulkan/--compare: do not load the validation layer (timing runs)\n"
-        "  --probe       with --vulkan: collect the Vulkan VDP renderer's per-frame feature counters while\n"
-        "                recording (sets BRIMIR_VDP2_PROBE for the core) and print a summary: per feature the\n"
+        "  --probe       collect per-frame counters while recording and print a summary. With --vulkan, the\n"
+        "                Vulkan VDP renderer's VDP2 counters (sets BRIMIR_VDP2_PROBE for the core): per feature the\n"
         "                frames using it, batches, arena and copy bytes per frame (median, maximum) and the\n"
-        "                front half's CPU time per frame\n"
+        "                front half's CPU time per frame. With a core built with -DBRIMIR_VDP1_PROBE=ON (any\n"
+        "                renderer; sets BRIMIR_VDP1_PROBE), per retro_run the software VDP1 work: commands, lines,\n"
+        "                pixel writes, VDP1SyncFB calls (and those after a draw or erase), CPU framebuffer writes\n"
+        "                and erases (median, maximum, mean)\n"
         "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
         "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
@@ -447,8 +450,8 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.rotation = degrees == 90 || degrees == 180 || degrees == 270 ? static_cast<uint32_t>(degrees) : 0;
         }
     }
-    if (args.config.probe && (!args.config.vulkan || args.compare)) {
-        std::fprintf(stderr, "--probe needs --vulkan (and no --compare)\n");
+    if (args.config.probe && args.compare) {
+        std::fprintf(stderr, "--probe cannot be combined with --compare\n");
         return ParseResult::Error;
     }
     if (args.config.noValidation && !vulkanRun) {
@@ -680,6 +683,37 @@ void PrintProbeSummary(const std::vector<vkhost::ProbeFrame>& frames) {
     std::fprintf(stderr, "vkhost: probe: cram modes used 0x%x\n", cramModes);
 }
 
+// --probe summary of the VDP1 counters (cores built with BRIMIR_VDP1_PROBE=ON): one line per counter.
+void PrintVdp1ProbeSummary(const std::vector<vkhost::Vdp1ProbeFrame>& frames) {
+    std::fprintf(stderr, "vkhost: probe-vdp1: %zu frames\n", frames.size());
+    if (frames.empty()) {
+        return;
+    }
+    const auto printStats = [&](const char* name, uint64_t vkhost::Vdp1ProbeFrame::*member) {
+        std::vector<uint64_t> values;
+        values.reserve(frames.size());
+        uint64_t sum = 0;
+        size_t usingFrames = 0;
+        for (const vkhost::Vdp1ProbeFrame& f : frames) {
+            values.push_back(f.*member);
+            sum += f.*member;
+            usingFrames += f.*member != 0;
+        }
+        std::sort(values.begin(), values.end());
+        std::fprintf(stderr, "vkhost: probe-vdp1: %-10s median %llu max %llu mean %.1f frames %zu\n", name,
+                     static_cast<unsigned long long>(values[values.size() / 2]),
+                     static_cast<unsigned long long>(values.back()),
+                     static_cast<double>(sum) / static_cast<double>(values.size()), usingFrames);
+    };
+    printStats("commands", &vkhost::Vdp1ProbeFrame::commands);
+    printStats("lines", &vkhost::Vdp1ProbeFrame::lines);
+    printStats("pixels", &vkhost::Vdp1ProbeFrame::pixels);
+    printStats("syncs", &vkhost::Vdp1ProbeFrame::syncs);
+    printStats("dirtysyncs", &vkhost::Vdp1ProbeFrame::dirtySyncs);
+    printStats("fbwrites", &vkhost::Vdp1ProbeFrame::fbWrites);
+    printStats("erases", &vkhost::Vdp1ProbeFrame::erases);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -772,7 +806,10 @@ int main(int argc, char** argv) {
     sink.PrintSampleSummary();
     sink.PrintSharpnessSummary();
     if (args.config.probe) {
-        PrintProbeSummary(report.probeFrames);
+        if (args.config.vulkan) {
+            PrintProbeSummary(report.probeFrames);
+        }
+        PrintVdp1ProbeSummary(report.vdp1ProbeFrames);
     }
     if (args.config.runahead) {
         std::fprintf(stderr, "vkhost: runahead: second instance ran %llu frames, %llu hardware frames, context %s\n",
