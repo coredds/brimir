@@ -396,11 +396,16 @@ struct VulkanOutput::Impl {
     // each sync index in `awaiting` (the ones its images were handed at) wait_sync_index and this output's fence of
     // that slot have returned since the retirement, and none of its images is the frontend's current one
     // (libretro_vulkan.h: an image must not be destroyed before wait_sync_index for the sync index it was handed at).
+    // A retired image that is the frontend's current one is repeated by it, possibly in frames at later sync indices
+    // (after a failed record, present or submit): when it stops being current, `awaiting` becomes every sync index.
     struct RetiredPresenter {
         std::unique_ptr<gpu::FramePresenter> presenter;
         std::unique_ptr<retro_vulkan_image[]> images;
         uint32_t count = 0;
         uint32_t awaiting = 0;
+        // One of its images is (or was, until the last ReleaseRetired) the frontend's current image: while it is, the
+        // frontend may repeat it at any later sync index, so `awaiting` is only (re)set once it stops being current.
+        bool held = false;
     };
 
     // A renderer frame context for frames with video disabled (context index slots.size() + i).
@@ -616,12 +621,22 @@ void VulkanOutput::Impl::InstallPresenter(std::unique_ptr<gpu::FramePresenter> c
 
 void VulkanOutput::Impl::ReleaseRetired(uint32_t syncIndex) {
     for (auto it = retiredPresenters.begin(); it != retiredPresenters.end();) {
-        if (syncIndex < 32) {
-            it->awaiting &= ~(1u << syncIndex);
-        }
         bool current = false;
         for (uint32_t i = 0; i < it->count; ++i) {
             current = current || currentImage == &it->images[i];
+        }
+        if (current) {
+            // The frontend repeats this image (a failed record, present or submit after the change) at whatever sync
+            // indices come next, so no wait counts while it is current.
+            it->held = true;
+        } else if (it->held) {
+            // It stopped being current (the next set_image, or a withdrawal): its last repeat may have been at any sync
+            // index, so it goes only after a full ring of waits from now on. (The wait that returned in this call, if
+            // any, is not counted.)
+            it->held = false;
+            it->awaiting = slots.size() >= 32 ? UINT32_MAX : (1u << slots.size()) - 1;
+        } else if (syncIndex < 32) {
+            it->awaiting &= ~(1u << syncIndex);
         }
         if (it->awaiting == 0 && !current) {
             it = retiredPresenters.erase(it); // destroys the presenter (its images and views)

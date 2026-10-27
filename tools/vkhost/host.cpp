@@ -196,7 +196,9 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
         m_vulkan->SetFailAllocAbove(config.failAllocAboveMiB << 20);
         m_vulkan->SetFailOutputImagesAbove(config.failOutputImagesAbove);
+        m_vulkan->SetFailSubmits(config.failSubmitAt, config.failSubmits);
     }
+    m_haveCaptured = false;
     m_deferImageRead = m_vulkan ? config.deferImageRead : 0;
     m_deferred.clear();
     m_frameScale = 0;
@@ -385,6 +387,7 @@ bool LibretroHost::RunFrame(FrameSink* sink) {
     m_resetInRunPending = m_frameIndex == m_resetInRun;
     m_resetInPresentPending = m_frameIndex == m_resetInPresent;
     if (m_vulkan) {
+        m_vulkan->ArmFailedSubmit(m_frameIndex);
         m_vulkan->BeginRun();
     }
     m_api->run();
@@ -698,14 +701,6 @@ void LibretroHost::ProcessDeferred(size_t keep) {
     while (m_deferred.size() > keep) {
         DeferredFrame entry = m_deferred.front();
         m_deferred.erase(m_deferred.begin());
-        if (entry.dupe) {
-            if (entry.sink != nullptr && m_lastFrame.w != 0) {
-                ++m_recordedFrames;
-                HostFrame frame = m_lastFrame;
-                entry.sink->OnFrame(std::move(frame));
-            }
-            continue;
-        }
         HostFrame frame;
         const auto readStart = std::chrono::steady_clock::now();
         const bool readOk = m_vulkan && m_vulkan->ReadDeferred(entry.image, frame);
@@ -719,7 +714,7 @@ void LibretroHost::ProcessDeferred(size_t keep) {
         m_lastFrame = frame;
         if (entry.sink != nullptr) {
             ++m_recordedFrames;
-            ++m_recordedHardware;
+            m_recordedHardware += entry.dupe ? 0 : 1; // a dupe is displayed again, not a new hardware frame
             entry.sink->OnFrame(std::move(frame));
         }
     }
@@ -728,9 +723,16 @@ void LibretroHost::ProcessDeferred(size_t keep) {
 void LibretroHost::Video(const void* data, unsigned width, unsigned height, size_t pitch) {
     if (data == nullptr && m_deferImageRead > 0 && m_contextLive) {
         ++m_duplicate;
+        // A frontend repeats the image it holds (the last set_image) and reads it again on its own schedule.
+        if (!m_haveCaptured) {
+            return;
+        }
         DeferredFrame entry;
-        entry.dupe = true;
+        entry.image = m_lastCaptured;
         entry.sink = m_sink;
+        entry.scale = m_lastCapturedScale;
+        entry.dupe = true;
+        m_vulkan->PinImage(entry.image);
         m_deferred.push_back(entry);
         ProcessDeferred(static_cast<size_t>(m_deferImageRead));
         return;
@@ -751,11 +753,15 @@ void LibretroHost::Video(const void* data, unsigned width, unsigned height, size
             Problem("hardware frame without a readable set_image image");
             return;
         }
+        m_lastCaptured = entry.image;
+        m_lastCapturedScale = entry.scale;
+        m_haveCaptured = true;
         m_deferred.push_back(entry);
         ProcessDeferred(static_cast<size_t>(m_deferImageRead));
         return;
     }
     if (data != nullptr) {
+        m_haveCaptured = false;
         ProcessDeferred(0); // a software frame: everything handed over before it is shown first
     }
     if (data == nullptr) {

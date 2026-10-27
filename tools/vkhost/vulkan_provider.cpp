@@ -71,6 +71,11 @@ VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit(VkQueue queue, uint32_t count, co
         commandBuffers += submits[i].commandBufferCount;
     }
     g_provider->CheckQueueUse("vkQueueSubmit", commandBuffers);
+    if (commandBuffers > 0 && g_provider->TakeFailedSubmit()) {
+        // --fail-submit-at: the core's frame submit fails (fault injection); nothing reaches the queue.
+        std::fprintf(stderr, "vkhost: vulkan: vkQueueSubmit refused (--fail-submit-at)\n");
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
     return g_provider->Real().queueSubmit(queue, count, submits, fence);
 }
 

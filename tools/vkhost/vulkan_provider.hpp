@@ -136,6 +136,25 @@ public:
     // --fail-output-images-above N: the core's vkCreateImage fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for images created
     // MUTABLE_FORMAT (the images it hands to set_image; libretro_vulkan.h requires the bit, its internal images do not
     // use it) wider than 704 * N (0: never).
+    // --fail-submit-at F --fail-submits N: the core's command-buffer submits (vkQueueSubmit with command buffers) fail
+    // in the runs F .. F + N - 1 (the host arms it in BeginRun); the core then repeats the previous frame.
+    void SetFailSubmits(int firstRun, int count) {
+        m_failSubmitFirst = firstRun;
+        m_failSubmitCount = count;
+    }
+    void ArmFailedSubmit(int run) {
+        m_failSubmitArmed = m_failSubmitFirst >= 0 && run >= m_failSubmitFirst && run < m_failSubmitFirst + m_failSubmitCount;
+    }
+    bool TakeFailedSubmit() {
+        const bool fail = m_failSubmitArmed;
+        m_failSubmitArmed = false;
+        return fail;
+    }
+    // --defer-image-read: pins the image of a captured frame again (a dupe: the frontend repeats the image it holds).
+    void PinImage(const DeferredImage& image) {
+        m_pinned.insert(image.image);
+        m_pinned.insert(image.view);
+    }
     void SetFailOutputImagesAbove(uint32_t scale) { m_failOutputImagesAbove = scale; }
     uint32_t FailOutputImagesAbove() const { return m_failOutputImagesAbove; }
 
@@ -166,6 +185,9 @@ private:
     uint64_t m_failAllocAbove = 0;
     uint64_t m_failedAllocations = 0;
     uint32_t m_failOutputImagesAbove = 0;
+    int m_failSubmitFirst = -1;
+    int m_failSubmitCount = 1;
+    bool m_failSubmitArmed = false;
     std::multiset<uint64_t> m_pinned; // handles of captured images and views not read yet
 
     bool ReadHandles(uint64_t image, int format, uint32_t baseMip, uint32_t baseLayer, unsigned w, unsigned h,

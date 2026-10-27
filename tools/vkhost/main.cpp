@@ -139,6 +139,8 @@ void PrintUsage(std::FILE* out) {
         "                injection: a GPU short of memory)\n"
         "  --fail-output-images-above N  with --vulkan: the core's vkCreateImage fails for its output images\n"
         "                (MUTABLE_FORMAT) wider than 704 x N\n"
+        "  --fail-submit-at F [--fail-submits N]  with --vulkan: the core's frame submit fails in runs F .. F+N-1\n"
+        "                (counting warmup frames from 0; N defaults to 1): the core repeats the frontend's image\n"
         "  --defer-image-read N  with --vulkan: read each set_image image N (1-2) displayed frames later, as a\n"
         "                threaded frontend does (before the core's next wait_sync_index for its sync index); the core\n"
         "                destroying such an image or its view before the read fails the run\n"
@@ -362,6 +364,13 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 std::fprintf(stderr, "Invalid --defer-image-read value (1 or 2): %s\n", value);
                 return ParseResult::Error;
             }
+        } else if (opt == "--fail-submit-at" || opt == "--fail-submits") {
+            int n = 0;
+            if (!ParseInt(value, n) || (opt == "--fail-submits" && n < 1)) {
+                std::fprintf(stderr, "Invalid %s value: %s\n", opt.c_str(), value);
+                return ParseResult::Error;
+            }
+            (opt == "--fail-submit-at" ? args.config.failSubmitAt : args.config.failSubmits) = n;
         } else if (opt == "--fail-output-images-above") {
             int n = 0;
             if (!ParseInt(value, n) || n < 1 || n > 3) {
@@ -402,10 +411,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         return ParseResult::Error;
     }
     if ((args.config.failAllocAboveMiB != 0 || args.config.failOutputImagesAbove != 0 ||
-         args.config.deferImageRead != 0) &&
+         args.config.deferImageRead != 0 || args.config.failSubmitAt >= 0) &&
         !vulkanRun) {
-        std::fprintf(stderr, "--fail-alloc-above, --fail-output-images-above and --defer-image-read need --vulkan or "
-                             "--compare\n");
+        std::fprintf(stderr, "--fail-alloc-above, --fail-output-images-above, --fail-submit-at and "
+                             "--defer-image-read need --vulkan or --compare\n");
         return ParseResult::Error;
     }
     if (args.config.deferImageRead != 0 && args.config.growMaskAt >= 0) {

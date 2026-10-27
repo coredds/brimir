@@ -84,6 +84,10 @@ struct HostConfig {
     // --defer-image-read N: with --vulkan, each set_image image is read N displayed frames later (1 or 2: before the
     // core's next wait_sync_index for its sync index, the latest a frontend may read it), as a threaded frontend does.
     int deferImageRead = 0;
+    // --fail-submit-at F [--fail-submits N]: with --vulkan, the core's frame submits fail in runs F .. F + N - 1
+    // (counting warmup frames from 0; N defaults to 1): the core repeats the frontend's image.
+    int failSubmitAt = -1;
+    int failSubmits = 1;
 };
 
 // One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).
@@ -222,6 +226,9 @@ private:
         uint32_t scale = 0;
     };
     std::vector<DeferredFrame> m_deferred; // oldest first
+    VulkanProvider::DeferredImage m_lastCaptured; // the image a dupe repeats (read again, not copied)
+    uint32_t m_lastCapturedScale = 0;
+    bool m_haveCaptured = false;
     int m_deferImageRead = 0;
     int m_resetInRun = -1;
     bool m_resetInRunPending = false;

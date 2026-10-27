@@ -511,6 +511,44 @@ foreach(name IN ITEMS deferred_live deferred_hidden)
     endif()
 endforeach()
 
+# The core's frame submit fails in the two runs of a live 1x -> 4x change (recorded frames 40 and 41): the frontend
+# repeats the image it holds, which belongs to the replaced output images, and reads it again late (--defer-image-read 2:
+# the second repeat after the next frame, i.e. after a retired image that stopped being current too early would be
+# freed). The replaced images must stay alive until a full ring after they stop being current: the run fails if the core
+# destroys one before its read. Frames 40 and 41 repeat frame 39, the other 298 frames match software, at 4x from 42 on.
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(repeat_after_change --vulkan --defer-image-read 2 --hash-sample 1 --set-option-at 100
+           brimir_internal_resolution=4 --fail-submit-at 100 --fail-submits 2)
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_vulkan_counters(repeat_after_change)
+require_log(repeat_after_change "recorded 300 frames \\(298 hardware\\)")
+require_log(repeat_after_change "Vulkan frame output failed: vkQueueSubmit failed")
+require_log(repeat_after_change "vkQueueSubmit refused")
+forbid_log(repeat_after_change "Vulkan VDP2 renderer (unavailable|off)")
+if(NOT "${repeat_after_change_code}" STREQUAL "0")
+    fail(repeat_after_change "brimir_vkhost exited with ${repeat_after_change_code}")
+endif()
+list(LENGTH repeat_after_change_hashes repeat_count)
+if(NOT repeat_count EQUAL 300)
+    fail(repeat_after_change "${repeat_count} frames recorded, expected 300")
+endif()
+list(GET repeat_after_change_hashes 39 repeat_before)
+string(REGEX REPLACE "^frame [0-9]+ " "" repeat_before "${repeat_before}")
+foreach(i RANGE 299)
+    list(GET repeat_after_change_hashes ${i} got)
+    list(GET software_hashes ${i} want)
+    if(i EQUAL 40 OR i EQUAL 41)
+        string(REGEX REPLACE "^frame [0-9]+ " "" got_pixels "${got}")
+        if(NOT got_pixels STREQUAL repeat_before)
+            fail(repeat_after_change "recorded frame ${i} is not a repeat of frame 39 ('${got}')")
+        endif()
+    elseif(NOT got STREQUAL want)
+        fail(repeat_after_change "recorded frame ${i} differs from software ('${got}' vs '${want}')")
+    endif()
+endforeach()
+message(STATUS "repeat_after_change: frames 40 and 41 repeat frame 39 (failed submits right after a live change, "
+               "late reads), the other 298 identical to software")
+
 file(REMOVE_RECURSE "${state_dir}")
 
 # --compare: software and Vulkan in two child processes. Identical content passes; a Vulkan run that is rotated 180

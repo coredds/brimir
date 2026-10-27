@@ -46,7 +46,8 @@ const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",    
 const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--reset-in-present", "--preferred-hw",
                                            "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",
                                            "--sharpness",  "--region",       "--fail-alloc-above",
-                                           "--fail-output-images-above", "--defer-image-read"};
+                                           "--fail-output-images-above", "--defer-image-read", "--fail-submit-at",
+                                           "--fail-submits"};
 // Takes a frame number and a file; each child writes its own file (<file>.software, <file>.vulkan).
 const std::string kSaveStateAt = "--save-state-at";
 // Takes a frame number and key=value; both children get it.
