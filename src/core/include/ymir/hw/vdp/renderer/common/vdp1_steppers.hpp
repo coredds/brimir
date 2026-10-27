@@ -12,6 +12,17 @@
 
 namespace ymir::vdp {
 
+// Brimir: two's complement wrapping addition and subtraction. The line and edge accumulators are shifted to the top
+// 13 bits of a sint32 and rely on wrapping, which is undefined for signed overflow. Unsigned arithmetic wraps and the
+// conversion back to sint32 is modular (C++20), so this is what the compilers did with the plain operators.
+constexpr sint32 WrapAdd(sint32 a, sint32 b) {
+    return static_cast<sint32>(static_cast<uint32>(a) + static_cast<uint32>(b));
+}
+
+constexpr sint32 WrapSub(sint32 a, sint32 b) {
+    return static_cast<sint32>(static_cast<uint32>(a) - static_cast<uint32>(b));
+}
+
 // Steps over the texels of a texture.
 struct TextureStepper {
     FORCE_INLINE void Setup(uint32 length, sint32 start, sint32 end, bool hss = false, sint32 hssSelect = 0) {
@@ -140,8 +151,9 @@ struct GouraudChannelStepper {
     // Skips the specified number of pixels.
     // Meant to be used when clipping lines with LineStepper::SystemClip().
     FORCE_INLINE void Skip(uint32 steps) {
-        m_value += m_intInc * steps;
-        m_accum -= m_num * steps;
+        // Brimir: explicit wrapping (the products are uint32, as before)
+        m_value = WrapAdd(m_value, static_cast<sint32>(static_cast<uint32>(m_intInc) * steps));
+        m_accum = WrapSub(m_accum, static_cast<sint32>(static_cast<uint32>(m_num) * steps));
         if (m_den != 0) {
             while (m_accum < 0) {
                 m_value += m_fracInc;
@@ -357,10 +369,10 @@ struct LineStepper {
             m_x += m_xMajInc * startClip;
             m_y += m_yMajInc * startClip;
             for (uint32 i = 0; i < startClip; ++i) {
-                m_accum -= m_num;
+                m_accum = WrapSub(m_accum, m_num); // Brimir: explicit wrapping, also below
                 if (m_den != 0) {
                     while (m_accum <= m_accumTarget) {
-                        m_accum += m_den;
+                        m_accum = WrapAdd(m_accum, m_den);
                         m_x += m_xMinInc;
                         m_y += m_yMinInc;
                     }
@@ -386,10 +398,10 @@ struct LineStepper {
             m_yEnd = m_y;
             sint32 tempAccum = m_accum;
             for (uint32 i = 0; i < endClip; ++i) {
-                tempAccum -= m_num;
+                tempAccum = WrapSub(tempAccum, m_num); // Brimir: explicit wrapping, also below
                 if (m_den != 0) {
                     while (tempAccum <= m_accumTarget) {
-                        tempAccum += m_den;
+                        tempAccum = WrapAdd(tempAccum, m_den);
                         m_xEnd += m_xMinInc;
                         m_yEnd += m_yMinInc;
                     }
@@ -413,9 +425,9 @@ struct LineStepper {
         ++m_step;
         m_x += m_xMajInc;
         m_y += m_yMajInc;
-        m_accum -= m_num;
+        m_accum = WrapSub(m_accum, m_num); // Brimir: explicit wrapping, also below
         if (m_accum <= m_accumTarget) {
-            m_accum += m_den;
+            m_accum = WrapAdd(m_accum, m_den);
             m_x += m_xMinInc;
             m_y += m_yMinInc;
             return m_antiAlias;
@@ -557,19 +569,20 @@ struct Edge {
     // Brimir: steps the coordinates only, for vdp1_clip.hpp's pre-stepping of a copy. Returns true if the major
     // counter stepped, which is when Step() also steps the gouraud shading.
     FORCE_INLINE bool StepCoordinates() {
-        m_accum += m_num;
+        // Brimir: the accumulators wrap explicitly (WrapAdd/WrapSub) instead of by signed overflow
+        m_accum = WrapAdd(m_accum, m_num);
         if (m_accum >= m_accumTarget) {
-            m_accum -= m_den;
+            m_accum = WrapSub(m_accum, m_den);
 
-            m_xAccum += m_xNum;
+            m_xAccum = WrapAdd(m_xAccum, m_xNum);
             if (m_xAccum >= m_xAccumTarget) {
-                m_xAccum -= m_xDen;
+                m_xAccum = WrapSub(m_xAccum, m_xDen);
                 m_x += m_xInc;
             }
 
-            m_yAccum += m_yNum;
+            m_yAccum = WrapAdd(m_yAccum, m_yNum);
             if (m_yAccum >= m_yAccumTarget) {
-                m_yAccum -= m_yDen;
+                m_yAccum = WrapSub(m_yAccum, m_yDen);
                 m_y += m_yInc;
             }
 
