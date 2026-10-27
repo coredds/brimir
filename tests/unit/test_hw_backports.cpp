@@ -1507,14 +1507,30 @@ TEST_CASE("VDP1 erase covers x1 <= x < x3 and y1 <= y <= y3", "[vdp][vdp1][chara
 TEST_CASE("VDP1 clipping commands use the raw 16-bit coordinates", "[vdp][vdp1][characterization]") {
     // Software stores CMDXC/CMDYC (system clip) and CMDXA..CMDYC (user clip) unmasked. (Ymir's D3D12 renderer masks
     // them to 10/9 bits.)
-    SECTION("system clip 0x1140 does not clip at 0x140") {
+    SECTION("system clip H = 0x1140 and V = 0x1020 are not masked to 10 and 9 bits") {
+        // masked, V would be 0x20 and H 0x140: the line at y = 100, x up to 340 would be clipped
         VDP1CharFixture f;
-        f.Command({0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1140, 0x10FF, 0, 0, 0, 0});
-        f.Line(0, 0x83E0, 310, 20, 340, 20);
+        f.Command({0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1140, 0x1020, 0, 0, 0, 0});
+        f.Line(0, 0x83E0, 310, 100, 340, 100);
         f.Draw();
         CHECK(f.state->state1.sysClipH == 0x1140);
-        CHECK(f.Pixel(330, 20) == 0x83E0);
-        CHECK(f.Pixel(340, 20) == 0x83E0);
+        CHECK(f.state->state1.sysClipV == 0x1020);
+        CHECK(f.Pixel(330, 100) == 0x83E0);
+        CHECK(f.Pixel(340, 100) == 0x83E0);
+    }
+    SECTION("user clip X1 = 0x1140 and Y1 = 0x1020 are not masked") {
+        // inside mode with the whole screen as the user area; the system clip is widened the same way
+        VDP1CharFixture f;
+        f.Command({0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1140, 0x1020, 0, 0, 0, 0});
+        f.Command({0x0008, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1140, 0x1020, 0, 0, 0, 0});
+        f.Line(0x0400, 0x83E0, 310, 100, 340, 100); // user clipping on, draw inside
+        f.Draw();
+        CHECK(f.state->state1.userClipX0 == 0);
+        CHECK(f.state->state1.userClipY0 == 0);
+        CHECK(f.state->state1.userClipX1 == 0x1140);
+        CHECK(f.state->state1.userClipY1 == 0x1020);
+        CHECK(f.Pixel(330, 100) == 0x83E0);
+        CHECK(f.Pixel(340, 100) == 0x83E0);
     }
     SECTION("user clip X0 = 0xFC00 rejects everything inside mode") {
         VDP1CharFixture f;
@@ -1527,8 +1543,19 @@ TEST_CASE("VDP1 clipping commands use the raw 16-bit coordinates", "[vdp][vdp1][
             CHECK(f.Pixel(x, 20) == 0x0000);
         }
     }
+    SECTION("user clip Y0 = 0x1000 rejects everything inside mode") {
+        // masked to 9 bits it would be 0 and the line would be drawn
+        VDP1CharFixture f;
+        f.Command({0x0008, 0, 0, 0, 0, 0, 0, 0x1000, 0, 0, 300, 200, 0, 0, 0, 0});
+        f.Line(0x0400, 0x83E0, 10, 20, 40, 20);
+        f.Draw();
+        CHECK(f.state->state1.userClipY0 == 0x1000);
+        for (uint32 x = 10; x <= 40; ++x) {
+            CAPTURE(x);
+            CHECK(f.Pixel(x, 20) == 0x0000);
+        }
+    }
 }
-
 TEST_CASE("VDP1 Draw Line is vertically doubled without the field offset", "[vdp][vdp1][characterization]") {
     // Deinterlaced double density (FBCR.DIE clear): lines use y << 1 and land on the even field only, while a sprite's
     // bottom edge gets the +1 so one sprite row covers both fields. (Ymir's D3D12 renderer does not double lines.)
@@ -1877,15 +1904,19 @@ VDP1Scene RandomScene(uint64 seed) {
     s.transparentMeshes = rng.Chance(50);
     auto randomSysClip = [&](uint16 &h, uint16 &v) {
         const uint32 r = static_cast<uint32>(rng.Range(0, 99));
-        if (r < 40) {
+        if (r < 35) {
             h = 319;
             v = 223;
-        } else if (r < 80) {
+        } else if (r < 70) {
             h = static_cast<uint16>(rng.Range(0, 400));
             v = static_cast<uint16>(rng.Range(0, 300));
-        } else {
+        } else if (r < 85) {
             h = static_cast<uint16>(rng.Range(0, 40));
             v = static_cast<uint16>(rng.Range(0, 40));
+        } else {
+            // raw 16-bit values beyond the 10/9 bits hardware registers hold (0x1140 style); software keeps them
+            h = static_cast<uint16>(rng.Range(0x400, 0xFFFF));
+            v = static_cast<uint16>(rng.Range(0x200, 0xFFFF));
         }
     };
     randomSysClip(s.sysClipH, s.sysClipV);
@@ -1893,6 +1924,16 @@ VDP1Scene RandomScene(uint64 seed) {
     s.userClipY0 = static_cast<uint16>(rng.Range(-8, 250));
     s.userClipX1 = static_cast<uint16>(rng.Chance(80) ? rng.Range(s.userClipX0, 340) : rng.Range(-8, 340));
     s.userClipY1 = static_cast<uint16>(rng.Chance(80) ? rng.Range(s.userClipY0, 260) : rng.Range(-8, 260));
+    if (rng.Chance(15)) {
+        s.userClipX1 = static_cast<uint16>(rng.Range(0x400, 0xFFFF));
+        s.userClipY1 = static_cast<uint16>(rng.Range(0x200, 0xFFFF));
+    }
+    if (rng.Chance(5)) {
+        s.userClipX0 = static_cast<uint16>(rng.Range(0x400, 0xFFFF));
+    }
+    if (rng.Chance(5)) {
+        s.userClipY0 = static_cast<uint16>(rng.Range(0x200, 0xFFFF));
+    }
     if (rng.Chance(30)) {
         s.localX = rng.Range(-60, 60);
         s.localY = rng.Range(-60, 60);
@@ -1904,8 +1945,8 @@ VDP1Scene RandomScene(uint64 seed) {
         }
     }
 
-    const sint32 w = s.sysClipH;
-    const sint32 h = s.sysClipV;
+    const sint32 w = std::min<sint32>(s.sysClipH, 420); // shapes stay around the screen whatever the raw clip value
+    const sint32 h = std::min<sint32>(s.sysClipV, 320);
     const uint32 count = static_cast<uint32>(rng.Range(1, 12));
     for (uint32 n = 0; n < count; ++n) {
         const uint32 kind = static_cast<uint32>(rng.Range(0, 99));
@@ -2030,8 +2071,8 @@ TEST_CASE("VDP1 quad termination never changes the framebuffers on random comman
     }
     CAPTURE(firstMismatch, terminations, quadTables);
     CHECK(mismatches == 0);
-    // The tables exercise the termination: most stop at least one quad early
-    CHECK(quadTables > kTables / 2);
+    // The tables exercise the termination: over 40% stop at least one quad early
+    CHECK(quadTables > kTables * 2 / 5);
 }
 
 TEST_CASE("VDP1 quad termination never changes the framebuffers on targeted quads",
@@ -2280,4 +2321,31 @@ TEST_CASE("VDP1 line pixels stay in the end point box", "[vdp][vdp1][quad-termin
         escapes += !LinePixelsInEndPointBox(a, b, true, -1, 0);
     }
     CHECK(escapes > 0);
+}
+
+TEST_CASE("VDP1 coordinate-only quad stepping equals the full stepping", "[vdp][vdp1][quad-termination][brimir]") {
+    // vdp1_clip.hpp pre-steps a copy with StepCoordinates; the gouraud shading must not influence the coordinates.
+    TestRng rng{23};
+    for (int i = 0; i < 5000; ++i) {
+        vdp::CoordS32 p[4];
+        for (auto &q : p) {
+            q = rng.Chance(70) ? vdp::CoordS32{rng.Range(-500, 800), rng.Range(-500, 700)}
+                               : vdp::CoordS32{rng.Range(-4096, 4095), rng.Range(-4096, 4095)};
+        }
+        vdp::QuadStepper full{p[0], p[1], p[2], p[3]};
+        if (rng.Chance(50)) {
+            full.SetupGouraud(vdp::Color555{.u16 = static_cast<uint16>(rng.Next())},
+                              vdp::Color555{.u16 = static_cast<uint16>(rng.Next())},
+                              vdp::Color555{.u16 = static_cast<uint16>(rng.Next())},
+                              vdp::Color555{.u16 = static_cast<uint16>(rng.Next())});
+        }
+        vdp::QuadStepper coords = full;
+        bool same = true;
+        for (; full.CanStep(); full.Step(), coords.StepCoordinates()) {
+            same = same && coords.CanStep() && coords.LeftEdge().X() == full.LeftEdge().X() &&
+                   coords.LeftEdge().Y() == full.LeftEdge().Y() && coords.RightEdge().X() == full.RightEdge().X() &&
+                   coords.RightEdge().Y() == full.RightEdge().Y();
+        }
+        REQUIRE((same && !coords.CanStep()));
+    }
 }

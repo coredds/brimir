@@ -548,6 +548,15 @@ struct Edge {
 
     // Steps the edge to the next coordinate.
     FORCE_INLINE void Step() {
+        // Brimir: Step() is StepCoordinates() plus the gouraud step (upstream has the body inline)
+        if (StepCoordinates() && m_gouraudEnable) {
+            m_gouraud.Step();
+        }
+    }
+
+    // Brimir: steps the coordinates only, for vdp1_clip.hpp's pre-stepping of a copy. Returns true if the major
+    // counter stepped, which is when Step() also steps the gouraud shading.
+    FORCE_INLINE bool StepCoordinates() {
         m_accum += m_num;
         if (m_accum >= m_accumTarget) {
             m_accum -= m_den;
@@ -564,10 +573,9 @@ struct Edge {
                 m_y += m_yInc;
             }
 
-            if (m_gouraudEnable) {
-                m_gouraud.Step();
-            }
+            return true;
         }
+        return false;
     }
 
     // Retrieves the current X coordinate of this edge.
@@ -720,6 +728,14 @@ struct QuadStepper {
 
         m_edgeL.Step();
         m_edgeR.Step();
+    }
+
+    // Brimir: like Step() without the gouraud shading, for vdp1_clip.hpp's pre-stepping of a copy.
+    FORCE_INLINE void StepCoordinates() {
+        ++m_step;
+
+        m_edgeL.StepCoordinates();
+        m_edgeR.StepCoordinates();
     }
 
 private:

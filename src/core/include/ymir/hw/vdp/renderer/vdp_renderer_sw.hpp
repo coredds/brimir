@@ -167,6 +167,8 @@ public:
     void SetVDP1QuadTerminationForTesting(bool enabled) {
         m_VDP1QuadTermination = enabled;
     }
+    // The count is a plain counter written by whichever thread draws VDP1, so it is only valid, and the switch above
+    // only safe to flip, with unthreaded VDP1 rendering.
     uint64 GetVDP1QuadTerminationsForTesting() const {
         return m_VDP1QuadTerminations;
     }
@@ -661,8 +663,9 @@ private:
     // VDP1
 
     uint16 m_VDP1doubleV;
-    bool m_VDP1QuadTermination = true;   // Brimir: SetVDP1QuadTerminationForTesting
-    uint64 m_VDP1QuadTerminations = 0; // Brimir: GetVDP1QuadTerminationsForTesting
+    bool m_VDP1QuadTermination = true; // Brimir: SetVDP1QuadTerminationForTesting
+    // Brimir: GetVDP1QuadTerminationsForTesting; not atomic, valid only with unthreaded VDP1 rendering
+    uint64 m_VDP1QuadTerminations = 0;
 
     struct VDP1PixelParams {
         VDP1Command::DrawMode mode;

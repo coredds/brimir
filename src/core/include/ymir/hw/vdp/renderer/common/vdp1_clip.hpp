@@ -13,11 +13,19 @@
 // - Every remaining line runs from the left edge's position to the right edge's position at some later quad step.
 //   An edge stepper moves each coordinate by at most one per step and only in one direction (Edge::Step), so its
 //   remaining positions lie in the box spanned by its current and its final position. The final positions are found
-//   by stepping copies of the edges, so they are exactly what the stepper produces, 13-bit wrapped deltas and the
-//   4095 step mask included.
+//   by stepping copies of the edges (coordinates only, Edge::StepCoordinates), so they are exactly what the stepper
+//   produces, 13-bit wrapped deltas and the 4095 step mask included.
 // - A line's pixels (main and antialias) lie in the box of its end points grown by one pixel, as long as the line
-//   steppers' 13-bit accumulators do not wrap. That holds for lines shorter than kMaxLineDelta on both axes, so the
-//   quad never stops while the remaining end points span that much (tests: "VDP1 line pixels stay in the end point box").
+//   stepper's accumulators do not wrap. LineStepper keeps them shifted to 13 signed bits, so they must stay in
+//   [-4096, 4095]. With major = max(|dx|, |dy|), num = 2 * minor <= 2 * major and den = 2 * major:
+//     - the accumulator starts at major + 1 + num (minus one for antialias) <= 3 * major + 1;
+//     - each step subtracts num and adds den only when the result is <= accumTarget (-1..1), so it never rises above
+//       max(start, accumTarget + den) <= 3 * major + 2, and the value before an add is >= accumTarget + 1 - num
+//       >= -2 * major;
+//     - so nothing wraps for 3 * major + 2 <= 4095, i.e. major <= 1364 (den itself needs major <= 2047).
+//   kMaxLineDelta is 1023, a margin below 1364. Every remaining line's end points lie in the remaining-edge box, so
+//   the quad never stops while that box is wider or taller than that. Longer lines do wrap and leave their end point
+//   box (tests: "VDP1 line pixels stay in the end point box" shows both sides).
 
 #include <ymir/hw/vdp/renderer/common/vdp1_steppers.hpp>
 
@@ -39,7 +47,7 @@ public:
         QuadStepper<t_bits> copy = quad;
         m_finalL = copy.LeftEdge().Coord();
         m_finalR = copy.RightEdge().Coord();
-        for (copy.Step(); copy.CanStep(); copy.Step()) {
+        for (copy.StepCoordinates(); copy.CanStep(); copy.StepCoordinates()) {
             m_finalL = copy.LeftEdge().Coord();
             m_finalR = copy.RightEdge().Coord();
         }
