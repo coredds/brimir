@@ -29,16 +29,12 @@ using namespace ymir;
 namespace ref = brimir::test::vdp1ref;
 using vdp::CoordS32;
 
-// splitmix64; deterministic on every platform
 struct TestRng {
     uint64 s;
     explicit TestRng(uint64 seed)
         : s(seed) {}
     uint64 Next() {
-        uint64 z = (s += 0x9E3779B97F4A7C15ull);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-        return z ^ (z >> 31);
+        return ref::SplitMix64(s);
     }
     sint32 Range(sint32 lo, sint32 hi) {
         return lo + static_cast<sint32>(Next() % static_cast<uint64>(static_cast<sint64>(hi) - lo + 1));
@@ -355,15 +351,26 @@ std::string CompareFbram(const SoftwareRun &sw, const ref::Fbram &fb) {
 // -----------------------------------------------------------------------------
 // Random scenarios
 
+// Scenario-structure features the generator produced (what is drawn is counted by the reference: DrawnCoverage)
 struct Coverage {
-    std::array<uint64, 8> commandTypes{};
-    std::array<uint64, 8> colorModes{};
-    std::array<uint64, 4> colorCalc{};
-    uint64 gouraud = 0, msbOn = 0, hss = 0, endCodeRows = 0, transparentRows = 0, userClip = 0, clipMode1 = 0;
-    std::array<std::array<uint64, 2>, 2> meshByTransparentMeshes{};
-    uint64 draws8bpp = 0, drawsDIEDoubleDensity = 0, drawsDeinterlacedDoubleDensity = 0, drawsDoubleV = 0;
-    uint64 rawLargeClip = 0, localCoords = 0, wrappedCoords = 0, sysClipCmds = 0, userClipCmds = 0;
-    uint64 erases = 0, partialErases = 0, swaps = 0, midFrameRegWrites = 0, batchLimits = 0, multiFrame = 0;
+    enum Counter : uint32 {
+        WrappedCoords, TransparentRows, EndCodeRows, RawLargeClip, UserClip, ClipMode1, LocalCoords, SysClipCmds,
+        UserClipCmds, Erases, PartialErases, Swaps, MidFrameRegWrites, BatchLimits, MultiFrame, Count
+    };
+    static constexpr const char *kNames[Count] = {
+        "wrapped coordinates", "transparent texture rows", "end-code texture rows", "raw large clip values",
+        "user clipping", "clipping mode 1", "local coordinate commands", "system clip commands", "user clip commands",
+        "erases", "partial erases", "swaps", "mid-frame register writes", "batch limits", "multi-frame tables"};
+    std::array<uint64, Count> counts{};
+
+    uint64 &operator[](uint32 counter) {
+        return counts[counter];
+    }
+    void Merge(const Coverage &other) {
+        for (uint32 i = 0; i < Count; ++i) {
+            counts[i] += other.counts[i];
+        }
+    }
 };
 
 CoordS32 RandomPoint(TestRng &rng, sint32 w, sint32 h, bool nearOnly, Coverage &cov) {
@@ -371,7 +378,7 @@ CoordS32 RandomPoint(TestRng &rng, sint32 w, sint32 h, bool nearOnly, Coverage &
         return {rng.Range(-48, w + 48), rng.Range(-48, h + 48)};
     }
     if (rng.Chance(3)) {
-        ++cov.wrappedCoords;
+        ++cov[Coverage::WrappedCoords];
         return {static_cast<sint16>(rng.Next()), static_cast<sint16>(rng.Next())}; // raw 16-bit: 13-bit sign extension
     }
     auto axis = [&](sint32 limit) {
@@ -392,8 +399,8 @@ std::vector<uint8> RandomTexture(TestRng &rng, uint32 bytesPerRow, uint32 rows, 
     std::vector<uint8> bytes(bytesPerRow * rows);
     for (uint32 y = 0; y < rows; ++y) {
         const uint32 kind = static_cast<uint32>(rng.Range(0, 99));
-        cov.transparentRows += kind < 15;
-        cov.endCodeRows += kind >= 15 && kind < 22;
+        cov[Coverage::TransparentRows] += kind < 15;
+        cov[Coverage::EndCodeRows] += kind >= 15 && kind < 22;
         for (uint32 i = 0; i < bytesPerRow; ++i) {
             uint8 v;
             if (kind < 15) {
@@ -433,7 +440,7 @@ void RandomSysClip(TestRng &rng, uint16 &h, uint16 &v, Coverage &cov) {
         // raw 16-bit values beyond the 10/9 bits hardware registers hold; software keeps them
         h = static_cast<uint16>(rng.Range(0x400, 0xFFFF));
         v = static_cast<uint16>(rng.Range(0x200, 0xFFFF));
-        ++cov.rawLargeClip;
+        ++cov[Coverage::RawLargeClip];
     }
 }
 
@@ -445,7 +452,7 @@ void RandomUserClip(TestRng &rng, uint16 &x0, uint16 &y0, uint16 &x1, uint16 &y1
     if (rng.Chance(15)) {
         x1 = static_cast<uint16>(rng.Range(0x400, 0xFFFF));
         y1 = static_cast<uint16>(rng.Range(0x200, 0xFFFF));
-        ++cov.rawLargeClip;
+        ++cov[Coverage::RawLargeClip];
     }
     if (rng.Chance(5)) {
         x0 = static_cast<uint16>(rng.Range(0x400, 0xFFFF));
@@ -581,22 +588,8 @@ void AddRandomDraw(TestRng &rng, Scenario &s, const GenRegs &regs, Coverage &cov
     }
 
     const vdp::VDP1Command::DrawMode mode{.u16 = pmod};
-    ++cov.commandTypes[command];
-    if (command <= 3) {
-        ++cov.colorModes[mode.colorMode];
-        cov.hss += mode.highSpeedShrink;
-    }
-    ++cov.colorCalc[mode.colorCalcBits];
-    cov.gouraud += mode.gouraudEnable;
-    cov.msbOn += mode.msbOn;
-    cov.userClip += mode.userClippingEnable;
-    cov.clipMode1 += mode.clippingMode;
-    ++cov.meshByTransparentMeshes[mode.meshEnable][s.transparentMeshes];
-    const bool doubleDensity = LSMD(regs.tvmd) == 3;
-    cov.draws8bpp += regs.tvmr & 1;
-    cov.drawsDIEDoubleDensity += doubleDensity && (regs.fbcr & 0x8) && !s.deinterlace;
-    cov.drawsDeinterlacedDoubleDensity += doubleDensity && s.deinterlace;
-    cov.drawsDoubleV += doubleDensity && s.deinterlace && !(regs.fbcr & 0x8);
+    cov[Coverage::UserClip] += mode.userClippingEnable;
+    cov[Coverage::ClipMode1] += mode.clippingMode;
 }
 
 uint16 RandomTVMD(TestRng &rng) {
@@ -638,7 +631,7 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
     }
     if (rng.Chance(30)) {
         s.maxBatchFragments = static_cast<uint32>(rng.Chance(50) ? rng.Range(1, 64) : rng.Range(64, 20000));
-        ++cov.batchLimits;
+        ++cov[Coverage::BatchLimits];
     }
 
     auto randomRegWrite = [&] {
@@ -662,7 +655,7 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
     };
 
     const uint32 frames = static_cast<uint32>(rng.Range(1, 3));
-    cov.multiFrame += frames > 1;
+    cov[Coverage::MultiFrame] += frames > 1;
     for (uint32 frame = 0; frame < frames; ++frame) {
         if ((frame > 0 || rng.Chance(20)) && rng.Chance(60)) {
             Op erase{.kind = Op::Kind::Erase, .value = static_cast<uint16>(rng.Next())};
@@ -680,13 +673,13 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
             erase.cycles = r < 40   ? 0
                            : r < 70 ? static_cast<uint64>(rng.Range(1, 3000))
                                     : static_cast<uint64>(rng.Range(3000, 300000));
-            cov.partialErases += erase.cycles != 0;
-            ++cov.erases;
+            cov[Coverage::PartialErases] += erase.cycles != 0;
+            ++cov[Coverage::Erases];
             s.ops.push_back(erase);
         }
         if (frame > 0 && rng.Chance(60)) {
             s.Op0(Op::Kind::Swap);
-            ++cov.swaps;
+            ++cov[Coverage::Swaps];
         }
         if (rng.Chance(25)) {
             randomRegWrite();
@@ -696,7 +689,7 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
         for (uint32 n = 0; n < count && s.CanAddCommand(); ++n) {
             if (rng.Chance(4)) {
                 randomRegWrite();
-                ++cov.midFrameRegWrites;
+                ++cov[Coverage::MidFrameRegWrites];
             }
             const uint32 kind = static_cast<uint32>(rng.Range(0, 99));
             if (kind < 7) {
@@ -705,18 +698,18 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
                 regs.sysClipH = ch;
                 regs.sysClipV = cv;
                 s.AddCommand({0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, ch, cv, 0, 0, 0, 0});
-                ++cov.sysClipCmds;
+                ++cov[Coverage::SysClipCmds];
             } else if (kind < 14) {
                 uint16 x0, y0, x1, y1;
                 RandomUserClip(rng, x0, y0, x1, y1, cov);
                 const uint16 type = rng.Chance(80) ? 0x0008 : 0x000B;
                 s.AddCommand({type, 0, 0, 0, 0, 0, x0, y0, 0, 0, x1, y1, 0, 0, 0, 0});
-                ++cov.userClipCmds;
+                ++cov[Coverage::UserClipCmds];
             } else if (kind < 18) {
                 const sint32 lx = rng.Chance(90) ? rng.Range(-80, 80) : static_cast<sint32>(rng.Next() & 0xFFFF);
                 const sint32 ly = rng.Chance(90) ? rng.Range(-80, 80) : static_cast<sint32>(rng.Next() & 0xFFFF);
                 s.AddCommand({0x000A, 0, 0, 0, 0, 0, U(lx), U(ly), 0, 0, 0, 0, 0, 0, 0, 0});
-                ++cov.localCoords;
+                ++cov[Coverage::LocalCoords];
             } else if (kind < 19) {
                 s.AddCommand({static_cast<uint16>(rng.Range(0xC, 0xF)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
             } else {
@@ -731,67 +724,57 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
 struct RandomRunResult {
     uint64 mismatches = 0;
     uint64 noBreakMismatches = 0;
+    uint64 failures = 0; // exceptions
     uint64 firstMismatch = ~0ull;
     uint32 maxPerUnit = 0;
     uint64 fragments = 0;
     uint64 batches = 0;
     uint64 spans = 0;
-    uint64 undefinedScenarios = 0;
+    uint64 tablesWithAlt = 0;  // tables ending with a non-zero alternate-field slice
+    uint64 tablesWithMesh = 0; // ... mesh slice
+    ref::DrawnCoverage drawn;
 };
 
 struct SeedResult {
-    bool undefined = false;
-    std::string diff, noBreakDiff;
+    std::string diff, noBreakDiff, failure;
     ref::ReferenceStats stats;
+    bool alt = false, mesh = false;
 };
+
+bool AnyNonZero(const vdp::SpriteFB &fb) {
+    return std::any_of(fb.begin(), fb.end(), [](uint8 b) { return b != 0; });
+}
 
 SeedResult RunRandomSeed(uint64 seed, Coverage &cov) {
     SeedResult out;
-    const Scenario s = RandomScenario(seed, cov);
-    // Every 4th scenario resolves its fragments from a shuffled (scatter) order; every 4th (others) also runs without
-    // the early break
-    ReferenceRun r;
     try {
-        r = RunReference(s, {}, seed % 4 == 0 ? seed * 2654435761ull + 1 : 0);
-    } catch (const ref::UndefinedLineError &) {
-        out.undefined = true; // a line software may hang on; not run
-        return out;
-    }
-    const auto sw = RunSoftware(s);
-    out.diff = CompareFbram(*sw, *r.fb);
-    out.stats = r.stats;
-    if (seed % 4 == 1) {
-        out.noBreakDiff = CompareFbram(*sw, *RunReference(s, {.earlyBreak = false}).fb);
+        const Scenario s = RandomScenario(seed, cov);
+        // Every 4th scenario resolves its fragments from a shuffled (scatter) order; every 4th (others) also runs
+        // without the early break
+        const ReferenceRun r = RunReference(s, {}, seed % 4 == 0 ? seed * 2654435761ull + 1 : 0);
+        const auto sw = RunSoftware(s);
+        out.diff = CompareFbram(*sw, *r.fb);
+        out.stats = r.stats;
+        out.alt = AnyNonZero(r.fb->alt[0]) || AnyNonZero(r.fb->alt[1]);
+        out.mesh = AnyNonZero(r.fb->mesh[0][0]) || AnyNonZero(r.fb->mesh[0][1]) || AnyNonZero(r.fb->mesh[1][0]) ||
+                   AnyNonZero(r.fb->mesh[1][1]);
+        if (seed % 4 == 1) {
+            out.noBreakDiff = CompareFbram(*sw, *RunReference(s, {.earlyBreak = false}).fb);
+        }
+    } catch (const std::exception &e) {
+        out.failure = e.what();
     }
     return out;
 }
 
-void MergeCoverage(Coverage &into, const Coverage &from) {
-    auto add = [](auto &a, const auto &b) {
-        for (size_t i = 0; i < a.size(); ++i) {
-            a[i] += b[i];
-        }
-    };
-    add(into.commandTypes, from.commandTypes);
-    add(into.colorModes, from.colorModes);
-    add(into.colorCalc, from.colorCalc);
-    add(into.meshByTransparentMeshes[0], from.meshByTransparentMeshes[0]);
-    add(into.meshByTransparentMeshes[1], from.meshByTransparentMeshes[1]);
-    for (auto field : {&Coverage::gouraud, &Coverage::msbOn, &Coverage::hss, &Coverage::endCodeRows,
-                       &Coverage::transparentRows, &Coverage::userClip, &Coverage::clipMode1, &Coverage::draws8bpp,
-                       &Coverage::drawsDIEDoubleDensity, &Coverage::drawsDeinterlacedDoubleDensity,
-                       &Coverage::drawsDoubleV, &Coverage::rawLargeClip, &Coverage::localCoords,
-                       &Coverage::wrappedCoords, &Coverage::sysClipCmds, &Coverage::userClipCmds, &Coverage::erases,
-                       &Coverage::partialErases, &Coverage::swaps, &Coverage::midFrameRegWrites,
-                       &Coverage::batchLimits, &Coverage::multiFrame}) {
-        into.*field += from.*field;
-    }
+uint32 WorkerCount() {
+    return std::clamp<uint32>(std::thread::hardware_concurrency() / 2, 1, 8);
 }
 
 // Runs the seeds on worker threads (each scenario owns its software renderer, unthreaded); Catch assertions stay on
 // the calling thread
 RandomRunResult RunRandomScenarios(uint64 firstSeed, uint64 count, Coverage &cov) {
-    const uint32 workers = std::clamp<uint32>(std::thread::hardware_concurrency(), 1, 16);
+    const uint32 workers = WorkerCount();
     std::vector<SeedResult> results(count);
     std::vector<Coverage> coverages(workers);
     std::atomic<uint64> next{0};
@@ -807,78 +790,61 @@ RandomRunResult RunRandomScenarios(uint64 firstSeed, uint64 count, Coverage &cov
         t.join();
     }
     for (const Coverage &c : coverages) {
-        MergeCoverage(cov, c);
+        cov.Merge(c);
     }
 
     RandomRunResult result;
     uint32 reported = 0;
+    auto report = [&](uint64 seed, const std::string &what) {
+        result.firstMismatch = std::min(result.firstMismatch, seed);
+        if (reported++ < 5) {
+            UNSCOPED_INFO("seed " << seed << ": " << what);
+        }
+    };
     for (uint64 i = 0; i < count; ++i) {
         const SeedResult &r = results[i];
         const uint64 seed = firstSeed + i;
-        if (r.undefined) {
-            ++result.undefinedScenarios;
+        if (!r.failure.empty()) {
+            ++result.failures;
+            report(seed, "exception: " + r.failure);
             continue;
         }
         if (!r.diff.empty()) {
             ++result.mismatches;
-            result.firstMismatch = std::min(result.firstMismatch, seed);
-            if (reported++ < 5) {
-                UNSCOPED_INFO("seed " << seed << ": " << r.diff);
-            }
+            report(seed, r.diff);
         }
         if (!r.noBreakDiff.empty()) {
             ++result.noBreakMismatches;
-            if (reported++ < 5) {
-                UNSCOPED_INFO("seed " << seed << " without the early break: " << r.noBreakDiff);
-            }
+            report(seed, "without the early break: " + r.noBreakDiff);
         }
         result.maxPerUnit = std::max(result.maxPerUnit, r.stats.maxPerUnit);
         result.fragments += r.stats.fragments;
         result.batches += r.stats.batches;
         result.spans += r.stats.spans;
+        result.tablesWithAlt += r.alt;
+        result.tablesWithMesh += r.mesh;
+        result.drawn.Merge(r.stats.drawn);
     }
     return result;
 }
 
-void CheckCoverage(const Coverage &cov) {
-    for (uint32 t = 0; t < 8; ++t) {
-        CAPTURE(t);
-        CHECK(cov.commandTypes[t] > 0);
+void CheckRandomRun(const RandomRunResult &r, const Coverage &cov) {
+    CAPTURE(r.firstMismatch, r.maxPerUnit, r.fragments, r.batches, r.spans);
+    CHECK(r.failures == 0);
+    CHECK(r.mismatches == 0);
+    CHECK(r.noBreakMismatches == 0);
+    CHECK(r.fragments > 0);
+    CHECK(r.tablesWithAlt > 0);
+    CHECK(r.tablesWithMesh > 0);
+    for (uint32 i = 0; i < ref::DrawnCoverage::Count; ++i) {
+        INFO("drawn: " << ref::DrawnCoverage::Name(i));
+        CHECK(r.drawn[i] > 0);
     }
-    for (uint32 m = 0; m < 8; ++m) {
-        CAPTURE(m);
-        CHECK(cov.colorModes[m] > 0);
+    for (uint32 i = 0; i < Coverage::Count; ++i) {
+        INFO("generated: " << Coverage::kNames[i]);
+        CHECK(cov.counts[i] > 0);
     }
-    for (uint32 c = 0; c < 4; ++c) {
-        CAPTURE(c);
-        CHECK(cov.colorCalc[c] > 0);
-    }
-    CHECK(cov.meshByTransparentMeshes[1][0] > 0);
-    CHECK(cov.meshByTransparentMeshes[1][1] > 0);
-    CHECK(cov.gouraud > 0);
-    CHECK(cov.msbOn > 0);
-    CHECK(cov.hss > 0);
-    CHECK(cov.endCodeRows > 0);
-    CHECK(cov.transparentRows > 0);
-    CHECK(cov.userClip > 0);
-    CHECK(cov.clipMode1 > 0);
-    CHECK(cov.draws8bpp > 0);
-    CHECK(cov.drawsDIEDoubleDensity > 0);
-    CHECK(cov.drawsDeinterlacedDoubleDensity > 0);
-    CHECK(cov.drawsDoubleV > 0);
-    CHECK(cov.rawLargeClip > 0);
-    CHECK(cov.localCoords > 0);
-    CHECK(cov.wrappedCoords > 0);
-    CHECK(cov.sysClipCmds > 0);
-    CHECK(cov.userClipCmds > 0);
-    CHECK(cov.erases > 0);
-    CHECK(cov.partialErases > 0);
-    CHECK(cov.swaps > 0);
-    CHECK(cov.midFrameRegWrites > 0);
-    CHECK(cov.batchLimits > 0);
-    CHECK(cov.multiFrame > 0);
 }
-
 } // namespace
 
 // =====================================================================================================================
@@ -887,7 +853,6 @@ void CheckCoverage(const Coverage &cov) {
 TEST_CASE("VDP1 reference steppers step exactly like vdp1_steppers.hpp", "[vdp1][reference]") {
     TestRng rng{101};
     uint64 lineMismatches = 0;
-    uint64 undefinedLines = 0;
     for (int i = 0; i < 100'000; ++i) {
         const bool longLine = i % 50 == 0;
         const sint32 range = longLine ? 20000 : 600;
@@ -900,12 +865,7 @@ TEST_CASE("VDP1 reference steppers step exactly like vdp1_steppers.hpp", "[vdp1]
         if (rng.Chance(60)) {
             const sint32 w = rng.Chance(80) ? rng.Range(0, 800) : rng.Range(0, 0xFFFF);
             const sint32 h = rng.Chance(80) ? rng.Range(0, 600) : rng.Range(0, 0x1FFFF);
-            const uint32 portSkip = port.SystemClip(w, h);
-            if (port.undefined) {
-                ++undefinedLines; // software may hang here
-                continue;
-            }
-            same = same && real.SystemClip(w, h) == portSkip;
+            same = same && real.SystemClip(w, h) == port.SystemClip(w, h);
         }
         same = same && real.Length() == port.length;
         bool realAA = false, portAA = false;
@@ -921,7 +881,6 @@ TEST_CASE("VDP1 reference steppers step exactly like vdp1_steppers.hpp", "[vdp1]
             ++lineMismatches;
         }
     }
-    CAPTURE(undefinedLines);
     CHECK(lineMismatches == 0);
 
     uint64 textureMismatches = 0;
@@ -989,12 +948,7 @@ TEST_CASE("VDP1 reference span slots equal LineStepper's step count", "[vdp1][re
         ref::RasterState state;
         state.doubleV = rng.Chance(20) ? 1 : 0;
         const ref::Span span{.a = a, .b = b};
-        uint32 slots;
-        try {
-            slots = ref::SpanSlots(state, cmd, span);
-        } catch (const ref::UndefinedLineError &) {
-            continue; // software may hang here
-        }
+        const uint32 slots = ref::SpanSlots(state, cmd, span);
         vdp::LineStepper<> real{a, b, cmd.antiAlias};
         const sint32 clipV = (cmd.clip.sysClipV << state.doubleV) | state.doubleV;
         real.SystemClip(cmd.clip.sysClipH, clipV);
@@ -1006,47 +960,126 @@ TEST_CASE("VDP1 reference span slots equal LineStepper's step count", "[vdp1][re
     }
 }
 
-TEST_CASE("VDP1 reference flags the lines whose SystemClip never ends", "[vdp1][reference]") {
-    // LineStepper::SystemClip's minor-step loops never end, with wrapping arithmetic, for some lines without
-    // antialiasing whose major delta is 2048 (mod 4096). The unthreaded software renderer (MSVC Release) hangs on a
-    // Draw Line command (207, 2426)-(1684, 378) with system clip 565 x 383. The reference refuses such spans
-    // (UndefinedLineError); the random tables skip them.
-    {
-        ref::port::Line line{{207, 2426}, {1684, 378}, false};
-        line.SystemClip(565, 383);
-        CHECK(line.undefined);
-    }
-    {
-        ref::port::Line line{{207, 2426}, {1684, 378}, true};
-        line.SystemClip(565, 383);
-        CHECK_FALSE(line.undefined);
-    }
-    TestRng rng{113};
-    uint64 undefined = 0, wrong = 0;
-    for (int i = 0; i < 200'000; ++i) {
-        const CoordS32 a{rng.Range(-3000, 3000), rng.Range(-3000, 3000)};
-        CoordS32 b{rng.Range(-3000, 3000), rng.Range(-3000, 3000)};
-        if (rng.Chance(50)) { // major delta 2048 or 4096 + 2048
-            const sint32 d = rng.Chance(80) ? 2048 : 6144;
-            if (rng.Chance(50)) {
-                b = {a.x() + (rng.Chance(50) ? d : -d), a.y() + rng.Range(-d, d)};
-            } else {
-                b = {a.x() + rng.Range(-d, d), a.y() + (rng.Chance(50) ? d : -d)};
-            }
-        }
-        const bool aa = rng.Chance(30);
-        ref::port::Line line{a, b, aa};
-        line.SystemClip(rng.Range(0, 704), rng.Range(0, 512));
-        if (line.undefined) {
-            ++undefined;
-            wrong += aa || line.dmaj % 4096 != 2048;
-        }
-    }
-    CAPTURE(undefined);
-    CHECK(undefined > 0);
-    CHECK(wrong == 0);
+namespace {
+
+// A line of the clip-loop hang class (master 1a769b1): major delta 2048 (+ 4096 k), towards negative (or positive)
+// coordinates on its major axis
+std::pair<CoordS32, CoordS32> HangClassLine(TestRng &rng, bool negative, bool xMajor) {
+    const sint32 d = (rng.Chance(80) ? 2048 : 6144) * (negative ? -1 : 1);
+    const CoordS32 a{rng.Chance(70) ? rng.Range(-300, 700) : rng.Range(-9000, 9000),
+                     rng.Chance(70) ? rng.Range(-300, 600) : rng.Range(-9000, 9000)};
+    const sint32 minor = rng.Range(-std::abs(d) + 1, std::abs(d) - 1);
+    const CoordS32 b = xMajor ? CoordS32{a.x() + d, a.y() + minor} : CoordS32{a.x() + minor, a.y() + d};
+    return {a, b};
 }
 
+} // namespace
+
+TEST_CASE("VDP1 reference clips the hang-class lines like LineStepper", "[vdp1][reference]") {
+    // LineStepper::SystemClip's minor-step loops could never end for lines without antialiasing whose major delta is
+    // 2048 (mod 4096) running towards negative coordinates on the major axis; master now clips those by stepping.
+    // The reference's port follows the same rule (written from its description): equal to LineStepper on the whole
+    // family, both directions and axes, AA on and off; the fallback is taken only in the hang class.
+    TestRng rng{113};
+    uint64 mismatches = 0, fallbacks = 0, wrongFallbacks = 0;
+    for (int i = 0; i < 40'000; ++i) {
+        const bool negative = rng.Chance(50), xMajor = rng.Chance(50), aa = rng.Chance(50);
+        const auto [a, b] = HangClassLine(rng, negative, xMajor);
+        const sint32 w = rng.Chance(80) ? rng.Range(0, 704) : rng.Range(0, 0xFFFF);
+        const sint32 h = rng.Chance(80) ? rng.Range(0, 512) : rng.Range(0, 0x1FFFF);
+        vdp::LineStepper<> real{a, b, aa};
+        ref::port::Line port{a, b, aa};
+        bool same = real.SystemClip(w, h) == port.SystemClip(w, h) && real.Length() == port.length;
+        if (port.clippedByStepping) {
+            ++fallbacks;
+            wrongFallbacks += aa || !negative;
+        }
+        bool realAA = false, portAA = false;
+        real.Step();
+        port.Step();
+        for (; same && real.CanStep(); realAA = real.Step(), portAA = port.Step()) {
+            same = port.CanStep() && real.Coord().elements == port.Coord().elements && realAA == portAA &&
+                   (!realAA || real.AACoord().elements == port.AACoord().elements);
+        }
+        same = same && !port.CanStep();
+        mismatches += !same;
+    }
+    CAPTURE(fallbacks);
+    CHECK(mismatches == 0);
+    CHECK(fallbacks > 0);
+    CHECK(wrongFallbacks == 0);
+}
+
+TEST_CASE("VDP1 reference matches software on hang-class lines", "[vdp1][reference]") {
+    // Draw Line and polylines (no antialiasing) and polygons and distorted sprites (antialiased spans) whose lines
+    // have a major delta of 2048 in both directions, through both renderers
+    TestRng rng{127};
+    uint64 drawn = 0, visibleFallbackLines = 0;
+    const std::vector<uint8> texture = [] {
+        std::vector<uint8> bytes(16 * 16 * 2);
+        for (uint32 i = 0; i < 16 * 16; ++i) {
+            bytes[i * 2] = static_cast<uint8>(0x80 | (i & 0x7F));
+            bytes[i * 2 + 1] = static_cast<uint8>(i * 7);
+        }
+        return bytes;
+    }();
+    for (int n = 0; n < 300; ++n) {
+        CAPTURE(n);
+        Scenario s;
+        s.clip.sysClipH = static_cast<uint16>(rng.Chance(50) ? 319 : rng.Range(100, 704));
+        s.clip.sysClipV = static_cast<uint16>(rng.Chance(50) ? 255 : rng.Range(100, 512));
+        if (rng.Chance(25)) {
+            s.tvmd = 0x80C0;
+            s.deinterlace = true;
+            s.vres = 448;
+        }
+        const uint16 srca = s.AddTexture(texture);
+        s.Op0(Op::Kind::BeginFrame);
+        for (int k = 0; k < 4; ++k) {
+            const bool negative = rng.Chance(50), xMajor = rng.Chance(50);
+            const auto [a, b] = HangClassLine(rng, negative, xMajor);
+            const uint16 color = static_cast<uint16>(rng.Next() | 0x8000);
+            const sint32 kind = rng.Range(0, 3);
+            if (kind == 0 && !s.deinterlace) {
+                // a Draw Line that takes the stepping fallback and still shows pixels
+                ref::port::Line line{a, b, false};
+                line.SystemClip(s.clip.sysClipH, s.clip.sysClipV);
+                visibleFallbackLines += line.clippedByStepping && line.length > 0;
+            }
+            switch (kind) {
+            case 0:
+                s.AddCommand({0x0006, 0, 0x00C0, color, 0, 0, U(a.x()), U(a.y()), U(b.x()), U(b.y()), 0, 0, 0, 0, 0, 0});
+                break;
+            case 1: {
+                const CoordS32 c{b.x() + rng.Range(-20, 20), b.y() + rng.Range(-20, 20)};
+                s.AddCommand({0x0005, 0, 0x00C0, color, 0, 0, U(a.x()), U(a.y()), U(b.x()), U(b.y()), U(c.x()),
+                              U(c.y()), U(a.x() + 3), U(a.y() + 3), 0, 0});
+                break;
+            }
+            case 2: {
+                // L-R lines of the quad run from edge A-D to edge B-C with the 2048 major delta
+                const CoordS32 off = xMajor ? CoordS32{0, rng.Range(1, 40)} : CoordS32{rng.Range(1, 40), 0};
+                s.Polygon(0x00C0, color, a, b, {b.x() + off.x(), b.y() + off.y()}, {a.x() + off.x(), a.y() + off.y()});
+                break;
+            }
+            default: {
+                const CoordS32 off = xMajor ? CoordS32{0, rng.Range(1, 40)} : CoordS32{rng.Range(1, 40), 0};
+                s.Distorted(0, 0x00E8, 0, srca, 0x0210, a, b, {b.x() + off.x(), b.y() + off.y()},
+                            {a.x() + off.x(), a.y() + off.y()});
+                break;
+            }
+            }
+        }
+        s.Op0(Op::Kind::EndFrame);
+        const auto sw = RunSoftware(s);
+        const ReferenceRun r = RunReference(s);
+        CHECK(CompareFbram(*sw, *r.fb) == "");
+        drawn += r.stats.fragments > 0;
+    }
+    CAPTURE(drawn, visibleFallbackLines);
+    CHECK(drawn > 50);
+    CHECK(visibleFallbackLines > 0);
+}
 // =====================================================================================================================
 // Pixel uniqueness and the early break
 
@@ -1071,14 +1104,14 @@ TEST_CASE("VDP1 reference lines never repeat a pixel, main and antialias include
     // Exhaustive over every delta within +-512 (the stepper depends on the deltas only), antialias on and off.
     constexpr sint32 kMax = 512;
     constexpr sint32 kGrid = 2 * kMax + 5;
-    std::atomic<uint64> repeats{0}, outside{0}, lines{0}, pixels{0};
+    std::atomic<uint64> repeats{0}, outsideGrid{0}, wrongMainCount{0}, lines{0}, pixels{0};
     std::atomic<sint32> nextDX{-kMax};
     std::vector<std::thread> threads;
-    for (uint32 w = 0; w < std::clamp<uint32>(std::thread::hardware_concurrency(), 1, 16); ++w) {
+    for (uint32 w = 0; w < WorkerCount(); ++w) {
         threads.emplace_back([&] {
             std::vector<uint32> stamp(static_cast<size_t>(kGrid) * kGrid, 0);
             uint32 generation = 0;
-            uint64 rep = 0, out = 0, lin = 0, pix = 0;
+            uint64 rep = 0, out = 0, wrong = 0, lin = 0, pix = 0;
             for (sint32 dx = nextDX++; dx <= kMax; dx = nextDX++) {
                 for (sint32 dy = -kMax; dy <= kMax; ++dy) {
                     for (const bool aa : {false, true}) {
@@ -1098,12 +1131,13 @@ TEST_CASE("VDP1 reference lines never repeat a pixel, main and antialias include
                             rep += s == generation;
                             s = generation;
                         });
-                        out += mains != static_cast<uint64>(std::max(std::abs(dx), std::abs(dy))) + 1;
+                        wrong += mains != static_cast<uint64>(std::max(std::abs(dx), std::abs(dy))) + 1;
                     }
                 }
             }
             repeats += rep;
-            outside += out;
+            outsideGrid += out;
+            wrongMainCount += wrong;
             lines += lin;
             pixels += pix;
         });
@@ -1113,7 +1147,8 @@ TEST_CASE("VDP1 reference lines never repeat a pixel, main and antialias include
     }
     CAPTURE(lines.load(), pixels.load());
     CHECK(repeats == 0);
-    CHECK(outside == 0);
+    CHECK(outsideGrid == 0);
+    CHECK(wrongMainCount == 0);
 
     // Random long lines (13-bit accumulator wraps beyond 1364), anywhere, with and without SystemClip
     TestRng rng{107};
@@ -1125,9 +1160,6 @@ TEST_CASE("VDP1 reference lines never repeat a pixel, main and antialias include
         ref::port::Line line{a, b, rng.Chance(70)};
         if (rng.Chance(50)) {
             line.SystemClip(rng.Range(0, 1000), rng.Range(0, 1000));
-            if (line.undefined) {
-                continue;
-            }
         }
         seen.clear();
         ForEachLinePixel(line, [&](CoordS32 c, uint32, bool) {
@@ -1155,9 +1187,6 @@ TEST_CASE("VDP1 reference: the in-clip steps of a line are contiguous, so the ea
         const sint32 clipW = rng.Range(0, 400), clipH = rng.Range(0, 300);
         ref::port::Line line{a, b, rng.Chance(70)};
         line.SystemClip(clipW, clipH);
-        if (line.undefined) {
-            continue;
-        }
         auto inside = [&](CoordS32 c) {
             return c.x() >= std::max(0, x0) && c.x() <= std::min(clipW, x1) && c.y() >= std::max(0, y0) &&
                    c.y() <= std::min(clipH, y1);
@@ -1199,20 +1228,14 @@ TEST_CASE("VDP1 reference FBRAM equals software on random command tables", "[vdp
     Coverage cov;
     const RandomRunResult r = RunRandomScenarios(1, 10'000, cov);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    CAPTURE(r.firstMismatch, r.maxPerUnit, r.fragments, r.batches, r.spans, r.undefinedScenarios, seconds);
-    CHECK(r.mismatches == 0);
-    CHECK(r.noBreakMismatches == 0);
-    CHECK(r.undefinedScenarios < 100); // tables with a line software may hang on are skipped
-    CheckCoverage(cov);
+    CAPTURE(seconds);
+    CheckRandomRun(r, cov);
 }
 
 TEST_CASE("VDP1 reference FBRAM equals software on random command tables (long)", "[vdp1][reference][.]") {
     Coverage cov;
     const RandomRunResult r = RunRandomScenarios(1'000'001, 200'000, cov);
-    CAPTURE(r.firstMismatch, r.maxPerUnit, r.fragments, r.undefinedScenarios);
-    CHECK(r.mismatches == 0);
-    CHECK(r.noBreakMismatches == 0);
-    CheckCoverage(cov);
+    CheckRandomRun(r, cov);
 }
 
 // =====================================================================================================================
@@ -1349,11 +1372,11 @@ TEST_CASE("VDP1 reference matches software on overlapping half-transparency chai
     }
 }
 
-TEST_CASE("VDP1 reference erase matches software", "[vdp1][reference]") {
-    // Regions with y1 == y3 (one row), x1 == x3 (nothing), y1 > y3, the 400/428 and VRes clamps, cycle-limited partial
-    // erases ending mid-row, 8 bpp and every erase offset shift, double density (alt mirror) and transparent meshes
-    // (mesh cleared). The display framebuffer first gets main, alt and mesh content from a mesh polygon drawn, then
-    // swapped in.
+namespace {
+
+// Full grid: 1,536 scenes; otherwise the subset with cycles {0, 37}, TVMD {normal, double density + HRES bit 0} and
+// neither or both of deinterlace and transparent meshes (192 scenes)
+uint64 RunEraseGrid(bool full) {
     struct Region {
         uint16 x1, y1, x3, y3;
     };
@@ -1368,6 +1391,10 @@ TEST_CASE("VDP1 reference erase matches software", "[vdp1][reference]") {
             for (const uint16 tvmr : tvmrs) {
                 for (const uint16 tvmd : tvmds) {
                     for (const uint32 flags : {0u, 1u, 2u, 3u}) {
+                        if (!full && ((cycles != 0 && cycles != 37) || (tvmd != 0x8000 && tvmd != 0x80C1) ||
+                                      (flags != 0 && flags != 3))) {
+                            continue;
+                        }
                         CAPTURE(rg.x1, rg.y1, rg.x3, rg.y3, cycles, tvmr, tvmd, flags);
                         Scenario s;
                         s.tvmd = tvmd;
@@ -1400,7 +1427,20 @@ TEST_CASE("VDP1 reference erase matches software", "[vdp1][reference]") {
             }
         }
     }
-    CHECK(scenarios == 6 * 4 * 4 * 4 * 4);
+    return scenarios;
+}
+
+} // namespace
+
+TEST_CASE("VDP1 reference erase matches software", "[vdp1][reference]") {
+    // Regions with y1 == y3 (one row), x1 == x3 (nothing), y1 > y3, the 400/428 and VRes clamps, cycle-limited partial
+    // erases ending mid-row, 8 bpp and every erase offset shift, double density (alt mirror) and transparent meshes
+    // (mesh cleared). The display framebuffer first gets main, alt and mesh content from mesh polygons, then swapped in.
+    CHECK(RunEraseGrid(false) == 6 * 2 * 4 * 2 * 2);
+}
+
+TEST_CASE("VDP1 reference erase matches software (full grid)", "[vdp1][reference][.]") {
+    CHECK(RunEraseGrid(true) == 6 * 4 * 4 * 4 * 4);
 }
 
 TEST_CASE("VDP1 reference: one random table (BRIMIR_VDP1REF_SEED)", "[vdp1][reference][.debug]") {

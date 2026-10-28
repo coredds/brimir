@@ -45,6 +45,14 @@ using ymir::vdp::VDP1Command;
 inline constexpr uint32 kVRAMMask = 0x7FFFF;
 inline constexpr uint32 kWordsPerFB = 0x20000; // 256 KiB / 2
 
+// splitmix64 (the fragment shuffle and the tests' random generator); deterministic on every platform
+inline uint64 SplitMix64(uint64 &state) {
+    uint64 z = (state += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
 // -----------------------------------------------------------------------------
 // 32-bit ports of the steppers (vdp1_steppers.hpp). Arithmetic wraps modulo 2^32 like the GPU's (and like the
 // software's in practice); no 64-bit operations.
@@ -136,29 +144,47 @@ struct Line {
         accumTarget = Shl(accumTarget, kShift);
     }
 
-    // Set by SystemClip when one of its minor-step loops ("while (accum <= accumTarget) accum += den") never ends with
-    // wrapping arithmetic. That happens for lines without antialiasing whose major delta is 2048 (mod 4096): den is
-    // (2 * 2048) << 19 = INT_MIN, so the accumulator alternates between two values, and if the non-negative one is
-    // <= accumTarget (0 or 1 << 19) the loop never exits. The software renderer has the same loop (with signed
-    // overflow, undefined behaviour): it hangs or not depending on the compiled code. See the tests.
-    bool undefined = false;
+    // Set by SystemClip when it took the stepping fallback below (for tests)
+    bool clippedByStepping = false;
 
-    // Runs a minor-step loop; false (and undefined set) if it would never end. den is a multiple of 2^20, so the
-    // accumulator's orbit has at most 4096 values: a loop that has not ended after 4096 adds never ends.
-    FORCE_INLINE bool SettleMinor(sint32 &acc, sint32 &px, sint32 &py) {
-        if (den == 0) {
-            return true;
-        }
-        for (uint32 n = 0; acc <= accumTarget; ++n) {
-            if (n > 4096) {
-                undefined = true;
-                return false;
+    // A minor-step loop of SystemClip ("while (accum <= accumTarget) accum += den") never ends when den is 2^31 (major
+    // delta 2048 mod 4096: the accumulator alternates between two values) and both values are <= accumTarget; that
+    // needs accumTarget = 1 << 19, i.e. no antialiasing and a line running towards negative coordinates on its major
+    // axis. Checked on every pass through the loop (inside it accum <= accumTarget already holds).
+    FORCE_INLINE bool MinorLoopNeverEnds(sint32 acc) const {
+        return den == std::numeric_limits<sint32>::min() && Add(acc, den) <= accumTarget;
+    }
+
+    // The rule master adopted for those lines (vdp1_steppers.hpp, 1a769b1): from the line's start, step a copy with
+    // the plain Step() rule over all dmaj + 1 pixels. No pixel (main, or AA when drawn) inside the padded clip area
+    // [lo, maxX] x [lo, maxY]: the line is fully clipped. Otherwise skip to the first such step (returned as the skip
+    // count) and end at the last one.
+    FORCE_INLINE uint32 ClipByStepping(sint32 lo, sint32 maxX, sint32 maxY) {
+        clippedByStepping = true;
+        auto inside = [&](CoordS32 c) { return c.x() >= lo && c.x() <= maxX && c.y() >= lo && c.y() <= maxY; };
+        Line probe = *this;
+        bool found = false;
+        uint32 first = 0, last = 0;
+        for (uint32 i = 0; i <= dmaj; ++i) {
+            const bool aa = probe.Step();
+            if (inside(probe.Coord()) || (aa && inside(probe.AACoord()))) {
+                first = found ? first : i;
+                found = true;
+                last = i;
             }
-            acc = Add(acc, den);
-            px += xMinInc;
-            py += yMinInc;
         }
-        return true;
+        if (!found) {
+            x = xEnd;
+            y = yEnd;
+            length = 0u;
+            return 0u;
+        }
+        for (uint32 i = 0; i < first; ++i) {
+            Step();
+        }
+        step = 0;
+        length = last - first + 1u;
+        return first;
     }
 
     // LineStepper::SystemClip: clips to 0..width x 0..height; returns the steps skipped at the start
@@ -190,6 +216,13 @@ struct Line {
         const sint32 start = xmajor ? xs : ys;
         const sint32 end = xmajor ? xe : ye;
         const sint32 maxLen = xmajor ? width : height;
+        const sint32 startAccum = accum;
+        auto fallback = [&] {
+            x = xs;
+            y = ys;
+            accum = startAccum;
+            return ClipByStepping(-kPadding, width, height);
+        };
 
         uint32 startClip = 0u;
         if (inc > 0 && start < -kPadding) {
@@ -203,8 +236,15 @@ struct Line {
             y = Add(y, Mul(yMajInc, startClip));
             for (uint32 i = 0; i < startClip; ++i) {
                 accum = Sub(accum, num);
-                if (!SettleMinor(accum, x, y)) {
-                    return 0u;
+                if (den != 0) {
+                    while (accum <= accumTarget) {
+                        if (MinorLoopNeverEnds(accum)) {
+                            return fallback();
+                        }
+                        accum = Add(accum, den);
+                        x += xMinInc;
+                        y += yMinInc;
+                    }
                 }
             }
             len -= startClip;
@@ -219,25 +259,23 @@ struct Line {
         endClip = std::min(endClip, len);
         if (endClip > 0u) {
             len -= endClip;
-            // The new end point is unused afterwards; the loop only matters for whether it ends, which it always does
-            // unless den is INT_MIN
-            if (den != std::numeric_limits<sint32>::min()) {
-                length = len + 1u;
-                return startClip;
-            }
-            sint32 tempAccum = accum;
-            sint32 ex = x, ey = y;
-            for (uint32 i = 0; i < len; ++i) {
-                tempAccum = Sub(tempAccum, num);
-                if (!SettleMinor(tempAccum, ex, ey)) {
-                    return 0u;
+            // The end loop only moves the (unused) end point; it matters only when it never ends, which needs den = 2^31
+            if (den == std::numeric_limits<sint32>::min()) {
+                sint32 tempAccum = accum;
+                for (uint32 i = 0; i < len; ++i) {
+                    tempAccum = Sub(tempAccum, num);
+                    while (tempAccum <= accumTarget) {
+                        if (MinorLoopNeverEnds(tempAccum)) {
+                            return fallback();
+                        }
+                        tempAccum = Add(tempAccum, den);
+                    }
                 }
             }
         }
         length = len + 1u;
         return startClip;
     }
-
     FORCE_INLINE bool CanStep() const {
         return step <= length;
     }
@@ -521,18 +559,18 @@ CommandSpans BuildCommandSpans(const uint8 *vram, uint32 address, ClipContext &c
 // -----------------------------------------------------------------------------
 // Part 2: span rasterization
 
-// Thrown by SpanSlots and RasterSpan for a span whose SystemClip never ends (port::Line::undefined): software has no
-// defined result there (it hangs, or not, depending on the compiled code)
-struct UndefinedLineError : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
-
 // 2 * Length() after LineStepper::SystemClip; 0 when VDP1IsLineSystemClipped rejects the line
 uint32 SpanSlots(const RasterState &state, const CommandParams &cmd, const Span &span);
 
+// What a span did, for the tests' drawn-coverage counters
+struct SpanInfo {
+    bool highSpeedShrink = false;   // textured line with high-speed shrink in effect
+    bool endCodeTerminated = false; // the second end code ended the line
+};
+
 // Appends the span's fragments (keys in [fragBase, fragBase + SpanSlots)) to `out`
 void RasterSpan(const RasterState &state, const CommandParams &cmd, const Span &span, const uint8 *vram,
-                const RasterOptions &options, std::vector<Fragment> &out);
+                const RasterOptions &options, std::vector<Fragment> &out, SpanInfo *info = nullptr);
 
 // -----------------------------------------------------------------------------
 // Part 3: per-word ordered resolve
@@ -563,11 +601,47 @@ struct EraseParams {
     uint64 cycles = 0;    // 0 = unlimited; else cycles + 1 writes in row-major order
 };
 
-void Erase(const EraseParams &params, Fbram &fbram);
+// Returns the number of words written to the main framebuffer
+uint64 Erase(const EraseParams &params, Fbram &fbram);
 
 // -----------------------------------------------------------------------------
 // Driver: commands -> batches -> raster -> resolve
 
+// Drawn coverage: fragments (and lines, erase writes) actually produced, by category
+struct DrawnCoverage {
+    enum Counter : uint32 {
+        CommandType0 = 0, // + CMDCTRL command 0-7: fragments
+        ColorMode0 = 8,   // + colour mode 0-7: fragments of textured commands
+        ColorCalc0 = 16,  // + mode 0-3: 16 bpp fragments that are not MSB-on
+        Gouraud = 20,     // 16 bpp fragments with Gouraud (not MSB-on)
+        Mesh,             // fragments written to the mesh framebuffer
+        Alt,              // fragments in the alternate field
+        MsbOn,
+        ByteEven,         // 8 bpp byte writes
+        ByteOdd,
+        DoubleInterlace,  // fragments drawn with FBCR.DIE
+        DieDoubleDensity, // ... in double density without deinterlacing (the DIL line select)
+        DoubleV,          // fragments drawn with doubleV
+        HssLines,         // spans with high-speed shrink that produced fragments
+        EndCodeLines,     // spans ended by end codes that produced fragments
+        EraseWrites,      // words an erase wrote
+        Count
+    };
+    std::array<uint64, Count> counts{};
+
+    uint64 &operator[](uint32 counter) {
+        return counts[counter];
+    }
+    uint64 operator[](uint32 counter) const {
+        return counts[counter];
+    }
+    void Merge(const DrawnCoverage &other) {
+        for (uint32 i = 0; i < Count; ++i) {
+            counts[i] += other.counts[i];
+        }
+    }
+    static const char *Name(uint32 counter);
+};
 struct ReferenceStats {
     uint64 commands = 0;
     uint64 batches = 0;
@@ -575,6 +649,7 @@ struct ReferenceStats {
     uint64 slots = 0;
     uint64 fragments = 0;
     uint32 maxPerUnit = 0;
+    DrawnCoverage drawn;
 };
 
 class ReferenceVDP1 {

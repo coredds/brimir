@@ -80,13 +80,6 @@ bool QuadSystemClipped(const ClipRect &clip, const std::array<CoordS32, 4> &v) {
            all([&](CoordS32 c) { return c.x() > clip.sysH; }) || all([&](CoordS32 c) { return c.y() > clip.sysV; });
 }
 
-uint64 SplitMix(uint64 &s) {
-    uint64 z = (s += 0x9E3779B97F4A7C15ull);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return z ^ (z >> 31);
-}
-
 } // namespace
 
 // =====================================================================================================================
@@ -372,14 +365,11 @@ uint32 SpanSlots(const RasterState &state, const CommandParams &cmd, const Span 
     }
     port::Line line{span.a, span.b, cmd.antiAlias};
     line.SystemClip(clip.sysH, clip.sysV);
-    if (line.undefined) {
-        throw UndefinedLineError("vdp1ref: LineStepper::SystemClip never ends for this line");
-    }
     return 2 * line.length;
 }
 
 void RasterSpan(const RasterState &state, const CommandParams &cmd, const Span &span, const uint8 *vram,
-                const RasterOptions &options, std::vector<Fragment> &out) {
+                const RasterOptions &options, std::vector<Fragment> &out, SpanInfo *info) {
     const ClipRect clip = EffectiveClip(cmd.clip, state.doubleV);
     if (LineSystemClipped(clip, span.a, span.b)) {
         return;
@@ -388,9 +378,6 @@ void RasterSpan(const RasterState &state, const CommandParams &cmd, const Span &
 
     port::Line line{span.a, span.b, cmd.antiAlias};
     const uint32 skipSteps = line.SystemClip(clip.sysH, clip.sysV);
-    if (line.undefined) {
-        throw UndefinedLineError("vdp1ref: LineStepper::SystemClip never ends for this line");
-    }
 
     port::Gouraud gouraud;
     if (mode.gouraudEnable) {
@@ -473,6 +460,9 @@ void RasterSpan(const RasterState &state, const CommandParams &cmd, const Span &
         std::swap(uStart, uEnd);
     }
     const bool useHighSpeedShrink = mode.highSpeedShrink && line.dmaj < charSizeH - 1;
+    if (info != nullptr) {
+        info->highSpeedShrink = useHighSpeedShrink;
+    }
 
     port::Texture uStepper;
     uStepper.Setup(line.dmaj + 1, uStart, uEnd, useHighSpeedShrink, state.evenOddCoordSelect ? 1 : 0);
@@ -548,6 +538,9 @@ void RasterSpan(const RasterState &state, const CommandParams &cmd, const Span &
             }
         }
         if (endCodeCount == 2) {
+            if (info != nullptr) {
+                info->endCodeTerminated = true;
+            }
             break;
         }
         uStepper.StepPixel();
@@ -720,7 +713,7 @@ ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, 
 // =====================================================================================================================
 // Erase
 
-void Erase(const EraseParams &params, Fbram &fbram) {
+uint64 Erase(const EraseParams &params, Fbram &fbram) {
     const uint32 scaleV = params.doubleDensity ? 1 : 0;
     const uint32 maxH = params.hiResH ? 428 : 400;
     const uint32 maxV = params.vres >> scaleV;
@@ -731,6 +724,7 @@ void Erase(const EraseParams &params, Fbram &fbram) {
     const bool mirror = params.deinterlace && params.doubleDensity;
     const uint8 fb = params.fbIndex & 1;
     const uint32 width = x3 > x1 ? x3 - x1 : 0;
+    uint64 writes = 0;
 
     // One write per (x, y) of the region; with a cycle budget, write i (row-major) happens if i <= cycles. Every write
     // stores the same value, so overlapping rows (offset shift 8 with x >= 256) need no order.
@@ -742,6 +736,7 @@ void Erase(const EraseParams &params, Fbram &fbram) {
             }
             const uint32 address = (((y << params.offsetShift) + x) * 2u) & 0x3FFFE;
             WriteBE16(fbram.main[fb], address, params.value);
+            ++writes;
             if (mirror) {
                 WriteBE16(fbram.alt[fb], address, params.value);
             }
@@ -753,11 +748,22 @@ void Erase(const EraseParams &params, Fbram &fbram) {
             }
         }
     }
+    return writes;
 }
 
 // =====================================================================================================================
 // Driver
 
+const char *DrawnCoverage::Name(uint32 counter) {
+    static constexpr const char *kNames[Count] = {
+        "command 0 (normal sprite)", "command 1 (scaled sprite)", "command 2 (distorted sprite)",
+        "command 3 (distorted sprite alt)", "command 4 (polygon)", "command 5 (polylines)", "command 6 (line)",
+        "command 7 (polylines alt)", "colour mode 0", "colour mode 1", "colour mode 2", "colour mode 3",
+        "colour mode 4", "colour mode 5", "colour mode 6", "colour mode 7", "replace", "shadow", "half-luminance",
+        "half-transparency", "Gouraud", "mesh", "alt field", "MSB-on", "8 bpp even byte", "8 bpp odd byte",
+        "double interlace (DIE)", "DIE in double density", "doubleV", "HSS lines", "end-code-terminated lines", "erase writes"};
+    return counter < Count ? kNames[counter] : "?";
+}
 ReferenceVDP1::ReferenceVDP1(const uint8 *vram, Fbram &fbram, RasterOptions options, uint32 maxBatchFragments,
                              uint64 shuffleSeed)
     : m_vram(vram)
@@ -812,19 +818,42 @@ void ReferenceVDP1::Flush() {
         const Span &span = m_spans[s];
         const CommandParams &cmd = m_commands[span.cmdIndex];
         const size_t first = fragments.size();
-        RasterSpan(m_state, cmd, span, m_vram, m_options, fragments);
+        SpanInfo info;
+        RasterSpan(m_state, cmd, span, m_vram, m_options, fragments, &info);
         const uint32 slots = (s + 1 < m_spans.size() ? m_spans[s + 1].fragBase : m_slots) - span.fragBase;
+        DrawnCoverage &d = m_stats.drawn;
         for (size_t i = first; i < fragments.size(); ++i) {
-            if (fragments[i].key < span.fragBase || fragments[i].key >= span.fragBase + slots) {
+            const Fragment &f = fragments[i];
+            if (f.key < span.fragBase || f.key >= span.fragBase + slots) {
                 throw std::logic_error("vdp1ref::Flush: fragment key outside its span's slots");
             }
+            using C = DrawnCoverage;
+            ++d[C::CommandType0 + (static_cast<uint32>(cmd.control.command) & 7)];
+            d[C::ColorMode0 + cmd.mode.colorMode] += cmd.textured;
+            d[C::Mesh] += (f.target & kTargetMeshBit) != 0;
+            d[C::Alt] += (f.target & kTargetAltBit) != 0;
+            d[C::DoubleInterlace] += m_state.dblInterlaceEnable;
+            d[C::DieDoubleDensity] += m_state.dblInterlaceEnable && m_state.doubleDensity && !m_state.deinterlace;
+            d[C::DoubleV] += m_state.doubleV != 0;
+            if (f.target & kTargetMsbOnBit) {
+                ++d[C::MsbOn];
+            } else if (m_state.pixel8Bits) {
+                ++d[(f.target & kTargetOddBit) ? C::ByteOdd : C::ByteEven];
+            } else {
+                ++d[C::ColorCalc0 + ((f.target >> kTargetCalcShift) & 3)];
+                d[C::Gouraud] += cmd.mode.gouraudEnable;
+            }
+        }
+        if (fragments.size() > first) {
+            d[DrawnCoverage::HssLines] += info.highSpeedShrink;
+            d[DrawnCoverage::EndCodeLines] += info.endCodeTerminated;
         }
         m_stats.slots += slots;
     }
     if (m_shuffle != 0) {
         // the GPU scatters fragments into their buckets in arbitrary order
         for (size_t i = fragments.size(); i > 1; --i) {
-            std::swap(fragments[i - 1], fragments[SplitMix(m_shuffle) % i]);
+            std::swap(fragments[i - 1], fragments[SplitMix64(m_shuffle) % i]);
         }
     }
     m_stats.spans += m_spans.size();
@@ -842,7 +871,7 @@ void ReferenceVDP1::Flush() {
 
 void ReferenceVDP1::Erase(const EraseParams &params) {
     Flush();
-    vdp1ref::Erase(params, m_fbram);
+    m_stats.drawn[DrawnCoverage::EraseWrites] += vdp1ref::Erase(params, m_fbram);
 }
 
 } // namespace brimir::test::vdp1ref
