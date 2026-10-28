@@ -174,6 +174,12 @@ public:
         m_failSubmitArmed = false;
         return fail;
     }
+    // A refused submit (never reached the queue) is not one of the retro_run's submits.
+    void UncountRunSubmit() {
+        if (m_inRun && m_runSubmits > 0) {
+            --m_runSubmits;
+        }
+    }
     // --defer-image-read: pins the image of a captured frame again (a dupe: the frontend repeats the image it holds).
     void PinImage(const DeferredImage& image) {
         m_pinned.insert(image.image);

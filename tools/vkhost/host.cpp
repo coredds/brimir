@@ -194,6 +194,14 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         setenv("BRIMIR_VDP1_PROBE", "1", 1);
 #endif
     }
+    if (config.gpuVdp1) {
+        // The core reads BRIMIR_VDP1_GPU when it first attaches the Vulkan VDP renderer.
+#ifdef _WIN32
+        _putenv_s("BRIMIR_VDP1_GPU", "1");
+#else
+        setenv("BRIMIR_VDP1_GPU", "1", 1);
+#endif
+    }
     if (config.vulkan && !config.refuseHw) {
         // Like a frontend's video driver, the instance and device exist before the core is loaded.
         m_vulkan = std::make_unique<VulkanProvider>(config.fakeApi, !config.noValidation);

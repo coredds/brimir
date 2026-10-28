@@ -436,6 +436,8 @@ struct VulkanOutput::Impl {
     bool hiddenCreated = false;
     uint32_t nextHidden = 0;
     bool compositeValid = false;
+    // VDP1 on the GPU: submits of VDP1 ops without a VDP2 frame (SubmitHidden), since the output was created
+    uint64_t vdp1OpsOnlySubmits = 0;
 
     // Internal resolution: requested (brimir_internal_resolution), whether a change waits for the next shown frame with
     // a VDP2 frame, the scale of the presenter's images (CreateSlots), and of the last frame handed over.
@@ -812,6 +814,13 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
 // Detaches the renderer; the device is idle or this output's submissions have completed.
 void VulkanOutput::Impl::DetachRendererIdle() {
     if (renderer) {
+        if (renderer->GpuVdp1()) {
+            // Diagnostics (brimir_vkhost checks): the submits VDP1 on the GPU added while attached (the drain of the
+            // detach itself not counted).
+            NegotiationLog(RETRO_LOG_INFO, "VDP1 on the GPU: " + std::to_string(vdp1OpsOnlySubmits) +
+                                               " ops-only submits, " + std::to_string(renderer->Vdp1SyncSubmits()) +
+                                               " sync submits");
+        }
         renderer->DetachDevice();
         renderer = nullptr;
     }
@@ -1355,25 +1364,35 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
         error = "the Vulkan VDP renderer was detached";
         return false;
     }
-    // This retro_run's VDP2 frame, if one ended; else the composite as it is (the last frame, at the last size).
-    const bool recorded = renderer->HasPendingFrame() && renderer->RecordPendingFrame(index, slot->cmd);
+    // This retro_run's VDP2 frame, if one ended; else the composite as it is (the last frame, at the last size). With
+    // VDP1 on the GPU the pending VDP1 ops go in the same command buffer, around the frame (with or without one). A
+    // frame a VDP1 sync submit already recorded is in the composite.
+    if (renderer->TakeFrameRecordedBySync()) {
+        m.compositeValid = true;
+    }
+    const bool recorded = renderer->RecordPendingFrame(index, slot->cmd);
+    const bool work = recorded || renderer->RecordedVdp1Work();
     if (!recorded && !m.compositeValid) {
-        // A fresh back half: nothing to show until its first frame.
+        // A fresh back half: nothing to show until its first frame (VDP1 ops recorded here wait for the ops-only
+        // submit, SubmitHidden).
         m.device->Table().vkEndCommandBuffer(slot->cmd);
+        if (work) {
+            renderer->RecordedFrameDropped();
+        }
         return false;
     }
     // The composite is at the renderer's internal resolution (a change is applied only together with a record).
     const gpu::OutputSettings output{settings.cropH, settings.cropV, settings.rotation, renderer->InternalScale()};
     if (!m.presenter->PresentDevice(index, renderer->CompositeBuffer(), w, h, output, slot->cmd)) {
         m.device->Table().vkEndCommandBuffer(slot->cmd);
-        if (recorded) {
+        if (work) {
             renderer->RecordedFrameDropped();
         }
         error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
         return false;
     }
     if (!m.SubmitFrame(*slot, index, error)) {
-        if (recorded) {
+        if (work) {
             renderer->RecordedFrameDropped();
         }
         return false;
@@ -1407,7 +1426,14 @@ uint32_t VulkanOutput::PresentedScale() const {
 
 bool VulkanOutput::SubmitHidden(std::string &error) {
     Impl &m = *m_impl;
-    if (m.mode != VulkanOutputMode::Compute || !RendererAttached() || !m.renderer->HasPendingFrame()) {
+    if (m.mode != VulkanOutputMode::Compute || !RendererAttached()) {
+        return true;
+    }
+    if (m.renderer->TakeFrameRecordedBySync()) {
+        m.compositeValid = true;
+    }
+    const bool frame = m.renderer->HasPendingFrame();
+    if (!frame && !m.renderer->HasPendingVdp1Work()) {
         return true;
     }
     const auto &vk = m.device->Table();
@@ -1434,9 +1460,12 @@ bool VulkanOutput::SubmitHidden(std::string &error) {
         return false;
     }
     const uint32_t rendererContext = static_cast<uint32_t>(m.slots.size()) + index;
-    if (!m.renderer->RecordPendingFrame(rendererContext, context.cmd)) {
+    // The frame (with the VDP1 ops around it), or the VDP1 ops alone (the ops-only submit).
+    const bool recorded = frame ? m.renderer->RecordPendingFrame(rendererContext, context.cmd)
+                                : m.renderer->RecordPendingVdp1Work(rendererContext, context.cmd);
+    if (!recorded && !m.renderer->RecordedVdp1Work()) {
         vk.vkEndCommandBuffer(context.cmd);
-        error = "recording a hidden VDP2 frame failed";
+        error = frame ? "recording a hidden VDP2 frame failed" : "recording the pending VDP1 ops failed";
         return false;
     }
     VkResult result = vk.vkEndCommandBuffer(context.cmd);
@@ -1456,7 +1485,12 @@ bool VulkanOutput::SubmitHidden(std::string &error) {
     }
     context.pending = true;
     m.nextHidden = (index + 1) % kHiddenContexts;
-    m.compositeValid = true;
+    if (frame && recorded) {
+        m.compositeValid = true;
+    }
+    if (!frame) {
+        ++m.vdp1OpsOnlySubmits;
+    }
     return true;
 }
 

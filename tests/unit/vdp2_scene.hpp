@@ -10,8 +10,10 @@
 #include <ymir/hw/vdp/vdp_configs.hpp>
 #include <ymir/hw/vdp/vdp_state.hpp>
 
+#include <array>
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -23,9 +25,45 @@ namespace brimir::test {
 
 class Vdp2SceneWriter;
 
+/// @brief A VDP1 command table (16 words: CMDCTRL, CMDLINK, CMDPMOD, CMDCOLR, CMDSRCA, CMDSIZE, XA, YA, XB, YB, XC, YC,
+/// XD, YD, CMDGRDA, unused) built field by field. Coordinates are 16-bit raw values (13-bit signed on the VDP).
+struct Vdp1Cmd {
+    std::array<uint16_t, 16> w{};
+
+    static Vdp1Cmd Normal(uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int x, int y);
+    /// @brief Scaled sprite with zoom point 0: A (upper left) and C (lower right).
+    static Vdp1Cmd Scaled(uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int ax, int ay, int cx, int cy);
+    /// @brief Scaled sprite with zoom point `zp` (1-15, CMDCTRL bits 8-11): A is the zoom point, B the (width, height).
+    static Vdp1Cmd ScaledZoom(uint16_t zp, uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int ax, int ay,
+                              int width, int height);
+    static Vdp1Cmd Distorted(uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int ax, int ay, int bx, int by,
+                             int cx, int cy, int dx, int dy);
+    static Vdp1Cmd Polygon(uint16_t pmod, uint16_t colr, int ax, int ay, int bx, int by, int cx, int cy, int dx, int dy);
+    static Vdp1Cmd Polyline(uint16_t pmod, uint16_t colr, int ax, int ay, int bx, int by, int cx, int cy, int dx,
+                            int dy);
+    static Vdp1Cmd Line(uint16_t pmod, uint16_t colr, int ax, int ay, int bx, int by);
+    static Vdp1Cmd UserClip(int x0, int y0, int x1, int y1);
+    static Vdp1Cmd SystemClip(int x1, int y1);
+    static Vdp1Cmd Local(int x, int y);
+    static Vdp1Cmd End();
+
+    /// @brief CMDCTRL direction bits (texture flips).
+    Vdp1Cmd &Flip(bool h, bool v);
+    Vdp1Cmd &Skip();
+    /// @brief Gouraud table address (CMDGRDA, address / 8); the caller sets the Gouraud bit in CMDPMOD.
+    Vdp1Cmd &Gouraud(uint16_t grda);
+};
+
+/// @brief CMDSIZE of a w x h texture (w a multiple of 8).
+constexpr uint16_t Vdp1Size(uint32_t w, uint32_t h) {
+    return static_cast<uint16_t>(((w / 8) << 8) | (h & 0xFF));
+}
+
 struct Vdp2Scene {
     std::function<void(Vdp2SceneWriter &)> setup;                // writes before the first frame
     std::function<void(Vdp2SceneWriter &, uint32_t y)> onLine;  // optional writes before RenderLine(y), every frame
+    // Optional writes after VDP2EndFrame, every frame (the BlankingAndSync phase: e.g. the display erase, vdp.cpp:933-947)
+    std::function<void(Vdp2SceneWriter &)> blanking;
     uint32_t frames = 2;                                         // >= 2 exercises fields and frame-to-frame state
     ymir::vdp::config::Enhancements enhancements{};
 };
@@ -45,8 +83,10 @@ public:
     void CRAM16(uint32_t address, uint16_t value);
     void VDP1Reg(uint32_t address, uint16_t value);
 
-    /// @brief Writes a word of VDP1 framebuffer `fb`. The draw framebuffer goes through VDP::VDP1WriteFB (the renderer
-    /// is notified); the display framebuffer, which the bus cannot reach, is written directly into the state.
+    /// @brief Writes a word of VDP1 framebuffer `fb` through VDP::VDP1WriteFB (the renderer is notified; the software
+    /// renderer mirrors it to the alternate field when deinterlacing an interlaced mode). The display framebuffer,
+    /// which the bus cannot reach, is written as the draw framebuffer of a swap and swapped back (only the index flips:
+    /// no erase latch, no renderer swap call), so a renderer with GPU-authoritative FBRAM sees the write too.
     void FBRAM16(uint32_t fb, uint32_t address, uint16_t value);
 
     /// @brief Forces a resolution, as VDP::UpdateResolution reports it (normally derived from TVMD at the top border).
@@ -64,22 +104,51 @@ public:
     void SwapFramebuffers();
 
     /// @brief Erases the display framebuffer with the latched erase parameters, as the VDP's erase in blanking does
-    /// (VDP::VDP1EraseFramebuffer with no cycle limit; no swap follows).
-    void EraseFramebuffer();
+    /// (VDP::VDP1EraseFramebuffer with no cycle limit, or the VBlank erase's `cycles`; no swap follows).
+    void EraseFramebuffer(uint64_t cycles = 0);
 
     /// @brief Writes a word of VDP1 VRAM (command tables, textures), as VDP::VDP1WriteVRAM.
     void VDP1VRAM16(uint32_t address, uint16_t value);
 
+    /// @brief Writes VDP1 VRAM bytes (textures, look-up tables, Gouraud tables) 16 bits at a time, as the bus does (an
+    /// odd count is padded with a zero byte).
+    void VDP1VRAMBytes(uint32_t address, std::span<const uint8_t> bytes);
+    /// @brief Writes a command table (32 bytes) at `address`.
+    void VDP1Command(uint32_t address, const Vdp1Cmd &cmd);
+    /// @brief Writes a Gouraud table (four RGB555 corner colours A-D) at `address`.
+    void VDP1Gouraud(uint32_t address, const std::array<uint16_t, 4> &colors);
+    /// @brief Writes a colour look-up table (16 colours) at `address`.
+    void VDP1LUT(uint32_t address, const std::array<uint16_t, 16> &colors);
+
     /// @brief Draws the VDP1 command table at VRAM address 0 into the draw framebuffer, as VDP::VDP1BeginFrame,
     /// VDP1ProcessCommand and VDP1EndFrame do (sequential "next" jumps only, up to the end bit).
     void DrawVDP1();
+    /// @brief Part of DrawVDP1: the command slots [first, first + count) of the table at 0 (32 bytes each, sequential,
+    /// skip and end bits honoured), so CPU and VRAM writes can go between commands. first == 0 begins the VDP1 frame;
+    /// reaching the end bit ends it (returns true then).
+    bool DrawVDP1Partial(uint32_t first, uint32_t count);
+
+    /// @brief A CPU read of the draw framebuffer as VDP::VDP1ReadFB does it (the renderer's VDP1SyncFB, then
+    /// VDPState::VDP1ReadFB), per attached state in Attach order.
+    std::vector<uint16_t> ReadFB16(uint32_t address);
+    /// @brief Every attached renderer's state saved, a blank renderer section loaded, then the saved state loaded again
+    /// (PreSaveStateSync, SaveState, LoadState, PostLoadStateSync as VDP::SaveState / LoadState call them).
+    void SaveLoadMidFrame();
+
+    /// @brief An FBRAM checkpoint (RenderBothFBRAM compares the GPU FBRAM with software's here); nothing without one.
+    void Checkpoint() {
+        if (checkpoint) {
+            checkpoint(*this);
+        }
+    }
+    std::function<void(Vdp2SceneWriter &)> checkpoint;
 
     /// @brief Runs one VDP frame from the top border: UpdateResolution, LatchTVMD, VDP2BeginFrame, the active lines
     /// (onLine(y) then VDP2RenderLine(y)), the VBlank IN field switch and VDP2EndFrame, in the order vdp.cpp uses.
     /// With firstLine > 0 the frame is continued from that line (no top border); with endLine below the field's line
-    /// count it stops before that line (no VBlank, no EndFrame).
+    /// count it stops before that line (no VBlank, no EndFrame). `blanking` runs after VDP2EndFrame.
     void RunFrame(const std::function<void(Vdp2SceneWriter &, uint32_t)> &onLine = {}, uint32_t firstLine = 0,
-                  uint32_t endLine = UINT32_MAX);
+                  uint32_t endLine = UINT32_MAX, const std::function<void(Vdp2SceneWriter &)> &blanking = {});
 
     /// @brief Applies `fn` to every attached state, in Attach order (for state no bus write can produce, e.g. derived
     /// register state the renderers read).
@@ -203,7 +272,17 @@ namespace brimir::test {
 /// @brief How an N x GPU frame (N > 1) is compared with the 1x software frame.
 enum class ScaleCompare { Nearest, SamplePoints };
 
+/// @brief The Vulkan renderer's VDP1 mode in RenderBoth: Default is BRIMIR_VDP1_MODE (gpu or software) when set, else
+/// Software (the stage 1 path).
+enum class Vdp1Path { Default, Software, Gpu };
+
+struct FbramResult;
+
 struct RenderBothOptions {
+    Vdp1Path vdp1 = Vdp1Path::Default;
+    // Set by RenderBothFBRAM: the GPU FBRAM is compared with software's after every submitted frame and at every
+    // Vdp2SceneWriter::Checkpoint (Gpu VDP1 mode only).
+    FbramResult *fbram = nullptr;
     // Internal resolution of the Vulkan renderer (VulkanVDPRenderer::SetInternalScale before the first frame); 0 =
     // BRIMIR_VDP2_SCALE (1-4) when set, else 1. beforeFrame may change it; each frame is compared at the renderer's
     // scale then.
@@ -236,8 +315,29 @@ struct RenderBothOptions {
 };
 
 /// @brief Runs the scene into a software and a Vulkan renderer pair (separate VDPStates, the same writes), replays each
-/// GPU frame in a one-shot submit and reads back the last frame's composite.
+/// GPU frame in a one-shot submit and reads back the last frame's composite. With VDP1 on the GPU each submit also
+/// carries the VDP1 ops (and a frame without pending VDP2 work but with VDP1 ops gets an ops-only submit).
 SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const RenderBothOptions &options = {});
+
+/// @brief The FBRAM comparison of RenderBothFBRAM: the eight slices (main fb0/fb1, alt fb0/fb1, mesh[alt][fb]) of the
+/// GPU FBRAM against the software renderer's (VDPState main, GetAltFBRAM, GetMeshFBRAM) at every checkpoint.
+struct FbramResult {
+    SceneResult frame;     // the frame comparison (RenderBoth's)
+    bool identical = false; // FBRAM equal at every checkpoint (and at least one compared)
+    std::string error;      // the harness failed (readback, recording, no Gpu VDP1 mode)
+    uint32_t checkpoints = 0;
+    uint64_t maxNonZero = 0; // the most non-zero software FBRAM bytes at one checkpoint (non-vacuous when > 0)
+    // The first difference: where (the checkpoint's label), the slice, byte address, (x, y) decoded with the
+    // framebuffer width and depth then, both values and how many bytes differed there.
+    std::string where;
+    uint32_t slice = 0, address = 0, x = 0, y = 0;
+    uint8_t software = 0, gpu = 0;
+    uint64_t count = 0;
+    std::string Describe() const;
+};
+
+/// @brief RenderBoth in Gpu VDP1 mode with the FBRAM compared after every frame and at every checkpoint.
+FbramResult RenderBothFBRAM(const Vdp2Scene &scene, gpu::VulkanDevice &device, RenderBothOptions options = {});
 
 /// @brief The scene at internal resolution n compared as a nearest upscale of software (CompareNearestPixels). Not
 /// vacuous: result.error is set (and identical false) when the software frame has fewer than two distinct colours or

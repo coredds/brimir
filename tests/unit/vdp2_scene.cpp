@@ -66,14 +66,174 @@ void Vdp2SceneWriter::VDP1Reg(uint32_t address, uint16_t value) {
 
 void Vdp2SceneWriter::FBRAM16(uint32_t fb, uint32_t address, uint16_t value) {
     for (Target &t : m_targets) {
-        if (fb == t.state->fbIndex.draw) {
-            // VDP::VDP1WriteFB (vdp.cpp:400-402)
-            t.state->VDP1WriteFB<uint16>(address, value,
-                                         [&](uint32 address, uint16 value) { t.renderer->VDP1WriteFB(address, value); });
-        } else {
-            util::WriteBE<uint16>(&t.state->mem1.FBRAM[fb & 1][address & 0x3FFFE], value);
+        // The display framebuffer is written as the draw framebuffer of a swap, then swapped back (the index only).
+        const bool display = (fb & 1) != t.state->fbIndex.draw;
+        if (display) {
+            t.state->fbIndex.Flip();
+        }
+        // VDP::VDP1WriteFB (vdp.cpp:400-402)
+        t.state->VDP1WriteFB<uint16>(address, value,
+                                     [&](uint32 address, uint16 value) { t.renderer->VDP1WriteFB(address, value); });
+        if (display) {
+            t.state->fbIndex.Flip();
         }
     }
+}
+
+void Vdp2SceneWriter::VDP1VRAMBytes(uint32_t address, std::span<const uint8_t> bytes) {
+    for (size_t i = 0; i < bytes.size(); i += 2) {
+        const uint8_t lo = i + 1 < bytes.size() ? bytes[i + 1] : 0;
+        VDP1VRAM16(address + static_cast<uint32_t>(i), static_cast<uint16_t>((bytes[i] << 8) | lo));
+    }
+}
+
+void Vdp2SceneWriter::VDP1Command(uint32_t address, const Vdp1Cmd &cmd) {
+    for (uint32_t i = 0; i < 16; ++i) {
+        VDP1VRAM16(address + i * 2, cmd.w[i]);
+    }
+}
+
+void Vdp2SceneWriter::VDP1Gouraud(uint32_t address, const std::array<uint16_t, 4> &colors) {
+    for (uint32_t i = 0; i < 4; ++i) {
+        VDP1VRAM16(address + i * 2, colors[i]);
+    }
+}
+
+void Vdp2SceneWriter::VDP1LUT(uint32_t address, const std::array<uint16_t, 16> &colors) {
+    for (uint32_t i = 0; i < 16; ++i) {
+        VDP1VRAM16(address + i * 2, colors[i]);
+    }
+}
+
+bool Vdp2SceneWriter::DrawVDP1Partial(uint32_t first, uint32_t count) {
+    bool ended = false;
+    for (Target &t : m_targets) {
+        if (first == 0) {
+            t.state->regs1.returnAddress = kVDP1NoReturn;
+            t.state->regs1.nextCommandAddress = 0;
+            t.state->regs1.currFrameEnded = false;
+            t.renderer->VDP1BeginFrame();
+        }
+        ended = false;
+        for (uint32_t slot = first; slot < first + count && slot * 0x20 < kVDP1VRAMSize; ++slot) {
+            const uint32_t address = slot * 0x20;
+            const VDP1Command::Control control{.u16 = t.state->mem1.ReadVRAM<uint16>(address)};
+            if (control.end) {
+                ended = true;
+                break;
+            }
+            if (!control.skip && control.IsValid()) {
+                t.state->regs1.currCommandAddress = address;
+                t.renderer->VDP1ExecuteCommand(address, control);
+            }
+        }
+        if (ended) {
+            t.state->regs1.currFrameEnded = true;
+            t.renderer->VDP1EndFrame();
+        }
+    }
+    return ended;
+}
+
+std::vector<uint16_t> Vdp2SceneWriter::ReadFB16(uint32_t address) {
+    std::vector<uint16_t> values;
+    for (Target &t : m_targets) {
+        // VDP::VDP1ReadFB (vdp.cpp:389-397)
+        t.renderer->VDP1SyncFB();
+        values.push_back(t.state->VDP1ReadFB<uint16>(address));
+    }
+    return values;
+}
+
+void Vdp2SceneWriter::SaveLoadMidFrame() {
+    for (Target &t : m_targets) {
+        // VDP::SaveState then VDP::LoadState (vdp.cpp:512-546), with a blank renderer section loaded in between
+        auto saved = std::make_unique<savestate::VDPSaveState>();
+        t.renderer->PreSaveStateSync();
+        t.state->SaveState(*saved);
+        t.renderer->SaveState(saved->renderer);
+        auto blank = std::make_unique<savestate::VDPSaveState::VDPRendererSaveState>();
+        t.renderer->LoadState(*blank);
+        t.state->LoadState(*saved);
+        t.renderer->LoadState(saved->renderer);
+        t.renderer->PostLoadStateSync();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// VDP1 command tables
+
+namespace {
+
+uint16_t U16(int v) {
+    return static_cast<uint16_t>(v);
+}
+
+} // namespace
+
+Vdp1Cmd Vdp1Cmd::Normal(uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int x, int y) {
+    return {{0x0000, 0, pmod, colr, srca, size, U16(x), U16(y), 0, 0, 0, 0, 0, 0, 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::Scaled(uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int ax, int ay, int cx, int cy) {
+    return {{0x0001, 0, pmod, colr, srca, size, U16(ax), U16(ay), 0, 0, U16(cx), U16(cy), 0, 0, 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::ScaledZoom(uint16_t zp, uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int ax, int ay,
+                            int width, int height) {
+    return {{static_cast<uint16_t>(0x0001 | ((zp & 0xF) << 8)), 0, pmod, colr, srca, size, U16(ax), U16(ay), U16(width),
+             U16(height), 0, 0, 0, 0, 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::Distorted(uint16_t pmod, uint16_t colr, uint16_t srca, uint16_t size, int ax, int ay, int bx, int by,
+                           int cx, int cy, int dx, int dy) {
+    return {{0x0002, 0, pmod, colr, srca, size, U16(ax), U16(ay), U16(bx), U16(by), U16(cx), U16(cy), U16(dx), U16(dy),
+             0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::Polygon(uint16_t pmod, uint16_t colr, int ax, int ay, int bx, int by, int cx, int cy, int dx,
+                         int dy) {
+    return {{0x0004, 0, pmod, colr, 0, 0, U16(ax), U16(ay), U16(bx), U16(by), U16(cx), U16(cy), U16(dx), U16(dy), 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::Polyline(uint16_t pmod, uint16_t colr, int ax, int ay, int bx, int by, int cx, int cy, int dx,
+                          int dy) {
+    return {{0x0005, 0, pmod, colr, 0, 0, U16(ax), U16(ay), U16(bx), U16(by), U16(cx), U16(cy), U16(dx), U16(dy), 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::Line(uint16_t pmod, uint16_t colr, int ax, int ay, int bx, int by) {
+    return {{0x0006, 0, pmod, colr, 0, 0, U16(ax), U16(ay), U16(bx), U16(by), 0, 0, 0, 0, 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::UserClip(int x0, int y0, int x1, int y1) {
+    return {{0x0008, 0, 0, 0, 0, 0, U16(x0), U16(y0), 0, 0, U16(x1), U16(y1), 0, 0, 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::SystemClip(int x1, int y1) {
+    return {{0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, U16(x1), U16(y1), 0, 0, 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::Local(int x, int y) {
+    return {{0x000A, 0, 0, 0, 0, 0, U16(x), U16(y), 0, 0, 0, 0, 0, 0, 0, 0}};
+}
+
+Vdp1Cmd Vdp1Cmd::End() {
+    return {{0x8000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+}
+
+Vdp1Cmd &Vdp1Cmd::Flip(bool h, bool v) {
+    w[0] = static_cast<uint16_t>((w[0] & ~0x0030) | (h ? 0x0010 : 0) | (v ? 0x0020 : 0));
+    return *this;
+}
+
+Vdp1Cmd &Vdp1Cmd::Skip() {
+    w[0] |= 0x4000;
+    return *this;
+}
+
+Vdp1Cmd &Vdp1Cmd::Gouraud(uint16_t grda) {
+    w[14] = grda;
+    return *this;
 }
 
 void Vdp2SceneWriter::SetResolution(uint32_t h, uint32_t v, bool exclusive) {
@@ -114,9 +274,9 @@ void Vdp2SceneWriter::SwapFramebuffers() {
     }
 }
 
-void Vdp2SceneWriter::EraseFramebuffer() {
+void Vdp2SceneWriter::EraseFramebuffer(uint64_t cycles) {
     for (Target &t : m_targets) {
-        t.renderer->VDP1EraseFramebuffer(0);
+        t.renderer->VDP1EraseFramebuffer(cycles);
     }
 }
 
@@ -184,7 +344,7 @@ void Vdp2SceneWriter::UpdateResolution() {
 }
 
 void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint32_t)> &onLine, uint32_t firstLine,
-                               uint32_t endLine) {
+                               uint32_t endLine, const std::function<void(Vdp2SceneWriter &)> &blanking) {
     if (firstLine == 0) {
         // Top border (vdp.cpp:955-965)
         UpdateResolution();
@@ -259,6 +419,9 @@ void Vdp2SceneWriter::RunFrame(const std::function<void(Vdp2SceneWriter &, uint3
         switchField();
         endFrame();
     }
+    if (blanking) {
+        blanking(*this);
+    }
 }
 
 void Vdp2SceneWriter::ForEachState(const std::function<void(VDPState &)> &fn) {
@@ -272,7 +435,7 @@ void Vdp2SceneWriter::Run(const Vdp2Scene &scene) {
         scene.setup(*this);
     }
     for (uint32_t frame = 0; frame < scene.frames; ++frame) {
-        RunFrame(scene.onLine);
+        RunFrame(scene.onLine, 0, UINT32_MAX, scene.blanking);
     }
 }
 
@@ -631,9 +794,23 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         gpuWidth = w;
         gpuHeight = h;
     };
+    // BRIMIR_VDP1_MODE=gpu runs every scene with VDP1 on the GPU.
+    Vdp1Path vdp1 = options.vdp1;
+    if (vdp1 == Vdp1Path::Default) {
+        const char *mode = std::getenv("BRIMIR_VDP1_MODE");
+        vdp1 = mode != nullptr && std::string(mode) == "gpu" ? Vdp1Path::Gpu : Vdp1Path::Software;
+    }
+    if (options.fbram != nullptr) {
+        vdp1 = Vdp1Path::Gpu;
+    }
+    vulkan->SetVdp1Mode(vdp1 == Vdp1Path::Gpu ? gpu::Vdp1Mode::Gpu : gpu::Vdp1Mode::Software);
     vulkan->AttachDevice(device, options.frameContexts);
     if (!vulkan->Attached()) {
         result.error = "AttachDevice failed";
+        return result;
+    }
+    if (vdp1 == Vdp1Path::Gpu && !vulkan->GpuVdp1()) {
+        result.error = "VDP1 on the GPU unavailable";
         return result;
     }
     // BRIMIR_VDP2_SCALE=N runs every scene at internal resolution N.
@@ -695,6 +872,62 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
             }
         });
     };
+    // FBRAM checkpoints (RenderBothFBRAM): the pending VDP1 ops in an ops-only submit, then the GPU FBRAM read back and
+    // compared with software's.
+    FbramResult *fbram = options.fbram;
+    bool fbramFailed = false;
+    const auto compareFbram = [&](const std::string &label) {
+        if (fbram == nullptr || fbramFailed) {
+            return;
+        }
+        if (vulkan->HasPendingVdp1Work()) {
+            bool recorded = false;
+            if (gpu::vk_util::SubmitOneShot(device, [&](VkCommandBuffer cmd) {
+                    recorded = vulkan->RecordPendingVdp1Work(0, cmd);
+                }) != VK_SUCCESS ||
+                !recorded) {
+                fbram->error = label + ": the ops-only submit failed";
+                fbramFailed = true;
+                return;
+            }
+        }
+        constexpr uint32_t kSlice = kVDP1FBRAMSize;
+        const std::vector<uint32_t> words = ReadbackBuffer(device, vulkan->Backend()->SpriteFBBuffer(), 8 * kSlice / 4);
+        if (words.size() * 4 != 8 * kSlice) {
+            fbram->error = label + ": FBRAM readback failed";
+            fbramFailed = true;
+            return;
+        }
+        const auto *gpuBytes = reinterpret_cast<const uint8_t *>(words.data());
+        const std::array<const SpriteFB *, 8> sw{&swState->mem1.FBRAM[0],         &swState->mem1.FBRAM[1],
+                                                 &software->GetAltFBRAM(0),        &software->GetAltFBRAM(1),
+                                                 &software->GetMeshFBRAM(false, 0), &software->GetMeshFBRAM(false, 1),
+                                                 &software->GetMeshFBRAM(true, 0),  &software->GetMeshFBRAM(true, 1)};
+        const uint32_t sizeH = swState->regs1.tvmr.fbSizeH;
+        const uint32_t rowBytes = swState->regs1.tvmr.pixel8Bits ? sizeH : sizeH * 2;
+        uint64_t nonZero = 0;
+        for (uint32_t slice = 0; slice < 8; ++slice) {
+            const uint8_t *g = gpuBytes + size_t{slice} * kSlice;
+            const SpriteFB &s = *sw[slice];
+            for (uint32_t i = 0; i < kSlice; ++i) {
+                nonZero += s[i] != 0 ? 1 : 0;
+                if (s[i] != g[i] && fbram->count++ == 0) {
+                    fbram->where = label;
+                    fbram->slice = slice;
+                    fbram->address = i;
+                    fbram->y = rowBytes != 0 ? i / rowBytes : 0;
+                    fbram->x = rowBytes != 0 ? (i % rowBytes) / (swState->regs1.tvmr.pixel8Bits ? 1 : 2) : 0;
+                    fbram->software = s[i];
+                    fbram->gpu = g[i];
+                }
+            }
+        }
+        ++fbram->checkpoints;
+        fbram->maxNonZero = std::max(fbram->maxNonZero, nonZero);
+    };
+    uint32_t checkpointIndex = 0;
+    writer.checkpoint = [&](Vdp2SceneWriter &) { compareFbram("checkpoint " + std::to_string(checkpointIndex++)); };
+
     if (scene.setup) {
         scene.setup(writer);
     }
@@ -720,20 +953,28 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 vulkan->PostLoadStateSync();
             }
         };
-        writer.RunFrame(onLine);
+        writer.RunFrame(onLine, 0, UINT32_MAX, scene.blanking);
         if (frame + 1 == scene.frames && !vulkan->HasPendingFrame()) {
             result.error = "the last frame has no recorded GPU frame";
             return result;
         }
-        if (vulkan->HasPendingFrame()) {
+        if (fbramFailed) {
+            result.error = "FBRAM: " + fbram->error;
+            return result;
+        }
+        if (vulkan->HasPendingFrame() || vulkan->HasPendingVdp1Work()) {
+            const bool hasFrame = vulkan->HasPendingFrame();
             vulkan->Backend()->SetPoisonImagesForTest(poisonImages); // the back half may be new (re-attached)
             bool recorded = false;
             const uint32_t context = options.contextForFrame ? options.contextForFrame(frame)
                                                              : frame % std::max(options.frameContexts, 1u);
+            // The frame (with the VDP1 ops around it), or the VDP1 ops alone (no VDP2 frame ended: the ops-only submit)
+            const auto record = [&](VkCommandBuffer cmd) {
+                recorded = hasFrame ? vulkan->RecordPendingFrame(context, cmd)
+                                    : vulkan->RecordPendingVdp1Work(context, cmd);
+            };
             if (frame == options.dropFrame) {
-                if (!RecordWithoutSubmit(device, [&](VkCommandBuffer cmd) {
-                        recorded = vulkan->RecordPendingFrame(context, cmd);
-                    }) || !recorded) {
+                if (!RecordWithoutSubmit(device, record) || !recorded) {
                     result.error = "frame " + std::to_string(frame) + ": recording failed";
                     return result;
                 }
@@ -745,7 +986,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                     device.Table().vkCmdResetQueryPool(cmd, timestamps.pool, 0, 2);
                     device.Table().vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamps.pool, 0);
                 }
-                recorded = vulkan->RecordPendingFrame(context, cmd);
+                record(cmd);
                 if (timestamps.pool != VK_NULL_HANDLE) {
                     device.Table().vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamps.pool, 1);
                 }
@@ -754,7 +995,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 result.error = "frame " + std::to_string(frame) + ": recording or submission failed";
                 return result;
             }
-            if (vulkan->Backend()->LastRecordStatsForTest().scale != vulkan->InternalScale()) {
+            if (hasFrame && vulkan->Backend()->LastRecordStatsForTest().scale != vulkan->InternalScale()) {
                 result.error = "frame " + std::to_string(frame) + " recorded at " +
                                std::to_string(vulkan->Backend()->LastRecordStatsForTest().scale) + "x, expected " +
                                std::to_string(vulkan->InternalScale()) + "x";
@@ -772,6 +1013,11 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
             if (options.afterFrame) {
                 options.afterFrame(frame, *vulkan, device);
             }
+        }
+        compareFbram("frame " + std::to_string(frame));
+        if (fbramFailed) {
+            result.error = "FBRAM: " + fbram->error;
+            return result;
         }
         if (options.compareFrame && options.compareFrame(frame)) {
             if (!CompareFrame(device, *vulkan, capture.pixels, capture.width, capture.height, gpuWidth, gpuHeight,
@@ -826,6 +1072,38 @@ SceneResult CompareScaled(const Vdp2Scene &scene, gpu::VulkanDevice &device, uin
 }
 
 } // namespace
+
+FbramResult RenderBothFBRAM(const Vdp2Scene &scene, gpu::VulkanDevice &device, RenderBothOptions options) {
+    FbramResult result;
+    options.fbram = &result;
+    options.vdp1 = Vdp1Path::Gpu;
+    result.frame = RenderBoth(scene, device, options);
+    if (result.error.empty() && result.checkpoints == 0) {
+        result.error = "no FBRAM checkpoint";
+    }
+    result.identical = result.error.empty() && result.frame.error.empty() && result.count == 0;
+    return result;
+}
+
+std::string FbramResult::Describe() const {
+    static constexpr const char *kSlices[8] = {"main fb0",    "main fb1",    "alt fb0",     "alt fb1",
+                                               "mesh[0] fb0", "mesh[0] fb1", "mesh[1] fb0", "mesh[1] fb1"};
+    std::ostringstream out;
+    out << "frame: " << frame.Describe() << "; FBRAM: ";
+    if (!error.empty()) {
+        out << "harness error: " << error;
+        return out.str();
+    }
+    out << checkpoints << " checkpoints, up to " << maxNonZero << " non-zero software bytes, ";
+    if (count == 0) {
+        out << "identical";
+    } else {
+        out << count << " bytes differ; first at " << where << ", " << kSlices[slice & 7] << " byte 0x" << std::hex
+            << address << std::dec << " (x " << x << ", y " << y << "): software 0x" << std::hex
+            << static_cast<uint32_t>(software) << ", gpu 0x" << static_cast<uint32_t>(gpu) << std::dec;
+    }
+    return out.str();
+}
 
 SceneResult CompareNearest(const Vdp2Scene &scene, gpu::VulkanDevice &device, uint32_t n, RenderBothOptions options) {
     return CompareScaled(scene, device, n, std::move(options), ScaleCompare::Nearest);

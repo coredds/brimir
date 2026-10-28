@@ -75,6 +75,19 @@ public:
     // STORAGE | TRANSFER_SRC | TRANSFER_DST.
     VkBuffer CompositeBuffer() const { return m_composite.buffer; }
 
+    // The sprite framebuffer (kSpriteFBBufferSize bytes in Ymir's slice layout; STORAGE | TRANSFER_SRC |
+    // TRANSFER_DST), which the sprite pass reads at the display framebuffer. In GPU VDP1 mode it is the GPU FBRAM:
+    // the VDP1 back half writes it (Vdp1VulkanBackend) and the frames carry no sprite slices.
+    VkBuffer SpriteFBBuffer() const { return m_spriteFB.buffer; }
+    // External: someone else (the VDP1 back half) initializes and writes the sprite framebuffer, so this back half
+    // never zeroes it (call before the first Record; a pending zero fill is dropped).
+    void SetSpriteFBExternal(bool external) {
+        m_spriteFBExternal = external;
+        if (external) {
+            m_pending.zeroSpriteFB = false;
+        }
+    }
+
     // Internal resolution n (1 to kMaxRenderScale) from the next Record on. The resources that scale (the background
     // layer image and the composite) are reallocated here for n only, the new ones before the old ones go. The caller
     // guarantees that no work uses the old ones any more: every submitted command buffer that uses them has completed,
@@ -252,6 +265,7 @@ private:
     VkDescriptorPool m_rescalePool = VK_NULL_HANDLE;
     VkDescriptorSet m_rescaleSet = VK_NULL_HANDLE;
     bool m_poisonImages = false;
+    bool m_spriteFBExternal = false;
     RecordStats m_lastStats{};
     uint32_t m_overflowBlocks = 0; // created by the current Record
 

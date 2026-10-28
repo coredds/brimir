@@ -588,6 +588,49 @@ endforeach()
 message(STATUS "repeat_after_change: frames 40 and 41 repeat frame 39 (failed submits right after a live change, "
                "late reads), the other 298 identical to software")
 
+# VDP1 on the GPU (GPU stage 2; --gpu-vdp1 sets BRIMIR_VDP1_GPU=1): the VDP1 ops go in the frame's submit, around its
+# VDP2 work, so the menu is identical to software with one submit per retro_run (with synchronization validation);
+# the menu never reads the framebuffer, so there is no sync submit.
+set(gpu_vdp1_state "${state_dir}/gpu_vdp1.state")
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(gpu_vdp1 --vulkan --gpu-vdp1 --save-state-at 100 "${gpu_vdp1_state}")
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(gpu_vdp1 300)
+check_vulkan_counters(gpu_vdp1)
+check_vdp2_renderer(gpu_vdp1)
+require_log(gpu_vdp1 "Vulkan VDP1 renderer active")
+# The save state's drain is the one sync submit (TODO(Task 6): a fence wait on the readback instead).
+require_log(gpu_vdp1 "VDP1 on the GPU: [0-9]+ ops-only submits, [01] sync submits")
+# The state saved with VDP1 on the GPU (FBRAM read back, mesh and doubleV from the GPU path) matches software's.
+execute_process(COMMAND "${STATE_DIFF}" "${sw_state}" "${gpu_vdp1_state}"
+                OUTPUT_VARIABLE state_diff_out ERROR_VARIABLE state_diff_err RESULT_VARIABLE state_diff_code)
+if(NOT state_diff_code EQUAL 0)
+    fail(gpu_vdp1 "the software- and GPU-VDP1-saved states differ outside the allowlist (exit ${state_diff_code}):\n"
+                  "${state_diff_out}${state_diff_err}")
+endif()
+# ... with hidden frames (their submits carry the VDP1 ops too).
+run_vkhost(gpu_vdp1_hidden --vulkan --gpu-vdp1 --hide-every 2 --option brimir_deinterlace_mode=bob)
+check_run(gpu_vdp1_hidden 300 REFERENCE software_hidden_bob)
+check_vulkan_counters(gpu_vdp1_hidden)
+check_vdp2_renderer(gpu_vdp1_hidden)
+require_log(gpu_vdp1_hidden "180 hidden frames")
+# ... and the ops-only submit: the present submit of run 100 is refused, its VDP1 ops are pending again and go alone in
+# a second submit of that run (the one allowed ops-only submit); recorded frame 40 repeats frame 39 (operational
+# exception, as for any failed submit) and every later frame is identical to software, so no VDP1 op was lost.
+run_vkhost(gpu_vdp1_ops_only --vulkan --gpu-vdp1 --fail-submit-at 100)
+check_one_repeat(gpu_vdp1_ops_only 40)
+check_vulkan_counters(gpu_vdp1_ops_only) # the refused submit does not count: one submit per retro_run
+require_log(gpu_vdp1_ops_only "vkQueueSubmit refused")
+require_log(gpu_vdp1_ops_only "VDP1 on the GPU: [1-9][0-9]* ops-only submits, 0 sync submits")
+# ... and --compare of the two renderers.
+execute_process(
+    COMMAND "${VKHOST}" ${common_args} --compare --gpu-vdp1
+    OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
+if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 300 frames identical")
+    message(FATAL_ERROR "--compare --gpu-vdp1: exit ${compare_code}\n${compare_out}\n${compare_err}")
+endif()
+message(STATUS "gpu_vdp1: VDP1 on the GPU identical to software (shown, hidden, after a refused submit, --compare)")
+
 file(REMOVE_RECURSE "${state_dir}")
 
 # --compare: software and Vulkan in two child processes. Identical content passes; a Vulkan run that is rotated 180

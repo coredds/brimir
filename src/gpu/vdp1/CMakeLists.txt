@@ -2,7 +2,7 @@
 # shader binding table (vdp1_bindings.hpp), the generated shader layout headers (gpu/shaders/generated/*.layout.h) and
 # the front end that turns VDP1 commands into spans and an op stream (vdp1_front.*). Nothing here includes a Vulkan
 # header. Added regardless of BRIMIR_VULKAN, so its [vdp1] tests also run in BRIMIR_VULKAN=OFF builds; brimir-gpu links
-# it. The Vulkan back half (vdp1_vulkan_backend.*) will be built by brimir-gpu.
+# it. The Vulkan back half (vdp1_vulkan_backend.*) is built by brimir-gpu (src/gpu/CMakeLists.txt).
 
 add_library(brimir-vdp1-front STATIC
     vdp1_front.cpp

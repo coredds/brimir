@@ -281,6 +281,17 @@ static void set_vdp2_probe(brimir::gpu::VulkanVDPRenderer& renderer) {
     };
 }
 
+// VDP1 on the GPU (GPU stage 2) while the Vulkan VDP renderer is attached: requested with the environment variable
+// BRIMIR_VDP1_GPU=1 (brimir_vkhost --gpu-vdp1) until its CPU framebuffer access and save states are final (stage 2,
+// Task 6); otherwise VDP1 runs in software inside the Vulkan VDP renderer, as in stage 1.
+static bool vdp1_mode_requested(void) {
+    static const bool requested = [] {
+        const char* env = std::getenv("BRIMIR_VDP1_GPU");
+        return env != nullptr && *env != '\0' && std::strcmp(env, "0") != 0;
+    }();
+    return requested;
+}
+
 // The VDP renderer follows the frame output: the Vulkan VDP renderer while the compute output is live, the software
 // renderer otherwise (copy-only output, no context, or the renderer cannot run on the device). Switching carries the
 // renderer state over (CoreWrapper). Call between frames: context_reset, the start of retro_run, or after a frame
@@ -300,9 +311,17 @@ static void sync_vdp_renderer(void) {
         }
         if (renderer == nullptr) {
             error = "installing it failed";
-        } else if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
-            set_vdp2_probe(*renderer);
-            brimir_log(RETRO_LOG_INFO, "Vulkan VDP2 renderer active");
+        } else {
+            renderer->SetVdp1Mode(vdp1_mode_requested() ? brimir::gpu::Vdp1Mode::Gpu : brimir::gpu::Vdp1Mode::Software);
+            if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
+                set_vdp2_probe(*renderer);
+                brimir_log(RETRO_LOG_INFO, "Vulkan VDP2 renderer active");
+                if (renderer->GpuVdp1()) {
+                    brimir_log(RETRO_LOG_INFO, "Vulkan VDP1 renderer active (VDP1 on the GPU)");
+                } else if (vdp1_mode_requested()) {
+                    brimir_log(RETRO_LOG_WARN, "VDP1 on the GPU unavailable; VDP1 in software");
+                }
+            }
         }
         if (!g_vulkanOutput->RendererAttached()) {
             g_vulkanRendererFailed = true;
@@ -467,6 +486,17 @@ static void present_vulkan_frame(void) {
         height = g_core->GetFramebufferHeight();
         presented = g_vulkanOutput->PresentCopy(g_core->GetFramebuffer(), width, height,
                                                 g_core->GetFramebufferPitch(), error);
+    }
+    if (renderer && g_vulkanOutput->RendererAttached()) {
+        // VDP1 on the GPU: ops the present did not take (nothing to show yet, or no present) go in the ops-only
+        // submit, so none waits past this retro_run.
+        brimir::gpu::VulkanVDPRenderer* vulkanRenderer = g_core->GetVulkanRenderer();
+        std::string opsError;
+        if (vulkanRenderer && vulkanRenderer->HasPendingVdp1Work() && !g_vulkanOutput->SubmitHidden(opsError) &&
+            !g_vulkanPresentErrorLogged) {
+            g_vulkanPresentErrorLogged = true;
+            brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed (VDP1 ops): %s", opsError.c_str());
+        }
     }
 
     if (!presented) {

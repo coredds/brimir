@@ -98,13 +98,16 @@ public:
 
     // Renderer path: presents the renderer's frame of this retro_run (recorded into the slot's command buffer), or
     // re-presents the composite (no VDP2 frame ended in this run) as w x h with the output transforms, in one submit,
-    // and hands the slot's image over. Returns false when nothing was handed over; error is empty when there was just
+    // and hands the slot's image over. With VDP1 on the GPU the pending VDP1 ops are recorded into the same command
+    // buffer (around the frame). Returns false when nothing was handed over; error is empty when there was just
     // nothing to show yet (a fresh composite), else says why (Mode() may have changed as with Present).
     bool PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSettings &settings, unsigned &outW, unsigned &outH,
                          std::string &error);
-    // Renderer path with video disabled: records the renderer's frame into the next hidden context and submits it
-    // (no presenter, no set_image), at the renderer's current internal resolution. True when there was nothing to
-    // record.
+    // Renderer path with video disabled: records the renderer's frame (with the VDP1 ops around it) into the next
+    // hidden context and submits it (no presenter, no set_image), at the renderer's current internal resolution.
+    // Without a frame but with VDP1 ops pending (VDP1 on the GPU), it submits the ops alone: the ops-only submit, also
+    // made for shown frames whose present did not take the ops (call it at the end of every retro_run). True when
+    // there was nothing to record.
     bool SubmitHidden(std::string &error);
 
     // Internal resolution n (1-4, brimir_internal_resolution) for the Vulkan VDP renderer. Kept across contexts: each

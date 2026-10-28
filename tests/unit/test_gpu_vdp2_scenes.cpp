@@ -21,7 +21,8 @@
 // BRIMIR_VDP2_SCALE=N (2-4) runs every scene at internal resolution N, the N x composite compared with the software
 // frame at the sample points outside the excluded lattice (vdp2_scene.hpp CompareSamplePointPixels; [scale] cases pin
 // N, compare scenes without sub-pixel features as a nearest upscale, and check the sub-pixels themselves against
-// vdp2_subpixel_reference.hpp with coordinate bitmaps).
+// vdp2_subpixel_reference.hpp with coordinate bitmaps). BRIMIR_VDP1_MODE=gpu runs the RenderBoth scenes with VDP1 on
+// the GPU (GPU stage 2; ctest brimir_tests_gpu_vdp1): both VDP1 modes must pass them.
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
@@ -3483,7 +3484,8 @@ TEST_CASE("Scene: weave keeps the other field when the frame contexts grow", "[g
     options.beforeFrame = [](uint32_t frame, gpu::VulkanVDPRenderer &renderer, gpu::VulkanDevice &) {
         if (frame == 4) {
             REQUIRE(renderer.EnsureFrameContexts(5));
-            REQUIRE(renderer.Backend()->FrameContexts() == 5);
+            // With VDP1 on the GPU the back halves have one more context, the sync submits'
+            REQUIRE(renderer.Backend()->FrameContexts() == 5 + (renderer.GpuVdp1() ? 1u : 0u));
         }
     };
     options.compareFrame = [](uint32_t) { return true; };

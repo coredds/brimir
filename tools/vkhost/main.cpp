@@ -117,6 +117,8 @@ void PrintUsage(std::FILE* out) {
         "                pixel writes, VDP1SyncFB calls (and those after a draw or erase), CPU framebuffer writes\n"
         "                and erases, and the GPU VDP1 front half's draw batches by end reason (zero until the\n"
         "                renderer runs the front half) (median, maximum, mean)\n"
+        "  --gpu-vdp1    with --vulkan/--compare: VDP1 on the GPU in the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=1\n"
+        "                for the core; its log says 'Vulkan VDP1 renderer active')\n"
         "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
         "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
@@ -236,6 +238,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--probe") {
             args.config.probe = true;
+            continue;
+        }
+        if (opt == "--gpu-vdp1") {
+            args.config.gpuVdp1 = true;
             continue;
         }
         if (opt == "--save-state-at") { // two values

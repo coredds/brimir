@@ -113,6 +113,8 @@ if(BRIMIR_VULKAN)
         unit/test_gpu_vdp2_scenes.cpp
         # VDP1 passes (raster, bucket, scatter, resolve, erase, CPU writes) on the device against the CPU reference
         unit/test_gpu_vdp1_passes.cpp
+        # VulkanVDPRenderer with VDP1 on the GPU against the software renderer: FBRAM and frames, scene by scene
+        unit/test_gpu_vdp1_scenes.cpp
         # CoreWrapper with the Vulkan VDP renderer: install, revert, VDP1 threading, device frames (no device needed)
         unit/test_core_wrapper_vulkan.cpp
     )
@@ -142,6 +144,16 @@ if(BRIMIR_JIT_X64_EFFECTIVE)
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
     set_tests_properties(brimir_tests_jit_ir PROPERTIES ENVIRONMENT "BRIMIR_JIT_BACKEND=ir")
+endif()
+
+# The stage 1 GPU scenes (VDP2 on the GPU) again with VDP1 on the GPU (vdp2_scene.hpp BRIMIR_VDP1_MODE): both VDP1
+# modes must keep them passing.
+if(BRIMIR_VULKAN)
+    add_test(NAME brimir_tests_gpu_vdp1
+        COMMAND brimir_tests "[gpu][vdp2][scene]"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+    set_tests_properties(brimir_tests_gpu_vdp1 PROPERTIES ENVIRONMENT "BRIMIR_VDP1_MODE=gpu")
 endif()
 
 # The libretro Vulkan context through brimir_vkhost (tests/vkhost_checks.cmake): BIOS menu frames, software vs

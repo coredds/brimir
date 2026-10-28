@@ -71,6 +71,8 @@ struct HostConfig {
     // --probe: collect the core's per-frame VDP2 probe lines (BRIMIR_VDP2_PROBE) and per-retro_run VDP1 probe lines
     // (BRIMIR_VDP1_PROBE) while recording
     bool probe = false;
+    // --gpu-vdp1: VDP1 on the GPU in the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=1 for the core)
+    bool gpuVdp1 = false;
     // --set-option-at F key=value: the option changes before frame F (counting warmup frames from 0, as --reset-at),
     // reported to the core through GET_VARIABLE_UPDATE (a live change, as RetroArch's Quick Menu).
     struct OptionChange {

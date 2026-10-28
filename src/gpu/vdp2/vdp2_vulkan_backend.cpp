@@ -108,7 +108,8 @@ VkResult Vdp2VulkanBackend::Init(uint32_t frameContexts, uint32_t scale, uint32_
         {&m_rotBases, kRotBasesBytes, kStorageDst},
         {&m_lnclBack, kLnclBackBytes, kStorageDst},
         {&m_nbgLines, kNBGLinesBytes, kStorageDst},
-        {&m_spriteFB, kSpriteFBBufferSize, kStorageDst},
+        // TRANSFER_SRC: the GPU FBRAM in GPU VDP1 mode is read back (SpriteFBBuffer)
+        {&m_spriteFB, kSpriteFBBufferSize, kStorageDst | VK_BUFFER_USAGE_TRANSFER_SRC_BIT},
         {&m_nbgChars, kNBGCharBufferSize, kStorageDst}, // TRANSFER_DST for the test-only poison fill
     };
     for (const auto &b : buffers) {
@@ -360,7 +361,7 @@ void Vdp2VulkanBackend::FrameDropped() {
         m_pending.clearComposite = true;
         m_pending.clearColor = m_recorded.clearColor;
     }
-    m_pending.zeroSpriteFB |= m_recorded.zeroSpriteFB;
+    m_pending.zeroSpriteFB |= m_recorded.zeroSpriteFB && !m_spriteFBExternal;
     if (m_recorded.rescale && !m_pending.rescale && m_lastContext < m_contexts.size()) {
         // The rescale never ran: its source is still the previous composite (kept by the context until it records
         // again), and the descriptor set still points at it.
