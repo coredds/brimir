@@ -52,7 +52,8 @@ VulkanVDPRenderer::VulkanVDPRenderer(VDPState &state, config::VDP2DebugRender &v
     , m_vdp1(std::make_unique<SoftwareVDPRenderer>(state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig))
     , m_front(state, vdp2AccessPatternsConfig)
     , m_vdp1Front(state)
-    , m_meshShadow(std::make_unique<MeshFBRAM>()) {
+    , m_meshShadow(std::make_unique<MeshFBRAM>())
+    , m_altShadow(std::make_unique<std::array<SpriteFB, 2>>()) {
     for (auto &alt : *m_meshShadow) {
         for (auto &fb : alt) {
             fb.fill(0);
@@ -132,8 +133,8 @@ void VulkanVDPRenderer::AbandonDevice() {
     m_front.MarkAllDirty();
     if (m_gpuVdp1) {
         // No Vulkan call and no read of the readback buffers (their memory may be gone with the device): software
-        // continues from the shadow as of the last merged readback (rule 8). Alt stays the inner renderer's.
-        HandToSoftware(nullptr, nullptr);
+        // continues from the shadow as of the last merge (rule 8).
+        HandToSoftware();
     }
     (void)m_vdp1Backend.release();
     m_device = nullptr;
@@ -184,7 +185,7 @@ bool VulkanVDPRenderer::HasPendingVdp1Work() const {
     }
     // A GpuNewer slice whose readback no command buffer took yet (rule 2: none may outlive the retro_run)
     for (uint32_t slice = 0; slice < 8; ++slice) {
-        if ((((kMainSlices | kMeshSlices) >> slice) & 1u) && NeedsReadback(slice, m_vdp1Seq)) {
+        if (((ShadowedSlices() >> slice) & 1u) && NeedsReadback(slice, m_vdp1Seq)) {
             return true;
         }
     }
@@ -299,7 +300,9 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     m_vdp1BeforeFrame = 0;
     m_contextFences.assign(contexts, VK_NULL_HANDLE);
     ResetShadow();
-    QueueFbramUpload(0xFF, &m_vdp1->GetAltFBRAM(0), &m_vdp1->GetAltFBRAM(1));
+    (*m_altShadow)[0] = m_vdp1->GetAltFBRAM(0);
+    (*m_altShadow)[1] = m_vdp1->GetAltFBRAM(1);
+    QueueFbramUpload(0xFF, &(*m_altShadow)[0], &(*m_altShadow)[1]);
     m_gpuVdp1 = true;
     m_frameRecordedBySync = false;
     return true;
@@ -308,53 +311,28 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
 void VulkanVDPRenderer::LeaveGpuVdp1() {
     if (m_gpuVdp1) {
         // The caller waited for the device: every committed readback is complete. Then one sync submit for what the
-        // GPU holds beyond them and for alt (GPU-only), so software continues from the GPU's framebuffers.
+        // GPU holds beyond them (alt included, shadowed or not), so software continues from the GPU's framebuffers.
         OwnWorkCompleted();
-        bool altTouched = false;
-        for (uint32_t fb = 0; fb < 2; ++fb) {
-            const SliceSync &s = m_slices[vdp1::Vdp1AltSlice(fb)];
-            altTouched = altTouched || s.lastTouch > s.valid;
+        if (!SyncShadow(kMainSlices | kMeshSlices | kAltSlices, Vdp1SyncKind::Detach, FramePolicy::Ignore)) {
+            Log("VDP1: reading the GPU framebuffers back failed; VDP1 continues in software from older ones");
         }
-        bool shadowBehind = false;
-        for (uint32_t slice = 0; slice < 8; ++slice) {
-            const SliceSync &s = m_slices[slice];
-            shadowBehind = shadowBehind || (((kMainSlices | kMeshSlices) >> slice) & 1u && s.lastTouch > s.valid);
-        }
-        const bool pendingWork = !m_vdp1Queue.empty() || m_vdp1Front.HasPendingOps();
-        bool altRead = false;
-        if (altTouched || shadowBehind || pendingWork) {
-            const bool synced = SyncSubmit(Vdp1SyncKind::Detach, FramePolicy::Ignore, altTouched ? kAltSlices : 0u);
-            altRead = synced && altTouched;
-            if (!synced && (altTouched || shadowBehind)) {
-                Log("VDP1: reading the GPU framebuffers back failed; VDP1 continues in software from older ones");
-            }
-        }
-        if (altRead) {
-            const uint8_t *data = m_vdp1Backend->ReadbackData(m_frameContexts);
-            auto alt = std::make_unique<std::array<SpriteFB, 2>>();
-            for (uint32_t fb = 0; fb < 2; ++fb) {
-                std::memcpy((*alt)[fb].data(), data + size_t{vdp1::Vdp1AltSlice(fb)} * kSliceSize, kSliceSize);
-            }
-            HandToSoftware(&(*alt)[0], &(*alt)[1]);
-        } else {
-            HandToSoftware(nullptr, nullptr);
-        }
+        HandToSoftware();
     }
     DestroyGpuVdp1();
 }
 
-void VulkanVDPRenderer::HandToSoftware(const SpriteFB *alt0, const SpriteFB *alt1) {
-    // VDPState holds main (the shadow); the inner renderer gets doubleV, mesh and alt, then copies VDPState into a
-    // threaded VDP1's own state (PostLoadStateSync), as after a state load.
+void VulkanVDPRenderer::HandToSoftware() {
+    // VDPState holds main (the shadow); the inner renderer gets doubleV (its own section loaded back with it), mesh
+    // and alt, then copies VDPState into a threaded VDP1's own state (PostLoadStateSync), as after a state load.
     m_vdp1->PreSaveStateSync();
     auto saved = std::make_unique<savestate::VDPSaveState::VDPRendererSaveState>();
     m_vdp1->SaveState(*saved);
     saved->vdp1State.doubleV = m_vdp1Front.DoubleV() ? 1 : 0;
-    saved->vdp1State.meshFBRAM = *m_meshShadow;
     m_vdp1->LoadState(*saved);
-    if (alt0 != nullptr && alt1 != nullptr) {
-        m_vdp1->SetAltFBRAM(0, *alt0);
-        m_vdp1->SetAltFBRAM(1, *alt1);
+    for (uint8_t fb = 0; fb < 2; ++fb) {
+        m_vdp1->SetMeshFBRAM(false, fb, (*m_meshShadow)[0][fb]);
+        m_vdp1->SetMeshFBRAM(true, fb, (*m_meshShadow)[1][fb]);
+        m_vdp1->SetAltFBRAM(fb, (*m_altShadow)[fb]);
     }
     m_vdp1->PostLoadStateSync();
 }
@@ -472,10 +450,12 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
         Log("VDP1: recording the VDP1 ops failed (upload space); they stay pending");
     }
 
-    // Rule 2: the readbacks of the GpuNewer slices this command buffer covers, plus `extra` (whatever they hold).
+    // Rule 2: the readbacks of the GpuNewer shadowed slices this command buffer covers, plus `extra` (whatever they
+    // hold, when covered).
+    const uint32_t shadowedSlices = ShadowedSlices();
     uint32_t mask = 0;
     for (uint32_t slice = 0; slice < 8; ++slice) {
-        const bool shadowed = ((kMainSlices | kMeshSlices) >> slice) & 1u;
+        const bool shadowed = (shadowedSlices >> slice) & 1u;
         const bool wanted = (extra >> slice) & 1u;
         const SliceSync &s = m_slices[slice];
         if ((shadowed && NeedsReadback(slice, covered)) ||
@@ -501,13 +481,27 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
 // -----------------------------------------------------------------------------
 // CPU shadow
 
+uint32_t VulkanVDPRenderer::ShadowedSlices() const {
+    return kMainSlices | kMeshSlices | (m_enhancements.deinterlace ? kAltSlices : 0u);
+}
+
+void VulkanVDPRenderer::ClearPending(SliceSync &s) {
+    for (PendingReadback &p : s.pending) {
+        if (p.mask) {
+            if (p.mask->any) {
+                p.mask->bits.fill(0);
+                p.mask->any = false;
+            }
+            m_maskPool.push_back(std::move(p.mask));
+        }
+    }
+    s.pending.clear();
+}
+
 void VulkanVDPRenderer::ResetShadow() {
     for (SliceSync &s : m_slices) {
-        s = {m_vdp1Seq, m_vdp1Seq, m_vdp1Seq, m_vdp1Seq, -1};
-    }
-    for (WriteMask &mask : m_writeMasks) {
-        mask.bits.fill(0);
-        mask.any = false;
+        ClearPending(s);
+        s.lastTouch = s.lastWrite = s.valid = m_vdp1Seq;
     }
     m_submittedSeq = m_vdp1Seq;
     m_proposed = {};
@@ -518,11 +512,7 @@ void VulkanVDPRenderer::MarkShadowValid(uint32_t mask) {
         if ((mask >> slice) & 1u) {
             SliceSync &s = m_slices[slice];
             s.valid = m_vdp1Seq;
-            s.pendingContext = -1;
-            if (slice < 2 && m_writeMasks[slice].any) {
-                m_writeMasks[slice].bits.fill(0);
-                m_writeMasks[slice].any = false;
-            }
+            ClearPending(s);
         }
     }
 }
@@ -534,22 +524,25 @@ void VulkanVDPRenderer::Touch(uint32_t slice) {
 void VulkanVDPRenderer::CpuWrite(uint32_t address, uint32_t bytes) {
     ++m_vdp1Seq;
     const uint32_t fb = m_state.fbIndex.draw & 1u;
-    m_slices[vdp1::Vdp1MainSlice(fb)].lastWrite = m_vdp1Seq;
-    WriteMask &mask = m_writeMasks[fb];
-    for (uint32_t i = 0; i < bytes; ++i) {
-        const uint32_t byte = (address + i) & (kSliceSize - 1);
-        mask.bits[byte >> 6] |= uint64_t{1} << (byte & 63);
+    SliceSync &s = m_slices[vdp1::Vdp1MainSlice(fb)];
+    s.lastWrite = m_vdp1Seq;
+    // Every committed readback that is not merged yet lacks this write: its merge keeps the CPU's bytes.
+    for (PendingReadback &p : s.pending) {
+        for (uint32_t i = 0; i < bytes; ++i) {
+            const uint32_t byte = (address + i) & (kSliceSize - 1);
+            p.mask->bits[byte >> 6] |= uint64_t{1} << (byte & 63);
+        }
+        p.mask->any = true;
     }
-    mask.any = true;
     if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
-        Touch(vdp1::Vdp1AltSlice(fb)); // the mirror (software's VDP1WriteFB)
+        Touch(vdp1::Vdp1AltSlice(fb)); // the mirror (software's VDP1WriteFB), an op on the GPU
     }
 }
 
 bool VulkanVDPRenderer::NeedsReadback(uint32_t slice, uint64_t covered) const {
     const SliceSync &s = m_slices[slice];
-    const uint64_t known = std::max(s.valid, s.pendingContext >= 0 ? s.pending : 0);
-    // Every op and CPU write into the slice must be in the command buffer: the commit clears the write mask.
+    const uint64_t known = std::max(s.valid, s.pending.empty() ? 0 : s.pending.back().seq);
+    // Every op and CPU write into the slice must be in the command buffer (the readback holds the writes so far).
     return s.lastTouch > known && s.lastTouch <= covered && s.lastWrite <= covered;
 }
 
@@ -563,45 +556,35 @@ void VulkanVDPRenderer::CommitReadback(uint32_t context) {
             continue;
         }
         ++m_syncStats.readbackSlices;
-        if ((((kMainSlices | kMeshSlices) >> slice) & 1u) == 0) {
-            continue; // alt: read by the caller of the sync submit
-        }
         SliceSync &s = m_slices[slice];
-        s.pending = m_proposed.seq[slice];
-        s.pendingContext = static_cast<int32_t>(context);
-        if (slice < 2 && m_writeMasks[slice].any) {
-            // The readback holds every CPU write so far; later ones are kept over it at the merge.
-            m_writeMasks[slice].bits.fill(0);
-            m_writeMasks[slice].any = false;
+        // A context holds one readback: an older entry of it was merged when the context began this command buffer.
+        PendingReadback entry;
+        entry.seq = m_proposed.seq[slice];
+        entry.context = context;
+        if (slice < 2) {
+            if (m_maskPool.empty()) {
+                entry.mask = std::make_unique<WriteMask>();
+            } else {
+                entry.mask = std::move(m_maskPool.back());
+                m_maskPool.pop_back();
+            }
         }
+        s.pending.push_back(std::move(entry));
     }
     m_proposed = {};
 }
 
-void VulkanVDPRenderer::MergeContext(uint32_t context) {
-    if (!m_gpuVdp1 || m_vdp1Backend == nullptr) {
-        return;
-    }
-    const uint8_t *data = nullptr;
-    const auto start = std::chrono::steady_clock::now();
-    bool merged = false;
-    for (uint32_t slice = 0; slice < 8; ++slice) {
-        SliceSync &s = m_slices[slice];
-        if (s.pendingContext != static_cast<int32_t>(context)) {
-            continue;
-        }
-        s.pendingContext = -1;
-        if (s.pending <= s.valid) {
-            continue;
-        }
-        if (data == nullptr && (data = m_vdp1Backend->ReadbackData(context)) == nullptr) {
-            return;
-        }
+void VulkanVDPRenderer::MergeEntry(uint32_t slice, size_t index) {
+    SliceSync &s = m_slices[slice];
+    const PendingReadback &p = s.pending[index];
+    const uint8_t *data = m_vdp1Backend ? m_vdp1Backend->ReadbackData(p.context) : nullptr;
+    if (data != nullptr && p.seq > s.valid) {
+        const auto start = std::chrono::steady_clock::now();
         const uint8_t *src = data + size_t{slice} * kSliceSize;
         if (slice < 2) {
             // Main: bytes the CPU wrote since the readback was committed keep the CPU's value.
             uint8_t *dst = m_state.mem1.FBRAM[slice].data();
-            const WriteMask &mask = m_writeMasks[slice];
+            const WriteMask &mask = *p.mask;
             if (!mask.any) {
                 std::memcpy(dst, src, kSliceSize);
             } else {
@@ -619,16 +602,42 @@ void VulkanVDPRenderer::MergeContext(uint32_t context) {
                     }
                 }
             }
+        } else if (slice < 4) {
+            std::memcpy((*m_altShadow)[slice - vdp1::Vdp1AltSlice(0)].data(), src, kSliceSize);
         } else {
             const uint32_t mesh = slice - vdp1::Vdp1MeshSlice(0, 0);
             std::memcpy((*m_meshShadow)[mesh >> 1][mesh & 1].data(), src, kSliceSize);
         }
-        s.valid = s.pending;
+        s.valid = p.seq;
         ++m_syncStats.mergedSlices;
-        merged = true;
-    }
-    if (merged) {
         m_syncStats.mergeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    }
+    // It and every older readback are done with (the older ones are behind it).
+    for (size_t i = 0; i <= index; ++i) {
+        PendingReadback &old = s.pending[i];
+        if (old.mask) {
+            if (old.mask->any) {
+                old.mask->bits.fill(0);
+                old.mask->any = false;
+            }
+            m_maskPool.push_back(std::move(old.mask));
+        }
+    }
+    s.pending.erase(s.pending.begin(), s.pending.begin() + static_cast<std::ptrdiff_t>(index + 1));
+}
+
+void VulkanVDPRenderer::MergeContext(uint32_t context) {
+    if (!m_gpuVdp1 || m_vdp1Backend == nullptr) {
+        return;
+    }
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        SliceSync &s = m_slices[slice];
+        for (size_t i = s.pending.size(); i-- > 0;) {
+            if (s.pending[i].context == context) {
+                MergeEntry(slice, i);
+                break;
+            }
+        }
     }
 }
 
@@ -671,7 +680,12 @@ void VulkanVDPRenderer::OwnWorkCompleted() {
     }
     for (uint32_t context = 0; context < m_contextFences.size(); ++context) {
         m_contextFences[context] = VK_NULL_HANDLE;
-        MergeContext(context);
+    }
+    // Every readback is complete: the newest of each slice is merged (the others are behind it).
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        if (!m_slices[slice].pending.empty()) {
+            MergeEntry(slice, m_slices[slice].pending.size() - 1);
+        }
     }
 }
 
@@ -679,18 +693,30 @@ void VulkanVDPRenderer::PollVdp1Readbacks() {
     if (!m_gpuVdp1 || m_device == nullptr) {
         return;
     }
-    uint32_t polled = 0; // contexts already looked at (bit i)
-    for (const SliceSync &s : m_slices) {
-        const int32_t context = s.pendingContext;
-        if (context < 0 || context >= 32 || ((polled >> context) & 1u)) {
-            continue;
+    // Contexts whose last command buffer has completed (bit i), each looked at once
+    uint64_t looked = 0, done = 0;
+    const auto completed = [&](uint32_t context) {
+        if (context >= 64) {
+            return false;
         }
-        polled |= 1u << context;
-        const VkFence fence = static_cast<size_t>(context) < m_contextFences.size() ? m_contextFences[context]
-                                                                                     : VK_NULL_HANDLE;
-        if (fence == VK_NULL_HANDLE ||
-            m_device->Table().vkGetFenceStatus(m_device->Device(), fence) == VK_SUCCESS) {
-            MergeContext(static_cast<uint32_t>(context));
+        const uint64_t bit = uint64_t{1} << context;
+        if ((looked & bit) == 0) {
+            looked |= bit;
+            const VkFence fence = context < m_contextFences.size() ? m_contextFences[context] : VK_NULL_HANDLE;
+            if (fence == VK_NULL_HANDLE ||
+                m_device->Table().vkGetFenceStatus(m_device->Device(), fence) == VK_SUCCESS) {
+                done |= bit;
+            }
+        }
+        return (done & bit) != 0;
+    };
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        SliceSync &s = m_slices[slice];
+        for (size_t i = s.pending.size(); i-- > 0;) {
+            if (completed(s.pending[i].context)) {
+                MergeEntry(slice, i); // the newest completed one
+                break;
+            }
         }
     }
 }
@@ -703,8 +729,10 @@ bool VulkanVDPRenderer::SyncSubmit(Vdp1SyncKind kind, FramePolicy policy, uint32
     const auto start = std::chrono::steady_clock::now();
     const uint32_t context = m_frameContexts; // the sync context: its previous command buffer has completed
     bool frameRecorded = false;
+    bool called = false;
     bool recorded = false;
     const bool submitted = m_syncSubmit([&](VkCommandBuffer cmd) {
+        called = true;
         (void)RecordVdp1Work(context, cmd, policy, frameRecorded, extra);
         // A partial failure still submits what was recorded (in order; the rest stays queued).
         recorded = frameRecorded || RecordedVdp1Work();
@@ -712,9 +740,14 @@ bool VulkanVDPRenderer::SyncSubmit(Vdp1SyncKind kind, FramePolicy policy, uint32
     });
     if (!submitted) {
         if (recorded) {
+            // Not submitted (refused, or a failed submit): the ops are queued again. A submit whose wait then failed
+            // also lands here and would replay its ops twice; that only happens with a lost device, whose work is
+            // gone anyway.
             RecordedFrameDropped();
         }
-        ++m_syncStats.refusedSyncs;
+        if (!called || recorded) {
+            ++m_syncStats.refusedSyncs; // nothing recorded (a recording failure, logged) is not a refusal
+        }
         return false;
     }
     m_frameRecordedBySync |= frameRecorded;
@@ -737,7 +770,7 @@ bool VulkanVDPRenderer::SyncShadow(uint32_t mask, Vdp1SyncKind kind, FramePolicy
             continue;
         }
         behind |= 1u << slice;
-        needSubmit = needSubmit || s.pendingContext < 0 || s.pending < s.lastTouch;
+        needSubmit = needSubmit || s.pending.empty() || s.pending.back().seq < s.lastTouch;
     }
     if (behind == 0) {
         return true;
@@ -751,8 +784,8 @@ bool VulkanVDPRenderer::SyncShadow(uint32_t mask, Vdp1SyncKind kind, FramePolicy
         if (((behind >> slice) & 1u) == 0 || s.valid >= s.lastTouch) {
             continue;
         }
-        if (s.pendingContext >= 0 && s.pending >= s.lastTouch) {
-            WaitContext(static_cast<uint32_t>(s.pendingContext), kind);
+        if (!s.pending.empty() && s.pending.back().seq >= s.lastTouch) {
+            WaitContext(s.pending.back().context, kind);
         }
         current = current && s.valid >= s.lastTouch;
     }
@@ -790,6 +823,9 @@ void VulkanVDPRenderer::Reset(bool hard) {
             for (auto &fb : alt) {
                 fb.fill(0);
             }
+        }
+        for (auto &fb : *m_altShadow) {
+            fb.fill(0);
         }
         const uint32_t slices = kAltSlices | kMeshSlices | (hard ? kMainSlices : 0u);
         QueueFbramUpload(slices, nullptr, nullptr);
@@ -992,20 +1028,15 @@ void VulkanVDPRenderer::DumpExtraVDP1Framebuffers(std::ostream &out) const {
         m_vdp1->DumpExtraVDP1Framebuffers(out);
         return;
     }
-    // Gpu mode (debug only): synced first, as a CPU read is (the shadow for main and mesh, alt read back), in
-    // software's layout (sw:610-623)
+    // Gpu mode (debug only): one sync of main, mesh and alt (as a CPU read; alt into its shadow), then software's
+    // layout (sw:610-623)
     auto &self = const_cast<VulkanVDPRenderer &>(*this);
-    (void)self.SyncShadow(kMainSlices | kMeshSlices, Vdp1SyncKind::Dump, FramePolicy::Sync);
+    (void)self.SyncShadow(kMainSlices | kMeshSlices | kAltSlices, Vdp1SyncKind::Dump, FramePolicy::Sync);
     const uint8_t drawFB = m_state.fbIndex.draw & 1u;
     const uint8_t dispFB = m_state.fbIndex.display & 1u;
     if (m_enhancements.deinterlace) {
-        const bool altRead = self.SyncSubmit(Vdp1SyncKind::Dump, FramePolicy::Sync, kAltSlices);
-        const uint8_t *data = altRead ? m_vdp1Backend->ReadbackData(m_frameContexts) : nullptr;
-        for (const uint8_t fb : {drawFB, dispFB}) {
-            const char *bytes = data != nullptr ? reinterpret_cast<const char *>(data) + size_t{vdp1::Vdp1AltSlice(fb)} * kSliceSize
-                                                : reinterpret_cast<const char *>(m_vdp1->GetAltFBRAM(fb).data());
-            out.write(bytes, kSliceSize);
-        }
+        out.write(reinterpret_cast<const char *>((*m_altShadow)[drawFB].data()), kSliceSize);
+        out.write(reinterpret_cast<const char *>((*m_altShadow)[dispFB].data()), kSliceSize);
     }
     if (m_enhancements.transparentMeshes) {
         for (const uint32_t alt : {0u, 1u}) {

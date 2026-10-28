@@ -942,14 +942,8 @@ TEST_CASE("GPU VDP1 scene: save states equal software's byte for byte; cross-ren
         const auto &gpuR = gpu.renderer.vdp1State;
         CHECK(swR.doubleV == gpuR.doubleV);
         CHECK(swR.meshFBRAM == gpuR.meshFBRAM);
-        CHECK(swR.sysClipH == gpuR.sysClipH);
-        CHECK(swR.sysClipV == gpuR.sysClipV);
-        CHECK(swR.userClipX0 == gpuR.userClipX0);
-        CHECK(swR.userClipY0 == gpuR.userClipY0);
-        CHECK(swR.userClipX1 == gpuR.userClipX1);
-        CHECK(swR.userClipY1 == gpuR.userClipY1);
-        CHECK(swR.localCoordX == gpuR.localCoordX);
-        CHECK(swR.localCoordY == gpuR.localCoordY);
+        // (The section's clip and local-coordinate fields are never written by either renderer's SaveState: always
+        // zero, so not compared.)
         CHECK(sw.renderer.vcellScrollInc == gpu.renderer.vcellScrollInc);
         for (const auto &alt : sw.renderer.vdp1State.meshFBRAM) {
             for (const auto &fb : alt) {
@@ -1299,61 +1293,107 @@ TEST_CASE("GPU VDP1: detach mid-game syncs, VDP1 continues in software, attach u
 namespace {
 
 // Abandon mid-frame (frame 4, line 100: the device is gone, no Vulkan call): VDP1 continues in software from the
-// shadow as of the last merged readback. The GPU finished the previous frame before frame 4 started (PollVdp1Readbacks
-// merged it), so exactly frame 4's VDP1 work so far is lost: the framebuffers then equal software's at the start of
-// frame 4. Attached again at frame 7. With `strict` every frame from 4 on is compared with software (the operational
-// exception: frame 4 differs); otherwise only the confined loss and frames 5 on (every lost pixel erased by then:
-// the framebuffer drawn in frame 4 is the display framebuffer of frame 5, erased in its blanking).
-void RunAbandonScene(bool strict) {
+// shadow as of the last merge (rule 8). With `waitLast` the GPU finished the previous frame before frame 4 started
+// (PollVdp1Readbacks merged it), so exactly frame 4's VDP1 work so far is lost: the framebuffers then equal software's
+// at the start of frame 4. Without it the GPU may still run the earlier frames when they are polled: the loss is
+// bounded by the frame contexts (two here; a context is waited for before it is reused, and merged then), so the
+// framebuffers equal software's at the start of frame 2, 3 or 4 (frame 2 when never polled: the worst case). With `deinterlace` (double density) alt is in the
+// shadow and survives the same way. Attached again at frame 7. With `strict` every frame from 4 on is compared with
+// software (the operational exception: frame 4 differs); otherwise the confined loss is checked, software then takes
+// over the renderer's state at the abandon, and frames 0 and 4 on must be identical (the continuation is exact).
+enum class Poll { AfterWait, NoWait, Never };
+
+void RunAbandonScene(bool strict, Poll poll, bool deinterlace) {
+    const bool waitLast = poll == Poll::AfterWait;
     auto device = OpenDevice();
     {
-        const ymir::vdp::config::Enhancements enhancements{.transparentMeshes = true};
+        const ymir::vdp::config::Enhancements enhancements{.deinterlace = deinterlace, .transparentMeshes = true};
         AsyncRig rig(*device, enhancements, false);
         REQUIRE(rig.Ready());
-        const Vdp2Scene scene = Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40),
-                                          10, enhancements, 32);
+        const uint16_t tvmd = deinterlace ? kDisp | kDoubleDensity : kDisp;
+        const Vdp2Scene scene = Vdp1Scene([tvmd](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, tvmd); },
+                                          AutoSwap(40), 10, enhancements, 32);
         scene.setup(rig.writer);
-        auto mainAtStartStorage = std::make_unique<std::array<ymir::vdp::SpriteFB, 2>>();
-        auto meshAtStartStorage = std::make_unique<std::array<std::array<ymir::vdp::SpriteFB, 2>, 2>>();
-        auto &mainAtStart = *mainAtStartStorage;
-        auto &meshAtStart = *meshAtStartStorage;
+        struct Snapshot {
+            std::array<ymir::vdp::SpriteFB, 2> main;
+            std::array<std::array<ymir::vdp::SpriteFB, 2>, 2> mesh;
+            std::array<ymir::vdp::SpriteFB, 2> alt;
+        };
+        std::array<std::unique_ptr<Snapshot>, 5> atStart{}; // software's framebuffers at the start of frames 0-4
         for (uint32_t f = 0; f < scene.frames; ++f) {
             INFO("frame " << f);
             if (f == 7) {
                 rig.vk->AttachDevice(rig.device, 2);
                 REQUIRE(rig.Ready());
             }
-            if (rig.Ready()) {
-                rig.WaitLast();
+            if (rig.Ready() && poll != Poll::Never) {
+                if (waitLast) {
+                    rig.WaitLast();
+                }
                 rig.vk->PollVdp1Readbacks(); // VulkanOutput::BeginRun
             }
             const auto onLine = [&](Vdp2SceneWriter &w, uint32_t y) {
-                if (f == 4 && y == 0) {
-                    mainAtStart = rig.swState->mem1.FBRAM;
-                    for (uint32_t alt = 0; alt < 2; ++alt) {
-                        for (uint32_t fb = 0; fb < 2; ++fb) {
-                            meshAtStart[alt][fb] = rig.sw->GetMeshFBRAM(alt != 0, static_cast<uint8_t>(fb));
-                        }
+                if (f < atStart.size() && y == 0) {
+                    auto snap = std::make_unique<Snapshot>();
+                    snap->main = rig.swState->mem1.FBRAM;
+                    for (uint8_t fb = 0; fb < 2; ++fb) {
+                        snap->mesh[0][fb] = rig.sw->GetMeshFBRAM(false, fb);
+                        snap->mesh[1][fb] = rig.sw->GetMeshFBRAM(true, fb);
+                        snap->alt[fb] = rig.sw->GetAltFBRAM(fb);
                     }
+                    atStart[f] = std::move(snap);
                 }
                 scene.onLine(w, y);
                 if (f == 4 && y == 100) {
                     rig.vk->AbandonDevice();
                     CHECK(!rig.vk->Attached());
-                    CHECK(rig.vkState->mem1.FBRAM == mainAtStart);
                     const ymir::vdp::SoftwareVDPRenderer &inner = rig.vk->InnerVdp1ForTest();
-                    for (uint32_t alt = 0; alt < 2; ++alt) {
-                        for (uint32_t fb = 0; fb < 2; ++fb) {
-                            CHECK(inner.GetMeshFBRAM(alt != 0, static_cast<uint8_t>(fb)) == meshAtStart[alt][fb]);
+                    const auto matches = [&](const Snapshot &s) {
+                        bool same = rig.vkState->mem1.FBRAM == s.main;
+                        for (uint8_t fb = 0; fb < 2; ++fb) {
+                            same = same && inner.GetMeshFBRAM(false, fb) == s.mesh[0][fb] &&
+                                   inner.GetMeshFBRAM(true, fb) == s.mesh[1][fb];
+                            same = same && (!deinterlace || inner.GetAltFBRAM(fb) == s.alt[fb]);
+                        }
+                        return same;
+                    };
+                    int lostFrom = -1; // the shadow is software's state at the start of this frame
+                    for (int j = 4; j >= 2 && lostFrom < 0; --j) {
+                        if (matches(*atStart[j])) {
+                            lostFrom = j;
                         }
                     }
+                    INFO("the shadow is software's framebuffers at the start of frame " << lostFrom);
+                    CHECK(lostFrom >= (waitLast ? 4 : 2));
+                    if (poll == Poll::Never) {
+                        // the worst case: only the context reuses merged (frame 3's record merged frame 1's readback)
+                        CHECK(lostFrom == 2);
+                    }
                     // ... and it is a loss: software has frame 4's draw
-                    CHECK(rig.swState->mem1.FBRAM != mainAtStart);
+                    CHECK(rig.swState->mem1.FBRAM != atStart[4]->main);
+                    if (deinterlace) {
+                        CHECK(rig.sw->GetAltFBRAM(rig.swState->fbIndex.draw) != atStart[4]->alt[rig.swState->fbIndex.draw]);
+                    }
+                    if (!strict) {
+                        // The confined loss checked: software takes over the state the renderer continues from (the
+                        // VDP state, its renderer section, alt), so every later frame must be identical again.
+                        auto saved = std::make_unique<ymir::savestate::VDPSaveState>();
+                        rig.vk->PreSaveStateSync();
+                        rig.vkState->SaveState(*saved);
+                        rig.vk->SaveState(saved->renderer);
+                        rig.swState->LoadState(*saved);
+                        rig.sw->LoadState(saved->renderer);
+                        for (uint8_t fb = 0; fb < 2; ++fb) {
+                            rig.sw->SetAltFBRAM(fb, inner.GetAltFBRAM(fb));
+                        }
+                        rig.sw->PostLoadStateSync();
+                    }
                 }
             };
             rig.writer.RunFrame(onLine, 0, UINT32_MAX, scene.blanking);
             REQUIRE(rig.Submit());
-            if (strict || f != 4) {
+            // (Not in frames 1-3 unless strict: the compare waits for the GPU, which merges every readback.)
+            if (strict || f == 0 || f >= 4) {
                 const std::string diff = rig.CompareFbram("frame " + std::to_string(f));
                 CHECK(diff.empty());
             }
@@ -1364,11 +1404,21 @@ void RunAbandonScene(bool strict) {
 
 } // namespace
 
-TEST_CASE("GPU VDP1: abandoning the device loses only the current retro_run's VDP1 work", "[gpu][vdp1][scene]") {
-    RunAbandonScene(false);
+TEST_CASE("GPU VDP1: abandoning the device loses only the VDP1 work of the runs the GPU had not completed",
+          "[gpu][vdp1][scene]") {
+    for (const bool deinterlace : {false, true}) {
+        for (const Poll poll : {Poll::AfterWait, Poll::NoWait, Poll::Never}) {
+            DYNAMIC_SECTION((deinterlace ? "double density, deinterlace" : "progressive")
+                            << (poll == Poll::AfterWait ? ", previous frame completed when polled"
+                                : poll == Poll::NoWait ? ", polled without a wait"
+                                                       : ", never polled (worst case)")) {
+                RunAbandonScene(false, poll, deinterlace);
+            }
+        }
+    }
 }
 
 TEST_CASE("GPU VDP1 exception: abandon loses the frame's VDP1 work (operational exception; frame 4 differs)",
           "[gpu][vdp1][scene][!shouldfail]") {
-    RunAbandonScene(true);
+    RunAbandonScene(true, Poll::AfterWait, false);
 }

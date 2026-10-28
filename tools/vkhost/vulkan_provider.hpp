@@ -41,16 +41,16 @@ struct HostFrame;
 
 // The core's submits and waits by kind (the Global Constraints of GPU stage 2: at most one frame submit per retro_run,
 // plus an ops-only submit after a refused one; sync submits and their waits inside retro_run; fence waits in
-// retro_serialize; nothing else outside retro_run and the context callbacks). A command-buffer submit is a sync submit
-// when the core waits for its fence in the retro_run it was submitted in.
+// retro_serialize; nothing else outside retro_run and the context callbacks). A sync submit is one with the fence the
+// core logs for its sync command context ("VDP1 sync submit fence 0x...").
 struct SubmitWaitStats {
     uint64_t refusedSubmits = 0;   // --fail-submit-at: never reached the queue (not one of the run's submits)
-    uint64_t syncSubmits = 0;      // waited for in their own retro_run (VDP1 sync submits)
+    uint64_t syncSubmits = 0;      // VDP1 sync submits (in retro_run or a context callback; the core's fence)
     uint64_t contextSubmits = 0;   // in context_reset / context_destroy outside retro_run (a detach's sync submit)
     uint64_t extraOpsOnlyRuns = 0; // runs with an accepted submit after a refused one, with the core's ops-only line
     uint64_t outsideSubmits = 0;   // anywhere else (retro_serialize, retro_unserialize, ...): must stay 0
     uint64_t frameWaits = 0;       // in retro_run, for fences of earlier runs (the frame slots, hidden contexts)
-    uint64_t syncWaits = 0;        // in retro_run, for a fence submitted in the same run
+    uint64_t syncWaits = 0;        // in retro_run, for a sync submit's fence
     uint64_t serializeWaits = 0;   // in retro_serialize / retro_serialize_size (submitted before it)
     uint64_t contextWaits = 0;     // in context_reset / context_destroy (vkDeviceWaitIdle included)
     uint64_t outsideWaits = 0;     // anywhere else: must stay 0
@@ -114,6 +114,9 @@ public:
     }
     // The core logged "VDP1 ops-only submit after a refused frame submit" (in the current retro_run).
     void NoteOpsOnlyAfterRefused() { m_runOpsOnlyLine = true; }
+    // The core logged "VDP1 sync submit fence 0x..." (its sync command context's fence).
+    // The latest one replaces the earlier (the core creates one per attach and destroys it at detach).
+    void NoteSyncFence(uint64_t fence) { m_syncFence = fence; }
     // A submit the hook accepted (fence: its fence, commandBuffers: how many), a refused one, and waits.
     void OnSubmitted(uint64_t fence, uint32_t commandBuffers);
     void OnRefusedSubmit();
@@ -298,8 +301,7 @@ private:
     bool m_inRun = false;
     uint64_t m_runIndex = 0;
     CorePhase m_phase = CorePhase::Other;
-    // Fences of accepted command-buffer submits: the run they were submitted in (0: outside a run).
-    std::unordered_map<uint64_t, uint64_t> m_fenceRuns;
+    uint64_t m_syncFence = 0; // the core's VDP1 sync submit fence (NoteSyncFence)
     SubmitWaitStats m_submitWaits;
 };
 

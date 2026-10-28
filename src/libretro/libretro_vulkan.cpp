@@ -498,6 +498,16 @@ constexpr VkFormat kCopyFormat = VK_FORMAT_B8G8R8A8_UNORM;
 constexpr uint32_t kCopyMaxSize = 704;
 static_assert(kCopyMaxSize == gpu::FramePresenter::kMaxOutputSize);
 
+// A Vulkan handle's bits (pointers on 64-bit platforms, integers elsewhere), for diagnostics.
+template <typename Handle>
+uint64_t HandleBits(Handle handle) {
+    if constexpr (std::is_pointer_v<Handle>) {
+        return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));
+    } else {
+        return static_cast<uint64_t>(handle);
+    }
+}
+
 // A transient command pool with one primary command buffer, and an unsignalled fence.
 VkResult VulkanOutput::Impl::CreateCommandContext(VkCommandPool &pool, VkCommandBuffer &cmd, VkFence &fence) {
     const auto &vk = device->Table();
@@ -692,6 +702,13 @@ VkResult VulkanOutput::Impl::CreateHidden() {
         DestroyHidden();
         return result;
     }
+    // Diagnostics (brimir_vkhost): the fence of the VDP1 sync submits, so a host can tell them from frame submits.
+    {
+        const uint64_t bits = HandleBits(sync.fence);
+        char text[64];
+        std::snprintf(text, sizeof(text), "VDP1 sync submit fence 0x%llx", static_cast<unsigned long long>(bits));
+        NegotiationLog(RETRO_LOG_DEBUG, text);
+    }
     hiddenCreated = true;
     nextHidden = 0;
     return VK_SUCCESS;
@@ -770,6 +787,8 @@ bool VulkanOutput::Impl::SyncSubmit(const gpu::VulkanVDPRenderer::SyncRecord &re
         return false;
     }
     if (vk.vkWaitForFences(dev, 1, &sync.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        // Submitted but not known to be complete: the renderer queues the ops again (harmless only because a failed
+        // wait means a lost device, whose work is gone anyway).
         NegotiationLog(RETRO_LOG_ERROR, "VDP1 on the GPU: waiting for a sync submit failed");
         return false;
     }

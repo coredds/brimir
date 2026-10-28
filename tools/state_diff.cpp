@@ -7,8 +7,9 @@
 // Decodes two retro_serialize states (BRI2 header, LZ4 payload, savestate_codec.hpp) and compares the renderer section
 // (VDPSaveState::VDPRendererSaveState) field by field. Both renderers save the software renderer's layout, but the
 // Vulkan renderer's NBG fetchers come from its front half, so a few line-local caches may legitimately differ. Exit
-// status: 0 when every difference in the renderer section is on the allowlist below, 3 otherwise, 2 on a read error.
-// Other sections are only summarized (bytes that differ): two runs of the same content differ in RTC-driven memory.
+// status: 0 when every difference in the renderer section is on the allowlist below and the VDP1 framebuffers
+// (vdp.FBRAM, displayFB) are identical, 3 otherwise, 2 on a read error. Other sections are only summarized (bytes that
+// differ): two runs of the same content differ in RTC-driven memory.
 //
 // Allowlist (fields the software renderer re-derives before any use, so their saved value never reaches a pixel):
 // - vramFetchers[*][0..3]: currChar, nextChar, lastCharIndex, lastCellX, charData, charDataAddress. VDP2PrepareLine
@@ -125,8 +126,15 @@ int main(int argc, char **argv) {
                 DifferingBytes(a->ssh2, b->ssh2), DifferingBytes(a->scsp, b->scsp),
                 DifferingBytes(a->vdp, b->vdp) - DifferingBytes(a->vdp.renderer, b->vdp.renderer));
 
-    std::printf("renderer section:\n");
+    // The VDP1 framebuffers are compared strictly too: the checks diff states saved at the same frame of the same
+    // content, whose frames are identical, and with VDP1 on the GPU they come from the CPU shadow.
+    std::printf("VDP1 framebuffers:\n");
     Report r;
+    for (size_t fb = 0; fb < a->vdp.FBRAM.size(); ++fb) {
+        r.Field("vdp.FBRAM[" + std::to_string(fb) + "]", a->vdp.FBRAM[fb], b->vdp.FBRAM[fb], false);
+    }
+    r.Field("vdp.displayFB", a->vdp.displayFB, b->vdp.displayFB, false);
+    std::printf("renderer section:\n");
     const Renderer &ra = a->vdp.renderer;
     const Renderer &rb = b->vdp.renderer;
     r.Field("vdp1State", ra.vdp1State, rb.vdp1State, false);

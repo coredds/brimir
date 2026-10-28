@@ -24,31 +24,39 @@
 //     VDPState and the inner renderer (main, alt, mesh, doubleV).
 //
 // GPU-authoritative FBRAM with a lazily synchronised CPU shadow (stage2-vdp1-research.md section 3.5). The shadow is
-// VDPState's main fb0/fb1 (which the CPU reads and the save state stores) and m_meshShadow (the save state's
-// meshFBRAM); alt is GPU-only (software never saves it). Each shadowed slice is, against the emulated FBRAM:
+// VDPState's main fb0/fb1 (which the CPU reads and the save state stores), m_meshShadow (the save state's meshFBRAM)
+// and, while the deinterlace enhancement is on, m_altShadow (alt is never saved, as software; it is shadowed only so a
+// lost device keeps it, rule 8). Each shadowed slice is, against the emulated FBRAM:
 // - Valid: the CPU copy holds every GPU op emitted so far (and every CPU write);
-// - Pending: the latest readback, committed with a submitted command buffer, holds every GPU op emitted so far;
+// - Pending: a readback committed with a submitted command buffer holds every GPU op emitted so far;
 // - GpuNewer: a GPU op was emitted after the latest readback.
 // Rules:
 // 1. Every op that changes FBRAM on the GPU (a draw command: main and, with transparent meshes, mesh of the draw
-//    framebuffer; an erase: main and mesh of the display framebuffer) makes its slices GpuNewer when it is emitted.
-// 2. Every command buffer the renderer records (frame, hidden, ops-only, sync) ends with a copy of each GpuNewer slice
-//    whose ops (and CPU writes) it covers into the context's host-cached readback buffer; FrameSubmitted commits it
-//    (Pending, with the context's fence) and clears the slice's CPU write mask.
-// 3. A CPU framebuffer write (VDPState already holds it) is an op with its value and sets the slice's write mask;
-//    it mirrors to alt as software does and never touches the meshes. No wait: the slice does not become GpuNewer.
-// 4. VDP1SyncFB (a CPU read of the draw framebuffer): Valid returns at once; Pending waits for the fence and merges
-//    (byte i keeps the CPU's value when the write mask has it, else takes the readback's); GpuNewer makes a sync
-//    submit (every pending op, the pending VDP2 frame ordered with them, a readback), waits and merges. So a burst of
-//    reads costs one sync submit, the first.
-// 5. PreSaveStateSync: rule 4 for every shadowed slice. Between retro_run calls every slice is Valid or Pending
-//    (rule 2 and the ops-only submit), so retro_serialize only waits for fences.
+//    framebuffer, alt too with deinterlacing; an erase: the same of the display framebuffer) makes its slices
+//    GpuNewer when it is emitted.
+// 2. Every command buffer the renderer records (frame, hidden, ops-only, sync) ends with a copy of each GpuNewer
+//    shadowed slice whose ops (and CPU writes) it covers into the context's host-cached readback buffer;
+//    FrameSubmitted commits it (Pending, with the context's fence). A slice keeps every committed readback not merged
+//    yet (one per context at most), each with the CPU writes made since its commit (its write mask), so the newest one
+//    that has completed can always be merged.
+// 3. A CPU framebuffer write (VDPState already holds it) is an op with its value and sets the bit of every committed
+//    readback's write mask; it mirrors to alt as software does (an op) and never touches the meshes. No wait: the
+//    main slice does not become GpuNewer.
+// 4. VDP1SyncFB (a CPU read of the draw framebuffer): Valid returns at once; Pending waits for the newest readback's
+//    fence and merges (byte i keeps the CPU's value when the readback's write mask has it, else takes the
+//    readback's); GpuNewer makes a sync submit (every pending op, the pending VDP2 frame ordered with them, the
+//    readbacks), waits and merges. So a burst of reads costs one sync submit, the first.
+// 5. PreSaveStateSync: rule 4 for main and mesh. Between retro_run calls every slice is Valid or Pending (rule 2 and
+//    the ops-only submit), so retro_serialize only waits for fences.
 // 6. PostLoadStateSync: main and mesh uploaded from the loaded state, Valid; alt left as it is (as software).
 // 7. Reset: main (hard reset), alt and mesh uploaded as the reset left them, after the ops so far.
-// 8. DetachDevice syncs (every slice, alt included) and hands the framebuffers to the inner renderer; AbandonDevice
-//    makes no Vulkan call: the inner renderer continues from the shadow as of the last readback merged
-//    (PollVdp1Readbacks, at the start of each retro_run, merges the completed ones), so the GPU work of the current
-//    retro_run is lost, and that of earlier ones the GPU had not finished when it started.
+// 8. DetachDevice syncs (every slice, alt included) and hands the framebuffers to the inner renderer
+//    (SetAltFBRAM, SetMeshFBRAM). AbandonDevice (the device lost) makes no Vulkan call: the inner renderer continues
+//    from the shadow (main, mesh, and alt while deinterlacing) as of the last merge. Merges happen at
+//    PollVdp1Readbacks (the start of each retro_run: every readback whose command buffer has completed, no wait) and
+//    whenever a context is reused (its previous command buffer has completed: the caller waited for it), so what is
+//    lost is the VDP1 work of every retro_run the GPU had not completed when last polled: at most as many runs as the
+//    caller has frame contexts (sync slots plus hidden contexts; typically 1-3 frames). Avoiding it would need waits.
 
 #include "gpu/vdp1/vdp1_front.hpp"
 #include "gpu/vdp1/vdp1_vulkan_backend.hpp"
@@ -261,6 +269,10 @@ public:
 
     void UpdateEnabledLayers() override;
 
+    // Gpu VDP1 mode (debug only): one Dump sync submit makes main, mesh and alt current, then alt and mesh are written
+    // as software writes them. VDP::DumpVDP1Framebuffers writes main (VDPState) before calling this, so its main is
+    // the shadow as of the last merge: call VDP1SyncFB (or PreSaveStateSync) first for current main framebuffers. No
+    // Brimir caller dumps framebuffers.
     void DumpExtraVDP1Framebuffers(std::ostream &out) const override;
 
 protected:
@@ -277,17 +289,22 @@ private:
     };
     // The CPU shadow's state of one FBRAM slice (the top of this file), in emissions (m_vdp1Seq: every GPU op and CPU
     // write increments it).
-    struct SliceSync {
-        uint64_t lastTouch = 0;      // the last GPU op that changes the slice
-        uint64_t lastWrite = 0;      // the last CPU write into it (main slices)
-        uint64_t valid = 0;          // the CPU copy holds every emission up to this one (Valid: valid >= lastTouch)
-        uint64_t pending = 0;        // the committed readback holds every emission up to this one
-        int32_t pendingContext = -1; // the context whose readback buffer holds it (-1: none)
-    };
-    // Bytes of a main slice the CPU wrote since its last committed readback (rule 3).
+    // Bytes of a main slice the CPU wrote since a readback was committed (rule 3).
     struct WriteMask {
         std::array<uint64_t, vdp1::kFbramSliceSize / 64> bits{};
         bool any = false;
+    };
+    // A committed readback not merged yet: it holds every emission up to seq, in `context`'s readback buffer.
+    struct PendingReadback {
+        uint64_t seq = 0;
+        uint32_t context = 0;
+        std::unique_ptr<WriteMask> mask; // main slices
+    };
+    struct SliceSync {
+        uint64_t lastTouch = 0; // the last GPU op that changes the slice
+        uint64_t lastWrite = 0; // the last CPU write into it (main slices)
+        uint64_t valid = 0;     // the CPU copy holds every emission up to this one (Valid: valid >= lastTouch)
+        std::vector<PendingReadback> pending; // oldest first
     };
     // The readback the last record call appended, committed by FrameSubmitted.
     struct ProposedReadback {
@@ -319,12 +336,15 @@ private:
     void QueueVdp1Ops(); // the front half's pending ops, in order
     void QueueFbramUpload(uint32_t sliceMask, const ymir::vdp::SpriteFB *alt0, const ymir::vdp::SpriteFB *alt1);
     // CPU shadow (the top of this file)
+    uint32_t ShadowedSlices() const;                     // main, mesh, and alt while deinterlacing
     void ResetShadow();                                  // every slice Valid, no readback pending
     void MarkShadowValid(uint32_t mask);                 // the CPU copy is the emulated state (uploads of it queued)
+    void ClearPending(SliceSync &s);
     void Touch(uint32_t slice);                          // rule 1
     void CpuWrite(uint32_t address, uint32_t bytes);     // rule 3 (VDPState wrote it already)
     bool NeedsReadback(uint32_t slice, uint64_t covered) const;
     void CommitReadback(uint32_t context);
+    void MergeEntry(uint32_t slice, size_t entry);       // merges pending[entry], drops it and the older ones
     void MergeContext(uint32_t context);                 // its command buffer has completed
     void WaitContext(uint32_t context, Vdp1SyncKind kind);
     // Makes the slices in `mask` Valid (rule 4): fence waits, or a sync submit when the GPU holds newer data. False
@@ -333,8 +353,8 @@ private:
     // One sync submit of the pending work with the readbacks, plus `extra` (alt slices for the inner renderer); its
     // readback buffer holds them until the next sync submit. False when refused or failed.
     bool SyncSubmit(Vdp1SyncKind kind, FramePolicy policy, uint32_t extra);
-    // Hands VDP1 to the inner renderer: doubleV, mesh from the shadow, alt from `alt` (null: keep its own).
-    void HandToSoftware(const ymir::vdp::SpriteFB *alt0, const ymir::vdp::SpriteFB *alt1);
+    // Hands VDP1 to the inner renderer: doubleV, mesh and alt from the shadow (VDPState holds main).
+    void HandToSoftware();
 
     ymir::vdp::VDPState &m_state;
     std::unique_ptr<ymir::vdp::SoftwareVDPRenderer> m_vdp1; // the software VDP1 backend
@@ -357,7 +377,8 @@ private:
     uint64_t m_vdp1Seq = 0;                   // emissions so far
     uint64_t m_submittedSeq = 0;              // emissions the committed command buffers cover
     std::array<SliceSync, 8> m_slices{};
-    std::array<WriteMask, 2> m_writeMasks{};  // main fb0, fb1
+    std::vector<std::unique_ptr<WriteMask>> m_maskPool; // cleared masks for reuse
+    std::unique_ptr<std::array<ymir::vdp::SpriteFB, 2>> m_altShadow; // Gpu mode: alt fb0, fb1
     ProposedReadback m_proposed;
     std::vector<VkFence> m_contextFences;     // per context: its last committed command buffer's (null: completed)
     std::function<bool(const SyncRecord &record)> m_syncSubmit;

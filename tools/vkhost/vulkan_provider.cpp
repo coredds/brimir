@@ -105,14 +105,24 @@ uint32_t CommandBufferCount(uint32_t count, const VkSubmitInfo2* submits) {
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits,
                                                 VkFence fence) {
-    g_provider->CheckQueueUse("vkQueueSubmit2", CommandBufferCount(count, submits));
-    return g_provider->Real().queueSubmit2(queue, count, submits, fence);
+    const uint32_t commandBuffers = CommandBufferCount(count, submits);
+    g_provider->CheckQueueUse("vkQueueSubmit2", commandBuffers);
+    const VkResult result = g_provider->Real().queueSubmit2(queue, count, submits, fence);
+    if (result == VK_SUCCESS) {
+        g_provider->OnSubmitted(HandleValue(fence), commandBuffers);
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit2KHR(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits,
                                                    VkFence fence) {
-    g_provider->CheckQueueUse("vkQueueSubmit2KHR", CommandBufferCount(count, submits));
-    return g_provider->Real().queueSubmit2KHR(queue, count, submits, fence);
+    const uint32_t commandBuffers = CommandBufferCount(count, submits);
+    g_provider->CheckQueueUse("vkQueueSubmit2KHR", commandBuffers);
+    const VkResult result = g_provider->Real().queueSubmit2KHR(queue, count, submits, fence);
+    if (result == VK_SUCCESS) {
+        g_provider->OnSubmitted(HandleValue(fence), commandBuffers);
+    }
+    return result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueWaitIdle(VkQueue queue) {
@@ -674,6 +684,7 @@ void VulkanProvider::DestroyContext(bool callCore) {
     }
     m_destroyDevice = nullptr;
     m_live = false;
+    m_syncFence = 0;
 }
 
 const retro_hw_render_interface* VulkanProvider::Interface() const {
@@ -726,6 +737,16 @@ void VulkanProvider::OnSubmitted(uint64_t fence, uint32_t commandBuffers) {
     if (m_selfTest || commandBuffers == 0) {
         return;
     }
+    if (fence != 0 && fence == m_syncFence) {
+        // The core's VDP1 sync submit (its fence logged by the core): allowed in retro_run and the context callbacks,
+        // never one of the run's frame submits
+        ++m_submitWaits.syncSubmits;
+        if (m_phase != CorePhase::Run && m_phase != CorePhase::Context) {
+            ++m_submitWaits.outsideSubmits;
+            AddProblem("a VDP1 sync submit outside retro_run and the context callbacks");
+        }
+        return;
+    }
     switch (m_phase) {
     case CorePhase::Run: ++m_runSubmits; break;
     case CorePhase::Context: ++m_submitWaits.contextSubmits; break;
@@ -733,9 +754,6 @@ void VulkanProvider::OnSubmitted(uint64_t fence, uint32_t commandBuffers) {
         ++m_submitWaits.outsideSubmits;
         AddProblem("a command buffer submit outside retro_run and the context callbacks");
         break;
-    }
-    if (fence != 0) {
-        m_fenceRuns[fence] = m_phase == CorePhase::Run ? m_runIndex : 0;
     }
 }
 
@@ -750,25 +768,20 @@ void VulkanProvider::OnWaitFences(uint32_t count, const uint64_t* fences) {
     if (m_selfTest) {
         return;
     }
-    switch (m_phase) {
-    case CorePhase::Run: {
-        bool sync = false;
-        for (uint32_t i = 0; i < count; ++i) {
-            const auto it = m_fenceRuns.find(fences[i]);
-            if (it != m_fenceRuns.end() && it->second == m_runIndex) {
-                // Submitted and waited for in the same retro_run: a sync submit (not one of the run's frame submits)
-                sync = true;
-                m_fenceRuns.erase(it);
-                ++m_submitWaits.syncSubmits;
-                if (m_runSubmits > 0) {
-                    --m_runSubmits;
-                }
-            }
-        }
-        ++(sync ? m_submitWaits.syncWaits : m_submitWaits.frameWaits);
-        break;
+    bool sync = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        sync = sync || (fences[i] != 0 && fences[i] == m_syncFence);
     }
-    case CorePhase::Serialize: ++m_submitWaits.serializeWaits; break;
+    switch (m_phase) {
+    case CorePhase::Run: ++(sync ? m_submitWaits.syncWaits : m_submitWaits.frameWaits); break;
+    case CorePhase::Serialize:
+        if (sync) {
+            ++m_submitWaits.outsideWaits;
+            AddProblem("a VDP1 sync wait in retro_serialize");
+        } else {
+            ++m_submitWaits.serializeWaits;
+        }
+        break;
     case CorePhase::Context: ++m_submitWaits.contextWaits; break;
     default:
         ++m_submitWaits.outsideWaits;

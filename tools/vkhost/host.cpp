@@ -478,6 +478,12 @@ void LibretroHost::CoreLogLine(const char* text) {
     if (m_vulkan && std::strstr(text, "VDP1 ops-only submit after a refused frame submit") != nullptr) {
         m_vulkan->NoteOpsOnlyAfterRefused();
     }
+    if (const char* line = m_vulkan ? std::strstr(text, "VDP1 sync submit fence 0x") : nullptr) {
+        unsigned long long fence = 0;
+        if (std::sscanf(line, "VDP1 sync submit fence 0x%llx", &fence) == 1) {
+            m_vulkan->NoteSyncFence(fence);
+        }
+    }
     if (const char* line = std::strstr(text, "Internal resolution: frames at ")) {
         unsigned scale = 0;
         if (std::sscanf(line, "Internal resolution: frames at %ux", &scale) == 1 && scale >= 1 && scale <= 4) {

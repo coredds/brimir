@@ -79,6 +79,19 @@ function(check_vulkan_counters name)
     require_log(${name} "core device memory: [0-9.]+ MiB after the last frame, peak [0-9.]+ MiB, [0-9]+ allocations")
 endfunction()
 
+# VDP1 on the GPU: the sync submits vkhost saw (the core's logged sync fence) are the ones the core counted (reads,
+# saves, detaches, dumps; the detach in context_destroy included), and none was for a read or a save.
+function(check_sync_counts name)
+    string(REGEX MATCH "VDP1 on the GPU: [0-9]+ ops-only submits, ([0-9]+) sync submits \\(reads 0, saves 0," core "${${name}_err}")
+    if(core STREQUAL "")
+        fail(${name} "no 'VDP1 on the GPU: ... sync submits (reads 0, saves 0, ...' line")
+    endif()
+    set(core_syncs "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "submits: sync ([0-9]+)," host "${${name}_err}")
+    if(NOT host OR NOT CMAKE_MATCH_1 STREQUAL core_syncs)
+        fail(${name} "vkhost saw '${host}', the core counted ${core_syncs} sync submits")
+    endif()
+endfunction()
 # VDP2 ran on the GPU for the whole run (the Vulkan VDP2 renderer attached at every context, never reverted).
 function(check_vdp2_renderer name)
     require_log(${name} "Vulkan VDP2 renderer active")
@@ -194,7 +207,8 @@ check_vdp2_renderer(vulkan)
 require_log(vulkan "device created through create_device2")
 require_log(vulkan "Vulkan frame output ready")
 # The two states' renderer sections may differ only in the line-local fetcher caches on brimir_state_diff's allowlist
-# (tools/state_diff.cpp); anything carried from line to line or frame to frame must match.
+# (tools/state_diff.cpp); anything carried from line to line or frame to frame must match, and so must the VDP1
+# framebuffers (vdp.FBRAM, displayFB: compared strictly, the runs are at the same frame of the same content).
 if(NOT STATE_DIFF OR NOT EXISTS "${STATE_DIFF}")
     fail(vulkan "STATE_DIFF (brimir_state_diff) not found: ${STATE_DIFF}")
 endif()
@@ -284,6 +298,10 @@ require_log(reset_to_copy_only "using copy-only frame output")
 require_log(reset_to_copy_only "Vulkan VDP2 renderer off")
 check_vulkan_counters(reset_in_present)
 check_vdp2_renderer(reset_in_present)
+# With VDP1 on the GPU (the default) the frame's VDP1 ops were pending at context_destroy: the detach's sync submit, the
+# one vkhost tells by the fence the core logs for its sync context.
+require_log(reset_in_present "submits: sync 1,")
+require_log(reset_in_present "sync submits \\(reads 0, saves 0, detaches 1,")
 require_log(reset_in_present "context resets 2,")
 
 # The sync index mask grows mid-run (0b1 -> 0b111): the next shown frame re-creates the slots and the renderer gains
@@ -607,8 +625,9 @@ check_vulkan_counters(gpu_vdp1)
 check_vdp2_renderer(gpu_vdp1)
 require_log(gpu_vdp1 "Vulkan VDP1 renderer active")
 require_log(gpu_vdp1 "VDP1 on the GPU: [0-9]+ ops-only submits, [0-9]+ sync submits \\(reads 0, saves 0,")
-require_log(gpu_vdp1 "submits: sync 0,")
-# The state saved with VDP1 on the GPU (FBRAM from the shadow, mesh and doubleV from the GPU path) matches software's.
+check_sync_counts(gpu_vdp1)
+# The state saved with VDP1 on the GPU matches software's: the VDP1 framebuffers (from the shadow; compared strictly by
+# brimir_state_diff) and the renderer section (mesh and doubleV from the GPU path).
 execute_process(COMMAND "${STATE_DIFF}" "${sw_state}" "${gpu_vdp1_state}"
                 OUTPUT_VARIABLE state_diff_out ERROR_VARIABLE state_diff_err RESULT_VARIABLE state_diff_code)
 if(NOT state_diff_code EQUAL 0)
@@ -645,7 +664,7 @@ check_run(gpu_vdp1_roundtrip 300)
 check_vulkan_counters(gpu_vdp1_roundtrip)
 check_vdp2_renderer(gpu_vdp1_roundtrip)
 require_log(gpu_vdp1_roundtrip "360 state round trips")
-require_log(gpu_vdp1_roundtrip "submits: sync 0,")
+check_sync_counts(gpu_vdp1_roundtrip)
 # ... run-ahead (hidden frames, a second instance on software).
 run_vkhost(gpu_vdp1_runahead --vulkan --gpu-vdp1 --runahead)
 check_run(gpu_vdp1_runahead 300 REFERENCE software_runahead)
