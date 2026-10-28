@@ -69,7 +69,8 @@ uint Vdp1RasDoubleV(uint f) { return BitExtract(f, 8, 1); }
 
 // Span::stepTexV
 uint Vdp1SpanQuadStep(uint stepTexV) { return Vdp1Lo16(stepTexV); }
-uint Vdp1SpanTexV(uint stepTexV) { return Vdp1Hi16(stepTexV); }
+// The texel row is int16 (-1 when CMDSIZE.V is 0), sign-extended to 32 bits
+uint Vdp1SpanTexV(uint stepTexV) { return uint(int(stepTexV) >> 16); }
 
 // Fragment::target (bit 31 live; a slot without a fragment reads as 0)
 static const uint kFragAltBit = 1u << 17;

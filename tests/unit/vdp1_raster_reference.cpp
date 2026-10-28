@@ -1,13 +1,12 @@
 #include "vdp1_raster_reference.hpp"
 
-#include <ymir/hw/vdp/renderer/common/vdp1_clip.hpp>
-#include <ymir/hw/vdp/renderer/common/vdp1_steppers.hpp>
-
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 namespace brimir::test::vdp1ref {
+
+namespace gpu = brimir::gpu::vdp1;
 
 namespace {
 
@@ -27,10 +26,6 @@ FORCE_INLINE uint16 ReadBE16(const SpriteFB &fb, uint32 address) {
 FORCE_INLINE void WriteBE16(SpriteFB &fb, uint32 address, uint16 value) {
     fb[address] = static_cast<uint8>(value >> 8);
     fb[address + 1] = static_cast<uint8>(value);
-}
-
-FORCE_INLINE sint32 SignExtend13(uint16 value) {
-    return static_cast<sint32>(static_cast<uint32>(value) << 19) >> 19;
 }
 
 // Clip rectangles with the doubleV doubling applied (VDP1IsPixelSystemClipped/VDP1IsPixelUserClipped)
@@ -73,286 +68,67 @@ bool LineSystemClipped(const ClipRect &clip, CoordS32 a, CoordS32 b) {
            (a.y() > clip.sysV && b.y() > clip.sysV);
 }
 
-// VDP1IsQuadSystemClipped
-bool QuadSystemClipped(const ClipRect &clip, const std::array<CoordS32, 4> &v) {
-    auto all = [&](auto pred) { return pred(v[0]) && pred(v[1]) && pred(v[2]) && pred(v[3]); };
-    return all([](CoordS32 c) { return c.x() < 0; }) || all([](CoordS32 c) { return c.y() < 0; }) ||
-           all([&](CoordS32 c) { return c.x() > clip.sysH; }) || all([&](CoordS32 c) { return c.y() > clip.sysV; });
-}
-
 } // namespace
 
 // =====================================================================================================================
-// Part 1: span builder
+// Part 1: decoding
 
-namespace {
-
-std::array<Color555, 4> ReadGouraudTable(const uint8 *vram, uint32 address) {
-    const uint32 table = static_cast<uint32>(Read16(vram, address + 0x1C)) << 3u;
-    return {Color555{.u16 = Read16(vram, table + 0u)}, Color555{.u16 = Read16(vram, table + 2u)},
-            Color555{.u16 = Read16(vram, table + 4u)}, Color555{.u16 = Read16(vram, table + 6u)}};
-}
-
-// VDP1PlotTexturedQuad
-void BuildTexturedQuad(const uint8 *vram, CommandSpans &out, const ClipRect &clip, VDP1Command::Size size) {
-    CommandParams &p = out.params;
-    if (QuadSystemClipped(clip, p.vertices)) {
-        return;
-    }
-    p.textured = true;
-    p.antiAlias = true;
-    p.mode.u16 = Read16(vram, p.address + 0x04);
-    p.color = Read16(vram, p.address + 0x06);
-    p.charAddr = static_cast<uint32>(Read16(vram, p.address + 0x08)) * 8u;
-    p.charSizeH = size.H * 8u;
-    p.charSizeV = size.V;
-    p.colorBank = p.color;
-    switch (p.mode.colorMode) {
-    case 0: p.colorBank &= 0xFFF0; break;
-    case 1: p.colorBank <<= 3u; break;
-    case 2: p.colorBank &= 0xFFC0; break;
-    case 3: p.colorBank &= 0xFF80; break;
-    case 4: p.colorBank &= 0xFF00; break;
-    case 5: p.charAddr &= ~0xFu; break; // VDP1PlotTexturedLine force-aligns it
-    }
-
-    ymir::vdp::QuadStepper<> quad{p.vertices[0], p.vertices[1], p.vertices[2], p.vertices[3]};
-    if (p.mode.gouraudEnable) {
-        p.gouraud = ReadGouraudTable(vram, p.address);
-        quad.SetupGouraud(p.gouraud[0], p.gouraud[1], p.gouraud[2], p.gouraud[3]);
-    }
-    ymir::vdp::TextureStepper texV;
-    quad.SetupTexture(texV, p.charSizeH == 0 ? 1 : p.charSizeV, p.control.flipV);
-
-    const ymir::vdp::VDP1QuadTermination termination{quad, clip.sysH, clip.sysV};
-    uint32 quadStep = 0;
-    for (; quad.CanStep(); quad.Step(), ++quadStep) {
-        if (termination.Done(quad)) {
-            break;
-        }
-        const CoordS32 l = quad.LeftEdge().Coord();
-        const CoordS32 r = quad.RightEdge().Coord();
-        while (texV.ShouldStepTexel()) {
-            texV.StepTexel();
-        }
-        texV.StepPixel();
-        if (LineSystemClipped(clip, l, r)) {
-            continue;
-        }
-        Span span{.quadStep = quadStep, .a = l, .b = r, .texV = texV.Value()};
-        if (p.mode.gouraudEnable) {
-            span.gouraudL = quad.LeftEdge().GouraudValue();
-            span.gouraudR = quad.RightEdge().GouraudValue();
-        }
-        out.spans.push_back(span);
-    }
-    out.draws = true;
-}
-
-// VDP1Cmd_DrawPolygon's quad loop
-void BuildPolygon(const uint8 *vram, CommandSpans &out, const ClipRect &clip) {
-    CommandParams &p = out.params;
-    p.mode.u16 = Read16(vram, p.address + 0x04);
-    p.color = Read16(vram, p.address + 0x06);
-    p.antiAlias = true;
-    if (QuadSystemClipped(clip, p.vertices)) {
-        return;
-    }
-    ymir::vdp::QuadStepper<> quad{p.vertices[0], p.vertices[1], p.vertices[2], p.vertices[3]};
-    if (p.mode.gouraudEnable) {
-        p.gouraud = ReadGouraudTable(vram, p.address);
-        quad.SetupGouraud(p.gouraud[0], p.gouraud[1], p.gouraud[2], p.gouraud[3]);
-    }
-    const ymir::vdp::VDP1QuadTermination termination{quad, clip.sysH, clip.sysV};
-    uint32 quadStep = 0;
-    for (; quad.CanStep(); quad.Step(), ++quadStep) {
-        if (termination.Done(quad)) {
-            break;
-        }
-        const CoordS32 l = quad.LeftEdge().Coord();
-        const CoordS32 r = quad.RightEdge().Coord();
-        if (LineSystemClipped(clip, l, r)) {
-            continue;
-        }
-        Span span{.quadStep = quadStep, .a = l, .b = r};
-        if (p.mode.gouraudEnable) {
-            span.gouraudL = quad.LeftEdge().GouraudValue();
-            span.gouraudR = quad.RightEdge().GouraudValue();
-        }
-        out.spans.push_back(span);
-    }
-    out.draws = true;
-}
-
-// The four vertices of a quad command after local coordinates and doubleV (polygon, polyline, distorted sprite)
-std::array<CoordS32, 4> QuadVertices(const uint8 *vram, uint32 address, const ClipContext &ctx, sint32 doubleV,
-                                     bool deinterlace) {
-    sint32 x[4], y[4];
+CommandParams DecodeCommand(const gpu::Vdp1CommandParams &c) {
+    CommandParams p;
+    p.address = c.cmdAddress;
+    p.control.u16 = static_cast<uint16>((c.drawFlags >> 16) & gpu::kCmdctrlMask);
+    p.mode.u16 = static_cast<uint16>(c.drawFlags & gpu::kCmdpmodMask);
+    p.textured = gpu::Vdp1CmdTextured(c.drawFlags);
+    p.antiAlias = gpu::Vdp1CmdAntiAlias(c.drawFlags);
+    p.color = static_cast<uint16>(c.color);
+    p.colorBank = c.colorBank;
+    p.charAddr = c.charAddr;
+    p.charSizeH = gpu::Vdp1Lo16(c.charSize);
+    p.charSizeV = gpu::Vdp1Hi16(c.charSize);
+    p.clip.sysClipH = static_cast<uint16>(gpu::Vdp1Lo16(c.sysClip));
+    p.clip.sysClipV = static_cast<uint16>(gpu::Vdp1Hi16(c.sysClip));
+    p.clip.userClipX0 = static_cast<uint16>(gpu::Vdp1Lo16(c.userClip0));
+    p.clip.userClipY0 = static_cast<uint16>(gpu::Vdp1Hi16(c.userClip0));
+    p.clip.userClipX1 = static_cast<uint16>(gpu::Vdp1Lo16(c.userClip1));
+    p.clip.userClipY1 = static_cast<uint16>(gpu::Vdp1Hi16(c.userClip1));
+    p.clip.localX = 0;
+    p.clip.localY = 0;
     for (uint32 i = 0; i < 4; ++i) {
-        x[i] = SignExtend13(Read16(vram, address + 0x0C + i * 4)) + ctx.localX;
-        y[i] = SignExtend13(Read16(vram, address + 0x0E + i * 4)) + ctx.localY;
+        p.vertices[i] = CoordS32{static_cast<sint32>(c.vertex[2 * i]), static_cast<sint32>(c.vertex[2 * i + 1])};
     }
-    const bool isRegularRect = (x[0] == x[3]) && (x[1] == x[2]) && (y[0] == y[1]) && (y[2] == y[3]);
-    const sint32 yAddAB = deinterlace && isRegularRect && (y[0] >= y[2]) ? doubleV : 0;
-    const sint32 yAddCD = deinterlace && isRegularRect && (y[0] < y[2]) ? doubleV : 0;
-    return {CoordS32{x[0], (y[0] << doubleV) + yAddAB}, CoordS32{x[1], (y[1] << doubleV) + yAddAB},
-            CoordS32{x[2], (y[2] << doubleV) + yAddCD}, CoordS32{x[3], (y[3] << doubleV) + yAddCD}};
+    for (uint32 i = 0; i < 4; ++i) {
+        const uint32 word = c.gouraud[i >> 1];
+        p.gouraud[i].u16 = static_cast<uint16>((i & 1) ? gpu::Vdp1Hi16(word) : gpu::Vdp1Lo16(word));
+    }
+    return p;
 }
 
-} // namespace
+RasterState DecodeRasterState(uint32 f, uint32 drawFB) {
+    return {
+        .fbSizeH = gpu::Vdp1RasFbSizeH(f),
+        .pixel8Bits = gpu::Vdp1RasPixel8(f),
+        .dblInterlaceEnable = gpu::Vdp1RasDblInterlace(f),
+        .dblInterlaceDrawLine = gpu::Vdp1RasDblInterlaceDrawLine(f),
+        .evenOddCoordSelect = gpu::Vdp1RasEvenOddCoordSelect(f),
+        .doubleDensity = gpu::Vdp1RasDoubleDensity(f),
+        .deinterlace = gpu::Vdp1RasDeinterlace(f),
+        .transparentMeshes = gpu::Vdp1RasTransparentMeshes(f),
+        .doubleV = gpu::Vdp1RasDoubleV(f),
+        .drawFB = static_cast<uint8>(drawFB & 1),
+    };
+}
 
-CommandSpans BuildCommandSpans(const uint8 *vram, uint32 address, ClipContext &ctx, const RasterState &state) {
-    using enum VDP1Command::CommandType;
-
-    CommandSpans out;
-    CommandParams &p = out.params;
-    p.address = address;
-    p.control.u16 = Read16(vram, address);
-    p.clip = ctx;
-    const ClipRect clip = EffectiveClip(ctx, state.doubleV);
-    const sint32 doubleV = static_cast<sint32>(state.doubleV);
-    auto coord = [&](uint32 offset) { return SignExtend13(Read16(vram, address + offset)); };
-
-    switch (p.control.command) {
-    case DrawNormalSprite: {
-        const VDP1Command::Size size{.u16 = Read16(vram, address + 0x0A)};
-        const uint32 charSizeH = size.H * 8u;
-        const uint32 charSizeV = size.V;
-        const sint32 xa = coord(0x0C) + ctx.localX;
-        const sint32 ya = coord(0x0E) + ctx.localY;
-        const sint32 xb = static_cast<sint32>(static_cast<uint32>(xa) + std::max(charSizeH, 1u) - 1u);
-        const sint32 yb = static_cast<sint32>(static_cast<uint32>(ya) + std::max(charSizeV, 1u) - 1u);
-        const sint32 yAdd = state.deinterlace ? doubleV : 0;
-        p.vertices = {CoordS32{xa, ya << doubleV}, CoordS32{xb, ya << doubleV}, CoordS32{xb, (yb << doubleV) + yAdd},
-                      CoordS32{xa, (yb << doubleV) + yAdd}};
-        BuildTexturedQuad(vram, out, clip, size);
-        break;
-    }
-    case DrawScaledSprite: {
-        const VDP1Command::Size size{.u16 = Read16(vram, address + 0x0A)};
-        const sint32 xa = coord(0x0C);
-        const sint32 ya = coord(0x0E);
-        sint32 qxa = xa, qya = ya, qxb = xa, qyb = ya, qxc = xa, qyc = ya, qxd = xa, qyd = ya;
-        const uint8 zoomPointH = p.control.zoomPoint & 3;
-        const uint8 zoomPointV = (p.control.zoomPoint >> 2) & 3;
-        if (zoomPointH == 0) {
-            const sint32 xc = coord(0x14);
-            qxb = xc;
-            qxc = xc;
-        } else {
-            const sint32 xb = coord(0x10);
-            switch (zoomPointH) {
-            case 1: qxb += xb, qxc += xb; break;
-            case 2:
-                qxa -= xb >> 1;
-                qxb += (xb + 1) >> 1;
-                qxc += (xb + 1) >> 1;
-                qxd -= xb >> 1;
-                break;
-            case 3: qxa -= xb, qxd -= xb; break;
-            }
-        }
-        if (zoomPointV == 0) {
-            const sint32 yc = coord(0x16);
-            qyc = yc;
-            qyd = yc;
-        } else {
-            const sint32 yb = coord(0x12);
-            switch (zoomPointV) {
-            case 1: qyc += yb, qyd += yb; break;
-            case 2:
-                qya -= yb >> 1;
-                qyb -= yb >> 1;
-                qyc += (yb + 1) >> 1;
-                qyd += (yb + 1) >> 1;
-                break;
-            case 3: qya -= yb, qyb -= yb; break;
-            }
-        }
-        const sint32 yAdd = state.deinterlace ? doubleV : 0;
-        p.vertices = {CoordS32{qxa + ctx.localX, (qya + ctx.localY) << doubleV},
-                      CoordS32{qxb + ctx.localX, (qyb + ctx.localY) << doubleV},
-                      CoordS32{qxc + ctx.localX, ((qyc + ctx.localY) << doubleV) + yAdd},
-                      CoordS32{qxd + ctx.localX, ((qyd + ctx.localY) << doubleV) + yAdd}};
-        BuildTexturedQuad(vram, out, clip, size);
-        break;
-    }
-    case DrawDistortedSprite:
-    case DrawDistortedSpriteAlt: {
-        const VDP1Command::Size size{.u16 = Read16(vram, address + 0x0A)};
-        p.vertices = QuadVertices(vram, address, ctx, doubleV, state.deinterlace);
-        BuildTexturedQuad(vram, out, clip, size);
-        break;
-    }
-    case DrawPolygon:
-        p.vertices = QuadVertices(vram, address, ctx, doubleV, state.deinterlace);
-        BuildPolygon(vram, out, clip);
-        break;
-    case DrawPolylines:
-    case DrawPolylinesAlt: {
-        p.vertices = QuadVertices(vram, address, ctx, doubleV, state.deinterlace);
-        p.mode.u16 = Read16(vram, address + 0x04);
-        p.color = Read16(vram, address + 0x06);
-        if (QuadSystemClipped(clip, p.vertices)) {
-            break;
-        }
-        if (p.mode.gouraudEnable) {
-            p.gouraud = ReadGouraudTable(vram, address);
-        }
-        for (uint32 i = 0; i < 4; ++i) {
-            const uint32 j = (i + 1) & 3;
-            if (LineSystemClipped(clip, p.vertices[i], p.vertices[j])) {
-                continue;
-            }
-            Span span{.quadStep = i, .a = p.vertices[i], .b = p.vertices[j]};
-            if (p.mode.gouraudEnable) {
-                span.gouraudL = p.gouraud[i];
-                span.gouraudR = p.gouraud[j];
-            }
-            out.spans.push_back(span);
-        }
-        out.draws = true;
-        break;
-    }
-    case DrawLine: {
-        const sint32 xa = coord(0x0C) + ctx.localX;
-        const sint32 ya = coord(0x0E) + ctx.localY;
-        const sint32 xb = coord(0x10) + ctx.localX;
-        const sint32 yb = coord(0x12) + ctx.localY;
-        p.vertices = {CoordS32{xa, ya << doubleV}, CoordS32{xb, yb << doubleV}, CoordS32{}, CoordS32{}};
-        p.mode.u16 = Read16(vram, address + 0x04);
-        p.color = Read16(vram, address + 0x06);
-        if (LineSystemClipped(clip, p.vertices[0], p.vertices[1])) {
-            break;
-        }
-        Span span{.a = p.vertices[0], .b = p.vertices[1]};
-        if (p.mode.gouraudEnable) {
-            p.gouraud = ReadGouraudTable(vram, address);
-            span.gouraudL = p.gouraud[0];
-            span.gouraudR = p.gouraud[1];
-        }
-        out.spans.push_back(span);
-        out.draws = true;
-        break;
-    }
-    case UserClipping:
-    case UserClippingAlt:
-        ctx.userClipX0 = Read16(vram, address + 0x0C);
-        ctx.userClipY0 = Read16(vram, address + 0x0E);
-        ctx.userClipX1 = Read16(vram, address + 0x14);
-        ctx.userClipY1 = Read16(vram, address + 0x16);
-        break;
-    case SystemClipping:
-        ctx.sysClipH = Read16(vram, address + 0x14);
-        ctx.sysClipV = Read16(vram, address + 0x16);
-        break;
-    case SetLocalCoordinates:
-        ctx.localX = coord(0x0C);
-        ctx.localY = coord(0x0E);
-        break;
-    default: break;
-    }
-    return out;
+Span DecodeSpan(const gpu::Vdp1Span &s) {
+    Span span;
+    span.cmdIndex = s.cmdIndex;
+    span.quadStep = gpu::Vdp1SpanQuadStep(s.stepTexV);
+    span.a = CoordS32{static_cast<sint32>(s.x0), static_cast<sint32>(s.y0)};
+    span.b = CoordS32{static_cast<sint32>(s.x1), static_cast<sint32>(s.y1)};
+    span.texV = gpu::Vdp1SpanTexV(s.stepTexV);
+    span.gouraudL.u16 = static_cast<uint16>(gpu::Vdp1Lo16(s.gouraudLR));
+    span.gouraudR.u16 = static_cast<uint16>(gpu::Vdp1Hi16(s.gouraudLR));
+    span.fragBase = s.fragBase;
+    return span;
 }
 
 // =====================================================================================================================
@@ -387,7 +163,9 @@ void RasterSpan(const RasterState &state, const CommandParams &cmd, const Span &
 
     const bool meshToMeshFB = state.transparentMeshes && mode.meshEnable;
     const uint32 targetMode = (static_cast<uint32>(mode.colorCalcBits) << kTargetCalcShift) |
-                              (meshToMeshFB ? kTargetMeshBit : 0u) | (mode.msbOn ? kTargetMsbOnBit : 0u);
+                              (meshToMeshFB ? kTargetMeshBit : 0u) | (mode.msbOn ? kTargetMsbOnBit : 0u) |
+                              (state.pixel8Bits ? kTargetPixel8Bit : 0u) |
+                              (state.transparentMeshes ? kTargetTransparentMeshesBit : 0u);
 
     // VDP1PlotPixel up to the write; returns its result (false only when clipped)
     auto plot = [&](CoordS32 coord, uint32 step, uint32 isAA, uint16 color) -> bool {
@@ -583,7 +361,7 @@ void RasterSpan(const RasterState &state, const CommandParams &cmd, const Span &
 // =====================================================================================================================
 // Part 3: per-word ordered resolve
 
-ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, Fbram &fbram, ResolveOrder order) {
+ResolveStats Resolve(uint32 drawFB, std::vector<Fragment> fragments, Fbram &fbram, ResolveOrder order) {
     // The GPU counts fragments per unit, scans, scatters fragment indices into per-unit buckets in arbitrary order and
     // sorts each bucket by key. Here: bucket by unit (a stable radix sort), then sort each bucket by key.
     const bool descending = order == ResolveOrder::DescendingForTesting;
@@ -624,7 +402,7 @@ ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, 
 
     ResolveStats stats;
     stats.fragments = fragments.size();
-    const uint8 fb = state.drawFB & 1;
+    const uint8 fb = drawFB & 1;
     for (size_t begin = 0; begin < fragments.size();) {
         const uint32 unit = fragments[begin].target & kTargetUnitMask;
         size_t end = begin + 1;
@@ -649,7 +427,8 @@ ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, 
                 continue;
             }
             const bool toMesh = (f.target & kTargetMeshBit) != 0;
-            if (state.pixel8Bits) {
+            const bool transparentMeshes = (f.target & kTargetTransparentMeshesBit) != 0;
+            if (f.target & kTargetPixel8Bit) {
                 const uint32 shift = (f.target & kTargetOddBit) ? 0 : 8;
                 const uint16 keep = static_cast<uint16>(~(0xFFu << shift));
                 const uint16 byte = static_cast<uint16>((f.color & 0xFF) << shift);
@@ -657,7 +436,7 @@ ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, 
                     s = (s & keep) | byte;
                 } else {
                     m = (m & keep) | byte;
-                    if (state.transparentMeshes) {
+                    if (transparentMeshes) {
                         s &= keep;
                     }
                 }
@@ -695,7 +474,7 @@ ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, 
                 s = dst.u16;
             } else {
                 m = dst.u16;
-                if (state.transparentMeshes) {
+                if (transparentMeshes) {
                     s = 0;
                 }
             }
@@ -711,36 +490,31 @@ ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, 
 }
 
 // =====================================================================================================================
-// Erase
+// Part 4: erase and CPU framebuffer writes
 
-uint64 Erase(const EraseParams &params, Fbram &fbram) {
-    const uint32 scaleV = params.doubleDensity ? 1 : 0;
-    const uint32 maxH = params.hiResH ? 428 : 400;
-    const uint32 maxV = params.vres >> scaleV;
-    const uint32 x1 = std::min<uint32>(params.x1, maxH);
-    const uint32 x3 = std::min<uint32>(params.x3, maxH);
-    const uint32 y1 = std::min<uint32>(params.y1, maxV) << scaleV;
-    const uint32 y3 = std::min<uint32>(params.y3, maxV) << scaleV;
-    const bool mirror = params.deinterlace && params.doubleDensity;
-    const uint8 fb = params.fbIndex & 1;
-    const uint32 width = x3 > x1 ? x3 - x1 : 0;
+uint64 Erase(const gpu::Vdp1ErasePushConstants &params, Fbram &fbram) {
+    const bool mirror = gpu::Vdp1EraseMirrorAlt(params.flags);
+    const bool clearMesh = gpu::Vdp1EraseClearMesh(params.flags);
+    const uint8 fb = static_cast<uint8>(gpu::Vdp1EraseFb(params.flags));
+    const uint32 width = params.x3 > params.x1 ? params.x3 - params.x1 : 0;
+    const uint16 value = static_cast<uint16>(params.value);
     uint64 writes = 0;
 
-    // One write per (x, y) of the region; with a cycle budget, write i (row-major) happens if i <= cycles. Every write
-    // stores the same value, so overlapping rows (offset shift 8 with x >= 256) need no order.
-    for (uint32 y = y1; y <= y3; y++) {
-        for (uint32 x = x1; x < x3; x++) {
-            const uint64 i = static_cast<uint64>(y - y1) * width + (x - x1);
-            if (params.cycles != 0 && i > params.cycles) {
+    // One write per (x, y) of the region; write i (row-major) happens if i < writeLimit. Every write stores the same
+    // value, so overlapping rows (offset shift 8 with x >= 256) need no order.
+    for (uint32 y = params.y1; y <= params.y3; y++) {
+        for (uint32 x = params.x1; x < params.x3; x++) {
+            const uint64 i = static_cast<uint64>(y - params.y1) * width + (x - params.x1);
+            if (i >= params.writeLimit) {
                 continue;
             }
             const uint32 address = (((y << params.offsetShift) + x) * 2u) & 0x3FFFE;
-            WriteBE16(fbram.main[fb], address, params.value);
+            WriteBE16(fbram.main[fb], address, value);
             ++writes;
             if (mirror) {
-                WriteBE16(fbram.alt[fb], address, params.value);
+                WriteBE16(fbram.alt[fb], address, value);
             }
-            if (params.transparentMeshes) {
+            if (clearMesh) {
                 WriteBE16(fbram.mesh[0][fb], address, 0);
                 if (mirror) {
                     WriteBE16(fbram.mesh[1][fb], address, 0);
@@ -749,6 +523,21 @@ uint64 Erase(const EraseParams &params, Fbram &fbram) {
         }
     }
     return writes;
+}
+
+void ApplyFbWrites(std::span<const gpu::Vdp1FbWrite> writes, Fbram &fbram) {
+    for (const gpu::Vdp1FbWrite &w : writes) {
+        const uint32 address = gpu::Vdp1FbWriteWord(w.address) * 2u;
+        const uint32 fb = gpu::Vdp1FbWriteFb(w.address);
+        const uint16 mask = static_cast<uint16>(w.mask);
+        auto apply = [&](SpriteFB &target) {
+            WriteBE16(target, address, static_cast<uint16>((ReadBE16(target, address) & ~mask) | (w.value & mask)));
+        };
+        apply(fbram.main[fb]);
+        if (gpu::Vdp1FbWriteMirrorAlt(w.address)) {
+            apply(fbram.alt[fb]);
+        }
+    }
 }
 
 // =====================================================================================================================
@@ -761,88 +550,122 @@ const char *DrawnCoverage::Name(uint32 counter) {
         "command 7 (polylines alt)", "colour mode 0", "colour mode 1", "colour mode 2", "colour mode 3",
         "colour mode 4", "colour mode 5", "colour mode 6", "colour mode 7", "replace", "shadow", "half-luminance",
         "half-transparency", "Gouraud", "mesh", "alt field", "MSB-on", "8 bpp even byte", "8 bpp odd byte",
-        "double interlace (DIE)", "DIE in double density", "doubleV", "HSS lines", "end-code-terminated lines", "erase writes"};
+        "double interlace (DIE)", "DIE in double density", "doubleV", "HSS lines", "end-code-terminated lines",
+        "erase writes", "mixed-mode batches"};
     return counter < Count ? kNames[counter] : "?";
 }
-ReferenceVDP1::ReferenceVDP1(const uint8 *vram, Fbram &fbram, RasterOptions options, uint32 maxBatchFragments,
-                             uint64 shuffleSeed)
-    : m_vram(vram)
-    , m_fbram(fbram)
+
+ReferenceVDP1::ReferenceVDP1(Fbram &fbram, RasterOptions options, uint64 shuffleSeed)
+    : m_fbram(fbram)
     , m_options(options)
-    , m_maxBatchFragments(std::max(maxBatchFragments, 1u))
-    , m_shuffle(shuffleSeed) {}
+    , m_shuffle(shuffleSeed)
+    , m_vram(ymir::vdp::kVDP1VRAMSize, 0) {}
 
-void ReferenceVDP1::Command(uint32 address, const RasterState &state) {
-    ++m_stats.commands;
-    CommandSpans cs = BuildCommandSpans(m_vram, address, clip, state);
-    if (!cs.draws) {
-        return;
-    }
-    m_commandInBatch = false;
-    for (const Span &span : cs.spans) {
-        const uint32 slots = SpanSlots(state, cs.params, span);
-        if (slots == 0) {
-            continue;
+void ReferenceVDP1::Replay(const gpu::Vdp1OpList &ops) {
+    ++m_stats.opLists;
+    // The segments partition the ops, in order
+    uint32 next = 0;
+    for (const gpu::Vdp1Segment &segment : ops.segments) {
+        if (segment.firstOp != next) {
+            throw std::logic_error("vdp1ref::Replay: segments do not partition the ops");
         }
-        AddSpan(cs.params, state, span, slots);
+        next += segment.opCount;
+    }
+    if (next != ops.ops.size() || ops.segments.empty()) {
+        throw std::logic_error("vdp1ref::Replay: segments do not cover the ops");
+    }
+
+    for (const gpu::Vdp1Op &op : ops.ops) {
+        switch (op.kind) {
+        case gpu::Vdp1OpKind::Draw: DrawBatch(ops, ops.batches.at(op.index)); break;
+        case gpu::Vdp1OpKind::Erase:
+            ++m_stats.erases;
+            m_stats.drawn[DrawnCoverage::EraseWrites] += vdp1ref::Erase(ops.erases.at(op.index), m_fbram);
+            break;
+        case gpu::Vdp1OpKind::FbWrites: {
+            const gpu::Vdp1FbWritePushConstants &run = ops.fbWriteRuns.at(op.index);
+            if (run.count == 0 || static_cast<size_t>(run.offset) + run.count > ops.fbWrites.size()) {
+                throw std::logic_error("vdp1ref::Replay: bad framebuffer write run");
+            }
+            ApplyFbWrites(std::span(ops.fbWrites).subspan(run.offset, run.count), m_fbram);
+            m_stats.fbWrites += run.count;
+            break;
+        }
+        }
     }
 }
 
-void ReferenceVDP1::AddSpan(const CommandParams &params, const RasterState &state, Span span, uint32 slots) {
-    if (m_pending && (!(m_state == state) ||
-                      (m_slots > 0 && static_cast<uint64>(m_slots) + slots > m_maxBatchFragments))) {
-        Flush();
+void ReferenceVDP1::DrawBatch(const gpu::Vdp1OpList &ops, const gpu::Vdp1DrawBatch &batch) {
+    // VRAM uploads first
+    for (uint32 i = 0; i < batch.copyCount; ++i) {
+        const gpu::Vdp1VramCopy &copy = ops.vramCopies.at(batch.firstCopy + i);
+        if (static_cast<size_t>(copy.vramOffset) + copy.size > m_vram.size() ||
+            static_cast<size_t>(copy.arenaOffset) + copy.size > ops.arena.size()) {
+            throw std::logic_error("vdp1ref::DrawBatch: VRAM copy out of range");
+        }
+        std::copy_n(ops.arena.begin() + copy.arenaOffset, copy.size, m_vram.begin() + copy.vramOffset);
+        m_stats.vramUploadBytes += copy.size;
     }
-    if (!m_pending) {
-        m_pending = true;
-        m_state = state;
-        m_commandInBatch = false;
+    if (batch.spanCount == 0 || batch.cmdCount == 0 ||
+        static_cast<size_t>(batch.spanOffset) + batch.spanCount > ops.spans.size() ||
+        static_cast<size_t>(batch.cmdOffset) + batch.cmdCount > ops.commands.size()) {
+        throw std::logic_error("vdp1ref::DrawBatch: bad batch");
     }
-    if (!m_commandInBatch) {
-        m_commands.push_back(params);
-        m_commandInBatch = true;
-    }
-    span.cmdIndex = static_cast<uint32>(m_commands.size() - 1);
-    span.fragBase = m_slots;
-    m_slots += slots;
-    m_spans.push_back(span);
-}
 
-void ReferenceVDP1::Flush() {
-    if (!m_pending) {
-        return;
+    std::vector<CommandParams> commands(batch.cmdCount);
+    std::vector<RasterState> states(batch.cmdCount);
+    for (uint32 i = 0; i < batch.cmdCount; ++i) {
+        const gpu::Vdp1CommandParams &c = ops.commands[batch.cmdOffset + i];
+        commands[i] = DecodeCommand(c);
+        states[i] = DecodeRasterState(c.rasterFlags, batch.drawFB);
     }
+    m_stats.commands += batch.cmdCount;
+
     std::vector<Fragment> fragments;
-    fragments.reserve(m_slots);
-    for (size_t s = 0; s < m_spans.size(); ++s) {
-        const Span &span = m_spans[s];
-        const CommandParams &cmd = m_commands[span.cmdIndex];
+    fragments.reserve(batch.fragmentCount);
+    uint32 modes = 0; // bit 0/1: 16/8 bpp fragments, bit 2/3: transparent meshes off/on
+    for (uint32 s = 0; s < batch.spanCount; ++s) {
+        const Span span = DecodeSpan(ops.spans[batch.spanOffset + s]);
+        if (span.cmdIndex >= batch.cmdCount) {
+            throw std::logic_error("vdp1ref::DrawBatch: span command index out of range");
+        }
+        const CommandParams &cmd = commands[span.cmdIndex];
+        const RasterState &state = states[span.cmdIndex];
+        const uint32 end = s + 1 < batch.spanCount ? ops.spans[batch.spanOffset + s + 1].fragBase : batch.fragmentCount;
+        if ((s == 0 && span.fragBase != 0) || end <= span.fragBase) {
+            throw std::logic_error("vdp1ref::DrawBatch: fragment bases are not a prefix sum");
+        }
+        const uint32 slots = end - span.fragBase;
+        if (slots != SpanSlots(state, cmd, span)) {
+            throw std::logic_error("vdp1ref::DrawBatch: span slots differ from SpanSlots");
+        }
         const size_t first = fragments.size();
         SpanInfo info;
-        RasterSpan(m_state, cmd, span, m_vram, m_options, fragments, &info);
-        const uint32 slots = (s + 1 < m_spans.size() ? m_spans[s + 1].fragBase : m_slots) - span.fragBase;
+        RasterSpan(state, cmd, span, m_vram.data(), m_options, fragments, &info);
         DrawnCoverage &d = m_stats.drawn;
         for (size_t i = first; i < fragments.size(); ++i) {
             const Fragment &f = fragments[i];
             if (f.key < span.fragBase || f.key >= span.fragBase + slots) {
-                throw std::logic_error("vdp1ref::Flush: fragment key outside its span's slots");
+                throw std::logic_error("vdp1ref::DrawBatch: fragment key outside its span's slots");
             }
             using C = DrawnCoverage;
             ++d[C::CommandType0 + (static_cast<uint32>(cmd.control.command) & 7)];
             d[C::ColorMode0 + cmd.mode.colorMode] += cmd.textured;
             d[C::Mesh] += (f.target & kTargetMeshBit) != 0;
             d[C::Alt] += (f.target & kTargetAltBit) != 0;
-            d[C::DoubleInterlace] += m_state.dblInterlaceEnable;
-            d[C::DieDoubleDensity] += m_state.dblInterlaceEnable && m_state.doubleDensity && !m_state.deinterlace;
-            d[C::DoubleV] += m_state.doubleV != 0;
+            d[C::DoubleInterlace] += state.dblInterlaceEnable;
+            d[C::DieDoubleDensity] += state.dblInterlaceEnable && state.doubleDensity && !state.deinterlace;
+            d[C::DoubleV] += state.doubleV != 0;
             if (f.target & kTargetMsbOnBit) {
                 ++d[C::MsbOn];
-            } else if (m_state.pixel8Bits) {
+            } else if (f.target & kTargetPixel8Bit) {
                 ++d[(f.target & kTargetOddBit) ? C::ByteOdd : C::ByteEven];
             } else {
                 ++d[C::ColorCalc0 + ((f.target >> kTargetCalcShift) & 3)];
                 d[C::Gouraud] += cmd.mode.gouraudEnable;
             }
+            modes |= (f.target & kTargetPixel8Bit) ? 2u : 1u;
+            modes |= (f.target & kTargetTransparentMeshesBit) ? 8u : 4u;
         }
         if (fragments.size() > first) {
             d[DrawnCoverage::HssLines] += info.highSpeedShrink;
@@ -850,28 +673,18 @@ void ReferenceVDP1::Flush() {
         }
         m_stats.slots += slots;
     }
+    m_stats.drawn[DrawnCoverage::MixedModeBatches] += (modes & 3) == 3 || (modes & 12) == 12;
     if (m_shuffle != 0) {
         // the GPU scatters fragments into their buckets in arbitrary order
         for (size_t i = fragments.size(); i > 1; --i) {
             std::swap(fragments[i - 1], fragments[SplitMix64(m_shuffle) % i]);
         }
     }
-    m_stats.spans += m_spans.size();
+    m_stats.spans += batch.spanCount;
     m_stats.fragments += fragments.size();
     ++m_stats.batches;
-    const ResolveStats rs = Resolve(m_state, std::move(fragments), m_fbram, m_options.resolveOrder);
+    const ResolveStats rs = Resolve(batch.drawFB, std::move(fragments), m_fbram, m_options.resolveOrder);
     m_stats.maxPerUnit = std::max(m_stats.maxPerUnit, rs.maxPerUnit);
-
-    m_pending = false;
-    m_commands.clear();
-    m_spans.clear();
-    m_slots = 0;
-    m_commandInBatch = false;
-}
-
-void ReferenceVDP1::Erase(const EraseParams &params) {
-    Flush();
-    m_stats.drawn[DrawnCoverage::EraseWrites] += vdp1ref::Erase(params, m_fbram);
 }
 
 } // namespace brimir::test::vdp1ref

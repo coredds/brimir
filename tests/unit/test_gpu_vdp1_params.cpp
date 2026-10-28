@@ -17,9 +17,15 @@
 #include <gpu/shaders/generated/vdp1_layout_probe.layout.h>
 #include <gpu/shaders/generated/vdp1_layout_probe.spv.h>
 #include <gpu/vdp1/vdp1_bindings.hpp>
+#include <gpu/vdp1/vdp1_front.hpp>
 #include <gpu/vdp1/vdp1_hw_params.hpp>
 
+#include <ymir/hw/vdp/renderer/common/vdp1_steppers.hpp>
 #include <ymir/hw/vdp/vdp1_defs.hpp>
+#include <ymir/hw/vdp/vdp_state.hpp>
+#include <ymir/util/data_ops.hpp>
+
+#include <memory>
 
 #include <algorithm>
 #include <array>
@@ -469,6 +475,14 @@ TEST_CASE("VDP1 bindings stay within the VDP2 maxima the device limits are set f
     STATIC_CHECK(kFragmentBufferSize == 32u * 1024 * 1024);
     STATIC_CHECK(kMaxStorageBufferRange == kFragmentBufferSize);
     STATIC_CHECK(kMaxStorageBufferRange <= (1u << 27));
+    // The per-batch span, command and CPU write buffers are within it too
+    STATIC_CHECK(kSpanBufferSize == 8u * 1024 * 1024);
+    STATIC_CHECK(kCommandBufferSize == 16u * 1024 * 80);
+    STATIC_CHECK(kFbWriteBufferSize == 4u * 1024 * 1024);
+    STATIC_CHECK(kSpanBufferSize <= kMaxStorageBufferRange);
+    STATIC_CHECK(kCommandBufferSize <= kMaxStorageBufferRange);
+    STATIC_CHECK(kFbWriteBufferSize <= kMaxStorageBufferRange);
+    STATIC_CHECK(kRasterScale == 1);
     STATIC_CHECK(kBucketBufferSize == 16u * 1024 * 1024);
     STATIC_CHECK(kUnitCount == 262144);
     STATIC_CHECK(kUnitCountsBufferSize == 1024u * 1024);
@@ -476,8 +490,21 @@ TEST_CASE("VDP1 bindings stay within the VDP2 maxima the device limits are set f
     STATIC_CHECK(kFbramBufferSize == 2u * 1024 * 1024);
     STATIC_CHECK(kFbramBufferSize == brimir::gpu::vdp2::kSpriteFBBufferSize);
     STATIC_CHECK(kVRAMBufferSize == 512u * 1024);
-    // A span (2 * (4096 + 1) slots at most) always fits a fresh batch
-    STATIC_CHECK(2u * 4097u < kMaxFragmentsPerBatch);
+    // A span always fits a fresh batch: its line is clipped to the padded raw 16-bit system clip box, at most
+    // ((0xFFFF << 1) | 1) + 4 pixels on the major axis (doubleV doubles CMDYC)
+    STATIC_CHECK(kMaxSpanSlots == 2u * (0x1FFFFu + 4u));
+    STATIC_CHECK(kMaxSpanSlots <= kMaxFragmentsPerBatch);
+    {
+        // A line SystemClip trims to the padded clip box [-1, clip + 2] keeps clip + 4 pixels
+        ymir::vdp::LineStepper<> line{{3, -20}, {3, 900}, true};
+        line.SystemClip(500, 700);
+        CHECK(line.Length() >= 700);
+        CHECK(line.Length() <= 700 + 4);
+        ymir::vdp::LineStepper<> wide{{-30, 5}, {900, 9}, true};
+        wide.SystemClip(600, 700);
+        CHECK(wide.Length() >= 600);
+        CHECK(wide.Length() <= 600 + 4);
+    }
 }
 
 TEST_CASE("The FBRAM slice layout is the VDP2 sprite buffer's", "[vdp1][params]") {
@@ -630,12 +657,15 @@ TEST_CASE("rasterFlags, fragment targets, FbWrite addresses and erase flags roun
             }
         }
     }
-    CHECK(Vdp1SpanQuadStep(Vdp1Pack16(4097, 255)) == 4097);
-    CHECK(Vdp1SpanTexV(Vdp1Pack16(4097, 255)) == 255);
+    CHECK(Vdp1SpanQuadStep(Vdp1Pack16(4095, 255)) == 4095);
+    CHECK(Vdp1SpanTexV(Vdp1Pack16(4095, 255)) == 255);
+    // texV is int16: row -1 (CMDSIZE.V = 0) reads back as TextureStepper::Value()'s 0xFFFFFFFF
+    CHECK(Vdp1SpanTexV(Vdp1Pack16(3, 0xFFFF)) == 0xFFFFFFFFu);
+    CHECK(Vdp1SpanQuadStep(Vdp1Pack16(3, 0xFFFF)) == 3);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The structs hold everything the reference's commands, spans and fragments do
+// The structs hold everything the reference's commands, spans and fragments do, as the front half fills them
 
 namespace {
 
@@ -647,7 +677,7 @@ uint32_t AsU(int32_t v) {
     return static_cast<uint32_t>(v);
 }
 
-// What the front half does with a reference command (the real packer, Task 3, does the same from its own state).
+// The reference's view packed again (the inverse of ref::DecodeCommand / DecodeSpan)
 Vdp1CommandParams PackCommand(const ref::CommandParams &p, const ref::RasterState &s) {
     Vdp1CommandParams c{};
     for (size_t i = 0; i < 4; ++i) {
@@ -673,49 +703,40 @@ Vdp1CommandParams PackCommand(const ref::CommandParams &p, const ref::RasterStat
 
 Vdp1Span PackSpan(const ref::Span &s) {
     return {AsU(s.a.x()), AsU(s.a.y()), AsU(s.b.x()), AsU(s.b.y()), s.cmdIndex, s.fragBase,
-            Pack(s.gouraudL, s.gouraudR), Vdp1Pack16(s.quadStep, s.texV)};
-}
-
-Vdp1Fragment PackFragment(const ref::Fragment &f, const ref::RasterState &s) {
-    const uint32_t t = f.target;
-    return {Vdp1MakeFragmentTarget(t & ref::kTargetWordMask, (t & ref::kTargetAltBit) != 0,
-                                   (t & ref::kTargetOddBit) != 0, (t >> ref::kTargetCalcShift) & 3,
-                                   (t & ref::kTargetMeshBit) != 0, (t & ref::kTargetMsbOnBit) != 0, s.pixel8Bits,
-                                   s.transparentMeshes),
-            f.color};
+            Pack(s.gouraudL, s.gouraudR), Vdp1Pack16(s.quadStep, s.texV & 0xFFFF)};
 }
 
 } // namespace
 
 TEST_CASE("The VDP1 structs hold every field of the reference's commands, spans and fragments", "[vdp1][params]") {
+    // Random commands through the real front half: its commands and spans decode into the reference's view and pack
+    // back to the same words (nothing is lost either way), the decoded fields are the command table's and registers',
+    // and the reference's fragments of a sample of spans carry the GPU fragment layout
     std::mt19937 rng(0x7D51u);
-    std::vector<uint8_t> vram(0x80000);
-    uint64_t commands = 0, spans = 0, fragments = 0, textured = 0, gouraud = 0, mesh = 0, alt = 0;
+    uint64_t commands = 0, spans = 0, fragments = 0, textured = 0, gouraud = 0, mesh = 0, alt = 0, pixel8 = 0,
+             negativeTexV = 0;
     constexpr uint32_t kCommandTableBase = 0x1000;
+    auto state = std::make_unique<ymir::vdp::VDPState>();
     for (uint32_t iteration = 0; iteration < 2500; ++iteration) {
         // Random VRAM, with plausible command tables: a command at a random address with sizes in range
+        auto &vram = state->mem1.VRAM;
         for (auto &b : vram) {
             b = static_cast<uint8_t>(rng());
         }
-        ref::RasterState state;
-        state.fbSizeH = (rng() & 1) ? 1024 : 512;
-        state.pixel8Bits = (rng() & 3) == 0;
-        state.dblInterlaceEnable = (rng() & 1) != 0;
-        state.dblInterlaceDrawLine = (rng() & 1) != 0;
-        state.evenOddCoordSelect = (rng() & 1) != 0;
-        state.doubleDensity = (rng() & 1) != 0;
-        state.deinterlace = (rng() & 1) != 0;
-        state.transparentMeshes = (rng() & 1) != 0;
-        state.doubleV = rng() & 1;
-        ref::ClipContext ctx;
+        state->regs1.WriteTVMR(static_cast<uint16_t>((rng() & 3) == 0 ? rng() & 7 : rng() & 6));
+        state->regs1.WriteFBCR(static_cast<uint16_t>(rng() & 0x1C));
+        state->regs2.WriteTVMD(static_cast<uint16_t>(0x8000 | ((rng() & 3) << 6) | (rng() & 7)));
+        state->regs2.LatchTVMD();
+        state->state2.layerEnabled[0] = true;
+        auto &ctx = state->state1;
         ctx.sysClipH = static_cast<uint16_t>(rng() % 700);
         ctx.sysClipV = static_cast<uint16_t>(rng() % 520);
         ctx.userClipX0 = static_cast<uint16_t>(rng() & 0xFFFF);
         ctx.userClipY0 = static_cast<uint16_t>(rng() & 0xFFFF);
         ctx.userClipX1 = static_cast<uint16_t>(rng() & 0xFFFF);
         ctx.userClipY1 = static_cast<uint16_t>(rng() & 0xFFFF);
-        ctx.localX = static_cast<int32_t>(rng() % 700) - 100;
-        ctx.localY = static_cast<int32_t>(rng() % 500) - 100;
+        ctx.localCoordX = static_cast<int32_t>(rng() % 700) - 100;
+        ctx.localCoordY = static_cast<int32_t>(rng() % 500) - 100;
 
         const uint32_t address = kCommandTableBase + (iteration % 64) * 0x20;
         // CMDCTRL: draw commands 0-7 (6 is the line, 5 and 7 polylines) with random flips
@@ -725,128 +746,93 @@ TEST_CASE("The VDP1 structs hold every field of the reference's commands, spans 
         for (uint32_t v = 0; v < 4; ++v) {
             const uint16_t x = static_cast<uint16_t>(rng() % 500);
             const uint16_t y = static_cast<uint16_t>(rng() % 400);
-            vram[address + 0x0C + v * 4] = static_cast<uint8_t>(x >> 8);
-            vram[address + 0x0D + v * 4] = static_cast<uint8_t>(x);
-            vram[address + 0x0E + v * 4] = static_cast<uint8_t>(y >> 8);
-            vram[address + 0x0F + v * 4] = static_cast<uint8_t>(y);
+            ::util::WriteBE<uint16_t>(&vram[address + 0x0C + v * 4], x);
+            ::util::WriteBE<uint16_t>(&vram[address + 0x0E + v * 4], y);
         }
-        // CMDSIZE: width in 8-pixel units 1-6, height 1-200; CMDSRCA / CMDGRDA inside VRAM
+        // CMDSIZE: width in 8-pixel units 1-6, height 0-200; CMDSRCA / CMDGRDA inside VRAM
         vram[address + 0x0A] = static_cast<uint8_t>(1 + rng() % 6);
-        vram[address + 0x0B] = static_cast<uint8_t>(1 + rng() % 200);
+        vram[address + 0x0B] = static_cast<uint8_t>(rng() % 10 == 0 ? 0 : 1 + rng() % 200);
 
-        ref::CommandSpans cs = ref::BuildCommandSpans(vram.data(), address, ctx, state);
+        const ymir::vdp::config::Enhancements enhancements{.deinterlace = (rng() & 1) != 0,
+                                                           .transparentMeshes = (rng() & 1) != 0};
+        Vdp1FrontEnd front{*state};
+        front.SetEnhancements(enhancements);
+        front.SetDoubleV((rng() & 1) != 0);
+        const VDP1Command::Control control{.u16 = ::util::ReadBE<uint16_t>(&vram[address])};
+        front.ExecuteCommand(address, control);
+        const Vdp1OpList ops = front.TakeOps();
         ++commands;
-        if (!cs.draws) {
+        if (ops.commands.empty()) {
             continue;
         }
-        const Vdp1CommandParams gpu = PackCommand(cs.params, state);
-        const uint32_t df = gpu.drawFlags;
-        const uint32_t rf = gpu.rasterFlags;
-        textured += cs.params.textured;
-        gouraud += cs.params.mode.gouraudEnable;
+        REQUIRE(ops.batches.size() == 1);
+        REQUIRE(ops.commands.size() == 1);
+        const Vdp1DrawBatch &batch = ops.batches[0];
+        const Vdp1CommandParams &gpu = ops.commands[0];
+        const ref::CommandParams p = ref::DecodeCommand(gpu);
+        const ref::RasterState rs = ref::DecodeRasterState(gpu.rasterFlags, batch.drawFB);
+        const Vdp1CommandParams repacked = PackCommand(p, rs);
+        CHECK(std::memcmp(&repacked, &gpu, sizeof(gpu)) == 0);
+        textured += p.textured;
+        gouraud += p.mode.gouraudEnable;
+        pixel8 += rs.pixel8Bits;
 
-        // The command round-trips through the accessors
-        CHECK(Vdp1CmdColorCalc(df) == cs.params.mode.colorCalcBits);
-        CHECK(Vdp1CmdGouraud(df) == (cs.params.mode.gouraudEnable != 0));
-        CHECK(Vdp1CmdColorMode(df) == cs.params.mode.colorMode);
-        CHECK(Vdp1CmdTransparentPixelDisable(df) == (cs.params.mode.transparentPixelDisable != 0));
-        CHECK(Vdp1CmdEndCodeDisable(df) == (cs.params.mode.endCodeDisable != 0));
-        CHECK(Vdp1CmdMesh(df) == (cs.params.mode.meshEnable != 0));
-        CHECK(Vdp1CmdClippingMode(df) == (cs.params.mode.clippingMode != 0));
-        CHECK(Vdp1CmdUserClip(df) == (cs.params.mode.userClippingEnable != 0));
-        CHECK(Vdp1CmdHighSpeedShrink(df) == (cs.params.mode.highSpeedShrink != 0));
-        CHECK(Vdp1CmdMsbOn(df) == (cs.params.mode.msbOn != 0));
-        CHECK(Vdp1CmdTextured(df) == cs.params.textured);
-        CHECK(Vdp1CmdAntiAlias(df) == cs.params.antiAlias);
-        CHECK(Vdp1CmdFlipH(df) == (cs.params.control.flipH != 0));
-        CHECK(Vdp1CmdFlipV(df) == (cs.params.control.flipV != 0));
-        CHECK(Vdp1CmdType(df) == static_cast<uint32_t>(cs.params.control.command));
-        CHECK(Vdp1RasPixel8(rf) == state.pixel8Bits);
-        CHECK(Vdp1RasFbSizeH(rf) == state.fbSizeH);
-        CHECK(Vdp1RasDblInterlace(rf) == state.dblInterlaceEnable);
-        CHECK(Vdp1RasDblInterlaceDrawLine(rf) == state.dblInterlaceDrawLine);
-        CHECK(Vdp1RasEvenOddCoordSelect(rf) == state.evenOddCoordSelect);
-        CHECK(Vdp1RasDoubleDensity(rf) == state.doubleDensity);
-        CHECK(Vdp1RasDeinterlace(rf) == state.deinterlace);
-        CHECK(Vdp1RasTransparentMeshes(rf) == state.transparentMeshes);
-        CHECK(Vdp1RasDoubleV(rf) == state.doubleV);
-        CHECK(gpu.color == cs.params.color);
-        CHECK(gpu.colorBank == cs.params.colorBank);
-        CHECK(gpu.charAddr == cs.params.charAddr);
-        CHECK(Vdp1Lo16(gpu.charSize) == cs.params.charSizeH);
-        CHECK(Vdp1Hi16(gpu.charSize) == cs.params.charSizeV);
-        CHECK(Vdp1Lo16(gpu.sysClip) == cs.params.clip.sysClipH);
-        CHECK(Vdp1Hi16(gpu.sysClip) == cs.params.clip.sysClipV);
-        CHECK(Vdp1Lo16(gpu.userClip0) == cs.params.clip.userClipX0);
-        CHECK(Vdp1Hi16(gpu.userClip0) == cs.params.clip.userClipY0);
-        CHECK(Vdp1Lo16(gpu.userClip1) == cs.params.clip.userClipX1);
-        CHECK(Vdp1Hi16(gpu.userClip1) == cs.params.clip.userClipY1);
-        CHECK(gpu.cmdAddress == cs.params.address);
-        for (size_t v = 0; v < 4; ++v) {
-            CHECK(static_cast<int32_t>(gpu.vertex[2 * v]) == cs.params.vertices[v].x());
-            CHECK(static_cast<int32_t>(gpu.vertex[2 * v + 1]) == cs.params.vertices[v].y());
-        }
-        for (size_t g = 0; g < 4; ++g) {
-            const uint32_t word = gpu.gouraud[g >> 1];
-            CHECK(((g & 1) ? Vdp1Hi16(word) : Vdp1Lo16(word)) == cs.params.gouraud[g].u16);
-        }
+        // The decoded fields are the inputs'
+        const ymir::vdp::VDP1Command::DrawMode mode{.u16 = ::util::ReadBE<uint16_t>(&vram[address + 4])};
+        CHECK(p.mode.u16 == (mode.u16 & kCmdpmodMask));
+        CHECK(p.control.u16 == (control.u16 & kCmdctrlMask));
+        CHECK(p.address == address);
+        CHECK(p.clip.sysClipH == ctx.sysClipH);
+        CHECK(p.clip.sysClipV == ctx.sysClipV);
+        CHECK(p.clip.userClipX0 == ctx.userClipX0);
+        CHECK(p.clip.userClipY0 == ctx.userClipY0);
+        CHECK(p.clip.userClipX1 == ctx.userClipX1);
+        CHECK(p.clip.userClipY1 == ctx.userClipY1);
+        CHECK(rs.pixel8Bits == state->regs1.tvmr.pixel8Bits);
+        CHECK(rs.fbSizeH == state->regs1.tvmr.fbSizeH);
+        CHECK(rs.dblInterlaceEnable == state->regs1.dblInterlaceEnable);
+        CHECK(rs.dblInterlaceDrawLine == state->regs1.dblInterlaceDrawLine);
+        CHECK(rs.evenOddCoordSelect == state->regs1.evenOddCoordSelect);
+        CHECK(rs.doubleDensity == (state->regs2.TVMD.LSMDn == ymir::vdp::InterlaceMode::DoubleDensity));
+        CHECK(rs.deinterlace == enhancements.deinterlace);
+        CHECK(rs.transparentMeshes == enhancements.transparentMeshes);
+        CHECK(rs.doubleV == (front.DoubleV() ? 1u : 0u));
+        CHECK(rs.drawFB == state->fbIndex.draw);
 
-        // Spans and their fragments
-        // Every span gets its slots; about a dozen per command are rasterized and checked, and eight of each one's
-        // fragments (the loop is long: a quad has hundreds of lines of hundreds of pixels)
-        uint32_t fragBase = 0;
+        // Spans and their fragments: about a dozen spans per command are rasterized and checked, and eight of each
+        // one's fragments (the loop is long: a quad has hundreds of lines of hundreds of pixels)
         std::vector<ref::Fragment> frags;
-        const size_t spanStride = std::max<size_t>(1, cs.spans.size() / 12);
-        size_t spanIndex = 0;
-        for (ref::Span &span : cs.spans) {
-            const uint32_t slots = ref::SpanSlots(state, cs.params, span);
-            if (slots == 0) {
-                continue;
-            }
-            span.cmdIndex = iteration & 0xFF;
-            span.fragBase = fragBase;
-            fragBase += slots;
-            if (spanIndex++ % spanStride != 0) {
+        const size_t spanStride = std::max<size_t>(1, batch.spanCount / 12);
+        for (uint32_t s = 0; s < batch.spanCount; ++s) {
+            const Vdp1Span &gs = ops.spans[batch.spanOffset + s];
+            const ref::Span span = ref::DecodeSpan(gs);
+            const Vdp1Span again = PackSpan(span);
+            CHECK(std::memcmp(&again, &gs, sizeof(gs)) == 0);
+            negativeTexV += static_cast<int32_t>(span.texV) < 0;
+            if (s % spanStride != 0) {
                 continue;
             }
             ++spans;
-            const Vdp1Span gs = PackSpan(span);
-            CHECK(static_cast<int32_t>(gs.x0) == span.a.x());
-            CHECK(static_cast<int32_t>(gs.y0) == span.a.y());
-            CHECK(static_cast<int32_t>(gs.x1) == span.b.x());
-            CHECK(static_cast<int32_t>(gs.y1) == span.b.y());
-            CHECK(gs.cmdIndex == span.cmdIndex);
-            CHECK(gs.fragBase == span.fragBase);
-            CHECK(Vdp1SpanQuadStep(gs.stepTexV) == span.quadStep);
-            CHECK(Vdp1SpanTexV(gs.stepTexV) == span.texV);
-            CHECK(Vdp1Lo16(gs.gouraudLR) == span.gouraudL.u16);
-            CHECK(Vdp1Hi16(gs.gouraudLR) == span.gouraudR.u16);
-
+            const uint32_t slots = ref::SpanSlots(rs, p, span);
             frags.clear();
-            ref::RasterSpan(state, cs.params, span, vram.data(), {}, frags);
+            ref::RasterSpan(rs, p, span, vram.data(), {}, frags);
             const size_t fragmentStride = std::max<size_t>(1, frags.size() / 8);
             for (size_t fragmentIndex = 0; fragmentIndex < frags.size(); fragmentIndex += fragmentStride) {
                 const ref::Fragment &f = frags[fragmentIndex];
-                const Vdp1Fragment gf = PackFragment(f, state);
+                const Vdp1Fragment gf{f.target | kFragLiveBit, f.color};
                 ++fragments;
                 mesh += (f.target & ref::kTargetMeshBit) != 0;
                 alt += (f.target & ref::kTargetAltBit) != 0;
                 // The slot index is the key
                 REQUIRE(f.key >= span.fragBase);
                 REQUIRE(f.key < span.fragBase + slots);
-                CHECK(Vdp1FragLive(gf.target));
-                CHECK(Vdp1FragWord(gf.target) == (f.target & ref::kTargetWordMask));
-                CHECK(Vdp1FragAlt(gf.target) == ((f.target & ref::kTargetAltBit) != 0));
-                CHECK(Vdp1FragOddByte(gf.target) == ((f.target & ref::kTargetOddBit) != 0));
-                CHECK(Vdp1FragColorCalc(gf.target) == ((f.target >> ref::kTargetCalcShift) & 3));
-                CHECK(Vdp1FragMesh(gf.target) == ((f.target & ref::kTargetMeshBit) != 0));
-                CHECK(Vdp1FragMsbOn(gf.target) == ((f.target & ref::kTargetMsbOnBit) != 0));
-                CHECK(Vdp1FragPixel8(gf.target) == state.pixel8Bits);
-                CHECK(Vdp1FragTransparentMeshes(gf.target) == state.transparentMeshes);
+                // The reference's target is the GPU fragment's target without the live bit
+                CHECK(gf.target == Vdp1MakeFragmentTarget(
+                                       f.target & ref::kTargetWordMask, (f.target & ref::kTargetAltBit) != 0,
+                                       (f.target & ref::kTargetOddBit) != 0, (f.target >> ref::kTargetCalcShift) & 3,
+                                       (f.target & ref::kTargetMeshBit) != 0, (f.target & ref::kTargetMsbOnBit) != 0,
+                                       rs.pixel8Bits, rs.transparentMeshes));
                 CHECK(Vdp1FragUnit(gf.target) == (f.target & ref::kTargetUnitMask));
-                // The reference's target is the fragment's target without the two bits that moved here
-                CHECK((gf.target & 0x7FFFFF) == (f.target & 0x7FFFFF));
-                CHECK(gf.color == f.color);
                 // The word is inside the framebuffer's slice
                 CHECK(Vdp1FbramByteAddress(0, Vdp1FragWord(gf.target)) < kFbramSliceSize);
             }
@@ -854,13 +840,16 @@ TEST_CASE("The VDP1 structs hold every field of the reference's commands, spans 
     }
     // The random commands covered what the structs must carry
     INFO("commands " << commands << " spans " << spans << " fragments " << fragments << " textured " << textured
-                     << " gouraud " << gouraud << " mesh " << mesh << " alt " << alt);
+                     << " gouraud " << gouraud << " mesh " << mesh << " alt " << alt << " 8 bpp " << pixel8
+                     << " texV -1 " << negativeTexV);
     CHECK(spans > 3000);
     CHECK(fragments > 10000);
     CHECK(textured > 100);
     CHECK(gouraud > 100);
     CHECK(mesh > 100);
     CHECK(alt > 100);
+    CHECK(pixel8 > 30);
+    CHECK(negativeTexV > 0);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -79,9 +79,12 @@ add_executable(brimir_tests
     unit/vdp2_subpixel_reference.cpp
     unit/test_vdp2_subpixel_reference.cpp
     unit/test_vdp2_front.cpp
-    # CPU reference of the GPU VDP1 rasterizer (spans, keyed fragments, per-word ordered resolve) against software
+    # CPU reference of the GPU VDP1 back half (keyed fragments, per-word ordered resolve, erase, CPU writes) fed by the
+    # VDP1 front half, against software
     unit/vdp1_raster_reference.cpp
     unit/test_vdp1_raster_reference.cpp
+    # VDP1 front half (commands, spans, op stream, batching, VRAM uploads)
+    unit/test_vdp1_front.cpp
     # brimir_vkhost's sample-point mapping and sharpness metric (tools/vkhost/sample_points.hpp, header-only)
     unit/test_vkhost_sample_points.cpp
 )

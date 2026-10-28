@@ -1,9 +1,12 @@
-// The CPU reference of the GPU VDP1 rasterizer (vdp1_raster_reference.hpp) against the steppers and against the
-// unthreaded SoftwareVDPRenderer's FBRAM (main framebuffers, alternate fields, meshes), byte for byte.
+// The CPU reference of the GPU VDP1 back half (vdp1_raster_reference.hpp), fed by the real front half
+// (gpu/vdp1/vdp1_front.hpp: commands, spans, VRAM uploads, erases, CPU framebuffer writes), against the steppers and
+// against the unthreaded SoftwareVDPRenderer's FBRAM (main framebuffers, alternate fields, meshes), byte for byte.
 
 #include "catch_amalgamated.hpp"
 
 #include "vdp1_raster_reference.hpp"
+
+#include <gpu/vdp1/vdp1_front.hpp>
 
 #include <ymir/hw/vdp/renderer/common/vdp1_steppers.hpp>
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
@@ -27,6 +30,7 @@ namespace {
 
 using namespace ymir;
 namespace ref = brimir::test::vdp1ref;
+namespace gpu = brimir::gpu::vdp1;
 using vdp::CoordS32;
 
 struct TestRng {
@@ -56,10 +60,18 @@ uint16 U(sint32 v) {
 // Scenarios: registers, VRAM and an op list, run on both renderers
 
 struct Op {
-    enum class Kind { BeginFrame, Command, EndFrame, WriteTVMR, WriteFBCR, WriteTVMD, Erase, Swap };
+    enum class Kind {
+        BeginFrame, Command, EndFrame, WriteTVMR, WriteFBCR, WriteTVMD, Erase, Swap,
+        WriteVRAM,       // a 16-bit VDP1 VRAM write (address, value)
+        WriteFB8,        // a CPU write to the draw framebuffer (address, value)
+        WriteFB16,
+        SetEnhancements, // value bit 0 deinterlace, bit 1 transparent meshes
+        FrameBoundary,   // the front half's MarkFrameBoundary (VDP2EndFrame); software has nothing to do
+        Take,            // the front half's TakeOps, replayed into the reference
+    };
     Kind kind;
-    uint32 address = 0; // Command
-    uint16 value = 0;   // register writes; Erase: the write value
+    uint32 address = 0; // Command, WriteVRAM, WriteFB*
+    uint16 value = 0;   // register writes, WriteVRAM, WriteFB*, SetEnhancements; Erase: the write value
     uint16 x1 = 0, y1 = 0, x3 = 0, y3 = 0;
     uint64 cycles = 0;
 };
@@ -80,7 +92,8 @@ struct Scenario {
     std::vector<uint8> vram = std::vector<uint8>(kVRAMSize, 0);
     std::vector<uint8> fbFill; // tiled over both main framebuffers; empty = zero
     std::vector<Op> ops;
-    uint32 maxBatchFragments = 0xFFFFFFFFu;
+    gpu::Vdp1BatchLimits limits; // the front half's batch capacities (lowered in some random tables)
+    bool hazardTracking = true;  // off only to show that the tests notice
 
     uint32 nextCommand = kCommandBase;
     uint32 nextGouraud = kGouraudBase;
@@ -180,13 +193,8 @@ void FillMain(const Scenario &s, std::array<vdp::SpriteFB, 2> &fbs) {
     }
 }
 
-std::unique_ptr<SoftwareRun> RunSoftware(const Scenario &s) {
-    auto run = std::make_unique<SoftwareRun>();
-    auto &state = *run->state;
-    run->renderer = std::make_unique<vdp::SoftwareVDPRenderer>(state, run->debug, run->access);
-    auto &renderer = *run->renderer;
-    renderer.ConfigureEnhancements({.deinterlace = s.deinterlace, .transparentMeshes = s.transparentMeshes});
-
+// The scenario's registers, clip state, VRAM and framebuffers in a fresh VDPState (both renderers start from this)
+void SetupState(const Scenario &s, vdp::VDPState &state) {
     state.regs2.WriteTVMD(s.tvmd);
     state.regs2.LatchTVMD();
     state.regs1.WriteTVMR(s.tvmr);
@@ -203,10 +211,48 @@ std::unique_ptr<SoftwareRun> RunSoftware(const Scenario &s) {
     state.state2.layerEnabled[0] = true;
     std::copy(s.vram.begin(), s.vram.end(), state.mem1.VRAM.begin());
     FillMain(s, state.mem1.FBRAM);
+}
+
+vdp::config::Enhancements EnhancementsOf(uint16 value) {
+    return {.deinterlace = (value & 1) != 0, .transparentMeshes = (value & 2) != 0};
+}
+
+// The ops every runner applies to VDPState the way the VDP does (register writes, erase latches, swaps, the memory
+// writes before their renderer hooks); returns false for the ops it leaves to the runner
+bool ApplyStateOp(const Op &op, vdp::VDPState &state) {
+    switch (op.kind) {
+    case Op::Kind::WriteTVMR: state.regs1.WriteTVMR(op.value); return true;
+    case Op::Kind::WriteFBCR: state.regs1.WriteFBCR(op.value); return true;
+    case Op::Kind::WriteTVMD:
+        state.regs2.WriteTVMD(op.value);
+        state.regs2.LatchTVMD();
+        return true;
+    case Op::Kind::Swap: state.fbIndex.Flip(); return true;
+    case Op::Kind::Erase:
+        state.regs1.eraseWriteValueLatch = op.value;
+        state.regs1.eraseX1Latch = op.x1;
+        state.regs1.eraseY1Latch = op.y1;
+        state.regs1.eraseX3Latch = op.x3;
+        state.regs1.eraseY3Latch = op.y3;
+        return false;
+    default: return false;
+    }
+}
+
+std::unique_ptr<SoftwareRun> RunSoftware(const Scenario &s) {
+    auto run = std::make_unique<SoftwareRun>();
+    auto &state = *run->state;
+    run->renderer = std::make_unique<vdp::SoftwareVDPRenderer>(state, run->debug, run->access);
+    auto &renderer = *run->renderer;
+    renderer.ConfigureEnhancements({.deinterlace = s.deinterlace, .transparentMeshes = s.transparentMeshes});
+    SetupState(s, state);
     renderer.VDP2SetResolution(320, s.vres, false);
     renderer.PostLoadStateSync();
 
     for (const Op &op : s.ops) {
+        if (ApplyStateOp(op, state)) {
+            continue;
+        }
         switch (op.kind) {
         case Op::Kind::BeginFrame: renderer.VDP1BeginFrame(); break;
         case Op::Kind::Command: {
@@ -215,21 +261,20 @@ std::unique_ptr<SoftwareRun> RunSoftware(const Scenario &s) {
             break;
         }
         case Op::Kind::EndFrame: renderer.VDP1EndFrame(); break;
-        case Op::Kind::WriteTVMR: state.regs1.WriteTVMR(op.value); break;
-        case Op::Kind::WriteFBCR: state.regs1.WriteFBCR(op.value); break;
-        case Op::Kind::WriteTVMD:
-            state.regs2.WriteTVMD(op.value);
-            state.regs2.LatchTVMD();
+        case Op::Kind::Erase: renderer.VDP1EraseFramebuffer(op.cycles); break;
+        case Op::Kind::WriteVRAM:
+            state.mem1.WriteVRAM<uint16>(op.address, op.value,
+                                         [&](uint32 a, uint16 v) { renderer.VDP1WriteVRAM(a, v); });
             break;
-        case Op::Kind::Erase:
-            state.regs1.eraseWriteValueLatch = op.value;
-            state.regs1.eraseX1Latch = op.x1;
-            state.regs1.eraseY1Latch = op.y1;
-            state.regs1.eraseX3Latch = op.x3;
-            state.regs1.eraseY3Latch = op.y3;
-            renderer.VDP1EraseFramebuffer(op.cycles);
+        case Op::Kind::WriteFB8:
+            state.VDP1WriteFB<uint8>(op.address, static_cast<uint8>(op.value),
+                                     [&](uint32 a, uint8 v) { renderer.VDP1WriteFB(a, v); });
             break;
-        case Op::Kind::Swap: state.fbIndex.Flip(); break;
+        case Op::Kind::WriteFB16:
+            state.VDP1WriteFB<uint16>(op.address, op.value, [&](uint32 a, uint16 v) { renderer.VDP1WriteFB(a, v); });
+            break;
+        case Op::Kind::SetEnhancements: renderer.ConfigureEnhancements(EnhancementsOf(op.value)); break;
+        default: break;
         }
     }
     return run;
@@ -238,80 +283,74 @@ std::unique_ptr<SoftwareRun> RunSoftware(const Scenario &s) {
 struct ReferenceRun {
     std::unique_ptr<ref::Fbram> fb = std::make_unique<ref::Fbram>();
     ref::ReferenceStats stats;
+    gpu::Vdp1FrontStats front;
+    std::unique_ptr<vdp::VDPState> state = std::make_unique<vdp::VDPState>(); // the front half's
+    bool doubleV = false;
 };
 
+// The front half driven like a renderer, its op lists replayed into the reference
 ReferenceRun RunReference(const Scenario &s, ref::RasterOptions options = {}, uint64 shuffleSeed = 0) {
     ReferenceRun run;
-    // VDP1Memory::Reset's pattern past the scenario's 128 KiB, as in the software renderer's VDPState
-    static const std::vector<uint8> kResetVRAM = [] {
-        std::vector<uint8> v(vdp::kVDP1VRAMSize);
-        for (uint32 addr = 0; addr < v.size(); addr++) {
-            v[addr] = (addr & 0x1F) == 0 ? 0x80 : (addr & 0x1F) == 1 ? 0x00 : (addr & 2) == 2 ? 0x55 : 0xAA;
-        }
-        return v;
-    }();
-    std::vector<uint8> vram = kResetVRAM;
-    std::copy(s.vram.begin(), s.vram.end(), vram.begin());
+    auto &state = *run.state;
+    SetupState(s, state);
     FillMain(s, run.fb->main);
 
-    ref::ReferenceVDP1 reference{vram.data(), *run.fb, options, s.maxBatchFragments, shuffleSeed};
-    reference.clip = s.clip;
-    vdp::VDP1Regs regs1;
-    regs1.WriteTVMR(s.tvmr);
-    regs1.WriteFBCR(s.fbcr);
-    uint16 tvmd = s.tvmd & 0x81F7;
-    uint32 doubleV = 0;
-    vdp::FBRAMIndex fbIndex;
+    gpu::Vdp1FrontEnd front{state};
+    front.SetEnhancements({.deinterlace = s.deinterlace, .transparentMeshes = s.transparentMeshes});
+    front.SetBatchLimitsForTesting(s.limits);
+    front.SetHazardTrackingForTesting(s.hazardTracking);
+    ref::ReferenceVDP1 reference{*run.fb, options, shuffleSeed};
 
     for (const Op &op : s.ops) {
+        if (ApplyStateOp(op, state)) {
+            continue;
+        }
         switch (op.kind) {
-        case Op::Kind::BeginFrame:
-            doubleV = s.deinterlace && LSMD(tvmd) == 3 && !regs1.dblInterlaceEnable;
-            break;
-        case Op::Kind::Command:
-            reference.Command(op.address, ref::RasterState{
-                                              .fbSizeH = regs1.tvmr.fbSizeH,
-                                              .pixel8Bits = regs1.tvmr.pixel8Bits,
-                                              .dblInterlaceEnable = regs1.dblInterlaceEnable,
-                                              .dblInterlaceDrawLine = regs1.dblInterlaceDrawLine,
-                                              .evenOddCoordSelect = regs1.evenOddCoordSelect,
-                                              .doubleDensity = LSMD(tvmd) == 3,
-                                              .deinterlace = s.deinterlace,
-                                              .transparentMeshes = s.transparentMeshes,
-                                              .doubleV = doubleV,
-                                              .drawFB = fbIndex.draw,
-                                          });
-            break;
-        case Op::Kind::EndFrame: break;
-        case Op::Kind::WriteTVMR: regs1.WriteTVMR(op.value); break;
-        case Op::Kind::WriteFBCR: regs1.WriteFBCR(op.value); break;
-        case Op::Kind::WriteTVMD: tvmd = op.value & 0x81F7; break;
-        case Op::Kind::Erase:
-            reference.Erase({
-                .fbIndex = fbIndex.display,
-                .value = op.value,
-                .x1 = op.x1,
-                .y1 = op.y1,
-                .x3 = op.x3,
-                .y3 = op.y3,
-                .offsetShift = regs1.tvmr.eraseOffsetShift,
-                .doubleDensity = LSMD(tvmd) == 3,
-                .hiResH = (tvmd & 1) != 0,
-                .vres = s.vres,
-                .deinterlace = s.deinterlace,
-                .transparentMeshes = s.transparentMeshes,
-                .cycles = op.cycles,
-            });
-            break;
-        case Op::Kind::Swap:
-            reference.Flush();
-            fbIndex.Flip();
+        case Op::Kind::BeginFrame: front.BeginFrame(); break;
+        case Op::Kind::Command: {
+            const vdp::VDP1Command::Control control{.u16 = util::ReadBE<uint16>(&state.mem1.VRAM[op.address])};
+            front.ExecuteCommand(op.address, control);
             break;
         }
+        case Op::Kind::Erase: front.Erase(op.cycles, s.vres); break;
+        case Op::Kind::WriteVRAM:
+            state.mem1.WriteVRAM<uint16>(op.address, op.value, [&](uint32 a, uint16) { front.WriteVRAM(a); });
+            break;
+        case Op::Kind::WriteFB8:
+            state.VDP1WriteFB<uint8>(op.address, static_cast<uint8>(op.value),
+                                     [&](uint32 a, uint8 v) { front.WriteFB8(a, v); });
+            break;
+        case Op::Kind::WriteFB16:
+            state.VDP1WriteFB<uint16>(op.address, op.value, [&](uint32 a, uint16 v) { front.WriteFB16(a, v); });
+            break;
+        case Op::Kind::SetEnhancements: front.SetEnhancements(EnhancementsOf(op.value)); break;
+        case Op::Kind::FrameBoundary: front.MarkFrameBoundary(); break;
+        case Op::Kind::Take: reference.Replay(front.TakeOps()); break;
+        default: break;
+        }
     }
-    reference.Flush();
+    reference.Replay(front.TakeOps());
     run.stats = reference.Stats();
+    run.front = front.Stats();
+    run.doubleV = front.DoubleV();
     return run;
+}
+
+// The clip state and doubleV the two renderers end with (the front half keeps software's VDPState::state1 and doubleV)
+std::string CompareState(const SoftwareRun &sw, const ReferenceRun &r) {
+    const auto &a = sw.state->state1;
+    const auto &b = r.state->state1;
+    if (a.sysClipH != b.sysClipH || a.sysClipV != b.sysClipV || a.userClipX0 != b.userClipX0 ||
+        a.userClipY0 != b.userClipY0 || a.userClipX1 != b.userClipX1 || a.userClipY1 != b.userClipY1 ||
+        a.localCoordX != b.localCoordX || a.localCoordY != b.localCoordY) {
+        return "clip state differs";
+    }
+    auto saved = std::make_unique<savestate::VDPSaveState::VDPRendererSaveState>();
+    sw.renderer->SaveState(*saved);
+    if ((saved->vdp1State.doubleV != 0) != r.doubleV) {
+        return "doubleV differs";
+    }
+    return {};
 }
 
 // Empty if equal; otherwise the first difference and the number of differing bytes
@@ -355,12 +394,14 @@ std::string CompareFbram(const SoftwareRun &sw, const ref::Fbram &fb) {
 struct Coverage {
     enum Counter : uint32 {
         WrappedCoords, TransparentRows, EndCodeRows, RawLargeClip, UserClip, ClipMode1, LocalCoords, SysClipCmds,
-        UserClipCmds, Erases, PartialErases, Swaps, MidFrameRegWrites, BatchLimits, MultiFrame, Count
+        UserClipCmds, Erases, PartialErases, Swaps, MidFrameRegWrites, BatchLimits, MultiFrame, VramWrites, FbWrites,
+        EnhancementChanges, FrameBoundaries, Takes, Count
     };
     static constexpr const char *kNames[Count] = {
         "wrapped coordinates", "transparent texture rows", "end-code texture rows", "raw large clip values",
         "user clipping", "clipping mode 1", "local coordinate commands", "system clip commands", "user clip commands",
-        "erases", "partial erases", "swaps", "mid-frame register writes", "batch limits", "multi-frame tables"};
+        "erases", "partial erases", "swaps", "mid-frame register writes", "batch limits", "multi-frame tables",
+        "mid-frame VRAM writes", "CPU framebuffer writes", "enhancement changes", "frame boundaries", "op takes"};
     std::array<uint64, Count> counts{};
 
     uint64 &operator[](uint32 counter) {
@@ -630,9 +671,74 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
         }
     }
     if (rng.Chance(30)) {
-        s.maxBatchFragments = static_cast<uint32>(rng.Chance(50) ? rng.Range(1, 64) : rng.Range(64, 20000));
+        s.limits.fragments = static_cast<uint32>(rng.Chance(50) ? rng.Range(1, 64) : rng.Range(64, 20000));
         ++cov[Coverage::BatchLimits];
     }
+
+    // The ops Task 1's tables did not have (VRAM and framebuffer writes between commands, enhancement changes, frame
+    // boundaries, takes, the other batch limits) come from a second generator, so the tables keep Task 1's commands
+    TestRng rng2{seed * 0x9E3779B97F4A7C15ull + 0x5EED};
+    if (rng2.Chance(10)) {
+        s.limits.spans = static_cast<uint32>(rng2.Range(1, 40));
+        ++cov[Coverage::BatchLimits];
+    }
+    if (rng2.Chance(10)) {
+        s.limits.commands = static_cast<uint32>(rng2.Range(1, 4));
+        ++cov[Coverage::BatchLimits];
+    }
+    if (rng2.Chance(10)) {
+        s.limits.fbWrites = static_cast<uint32>(rng2.Range(1, 3));
+        ++cov[Coverage::BatchLimits];
+    }
+    auto extraOps = [&] {
+        if (rng2.Chance(8)) {
+            // VRAM writes, mostly into what earlier commands read: textures, Gouraud tables, command tables and the
+            // look-up tables in the noise area
+            const uint32 count = static_cast<uint32>(rng2.Range(1, 4));
+            for (uint32 i = 0; i < count; ++i) {
+                uint32 address;
+                const uint32 r = static_cast<uint32>(rng2.Range(0, 99));
+                if (r < 40 && s.nextTexture > Scenario::kTextureBase) {
+                    address = static_cast<uint32>(rng2.Range(Scenario::kTextureBase, s.nextTexture - 1));
+                } else if (r < 60 && s.nextGouraud > Scenario::kGouraudBase) {
+                    address = static_cast<uint32>(rng2.Range(Scenario::kGouraudBase, s.nextGouraud - 1));
+                } else if (r < 75 && s.nextCommand > Scenario::kCommandBase) {
+                    address = static_cast<uint32>(rng2.Range(Scenario::kCommandBase, s.nextCommand - 1));
+                } else {
+                    address = static_cast<uint32>(rng2.Range(Scenario::kTextureBase, Scenario::kVRAMSize - 2));
+                }
+                s.ops.push_back({.kind = Op::Kind::WriteVRAM,
+                                 .address = address & ~1u,
+                                 .value = static_cast<uint16>(rng2.Next())});
+                ++cov[Coverage::VramWrites];
+            }
+        }
+        if (rng2.Chance(5)) {
+            const uint32 count = static_cast<uint32>(rng2.Range(1, 8));
+            for (uint32 i = 0; i < count; ++i) {
+                const uint32 address = rng2.Chance(80)
+                                           ? static_cast<uint32>((rng2.Range(0, 260) * 512 + rng2.Range(0, 400)) * 2)
+                                           : static_cast<uint32>(rng2.Range(0, 0x3FFFF));
+                const bool byte = rng2.Chance(40);
+                s.ops.push_back({.kind = byte ? Op::Kind::WriteFB8 : Op::Kind::WriteFB16,
+                                 .address = (byte ? address + rng2.Range(0, 1) : address) & 0x3FFFF,
+                                 .value = static_cast<uint16>(rng2.Next())});
+                ++cov[Coverage::FbWrites];
+            }
+        }
+        if (rng2.Chance(2)) {
+            s.Op0(Op::Kind::SetEnhancements, static_cast<uint16>(rng2.Range(0, 3)));
+            ++cov[Coverage::EnhancementChanges];
+        }
+        if (rng2.Chance(4)) {
+            s.Op0(Op::Kind::FrameBoundary);
+            ++cov[Coverage::FrameBoundaries];
+        }
+        if (rng2.Chance(4)) {
+            s.Op0(Op::Kind::Take);
+            ++cov[Coverage::Takes];
+        }
+    };
 
     auto randomRegWrite = [&] {
         switch (rng.Range(0, 5)) {
@@ -691,6 +797,7 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
                 randomRegWrite();
                 ++cov[Coverage::MidFrameRegWrites];
             }
+            extraOps();
             const uint32 kind = static_cast<uint32>(rng.Range(0, 99));
             if (kind < 7) {
                 uint16 ch, cv;
@@ -716,6 +823,7 @@ Scenario RandomScenario(uint64 seed, Coverage &cov) {
                 AddRandomDraw(rng, s, regs, cov);
             }
         }
+        extraOps();
         s.Op0(Op::Kind::EndFrame);
     }
     return s;
@@ -733,11 +841,14 @@ struct RandomRunResult {
     uint64 tablesWithAlt = 0;  // tables ending with a non-zero alternate-field slice
     uint64 tablesWithMesh = 0; // ... mesh slice
     ref::DrawnCoverage drawn;
+    std::array<uint64, 6> batchEnds{}; // the front half's batch closes, by gpu::Vdp1BatchEnd
+    uint64 fbWrites = 0, vramUploadBytes = 0;
 };
 
 struct SeedResult {
     std::string diff, noBreakDiff, failure;
     ref::ReferenceStats stats;
+    gpu::Vdp1FrontStats front;
     bool alt = false, mesh = false;
 };
 
@@ -754,7 +865,11 @@ SeedResult RunRandomSeed(uint64 seed, Coverage &cov) {
         const ReferenceRun r = RunReference(s, {}, seed % 4 == 0 ? seed * 2654435761ull + 1 : 0);
         const auto sw = RunSoftware(s);
         out.diff = CompareFbram(*sw, *r.fb);
+        if (out.diff.empty()) {
+            out.diff = CompareState(*sw, r);
+        }
         out.stats = r.stats;
+        out.front = r.front;
         out.alt = AnyNonZero(r.fb->alt[0]) || AnyNonZero(r.fb->alt[1]);
         out.mesh = AnyNonZero(r.fb->mesh[0][0]) || AnyNonZero(r.fb->mesh[0][1]) || AnyNonZero(r.fb->mesh[1][0]) ||
                    AnyNonZero(r.fb->mesh[1][1]);
@@ -824,12 +939,24 @@ RandomRunResult RunRandomScenarios(uint64 firstSeed, uint64 count, Coverage &cov
         result.tablesWithAlt += r.alt;
         result.tablesWithMesh += r.mesh;
         result.drawn.Merge(r.stats.drawn);
+        for (size_t e = 0; e < result.batchEnds.size(); ++e) {
+            result.batchEnds[e] += r.front.batchEnds[e];
+        }
+        result.fbWrites += r.stats.fbWrites;
+        result.vramUploadBytes += r.stats.vramUploadBytes;
     }
     return result;
 }
 
 void CheckRandomRun(const RandomRunResult &r, const Coverage &cov) {
-    CAPTURE(r.firstMismatch, r.maxPerUnit, r.fragments, r.batches, r.spans);
+    CAPTURE(r.firstMismatch, r.maxPerUnit, r.fragments, r.batches, r.spans, r.fbWrites, r.vramUploadBytes);
+    static constexpr const char *kEndNames[] = {"op kind", "VRAM hazard", "framebuffer swap", "capacity",
+                                                "frame boundary", "take"};
+    for (size_t e = 0; e < r.batchEnds.size(); ++e) {
+        INFO("batches closed by " << kEndNames[e] << ": " << r.batchEnds[e]);
+        CHECK(r.batchEnds[e] > 0);
+    }
+    CHECK(r.fbWrites > 0);
     CHECK(r.failures == 0);
     CHECK(r.mismatches == 0);
     CHECK(r.noBreakMismatches == 0);
@@ -1443,6 +1570,119 @@ TEST_CASE("VDP1 reference erase matches software (full grid)", "[vdp1][reference
     CHECK(RunEraseGrid(true) == 6 * 4 * 4 * 4 * 4);
 }
 
+TEST_CASE("VDP1 reference through the front half: VRAM rewrites between commands", "[vdp1][reference][front]") {
+    // Sprites read a texture (colour mode 5) or a look-up table (colour mode 1) that the CPU rewrites after each draw,
+    // before the next draw reads it again: software draws each sprite with the data of its time. The front half closes
+    // the batch at each rewrite and uploads the old data with it. With hazard tracking off the GPU would draw the
+    // earlier sprites with the later data, and the comparison notices.
+    for (const uint32_t colorMode : {5u, 1u}) {
+        CAPTURE(colorMode);
+        Scenario s;
+        s.fbFill = {0x80, 0x00};
+        const uint16_t srca = s.AddTexture(colorMode == 5 ? RGBTexture(16, 16, 9) : std::vector<uint8>(128, 0x5A));
+        const uint32_t textureAddress = srca * 8u;
+        const uint32_t lut = 0x6000;
+        for (uint32 i = 0; i < 16; ++i) {
+            s.Write16(lut + i * 2, static_cast<uint16>(0x8000 | (i * 0x0421)));
+        }
+        s.Op0(Op::Kind::BeginFrame);
+        for (int k = 0; k < 12; ++k) {
+            const CoordS32 a{10 + k * 24, 20 + (k % 3) * 30};
+            s.Distorted(0, static_cast<uint16>(0x00C0 | (colorMode << 3)), static_cast<uint16>(lut / 8), srca, 0x0210, a,
+                        {a.x() + 15, a.y()}, {a.x() + 15, a.y() + 15}, {a.x(), a.y() + 15});
+            // rewrite a texel row (or a look-up table entry) the next sprite reads
+            for (uint32 w = 0; w < 4; ++w) {
+                const uint32_t address = colorMode == 5 ? textureAddress + ((k * 37 + w * 8) % 512 & ~1u)
+                                                        : lut + ((k + w) % 16) * 2;
+                s.ops.push_back({.kind = Op::Kind::WriteVRAM,
+                                 .address = address,
+                                 .value = static_cast<uint16>(0x8000 | ((k * 7919 + w * 31) & 0x7FFF))});
+            }
+        }
+        s.Op0(Op::Kind::EndFrame);
+        const auto sw = RunSoftware(s);
+        const ReferenceRun r = RunReference(s);
+        CHECK(CompareFbram(*sw, *r.fb) == "");
+        CHECK(r.front.batchEnds[static_cast<size_t>(gpu::Vdp1BatchEnd::VramHazard)] == 12);
+        CHECK(r.stats.batches == 12);
+
+        Scenario off = s;
+        off.hazardTracking = false;
+        const ReferenceRun broken = RunReference(off);
+        CHECK(broken.stats.batches == 1);
+        CHECK(CompareFbram(*sw, *broken.fb) != "");
+    }
+}
+
+TEST_CASE("VDP1 reference through the front half: one batch mixing 8 bpp, 16 bpp and transparent meshes",
+          "[vdp1][reference][front]") {
+    // Overlapping draws in one batch while TVMR switches between 16 and 8 bpp and the transparent-meshes enhancement
+    // switches on and off: each fragment carries its command's modes, so the batch does not split and the per-word
+    // resolve applies each write as software did (16-bit words, 8-bit bytes, mesh writes and mesh clears).
+    for (const bool startMeshes : {false, true}) {
+        CAPTURE(startMeshes);
+        Scenario s;
+        s.transparentMeshes = startMeshes;
+        s.fbFill = {0x9C, 0xE7, 0x80, 0x01, 0x5A};
+        const uint16 grda = s.AddGouraud({0x7FFF, 0x0000, 0x03E0, 0x7C00});
+        s.Op0(Op::Kind::BeginFrame);
+        const CoordS32 a{40, 30}, b{140, 40}, c{150, 120}, d{30, 110};
+        s.Polygon(0x01C0, 0x83E0, a, b, c, d);                 // mesh, 16 bpp
+        s.Op0(Op::Kind::WriteTVMR, 1);                         // 8 bpp
+        s.Polygon(0x00C0, 0x00A5, {60, 20}, {170, 50}, {120, 140}, {50, 90});
+        s.Polygon(0x01C0, 0x003C, {20, 60}, {160, 60}, {160, 80}, {20, 80}); // mesh, 8 bpp
+        s.Op0(Op::Kind::SetEnhancements, startMeshes ? 0 : 2); // transparent meshes toggled
+        s.Polygon(0x01C0, 0x00F0, {50, 50}, {130, 50}, {130, 130}, {50, 130});
+        s.Polygon(0x80C0, 0x0000, {70, 40}, {90, 40}, {90, 140}, {70, 140}); // MSB-on in 8 bpp
+        s.Op0(Op::Kind::WriteTVMR, 0);                                         // 16 bpp again
+        s.Polygon(0x01C7, 0x801F, {35, 35}, {145, 45}, {145, 125}, {35, 115}, grda); // mesh, half-transparent, Gouraud
+        s.Op0(Op::Kind::SetEnhancements, startMeshes ? 2 : 0);
+        s.Polygon(0x00C3, 0xFC00, {45, 25}, {155, 65}, {125, 135}, {25, 95}); // half-transparent
+        s.Polygon(0x00C1, 0x8000, {80, 30}, {100, 30}, {100, 150}, {80, 150}); // shadow
+        s.Op0(Op::Kind::EndFrame);
+        const auto sw = RunSoftware(s);
+        const ReferenceRun r = RunReference(s, {}, 77);
+        CHECK(CompareFbram(*sw, *r.fb) == "");
+        CHECK(r.stats.batches == 1);
+        CHECK(r.stats.drawn[ref::DrawnCoverage::MixedModeBatches] == 1);
+        CHECK(r.stats.drawn[ref::DrawnCoverage::Mesh] > 0);
+        CHECK(r.stats.drawn[ref::DrawnCoverage::ByteEven] > 0);
+        CHECK(r.stats.drawn[ref::DrawnCoverage::ColorCalc0 + 3] > 0);
+    }
+}
+
+TEST_CASE("VDP1 reference through the front half: swaps, CPU writes and erases between draws",
+          "[vdp1][reference][front]") {
+    // A manual-swap pattern: draws into one framebuffer, a swap (no erase), draws into the other, CPU writes into the
+    // draw framebuffer between draws (deinterlaced double density: mirrored to the alternate field), an erase of the
+    // display framebuffer and a frame boundary in the middle
+    Scenario s;
+    s.tvmd = 0x80C0;
+    s.deinterlace = true;
+    s.transparentMeshes = true;
+    s.vres = 448;
+    s.fbFill = {0x12, 0x34};
+    s.Op0(Op::Kind::BeginFrame);
+    s.Polygon(0x01C0, 0x83E0, {10, 10}, {60, 10}, {60, 60}, {10, 60});
+    s.ops.push_back({.kind = Op::Kind::WriteFB16, .address = (20 * 512 + 20) * 2, .value = 0xFFFF});
+    s.ops.push_back({.kind = Op::Kind::WriteFB8, .address = (21 * 512 + 20) * 2 + 1, .value = 0xAB});
+    s.Polygon(0x00C3, 0x801F, {15, 15}, {50, 15}, {50, 50}, {15, 50});
+    s.Op0(Op::Kind::Swap);
+    s.Polygon(0x00C0, 0xFC00, {30, 30}, {90, 30}, {90, 90}, {30, 90});
+    s.Op0(Op::Kind::FrameBoundary);
+    s.ops.push_back({.kind = Op::Kind::Erase, .value = 0x8421, .x1 = 0, .y1 = 0, .x3 = 40, .y3 = 40});
+    s.Polygon(0x01C0, 0x801F, {35, 35}, {85, 35}, {85, 85}, {35, 85});
+    s.Op0(Op::Kind::EndFrame);
+    const auto sw = RunSoftware(s);
+    const ReferenceRun r = RunReference(s, {}, 5);
+    CHECK(CompareFbram(*sw, *r.fb) == "");
+    CHECK(CompareState(*sw, r) == "");
+    CHECK(r.stats.batches == 4);
+    CHECK(r.front.batchEnds[static_cast<size_t>(gpu::Vdp1BatchEnd::FbSwap)] == 1);
+    CHECK(r.stats.fbWrites == 2);
+    CHECK(r.stats.erases == 1);
+}
+
 TEST_CASE("VDP1 reference: one random table (BRIMIR_VDP1REF_SEED)", "[vdp1][reference][.debug]") {
     const char *env = std::getenv("BRIMIR_VDP1REF_SEED");
     const uint64 seed = env ? std::strtoull(env, nullptr, 10) : 1;
@@ -1450,7 +1690,7 @@ TEST_CASE("VDP1 reference: one random table (BRIMIR_VDP1REF_SEED)", "[vdp1][refe
     const Scenario s = RandomScenario(seed, cov);
     std::printf("seed %llu: tvmd %04X tvmr %04X fbcr %04X deint %d tm %d vres %u maxBatch %u ops %zu\n",
                 static_cast<unsigned long long>(seed), s.tvmd, s.tvmr, s.fbcr, s.deinterlace, s.transparentMeshes,
-                s.vres, s.maxBatchFragments, s.ops.size());
+                s.vres, s.limits.fragments, s.ops.size());
     std::printf("clip sys %u %u user %u %u %u %u local %d %d\n", s.clip.sysClipH, s.clip.sysClipV, s.clip.userClipX0,
                 s.clip.userClipY0, s.clip.userClipX1, s.clip.userClipY1, s.clip.localX, s.clip.localY);
     for (const Op &op : s.ops) {

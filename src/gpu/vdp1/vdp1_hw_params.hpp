@@ -235,7 +235,8 @@ struct Vdp1Span {
     HLSLuint cmdIndex;       // Vdp1CommandParams index (relative to Vdp1BatchPushConstants::cmdOffset)
     HLSLuint fragBase;       // first fragment slot of the span (the batch's prefix sum of 2 * Length() after SystemClip)
     HLSLuint gouraudLR;      // the Gouraud colours at the left and right end: left Color555 | right << 16
-    HLSLuint stepTexV;       // quadStep (bits 15-0: the quad step or polyline segment) | texel row V << 16 (textured)
+    HLSLuint stepTexV;       // quadStep (bits 15-0: the quad step 0-4095 or polyline segment 0-3) | texel row V << 16
+                             // (textured; int16: -1 to 254, -1 when CMDSIZE.V is 0 with a non-zero width)
 };
 static_assert(sizeof(Vdp1Span) == 32);
 static_assert(offsetof(Vdp1Span, x0) == 0 && offsetof(Vdp1Span, cmdIndex) == 16 &&
@@ -245,8 +246,10 @@ static_assert(offsetof(Vdp1Span, x0) == 0 && offsetof(Vdp1Span, cmdIndex) == 16 
 constexpr uint32_t Vdp1SpanQuadStep(uint32_t stepTexV) {
     return Vdp1Lo16(stepTexV);
 }
+/// @brief The texel row, sign-extended from 16 bits (QuadStepper::SetupTexture steps from 0 to CMDSIZE.V - 1, so a
+/// height of 0 steps to row -1: TextureStepper::Value() is then 0xFFFFFFFF).
 constexpr uint32_t Vdp1SpanTexV(uint32_t stepTexV) {
-    return Vdp1Hi16(stepTexV);
+    return static_cast<uint32_t>(static_cast<int32_t>(stepTexV) >> 16);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

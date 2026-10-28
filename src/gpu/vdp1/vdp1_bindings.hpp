@@ -63,18 +63,45 @@ inline constexpr uint32_t kBindingScanSums = 20;
 inline constexpr uint32_t kVRAMBufferSize = vdp2::kVRAMBufferSize;
 static_assert(kFbramBufferSize == vdp2::kSpriteFBBufferSize);
 
-/// @brief The most fragment slots of one batch: the front half closes a batch between spans when the next span's slots
-/// would not fit (a span has at most 2 * 4097 slots). 4 Mi x 8 B = 32 MiB, the largest storage buffer range any
-/// binding needs (gpu_version.hpp requires it of maxStorageBufferRange; Vulkan guarantees 2^27).
+/// @brief The most fragment slots of one batch: the front half (vdp1_front.hpp) closes a batch between spans when the
+/// next span's slots would not fit. 4 Mi x 8 B = 32 MiB, the largest storage buffer range any binding needs
+/// (gpu_version.hpp requires it of maxStorageBufferRange; Vulkan guarantees 2^27).
 inline constexpr uint32_t kMaxFragmentsPerBatch = 4u * 1024 * 1024;
 inline constexpr uint32_t kFragmentBufferSize = kMaxFragmentsPerBatch * sizeof(Vdp1Fragment);
 inline constexpr uint32_t kBucketBufferSize = kMaxFragmentsPerBatch * sizeof(uint32_t);
 inline constexpr uint32_t kUnitCountsBufferSize = kUnitCount * sizeof(uint32_t);
 static_assert(kFragmentBufferSize == 32u * 1024 * 1024 && kFragmentBufferSize <= (1u << 27));
 
+/// @brief The most fragment slots of one span: 2 * LineStepper::Length() after SystemClip. SystemClip keeps a line in
+/// the padded clip box [-1, clip + 2] of its major axis (or leaves it whole when both ends are inside that box), and
+/// the clip is the raw 16-bit system clip of the command: CMDXC up to 0xFFFF and CMDYC up to 0xFFFF, which doubleV
+/// makes (0xFFFF << 1) | 1. So a line has at most 0x1FFFF + 4 pixels: 262,150 slots, which always fit a fresh batch.
+inline constexpr uint32_t kMaxSpanSlots = 2u * ((2u * 0xFFFFu + 1u) + 4u);
+static_assert(kMaxSpanSlots == 262150 && kMaxSpanSlots <= kMaxFragmentsPerBatch);
+
+/// @brief The most spans, commands and CPU framebuffer write records of one batch (one op). The front half closes a
+/// batch between spans (or a write run between records) at any of them.
+/// - spans: 256 Ki x 32 B = 8 MiB (a polygon-heavy frame has about 10 K);
+/// - commands: 16 Ki x 80 B = 1.25 MiB, as many command tables as VDP1 VRAM holds;
+/// - writes: 256 Ki x 16 B = 4 MiB, one per byte of a framebuffer.
+inline constexpr uint32_t kMaxSpansPerBatch = 256u * 1024;
+inline constexpr uint32_t kMaxCommandsPerBatch = 16u * 1024;
+inline constexpr uint32_t kMaxFbWritesPerBatch = 256u * 1024;
+inline constexpr uint32_t kSpanBufferSize = kMaxSpansPerBatch * sizeof(Vdp1Span);
+inline constexpr uint32_t kCommandBufferSize = kMaxCommandsPerBatch * sizeof(Vdp1CommandParams);
+inline constexpr uint32_t kFbWriteBufferSize = kMaxFbWritesPerBatch * sizeof(Vdp1FbWrite);
+static_assert(kMaxSpansPerBatch <= kMaxFragmentsPerBatch); // span indices fit the fragment-indexed passes
+static_assert(kMaxCommandsPerBatch * 0x20 == kVRAMBufferSize); // 32-byte command tables in 512 KiB of VDP1 VRAM
+static_assert(kMaxFbWritesPerBatch == kFbramSliceSize);
+
+/// @brief The raster pass's `scale` push constant (Vdp1BatchPushConstants::scale): stage 2 draws at native resolution.
+inline constexpr uint32_t kRasterScale = 1;
+
 /// @brief The largest range of one storage buffer binding (the device limit maxStorageBufferRange must cover it).
-inline constexpr uint32_t kMaxStorageBufferRange = std::max(
-    {kFragmentBufferSize, kBucketBufferSize, kUnitCountsBufferSize, kFbramBufferSize, kVRAMBufferSize});
+inline constexpr uint32_t kMaxStorageBufferRange =
+    std::max({kFragmentBufferSize, kBucketBufferSize, kUnitCountsBufferSize, kFbramBufferSize, kVRAMBufferSize,
+              kSpanBufferSize, kCommandBufferSize, kFbWriteBufferSize});
+static_assert(kMaxStorageBufferRange <= (1u << 27));
 
 /// @brief Workgroup size of the VDP1 passes (one dimension, or 8 x 8 for the erase pass): 64 invocations, within the
 /// 128 Vulkan guarantees and what VDP2 already requires (vdp2::kMaxWorkgroupInvocations).

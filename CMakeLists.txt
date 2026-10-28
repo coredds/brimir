@@ -159,7 +159,7 @@ add_subdirectory(src/jit)
 # Vulkan-free front half of the VDP2 GPU renderer (brimir-vdp2-front), built with or without BRIMIR_VULKAN.
 add_subdirectory(src/gpu/vdp2)
 
-# Vulkan-free front half of the VDP1 GPU renderer (brimir-vdp1-front; an INTERFACE library until the front end lands).
+# Vulkan-free front half of the VDP1 GPU renderer (brimir-vdp1-front), built with or without BRIMIR_VULKAN.
 add_subdirectory(src/gpu/vdp1)
 
 # Vulkan GPU renderer library (brimir-gpu); consumers get BRIMIR_VULKAN=1 through it.
@@ -226,7 +226,7 @@ if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
         # Final consumers must also link IPO objects (notably MSVC /GL objects).
         list(APPEND brimir_ipo_targets brimir_libretro brimir_tests)
         if(BRIMIR_LTO)
-            list(APPEND brimir_ipo_targets brimir_bridge brimir_libretro_api brimir-gpu brimir-vdp2-front)
+            list(APPEND brimir_ipo_targets brimir_bridge brimir_libretro_api brimir-gpu brimir-vdp2-front brimir-vdp1-front)
         endif()
         if(Brimir_ENABLE_IPO)
             list(APPEND brimir_ipo_targets brimir-core brimir-jit brimir_bench)
@@ -236,7 +236,7 @@ if(BRIMIR_LTO OR Brimir_ENABLE_IPO)
     endif()
 endif()
 
-foreach(target IN ITEMS brimir-core brimir-jit brimir-gpu brimir-vdp2-front brimir_bridge brimir_libretro_api brimir_libretro brimir_tests brimir_bench brimir_vkhost)
+foreach(target IN ITEMS brimir-core brimir-jit brimir-gpu brimir-vdp2-front brimir-vdp1-front brimir_bridge brimir_libretro_api brimir_libretro brimir_tests brimir_bench brimir_vkhost)
     if(TARGET ${target})
         set(enable_ipo FALSE)
         if(target IN_LIST brimir_ipo_targets)

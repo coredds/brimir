@@ -1,15 +1,16 @@
 #pragma once
 
-// A CPU executable specification of the GPU VDP1 rasterizer (GPU stage 2; docs/ymir-hw-renderer-notes/
+// A CPU executable specification of the GPU VDP1 back half (GPU stage 2; docs/ymir-hw-renderer-notes/
 // stage2-vdp1-research.md sections 4.1-4.3), written from the software renderer (vdp_renderer_sw.cpp,
-// vdp1_steppers.hpp) independently of Ymir's shaders. The GPU front half (Task 3) and shaders (Task 4) are checked
-// against it part by part; the tests check it against SoftwareVDPRenderer's FBRAM byte for byte.
+// vdp1_steppers.hpp) independently of Ymir's shaders. It replays the op stream of the real front half
+// (src/gpu/vdp1/vdp1_front.hpp: commands, spans, VRAM uploads, erases, CPU framebuffer writes) the way the GPU passes
+// will; the shaders (Task 4) are checked against it part by part and the tests check it against SoftwareVDPRenderer's
+// FBRAM byte for byte.
 //
-// Three separable parts:
-//   1. Span builder: VDP1 command -> command parameters and spans (one span per line software plots). A test-local
-//      port of the software command handlers and quad loops (with VDP1QuadTermination); Task 3's front half
-//      replaces it.
-//   2. RasterSpan(span) -> fragments: a pure function of the span, its command, the batch's raster state and VRAM. It
+// Parts:
+//   1. Decoding: the front half's GPU structs (Vdp1CommandParams, Vdp1Span) into the reference's view (CommandParams,
+//      RasterState per command, Span), through the same accessors the shaders use.
+//   2. RasterSpan(span) -> fragments: a pure function of the span, its command, the command's raster state and VRAM. It
 //      steps the line iteratively with a 32-bit port of LineStepper/TextureStepper/GouraudStepper (no SetStep jumps)
 //      and runs the loop body of VDP1PlotLine / VDP1PlotTexturedLine and the read half of VDP1PlotPixel (clipping,
 //      mesh skip, double-interlace skip, address). Every pixel VDP1PlotPixel would write becomes a fragment with
@@ -17,10 +18,15 @@
 //      after LineStepper::SystemClip). Key order is software's emission order.
 //   3. Resolve(fragments in any order) -> FBRAM: per FBRAM word (16 bits of the draw framebuffer or of its alternate
 //      field), the word's fragments sorted by key are applied with the write half of VDP1PlotPixel to the word's
-//      (main, mesh) pair: colour calculation in 16 bpp, bytes in 8 bpp, MSB-on ORing bit 15 of the word.
+//      (main, mesh) pair: colour calculation in 16 bpp, bytes in 8 bpp, MSB-on ORing bit 15 of the word. Each fragment
+//      carries its command's 8-bpp and transparent-meshes modes, so a batch may mix them.
+//   4. Erase (from Vdp1ErasePushConstants) and CPU framebuffer writes (Vdp1FbWrite records).
 //
-// Batches (a run of commands with the same raster state, cut between spans at a fragment limit) are resolved in order;
-// a batch boundary is a barrier.
+// Batches are resolved in op order; a batch boundary is a barrier. The reference keeps its own copy of VDP1 VRAM, built
+// only from the batches' uploads, as the GPU's.
+
+#include <gpu/vdp1/vdp1_front.hpp>
+#include <gpu/vdp1/vdp1_hw_params.hpp>
 
 #include <ymir/core/types.hpp>
 #include <ymir/hw/vdp/vdp1_defs.hpp>
@@ -32,6 +38,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -464,7 +471,8 @@ struct Gouraud {
 // -----------------------------------------------------------------------------
 // Data
 
-// Registers and enhancements at draw time. A batch has one raster state; a change splits the batch.
+// Registers and enhancements at draw time: per command (Vdp1CommandParams::rasterFlags), except the draw framebuffer,
+// which is per batch
 struct RasterState {
     uint32 fbSizeH = 512;           // TVMR
     bool pixel8Bits = false;        // TVMR
@@ -480,7 +488,8 @@ struct RasterState {
     bool operator==(const RasterState &) const = default;
 };
 
-// System clip, user clip and local coordinates (VDPState::state1), raw as the clip commands store them
+// System clip, user clip and local coordinates (VDPState::state1), raw as the clip commands store them (the local
+// coordinates are already applied to a command's vertices)
 struct ClipContext {
     uint16 sysClipH = 319, sysClipV = 223;
     uint16 userClipX0 = 0, userClipY0 = 0, userClipX1 = 319, userClipY1 = 223;
@@ -520,6 +529,8 @@ inline constexpr uint32 kTargetOddBit = 1u << 18;  // 8 bpp: the odd byte of the
 inline constexpr uint32 kTargetCalcShift = 19;     // 2 bits: colour calculation (16 bpp)
 inline constexpr uint32 kTargetMeshBit = 1u << 21; // transparent meshes: write to the mesh framebuffer
 inline constexpr uint32 kTargetMsbOnBit = 1u << 22;
+inline constexpr uint32 kTargetPixel8Bit = 1u << 23;            // the command drew in 8 bpp (TVMR)
+inline constexpr uint32 kTargetTransparentMeshesBit = 1u << 24; // ... with transparent meshes on
 inline constexpr uint32 kTargetUnitMask = kTargetWordMask | kTargetAltBit; // the resolve unit
 
 struct Fragment {
@@ -545,16 +556,11 @@ struct RasterOptions {
 };
 
 // -----------------------------------------------------------------------------
-// Part 1: span builder (test-local port of the software command handlers; Task 3 replaces it)
+// Part 1: decoding the front half's GPU structs (brimir::gpu::vdp1, vdp1_hw_params.hpp)
 
-struct CommandSpans {
-    bool draws = false; // a draw command that was not rejected whole
-    CommandParams params;
-    std::vector<Span> spans; // cmdIndex and fragBase unset
-};
-
-// Executes the command at `address` (clip and local coordinate commands update `ctx`)
-CommandSpans BuildCommandSpans(const uint8 *vram, uint32 address, ClipContext &ctx, const RasterState &state);
+CommandParams DecodeCommand(const brimir::gpu::vdp1::Vdp1CommandParams &command);
+RasterState DecodeRasterState(uint32 rasterFlags, uint32 drawFB);
+Span DecodeSpan(const brimir::gpu::vdp1::Vdp1Span &span);
 
 // -----------------------------------------------------------------------------
 // Part 2: span rasterization
@@ -581,31 +587,22 @@ struct ResolveStats {
     uint32 maxPerUnit = 0;  // most fragments on one word
 };
 
-// Applies the batch's fragments (any order; keys unique) to the draw framebuffer state.drawFB
-ResolveStats Resolve(const RasterState &state, std::vector<Fragment> fragments, Fbram &fbram,
+// Applies the batch's fragments (any order; keys unique) to the draw framebuffer `drawFB`. 8 bpp and transparent
+// meshes come from each fragment (kTargetPixel8Bit, kTargetTransparentMeshesBit).
+ResolveStats Resolve(uint32 drawFB, std::vector<Fragment> fragments, Fbram &fbram,
                      ResolveOrder order = ResolveOrder::Ascending);
 
 // -----------------------------------------------------------------------------
-// Erase (VDP1DoEraseFramebuffer), per framebuffer word
-
-struct EraseParams {
-    uint8 fbIndex = 1;    // the display framebuffer
-    uint16 value = 0;     // eraseWriteValueLatch
-    uint16 x1 = 0, y1 = 0, x3 = 0, y3 = 0; // erase*Latch
-    uint32 offsetShift = 9; // TVMR eraseOffsetShift
-    bool doubleDensity = false;
-    bool hiResH = false;  // TVMD.HRESOn & 1
-    uint32 vres = 224;    // the renderer's vertical resolution (VDP2SetResolution)
-    bool deinterlace = false;
-    bool transparentMeshes = false;
-    uint64 cycles = 0;    // 0 = unlimited; else cycles + 1 writes in row-major order
-};
+// Part 4: erase (VDP1DoEraseFramebuffer, per framebuffer word) and CPU framebuffer writes
 
 // Returns the number of words written to the main framebuffer
-uint64 Erase(const EraseParams &params, Fbram &fbram);
+uint64 Erase(const brimir::gpu::vdp1::Vdp1ErasePushConstants &params, Fbram &fbram);
+
+// Applies the records in order
+void ApplyFbWrites(std::span<const brimir::gpu::vdp1::Vdp1FbWrite> writes, Fbram &fbram);
 
 // -----------------------------------------------------------------------------
-// Driver: commands -> batches -> raster -> resolve
+// Driver: op lists -> VRAM uploads, raster and resolve per batch, erases, writes
 
 // Drawn coverage: fragments (and lines, erase writes) actually produced, by category
 struct DrawnCoverage {
@@ -625,6 +622,7 @@ struct DrawnCoverage {
         HssLines,         // spans with high-speed shrink that produced fragments
         EndCodeLines,     // spans ended by end codes that produced fragments
         EraseWrites,      // words an erase wrote
+        MixedModeBatches, // batches whose fragments mix 8 and 16 bpp or transparent meshes on and off
         Count
     };
     std::array<uint64, Count> counts{};
@@ -643,48 +641,43 @@ struct DrawnCoverage {
     static const char *Name(uint32 counter);
 };
 struct ReferenceStats {
-    uint64 commands = 0;
+    uint64 opLists = 0;
+    uint64 commands = 0; // command parameters in batches
     uint64 batches = 0;
     uint64 spans = 0;
     uint64 slots = 0;
     uint64 fragments = 0;
+    uint64 vramUploadBytes = 0;
+    uint64 fbWrites = 0;
+    uint64 erases = 0;
     uint32 maxPerUnit = 0;
     DrawnCoverage drawn;
 };
 
 class ReferenceVDP1 {
 public:
-    ReferenceVDP1(const uint8 *vram, Fbram &fbram, RasterOptions options = {},
-                  uint32 maxBatchFragments = 0xFFFFFFFFu, uint64 shuffleSeed = 0);
+    // VRAM starts zeroed: only the front half's uploads fill it, as on the GPU
+    explicit ReferenceVDP1(Fbram &fbram, RasterOptions options = {}, uint64 shuffleSeed = 0);
 
-    ClipContext clip;
-
-    // Executes a command with the registers at the time of the command (VDP1ExecuteCommand)
-    void Command(uint32 address, const RasterState &state);
-    // Rasterizes and resolves the pending batch
-    void Flush();
-    // Flushes, then erases
-    void Erase(const EraseParams &params);
+    // Replays the ops in order. Checks the list's structure (segments partition the ops; every span's slots equal
+    // SpanSlots of its decoded command; fragment keys stay inside their span's slots) and throws std::logic_error if it
+    // is broken.
+    void Replay(const brimir::gpu::vdp1::Vdp1OpList &ops);
 
     const ReferenceStats &Stats() const {
         return m_stats;
     }
+    const std::vector<uint8> &VRAM() const {
+        return m_vram;
+    }
 
 private:
-    void AddSpan(const CommandParams &params, const RasterState &state, Span span, uint32 slots);
+    void DrawBatch(const brimir::gpu::vdp1::Vdp1OpList &ops, const brimir::gpu::vdp1::Vdp1DrawBatch &batch);
 
-    const uint8 *m_vram;
     Fbram &m_fbram;
     RasterOptions m_options;
-    uint32 m_maxBatchFragments;
     uint64 m_shuffle;
-
-    bool m_pending = false;
-    RasterState m_state;
-    std::vector<CommandParams> m_commands;
-    bool m_commandInBatch = false;
-    std::vector<Span> m_spans;
-    uint32 m_slots = 0;
+    std::vector<uint8> m_vram;
     ReferenceStats m_stats;
 };
 
