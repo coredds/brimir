@@ -2,6 +2,7 @@
 
 #include <ymir/hw/vdp/renderer/common/vdp1_clip.hpp>
 #include <ymir/hw/vdp/renderer/common/vdp1_steppers.hpp>
+#include <ymir/hw/vdp/renderer/vdp1_probe.hpp>
 #include <ymir/util/bit_ops.hpp>
 
 #include <algorithm>
@@ -140,6 +141,15 @@ void Vdp1FrontEnd::WriteVRAM(uint32_t address) {
 
 void Vdp1FrontEnd::MarkFrameBoundary() {
     CloseAll(Vdp1BatchEnd::FrameBoundary);
+    // the frame's batch counts
+    m_stats.lastFrameBatchEnds = m_stats.frameBatchEnds;
+    uint64_t frameBatches = 0;
+    for (const uint64_t n : m_stats.frameBatchEnds) {
+        frameBatches += n;
+    }
+    m_stats.maxFrameBatches = std::max(m_stats.maxFrameBatches, frameBatches);
+    m_stats.frameBatchEnds.fill(0);
+    ++m_stats.frames;
     const uint32_t end = static_cast<uint32_t>(m_ops.ops.size());
     m_ops.segments.push_back({m_segmentStart, end - m_segmentStart});
     m_segmentStart = end;
@@ -194,6 +204,8 @@ void Vdp1FrontEnd::CloseBatch(Vdp1BatchEnd end) {
     m_cmdInBatch = false;
     ++m_stats.batches;
     ++m_stats.batchEnds[static_cast<size_t>(end)];
+    ++m_stats.frameBatchEnds[static_cast<size_t>(end)];
+    BRIMIR_VDP1_PROBE_BATCH(static_cast<uint32_t>(end));
 }
 
 void Vdp1FrontEnd::MarkHazards(uint32_t address, uint32_t size) {

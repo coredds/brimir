@@ -730,8 +730,9 @@ RETRO_API void retro_reset(void) {
 }
 
 // Diagnostics: in builds configured with BRIMIR_VDP1_PROBE=ON and with the environment variable BRIMIR_VDP1_PROBE set
-// (brimir_vkhost --probe), one debug line per retro_run with the VDP1 work counted by the software renderer
-// (ymir/hw/vdp/renderer/vdp1_probe.hpp). Other builds compile this to nothing.
+// (brimir_vkhost --probe), one debug line per retro_run with the VDP1 work counted by the software renderer and the draw
+// batches the GPU VDP1 front half closed, by end reason (ymir/hw/vdp/renderer/vdp1_probe.hpp). Other builds compile this
+// to nothing.
 static void log_vdp1_probe(void) {
 #if BRIMIR_VDP1_PROBE
     static const bool requested = [] {
@@ -742,11 +743,14 @@ static void log_vdp1_probe(void) {
     if (requested) {
         brimir_log(RETRO_LOG_DEBUG,
                    "VDP1 probe: commands %llu lines %llu pixels %llu syncs %llu dirtysyncs %llu fbwrites %llu "
-                   "erases %llu",
+                   "erases %llu batches opkind %llu hazard %llu swap %llu capacity %llu boundary %llu take %llu",
                    static_cast<unsigned long long>(s.commands), static_cast<unsigned long long>(s.lines),
                    static_cast<unsigned long long>(s.pixels), static_cast<unsigned long long>(s.syncs),
                    static_cast<unsigned long long>(s.dirtySyncs), static_cast<unsigned long long>(s.fbWrites),
-                   static_cast<unsigned long long>(s.erases));
+                   static_cast<unsigned long long>(s.erases), static_cast<unsigned long long>(s.batchEnds[0]),
+                   static_cast<unsigned long long>(s.batchEnds[1]), static_cast<unsigned long long>(s.batchEnds[2]),
+                   static_cast<unsigned long long>(s.batchEnds[3]), static_cast<unsigned long long>(s.batchEnds[4]),
+                   static_cast<unsigned long long>(s.batchEnds[5]));
     }
 #endif
 }

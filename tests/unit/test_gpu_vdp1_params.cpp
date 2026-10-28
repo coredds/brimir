@@ -374,11 +374,12 @@ TEST_CASE("The layout probe declares every VDP1 struct, binding and push-constan
     CHECK(m.localSize == std::vector<uint32_t>{64, 1, 1});
     STATIC_CHECK(kWorkgroupSize == 64);
 
-    // The binding table is the ten resources of the shaders' pipelines, in the t (0-15) and u (16+) ranges.
-    STATIC_CHECK(kLayoutProbeBindings.size() == 10);
+    // The binding table is the twelve resources of the shaders' pipelines, in the t (0-15) and u (16+) ranges.
+    STATIC_CHECK(kLayoutProbeBindings.size() == 12);
     STATIC_CHECK(kBindingCommands < 16 && kBindingSpans < 16 && kBindingVRAM < 16 && kBindingFbWrites < 16);
     STATIC_CHECK(kBindingFragments >= 16 && kBindingUnitCounts >= 16 && kBindingBucket >= 16 &&
-                 kBindingFbram >= 16 && kBindingScanSums >= 16 && kBindingUnitOffsets >= 16);
+                 kBindingFbram >= 16 && kBindingScanSums >= 16 && kBindingUnitOffsets >= 16 &&
+                 kBindingBatchState >= 16 && kBindingFbWinners >= 16);
     const auto uses = [](std::span<const Binding> table, uint32_t binding) {
         return std::any_of(table.begin(), table.end(), [&](const Binding &b) { return b.binding == binding; });
     };
@@ -461,10 +462,10 @@ TEST_CASE("The VDP1 probe check rejects modules that depart from the rules", "[v
 // Bindings and limits
 
 TEST_CASE("VDP1 bindings stay within the VDP2 maxima the device limits are set from", "[vdp1][params][limits]") {
-    STATIC_CHECK(kMaxStageUsage.storageBuffers == 6);
+    STATIC_CHECK(kMaxStageUsage.storageBuffers == 7);
     STATIC_CHECK(kMaxStageUsage.storageImages == 0);
     STATIC_CHECK(kMaxStageUsage.sampledImages == 0);
-    STATIC_CHECK(kMaxStageUsage.resources == 6);
+    STATIC_CHECK(kMaxStageUsage.resources == 7);
     // VDP2's maxima (7 storage buffers, 3 storage images, 5 sampled images, 11 resources) cover them
     STATIC_CHECK(kMaxStageUsage.storageBuffers <= brimir::gpu::vdp2::kMaxStageUsage.storageBuffers);
     STATIC_CHECK(kMaxStageUsage.resources <= brimir::gpu::vdp2::kMaxStageUsage.resources);
@@ -866,7 +867,7 @@ constexpr uint32_t kProbeWords = 94;
 std::array<uint32_t, kProbeWords> ProbeExpected(const Vdp1CommandParams &c, const Vdp1Span &s, const Vdp1Fragment &f,
                                                 const Vdp1FbWrite &w, const ProbePush &p, uint32_t vramWord,
                                                 uint32_t bucket, uint32_t fbramWord, uint32_t scanSum,
-                                                uint32_t unitOffset) {
+                                                uint32_t unitOffset, uint32_t batchState, uint32_t winner) {
     std::array<uint32_t, kProbeWords> out{};
     size_t k = 0;
     const auto emit = [&](uint32_t value) { out[k++] = value; };
@@ -952,7 +953,7 @@ std::array<uint32_t, kProbeWords> ProbeExpected(const Vdp1CommandParams &c, cons
     emit(vramWord);
     emit(bucket);
     emit(fbramWord);
-    emit(scanSum ^ unitOffset);
+    emit(scanSum ^ unitOffset ^ batchState ^ winner);
     emit(Vdp1MakeDrawFlags(df & kCmdpmodMask,
                            Vdp1CmdType(df) | (Vdp1CmdFlipH(df) ? 16u : 0u) | (Vdp1CmdFlipV(df) ? 32u : 0u),
                            Vdp1CmdTextured(df), Vdp1CmdAntiAlias(df)));
@@ -986,7 +987,7 @@ TEST_CASE("The C++ accessor copies are what the probe's HLSL evaluates (host sid
     std::memset(&onesWrite, 0xFF, sizeof(onesWrite));
     ProbePush push;
     std::memset(&push, 0xFF, sizeof(push));
-    const auto e = ProbeExpected(ones, onesSpan, onesFrag, onesWrite, push, 0, 0, 0, 0, 0);
+    const auto e = ProbeExpected(ones, onesSpan, onesFrag, onesWrite, push, 0, 0, 0, 0, 0, 0, 0);
     CHECK(e[10] == 3);     // colour calculation
     CHECK(e[12] == 7);     // colour mode
     CHECK(e[24] == 15);    // command
@@ -1038,7 +1039,7 @@ TEST_CASE("The probe's HLSL accessors equal the C++ copies on random words", "[g
     std::vector<Vdp1Fragment> fragments(kCases);
     std::vector<Vdp1FbWrite> fbWrites(kCases);
     std::vector<uint32_t> vram(kVRAMBufferSize / 4), bucket(kCases), fbram(kFbramBufferSize / 4), scanSums(kCases),
-        unitOffsets(kCases);
+        unitOffsets(kCases), batchState(kBatchStateWords), winners(kCases);
     FillRandom(commands, rng);
     FillRandom(spans, rng);
     FillRandom(fragments, rng);
@@ -1048,6 +1049,8 @@ TEST_CASE("The probe's HLSL accessors equal the C++ copies on random words", "[g
     FillRandom(fbram, rng);
     FillRandom(scanSums, rng);
     FillRandom(unitOffsets, rng);
+    FillRandom(batchState, rng);
+    FillRandom(winners, rng);
     ProbePush push{};
     push.batch = {Rand32(rng), kCases, Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng)};
     push.erase = {Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng),
@@ -1062,7 +1065,7 @@ TEST_CASE("The probe's HLSL accessors equal the C++ copies on random words", "[g
         vu::Buffer buffer;
     };
     std::vector<uint32_t> results(static_cast<size_t>(kCases) * kProbeWords, 0xCDCDCDCDu);
-    std::array<Resource, 10> resources{{
+    std::array<Resource, 12> resources{{
         {kBindingCommands, commands.data(), commands.size() * sizeof(Vdp1CommandParams), {}},
         {kBindingSpans, spans.data(), spans.size() * sizeof(Vdp1Span), {}},
         {kBindingVRAM, vram.data(), vram.size() * 4, {}},
@@ -1073,6 +1076,8 @@ TEST_CASE("The probe's HLSL accessors equal the C++ copies on random words", "[g
         {kBindingFbram, fbram.data(), fbram.size() * 4, {}},
         {kBindingScanSums, scanSums.data(), scanSums.size() * 4, {}},
         {kBindingUnitOffsets, unitOffsets.data(), unitOffsets.size() * 4, {}},
+        {kBindingBatchState, batchState.data(), batchState.size() * 4, {}},
+        {kBindingFbWinners, winners.data(), winners.size() * 4, {}},
     }};
 
     constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -1133,7 +1138,8 @@ TEST_CASE("The probe's HLSL accessors equal the C++ copies on random words", "[g
     for (uint32_t i = 0; i < kCases; ++i) {
         const auto expected = ProbeExpected(commands[i], spans[i], fragments[i], fbWrites[i], push,
                                             vram[i & (kVRAMBufferSize / 4 - 1)], bucket[i],
-                                            fbram[i & (kFbramBufferSize / 4 - 1)], scanSums[i], unitOffsets[i]);
+                                            fbram[i & (kFbramBufferSize / 4 - 1)], scanSums[i], unitOffsets[i],
+                                            batchState[i & 15], winners[i]);
         for (uint32_t word = 0; word < kProbeWords; ++word) {
             const uint32_t got = results[static_cast<size_t>(i) * kProbeWords + word];
             if (got != expected[word] && failures++ < 10) {

@@ -115,7 +115,8 @@ void PrintUsage(std::FILE* out) {
         "                front half's CPU time per frame. With a core built with -DBRIMIR_VDP1_PROBE=ON (any\n"
         "                renderer; sets BRIMIR_VDP1_PROBE), per retro_run the software VDP1 work: commands, lines,\n"
         "                pixel writes, VDP1SyncFB calls (and those after a draw or erase), CPU framebuffer writes\n"
-        "                and erases (median, maximum, mean)\n"
+        "                and erases, and the GPU VDP1 front half's draw batches by end reason (zero until the\n"
+        "                renderer runs the front half) (median, maximum, mean)\n"
         "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
         "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
@@ -689,21 +690,25 @@ void PrintVdp1ProbeSummary(const std::vector<vkhost::Vdp1ProbeFrame>& frames) {
     if (frames.empty()) {
         return;
     }
-    const auto printStats = [&](const char* name, uint64_t vkhost::Vdp1ProbeFrame::*member) {
+    const auto printValues = [&](const char* name, const auto& get) {
         std::vector<uint64_t> values;
         values.reserve(frames.size());
         uint64_t sum = 0;
         size_t usingFrames = 0;
         for (const vkhost::Vdp1ProbeFrame& f : frames) {
-            values.push_back(f.*member);
-            sum += f.*member;
-            usingFrames += f.*member != 0;
+            const uint64_t v = get(f);
+            values.push_back(v);
+            sum += v;
+            usingFrames += v != 0;
         }
         std::sort(values.begin(), values.end());
         std::fprintf(stderr, "vkhost: probe-vdp1: %-10s median %llu max %llu mean %.1f frames %zu\n", name,
                      static_cast<unsigned long long>(values[values.size() / 2]),
                      static_cast<unsigned long long>(values.back()),
                      static_cast<double>(sum) / static_cast<double>(values.size()), usingFrames);
+    };
+    const auto printStats = [&](const char* name, uint64_t vkhost::Vdp1ProbeFrame::*member) {
+        printValues(name, [member](const vkhost::Vdp1ProbeFrame& f) { return f.*member; });
     };
     printStats("commands", &vkhost::Vdp1ProbeFrame::commands);
     printStats("lines", &vkhost::Vdp1ProbeFrame::lines);
@@ -712,6 +717,18 @@ void PrintVdp1ProbeSummary(const std::vector<vkhost::Vdp1ProbeFrame>& frames) {
     printStats("dirtysyncs", &vkhost::Vdp1ProbeFrame::dirtySyncs);
     printStats("fbwrites", &vkhost::Vdp1ProbeFrame::fbWrites);
     printStats("erases", &vkhost::Vdp1ProbeFrame::erases);
+    // GPU VDP1 front half: draw batches per retro_run, in all and by end reason
+    printValues("batches", [](const vkhost::Vdp1ProbeFrame& f) {
+        uint64_t n = 0;
+        for (uint64_t b : f.batchEnds) {
+            n += b;
+        }
+        return n;
+    });
+    static constexpr const char* kEnds[6] = {"b_opkind", "b_hazard", "b_swap", "b_capacity", "b_boundary", "b_take"};
+    for (int i = 0; i < 6; ++i) {
+        printValues(kEnds[i], [i](const vkhost::Vdp1ProbeFrame& f) { return f.batchEnds[i]; });
+    }
 }
 
 } // namespace

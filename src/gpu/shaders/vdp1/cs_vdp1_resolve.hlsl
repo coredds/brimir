@@ -1,9 +1,11 @@
 // Brimir: VDP1 resolve pass, the per-FBRAM-word ordered resolve (GPU stage 2; research section 4.3). Written from the
 // CPU reference's Resolve (tests/unit/vdp1_raster_reference.cpp). Brimir only.
 //
-// Thread t of group g (of 4096) owns unit u = 4096 t + g (an FBRAM word of the draw framebuffer, field u >> 17): the
-// words of a group lie 4096 apart, so the deep stacks around one apex, on neighbouring words, are resolved by different
-// groups in parallel instead of one after another by one group. Its fragments are
+// Dispatched indirectly (g_batchState kBatchStateResolveArgs) over the batch's unit range [unitLo, unitHi): thread t of
+// group g (of G = min(unitHi - unitLo, 4096)) owns unit u = unitLo + G t + g (an FBRAM word of the draw framebuffer,
+// field u >> 17; a range of n <= 4096 units has one unit per group). The words of a group lie G apart, so the deep stacks around one apex, on neighbouring words, are
+// resolved by different groups in parallel instead of one after another by one group. Units outside the range have no
+// fragment. Its fragments are
 // the slots in its bucket, g_bucket[begin, begin + n) with n = g_unitCounts[u] and begin + n = g_scanSums[u / 64] +
 // g_unitOffsets[u] (after the scatter pass). The slots are the order keys, distinct, in arbitrary order; applied in
 // ascending order with the write half of VDP1PlotPixel (ApplyFragment) to the unit's (main, mesh) word pair they give
@@ -19,7 +21,7 @@
 //   one coalesced pass over the bucket (the gather) plus the histograms; every pass loads four keys per thread at a
 //   time.
 // Bindings (vdp1_bindings.hpp kResolveBindings): fragments (16), unit counts (17), bucket (18), FBRAM (19), scan sums
-// (20), unit offsets (21). Push constants: BatchParams (drawFB).
+// (20), unit offsets (21), batch state (22). Push constants: BatchParams (drawFB).
 
 #include "vdp1_defs.hlsli"
 #include "vdp1_params.hlsli"
@@ -32,6 +34,7 @@ RWStructuredBuffer<uint> g_bucket : register(u2);
 RWByteAddressBuffer g_fbram : register(u3);
 RWStructuredBuffer<uint> g_scanSums : register(u4);
 RWStructuredBuffer<uint> g_unitOffsets : register(u5);
+RWStructuredBuffer<uint> g_batchState : register(u6);
 
 #include "vdp1_fbram.hlsli"
 
@@ -311,7 +314,12 @@ void ResolveLarge(uint unit, uint fb, uint t) {
 [numthreads(64, 1, 1)]
 void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
     const uint t = tid.x;
-    const uint unit = t * (kUnitCount / 64) + gid.x;
+    uint words, wordStride;
+    g_batchState.GetDimensions(words, wordStride);
+    const uint unitLo = words > kBatchStateUnitHi ? g_batchState[kBatchStateUnitLo] : 0;
+    const uint unitHi = words > kBatchStateUnitHi ? g_batchState[kBatchStateUnitHi] : 0;
+    const uint groups = words > kBatchStateResolveArgs ? g_batchState[kBatchStateResolveArgs] : 0;
+    const uint unit = unitLo + t * groups + gid.x;
     const uint fb = g_batch.drawFB & 1;
     uint counts, stride;
     g_unitCounts.GetDimensions(counts, stride);
@@ -321,7 +329,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (unit < kUnitCount && unit < counts && g_unitCounts[unit] != 0) {
+    if (unit < unitHi && unit < kUnitCount && unit < counts && g_unitCounts[unit] != 0) {
         const UnitInfo info = GetUnit(unit, fb);
         if (info.count <= kSmallMax) {
             ResolveSmall(info);

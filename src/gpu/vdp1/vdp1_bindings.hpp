@@ -9,17 +9,24 @@
 // The passes (docs/ymir-hw-renderer-notes/stage2-vdp1-research.md section 4.3), per batch of spans, in this order with
 // a compute-to-compute barrier between them:
 //   raster       one thread per span: software's line loop; writes every fragment slot of the span (a fragment, or 0
-//                for a slot that has none) and counts the fragments per unit (an FBRAM word of one field)
-//   bucket       per block of kScanBlockSize units: the exclusive scan of the counts within the block (g_unitOffsets)
-//                and the block's total (g_scanSums)
-//   bucket_sums  one workgroup: the exclusive scan of the block totals, in place
+//                for a slot that has none), counts the fragments per unit (an FBRAM word of one field) and accumulates
+//                the batch's unit range (the lowest and highest unit with a fragment) in g_batchState
+//   batch_range  one thread: turns the accumulated range into [unitLo, unitHi) and the indirect dispatch arguments of
+//                the bucket and resolve passes (zero groups for a batch without fragments), and resets the accumulator
+//   bucket       (indirect) per block of kScanBlockSize units of the range: the exclusive scan of the counts within the
+//                block (g_unitOffsets) and the block's total (g_scanSums)
+//   bucket_sums  one workgroup: the exclusive scan of the range's block totals, in place
 //   scatter      writes each live fragment's slot index into its unit's bucket (g_scanSums[block] + g_unitOffsets,
 //                advanced atomically: arbitrary order within a bucket)
-//   resolve      one thread per unit: sorts its bucket's slot indices (the order keys), applies the fragments in key
+//   resolve      (indirect) one thread per unit of the range: sorts its bucket's slot indices (the order keys), applies the fragments in key
 //                order with software's write formulas to the unit's (main, mesh) FBRAM words and clears its count;
 //                units with more than kResolveSmallMax fragments are resolved by the whole workgroup
 //   erase        the erase region, one thread per word
-//   fbwrite      CPU framebuffer writes, in order
+//   fb_write_mark   one thread per CPU framebuffer write record of a run: InterlockedMax(record + 1) into the winner
+//                   slot of each byte it writes (main field, and the alternate field when it mirrors)
+//   fb_write        one thread per record: writes the bytes it won (the last record of the run that writes them: the
+//                   in-order result)
+//   fb_write_clear  one thread per record: zeroes its winner slots for the next run
 //
 //  binding  register  resource        descriptor type  size / element                          used by
 //        0  t0        g_commands      STORAGE_BUFFER   CommandParams, 80 B each                 raster
@@ -33,7 +40,15 @@
 //       20  u4        g_scanSums      STORAGE_BUFFER   uint[kScanBlockCount]                    bucket, bucket_sums,
 //                                                                                              scatter, resolve
 //       21  u5        g_unitOffsets   STORAGE_BUFFER   uint[kUnitCount]                         bucket, scatter, resolve
+//       22  u6        g_batchState    STORAGE_BUFFER   uint[kBatchStateWords], also the         raster, batch_range,
+//                                                      INDIRECT_BUFFER of the bucket and        bucket, bucket_sums,
+//                                                      resolve dispatches                       resolve
+//       23  u7        g_fbWinners     STORAGE_BUFFER   uint[kFbWinnerCount] (4 MiB)             fb_write_mark, fb_write,
+//                                                                                              fb_write_clear
 //
+// The unit range makes a batch's fixed cost proportional to the FBRAM area it touched instead of all 262,144 units
+// (exact by construction: it is the hull of the units the raster pass counted). Units outside it have no fragments, a
+// count of zero and are not looked at.
 // g_vram (2) is the VDP1 back half's own buffer, the GPU's copy of VDP1 VRAM (kVRAMBufferSize, ymir::vdp::
 // kVDP1VRAMSize; vdp1_front.hpp checks the two are equal): it receives each batch's Vdp1OpList::vramCopies before the
 // batch's passes run, and starts zeroed. g_fbram (19) is a view of the buffer the VDP2 back half binds as
@@ -46,6 +61,10 @@
 //   writes each of its 2 * Length() slots, a fragment or 0), and the spans' slots partition [0, fragmentCount). Zero
 //   it at creation anyway, so no pass ever reads uninitialised memory.
 // - g_unitOffsets, g_scanSums and g_bucket are written before they are read within a batch: no clearing.
+// - g_batchState is zero at creation (the accumulator stores the range's low end inverted, so zero is "empty"); the
+//   batch_range pass resets the accumulator. Its buffer needs VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, and the barrier after
+//   batch_range must include VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT / VK_ACCESS_INDIRECT_COMMAND_READ_BIT.
+// - g_fbWinners is zero at creation; fb_write_clear returns it to zero after each run.
 // The buffer sizes and the scan sizing below are what stage 2 starts from; a shader that needs another resource adds a
 // binding here.
 // No Vulkan header may be included here.
@@ -75,6 +94,28 @@ inline constexpr uint32_t kBindingBucket = 18;
 inline constexpr uint32_t kBindingFbram = 19;
 inline constexpr uint32_t kBindingScanSums = 20;
 inline constexpr uint32_t kBindingUnitOffsets = 21;
+inline constexpr uint32_t kBindingBatchState = 22;
+inline constexpr uint32_t kBindingFbWinners = 23;
+
+/// @brief g_fbWinners: per (field, framebuffer, FBRAM word, byte) the last CPU write record of the current run that
+/// writes it (record index + 1; 0 none). Index Vdp1FbWinnerIndex. 4 MiB.
+inline constexpr uint32_t kFbWinnerCount = 2u * 2u * kWordsPerFramebuffer * 2u;
+inline constexpr uint32_t kFbWinnersBufferSize = kFbWinnerCount * sizeof(uint32_t);
+constexpr uint32_t Vdp1FbWinnerIndex(bool alt, uint32_t fb, uint32_t word, bool lowByte) {
+    return ((((alt ? 2u : 0u) + (fb & 1u)) * kWordsPerFramebuffer + (word & kWordIndexMask)) << 1) | (lowByte ? 1u : 0u);
+}
+
+/// @brief g_batchState words: the bucket pass's VkDispatchIndirectCommand (x, 1, 1), the resolve pass's, the batch's
+/// unit range [unitLo, unitHi) (written by batch_range) and the raster pass's accumulator (InterlockedMax of ~unit and
+/// of unit + 1, so that zero means no unit).
+inline constexpr uint32_t kBatchStateBucketArgs = 0;
+inline constexpr uint32_t kBatchStateResolveArgs = 3;
+inline constexpr uint32_t kBatchStateUnitLo = 6;
+inline constexpr uint32_t kBatchStateUnitHi = 7;
+inline constexpr uint32_t kBatchStateAccLoInv = 8;
+inline constexpr uint32_t kBatchStateAccHi = 9;
+inline constexpr uint32_t kBatchStateWords = 16;
+inline constexpr uint32_t kBatchStateBufferSize = kBatchStateWords * sizeof(uint32_t);
 
 /// @brief The GPU's copy of VDP1 VRAM: 512 KiB (ymir::vdp::kVDP1VRAMSize; the raster pass masks its addresses to it).
 inline constexpr uint32_t kVRAMBufferSize = 512u * 1024;
@@ -118,7 +159,8 @@ inline constexpr uint32_t kRasterScale = 1;
 /// @brief The largest range of one storage buffer binding (the device limit maxStorageBufferRange must cover it).
 inline constexpr uint32_t kMaxStorageBufferRange =
     std::max({kFragmentBufferSize, kBucketBufferSize, kUnitCountsBufferSize, kUnitOffsetsBufferSize, kFbramBufferSize,
-              kVRAMBufferSize, kSpanBufferSize, kCommandBufferSize, kFbWriteBufferSize});
+              kVRAMBufferSize, kSpanBufferSize, kCommandBufferSize, kFbWriteBufferSize, kFbWinnersBufferSize,
+              kBatchStateBufferSize});
 static_assert(kMaxStorageBufferRange <= (1u << 27));
 
 /// @brief Workgroup size of the VDP1 passes (one dimension, or 8 x 8 for the erase pass): 64 invocations, within the
@@ -138,12 +180,16 @@ static_assert(kMaxPushConstantSize == 32);
 
 /// @brief Dispatch shapes (all 64 x 1 x 1 workgroups except the erase pass):
 /// - raster: one thread per span, ceil(spanCount / 64) groups (at most 4096);
-/// - bucket: kScanBlockCount groups (4096), one unit per thread; bucket_sums: one group;
+/// - batch_range: one group;
+/// - bucket: vkCmdDispatchIndirect at kBatchStateBucketArgs: one group per 64-unit block of the batch's unit range (at
+///   most kScanBlockCount, 4096; none for a batch without fragments); bucket_sums: one group;
 /// - scatter: kScatterSlotsPerThread slots per thread, ceil(fragmentCount / kScatterSlotsPerGroup) groups (at most
 ///   16384; one slot per thread would need 65536 groups for a full batch, beyond the guaranteed 65535);
-/// - resolve: one unit per thread, kUnitCount / 64 groups (4096);
+/// - resolve: vkCmdDispatchIndirect at kBatchStateResolveArgs: G = ceil((unitHi - unitLo) / 64) groups (at most
+///   kResolveGroupCount, 4096); thread t of group g owns unit unitLo + G t + g;
 /// - erase: kEraseGroupSize x kEraseGroupSize groups over the region (x3 - x1 by y3 - y1 + 1 words);
-/// - fbwrite: one group, the records in order in chunks of 64.
+/// - fb_write_mark, fb_write, fb_write_clear: one thread per record of the run, ceil(count / 64) groups each (at most
+///   4096), in that order.
 inline constexpr uint32_t kScatterSlotsPerThread = 4;
 inline constexpr uint32_t kScatterSlotsPerGroup = kScatterSlotsPerThread * kWorkgroupSize;
 inline constexpr uint32_t kEraseGroupSize = 8;
@@ -167,36 +213,44 @@ inline constexpr uint32_t kResolveFoldChunk = 256;
 static_assert((kResolveSortCapacity & (kResolveSortCapacity - 1)) == 0 && kResolveFoldChunk % kWorkgroupSize == 0);
 
 /// @brief Workgroup (groupshared) memory of each VDP1 pass, in bytes (the test reads them from the SPIR-V):
+/// - raster: the group's unit range (two uints);
 /// - bucket, bucket_sums: one uint per thread;
 /// - resolve: the window's keys, the histogram, the workgroup's large units, one fold chunk of fragments (target,
 ///   colour) and four scalars;
-/// - fbwrite: one chunk of records (address, value, mask).
+/// - the others: none.
+inline constexpr uint32_t kRasterSharedMemorySize = 2 * 4;
 inline constexpr uint32_t kScanSharedMemorySize = kWorkgroupSize * 4;
 inline constexpr uint32_t kResolveSharedMemorySize =
     (kResolveSortCapacity + kResolveHistogramBins + kWorkgroupSize + 2 * kResolveFoldChunk + 4) * 4;
-inline constexpr uint32_t kFbWriteSharedMemorySize = kWorkgroupSize * 3 * 4;
 /// @brief The largest of them (the device limit maxComputeSharedMemorySize must cover it; gpu_version.hpp takes the
 /// maximum with VDP2, whose NBG fetch pass needs more): the resolve pass's 11,536 bytes, within the guaranteed 16384.
 inline constexpr uint32_t kMaxComputeSharedMemorySize =
-    std::max({kScanSharedMemorySize, kResolveSharedMemorySize, kFbWriteSharedMemorySize});
+    std::max({kRasterSharedMemorySize, kScanSharedMemorySize, kResolveSharedMemorySize});
 static_assert(kMaxComputeSharedMemorySize == 11536 && kMaxComputeSharedMemorySize <= 16384);
 
-inline constexpr std::array<Binding, 5> kRasterBindings{{
+inline constexpr std::array<Binding, 6> kRasterBindings{{
     {kBindingCommands, DescriptorKind::StorageBuffer},
     {kBindingSpans, DescriptorKind::StorageBuffer},
     {kBindingVRAM, DescriptorKind::StorageBuffer},
     {kBindingFragments, DescriptorKind::StorageBuffer},
     {kBindingUnitCounts, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
 }};
 
-inline constexpr std::array<Binding, 3> kBucketBindings{{
+inline constexpr std::array<Binding, 1> kBatchRangeBindings{{
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
+}};
+
+inline constexpr std::array<Binding, 4> kBucketBindings{{
     {kBindingUnitCounts, DescriptorKind::StorageBuffer},
     {kBindingScanSums, DescriptorKind::StorageBuffer},
     {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
 }};
 
-inline constexpr std::array<Binding, 1> kBucketSumsBindings{{
+inline constexpr std::array<Binding, 2> kBucketSumsBindings{{
     {kBindingScanSums, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
 }};
 
 inline constexpr std::array<Binding, 4> kScatterBindings{{
@@ -206,26 +260,38 @@ inline constexpr std::array<Binding, 4> kScatterBindings{{
     {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
 }};
 
-inline constexpr std::array<Binding, 6> kResolveBindings{{
+inline constexpr std::array<Binding, 7> kResolveBindings{{
     {kBindingFragments, DescriptorKind::StorageBuffer},
     {kBindingUnitCounts, DescriptorKind::StorageBuffer},
     {kBindingBucket, DescriptorKind::StorageBuffer},
     {kBindingFbram, DescriptorKind::StorageBuffer},
     {kBindingScanSums, DescriptorKind::StorageBuffer},
     {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
 }};
 
 inline constexpr std::array<Binding, 1> kEraseBindings{{
     {kBindingFbram, DescriptorKind::StorageBuffer},
 }};
 
-inline constexpr std::array<Binding, 2> kFbWriteBindings{{
+inline constexpr std::array<Binding, 2> kFbWriteMarkBindings{{
+    {kBindingFbWrites, DescriptorKind::StorageBuffer},
+    {kBindingFbWinners, DescriptorKind::StorageBuffer},
+}};
+
+inline constexpr std::array<Binding, 3> kFbWriteBindings{{
     {kBindingFbWrites, DescriptorKind::StorageBuffer},
     {kBindingFbram, DescriptorKind::StorageBuffer},
+    {kBindingFbWinners, DescriptorKind::StorageBuffer},
+}};
+
+inline constexpr std::array<Binding, 2> kFbWriteClearBindings{{
+    {kBindingFbWrites, DescriptorKind::StorageBuffer},
+    {kBindingFbWinners, DescriptorKind::StorageBuffer},
 }};
 
 /// @brief The layout probe (cs_vdp1_layout_probe.hlsl) declares every resource and every push-constant struct.
-inline constexpr std::array<Binding, 10> kLayoutProbeBindings{{
+inline constexpr std::array<Binding, 12> kLayoutProbeBindings{{
     {kBindingCommands, DescriptorKind::StorageBuffer},
     {kBindingSpans, DescriptorKind::StorageBuffer},
     {kBindingVRAM, DescriptorKind::StorageBuffer},
@@ -236,13 +302,18 @@ inline constexpr std::array<Binding, 10> kLayoutProbeBindings{{
     {kBindingFbram, DescriptorKind::StorageBuffer},
     {kBindingScanSums, DescriptorKind::StorageBuffer},
     {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
+    {kBindingFbWinners, DescriptorKind::StorageBuffer},
 }};
 
 /// @brief The largest per-stage use over the VDP1 pipelines (gpu_version.hpp takes the maximum with VDP2's).
 constexpr StageUsage MaxStageUsage() {
     StageUsage usage;
     for (std::span<const Binding> bindings : {std::span<const Binding>(kRasterBindings),
+                                              std::span<const Binding>(kBatchRangeBindings),
                                               std::span<const Binding>(kBucketBindings),
+                                              std::span<const Binding>(kFbWriteMarkBindings),
+                                              std::span<const Binding>(kFbWriteClearBindings),
                                               std::span<const Binding>(kBucketSumsBindings),
                                               std::span<const Binding>(kScatterBindings),
                                               std::span<const Binding>(kResolveBindings),
@@ -263,7 +334,7 @@ constexpr StageUsage MaxStageUsage() {
 }
 
 inline constexpr StageUsage kMaxStageUsage = MaxStageUsage();
-static_assert(kMaxStageUsage.storageBuffers == 6 && kMaxStageUsage.storageImages == 0 &&
-              kMaxStageUsage.sampledImages == 0 && kMaxStageUsage.resources == 6);
+static_assert(kMaxStageUsage.storageBuffers == 7 && kMaxStageUsage.storageImages == 0 &&
+              kMaxStageUsage.sampledImages == 0 && kMaxStageUsage.resources == 7);
 
 } // namespace brimir::gpu::vdp1

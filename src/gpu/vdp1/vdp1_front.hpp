@@ -140,6 +140,12 @@ struct Vdp1FrontStats {
     uint64_t fragmentSlots = 0;
     uint64_t batches = 0;
     std::array<uint64_t, 6> batchEnds{}; // by Vdp1BatchEnd
+    // Per frame (MarkFrameBoundary ends a frame): the open frame's batches by end reason, the last completed frame's,
+    // the most batches of one frame and the frames completed
+    std::array<uint64_t, 6> frameBatchEnds{};
+    std::array<uint64_t, 6> lastFrameBatchEnds{};
+    uint64_t maxFrameBatches = 0;
+    uint64_t frames = 0;
     uint64_t erases = 0;
     uint64_t fbWrites = 0;
     uint64_t vramUploadBytes = 0;

@@ -873,6 +873,12 @@ TEST_CASE("VDP1 reference through the front half: swaps, CPU writes and erases b
     CHECK(r.front.batchEnds[static_cast<size_t>(gpu::Vdp1BatchEnd::FbSwap)] == 1);
     CHECK(r.stats.fbWrites == 2);
     CHECK(r.stats.erases == 1);
+    // Per-frame batch counts: the frame before the boundary closed one batch at a CPU write (op kind), one at the swap
+    // and one at the boundary; the open frame one at the final take
+    CHECK(r.front.frames == 1);
+    CHECK(r.front.lastFrameBatchEnds == std::array<uint64, 6>{1, 0, 1, 0, 1, 0});
+    CHECK(r.front.maxFrameBatches == 3);
+    CHECK(r.front.frameBatchEnds == std::array<uint64, 6>{0, 0, 0, 0, 0, 1});
 }
 
 TEST_CASE("VDP1 reference: one random table (BRIMIR_VDP1REF_SEED)", "[vdp1][reference][.debug]") {

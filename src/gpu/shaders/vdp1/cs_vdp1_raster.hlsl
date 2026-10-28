@@ -9,9 +9,11 @@
 // - every pixel VDP1PlotPixel would write becomes a fragment in slot fragBase + 2 * step + isAA (the order key; the
 //   fragment buffer holds no key) and counts one for its unit (the FBRAM word and field) in g_unitCounts;
 // - writes every one of the span's 2 * Length() slots: the fragment, or 0 (not live) for a slot without one. The spans'
-//   slots partition [0, fragmentCount), so the batch's fragment buffer needs no clearing.
+//   slots partition [0, fragmentCount), so the batch's fragment buffer needs no clearing;
+// - the group's lowest and highest counted unit go into the batch's range accumulator (g_batchState; one atomic pair
+//   per group), from which batch_range sizes the bucket and resolve dispatches.
 // Bindings (src/gpu/vdp1/vdp1_bindings.hpp kRasterBindings): commands (0), spans (1), VDP1 VRAM (2), fragments (16),
-// unit counts (17). Push constants: BatchParams (scale is 1: stage 2 draws at native resolution).
+// unit counts (17), batch state (22). Push constants: BatchParams (scale is 1: stage 2 draws at native resolution).
 
 #include "vdp1_defs.hlsli"
 #include "vdp1_params.hlsli"
@@ -24,6 +26,7 @@ StructuredBuffer<Span> g_spans : register(t1);
 ByteAddressBuffer g_vram : register(t2);
 RWStructuredBuffer<Fragment> g_fragments : register(u0);
 RWStructuredBuffer<uint> g_unitCounts : register(u1);
+RWStructuredBuffer<uint> g_batchState : register(u6);
 
 static const uint kVRAMMask = kVRAMBufferSize - 1;
 
@@ -81,9 +84,19 @@ void ZeroSlotsUpTo(inout SlotWriter w, uint slot) {
     }
 }
 
+// The units this thread counted (thread-private)
+static uint s_unitLo = 0xFFFFFFFFu;
+static uint s_unitHi = 0;
+
 void WriteFragment(inout SlotWriter w, uint slot, uint target, uint color) {
     if (slot < w.next || slot >= w.end) {
         return; // outside the span's slots (a span list that does not match its commands)
+    }
+    uint counts, stride;
+    g_unitCounts.GetDimensions(counts, stride);
+    const uint unit = Vdp1FragUnit(target);
+    if (unit >= counts) {
+        return; // a counts buffer smaller than kUnitCount: the slot stays empty
     }
     ZeroSlotsUpTo(w, slot);
     Fragment f;
@@ -91,11 +104,39 @@ void WriteFragment(inout SlotWriter w, uint slot, uint target, uint color) {
     f.color = color;
     g_fragments[w.fragBase + slot] = f;
     w.next = slot + 1;
-    InterlockedAdd(g_unitCounts[Vdp1FragUnit(target)], 1);
+    InterlockedAdd(g_unitCounts[unit], 1);
+    s_unitLo = min(s_unitLo, unit);
+    s_unitHi = max(s_unitHi, unit + 1);
 }
 
+// The group's unit range: ~lo (max) and hi (max), so zero is empty
+groupshared uint gs_rangeLoInv;
+groupshared uint gs_rangeHi;
+
+void RasterSpan(uint3 id);
+
 [numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
+    if (tid.x == 0) {
+        gs_rangeLoInv = 0;
+        gs_rangeHi = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    RasterSpan(id);
+    if (s_unitHi != 0) {
+        InterlockedMax(gs_rangeLoInv, ~s_unitLo);
+        InterlockedMax(gs_rangeHi, s_unitHi);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint words, stride;
+    g_batchState.GetDimensions(words, stride);
+    if (tid.x == 0 && gs_rangeHi != 0 && kBatchStateAccHi < words) {
+        InterlockedMax(g_batchState[kBatchStateAccLoInv], gs_rangeLoInv);
+        InterlockedMax(g_batchState[kBatchStateAccHi], gs_rangeHi);
+    }
+}
+
+void RasterSpan(uint3 id) {
     if (id.x >= g_batch.spanCount) {
         return;
     }

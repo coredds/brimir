@@ -101,6 +101,19 @@ uint Vdp1FbWriteWord(uint a) { return a & kWordIndexMask; }
 uint Vdp1FbWriteFb(uint a) { return BitExtract(a, 17, 1); }
 bool Vdp1FbWriteMirrorAlt(uint a) { return BitTest(a, 18); }
 
+// g_batchState words (vdp1_bindings.hpp kBatchState*)
+static const uint kBatchStateBucketArgs = 0;
+static const uint kBatchStateResolveArgs = 3;
+static const uint kBatchStateUnitLo = 6;
+static const uint kBatchStateUnitHi = 7;
+static const uint kBatchStateAccLoInv = 8;
+static const uint kBatchStateAccHi = 9;
+
+// g_fbWinners index (vdp1_bindings.hpp Vdp1FbWinnerIndex)
+uint Vdp1FbWinnerIndex(bool alt, uint fb, uint word, bool lowByte) {
+    return ((((alt ? 2u : 0u) + (fb & 1)) * kWordsPerFramebuffer + (word & kWordIndexMask)) << 1) | (lowByte ? 1u : 0u);
+}
+
 // ErasePushConstants::flags
 uint Vdp1MakeEraseFlags(uint fb, bool mirrorAlt, bool clearMesh) {
     return (fb & 1) | (mirrorAlt ? 2u : 0u) | (clearMesh ? 4u : 0u);

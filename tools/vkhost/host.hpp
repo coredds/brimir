@@ -120,6 +120,9 @@ struct Vdp1ProbeFrame {
     uint64_t dirtySyncs = 0;
     uint64_t fbWrites = 0;
     uint64_t erases = 0;
+    // draw batches the GPU VDP1 front half closed, by end reason (op kind, VRAM hazard, framebuffer swap, capacity,
+    // frame boundary, take; zero in older cores and without a front half)
+    uint64_t batchEnds[6] = {};
 };
 
 // What a run did, for the CLI summary and the checks.

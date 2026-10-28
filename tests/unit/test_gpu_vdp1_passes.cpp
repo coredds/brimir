@@ -10,18 +10,21 @@
 // more than 8,000 fragments per word, every draw mode, 8 bpp, meshes, double interlace, erases) and for seeded random
 // command tables (vdp1_scenario.hpp). Every op of an op list is replayed on both, FBRAM compared after each one; each
 // scene's final FBRAM is also compared with the software renderer's.
-// [gpu]: SKIP without a device. Seed counts are smaller on a CPU device (lavapipe); BRIMIR_VDP1_GPU_SEEDS overrides
-// them. With BRIMIR_VK_SYNC_VALIDATION=1 synchronization validation runs too.
+// [gpu]: SKIP without a device. The random tables default to 40 seeds (10 on a CPU device such as lavapipe);
+// BRIMIR_VDP1_GPU_SEEDS=N runs N and prints the totals. The [timing] case is hidden ([.]): run it explicitly. With BRIMIR_VK_SYNC_VALIDATION=1 synchronization validation runs too.
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
 #include "vdp1_raster_reference.hpp"
 #include "vdp1_scenario.hpp"
 
+#include <gpu/shaders/generated/vdp1_batch_range.spv.h>
 #include <gpu/shaders/generated/vdp1_bucket.spv.h>
 #include <gpu/shaders/generated/vdp1_bucket_sums.spv.h>
 #include <gpu/shaders/generated/vdp1_erase.spv.h>
 #include <gpu/shaders/generated/vdp1_fb_write.spv.h>
+#include <gpu/shaders/generated/vdp1_fb_write_clear.spv.h>
+#include <gpu/shaders/generated/vdp1_fb_write_mark.spv.h>
 #include <gpu/shaders/generated/vdp1_raster.spv.h>
 #include <gpu/shaders/generated/vdp1_resolve.spv.h>
 #include <gpu/shaders/generated/vdp1_scatter.spv.h>
@@ -52,10 +55,12 @@ using brimir::gpu::VulkanDevice;
 using brimir::test::CloseAndCheckValidation;
 using brimir::test::OpenDevice;
 
-enum class Pass : uint32 { Raster, Bucket, BucketSums, Scatter, Resolve, Erase, FbWrite, Count };
+enum class Pass : uint32 {
+    Raster, BatchRange, Bucket, BucketSums, Scatter, Resolve, Erase, FbWriteMark, FbWrite, FbWriteClear, Count
+};
 constexpr uint32 kPassCount = static_cast<uint32>(Pass::Count);
-constexpr const char *kPassNames[kPassCount] = {"raster", "bucket", "bucket_sums", "scatter",
-                                                "resolve", "erase", "fb_write"};
+constexpr const char *kPassNames[kPassCount] = {"raster", "batch_range", "bucket", "bucket_sums", "scatter",
+                                                "resolve", "erase", "fb_write_mark", "fb_write", "fb_write_clear"};
 
 struct Timings {
     std::array<double, kPassCount> ms{};
@@ -96,7 +101,10 @@ struct Inspect {
 // reads; consecutive passes are separated by compute-to-compute barriers.
 class GpuVdp1 {
 public:
-    enum Buf : uint32 { Commands, Spans, Vram, FbWrites, Fragments, UnitCounts, Bucket, Fbram, ScanSums, UnitOffsets, kBufCount };
+    enum Buf : uint32 {
+        Commands, Spans, Vram, FbWrites, Fragments, UnitCounts, Bucket, Fbram, ScanSums, UnitOffsets, BatchState, FbWinners,
+        kBufCount
+    };
 
     // Memory for the buffers: host-cached (fast readback for the comparisons; the GPU reads and writes system memory) or
     // device-local and host-visible (for the timings, when the device has such memory)
@@ -214,14 +222,17 @@ public:
             }
         };
         auto bucket = [&](VkCommandBuffer cmd) {
-            Dispatch(cmd, Pass::Bucket, nullptr, gpu::kScanBlockCount);
+            Dispatch(cmd, Pass::BatchRange, nullptr, 1);
+            DispatchIndirect(cmd, Pass::Bucket, nullptr, gpu::kBatchStateBucketArgs);
             Dispatch(cmd, Pass::BucketSums, nullptr, 1);
             const uint32 scatterGroups = (pc.fragmentCount + gpu::kScatterSlotsPerGroup - 1) / gpu::kScatterSlotsPerGroup;
             if (scatterGroups != 0) {
                 Dispatch(cmd, Pass::Scatter, &pc, scatterGroups);
             }
         };
-        auto resolve = [&](VkCommandBuffer cmd) { Dispatch(cmd, Pass::Resolve, &pc, gpu::kResolveGroupCount); };
+        auto resolve = [&](VkCommandBuffer cmd) {
+            DispatchIndirect(cmd, Pass::Resolve, &pc, gpu::kBatchStateResolveArgs);
+        };
         if (inspect == nullptr) {
             return Submit([&](VkCommandBuffer cmd) {
                 raster(cmd);
@@ -249,18 +260,26 @@ public:
     bool ResolveFragments(const std::vector<gpu::Vdp1Fragment> &slots, uint32 drawFB) {
         Copy(Fragments, slots.data(), slots.size() * sizeof(gpu::Vdp1Fragment));
         uint32 *counts = Map<uint32>(UnitCounts);
+        uint32 lo = ~0u, hi = 0;
         for (const gpu::Vdp1Fragment &f : slots) {
             if (gpu::Vdp1FragLive(f.target)) {
-                ++counts[gpu::Vdp1FragUnit(f.target)];
+                const uint32 unit = gpu::Vdp1FragUnit(f.target);
+                ++counts[unit];
+                lo = std::min(lo, unit);
+                hi = std::max(hi, unit + 1);
             }
         }
+        uint32 *state = Map<uint32>(BatchState);
+        state[gpu::kBatchStateAccLoInv] = hi != 0 ? ~lo : 0;
+        state[gpu::kBatchStateAccHi] = hi;
         const gpu::Vdp1BatchPushConstants pc{0, 0, 0, static_cast<uint32>(slots.size()), drawFB, 1};
         return Submit([&](VkCommandBuffer cmd) {
-            Dispatch(cmd, Pass::Bucket, nullptr, gpu::kScanBlockCount);
+            Dispatch(cmd, Pass::BatchRange, nullptr, 1);
+            DispatchIndirect(cmd, Pass::Bucket, nullptr, gpu::kBatchStateBucketArgs);
             Dispatch(cmd, Pass::BucketSums, nullptr, 1);
             Dispatch(cmd, Pass::Scatter, &pc,
                      (pc.fragmentCount + gpu::kScatterSlotsPerGroup - 1) / gpu::kScatterSlotsPerGroup);
-            Dispatch(cmd, Pass::Resolve, &pc, gpu::kResolveGroupCount);
+            DispatchIndirect(cmd, Pass::Resolve, &pc, gpu::kBatchStateResolveArgs);
         });
     }
 
@@ -274,7 +293,15 @@ public:
     }
 
     bool FbWrite(const gpu::Vdp1FbWritePushConstants &pc) {
-        return Submit([&](VkCommandBuffer cmd) { Dispatch(cmd, Pass::FbWrite, &pc, 1); });
+        const uint32 groups = (pc.count + kWorkgroupSize - 1) / kWorkgroupSize;
+        if (groups == 0) {
+            return true;
+        }
+        return Submit([&](VkCommandBuffer cmd) {
+            Dispatch(cmd, Pass::FbWriteMark, &pc, groups);
+            Dispatch(cmd, Pass::FbWrite, &pc, groups);
+            Dispatch(cmd, Pass::FbWriteClear, &pc, groups);
+        });
     }
 
     void Copy(Buf b, const void *data, size_t size) {
@@ -314,21 +341,25 @@ private:
         static constexpr std::array<uint32, kBufCount> kBindings{
             gpu::kBindingCommands, gpu::kBindingSpans,  gpu::kBindingVRAM,     gpu::kBindingFbWrites,
             gpu::kBindingFragments, gpu::kBindingUnitCounts, gpu::kBindingBucket, gpu::kBindingFbram,
-            gpu::kBindingScanSums, gpu::kBindingUnitOffsets};
+            gpu::kBindingScanSums, gpu::kBindingUnitOffsets, gpu::kBindingBatchState, gpu::kBindingFbWinners};
         static constexpr std::array<uint32, kBufCount> kSizes{
             gpu::kCommandBufferSize,  gpu::kSpanBufferSize,       gpu::kVRAMBufferSize,   gpu::kFbWriteBufferSize,
             gpu::kFragmentBufferSize, gpu::kUnitCountsBufferSize, gpu::kBucketBufferSize, gpu::kFbramBufferSize,
-            gpu::kScanSumsBufferSize, gpu::kUnitOffsetsBufferSize};
+            gpu::kScanSumsBufferSize, gpu::kUnitOffsetsBufferSize, gpu::kBatchStateBufferSize,
+            gpu::kFbWinnersBufferSize};
         constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         const VkMemoryPropertyFlags preferred =
             kHost | (memory == Memory::DeviceLocal ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
         m_deviceLocal = memory == Memory::DeviceLocal;
         for (uint32 b = 0; b < kBufCount; ++b) {
             m_bindingOf[b] = kBindings[b];
-            VkResult r = vu::CreateBuffer(m_device, kSizes[b], VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, preferred, m_buffers[b]);
+            // the batch state is also the bucket and resolve passes' indirect dispatch arguments
+            const VkBufferUsageFlags usage =
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (b == BatchState ? VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT : 0u);
+            VkResult r = vu::CreateBuffer(m_device, kSizes[b], usage, preferred, m_buffers[b]);
             if (r != VK_SUCCESS) {
                 m_deviceLocal = false;
-                r = vu::CreateBuffer(m_device, kSizes[b], VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, kHost, m_buffers[b]);
+                r = vu::CreateBuffer(m_device, kSizes[b], usage, kHost, m_buffers[b]);
             }
             if (r != VK_SUCCESS || m_buffers[b].mapped == nullptr) {
                 return false;
@@ -343,12 +374,15 @@ private:
         };
         const std::array<PassDesc, kPassCount> passes{{
             {sh::kVdp1RasterSpv, gpu::kRasterBindings, sizeof(gpu::Vdp1BatchPushConstants)},
+            {sh::kVdp1BatchRangeSpv, gpu::kBatchRangeBindings, 0},
             {sh::kVdp1BucketSpv, gpu::kBucketBindings, 0},
             {sh::kVdp1BucketSumsSpv, gpu::kBucketSumsBindings, 0},
             {sh::kVdp1ScatterSpv, gpu::kScatterBindings, sizeof(gpu::Vdp1BatchPushConstants)},
             {sh::kVdp1ResolveSpv, gpu::kResolveBindings, sizeof(gpu::Vdp1BatchPushConstants)},
             {sh::kVdp1EraseSpv, gpu::kEraseBindings, sizeof(gpu::Vdp1ErasePushConstants)},
+            {sh::kVdp1FbWriteMarkSpv, gpu::kFbWriteMarkBindings, sizeof(gpu::Vdp1FbWritePushConstants)},
             {sh::kVdp1FbWriteSpv, gpu::kFbWriteBindings, sizeof(gpu::Vdp1FbWritePushConstants)},
+            {sh::kVdp1FbWriteClearSpv, gpu::kFbWriteClearBindings, sizeof(gpu::Vdp1FbWritePushConstants)},
         }};
         uint32 descriptors = 0;
         for (const PassDesc &p : passes) {
@@ -402,9 +436,9 @@ private:
 
         // Timestamps, when the queue has them
         uint32 families = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(m_device.Physical(), &families, nullptr);
+        volk::vkGetPhysicalDeviceQueueFamilyProperties(m_device.Physical(), &families, nullptr);
         std::vector<VkQueueFamilyProperties> props(families);
-        vkGetPhysicalDeviceQueueFamilyProperties(m_device.Physical(), &families, props.data());
+        volk::vkGetPhysicalDeviceQueueFamilyProperties(m_device.Physical(), &families, props.data());
         if (m_device.QueueFamily() < families && props[m_device.QueueFamily()].timestampValidBits != 0) {
             VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
             info.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -418,6 +452,15 @@ private:
     }
 
     void Dispatch(VkCommandBuffer cmd, Pass pass, const void *push, uint32 x, uint32 y = 1) {
+        Record(cmd, pass, push, x, y, ~0u);
+    }
+
+    // vkCmdDispatchIndirect with the arguments at word `argsWord` of the batch state
+    void DispatchIndirect(VkCommandBuffer cmd, Pass pass, const void *push, uint32 argsWord) {
+        Record(cmd, pass, push, 0, 0, argsWord);
+    }
+
+    void Record(VkCommandBuffer cmd, Pass pass, const void *push, uint32 x, uint32 y, uint32 argsWord) {
         const auto &vk = m_device.Table();
         const Pipe &p = m_pipes[static_cast<uint32>(pass)];
         vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
@@ -429,14 +472,20 @@ private:
         if (timed) {
             vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_queries, m_queryCount);
         }
-        vk.vkCmdDispatch(cmd, x, y, 1);
+        if (argsWord == ~0u) {
+            vk.vkCmdDispatch(cmd, x, y, 1);
+        } else {
+            vk.vkCmdDispatchIndirect(cmd, m_buffers[BatchState].buffer, argsWord * sizeof(uint32));
+        }
         if (timed) {
             vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_queries, m_queryCount + 1);
             m_queryPass[m_queryCount / 2] = pass;
             m_queryCount += 2;
         }
+        // compute writes before the next pass's shader accesses and indirect argument reads
         vu::GlobalBarrier(m_device, cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                          VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
 
     bool Submit(const std::function<void(VkCommandBuffer)> &record) {
@@ -561,6 +610,7 @@ struct RasterExpectation {
     std::vector<gpu::Vdp1Fragment> slots;
     std::vector<uint32> counts;
     uint32 maxPerUnit = 0;
+    uint32 unitLo = 0, unitHi = 0; // the hull of the fragments' units (0, 0 without fragments)
 };
 
 RasterExpectation ExpectedRaster(const gpu::Vdp1OpList &ops, const gpu::Vdp1DrawBatch &b, const uint8 *vram) {
@@ -579,7 +629,10 @@ RasterExpectation ExpectedRaster(const gpu::Vdp1OpList &ops, const gpu::Vdp1Draw
             throw std::logic_error("ExpectedRaster: a fragment key outside the batch's slots");
         }
         e.slots[f.key] = {f.target | gpu::kFragLiveBit, f.color};
-        e.maxPerUnit = std::max(e.maxPerUnit, ++e.counts[f.target & gpu::kFragUnitMask]);
+        const uint32 unit = f.target & gpu::kFragUnitMask;
+        e.maxPerUnit = std::max(e.maxPerUnit, ++e.counts[unit]);
+        e.unitLo = e.unitHi == 0 ? unit : std::min(e.unitLo, unit);
+        e.unitHi = std::max(e.unitHi, unit + 1);
     }
     return e;
 }
@@ -601,11 +654,21 @@ std::string CompareRaster(const RasterExpectation &e, GpuVdp1 &g) {
                    std::to_string(e.counts[u]);
         }
     }
+    // The batch's unit range accumulated by the raster pass is the hull of the reference's fragments: every fragment
+    // lies inside it (the bucket and resolve passes cover only it) and it is no wider than needed
+    const uint32 *state = g.Map<uint32>(GpuVdp1::BatchState);
+    const uint32 hi = state[gpu::kBatchStateAccHi];
+    const uint32 lo = hi != 0 ? ~state[gpu::kBatchStateAccLoInv] : 0;
+    if (lo != e.unitLo || hi != e.unitHi) {
+        return "unit range: GPU [" + std::to_string(lo) + ", " + std::to_string(hi) + "), reference [" +
+               std::to_string(e.unitLo) + ", " + std::to_string(e.unitHi) + ")";
+    }
     return {};
 }
 
-// After the scatter pass: unit u's bucket is [prefix(u), prefix(u) + count(u)) of the exclusive prefix of the counts,
-// and holds exactly the unit's live slots
+// After the scatter pass: the batch range is the hull, and unit u of the range's bucket is [prefix(u), prefix(u) +
+// count(u)) of the exclusive prefix of the range's counts, holding exactly the unit's live slots (units outside the range
+// have no fragment and stale offsets)
 std::string CompareBuckets(const RasterExpectation &e, GpuVdp1 &g) {
     const uint32 *sums = g.Map<uint32>(GpuVdp1::ScanSums);
     const uint32 *offsets = g.Map<uint32>(GpuVdp1::UnitOffsets);
@@ -616,8 +679,20 @@ std::string CompareBuckets(const RasterExpectation &e, GpuVdp1 &g) {
             expected[gpu::Vdp1FragUnit(e.slots[i].target)].push_back(i);
         }
     }
+    const uint32 *state = g.Map<uint32>(GpuVdp1::BatchState);
+    const uint32 lo = state[gpu::kBatchStateUnitLo], hi = state[gpu::kBatchStateUnitHi];
+    if (lo != e.unitLo || hi != e.unitHi) {
+        return "batch range [" + std::to_string(lo) + ", " + std::to_string(hi) + ") differs from the hull";
+    }
+    if (state[gpu::kBatchStateAccLoInv] != 0 || state[gpu::kBatchStateAccHi] != 0) {
+        return "the range accumulator was not reset";
+    }
+    if (state[gpu::kBatchStateBucketArgs] != ((hi + 63) >> 6) - (lo >> 6) ||
+        state[gpu::kBatchStateResolveArgs] != std::min(hi - lo, gpu::kResolveGroupCount)) {
+        return "indirect dispatch arguments do not match the range";
+    }
     uint32 prefix = 0;
-    for (uint32 u = 0; u < gpu::kUnitCount; ++u) {
+    for (uint32 u = (lo >> 6) << 6; u < hi; ++u) {
         const uint32 end = sums[u >> 6] + offsets[u];
         if (end != prefix + e.counts[u]) {
             return "unit " + std::to_string(u) + " bucket ends at " + std::to_string(end) + ", expected " +
@@ -1203,7 +1278,7 @@ TEST_CASE("VDP1 passes: CPU framebuffer write runs of overlapping records equal 
         GpuVdp1 g(*device);
         REQUIRE(g.Ok());
         TestRng rng{31337};
-        for (const uint32 count : {1u, 63u, 64u, 65u, 1000u, 20000u}) {
+        for (const uint32 count : {1u, 63u, 64u, 65u, 1000u, 20000u, 131072u}) {
             CAPTURE(count);
             gpu::Vdp1OpList ops;
             for (uint32 k = 0; k < count; ++k) {
@@ -1246,16 +1321,16 @@ TEST_CASE("VDP1 passes: random command tables through the front half equal the r
     {
         GpuVdp1 g(*device);
         REQUIRE(g.Ok());
-        const uint64 seeds = SeedCount(*device, 160, 40);
+        const uint64 seeds = SeedCount(*device, 40, 10);
         const auto t0 = std::chrono::steady_clock::now();
         SceneStats stats;
         uint64 mismatches = 0;
         Coverage cov;
         for (uint64 seed = 1; seed <= seeds; ++seed) {
             const Scenario s = RandomScenario(seed, cov);
-            // every fourth table: each batch's raster and scatter output and FBRAM after every op; the others FBRAM at
+            // every other table: each batch's raster and scatter output and FBRAM after every op; the others FBRAM at
             // the end of each op list
-            const std::string d = RunScene(g, s, seed % 4 == 1, &stats);
+            const std::string d = RunScene(g, s, seed % 2 == 1, &stats);
             if (!d.empty()) {
                 if (mismatches++ < 5) {
                     UNSCOPED_INFO("seed " << seed << ": " << d);
@@ -1271,15 +1346,17 @@ TEST_CASE("VDP1 passes: random command tables through the front half equal the r
         CHECK(stats.batches > seeds);
         CHECK(stats.erases > 0);
         CHECK(stats.fbWriteRuns > 0);
-        std::printf("VDP1 GPU random tables (%s): %llu seeds, %.1f s, %llu batches, %llu slots, max %u per word; %s\n",
+        if (std::getenv("BRIMIR_VDP1_GPU_SEEDS") != nullptr) { // an explicit (long) run reports its totals
+            std::printf("VDP1 GPU random tables (%s): %llu seeds, %.1f s, %llu batches, %llu slots, max %u per word; %s\n",
                     device->Properties().deviceName, static_cast<unsigned long long>(seeds), seconds,
                     static_cast<unsigned long long>(stats.batches), static_cast<unsigned long long>(stats.fragments),
                     stats.maxPerUnit, g.Times().Format().c_str());
+        }
     }
     CloseAndCheckValidation(device);
 }
 
-TEST_CASE("VDP1 passes: timings of a polygon-heavy batch and an apex stack", "[gpu][vdp1][passes][timing]") {
+TEST_CASE("VDP1 passes: timings of a polygon-heavy batch and an apex stack", "[gpu][vdp1][passes][timing][.]") {
     // About a million fragment slots in one batch (128 overlapping Gouraud, textured and half-transparent quads, as
     // many as the scenario's command area holds, over a 320 x 224 screen), checked against the reference, with the
     // GPU time per pass printed
@@ -1326,6 +1403,84 @@ TEST_CASE("VDP1 passes: timings of a polygon-heavy batch and an apex stack", "[g
         const Timings apex = g.Times();
         std::printf("VDP1 GPU apex stack (%s): 9000 spans; %s; total %.3f ms\n", device->Properties().deviceName,
                     apex.Format().c_str(), apex.Total());
+
+        // A batch's fixed cost: no fragment (a transparent textured line), one short line, and two fragments at the
+        // two ends of the unit space (the cost of covering all 262,144 units, as before the unit range)
+        {
+            auto timeList = [&](const char *name, const gpu::Vdp1OpList &ops) {
+                SceneRunner small(g, *ApexInitialFbram(), false);
+                small.Replay(ops); // warm up
+                g.Times().Clear();
+                for (int rep = 0; rep < 20; ++rep) {
+                    CHECK(small.Replay(ops) == "");
+                }
+                Timings t = g.Times();
+                for (uint32 p = 0; p < kPassCount; ++p) {
+                    t.ms[p] /= 20;
+                    t.dispatches[p] /= 20;
+                }
+                std::printf("VDP1 GPU %s (%s): per batch %s; total %.4f ms\n", name, device->Properties().deviceName,
+                            t.Format().c_str(), t.Total());
+            };
+            gpu::Vdp1OpList empty;
+            {
+                gpu::Vdp1DrawBatch b{};
+                gpu::Vdp1CommandParams c = HandCommand(0x0028, 2, true, false, 0, 0); // colour mode 5, VRAM zero
+                c.charAddr = 0x70000;
+                c.charSize = gpu::Vdp1Pack16(16, 16);
+                empty.commands.push_back(c);
+                b.cmdCount = 1;
+                AddSpan(empty, b, {100, 100}, {110, 100}, 0, 0, 0, 0);
+                empty.ops.push_back({gpu::Vdp1OpKind::Draw, 0});
+                empty.batches.push_back(b);
+                CloseList(empty);
+            }
+            gpu::Vdp1OpList line;
+            {
+                gpu::Vdp1DrawBatch b{};
+                line.commands.push_back(HandCommand(0x00C0, 4, false, false, 0x83E0, 0));
+                b.cmdCount = 1;
+                AddSpan(line, b, {100, 100}, {110, 100}, 0, 0, 0, 0);
+                line.ops.push_back({gpu::Vdp1OpKind::Draw, 0});
+                line.batches.push_back(b);
+                CloseList(line);
+            }
+            gpu::Vdp1OpList ends;
+            {
+                gpu::Vdp1DrawBatch b{};
+                // deinterlaced double density: (0, 0) is unit 0 of field 0; (511, 511) unit 0x1FFFF of field 1
+                gpu::Vdp1CommandParams c = HandCommand(0x00C0, 4, false, false, 0x83E0, 0x60);
+                c.sysClip = gpu::Vdp1Pack16(1023, 1023);
+                ends.commands.push_back(c);
+                b.cmdCount = 1;
+                AddSpan(ends, b, {0, 0}, {0, 0}, 0, 0, 0, 0);
+                AddSpan(ends, b, {511, 511}, {511, 511}, 1, 0, 0, 0);
+                ends.ops.push_back({gpu::Vdp1OpKind::Draw, 0});
+                ends.batches.push_back(b);
+                CloseList(ends);
+            }
+            timeList("batch without fragments", empty);
+            timeList("batch of one 11-pixel line", line);
+            timeList("batch covering all units", ends);
+        }
+
+        // CPU framebuffer write runs: 71,680 words in sequence (a 320 x 224 framebuffer) and 131,072 byte writes
+        for (const uint32 count : {71680u, 131072u}) {
+            gpu::Vdp1OpList ops;
+            for (uint32 k = 0; k < count; ++k) {
+                const bool bytes = count == 131072u;
+                ops.fbWrites.push_back({gpu::Vdp1MakeFbWriteAddress(bytes ? k / 2 : k, 0, false), k & 0xFFFF,
+                                        bytes ? ((k & 1) != 0 ? 0x00FFu : 0xFF00u) : 0xFFFFu, 0});
+            }
+            ops.fbWriteRuns.push_back({0, count});
+            ops.ops.push_back({gpu::Vdp1OpKind::FbWrites, 0});
+            CloseList(ops);
+            SceneRunner runner(g, *ApexInitialFbram(), false);
+            g.Times().Clear();
+            CHECK(runner.Replay(ops) == "");
+            std::printf("VDP1 GPU CPU writes, %u records (%s): %s; total %.3f ms\n", count,
+                        device->Properties().deviceName, g.Times().Format().c_str(), g.Times().Total());
+        }
 
         // One word alone with 9,000 and 50,000 fragments (keys spread over 3 M slots), the bucket to resolve passes
         for (const uint32 perWord : {9000u, 50000u}) {

@@ -6,17 +6,20 @@
 //   the pass's struct, and the groupshared bytes vdp1_bindings.hpp states. The check rejects modules altered to break
 //   the rules. These run without a Vulkan device ([vdp1]).
 // - The device limits check covers the VDP1 maxima ([vdp1][limits], BRIMIR_VULKAN builds).
-// - The seven pipelines are created on the headless device from their binding tables and push-constant ranges, with
+// - The ten pipelines are created on the headless device from their binding tables and push-constant ranges, with
 //   zero validation errors ([gpu][vdp1]; SKIP without a device).
 // The passes' results against the CPU reference are in test_gpu_vdp1_passes.cpp.
 #include "catch_amalgamated.hpp"
 
+#include <gpu/shaders/generated/vdp1_batch_range.spv.h>
 #include <gpu/shaders/generated/vdp1_bucket.spv.h>
 #include <gpu/shaders/generated/vdp1_bucket_sums.spv.h>
 #include <gpu/shaders/generated/vdp1_erase.layout.h>
 #include <gpu/shaders/generated/vdp1_erase.spv.h>
 #include <gpu/shaders/generated/vdp1_fb_write.layout.h>
 #include <gpu/shaders/generated/vdp1_fb_write.spv.h>
+#include <gpu/shaders/generated/vdp1_fb_write_clear.spv.h>
+#include <gpu/shaders/generated/vdp1_fb_write_mark.spv.h>
 #include <gpu/shaders/generated/vdp1_raster.layout.h>
 #include <gpu/shaders/generated/vdp1_raster.spv.h>
 #include <gpu/shaders/generated/vdp1_resolve.layout.h>
@@ -58,7 +61,9 @@ struct ShaderCase {
 
 const std::vector<ShaderCase> &Shaders() {
     static const std::vector<ShaderCase> shaders{
-        {"vdp1_raster", sh::kVdp1RasterSpv, kRasterBindings, sizeof(Vdp1BatchPushConstants), 64, 1, 0},
+        {"vdp1_raster", sh::kVdp1RasterSpv, kRasterBindings, sizeof(Vdp1BatchPushConstants), 64, 1,
+         kRasterSharedMemorySize},
+        {"vdp1_batch_range", sh::kVdp1BatchRangeSpv, kBatchRangeBindings, 0, 64, 1, 0},
         {"vdp1_bucket", sh::kVdp1BucketSpv, kBucketBindings, 0, 64, 1, kScanSharedMemorySize},
         {"vdp1_bucket_sums", sh::kVdp1BucketSumsSpv, kBucketSumsBindings, 0, 64, 1, kScanSharedMemorySize},
         {"vdp1_scatter", sh::kVdp1ScatterSpv, kScatterBindings, sizeof(Vdp1BatchPushConstants), 64, 1, 0},
@@ -66,8 +71,11 @@ const std::vector<ShaderCase> &Shaders() {
          kResolveSharedMemorySize},
         {"vdp1_erase", sh::kVdp1EraseSpv, kEraseBindings, sizeof(Vdp1ErasePushConstants), kEraseGroupSize,
          kEraseGroupSize, 0},
-        {"vdp1_fb_write", sh::kVdp1FbWriteSpv, kFbWriteBindings, sizeof(Vdp1FbWritePushConstants), 64, 1,
-         kFbWriteSharedMemorySize},
+        {"vdp1_fb_write_mark", sh::kVdp1FbWriteMarkSpv, kFbWriteMarkBindings, sizeof(Vdp1FbWritePushConstants), 64, 1,
+         0},
+        {"vdp1_fb_write", sh::kVdp1FbWriteSpv, kFbWriteBindings, sizeof(Vdp1FbWritePushConstants), 64, 1, 0},
+        {"vdp1_fb_write_clear", sh::kVdp1FbWriteClearSpv, kFbWriteClearBindings, sizeof(Vdp1FbWritePushConstants), 64,
+         1, 0},
     };
     return shaders;
 }
@@ -332,13 +340,13 @@ TEST_CASE("VDP1 dispatch shapes and groupshared sizes stay within the baseline",
     // VDP2 NBG fetch pass's share, so the device limit stays VDP2's
     STATIC_CHECK(kResolveSharedMemorySize == 11536);
     STATIC_CHECK(kScanSharedMemorySize == 256);
-    STATIC_CHECK(kFbWriteSharedMemorySize == 768);
+    STATIC_CHECK(kRasterSharedMemorySize == 8);
     STATIC_CHECK(kMaxComputeSharedMemorySize == kResolveSharedMemorySize);
     STATIC_CHECK(kMaxComputeSharedMemorySize <= brimir::gpu::vdp2::kMaxComputeSharedMemorySize);
-    // Per-stage descriptors: the resolve pass's six storage buffers, within VDP2's seven
-    STATIC_CHECK(kMaxStageUsage.storageBuffers == 6);
+    // Per-stage descriptors: the resolve pass's seven storage buffers, VDP2's seven
+    STATIC_CHECK(kMaxStageUsage.storageBuffers == 7);
     STATIC_CHECK(kMaxStageUsage.storageBuffers <= brimir::gpu::vdp2::kMaxStageUsage.storageBuffers);
-    STATIC_CHECK(kResolveBindings.size() == 6);
+    STATIC_CHECK(kResolveBindings.size() == 7);
     // The resolve's small path and window
     STATIC_CHECK(kResolveSmallMax == 32);
     STATIC_CHECK(kResolveSortCapacity == 2048);
@@ -347,7 +355,7 @@ TEST_CASE("VDP1 dispatch shapes and groupshared sizes stay within the baseline",
 }
 
 TEST_CASE("The VDP1 SPIR-V check rejects modules that depart from the rules", "[vdp1][pipelines]") {
-    const ShaderCase &resolve = Shaders()[4];
+    const ShaderCase &resolve = Shaders()[5];
     REQUIRE(std::string(resolve.name) == "vdp1_resolve");
     const std::vector<uint32_t> words(resolve.spirv.begin(), resolve.spirv.end());
     REQUIRE(CheckModule(words, resolve).empty());

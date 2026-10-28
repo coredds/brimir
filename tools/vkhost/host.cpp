@@ -471,16 +471,20 @@ bool LibretroHost::ProbeLine(const char* text) {
 
 bool LibretroHost::Vdp1ProbeLine(const char* text) {
     const char* line = std::strstr(text, "VDP1 probe: ");
-    unsigned long long v[7] = {};
+    unsigned long long v[13] = {};
     const int n = std::sscanf(line,
                               "VDP1 probe: commands %llu lines %llu pixels %llu syncs %llu dirtysyncs %llu fbwrites %llu "
-                              "erases %llu",
-                              &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
-    if (n != 7) {
+                              "erases %llu batches opkind %llu hazard %llu swap %llu capacity %llu boundary %llu take %llu",
+                              &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12]);
+    if (n != 7 && n != 13) { // 7: a core without the batch counters
         return false;
     }
     if (m_sink != nullptr) {
-        m_vdp1ProbeFrames.push_back({v[0], v[1], v[2], v[3], v[4], v[5], v[6]});
+        Vdp1ProbeFrame f{v[0], v[1], v[2], v[3], v[4], v[5], v[6], {}};
+        for (int i = 0; i < 6; ++i) {
+            f.batchEnds[i] = v[7 + i];
+        }
+        m_vdp1ProbeFrames.push_back(f);
     }
     return true;
 }
