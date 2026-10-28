@@ -20,10 +20,35 @@
 //     GPU FBRAM (no sprite slices; stage2-vdp1-research.md sections 2.3 and 5). The ops before a VDP2 frame's end are
 //     replayed before that frame's VDP2 work and the ops after it (the BlankingAndSync display erase) after it, in the
 //     same command buffer; RecordPendingVdp1Work replays pending ops without a frame. Entering Gpu mode uploads the
-//     CPU's FBRAM (VDPState main, the inner renderer's alt and mesh); leaving it (DetachDevice) drains the GPU into
-//     VDPState and the inner renderer (alt excepted, stale as across save states).
-//     TODO(Task 6): CPU framebuffer reads (VDP1SyncFB) and save states drain the GPU with a submit and a fence wait
-//     each time the GPU holds newer data (SyncVdp1ToCpu); the CPU shadow model of research section 3.5 replaces this.
+//     CPU's FBRAM (VDPState main, the inner renderer's alt and mesh); leaving it (DetachDevice) syncs the GPU into
+//     VDPState and the inner renderer (main, alt, mesh, doubleV).
+//
+// GPU-authoritative FBRAM with a lazily synchronised CPU shadow (stage2-vdp1-research.md section 3.5). The shadow is
+// VDPState's main fb0/fb1 (which the CPU reads and the save state stores) and m_meshShadow (the save state's
+// meshFBRAM); alt is GPU-only (software never saves it). Each shadowed slice is, against the emulated FBRAM:
+// - Valid: the CPU copy holds every GPU op emitted so far (and every CPU write);
+// - Pending: the latest readback, committed with a submitted command buffer, holds every GPU op emitted so far;
+// - GpuNewer: a GPU op was emitted after the latest readback.
+// Rules:
+// 1. Every op that changes FBRAM on the GPU (a draw command: main and, with transparent meshes, mesh of the draw
+//    framebuffer; an erase: main and mesh of the display framebuffer) makes its slices GpuNewer when it is emitted.
+// 2. Every command buffer the renderer records (frame, hidden, ops-only, sync) ends with a copy of each GpuNewer slice
+//    whose ops (and CPU writes) it covers into the context's host-cached readback buffer; FrameSubmitted commits it
+//    (Pending, with the context's fence) and clears the slice's CPU write mask.
+// 3. A CPU framebuffer write (VDPState already holds it) is an op with its value and sets the slice's write mask;
+//    it mirrors to alt as software does and never touches the meshes. No wait: the slice does not become GpuNewer.
+// 4. VDP1SyncFB (a CPU read of the draw framebuffer): Valid returns at once; Pending waits for the fence and merges
+//    (byte i keeps the CPU's value when the write mask has it, else takes the readback's); GpuNewer makes a sync
+//    submit (every pending op, the pending VDP2 frame ordered with them, a readback), waits and merges. So a burst of
+//    reads costs one sync submit, the first.
+// 5. PreSaveStateSync: rule 4 for every shadowed slice. Between retro_run calls every slice is Valid or Pending
+//    (rule 2 and the ops-only submit), so retro_serialize only waits for fences.
+// 6. PostLoadStateSync: main and mesh uploaded from the loaded state, Valid; alt left as it is (as software).
+// 7. Reset: main (hard reset), alt and mesh uploaded as the reset left them, after the ops so far.
+// 8. DetachDevice syncs (every slice, alt included) and hands the framebuffers to the inner renderer; AbandonDevice
+//    makes no Vulkan call: the inner renderer continues from the shadow as of the last readback merged
+//    (PollVdp1Readbacks, at the start of each retro_run, merges the completed ones), so the GPU work of the current
+//    retro_run is lost, and that of earlier ones the GPU had not finished when it started.
 
 #include "gpu/vdp1/vdp1_front.hpp"
 #include "gpu/vdp1/vdp1_vulkan_backend.hpp"
@@ -61,18 +86,19 @@ public:
     // again). The next frame uploads all of VRAM and CRAM and starts from a cleared composite. Attached() is false if
     // the back half failed. When already attached, the old back half is destroyed immediately: the caller must have
     // waited for the device to be idle first (as for DetachDevice).
-    // With Vdp1Mode::Gpu requested it also creates the VDP1 back half (one more upload context, for the sync submits)
+    // With Vdp1Mode::Gpu requested it also creates the VDP1 back half (one more upload context, the sync submits')
     // and enters Gpu mode, uploading the CPU's FBRAM with the next command buffer; if that fails VDP1 stays in software.
     void AttachDevice(VulkanDevice &device, uint32_t frameContexts, uint32_t maxScale = 4);
     // Drops the pending frame and destroys the GPU resources. The caller has waited for the device to be idle. In Gpu
-    // VDP1 mode the pending VDP1 ops are replayed and FBRAM is read back first (a submit and a fence wait on the still
-    // valid device), so VDP1 continues in software from the GPU's framebuffers.
+    // VDP1 mode the pending VDP1 ops are replayed and FBRAM is read back first (a sync submit, see SetSyncSubmit, on the
+    // still valid device), so VDP1 continues in software from the GPU's framebuffers.
     void DetachDevice();
     // Grows the back half's frame contexts to at least `frameContexts` in place (a larger sync index mask): the
     // composite (the other field when weaving), the GPU copies of VRAM/CRAM and the pending frame are kept. The work of
     // every context whose index changes meaning must have completed. False when detached.
     bool EnsureFrameContexts(uint32_t frameContexts);
-    // Forgets the back half without any Vulkan call (its device may already be gone): leaks its objects.
+    // Forgets the back half without any Vulkan call (its device may already be gone): leaks its objects. In Gpu VDP1
+    // mode VDP1 continues in software from the CPU shadow (rule 8 at the top of this file).
     void AbandonDevice();
     bool Attached() const { return m_backend != nullptr; }
 
@@ -104,25 +130,62 @@ public:
     // the next frame, and the VDP1 ops it carried are pending again (replayed before any later op). The caller must
     // call this whenever a recorded command buffer does not reach the queue.
     void RecordedFrameDropped();
+    // The command buffer of the last RecordPendingFrame or RecordPendingVdp1Work for `context` was submitted; `fence`
+    // signals its completion (VK_NULL_HANDLE: it has already completed). The caller must call this for every such
+    // command buffer it submits (Gpu VDP1 mode: it commits the command buffer's readbacks, rule 2). The fence must stay
+    // valid, and not be reset, until the context's next command buffer begins (the next record call with `context`) or
+    // OwnWorkCompleted.
+    void FrameSubmitted(uint32_t context, VkFence fence);
+    // Every command buffer the caller submitted has completed (it waited for their fences, and may destroy them now).
+    void OwnWorkCompleted();
+    // Gpu VDP1 mode: merges the readbacks whose command buffers have completed (vkGetFenceStatus, no wait) into the
+    // CPU shadow. The caller calls it at the start of each retro_run, which bounds what AbandonDevice loses.
+    void PollVdp1Readbacks();
 
-    // VDP1 on the GPU (see the top of this file). The mode applies at the next AttachDevice (Software until then);
-    // GpuVdp1() is the effective mode: Gpu only while attached with a VDP1 back half.
+    // Gpu VDP1 mode: the caller's sync submit (rules 4, 5 and 8 at the top of this file). `submit` begins a command
+    // buffer of its own (a pool and fence of its own; the renderer records into its sync context), calls `record`
+    // (false: nothing to submit, end it without submitting), submits it under the queue lock and waits for its fence.
+    // It returns true only when the command buffer was submitted and has completed. It refuses (false) where GPU work
+    // is not allowed (outside retro_run and the context callbacks). Kept across AttachDevice. Unset: no sync submits
+    // (a read or save that needs newer GPU data gets the CPU's older copy, logged).
+    using SyncRecord = std::function<bool(VkCommandBuffer)>;
+    void SetSyncSubmit(std::function<bool(const SyncRecord &record)> submit) { m_syncSubmit = std::move(submit); }
+    // Why the renderer made a sync submit or a fence wait.
+    enum class Vdp1SyncKind : uint32_t { Read, Save, Detach, Dump };
+    static constexpr uint32_t kVdp1SyncKinds = 4;
+    struct Vdp1SyncStats {
+        std::array<uint64_t, kVdp1SyncKinds> syncSubmits{}; // a submit and a fence wait, by kind
+        std::array<uint64_t, kVdp1SyncKinds> fenceWaits{};  // a wait for a submitted readback (no submit), by kind
+        uint64_t refusedSyncs = 0;    // a sync submit was needed but refused or failed (older data used)
+        uint64_t readbackSlices = 0;  // slices read back at the end of committed command buffers
+        uint64_t mergedSlices = 0;    // readback slices merged into the shadow
+        double syncSeconds = 0, maxSyncSeconds = 0; // sync submits: record, submit, wait and merge
+        double waitSeconds = 0, maxWaitSeconds = 0; // fence waits and their merges
+        double mergeSeconds = 0;                    // every merge (also those in the two above)
+    };
+    const Vdp1SyncStats &Vdp1Sync() const { return m_syncStats; }
+    uint64_t Vdp1SyncSubmits() const;
+
+    // VDP1 on the GPU (see the top of this file). The mode applies at the next AttachDevice (Software until set; the
+    // libretro core sets Gpu unless BRIMIR_VDP1_GPU=0); GpuVdp1() is the effective mode: Gpu only while attached with a
+    // VDP1 back half.
     void SetVdp1Mode(Vdp1Mode mode) { m_vdp1Mode = mode; }
     Vdp1Mode RequestedVdp1Mode() const { return m_vdp1Mode; }
     bool GpuVdp1() const { return m_gpuVdp1; }
-    // Gpu mode: VDP1 ops wait for a command buffer (RecordPendingFrame or RecordPendingVdp1Work).
+    // Gpu mode: VDP1 ops (or the readback of a slice they changed, rule 2) wait for a command buffer
+    // (RecordPendingFrame or RecordPendingVdp1Work).
     bool HasPendingVdp1Work() const;
     // Gpu mode: replays the pending VDP1 ops into cmd without a VDP2 frame (the ops-only submit; with a frame pending,
     // only the ops before its end). False when nothing was recorded or recording failed (the ops stay pending).
     bool RecordPendingVdp1Work(uint32_t context, VkCommandBuffer cmd);
     // The last RecordPendingFrame or RecordPendingVdp1Work recorded VDP1 work: a command buffer that is not submitted
     // must then be reported with RecordedFrameDropped even without a frame.
-    bool RecordedVdp1Work() const { return !m_vdp1Recorded.empty(); }
-    // A VDP2 frame was recorded and submitted by a VDP1 sync (SyncVdp1ToCpu, ordered with the ops after it) since the
-    // last call: the composite holds it (the caller presents the composite as it is).
+    bool RecordedVdp1Work() const { return !m_vdp1Recorded.empty() || m_proposed.mask != 0; }
+    // A VDP2 frame was recorded and submitted by a VDP1 sync submit (ordered with the ops after it) since the last
+    // call: the composite holds it (the caller presents the composite as it is).
     bool TakeFrameRecordedBySync();
-    // GPU VDP1 sync submits (each with a fence wait) since construction.
-    uint64_t Vdp1SyncSubmits() const { return m_vdp1SyncSubmits; }
+    // The inner software renderer (VDP1 in Software mode and while detached), for tests.
+    const ymir::vdp::SoftwareVDPRenderer &InnerVdp1ForTest() const { return *m_vdp1; }
     // The VDP1 back half (nullptr unless GpuVdp1()) and front half, for tests.
     vdp1::Vdp1VulkanBackend *Vdp1Backend() { return m_vdp1Backend.get(); }
     const vdp1::Vdp1FrontEnd &Vdp1Front() const { return m_vdp1Front; }
@@ -204,11 +267,34 @@ protected:
     void UpdateEnhancements() override;
 
 private:
-    // Gpu mode: an op list of the front half, or an FBRAM upload (sliceMask != 0, fbram holds all eight slices).
+    // Gpu mode: an op list of the front half, or an FBRAM upload (sliceMask != 0, fbram holds all eight slices). seq:
+    // the emissions (m_vdp1Seq) it and the work before it cover.
     struct Vdp1Work {
         vdp1::Vdp1OpList ops;
         std::vector<uint8_t> fbram;
         uint32_t sliceMask = 0;
+        uint64_t seq = 0;
+    };
+    // The CPU shadow's state of one FBRAM slice (the top of this file), in emissions (m_vdp1Seq: every GPU op and CPU
+    // write increments it).
+    struct SliceSync {
+        uint64_t lastTouch = 0;      // the last GPU op that changes the slice
+        uint64_t lastWrite = 0;      // the last CPU write into it (main slices)
+        uint64_t valid = 0;          // the CPU copy holds every emission up to this one (Valid: valid >= lastTouch)
+        uint64_t pending = 0;        // the committed readback holds every emission up to this one
+        int32_t pendingContext = -1; // the context whose readback buffer holds it (-1: none)
+    };
+    // Bytes of a main slice the CPU wrote since its last committed readback (rule 3).
+    struct WriteMask {
+        std::array<uint64_t, vdp1::kFbramSliceSize / 64> bits{};
+        bool any = false;
+    };
+    // The readback the last record call appended, committed by FrameSubmitted.
+    struct ProposedReadback {
+        int32_t context = -1;
+        uint32_t mask = 0;
+        uint64_t covered = 0; // emissions the command buffer covers
+        std::array<uint64_t, 8> seq{};
     };
     // What RecordVdp1Work does with a pending VDP2 frame: record it between the ops before and after its end; keep it
     // (only the ops before its end); record it only if ops after its end are pending, else keep it (a sync); ignore
@@ -225,14 +311,30 @@ private:
     bool EnterGpuVdp1(VulkanDevice &device, uint32_t contexts);
     void LeaveGpuVdp1();
     void DestroyGpuVdp1();
-    bool RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, FramePolicy policy, bool &frameRecorded);
+    // Replays the pending work into cmd (see FramePolicy), then the readbacks of rule 2 plus the slices of `extra` (when
+    // covered). False when recording failed (what was recorded is in m_vdp1Recorded, the rest stays queued).
+    bool RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, FramePolicy policy, bool &frameRecorded,
+                        uint32_t extra = 0);
     bool ReplayVdp1Work(const Vdp1Work &work, uint32_t context, VkCommandBuffer cmd);
     void QueueVdp1Ops(); // the front half's pending ops, in order
     void QueueFbramUpload(uint32_t sliceMask, const ymir::vdp::SpriteFB *alt0, const ymir::vdp::SpriteFB *alt1);
-    // TODO(Task 6): the CPU shadow model replaces this full drain. Replays every pending VDP1 op in a sync submit,
-    // waits for it and reads FBRAM back into VDPState (main) and m_meshShadow, when the GPU may hold newer data.
-    bool SyncVdp1ToCpu(FramePolicy policy);
-    uint64_t Vdp1GpuOpCount() const;
+    // CPU shadow (the top of this file)
+    void ResetShadow();                                  // every slice Valid, no readback pending
+    void MarkShadowValid(uint32_t mask);                 // the CPU copy is the emulated state (uploads of it queued)
+    void Touch(uint32_t slice);                          // rule 1
+    void CpuWrite(uint32_t address, uint32_t bytes);     // rule 3 (VDPState wrote it already)
+    bool NeedsReadback(uint32_t slice, uint64_t covered) const;
+    void CommitReadback(uint32_t context);
+    void MergeContext(uint32_t context);                 // its command buffer has completed
+    void WaitContext(uint32_t context, Vdp1SyncKind kind);
+    // Makes the slices in `mask` Valid (rule 4): fence waits, or a sync submit when the GPU holds newer data. False
+    // when one stays behind (sync refused or failed; logged).
+    bool SyncShadow(uint32_t mask, Vdp1SyncKind kind, FramePolicy policy);
+    // One sync submit of the pending work with the readbacks, plus `extra` (alt slices for the inner renderer); its
+    // readback buffer holds them until the next sync submit. False when refused or failed.
+    bool SyncSubmit(Vdp1SyncKind kind, FramePolicy policy, uint32_t extra);
+    // Hands VDP1 to the inner renderer: doubleV, mesh from the shadow, alt from `alt` (null: keep its own).
+    void HandToSoftware(const ymir::vdp::SpriteFB *alt0, const ymir::vdp::SpriteFB *alt1);
 
     ymir::vdp::VDPState &m_state;
     std::unique_ptr<ymir::vdp::SoftwareVDPRenderer> m_vdp1; // the software VDP1 backend
@@ -246,16 +348,20 @@ private:
     std::vector<Vdp1Work> m_vdp1Queue;        // pending, in emulation order
     size_t m_vdp1BeforeFrame = 0;             // m_vdp1Queue[0, this) precede the pending VDP2 frame's end
     std::vector<Vdp1Work> m_vdp1Recorded;     // what the last record call recorded (for RecordedFrameDropped)
-    std::unique_ptr<MeshFBRAM> m_meshShadow;  // Gpu mode: the mesh framebuffers as of the last sync or load
+    std::unique_ptr<MeshFBRAM> m_meshShadow;  // Gpu mode: the CPU shadow of the mesh framebuffers
     bool m_stateLoaded = false;               // LoadState since the last PostLoadStateSync
-    uint64_t m_vdp1SyncedOps = 0;             // Vdp1GpuOpCount at the last sync: VDPState and the shadow are current
-    uint64_t m_vdp1SyncSubmits = 0;
     bool m_frameRecordedBySync = false;
     VulkanDevice *m_device = nullptr;
     uint32_t m_frameContexts = 0;             // the caller's; Gpu mode adds the sync context (index m_frameContexts)
-    VkCommandPool m_syncPool = VK_NULL_HANDLE;
-    VkCommandBuffer m_syncCmd = VK_NULL_HANDLE;
-    VkFence m_syncFence = VK_NULL_HANDLE;
+    // CPU shadow
+    uint64_t m_vdp1Seq = 0;                   // emissions so far
+    uint64_t m_submittedSeq = 0;              // emissions the committed command buffers cover
+    std::array<SliceSync, 8> m_slices{};
+    std::array<WriteMask, 2> m_writeMasks{};  // main fb0, fb1
+    ProposedReadback m_proposed;
+    std::vector<VkFence> m_contextFences;     // per context: its last committed command buffer's (null: completed)
+    std::function<bool(const SyncRecord &record)> m_syncSubmit;
+    Vdp1SyncStats m_syncStats;
 
     uint32_t m_HRes = ymir::vdp::kDefaultResH;
     uint32_t m_VRes = ymir::vdp::kDefaultResV;

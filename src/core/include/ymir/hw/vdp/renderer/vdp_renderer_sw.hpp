@@ -181,6 +181,14 @@ public:
     const SpriteFB &GetMeshFBRAM(bool altField, uint8 fbIndex) const {
         return m_meshFBRAM[altField][fbIndex & 1];
     }
+    // Brimir: and write access, so the external renderer can hand VDP1 back with the framebuffers it drew (VDP1 on the
+    // GPU, then software while detached). Call with a threaded VDP1 idle (after PreSaveStateSync).
+    void SetAltFBRAM(uint8 fbIndex, const SpriteFB &fb) {
+        m_altFBRAM[fbIndex & 1] = fb;
+    }
+    void SetMeshFBRAM(bool altField, uint8 fbIndex, const SpriteFB &fb) {
+        m_meshFBRAM[altField][fbIndex & 1] = fb;
+    }
 
 private:
     VDPState &m_state;

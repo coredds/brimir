@@ -39,6 +39,38 @@ namespace vkhost {
 
 struct HostFrame;
 
+// The core's submits and waits by kind (the Global Constraints of GPU stage 2: at most one frame submit per retro_run,
+// plus an ops-only submit after a refused one; sync submits and their waits inside retro_run; fence waits in
+// retro_serialize; nothing else outside retro_run and the context callbacks). A command-buffer submit is a sync submit
+// when the core waits for its fence in the retro_run it was submitted in.
+struct SubmitWaitStats {
+    uint64_t refusedSubmits = 0;   // --fail-submit-at: never reached the queue (not one of the run's submits)
+    uint64_t syncSubmits = 0;      // waited for in their own retro_run (VDP1 sync submits)
+    uint64_t contextSubmits = 0;   // in context_reset / context_destroy outside retro_run (a detach's sync submit)
+    uint64_t extraOpsOnlyRuns = 0; // runs with an accepted submit after a refused one, with the core's ops-only line
+    uint64_t outsideSubmits = 0;   // anywhere else (retro_serialize, retro_unserialize, ...): must stay 0
+    uint64_t frameWaits = 0;       // in retro_run, for fences of earlier runs (the frame slots, hidden contexts)
+    uint64_t syncWaits = 0;        // in retro_run, for a fence submitted in the same run
+    uint64_t serializeWaits = 0;   // in retro_serialize / retro_serialize_size (submitted before it)
+    uint64_t contextWaits = 0;     // in context_reset / context_destroy (vkDeviceWaitIdle included)
+    uint64_t outsideWaits = 0;     // anywhere else: must stay 0
+    void Add(const SubmitWaitStats& o) {
+        refusedSubmits += o.refusedSubmits;
+        syncSubmits += o.syncSubmits;
+        contextSubmits += o.contextSubmits;
+        extraOpsOnlyRuns += o.extraOpsOnlyRuns;
+        outsideSubmits += o.outsideSubmits;
+        frameWaits += o.frameWaits;
+        syncWaits += o.syncWaits;
+        serializeWaits += o.serializeWaits;
+        contextWaits += o.contextWaits;
+        outsideWaits += o.outsideWaits;
+    }
+};
+
+// What the host is calling into the core (for SubmitWaitStats).
+enum class CorePhase { Other, Run, Serialize, Unserialize, Context };
+
 // No Vulkan loader or no device meeting the baseline (tests skip on this).
 class VulkanUnavailable : public std::runtime_error {
 public:
@@ -70,9 +102,24 @@ public:
     // GET_AUDIO_VIDEO_ENABLE's video bit for the frame about to run. While false, presentation calls (set_image,
     // get_sync_index, wait_sync_index, vkQueueWaitIdle) are problems; submits are counted (HiddenSubmits).
     void SetVideoEnabled(bool enabled) { m_videoEnabled = enabled; }
-    // Around each retro_run: more than one submit with command buffers in one run is a problem.
+    // Around each retro_run: more than one accepted frame submit (command buffers; sync submits not counted) in one run
+    // is a problem, and so is a second submit after a refused one unless the core logged its ops-only line.
     void BeginRun();
     void EndRun();
+    // The call into the core the next submits and waits belong to; returns the previous phase (restore it after).
+    CorePhase SetPhase(CorePhase phase) {
+        const CorePhase previous = m_phase;
+        m_phase = phase;
+        return previous;
+    }
+    // The core logged "VDP1 ops-only submit after a refused frame submit" (in the current retro_run).
+    void NoteOpsOnlyAfterRefused() { m_runOpsOnlyLine = true; }
+    // A submit the hook accepted (fence: its fence, commandBuffers: how many), a refused one, and waits.
+    void OnSubmitted(uint64_t fence, uint32_t commandBuffers);
+    void OnRefusedSubmit();
+    void OnWaitFences(uint32_t count, const uint64_t* fences);
+    void OnDeviceWaitIdle();
+    const SubmitWaitStats& SubmitWaits() const { return m_submitWaits; }
 
     // Reads back the image of the last set_image (top-left w x h) as XRGB8888. Returns false when there is none.
     bool ReadImage(unsigned w, unsigned h, HostFrame& out);
@@ -174,12 +221,7 @@ public:
         m_failSubmitArmed = false;
         return fail;
     }
-    // A refused submit (never reached the queue) is not one of the retro_run's submits.
-    void UncountRunSubmit() {
-        if (m_inRun && m_runSubmits > 0) {
-            --m_runSubmits;
-        }
-    }
+
     // --defer-image-read: pins the image of a captured frame again (a dupe: the frontend repeats the image it holds).
     void PinImage(const DeferredImage& image) {
         m_pinned.insert(image.image);
@@ -249,9 +291,16 @@ private:
     uint64_t m_hiddenGpuCalls = 0;
     uint64_t m_coreSubmits = 0;
     uint64_t m_hiddenSubmits = 0;
-    uint64_t m_runSubmits = 0;
+    uint64_t m_runSubmits = 0; // accepted frame submits of the current run (sync submits taken out at their wait)
+    uint64_t m_runRefused = 0;
+    bool m_runOpsOnlyLine = false;
     uint64_t m_maxRunSubmits = 0;
     bool m_inRun = false;
+    uint64_t m_runIndex = 0;
+    CorePhase m_phase = CorePhase::Other;
+    // Fences of accepted command-buffer submits: the run they were submitted in (0: outside a run).
+    std::unordered_map<uint64_t, uint64_t> m_fenceRuns;
+    SubmitWaitStats m_submitWaits;
 };
 
 } // namespace vkhost

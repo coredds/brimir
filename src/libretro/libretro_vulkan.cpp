@@ -438,6 +438,15 @@ struct VulkanOutput::Impl {
     bool compositeValid = false;
     // VDP1 on the GPU: submits of VDP1 ops without a VDP2 frame (SubmitHidden), since the output was created
     uint64_t vdp1OpsOnlySubmits = 0;
+    // ... the renderer's sync submits: their command buffer and fence (created with the hidden contexts), whether GPU
+    // work is allowed now (SetGpuWorkAllowed) and the refused ones.
+    HiddenContext sync{};
+    bool gpuWorkAllowed = false;
+    uint64_t refusedSyncSubmits = 0;
+    // This retro_run (BeginRun): a frame or ops-only submit was accepted, or refused.
+    bool runSubmitted = false;
+    bool runRefused = false;
+    bool opsDeferredLogged = false;
 
     // Internal resolution: requested (brimir_internal_resolution), whether a change waits for the next shown frame with
     // a VDP2 frame, the scale of the presenter's images (CreateSlots), and of the last frame handed over.
@@ -470,6 +479,8 @@ struct VulkanOutput::Impl {
     void DestroyHidden();
     VkResult WaitOwnWork();
     VkResult DrainQueue();
+    // The renderer's sync submit (VulkanVDPRenderer::SetSyncSubmit).
+    bool SyncSubmit(const gpu::VulkanVDPRenderer::SyncRecord &record);
     bool AttachRendererTo(gpu::VulkanVDPRenderer &target, std::string &error);
     void DetachRendererIdle();
     void Withdraw();
@@ -677,6 +688,10 @@ VkResult VulkanOutput::Impl::CreateHidden() {
             return result;
         }
     }
+    if (const VkResult result = CreateCommandContext(sync.pool, sync.cmd, sync.fence); result != VK_SUCCESS) {
+        DestroyHidden();
+        return result;
+    }
     hiddenCreated = true;
     nextHidden = 0;
     return VK_SUCCESS;
@@ -690,8 +705,11 @@ void VulkanOutput::Impl::DestroyHidden() {
             vk.vkDestroyFence(device->Device(), context.fence, nullptr);
             vk.vkDestroyCommandPool(device->Device(), context.pool, nullptr);
         }
+        vk.vkDestroyFence(device->Device(), sync.fence, nullptr);
+        vk.vkDestroyCommandPool(device->Device(), sync.pool, nullptr);
     }
     hidden = {};
+    sync = {};
     hiddenCreated = false;
     nextHidden = 0;
 }
@@ -712,7 +730,50 @@ VkResult VulkanOutput::Impl::WaitOwnWork() {
             context.pending = false;
         }
     }
+    if (renderer) {
+        renderer->OwnWorkCompleted(); // the fences may be destroyed or reset from here on
+    }
     return VK_SUCCESS;
+}
+
+// The renderer's sync submit: a command buffer and fence of their own, the queue lock held only around vkQueueSubmit,
+// then a wait for the fence (the only CPU wait VDP1 on the GPU adds inside retro_run; refused elsewhere).
+bool VulkanOutput::Impl::SyncSubmit(const gpu::VulkanVDPRenderer::SyncRecord &record) {
+    if (!gpuWorkAllowed || !device || !hiddenCreated) {
+        ++refusedSyncSubmits;
+        return false;
+    }
+    const auto &vk = device->Table();
+    const VkDevice dev = device->Device();
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vk.vkResetCommandPool(dev, sync.pool, 0) != VK_SUCCESS || vk.vkBeginCommandBuffer(sync.cmd, &begin) != VK_SUCCESS) {
+        ++refusedSyncSubmits;
+        return false;
+    }
+    if (!record(sync.cmd)) {
+        vk.vkEndCommandBuffer(sync.cmd);
+        return false;
+    }
+    VkResult result = vk.vkEndCommandBuffer(sync.cmd);
+    if (result == VK_SUCCESS) {
+        result = vk.vkResetFences(dev, 1, &sync.fence);
+    }
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &sync.cmd;
+        result = device->Submit(submit, sync.fence);
+    }
+    if (result != VK_SUCCESS) {
+        ++refusedSyncSubmits;
+        return false;
+    }
+    if (vk.vkWaitForFences(dev, 1, &sync.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        NegotiationLog(RETRO_LOG_ERROR, "VDP1 on the GPU: waiting for a sync submit failed");
+        return false;
+    }
+    return true;
 }
 
 // Attaches `target` with the current slot count; the caller has made sure no submission uses a previous back half.
@@ -737,8 +798,10 @@ bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::s
                                                "x");
         }
     }
+    target.SetSyncSubmit([this](const gpu::VulkanVDPRenderer::SyncRecord &record) { return SyncSubmit(record); });
     target.AttachDevice(*device, static_cast<uint32_t>(slots.size()) + kHiddenContexts, presenter->Scale());
     if (!target.Attached()) {
+        target.SetSyncSubmit(nullptr);
         error = "creating the VDP2 GPU resources failed";
         if (presenter->Scale() > 1) {
             // The software renderer's frames are native: no N x images for them (kept if 1x cannot be created).
@@ -814,14 +877,34 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
 // Detaches the renderer; the device is idle or this output's submissions have completed.
 void VulkanOutput::Impl::DetachRendererIdle() {
     if (renderer) {
-        if (renderer->GpuVdp1()) {
-            // Diagnostics (brimir_vkhost checks): the submits VDP1 on the GPU added while attached (the drain of the
-            // detach itself not counted).
-            NegotiationLog(RETRO_LOG_INFO, "VDP1 on the GPU: " + std::to_string(vdp1OpsOnlySubmits) +
-                                               " ops-only submits, " + std::to_string(renderer->Vdp1SyncSubmits()) +
-                                               " sync submits");
+        const bool gpuVdp1 = renderer->GpuVdp1();
+        renderer->DetachDevice(); // with VDP1 on the GPU: its sync submit (counted below as a detach)
+        if (gpuVdp1) {
+            // Diagnostics (brimir_vkhost checks): the submits and waits VDP1 on the GPU added since the renderer was
+            // created, by kind, with their times.
+            using Kind = gpu::VulkanVDPRenderer::Vdp1SyncKind;
+            const gpu::VulkanVDPRenderer::Vdp1SyncStats &s = renderer->Vdp1Sync();
+            const auto count = [](uint64_t n) { return std::to_string(n); };
+            const auto at = [](const auto &a, Kind k) { return a[static_cast<uint32_t>(k)]; };
+            const auto ms = [](double seconds) {
+                char text[32];
+                std::snprintf(text, sizeof(text), "%.3f", seconds * 1e3);
+                return std::string(text);
+            };
+            NegotiationLog(RETRO_LOG_INFO,
+                           "VDP1 on the GPU: " + count(vdp1OpsOnlySubmits) + " ops-only submits, " +
+                               count(renderer->Vdp1SyncSubmits()) + " sync submits (reads " +
+                               count(at(s.syncSubmits, Kind::Read)) + ", saves " + count(at(s.syncSubmits, Kind::Save)) +
+                               ", detaches " + count(at(s.syncSubmits, Kind::Detach)) + ", dumps " +
+                               count(at(s.syncSubmits, Kind::Dump)) + "; " + ms(s.syncSeconds) + " ms, max " +
+                               ms(s.maxSyncSeconds) + " ms), fence waits (reads " +
+                               count(at(s.fenceWaits, Kind::Read)) + ", saves " + count(at(s.fenceWaits, Kind::Save)) +
+                               "; " + ms(s.waitSeconds) + " ms, max " + ms(s.maxWaitSeconds) + " ms), refused " +
+                               count(s.refusedSyncs) + " (output " + count(refusedSyncSubmits) + "), readback slices " +
+                               count(s.readbackSlices) + ", merged " + count(s.mergedSlices) + " (" +
+                               ms(s.mergeSeconds) + " ms)");
         }
-        renderer->DetachDevice();
+        renderer->SetSyncSubmit(nullptr);
         renderer = nullptr;
     }
     compositeValid = false;
@@ -902,10 +985,12 @@ void VulkanOutput::Impl::Teardown() {
 void VulkanOutput::Impl::Abandon() {
     if (renderer) {
         renderer->AbandonDevice();
+        renderer->SetSyncSubmit(nullptr);
         renderer = nullptr;
     }
     compositeValid = false;
     hidden = {};
+    sync = {};
     hiddenCreated = false;
     slots.clear();
     (void)presenter.release();
@@ -1057,8 +1142,10 @@ bool VulkanOutput::Impl::SubmitFrame(Slot &slot, uint32_t index, std::string &er
     submit.pCommandBuffers = &slot.cmd;
     if (const VkResult result = device->Submit(submit, slot.fence); result != VK_SUCCESS) {
         error = std::string("vkQueueSubmit failed: ") + gpu::vk_util::ResultName(result);
+        runRefused = true;
         return false;
     }
+    runSubmitted = true;
     slot.pending = true;
     const retro_vulkan_image *image = &slot.image;
     if (mode == VulkanOutputMode::Compute) {
@@ -1397,6 +1484,7 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
         }
         return false;
     }
+    renderer->FrameSubmitted(index, slot->fence);
     if (recorded) {
         m.compositeValid = true;
     }
@@ -1424,6 +1512,19 @@ uint32_t VulkanOutput::PresentedScale() const {
     return m_impl->presentedScale;
 }
 
+void VulkanOutput::BeginRun() {
+    Impl &m = *m_impl;
+    m.runSubmitted = false;
+    m.runRefused = false;
+    if (m.mode == VulkanOutputMode::Compute && RendererAttached()) {
+        m.renderer->PollVdp1Readbacks();
+    }
+}
+
+void VulkanOutput::SetGpuWorkAllowed(bool allowed) {
+    m_impl->gpuWorkAllowed = allowed;
+}
+
 bool VulkanOutput::SubmitHidden(std::string &error) {
     Impl &m = *m_impl;
     if (m.mode != VulkanOutputMode::Compute || !RendererAttached()) {
@@ -1435,6 +1536,18 @@ bool VulkanOutput::SubmitHidden(std::string &error) {
     const bool frame = m.renderer->HasPendingFrame();
     if (!frame && !m.renderer->HasPendingVdp1Work()) {
         return true;
+    }
+    if (!frame && m.runSubmitted) {
+        // A frame submit of this retro_run was accepted but did not take every VDP1 op (a recording failure): never a
+        // second accepted submit in one retro_run; the ops wait for the next one.
+        if (!m.opsDeferredLogged) {
+            m.opsDeferredLogged = true;
+            NegotiationLog(RETRO_LOG_WARN, "VDP1 on the GPU: ops left after this retro_run's submit wait for the next");
+        }
+        return true;
+    }
+    if (!frame && m.runRefused) {
+        NegotiationLog(RETRO_LOG_WARN, "VDP1 ops-only submit after a refused frame submit");
     }
     const auto &vk = m.device->Table();
     const VkDevice dev = m.device->Device();
@@ -1480,9 +1593,13 @@ bool VulkanOutput::SubmitHidden(std::string &error) {
     }
     if (result != VK_SUCCESS) {
         m.renderer->RecordedFrameDropped();
-        error = std::string("submitting a hidden VDP2 frame failed: ") + gpu::vk_util::ResultName(result);
+        m.runRefused = true;
+        error = std::string(frame ? "submitting a hidden VDP2 frame failed: " : "submitting the pending VDP1 ops failed: ") +
+                gpu::vk_util::ResultName(result);
         return false;
     }
+    m.runSubmitted = true;
+    m.renderer->FrameSubmitted(rendererContext, context.fence);
     context.pending = true;
     m.nextHidden = (index + 1) % kHiddenContexts;
     if (frame && recorded) {

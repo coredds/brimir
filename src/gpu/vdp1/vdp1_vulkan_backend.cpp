@@ -143,6 +143,7 @@ VkResult Vdp1VulkanBackend::Init(uint32_t frameContexts) {
         }
     }
     m_contexts.resize(frameContexts);
+    m_readbacks.resize(frameContexts);
     return VK_SUCCESS;
 }
 
@@ -166,12 +167,16 @@ void Vdp1VulkanBackend::Destroy() {
     for (vk_util::Buffer &b : m_buffers) {
         vk_util::DestroyBuffer(m_device, b);
     }
-    vk_util::DestroyBuffer(m_device, m_readback);
+    for (vk_util::Buffer &readback : m_readbacks) {
+        vk_util::DestroyBuffer(m_device, readback);
+    }
+    m_readbacks.clear();
 }
 
 void Vdp1VulkanBackend::EnsureContexts(uint32_t count) {
     if (count > m_contexts.size()) {
         m_contexts.resize(count);
+        m_readbacks.resize(count);
     }
 }
 
@@ -464,32 +469,44 @@ bool Vdp1VulkanBackend::RecordFbramUpload(std::span<const uint8_t> slices, uint3
     return true;
 }
 
-bool Vdp1VulkanBackend::RecordReadback(VkCommandBuffer cmd) {
-    if (!Ok() || cmd == VK_NULL_HANDLE) {
+bool Vdp1VulkanBackend::RecordReadback(uint32_t contextIndex, uint32_t mask, VkCommandBuffer cmd) {
+    mask &= (1u << kFbramSliceCount) - 1;
+    if (!Ok() || cmd == VK_NULL_HANDLE || contextIndex >= m_readbacks.size()) {
         return false;
     }
-    if (m_readback.buffer == VK_NULL_HANDLE) {
+    if (mask == 0) {
+        return true;
+    }
+    vk_util::Buffer &readback = m_readbacks[contextIndex];
+    if (readback.buffer == VK_NULL_HANDLE) {
         constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         if (vk_util::CreateBuffer(m_device, kFbramBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                  kHost | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_readback) != VK_SUCCESS &&
-            vk_util::CreateBuffer(m_device, kFbramBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, kHost, m_readback) !=
+                                  kHost | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, readback) != VK_SUCCESS &&
+            vk_util::CreateBuffer(m_device, kFbramBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, kHost, readback) !=
                 VK_SUCCESS) {
             return false;
         }
-        if (m_readback.mapped == nullptr) {
-            vk_util::DestroyBuffer(m_device, m_readback);
+        if (readback.mapped == nullptr) {
+            vk_util::DestroyBuffer(m_device, readback);
             return false;
         }
     }
+    std::array<VkBufferCopy, kFbramSliceCount> regions{};
+    uint32_t count = 0;
+    for (uint32_t slice = 0; slice < kFbramSliceCount; ++slice) {
+        if ((mask >> slice) & 1u) {
+            const VkDeviceSize offset = VkDeviceSize{slice} * kFbramSliceSize;
+            regions[count++] = {offset, offset, kFbramSliceSize};
+        }
+    }
     Barrier(cmd, kCompute | kTransfer, kWrites, kTransfer, VK_ACCESS_TRANSFER_READ_BIT);
-    const VkBufferCopy region{0, 0, kFbramBufferSize};
-    m_device.Table().vkCmdCopyBuffer(cmd, m_fbram, m_readback.buffer, 1, &region);
+    m_device.Table().vkCmdCopyBuffer(cmd, m_fbram, readback.buffer, count, regions.data());
     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
     return true;
 }
 
-const uint8_t *Vdp1VulkanBackend::ReadbackData() const {
-    return static_cast<const uint8_t *>(m_readback.mapped);
+const uint8_t *Vdp1VulkanBackend::ReadbackData(uint32_t contextIndex) const {
+    return contextIndex < m_readbacks.size() ? static_cast<const uint8_t *>(m_readbacks[contextIndex].mapped) : nullptr;
 }
 
 void Vdp1VulkanBackend::FrameDropped() {

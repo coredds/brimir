@@ -107,8 +107,18 @@ public:
     // hidden context and submits it (no presenter, no set_image), at the renderer's current internal resolution.
     // Without a frame but with VDP1 ops pending (VDP1 on the GPU), it submits the ops alone: the ops-only submit, also
     // made for shown frames whose present did not take the ops (call it at the end of every retro_run). True when
-    // there was nothing to record.
+    // there was nothing to record. The ops-only submit is never a second accepted submit of a retro_run: after an
+    // accepted one the ops wait for the next retro_run (logged once); after a refused one it is made and logged
+    // ("VDP1 ops-only submit after a refused frame submit").
     bool SubmitHidden(std::string &error);
+
+    // The start of a retro_run (for the one-submit rule above), before the emulation: also takes the attached
+    // renderer's completed VDP1 framebuffer readbacks (VulkanVDPRenderer::PollVdp1Readbacks).
+    void BeginRun();
+    // Whether GPU work outside the frame submits is allowed now: inside retro_run and the context callbacks only. The
+    // renderer's VDP1 sync submits (VulkanVDPRenderer::SetSyncSubmit; a submit on a command buffer and fence of this
+    // output, under the queue lock, then a wait) are refused otherwise. False until set.
+    void SetGpuWorkAllowed(bool allowed);
 
     // Internal resolution n (1-4, brimir_internal_resolution) for the Vulkan VDP renderer. Kept across contexts: each
     // attach creates output images for it first and attaches the renderer at most at their scale (the renderer tries

@@ -87,6 +87,30 @@ static unsigned g_presentedScale = 0;
 static bool g_internalResolutionNoopLogged = false;
 // retro_load_game is applying the options before it knows whether Vulkan is requested.
 static bool g_loadingContent = false;
+// GPU work outside the frame submits (VDP1 on the GPU's sync submits) is allowed inside retro_run and the context
+// callbacks only (VulkanOutput::SetGpuWorkAllowed); scopes nest (a driver reinit inside retro_run).
+static bool g_gpuWorkAllowed = false;
+class GpuWorkScope {
+public:
+    GpuWorkScope() : m_previous(g_gpuWorkAllowed) {
+        g_gpuWorkAllowed = true;
+        Apply();
+    }
+    ~GpuWorkScope() {
+        g_gpuWorkAllowed = m_previous;
+        Apply();
+    }
+    GpuWorkScope(const GpuWorkScope&) = delete;
+    GpuWorkScope& operator=(const GpuWorkScope&) = delete;
+    static void Apply() {
+        if (g_vulkanOutput) {
+            g_vulkanOutput->SetGpuWorkAllowed(g_gpuWorkAllowed);
+        }
+    }
+
+private:
+    bool m_previous;
+};
 #endif
 
 static void reset_frame_state(void) {
@@ -281,13 +305,13 @@ static void set_vdp2_probe(brimir::gpu::VulkanVDPRenderer& renderer) {
     };
 }
 
-// VDP1 on the GPU (GPU stage 2) while the Vulkan VDP renderer is attached: requested with the environment variable
-// BRIMIR_VDP1_GPU=1 (brimir_vkhost --gpu-vdp1) until its CPU framebuffer access and save states are final (stage 2,
-// Task 6); otherwise VDP1 runs in software inside the Vulkan VDP renderer, as in stage 1.
+// VDP1 runs on the GPU (GPU stage 2) whenever the Vulkan VDP renderer is attached; the debug override
+// BRIMIR_VDP1_GPU=0 (brimir_vkhost --software-vdp1) keeps it in software inside the Vulkan VDP renderer, as in stage 1
+// (also the fallback when the VDP1 back half cannot be created, and VDP1 while the renderer is detached).
 static bool vdp1_mode_requested(void) {
     static const bool requested = [] {
         const char* env = std::getenv("BRIMIR_VDP1_GPU");
-        return env != nullptr && *env != '\0' && std::strcmp(env, "0") != 0;
+        return env == nullptr || std::strcmp(env, "0") != 0;
     }();
     return requested;
 }
@@ -370,8 +394,10 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
     if (!g_vulkanRequested) {
         return;
     }
+    GpuWorkScope gpuWork;
     if (!g_vulkanOutput) {
         g_vulkanOutput = std::make_unique<brimir::libretro::VulkanOutput>();
+        GpuWorkScope::Apply();
     }
     g_vulkanOutput->SetInternalScale(requested_internal_resolution());
     std::string reason;
@@ -411,6 +437,7 @@ static void RETRO_CALLCONV vulkan_context_destroy(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     // Waits for the device, detaches the Vulkan VDP renderer (it stays installed for the next context_reset), then
     // frees the output. Safe between VDP2EndFrame and the frame's recording (a reinit inside retro_run).
+    GpuWorkScope gpuWork;
     if (g_vulkanOutput) {
         g_vulkanOutput->ContextDestroy();
     }
@@ -431,6 +458,9 @@ static void log_vulkan_output_change(brimir::libretro::VulkanOutputMode before, 
 // growth is handled by the next shown frame's BeginFrame, which keeps the renderer's composite.
 static void prepare_vulkan_frame(void) {
     sync_vdp_renderer();
+    if (g_vulkanOutput) {
+        g_vulkanOutput->BeginRun();
+    }
 }
 
 // The Vulkan half of retro_run's video output: present the frame RunFrame completed.
@@ -790,6 +820,9 @@ RETRO_API void retro_run(void) {
     if (!g_core) {
         return;
     }
+#ifdef BRIMIR_VULKAN
+    GpuWorkScope gpuWork;
+#endif
 
     // Only re-query core options when the frontend reports a change. This avoids
     // string comparisons and setter calls on every frame when nothing changed.

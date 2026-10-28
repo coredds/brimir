@@ -71,8 +71,10 @@ struct HostConfig {
     // --probe: collect the core's per-frame VDP2 probe lines (BRIMIR_VDP2_PROBE) and per-retro_run VDP1 probe lines
     // (BRIMIR_VDP1_PROBE) while recording
     bool probe = false;
-    // --gpu-vdp1: VDP1 on the GPU in the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=1 for the core)
+    // --gpu-vdp1: VDP1 on the GPU in the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=1 for the core; the default)
     bool gpuVdp1 = false;
+    // --software-vdp1: VDP1 in software inside the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=0, the debug override)
+    bool softwareVdp1 = false;
     // --set-option-at F key=value: the option changes before frame F (counting warmup frames from 0, as --reset-at),
     // reported to the core through GET_VARIABLE_UPDATE (a live change, as RetroArch's Quick Menu).
     struct OptionChange {
@@ -136,7 +138,10 @@ struct RunReport {
     uint64_t lockViolations = 0;
     uint64_t hiddenGpuCalls = 0; // presentation calls or hardware frames in frames with video disabled
     uint64_t hiddenSubmits = 0;  // command buffer submits in frames with video disabled (the core's VDP2 work)
-    uint64_t maxRunSubmits = 0;  // most command buffer submits in one retro_run (must stay at most 1)
+    uint64_t maxRunSubmits = 0;  // most command buffer submits in one retro_run (must stay at most 1; sync ones aside)
+    SubmitWaitStats submitWaits; // the core's submits and waits by kind
+    uint64_t serializeCalls = 0;
+    double serializeSeconds = 0, maxSerializeSeconds = 0, unserializeSeconds = 0;
     uint64_t unreadableFrames = 0;
     bool validation = false;
     uint32_t validationErrors = 0;
@@ -272,6 +277,11 @@ private:
     const retro_hw_render_context_negotiation_interface* m_negotiation = nullptr;
     bool m_contextLive = false;
     uint64_t m_contextResets = 0;
+    // retro_serialize (with retro_serialize_size) and retro_unserialize wall time
+    uint64_t m_serializeCalls = 0;
+    double m_serializeSeconds = 0;
+    double m_maxSerializeSeconds = 0;
+    double m_unserializeSeconds = 0;
     uint64_t m_hardwareFrames = 0;
     uint64_t m_recordedFrames = 0;
     uint64_t m_recordedHardware = 0;
@@ -282,6 +292,7 @@ private:
     uint64_t m_hiddenGpuCalls = 0;
     uint64_t m_hiddenSubmits = 0;
     uint64_t m_maxRunSubmits = 0;
+    SubmitWaitStats m_submitWaits;
     uint64_t m_failedAllocations = 0;
     uint64_t m_coreMemoryPeak = 0;
     uint64_t m_coreMemoryAllocations = 0;

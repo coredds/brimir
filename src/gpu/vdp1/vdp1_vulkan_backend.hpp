@@ -59,11 +59,13 @@ public:
     // Copies the slices in `mask` (bit i: slice i of vdp1_hw_params.hpp) from `slices` (kFbramBufferSize bytes, slice
     // i at i * kFbramSliceSize) into the GPU FBRAM, ordered with the Records around it. All or nothing, as Record.
     bool RecordFbramUpload(std::span<const uint8_t> slices, uint32_t mask, uint32_t context, VkCommandBuffer cmd);
-    // Copies all of the GPU FBRAM into the readback buffer (ReadbackData once cmd has completed). False when the
-    // readback buffer cannot be allocated.
-    bool RecordReadback(VkCommandBuffer cmd);
-    // The readback buffer (kFbramBufferSize bytes, slice order); null before the first RecordReadback.
-    const uint8_t *ReadbackData() const;
+    // Copies the slices in `mask` of the GPU FBRAM into `context`'s readback buffer (host-cached; ReadbackData once cmd
+    // has completed), after the work recorded before it. Each context has its own buffer, so a readback stays readable
+    // until the context's next command buffer begins. False when the buffer cannot be allocated (nothing recorded).
+    bool RecordReadback(uint32_t context, uint32_t mask, VkCommandBuffer cmd);
+    // `context`'s readback buffer (kFbramBufferSize bytes, slice i at i * kFbramSliceSize); null before its first
+    // RecordReadback.
+    const uint8_t *ReadbackData(uint32_t context) const;
 
     // The command buffer of the last BeginContext will not be submitted: the one-time work it carried (zeroing the
     // back half's buffers) is pending again. Its op lists are the caller's to replay.
@@ -126,8 +128,8 @@ private:
     std::array<vk_util::Buffer, kBufCount> m_buffers{};
     std::array<Pipe, kPassCount> m_pipes{};
     VkDescriptorPool m_pool = VK_NULL_HANDLE;
-    vk_util::Buffer m_readback;
     std::vector<Context> m_contexts;
+    std::vector<vk_util::Buffer> m_readbacks; // per context
     bool m_pendingZero = true;  // the back half's buffers are zeroed by the next Record
     bool m_recordedZero = false; // ... and the command buffer of the last BeginContext carries it
     RecordStats m_stats{};

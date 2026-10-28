@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -88,14 +89,16 @@ public:
     /// which the bus cannot reach, is written as the draw framebuffer of a swap and swapped back (only the index flips:
     /// no erase latch, no renderer swap call), so a renderer with GPU-authoritative FBRAM sees the write too.
     void FBRAM16(uint32_t fb, uint32_t address, uint16_t value);
+    /// @brief The same with a byte write (VDP::VDP1WriteFB<uint8>).
+    void FBRAM8(uint32_t fb, uint32_t address, uint8_t value);
 
     /// @brief Forces a resolution, as VDP::UpdateResolution reports it (normally derived from TVMD at the top border).
     void SetResolution(uint32_t h, uint32_t v, bool exclusive);
 
-    /// @brief A soft VDP reset, as VDP::Reset(false) does it (e.g. on an SMPC clock change): the state and the
+    /// @brief A VDP reset, as VDP::Reset(hard) does it (soft: e.g. on an SMPC clock change): the state and the
     /// renderers reset, then the resolution update. Called from onLine(y), RunFrame then renders line 0 again instead
     /// of line y (VDP::Reset restarts the active display at VCNT 0) and continues the frame from there.
-    void ResetVDP();
+    void ResetVDP(bool hard = false);
 
     /// @brief Sets TVSTAT.ODD and notifies the renderers, as the VDP does at VBlank IN.
     void Field(bool odd);
@@ -131,6 +134,13 @@ public:
     /// @brief A CPU read of the draw framebuffer as VDP::VDP1ReadFB does it (the renderer's VDP1SyncFB, then
     /// VDPState::VDP1ReadFB), per attached state in Attach order.
     std::vector<uint16_t> ReadFB16(uint32_t address);
+    std::vector<uint8_t> ReadFB8(uint32_t address);
+    /// @brief Every attached pair's state as VDP::SaveState saves it (PreSaveStateSync, VDPState::SaveState, the
+    /// renderer's SaveState), in Attach order.
+    std::vector<std::unique_ptr<ymir::savestate::VDPSaveState>> SaveStates();
+    /// @brief Saves every pair (SaveStates) and loads pair i with pair (i + 1) % n's state (VDP::LoadState: VDPState,
+    /// renderer LoadState, PostLoadStateSync): with two pairs, software loads the other renderer's state and vice versa.
+    void CrossLoad();
     /// @brief Every attached renderer's state saved, a blank renderer section loaded, then the saved state loaded again
     /// (PreSaveStateSync, SaveState, LoadState, PostLoadStateSync as VDP::SaveState / LoadState call them).
     void SaveLoadMidFrame();
@@ -312,6 +322,8 @@ struct RenderBothOptions {
     // When set, each submitted frame's GPU time in milliseconds (timestamps around RecordPendingFrame's commands) is
     // appended; nothing is appended when the queue has no timestamps.
     std::vector<double> *gpuMilliseconds = nullptr;
+    // The Vulkan renderer's sync submits (InstallSyncSubmit) are counted here when set.
+    struct SyncSubmitCounter *syncCounter = nullptr;
 };
 
 /// @brief Runs the scene into a software and a Vulkan renderer pair (separate VDPStates, the same writes), replays each
@@ -355,6 +367,19 @@ uint32_t EnvScale();
 
 /// @brief Reads the first `words` 32-bit words of a device buffer (one-shot submit, waits).
 std::vector<uint32_t> ReadbackBuffer(gpu::VulkanDevice &device, VkBuffer buffer, uint32_t words);
+
+/// @brief Counts of the sync submits a test's renderer made through InstallSyncSubmit.
+struct SyncSubmitCounter {
+    uint64_t submits = 0; // submitted and completed
+    uint64_t refused = 0; // refused (allowed == false) or failed
+    bool allowed = true;  // false: refuse every sync submit (as VulkanOutput outside retro_run)
+};
+
+/// @brief Gives the renderer a sync submit (VulkanVDPRenderer::SetSyncSubmit) on its own command pool and fence: the
+/// command buffer is submitted only when the renderer recorded something, then waited for. Counts into `counter` when
+/// set (it must outlive the renderer's use of the callback).
+void InstallSyncSubmit(gpu::VulkanVDPRenderer &renderer, gpu::VulkanDevice &device,
+                       SyncSubmitCounter *counter = nullptr);
 
 } // namespace brimir::test
 

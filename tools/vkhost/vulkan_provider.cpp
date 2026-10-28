@@ -63,6 +63,15 @@ struct VulkanProvider::Readback {
 
 namespace {
 
+template <typename Handle>
+uint64_t HandleValue(Handle handle) {
+    if constexpr (std::is_pointer_v<Handle>) {
+        return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));
+    } else {
+        return static_cast<uint64_t>(handle);
+    }
+}
+
 // --- Wrapped Vulkan functions handed to the core ----------------------------------------------------------------
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits,
@@ -73,13 +82,17 @@ VKAPI_ATTR VkResult VKAPI_CALL HookQueueSubmit(VkQueue queue, uint32_t count, co
     }
     g_provider->CheckQueueUse("vkQueueSubmit", commandBuffers);
     if (commandBuffers > 0 && g_provider->TakeFailedSubmit()) {
-        // --fail-submit-at: the core's frame submit fails (fault injection); nothing reaches the queue, so it does not
-        // count against the one submit per retro_run.
+        // --fail-submit-at: the core's frame submit fails (fault injection); nothing reaches the queue, so it is
+        // counted as refused, not as one of the retro_run's submits.
         std::fprintf(stderr, "vkhost: vulkan: vkQueueSubmit refused (--fail-submit-at)\n");
-        g_provider->UncountRunSubmit();
+        g_provider->OnRefusedSubmit();
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
-    return g_provider->Real().queueSubmit(queue, count, submits, fence);
+    const VkResult result = g_provider->Real().queueSubmit(queue, count, submits, fence);
+    if (result == VK_SUCCESS) {
+        g_provider->OnSubmitted(HandleValue(fence), commandBuffers);
+    }
+    return result;
 }
 
 uint32_t CommandBufferCount(uint32_t count, const VkSubmitInfo2* submits) {
@@ -113,11 +126,17 @@ VKAPI_ATTR VkResult VKAPI_CALL HookQueueWaitIdle(VkQueue queue) {
 VKAPI_ATTR VkResult VKAPI_CALL HookWaitForFences(VkDevice device, uint32_t count, const VkFence* fences,
                                                  VkBool32 waitAll, uint64_t timeout) {
     g_provider->CheckWait("vkWaitForFences");
+    std::vector<uint64_t> handles;
+    for (uint32_t i = 0; fences != nullptr && i < count; ++i) {
+        handles.push_back(HandleValue(fences[i]));
+    }
+    g_provider->OnWaitFences(static_cast<uint32_t>(handles.size()), handles.data());
     return g_provider->Real().waitForFences(device, count, fences, waitAll, timeout);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookDeviceWaitIdle(VkDevice device) {
     g_provider->CheckWait("vkDeviceWaitIdle");
+    g_provider->OnDeviceWaitIdle();
     return g_provider->Real().deviceWaitIdle(device);
 }
 
@@ -133,15 +152,6 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateComputePipelines(VkDevice device, VkPip
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
     return g_provider->Real().createComputePipelines(device, cache, count, infos, allocator, pipelines);
-}
-
-template <typename Handle>
-uint64_t HandleValue(Handle handle) {
-    if constexpr (std::is_pointer_v<Handle>) {
-        return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));
-    } else {
-        return static_cast<uint64_t>(handle);
-    }
 }
 
 template <typename Handle>
@@ -678,9 +688,6 @@ void VulkanProvider::CheckQueueUse(const char* function, uint32_t commandBuffers
             if (!m_videoEnabled) {
                 ++m_hiddenSubmits;
             }
-            if (m_inRun && ++m_runSubmits > 1) {
-                AddProblem("more than one command buffer submit in one retro_run");
-            }
         }
     }
     if (m_lockOwner.load() != std::this_thread::get_id()) {
@@ -692,11 +699,94 @@ void VulkanProvider::CheckQueueUse(const char* function, uint32_t commandBuffers
 void VulkanProvider::BeginRun() {
     m_inRun = true;
     m_runSubmits = 0;
+    m_runRefused = 0;
+    m_runOpsOnlyLine = false;
+    ++m_runIndex;
+    m_phase = CorePhase::Run;
 }
 
 void VulkanProvider::EndRun() {
     m_inRun = false;
+    m_phase = CorePhase::Other;
+    if (m_runSubmits > 1) {
+        AddProblem("more than one command buffer submit in one retro_run (sync submits not counted)");
+    }
+    if (m_runRefused > 0 && m_runSubmits > 0) {
+        // A second submit after a refused one: only the ops-only submit, which the core logs
+        if (m_runOpsOnlyLine) {
+            ++m_submitWaits.extraOpsOnlyRuns;
+        } else {
+            AddProblem("a submit after a refused one in the same retro_run without the core's ops-only line");
+        }
+    }
     m_maxRunSubmits = std::max(m_maxRunSubmits, m_runSubmits);
+}
+
+void VulkanProvider::OnSubmitted(uint64_t fence, uint32_t commandBuffers) {
+    if (m_selfTest || commandBuffers == 0) {
+        return;
+    }
+    switch (m_phase) {
+    case CorePhase::Run: ++m_runSubmits; break;
+    case CorePhase::Context: ++m_submitWaits.contextSubmits; break;
+    default:
+        ++m_submitWaits.outsideSubmits;
+        AddProblem("a command buffer submit outside retro_run and the context callbacks");
+        break;
+    }
+    if (fence != 0) {
+        m_fenceRuns[fence] = m_phase == CorePhase::Run ? m_runIndex : 0;
+    }
+}
+
+void VulkanProvider::OnRefusedSubmit() {
+    ++m_submitWaits.refusedSubmits;
+    if (m_phase == CorePhase::Run) {
+        ++m_runRefused;
+    }
+}
+
+void VulkanProvider::OnWaitFences(uint32_t count, const uint64_t* fences) {
+    if (m_selfTest) {
+        return;
+    }
+    switch (m_phase) {
+    case CorePhase::Run: {
+        bool sync = false;
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto it = m_fenceRuns.find(fences[i]);
+            if (it != m_fenceRuns.end() && it->second == m_runIndex) {
+                // Submitted and waited for in the same retro_run: a sync submit (not one of the run's frame submits)
+                sync = true;
+                m_fenceRuns.erase(it);
+                ++m_submitWaits.syncSubmits;
+                if (m_runSubmits > 0) {
+                    --m_runSubmits;
+                }
+            }
+        }
+        ++(sync ? m_submitWaits.syncWaits : m_submitWaits.frameWaits);
+        break;
+    }
+    case CorePhase::Serialize: ++m_submitWaits.serializeWaits; break;
+    case CorePhase::Context: ++m_submitWaits.contextWaits; break;
+    default:
+        ++m_submitWaits.outsideWaits;
+        AddProblem("a fence wait outside retro_run, retro_serialize and the context callbacks");
+        break;
+    }
+}
+
+void VulkanProvider::OnDeviceWaitIdle() {
+    if (m_selfTest) {
+        return;
+    }
+    if (m_phase == CorePhase::Context) {
+        ++m_submitWaits.contextWaits;
+    } else {
+        ++m_submitWaits.outsideWaits;
+        AddProblem("vkDeviceWaitIdle outside the context callbacks");
+    }
 }
 
 void VulkanProvider::CheckWait(const char* function) {

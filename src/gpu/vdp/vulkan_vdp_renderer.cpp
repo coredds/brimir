@@ -113,29 +113,36 @@ bool VulkanVDPRenderer::EnsureFrameContexts(uint32_t frameContexts) {
     if (!m_backend) {
         return false;
     }
-    // The sync context moves up with the caller's count (its work has always completed: every sync waits).
+    // The sync context moves up with the caller's count (its work has always completed and been merged: every sync
+    // waits).
     const uint32_t extra = m_gpuVdp1 ? 1u : 0u;
     m_backend->EnsureContexts(frameContexts + extra);
     if (m_vdp1Backend) {
         m_vdp1Backend->EnsureContexts(frameContexts + extra);
     }
     m_frameContexts = std::max(m_frameContexts, frameContexts);
+    if (m_contextFences.size() < m_frameContexts + extra) {
+        m_contextFences.resize(m_frameContexts + extra, VK_NULL_HANDLE);
+    }
     return true;
 }
 
 void VulkanVDPRenderer::AbandonDevice() {
     m_front.ConsumeFrame();
     m_front.MarkAllDirty();
-    // TODO(Task 6): the GPU FBRAM is lost with the device: VDP1 continues in software from the CPU's (stale) copy.
+    if (m_gpuVdp1) {
+        // No Vulkan call and no read of the readback buffers (their memory may be gone with the device): software
+        // continues from the shadow as of the last merged readback (rule 8). Alt stays the inner renderer's.
+        HandToSoftware(nullptr, nullptr);
+    }
     (void)m_vdp1Backend.release();
-    m_syncPool = VK_NULL_HANDLE;
-    m_syncCmd = VK_NULL_HANDLE;
-    m_syncFence = VK_NULL_HANDLE;
     m_device = nullptr;
     m_gpuVdp1 = false;
     m_vdp1Queue.clear();
     m_vdp1Recorded.clear();
     m_vdp1BeforeFrame = 0;
+    m_proposed = {};
+    m_contextFences.clear();
     (void)m_vdp1Front.TakeOps();
     (void)m_backend.release();
 }
@@ -169,7 +176,19 @@ bool VulkanVDPRenderer::RecordPendingFrame(uint32_t context, VkCommandBuffer cmd
 }
 
 bool VulkanVDPRenderer::HasPendingVdp1Work() const {
-    return m_gpuVdp1 && (!m_vdp1Queue.empty() || m_vdp1Front.HasPendingOps());
+    if (!m_gpuVdp1) {
+        return false;
+    }
+    if (!m_vdp1Queue.empty() || m_vdp1Front.HasPendingOps()) {
+        return true;
+    }
+    // A GpuNewer slice whose readback no command buffer took yet (rule 2: none may outlive the retro_run)
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        if ((((kMainSlices | kMeshSlices) >> slice) & 1u) && NeedsReadback(slice, m_vdp1Seq)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool VulkanVDPRenderer::RecordPendingVdp1Work(uint32_t context, VkCommandBuffer cmd) {
@@ -178,7 +197,7 @@ bool VulkanVDPRenderer::RecordPendingVdp1Work(uint32_t context, VkCommandBuffer 
         return false;
     }
     bool frameRecorded = false;
-    return RecordVdp1Work(context, cmd, FramePolicy::Keep, frameRecorded) && !m_vdp1Recorded.empty();
+    return RecordVdp1Work(context, cmd, FramePolicy::Keep, frameRecorded) && RecordedVdp1Work();
 }
 
 bool VulkanVDPRenderer::TakeFrameRecordedBySync() {
@@ -195,6 +214,7 @@ void VulkanVDPRenderer::RecordedFrameDropped() {
     if (m_vdp1Backend) {
         m_vdp1Backend->FrameDropped();
     }
+    m_proposed = {}; // its readbacks never happen
     if (!m_vdp1Recorded.empty()) {
         // The dropped ops come before everything still pending (they were recorded first).
         const size_t count = m_vdp1Recorded.size();
@@ -260,28 +280,6 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     if (!backend->Ok()) {
         return false;
     }
-    const auto &vk = device.Table();
-    const VkDevice dev = device.Device();
-    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-    poolInfo.queueFamilyIndex = device.QueueFamily();
-    VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-    const VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    bool ok = vk.vkCreateCommandPool(dev, &poolInfo, nullptr, &m_syncPool) == VK_SUCCESS;
-    if (ok) {
-        allocInfo.commandPool = m_syncPool;
-        ok = vk.vkAllocateCommandBuffers(dev, &allocInfo, &m_syncCmd) == VK_SUCCESS &&
-             vk.vkCreateFence(dev, &fenceInfo, nullptr, &m_syncFence) == VK_SUCCESS;
-    }
-    if (!ok) {
-        vk.vkDestroyFence(dev, m_syncFence, nullptr);
-        vk.vkDestroyCommandPool(dev, m_syncPool, nullptr);
-        m_syncPool = VK_NULL_HANDLE;
-        m_syncCmd = VK_NULL_HANDLE;
-        m_syncFence = VK_NULL_HANDLE;
-        return false;
-    }
     m_device = &device;
     m_vdp1Backend = std::move(backend);
     m_backend->SetSpriteFBExternal(true);
@@ -299,69 +297,96 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     m_vdp1Queue.clear();
     m_vdp1Recorded.clear();
     m_vdp1BeforeFrame = 0;
+    m_contextFences.assign(contexts, VK_NULL_HANDLE);
+    ResetShadow();
     QueueFbramUpload(0xFF, &m_vdp1->GetAltFBRAM(0), &m_vdp1->GetAltFBRAM(1));
     m_gpuVdp1 = true;
-    m_vdp1SyncedOps = Vdp1GpuOpCount();
     m_frameRecordedBySync = false;
     return true;
 }
 
 void VulkanVDPRenderer::LeaveGpuVdp1() {
     if (m_gpuVdp1) {
-        // Software continues from the GPU's framebuffers: every pending op replayed, main into VDPState, mesh and
-        // doubleV into the inner renderer. TODO(Task 6): the alt framebuffers stay the inner renderer's (stale; the
-        // same transient as a save state load), until it gets setters for them.
-        if (SyncVdp1ToCpu(FramePolicy::Ignore)) {
-            auto saved = std::make_unique<savestate::VDPSaveState::VDPRendererSaveState>();
-            m_vdp1->SaveState(*saved);
-            saved->vdp1State.doubleV = m_vdp1Front.DoubleV() ? 1 : 0;
-            saved->vdp1State.meshFBRAM = *m_meshShadow;
-            m_vdp1->LoadState(*saved);
+        // The caller waited for the device: every committed readback is complete. Then one sync submit for what the
+        // GPU holds beyond them and for alt (GPU-only), so software continues from the GPU's framebuffers.
+        OwnWorkCompleted();
+        bool altTouched = false;
+        for (uint32_t fb = 0; fb < 2; ++fb) {
+            const SliceSync &s = m_slices[vdp1::Vdp1AltSlice(fb)];
+            altTouched = altTouched || s.lastTouch > s.valid;
+        }
+        bool shadowBehind = false;
+        for (uint32_t slice = 0; slice < 8; ++slice) {
+            const SliceSync &s = m_slices[slice];
+            shadowBehind = shadowBehind || (((kMainSlices | kMeshSlices) >> slice) & 1u && s.lastTouch > s.valid);
+        }
+        const bool pendingWork = !m_vdp1Queue.empty() || m_vdp1Front.HasPendingOps();
+        bool altRead = false;
+        if (altTouched || shadowBehind || pendingWork) {
+            const bool synced = SyncSubmit(Vdp1SyncKind::Detach, FramePolicy::Ignore, altTouched ? kAltSlices : 0u);
+            altRead = synced && altTouched;
+            if (!synced && (altTouched || shadowBehind)) {
+                Log("VDP1: reading the GPU framebuffers back failed; VDP1 continues in software from older ones");
+            }
+        }
+        if (altRead) {
+            const uint8_t *data = m_vdp1Backend->ReadbackData(m_frameContexts);
+            auto alt = std::make_unique<std::array<SpriteFB, 2>>();
+            for (uint32_t fb = 0; fb < 2; ++fb) {
+                std::memcpy((*alt)[fb].data(), data + size_t{vdp1::Vdp1AltSlice(fb)} * kSliceSize, kSliceSize);
+            }
+            HandToSoftware(&(*alt)[0], &(*alt)[1]);
         } else {
-            Log("VDP1: reading the GPU framebuffers back failed; VDP1 continues in software from older ones");
+            HandToSoftware(nullptr, nullptr);
         }
     }
     DestroyGpuVdp1();
 }
 
+void VulkanVDPRenderer::HandToSoftware(const SpriteFB *alt0, const SpriteFB *alt1) {
+    // VDPState holds main (the shadow); the inner renderer gets doubleV, mesh and alt, then copies VDPState into a
+    // threaded VDP1's own state (PostLoadStateSync), as after a state load.
+    m_vdp1->PreSaveStateSync();
+    auto saved = std::make_unique<savestate::VDPSaveState::VDPRendererSaveState>();
+    m_vdp1->SaveState(*saved);
+    saved->vdp1State.doubleV = m_vdp1Front.DoubleV() ? 1 : 0;
+    saved->vdp1State.meshFBRAM = *m_meshShadow;
+    m_vdp1->LoadState(*saved);
+    if (alt0 != nullptr && alt1 != nullptr) {
+        m_vdp1->SetAltFBRAM(0, *alt0);
+        m_vdp1->SetAltFBRAM(1, *alt1);
+    }
+    m_vdp1->PostLoadStateSync();
+}
+
 void VulkanVDPRenderer::DestroyGpuVdp1() {
     m_vdp1Backend.reset();
-    if (m_device != nullptr) {
-        const auto &vk = m_device->Table();
-        vk.vkDestroyFence(m_device->Device(), m_syncFence, nullptr);
-        vk.vkDestroyCommandPool(m_device->Device(), m_syncPool, nullptr); // frees the command buffer
-    }
-    m_syncPool = VK_NULL_HANDLE;
-    m_syncCmd = VK_NULL_HANDLE;
-    m_syncFence = VK_NULL_HANDLE;
     m_device = nullptr;
     m_gpuVdp1 = false;
     m_vdp1Queue.clear();
     m_vdp1Recorded.clear();
     m_vdp1BeforeFrame = 0;
+    m_proposed = {};
+    m_contextFences.clear();
     (void)m_vdp1Front.TakeOps();
     if (m_backend) {
         m_backend->SetSpriteFBExternal(false);
     }
 }
 
-uint64_t VulkanVDPRenderer::Vdp1GpuOpCount() const {
-    // The ops that change FBRAM beyond what the CPU already wrote into VDPState (CPU writes do not count)
-    const vdp1::Vdp1FrontStats &stats = m_vdp1Front.Stats();
-    return stats.spans + stats.erases;
-}
-
 void VulkanVDPRenderer::QueueVdp1Ops() {
     if (m_vdp1Front.HasPendingOps()) {
-        m_vdp1Queue.push_back({m_vdp1Front.TakeOps(), {}, 0});
+        m_vdp1Queue.push_back({m_vdp1Front.TakeOps(), {}, 0, m_vdp1Seq});
     } else {
         (void)m_vdp1Front.TakeOps(); // op-less frame boundaries
     }
 }
 
 void VulkanVDPRenderer::QueueFbramUpload(uint32_t sliceMask, const SpriteFB *alt0, const SpriteFB *alt1) {
+    QueueVdp1Ops(); // the ops so far come first
     Vdp1Work work;
     work.sliceMask = sliceMask;
+    work.seq = m_vdp1Seq;
     work.fbram.assign(vdp1::kFbramBufferSize, 0);
     const auto put = [&](uint32_t slice, const SpriteFB *fb) {
         if (fb != nullptr && ((sliceMask >> slice) & 1u)) {
@@ -389,9 +414,12 @@ bool VulkanVDPRenderer::ReplayVdp1Work(const Vdp1Work &work, uint32_t context, V
 }
 
 bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, FramePolicy policy,
-                                       bool &frameRecorded) {
+                                       bool &frameRecorded, uint32_t extra) {
     frameRecorded = false;
     m_vdp1Recorded.clear(); // the previous command buffer was submitted (or reported dropped)
+    m_proposed = {};
+    // This context's previous command buffer has completed: its readbacks can be merged before the buffer is reused.
+    MergeContext(context);
     if (!m_vdp1Backend->BeginContext(context)) {
         return false;
     }
@@ -427,6 +455,14 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
         QueueVdp1Ops();
         replay(m_vdp1Queue.size());
     }
+    // The emissions this command buffer covers, with the earlier committed ones (one queue: they run first).
+    uint64_t covered = m_submittedSeq;
+    if (done > 0) {
+        covered = std::max(covered, m_vdp1Queue[done - 1].seq);
+    }
+    if (done == m_vdp1Queue.size() && !m_vdp1Front.HasPendingOps()) {
+        covered = m_vdp1Seq;
+    }
     // What was recorded leaves the queue (RecordedFrameDropped puts it back); what failed stays, in order.
     m_vdp1Recorded.assign(std::make_move_iterator(m_vdp1Queue.begin()),
                           std::make_move_iterator(m_vdp1Queue.begin() + static_cast<std::ptrdiff_t>(done)));
@@ -435,63 +471,303 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     if (!ok) {
         Log("VDP1: recording the VDP1 ops failed (upload space); they stay pending");
     }
+
+    // Rule 2: the readbacks of the GpuNewer slices this command buffer covers, plus `extra` (whatever they hold).
+    uint32_t mask = 0;
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        const bool shadowed = ((kMainSlices | kMeshSlices) >> slice) & 1u;
+        const bool wanted = (extra >> slice) & 1u;
+        const SliceSync &s = m_slices[slice];
+        if ((shadowed && NeedsReadback(slice, covered)) ||
+            (wanted && s.lastTouch <= covered && s.lastWrite <= covered)) {
+            mask |= 1u << slice;
+        }
+    }
+    m_proposed.context = static_cast<int32_t>(context);
+    m_proposed.covered = covered;
+    if (mask != 0) {
+        if (m_vdp1Backend->RecordReadback(context, mask, cmd)) {
+            m_proposed.mask = mask;
+            for (uint32_t slice = 0; slice < 8; ++slice) {
+                m_proposed.seq[slice] = m_slices[slice].lastTouch;
+            }
+        } else {
+            Log("VDP1: the framebuffer readback buffer cannot be allocated; the CPU copy falls behind");
+        }
+    }
     return ok;
 }
 
-bool VulkanVDPRenderer::SyncVdp1ToCpu(FramePolicy policy) {
-    if (!m_gpuVdp1 || m_device == nullptr) {
-        return false;
+// -----------------------------------------------------------------------------
+// CPU shadow
+
+void VulkanVDPRenderer::ResetShadow() {
+    for (SliceSync &s : m_slices) {
+        s = {m_vdp1Seq, m_vdp1Seq, m_vdp1Seq, m_vdp1Seq, -1};
     }
-    if (Vdp1GpuOpCount() == m_vdp1SyncedOps) {
-        // VDPState and the mesh shadow are current: the pending ops are only CPU writes (already in VDPState) and
-        // uploads of what the CPU holds.
-        return true;
+    for (WriteMask &mask : m_writeMasks) {
+        mask.bits.fill(0);
+        mask.any = false;
     }
-    const auto &vk = m_device->Table();
-    const VkDevice dev = m_device->Device();
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vk.vkResetCommandPool(dev, m_syncPool, 0) != VK_SUCCESS || vk.vkBeginCommandBuffer(m_syncCmd, &begin) != VK_SUCCESS) {
-        return false;
-    }
-    bool frameRecorded = false;
-    const bool recorded = RecordVdp1Work(m_frameContexts, m_syncCmd, policy, frameRecorded);
-    const bool readback = recorded && m_vdp1Backend->RecordReadback(m_syncCmd);
-    VkResult result = vk.vkEndCommandBuffer(m_syncCmd);
-    if (result == VK_SUCCESS && readback) {
-        result = vk.vkResetFences(dev, 1, &m_syncFence);
-        if (result == VK_SUCCESS) {
-            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submit.commandBufferCount = 1;
-            submit.pCommandBuffers = &m_syncCmd;
-            result = m_device->Submit(submit, m_syncFence);
+    m_submittedSeq = m_vdp1Seq;
+    m_proposed = {};
+}
+
+void VulkanVDPRenderer::MarkShadowValid(uint32_t mask) {
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        if ((mask >> slice) & 1u) {
+            SliceSync &s = m_slices[slice];
+            s.valid = m_vdp1Seq;
+            s.pendingContext = -1;
+            if (slice < 2 && m_writeMasks[slice].any) {
+                m_writeMasks[slice].bits.fill(0);
+                m_writeMasks[slice].any = false;
+            }
         }
-        if (result == VK_SUCCESS) {
-            ++m_vdp1SyncSubmits;
-            result = vk.vkWaitForFences(dev, 1, &m_syncFence, VK_TRUE, UINT64_MAX);
+    }
+}
+
+void VulkanVDPRenderer::Touch(uint32_t slice) {
+    m_slices[slice].lastTouch = m_vdp1Seq;
+}
+
+void VulkanVDPRenderer::CpuWrite(uint32_t address, uint32_t bytes) {
+    ++m_vdp1Seq;
+    const uint32_t fb = m_state.fbIndex.draw & 1u;
+    m_slices[vdp1::Vdp1MainSlice(fb)].lastWrite = m_vdp1Seq;
+    WriteMask &mask = m_writeMasks[fb];
+    for (uint32_t i = 0; i < bytes; ++i) {
+        const uint32_t byte = (address + i) & (kSliceSize - 1);
+        mask.bits[byte >> 6] |= uint64_t{1} << (byte & 63);
+    }
+    mask.any = true;
+    if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
+        Touch(vdp1::Vdp1AltSlice(fb)); // the mirror (software's VDP1WriteFB)
+    }
+}
+
+bool VulkanVDPRenderer::NeedsReadback(uint32_t slice, uint64_t covered) const {
+    const SliceSync &s = m_slices[slice];
+    const uint64_t known = std::max(s.valid, s.pendingContext >= 0 ? s.pending : 0);
+    // Every op and CPU write into the slice must be in the command buffer: the commit clears the write mask.
+    return s.lastTouch > known && s.lastTouch <= covered && s.lastWrite <= covered;
+}
+
+void VulkanVDPRenderer::CommitReadback(uint32_t context) {
+    if (m_proposed.context != static_cast<int32_t>(context)) {
+        return;
+    }
+    m_submittedSeq = std::max(m_submittedSeq, m_proposed.covered);
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        if (((m_proposed.mask >> slice) & 1u) == 0) {
+            continue;
+        }
+        ++m_syncStats.readbackSlices;
+        if ((((kMainSlices | kMeshSlices) >> slice) & 1u) == 0) {
+            continue; // alt: read by the caller of the sync submit
+        }
+        SliceSync &s = m_slices[slice];
+        s.pending = m_proposed.seq[slice];
+        s.pendingContext = static_cast<int32_t>(context);
+        if (slice < 2 && m_writeMasks[slice].any) {
+            // The readback holds every CPU write so far; later ones are kept over it at the merge.
+            m_writeMasks[slice].bits.fill(0);
+            m_writeMasks[slice].any = false;
+        }
+    }
+    m_proposed = {};
+}
+
+void VulkanVDPRenderer::MergeContext(uint32_t context) {
+    if (!m_gpuVdp1 || m_vdp1Backend == nullptr) {
+        return;
+    }
+    const uint8_t *data = nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    bool merged = false;
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        SliceSync &s = m_slices[slice];
+        if (s.pendingContext != static_cast<int32_t>(context)) {
+            continue;
+        }
+        s.pendingContext = -1;
+        if (s.pending <= s.valid) {
+            continue;
+        }
+        if (data == nullptr && (data = m_vdp1Backend->ReadbackData(context)) == nullptr) {
+            return;
+        }
+        const uint8_t *src = data + size_t{slice} * kSliceSize;
+        if (slice < 2) {
+            // Main: bytes the CPU wrote since the readback was committed keep the CPU's value.
+            uint8_t *dst = m_state.mem1.FBRAM[slice].data();
+            const WriteMask &mask = m_writeMasks[slice];
+            if (!mask.any) {
+                std::memcpy(dst, src, kSliceSize);
+            } else {
+                for (uint32_t block = 0; block < kSliceSize / 64; ++block) {
+                    const uint64_t bits = mask.bits[block];
+                    const uint32_t base = block * 64;
+                    if (bits == 0) {
+                        std::memcpy(dst + base, src + base, 64);
+                        continue;
+                    }
+                    for (uint32_t i = 0; i < 64; ++i) {
+                        if (((bits >> i) & 1u) == 0) {
+                            dst[base + i] = src[base + i];
+                        }
+                    }
+                }
+            }
         } else {
+            const uint32_t mesh = slice - vdp1::Vdp1MeshSlice(0, 0);
+            std::memcpy((*m_meshShadow)[mesh >> 1][mesh & 1].data(), src, kSliceSize);
+        }
+        s.valid = s.pending;
+        ++m_syncStats.mergedSlices;
+        merged = true;
+    }
+    if (merged) {
+        m_syncStats.mergeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    }
+}
+
+void VulkanVDPRenderer::WaitContext(uint32_t context, Vdp1SyncKind kind) {
+    const auto start = std::chrono::steady_clock::now();
+    const VkFence fence = context < m_contextFences.size() ? m_contextFences[context] : VK_NULL_HANDLE;
+    if (fence != VK_NULL_HANDLE && m_device != nullptr) {
+        const VkResult result = m_device->Table().vkWaitForFences(m_device->Device(), 1, &fence, VK_TRUE, UINT64_MAX);
+        ++m_syncStats.fenceWaits[static_cast<uint32_t>(kind)];
+        if (result != VK_SUCCESS) {
+            Log("VDP1: waiting for a framebuffer readback failed; the CPU copy stays behind");
+            return;
+        }
+        m_contextFences[context] = VK_NULL_HANDLE;
+    }
+    MergeContext(context);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    m_syncStats.waitSeconds += seconds;
+    m_syncStats.maxWaitSeconds = std::max(m_syncStats.maxWaitSeconds, seconds);
+}
+
+void VulkanVDPRenderer::FrameSubmitted(uint32_t context, VkFence fence) {
+    if (!m_gpuVdp1) {
+        return;
+    }
+    if (context >= m_contextFences.size()) {
+        m_contextFences.resize(context + 1, VK_NULL_HANDLE);
+    }
+    m_contextFences[context] = fence;
+    m_vdp1Recorded.clear(); // submitted: nothing to put back
+    CommitReadback(context);
+    if (fence == VK_NULL_HANDLE) {
+        MergeContext(context);
+    }
+}
+
+void VulkanVDPRenderer::OwnWorkCompleted() {
+    if (!m_gpuVdp1) {
+        return;
+    }
+    for (uint32_t context = 0; context < m_contextFences.size(); ++context) {
+        m_contextFences[context] = VK_NULL_HANDLE;
+        MergeContext(context);
+    }
+}
+
+void VulkanVDPRenderer::PollVdp1Readbacks() {
+    if (!m_gpuVdp1 || m_device == nullptr) {
+        return;
+    }
+    uint32_t polled = 0; // contexts already looked at (bit i)
+    for (const SliceSync &s : m_slices) {
+        const int32_t context = s.pendingContext;
+        if (context < 0 || context >= 32 || ((polled >> context) & 1u)) {
+            continue;
+        }
+        polled |= 1u << context;
+        const VkFence fence = static_cast<size_t>(context) < m_contextFences.size() ? m_contextFences[context]
+                                                                                     : VK_NULL_HANDLE;
+        if (fence == VK_NULL_HANDLE ||
+            m_device->Table().vkGetFenceStatus(m_device->Device(), fence) == VK_SUCCESS) {
+            MergeContext(static_cast<uint32_t>(context));
+        }
+    }
+}
+
+bool VulkanVDPRenderer::SyncSubmit(Vdp1SyncKind kind, FramePolicy policy, uint32_t extra) {
+    if (!m_syncSubmit || m_vdp1Backend == nullptr) {
+        ++m_syncStats.refusedSyncs;
+        return false;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const uint32_t context = m_frameContexts; // the sync context: its previous command buffer has completed
+    bool frameRecorded = false;
+    bool recorded = false;
+    const bool submitted = m_syncSubmit([&](VkCommandBuffer cmd) {
+        (void)RecordVdp1Work(context, cmd, policy, frameRecorded, extra);
+        // A partial failure still submits what was recorded (in order; the rest stays queued).
+        recorded = frameRecorded || RecordedVdp1Work();
+        return recorded;
+    });
+    if (!submitted) {
+        if (recorded) {
             RecordedFrameDropped();
         }
-    } else {
-        RecordedFrameDropped();
+        ++m_syncStats.refusedSyncs;
         return false;
     }
-    if (result != VK_SUCCESS) {
-        return false;
-    }
-    m_vdp1Recorded.clear(); // submitted and complete
     m_frameRecordedBySync |= frameRecorded;
-    const uint8_t *data = m_vdp1Backend->ReadbackData();
-    std::memcpy(m_state.mem1.FBRAM[0].data(), data + size_t{vdp1::Vdp1MainSlice(0)} * kSliceSize, kSliceSize);
-    std::memcpy(m_state.mem1.FBRAM[1].data(), data + size_t{vdp1::Vdp1MainSlice(1)} * kSliceSize, kSliceSize);
-    for (uint32_t alt = 0; alt < 2; ++alt) {
-        for (uint32_t fb = 0; fb < 2; ++fb) {
-            std::memcpy((*m_meshShadow)[alt][fb].data(), data + size_t{vdp1::Vdp1MeshSlice(alt, fb)} * kSliceSize,
-                        kSliceSize);
-        }
-    }
-    m_vdp1SyncedOps = Vdp1GpuOpCount();
+    FrameSubmitted(context, VK_NULL_HANDLE); // complete: commits and merges its readbacks
+    ++m_syncStats.syncSubmits[static_cast<uint32_t>(kind)];
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    m_syncStats.syncSeconds += seconds;
+    m_syncStats.maxSyncSeconds = std::max(m_syncStats.maxSyncSeconds, seconds);
     return true;
+}
+
+bool VulkanVDPRenderer::SyncShadow(uint32_t mask, Vdp1SyncKind kind, FramePolicy policy) {
+    // GpuNewer slices need the sync submit (it also reads back every other covered GpuNewer slice); Pending ones a
+    // wait for their fence.
+    uint32_t behind = 0;
+    bool needSubmit = false;
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        const SliceSync &s = m_slices[slice];
+        if (((mask >> slice) & 1u) == 0 || s.valid >= s.lastTouch) {
+            continue;
+        }
+        behind |= 1u << slice;
+        needSubmit = needSubmit || s.pendingContext < 0 || s.pending < s.lastTouch;
+    }
+    if (behind == 0) {
+        return true;
+    }
+    if (needSubmit) {
+        (void)SyncSubmit(kind, policy, behind);
+    }
+    bool current = true;
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        const SliceSync &s = m_slices[slice];
+        if (((behind >> slice) & 1u) == 0 || s.valid >= s.lastTouch) {
+            continue;
+        }
+        if (s.pendingContext >= 0 && s.pending >= s.lastTouch) {
+            WaitContext(static_cast<uint32_t>(s.pendingContext), kind);
+        }
+        current = current && s.valid >= s.lastTouch;
+    }
+    if (!current) {
+        Log("VDP1: the GPU framebuffers could not be read back here; the CPU copy is older");
+    }
+    return current;
+}
+
+uint64_t VulkanVDPRenderer::Vdp1SyncSubmits() const {
+    uint64_t total = 0;
+    for (const uint64_t n : m_syncStats.syncSubmits) {
+        total += n;
+    }
+    return total;
 }
 
 // -----------------------------------------------------------------------------
@@ -505,16 +781,19 @@ void VulkanVDPRenderer::Reset(bool hard) {
     m_exclusiveMonitor = false;
     m_displayEraseSinceCapture = false;
     if (m_gpuVdp1) {
-        // VDPState was reset first (VDP::Reset): a hard reset cleared main FBRAM. Software clears the alt and mesh
-        // framebuffers at every reset (sw:94-136): after the ops so far, as uploads of zeros (and main from VDPState).
+        // VDPState was reset first (VDP::Reset): a hard reset cleared main FBRAM (a soft one keeps it: the GPU's stays
+        // authoritative). Software clears the alt and mesh framebuffers at every reset (sw:94-136). Rule 7: the ops so
+        // far are replayed first, then the uploads of zeros (and main from VDPState); the erases after this use the
+        // reset m_VRes above, as software's.
         m_vdp1Front.Reset(hard);
-        QueueVdp1Ops();
         for (auto &alt : *m_meshShadow) {
             for (auto &fb : alt) {
                 fb.fill(0);
             }
         }
-        QueueFbramUpload(kAltSlices | kMeshSlices | (hard ? kMainSlices : 0u), nullptr, nullptr);
+        const uint32_t slices = kAltSlices | kMeshSlices | (hard ? kMainSlices : 0u);
+        QueueFbramUpload(slices, nullptr, nullptr);
+        MarkShadowValid(slices);
     }
 }
 
@@ -530,8 +809,9 @@ void VulkanVDPRenderer::UpdateEnhancements() {
 
 void VulkanVDPRenderer::PreSaveStateSync() {
     m_vdp1->PreSaveStateSync();
-    if (m_gpuVdp1 && !SyncVdp1ToCpu(FramePolicy::Sync)) {
-        Log("VDP1: reading the GPU framebuffers back for a save state failed; the state holds older ones");
+    // Rule 5: fence waits in retro_serialize; a sync submit only for a save inside retro_run with newer GPU data.
+    if (m_gpuVdp1 && !SyncShadow(kMainSlices | kMeshSlices, Vdp1SyncKind::Save, FramePolicy::Sync)) {
+        Log("VDP1: the save state holds older framebuffers");
     }
 }
 
@@ -539,12 +819,13 @@ void VulkanVDPRenderer::PostLoadStateSync() {
     m_vdp1->PostLoadStateSync();
     m_front.PostLoadStateSync();
     if (m_gpuVdp1) {
-        // The ops before the load happened (their alt writes stay, as software's), then the loaded framebuffers.
+        // Rule 6: the ops before the load happened (their alt writes stay, as software's), then the loaded
+        // framebuffers.
         QueueVdp1Ops();
         m_vdp1Front.PostLoadStateSync();
         if (m_stateLoaded) {
             QueueFbramUpload(kMainSlices | kMeshSlices, nullptr, nullptr);
-            m_vdp1SyncedOps = Vdp1GpuOpCount();
+            MarkShadowValid(kMainSlices | kMeshSlices);
         }
     }
     m_stateLoaded = false;
@@ -595,10 +876,8 @@ void VulkanVDPRenderer::VDP1WriteVRAM(uint32_t address, uint16_t value) {
 
 void VulkanVDPRenderer::VDP1SyncFB() {
     if (m_gpuVdp1) {
-        // TODO(Task 6): the CPU shadow (one sync submit per read burst, readbacks with every submit).
-        if (!SyncVdp1ToCpu(FramePolicy::Sync)) {
-            Log("VDP1: reading the GPU framebuffers back failed; the CPU reads older data");
-        }
+        // Rule 4: the CPU reads the draw framebuffer's main slice.
+        (void)SyncShadow(1u << vdp1::Vdp1MainSlice(m_state.fbIndex.draw & 1u), Vdp1SyncKind::Read, FramePolicy::Sync);
         return;
     }
     m_vdp1->VDP1SyncFB();
@@ -614,6 +893,7 @@ void VulkanVDPRenderer::VDP1DebugSyncFB() {
 void VulkanVDPRenderer::VDP1WriteFB(uint32_t address, uint8_t value) {
     if (m_gpuVdp1) {
         m_vdp1Front.WriteFB8(address, value);
+        CpuWrite(address, 1);
         return;
     }
     m_vdp1->VDP1WriteFB(address, value);
@@ -622,6 +902,7 @@ void VulkanVDPRenderer::VDP1WriteFB(uint32_t address, uint8_t value) {
 void VulkanVDPRenderer::VDP1WriteFB(uint32_t address, uint16_t value) {
     if (m_gpuVdp1) {
         m_vdp1Front.WriteFB16(address, value);
+        CpuWrite(address & ~1u, 2);
         return;
     }
     m_vdp1->VDP1WriteFB(address, value);
@@ -636,6 +917,20 @@ void VulkanVDPRenderer::VDP1WriteReg(uint32_t address, uint16_t value) {
 
 void VulkanVDPRenderer::VDP1EraseFramebuffer(uint64_t cycles) {
     if (m_gpuVdp1) {
+        // Rule 1: the display framebuffer's main, its alt mirror and its meshes, as VDP1DoEraseFramebuffer writes them
+        ++m_vdp1Seq;
+        const uint32_t fb = m_state.fbIndex.display & 1u;
+        const bool mirror = m_enhancements.deinterlace && m_state.regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+        Touch(vdp1::Vdp1MainSlice(fb));
+        if (mirror) {
+            Touch(vdp1::Vdp1AltSlice(fb));
+        }
+        if (m_enhancements.transparentMeshes) {
+            Touch(vdp1::Vdp1MeshSlice(0, fb));
+            if (mirror) {
+                Touch(vdp1::Vdp1MeshSlice(1, fb));
+            }
+        }
         m_vdp1Front.Erase(cycles, m_VRes);
         return;
     }
@@ -663,6 +958,22 @@ void VulkanVDPRenderer::VDP1BeginFrame() {
 
 void VulkanVDPRenderer::VDP1ExecuteCommand(uint32_t cmdAddress, VDP1Command::Control control) {
     if (m_gpuVdp1) {
+        if (static_cast<uint16_t>(control.command) <= 0x7) {
+            // Rule 1: a draw command plots into the draw framebuffer's main (alt with deinterlacing, VDP1PlotPixel's
+            // altFB) and, with transparent meshes, its meshes
+            ++m_vdp1Seq;
+            const uint32_t fb = m_state.fbIndex.draw & 1u;
+            Touch(vdp1::Vdp1MainSlice(fb));
+            if (m_enhancements.deinterlace) {
+                Touch(vdp1::Vdp1AltSlice(fb));
+            }
+            if (m_enhancements.transparentMeshes) {
+                Touch(vdp1::Vdp1MeshSlice(0, fb));
+                if (m_enhancements.deinterlace) {
+                    Touch(vdp1::Vdp1MeshSlice(1, fb));
+                }
+            }
+        }
         m_vdp1Front.ExecuteCommand(cmdAddress, control);
         return;
     }
@@ -677,8 +988,31 @@ void VulkanVDPRenderer::VDP1EndFrame() {
 }
 
 void VulkanVDPRenderer::DumpExtraVDP1Framebuffers(std::ostream &out) const {
-    // Gpu mode: the inner renderer's framebuffers as of the last switch (debug only)
-    m_vdp1->DumpExtraVDP1Framebuffers(out);
+    if (!m_gpuVdp1) {
+        m_vdp1->DumpExtraVDP1Framebuffers(out);
+        return;
+    }
+    // Gpu mode (debug only): synced first, as a CPU read is (the shadow for main and mesh, alt read back), in
+    // software's layout (sw:610-623)
+    auto &self = const_cast<VulkanVDPRenderer &>(*this);
+    (void)self.SyncShadow(kMainSlices | kMeshSlices, Vdp1SyncKind::Dump, FramePolicy::Sync);
+    const uint8_t drawFB = m_state.fbIndex.draw & 1u;
+    const uint8_t dispFB = m_state.fbIndex.display & 1u;
+    if (m_enhancements.deinterlace) {
+        const bool altRead = self.SyncSubmit(Vdp1SyncKind::Dump, FramePolicy::Sync, kAltSlices);
+        const uint8_t *data = altRead ? m_vdp1Backend->ReadbackData(m_frameContexts) : nullptr;
+        for (const uint8_t fb : {drawFB, dispFB}) {
+            const char *bytes = data != nullptr ? reinterpret_cast<const char *>(data) + size_t{vdp1::Vdp1AltSlice(fb)} * kSliceSize
+                                                : reinterpret_cast<const char *>(m_vdp1->GetAltFBRAM(fb).data());
+            out.write(bytes, kSliceSize);
+        }
+    }
+    if (m_enhancements.transparentMeshes) {
+        for (const uint32_t alt : {0u, 1u}) {
+            out.write(reinterpret_cast<const char *>((*m_meshShadow)[alt][drawFB].data()), kSliceSize);
+            out.write(reinterpret_cast<const char *>((*m_meshShadow)[alt][dispFB].data()), kSliceSize);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

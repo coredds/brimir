@@ -39,7 +39,8 @@ namespace fs = std::filesystem;
 // Command line flags that take no value; every other flag consumes the next argument.
 const std::set<std::string> kValueless = {"--hash",        "--verbose", "--vulkan",  "--refuse-hw",
                                           "--runahead",    "--compare", "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",
-                                          "--fail-output-images-on-grow"};
+                                          "--fail-output-images-on-grow", "--gpu-vdp1", "--software-vdp1",
+                                          "--probe"};
 // Dropped from both children (the compare adds its own).
 const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",       "--dump-dir", "--dump-frame",
                                         "--system-dir", "--frames", "--compare-vulkan-option"};

@@ -80,6 +80,20 @@ void Vdp2SceneWriter::FBRAM16(uint32_t fb, uint32_t address, uint16_t value) {
     }
 }
 
+void Vdp2SceneWriter::FBRAM8(uint32_t fb, uint32_t address, uint8_t value) {
+    for (Target &t : m_targets) {
+        const bool display = (fb & 1) != t.state->fbIndex.draw;
+        if (display) {
+            t.state->fbIndex.Flip();
+        }
+        t.state->VDP1WriteFB<uint8>(address, value,
+                                    [&](uint32 address, uint8 value) { t.renderer->VDP1WriteFB(address, value); });
+        if (display) {
+            t.state->fbIndex.Flip();
+        }
+    }
+}
+
 void Vdp2SceneWriter::VDP1VRAMBytes(uint32_t address, std::span<const uint8_t> bytes) {
     for (size_t i = 0; i < bytes.size(); i += 2) {
         const uint8_t lo = i + 1 < bytes.size() ? bytes[i + 1] : 0;
@@ -143,6 +157,40 @@ std::vector<uint16_t> Vdp2SceneWriter::ReadFB16(uint32_t address) {
         values.push_back(t.state->VDP1ReadFB<uint16>(address));
     }
     return values;
+}
+
+std::vector<uint8_t> Vdp2SceneWriter::ReadFB8(uint32_t address) {
+    std::vector<uint8_t> values;
+    for (Target &t : m_targets) {
+        t.renderer->VDP1SyncFB();
+        values.push_back(t.state->VDP1ReadFB<uint8>(address));
+    }
+    return values;
+}
+
+std::vector<std::unique_ptr<savestate::VDPSaveState>> Vdp2SceneWriter::SaveStates() {
+    std::vector<std::unique_ptr<savestate::VDPSaveState>> saved;
+    for (Target &t : m_targets) {
+        // VDP::SaveState (vdp.cpp:512-523)
+        auto state = std::make_unique<savestate::VDPSaveState>();
+        t.renderer->PreSaveStateSync();
+        t.state->SaveState(*state);
+        t.renderer->SaveState(state->renderer);
+        saved.push_back(std::move(state));
+    }
+    return saved;
+}
+
+void Vdp2SceneWriter::CrossLoad() {
+    auto saved = SaveStates();
+    for (size_t i = 0; i < m_targets.size(); ++i) {
+        // VDP::LoadState (vdp.cpp:530-546)
+        const savestate::VDPSaveState &state = *saved[(i + 1) % saved.size()];
+        Target &t = m_targets[i];
+        t.state->LoadState(state);
+        t.renderer->LoadState(state.renderer);
+        t.renderer->PostLoadStateSync();
+    }
 }
 
 void Vdp2SceneWriter::SaveLoadMidFrame() {
@@ -245,11 +293,11 @@ void Vdp2SceneWriter::SetResolution(uint32_t h, uint32_t v, bool exclusive) {
     }
 }
 
-void Vdp2SceneWriter::ResetVDP() {
-    // VDP::Reset (vdp.cpp:83-100), soft
+void Vdp2SceneWriter::ResetVDP(bool hard) {
+    // VDP::Reset (vdp.cpp:83-100)
     for (Target &t : m_targets) {
-        t.state->Reset(false);
-        t.renderer->Reset(false);
+        t.state->Reset(hard);
+        t.renderer->Reset(hard);
     }
     m_HRes = kDefaultResH;
     m_VRes = kDefaultResV;
@@ -674,6 +722,53 @@ std::vector<uint32_t> ReadbackBuffer(gpu::VulkanDevice &device, VkBuffer buffer,
     return out;
 }
 
+void InstallSyncSubmit(gpu::VulkanVDPRenderer &renderer, gpu::VulkanDevice &device, SyncSubmitCounter *counter) {
+    renderer.SetSyncSubmit([&device, counter](const gpu::VulkanVDPRenderer::SyncRecord &record) {
+        if (counter != nullptr && !counter->allowed) {
+            ++counter->refused;
+            return false;
+        }
+        const auto &vk = device.Table();
+        const VkDevice dev = device.Device();
+        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolInfo.queueFamilyIndex = device.QueueFamily();
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        const VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        bool ok = vk.vkCreateCommandPool(dev, &poolInfo, nullptr, &pool) == VK_SUCCESS &&
+                  vk.vkCreateFence(dev, &fenceInfo, nullptr, &fence) == VK_SUCCESS;
+        if (ok) {
+            VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            allocInfo.commandPool = pool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = 1;
+            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            ok = vk.vkAllocateCommandBuffers(dev, &allocInfo, &cmd) == VK_SUCCESS &&
+                 vk.vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS;
+        }
+        bool recorded = false;
+        if (ok) {
+            recorded = record(cmd);
+            ok = vk.vkEndCommandBuffer(cmd) == VK_SUCCESS && recorded;
+        }
+        if (ok) {
+            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &cmd;
+            ok = device.Submit(submit, fence) == VK_SUCCESS &&
+                 vk.vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+        }
+        vk.vkDestroyFence(dev, fence, nullptr);
+        vk.vkDestroyCommandPool(dev, pool, nullptr);
+        if (counter != nullptr && (ok || recorded)) {
+            ++(ok ? counter->submits : counter->refused);
+        }
+        return ok;
+    });
+}
+
 namespace {
 
 // Records a command buffer and destroys it without submitting it.
@@ -804,6 +899,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         vdp1 = Vdp1Path::Gpu;
     }
     vulkan->SetVdp1Mode(vdp1 == Vdp1Path::Gpu ? gpu::Vdp1Mode::Gpu : gpu::Vdp1Mode::Software);
+    InstallSyncSubmit(*vulkan, device, options.syncCounter);
     vulkan->AttachDevice(device, options.frameContexts);
     if (!vulkan->Attached()) {
         result.error = "AttachDevice failed";
@@ -890,6 +986,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 fbramFailed = true;
                 return;
             }
+            vulkan->FrameSubmitted(0, VK_NULL_HANDLE); // completed (SubmitOneShot waits)
         }
         constexpr uint32_t kSlice = kVDP1FBRAMSize;
         const std::vector<uint32_t> words = ReadbackBuffer(device, vulkan->Backend()->SpriteFBBuffer(), 8 * kSlice / 4);
@@ -954,7 +1051,9 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
             }
         };
         writer.RunFrame(onLine, 0, UINT32_MAX, scene.blanking);
-        if (frame + 1 == scene.frames && !vulkan->HasPendingFrame()) {
+        // A VDP1 sync submit in blanking (a CPU read or a save after VDP2EndFrame) may have recorded the frame.
+        const bool recordedBySync = vulkan->TakeFrameRecordedBySync();
+        if (frame + 1 == scene.frames && !vulkan->HasPendingFrame() && !recordedBySync) {
             result.error = "the last frame has no recorded GPU frame";
             return result;
         }
@@ -995,6 +1094,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 result.error = "frame " + std::to_string(frame) + ": recording or submission failed";
                 return result;
             }
+            vulkan->FrameSubmitted(context, VK_NULL_HANDLE); // completed (SubmitOneShot waits)
             if (hasFrame && vulkan->Backend()->LastRecordStatsForTest().scale != vulkan->InternalScale()) {
                 result.error = "frame " + std::to_string(frame) + " recorded at " +
                                std::to_string(vulkan->Backend()->LastRecordStatsForTest().scale) + "x, expected " +

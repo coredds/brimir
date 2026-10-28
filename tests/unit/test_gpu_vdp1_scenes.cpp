@@ -559,7 +559,7 @@ TEST_CASE("GPU VDP1 scene: a dropped command buffer's VDP1 ops are replayed with
 }
 
 TEST_CASE("GPU VDP1 scene: save and load between commands", "[gpu][vdp1][scene]") {
-    // TODO(Task 6) replaces the full drain the save uses (one sync submit and wait) with the CPU shadow.
+    // The save inside the frame (the GPU holds newer data) makes one sync submit; the load uploads main and mesh.
     FrameControl c = AutoSwap(40);
     c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool) {
         const Assets a = WriteAssets(w, rng);
@@ -597,6 +597,7 @@ std::string RunScenarioThroughRenderer(gpu::VulkanDevice &device, const vs::Scen
     vs::SetupState(s, *vkState);
     // Attach after the setup: entering Gpu mode uploads the CPU's framebuffers (the scenario's fill)
     vulkan->SetVdp1Mode(gpu::Vdp1Mode::Gpu);
+    brimir::test::InstallSyncSubmit(*vulkan, device);
     vulkan->AttachDevice(device, 1);
     if (!vulkan->GpuVdp1()) {
         return "VDP1 on the GPU unavailable";
@@ -625,6 +626,7 @@ std::string RunScenarioThroughRenderer(gpu::VulkanDevice &device, const vs::Scen
                 diff = where + ": the ops-only submit failed";
                 return;
             }
+            vulkan->FrameSubmitted(0, VK_NULL_HANDLE);
         }
         const std::vector<uint32_t> words =
             ReadbackBuffer(device, vulkan->Backend()->SpriteFBBuffer(), 8 * vdp::kVDP1FBRAMSize / 4);
@@ -728,4 +730,645 @@ TEST_CASE("GPU VDP1: random command tables through the renderer, FBRAM after eve
     CHECK(compares >= seeds);
     CHECK(nonZero > 0);
     CloseAndCheckValidation(device);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// CPU framebuffer access, save states and the device lifecycle (GPU stage 2, Task 6): the CPU shadow of
+// vulkan_vdp_renderer.hpp (rules 1-8 at its top). RenderBoth installs a sync submit (InstallSyncSubmit) and waits for
+// every submit; AsyncRig below submits without waiting, as VulkanOutput does, so readbacks stay Pending on a fence.
+
+namespace {
+
+using brimir::test::SyncSubmitCounter;
+using SyncKind = gpu::VulkanVDPRenderer::Vdp1SyncKind;
+
+// Byte address of pixel (x, y) of a 16-bpp framebuffer 512 pixels wide (TVMR 0)
+constexpr uint32_t Pixel16(uint32_t x, uint32_t y) {
+    return (y * 512 + x) * 2;
+}
+
+// A command table at 0 that draws one polygon (x0, y0)-(x1, y1) in `color` (replace).
+void WriteOverdraw(Vdp2SceneWriter &w, int x0, int y0, int x1, int y1, uint16_t color) {
+    w.VDP1Command(0x00, Vdp1Cmd::SystemClip(319, 223));
+    w.VDP1Command(0x20, Vdp1Cmd::UserClip(0, 0, 319, 223));
+    w.VDP1Command(0x40, Vdp1Cmd::Local(0, 0));
+    w.VDP1Command(0x60, Vdp1Cmd::Polygon(0x0000, color, x0, y0, x1, y0, x1, y1, x0, y1));
+    w.VDP1Command(0x80, Vdp1Cmd::End());
+}
+
+// The write-then-read hazard (research section 3.3): after a draw (the draw framebuffer is GpuNewer), a CPU write and a
+// read of it return the write; a draw over it and a read return the draw; word and byte variants. Reads of both pairs
+// compared (software first). One sync submit per read after a draw.
+FrameControl HazardControl(bool byteWrites, SyncSubmitCounter &counter) {
+    FrameControl c = AutoSwap(30);
+    const auto draw = c.draw;
+    c.draw = [draw, byteWrites, &counter](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool swapped) {
+        draw(w, rng, f, swapped);
+        const uint32_t fb = w.DrawFramebuffer();
+        const uint32_t a = Pixel16(40 + f, 30 + f);
+        uint64_t before = counter.submits;
+        if (byteWrites) {
+            w.FBRAM8(fb, a + 1, static_cast<uint8_t>(0x5A + f));
+            const auto low = w.ReadFB8(a + 1);
+            CHECK(low[0] == low[1]);
+            CHECK(low[1] == static_cast<uint8_t>(0x5A + f));
+            const auto word = w.ReadFB16(a); // the draw's high byte, the CPU's low byte
+            CHECK(word[0] == word[1]);
+            CHECK((word[1] & 0xFF) == static_cast<uint8_t>(0x5A + f));
+            w.FBRAM8(fb, a, 0x12);
+            const auto high = w.ReadFB16(a);
+            CHECK(high[0] == high[1]);
+            CHECK(high[1] == static_cast<uint16_t>(0x1200 | static_cast<uint8_t>(0x5A + f)));
+        } else {
+            w.FBRAM16(fb, a, static_cast<uint16_t>(0x1234 + f));
+            const auto v = w.ReadFB16(a);
+            CHECK(v[0] == v[1]);
+            CHECK(v[1] == static_cast<uint16_t>(0x1234 + f));
+        }
+        CHECK(counter.submits == before + 1); // the first read after the draw
+        before = counter.submits;
+        WriteOverdraw(w, 20, 20, 100, 80, 0x83E0);
+        w.DrawVDP1();
+        const auto v = w.ReadFB16(a);
+        CHECK(v[0] == v[1]);
+        CHECK(v[1] == 0x83E0);
+        if (byteWrites) {
+            const auto low = w.ReadFB8(a + 1);
+            CHECK(low[0] == low[1]);
+            CHECK(low[1] == 0xE0);
+        }
+        CHECK(counter.submits == before + 1);
+    };
+    return c;
+}
+
+} // namespace
+
+TEST_CASE("GPU VDP1 scene: a CPU write read back after a draw, then a draw over it (write-then-read hazard)",
+          "[gpu][vdp1][scene]") {
+    for (const bool byteWrites : {false, true}) {
+        for (const bool threaded : {false, true}) {
+            DYNAMIC_SECTION((byteWrites ? "bytes" : "words") << (threaded ? ", threaded VDP1 on" : "")) {
+                SyncSubmitCounter counter;
+                RenderBothOptions options;
+                options.syncCounter = &counter;
+                options.threadedVDP1 = threaded; // the inner software renderer's thread (GPU mode does not use it)
+                RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); },
+                                        HazardControl(byteWrites, counter), 4, {}, 20),
+                              options);
+                CHECK(counter.submits == 8);
+                CHECK(counter.refused == 0);
+            }
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 scene: a burst of CPU reads between draws makes one sync submit", "[gpu][vdp1][scene]") {
+    SyncSubmitCounter counter;
+    FrameControl c;
+    c.program = AutoSwap(30).program;
+    uint32_t reads = 0;
+    c.draw = [&counter, &reads](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 30);
+        w.DrawVDP1();
+        for (uint32_t burst = 0; burst < 2; ++burst) {
+            const uint64_t before = counter.submits;
+            for (uint32_t i = 0; i < 64; ++i) {
+                const uint32_t address = (Rand(rng, 0x20000) * 2) & 0x3FFFE;
+                const auto v = w.ReadFB16(address);
+                ++reads;
+                CHECK(v[0] == v[1]);
+                if (i % 8 == 3) {
+                    // CPU writes between the reads do not make the GPU newer
+                    w.FBRAM16(w.DrawFramebuffer(), address, static_cast<uint16_t>(rng()));
+                    const auto written = w.ReadFB16(address);
+                    CHECK(written[0] == written[1]);
+                }
+                CHECK(counter.submits == before + 1);
+            }
+            WriteOverdraw(w, RandI(rng, 0, 100), RandI(rng, 0, 60), RandI(rng, 150, 300), RandI(rng, 100, 200),
+                          static_cast<uint16_t>(0x8000 | rng()));
+            w.DrawVDP1();
+        }
+    };
+    RenderBothOptions options;
+    options.syncCounter = &counter;
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 4, {}, 21), options);
+    INFO(reads << " reads");
+    CHECK(reads == 4 * 2 * 64);
+    CHECK(counter.submits == 4 * 2);
+}
+
+TEST_CASE("GPU VDP1 scene: CPU writes and reads in double-density interlace mirror to alt and leave the meshes",
+          "[gpu][vdp1][scene]") {
+    FrameControl c = AutoSwap(40);
+    c.line = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, uint32_t y) {
+        if (y % 40 != 9) {
+            return;
+        }
+        for (uint32_t i = 0; i < 64; ++i) {
+            const uint32_t address = (Rand(rng, 0x20000) * 2) & 0x3FFFE;
+            const uint16_t value = static_cast<uint16_t>(rng());
+            if (i % 2 == 0) {
+                w.FBRAM16(w.DrawFramebuffer(), address, value);
+            } else {
+                w.FBRAM8(w.DrawFramebuffer(), address + (i & 2) / 2, static_cast<uint8_t>(value));
+            }
+            const auto v = w.ReadFB16(address);
+            CHECK(v[0] == v[1]);
+        }
+        w.Checkpoint();
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); }, c,
+                            4, {.deinterlace = true, .transparentMeshes = true}, 22));
+}
+
+TEST_CASE("GPU VDP1 scene: a read and a save in blanking with the trailing display erase pending",
+          "[gpu][vdp1][scene]") {
+    // After VDP2EndFrame (the frame is pending, not recorded) the BlankingAndSync display erase is a trailing op: the
+    // sync submit records the frame, then the erase, then the readbacks (FramePolicy::Sync). Even frames read first,
+    // odd frames save and load first; one sync submit either way.
+    SyncSubmitCounter counter;
+    Vdp2Scene scene = Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40), 6,
+                                {.transparentMeshes = true}, 23);
+    const auto blanking = scene.blanking;
+    auto frame = std::make_shared<uint32_t>(0);
+    scene.blanking = [blanking, frame, &counter](Vdp2SceneWriter &w) {
+        blanking(w);
+        const uint32_t f = (*frame)++;
+        const uint64_t before = counter.submits;
+        if (f % 2 == 1) {
+            w.SaveLoadMidFrame();
+        }
+        std::mt19937 rng(f);
+        for (uint32_t i = 0; i < 16; ++i) {
+            const auto v = w.ReadFB16((Rand(rng, 0x20000) * 2) & 0x3FFFE);
+            CHECK(v[0] == v[1]);
+        }
+        if (f % 2 == 0) {
+            w.SaveLoadMidFrame();
+        }
+        CHECK(counter.submits == before + 1);
+    };
+    RenderBothOptions options;
+    options.syncCounter = &counter;
+    RunFbramScene(scene, options);
+    CHECK(counter.submits == 6);
+}
+
+TEST_CASE("GPU VDP1 scene: save states equal software's byte for byte; cross-renderer loads both ways",
+          "[gpu][vdp1][scene]") {
+    // Mid-frame (between commands, the GPU holding newer data) the state of each pair is saved: the VDP part (main
+    // FBRAM included) and the renderer's VDP1 part (doubleV, meshFBRAM) must be identical. In frames 1 and 3 each pair
+    // then loads the other's state (software the GPU renderer's, the GPU renderer software's) and continues.
+    FrameControl c = AutoSwap(40);
+    uint32_t compared = 0;
+    uint64_t meshBytes = 0;
+    c.draw = [&compared, &meshBytes](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 40);
+        w.DrawVDP1Partial(0, 25);
+        const auto saved = w.SaveStates();
+        REQUIRE(saved.size() == 2);
+        const ymir::savestate::VDPSaveState &sw = *saved[0];
+        const ymir::savestate::VDPSaveState &gpu = *saved[1];
+        // Field by field (the structs' padding is indeterminate: the serialized state, compared byte for byte by
+        // brimir_state_diff in tests/vkhost_checks.cmake, holds the fields)
+        CHECK(sw.VRAM1 == gpu.VRAM1);
+        CHECK(sw.FBRAM == gpu.FBRAM);
+        CHECK(sw.displayFB == gpu.displayFB);
+        const auto &swR = sw.renderer.vdp1State;
+        const auto &gpuR = gpu.renderer.vdp1State;
+        CHECK(swR.doubleV == gpuR.doubleV);
+        CHECK(swR.meshFBRAM == gpuR.meshFBRAM);
+        CHECK(swR.sysClipH == gpuR.sysClipH);
+        CHECK(swR.sysClipV == gpuR.sysClipV);
+        CHECK(swR.userClipX0 == gpuR.userClipX0);
+        CHECK(swR.userClipY0 == gpuR.userClipY0);
+        CHECK(swR.userClipX1 == gpuR.userClipX1);
+        CHECK(swR.userClipY1 == gpuR.userClipY1);
+        CHECK(swR.localCoordX == gpuR.localCoordX);
+        CHECK(swR.localCoordY == gpuR.localCoordY);
+        CHECK(sw.renderer.vcellScrollInc == gpu.renderer.vcellScrollInc);
+        for (const auto &alt : sw.renderer.vdp1State.meshFBRAM) {
+            for (const auto &fb : alt) {
+                meshBytes += static_cast<uint64_t>(std::count_if(fb.begin(), fb.end(), [](uint8_t b) { return b != 0; }));
+            }
+        }
+        ++compared;
+        if (f == 1 || f == 3) {
+            w.CrossLoad();
+        }
+        w.DrawVDP1Partial(25, 64);
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); }, c,
+                            5, {.deinterlace = true, .transparentMeshes = true}, 24));
+    CHECK(compared == 5);
+    CHECK(meshBytes > 0);
+}
+
+TEST_CASE("GPU VDP1 scene: a save and load every frame for 300 frames continues identically", "[gpu][vdp1][scene]") {
+    FrameControl c = AutoSwap(8);
+    c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 8);
+        w.DrawVDP1Partial(0, 6);
+        w.SaveLoadMidFrame();
+        w.DrawVDP1Partial(6, 64);
+    };
+    c.line = [](Vdp2SceneWriter &w, std::mt19937 &, uint32_t, uint32_t y) {
+        if (y == 100) {
+            w.SaveLoadMidFrame();
+        }
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 300,
+                            {.transparentMeshes = true}, 25));
+}
+
+TEST_CASE("GPU VDP1 scene: soft and hard VDP resets mid-frame", "[gpu][vdp1][scene]") {
+    // A reset replays the ops before it, then uploads the reset framebuffers (rule 7); the erase and draw after it use
+    // the reset resolution, as software's.
+    FrameControl c = AutoSwap(30);
+    auto done = std::make_shared<uint32_t>(UINT32_MAX); // the frame last reset (the frame restarts at line 0)
+    c.line = [done](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, uint32_t y) {
+        if (y != 60 || (f != 2 && f != 4) || *done == f) {
+            return;
+        }
+        *done = f;
+        w.ResetVDP(f == 4);
+        Display(w, rng);
+        RandomErase(w, rng);
+        w.SwapFramebuffers(); // latches the erase registers
+        w.EraseFramebuffer(0);
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 30);
+        w.DrawVDP1();
+        w.Checkpoint();
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 6,
+                            {.transparentMeshes = true}, 26));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Unwaited submits (as VulkanOutput's), detach, attach and abandon
+
+namespace {
+
+// A software and a Vulkan renderer (VDP1 on the GPU) on separate states with the same writes; frames are recorded into
+// two frame contexts round-robin and submitted without a wait (FrameSubmitted with the fence), each context's fence
+// waited for only before the context is reused, as VulkanOutput does.
+struct AsyncRig {
+    struct Ctx {
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool pending = false;
+    };
+
+    AsyncRig(gpu::VulkanDevice &dev, const ymir::vdp::config::Enhancements &enhancements, bool threaded)
+        : device(dev), writer(enhancements) {
+        swState = std::make_unique<VDPState>();
+        vkState = std::make_unique<VDPState>();
+        sw = std::make_unique<ymir::vdp::SoftwareVDPRenderer>(*swState, swDebug, access);
+        vk = std::make_unique<gpu::VulkanVDPRenderer>(*vkState, vkDebug, access);
+        vk->SetVdp1Mode(gpu::Vdp1Mode::Gpu);
+        brimir::test::InstallSyncSubmit(*vk, device, &sync);
+        vk->AttachDevice(device, 2);
+        vk->EnableThreadedVDP1(threaded);
+        writer.Attach(*swState, *sw);
+        writer.Attach(*vkState, *vk);
+        const auto &t = device.Table();
+        for (Ctx &c : ctx) {
+            VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            poolInfo.queueFamilyIndex = device.QueueFamily();
+            t.vkCreateCommandPool(device.Device(), &poolInfo, nullptr, &c.pool);
+            VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            allocInfo.commandPool = c.pool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = 1;
+            t.vkAllocateCommandBuffers(device.Device(), &allocInfo, &c.cmd);
+            const VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            t.vkCreateFence(device.Device(), &fenceInfo, nullptr, &c.fence);
+        }
+    }
+    ~AsyncRig() {
+        WaitAll();
+        vk.reset();
+        const auto &t = device.Table();
+        for (Ctx &c : ctx) {
+            t.vkDestroyFence(device.Device(), c.fence, nullptr);
+            t.vkDestroyCommandPool(device.Device(), c.pool, nullptr);
+        }
+    }
+    AsyncRig(const AsyncRig &) = delete;
+    AsyncRig &operator=(const AsyncRig &) = delete;
+
+    bool Ready() const {
+        return vk->Attached() && vk->GpuVdp1();
+    }
+
+    // Records the pending frame (or VDP1 work) into the next context and submits it without waiting.
+    bool Submit() {
+        if (!vk->Attached() || (!vk->HasPendingFrame() && !vk->HasPendingVdp1Work())) {
+            return true;
+        }
+        const auto &t = device.Table();
+        const bool frame = vk->HasPendingFrame();
+        Ctx &c = ctx[next];
+        if (c.pending) {
+            t.vkWaitForFences(device.Device(), 1, &c.fence, VK_TRUE, UINT64_MAX);
+            c.pending = false;
+        }
+        t.vkResetCommandPool(device.Device(), c.pool, 0);
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        t.vkBeginCommandBuffer(c.cmd, &begin);
+        const bool recorded = frame ? vk->RecordPendingFrame(next, c.cmd) : vk->RecordPendingVdp1Work(next, c.cmd);
+        t.vkEndCommandBuffer(c.cmd);
+        if (!recorded && !vk->RecordedVdp1Work()) {
+            return false;
+        }
+        t.vkResetFences(device.Device(), 1, &c.fence);
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &c.cmd;
+        if (device.Submit(submit, c.fence) != VK_SUCCESS) {
+            vk->RecordedFrameDropped();
+            return false;
+        }
+        vk->FrameSubmitted(next, c.fence);
+        c.pending = true;
+        last = next;
+        next = (next + 1) % static_cast<uint32_t>(ctx.size());
+        return true;
+    }
+
+    // The last submit has completed (a GPU that finished the previous retro_run's work before the next one starts).
+    void WaitLast() {
+        Ctx &c = ctx[last];
+        if (c.pending) {
+            device.Table().vkWaitForFences(device.Device(), 1, &c.fence, VK_TRUE, UINT64_MAX);
+        }
+    }
+
+    void WaitAll() {
+        for (Ctx &c : ctx) {
+            if (c.pending) {
+                device.Table().vkWaitForFences(device.Device(), 1, &c.fence, VK_TRUE, UINT64_MAX);
+                c.pending = false;
+            }
+        }
+        if (vk) {
+            vk->OwnWorkCompleted();
+        }
+    }
+
+    // The emulated FBRAM against software's: the GPU FBRAM (after submitting the pending work and waiting for it), or
+    // the inner software renderer's (VDPState main, its alt and mesh) while VDP1 is not on the GPU.
+    std::string CompareFbram(const std::string &where) {
+        constexpr uint32_t kSlice = ymir::vdp::kVDP1FBRAMSize;
+        std::vector<uint8_t> got(8 * size_t{kSlice});
+        if (Ready()) {
+            if (!Submit()) {
+                return where + ": submit failed";
+            }
+            WaitAll();
+            const std::vector<uint32_t> words = ReadbackBuffer(device, vk->Backend()->SpriteFBBuffer(), 8 * kSlice / 4);
+            if (words.size() * 4 != got.size()) {
+                return where + ": readback failed";
+            }
+            std::memcpy(got.data(), words.data(), got.size());
+        } else {
+            vk->PreSaveStateSync(); // a threaded inner VDP1 drained
+            const ymir::vdp::SoftwareVDPRenderer &inner = vk->InnerVdp1ForTest();
+            const std::array<const ymir::vdp::SpriteFB *, 8> slices{
+                &vkState->mem1.FBRAM[0],       &vkState->mem1.FBRAM[1],       &inner.GetAltFBRAM(0),
+                &inner.GetAltFBRAM(1),         &inner.GetMeshFBRAM(false, 0), &inner.GetMeshFBRAM(false, 1),
+                &inner.GetMeshFBRAM(true, 0),  &inner.GetMeshFBRAM(true, 1)};
+            for (uint32_t i = 0; i < 8; ++i) {
+                std::memcpy(got.data() + size_t{i} * kSlice, slices[i]->data(), kSlice);
+            }
+        }
+        sw->PreSaveStateSync();
+        const std::array<const ymir::vdp::SpriteFB *, 8> want{
+            &swState->mem1.FBRAM[0],    &swState->mem1.FBRAM[1],    &sw->GetAltFBRAM(0),
+            &sw->GetAltFBRAM(1),        &sw->GetMeshFBRAM(false, 0), &sw->GetMeshFBRAM(false, 1),
+            &sw->GetMeshFBRAM(true, 0), &sw->GetMeshFBRAM(true, 1)};
+        uint64_t differ = 0;
+        std::string first;
+        for (uint32_t i = 0; i < 8; ++i) {
+            for (uint32_t b = 0; b < kSlice; ++b) {
+                if (got[size_t{i} * kSlice + b] != (*want[i])[b] && differ++ == 0) {
+                    first = "slice " + std::to_string(i) + " byte " + std::to_string(b);
+                }
+            }
+        }
+        return differ == 0 ? std::string{} : where + ": " + std::to_string(differ) + " bytes differ, first " + first;
+    }
+
+    gpu::VulkanDevice &device;
+    std::unique_ptr<VDPState> swState, vkState;
+    ymir::vdp::config::VDP2DebugRender swDebug{}, vkDebug{};
+    ymir::vdp::config::VDP2AccessPatternsConfig access{};
+    std::unique_ptr<ymir::vdp::SoftwareVDPRenderer> sw;
+    std::unique_ptr<gpu::VulkanVDPRenderer> vk;
+    Vdp2SceneWriter writer;
+    SyncSubmitCounter sync;
+    std::array<Ctx, 2> ctx{};
+    uint32_t next = 0;
+    uint32_t last = 0;
+};
+
+uint64_t Count(const std::array<uint64_t, gpu::VulkanVDPRenderer::kVdp1SyncKinds> &a, SyncKind kind) {
+    return a[static_cast<uint32_t>(kind)];
+}
+
+// The validation errors so far (before the device is destroyed: an abandoned renderer leaks its objects on purpose).
+void CloseAfterLeak(std::unique_ptr<gpu::VulkanDevice> &device) {
+    const bool validation = device->ValidationEnabled();
+    const uint32_t errors = device->ValidationErrors()->load();
+    device.reset();
+    if (validation) {
+        CHECK(errors == 0);
+    }
+}
+
+} // namespace
+
+TEST_CASE("GPU VDP1: reads and saves after an unwaited submit wait for its readback (no sync submit)",
+          "[gpu][vdp1][scene]") {
+    auto device = OpenDevice();
+    {
+        AsyncRig rig(*device, {.transparentMeshes = true}, false);
+        REQUIRE(rig.Ready());
+        const Vdp2Scene scene = Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40),
+                                          6, {.transparentMeshes = true}, 30);
+        scene.setup(rig.writer);
+        for (uint32_t f = 0; f < scene.frames; ++f) {
+            INFO("frame " << f);
+            rig.writer.RunFrame(scene.onLine, 0, UINT32_MAX, scene.blanking);
+            REQUIRE(rig.Submit()); // the frame's readbacks are Pending on its fence (rule 2)
+            const uint64_t syncs = rig.sync.submits;
+            const auto waits = [&](SyncKind kind) { return Count(rig.vk->Vdp1Sync().fenceWaits, kind); };
+            const uint64_t readWaits = waits(SyncKind::Read);
+            const uint64_t saveWaits = waits(SyncKind::Save);
+            // retro_serialize: fence waits only (rule 5). The frame's readbacks are all in one context: the first wait
+            // merges them, so a save first (odd frames) waits once and the read after it not at all, and the other way
+            // round in even frames.
+            const auto save = [&] {
+                const auto saved = rig.writer.SaveStates();
+                CHECK(saved[0]->FBRAM == saved[1]->FBRAM);
+                CHECK(saved[0]->renderer.vdp1State.meshFBRAM == saved[1]->renderer.vdp1State.meshFBRAM);
+                CHECK(saved[0]->renderer.vdp1State.doubleV == saved[1]->renderer.vdp1State.doubleV);
+            };
+            if (f % 2 == 1) {
+                save();
+            }
+            // A CPU byte write after the readback was committed is kept over it by the merge (the write mask)
+            const uint32_t a = Pixel16(10 + f * 7, 20 + f * 5);
+            rig.writer.FBRAM8(rig.writer.DrawFramebuffer(), a + 1, static_cast<uint8_t>(0xA5 ^ f));
+            const auto word = rig.writer.ReadFB16(a);
+            CHECK(word[0] == word[1]);
+            CHECK((word[1] & 0xFF) == static_cast<uint8_t>(0xA5 ^ f));
+            if (f % 2 == 0) {
+                save();
+            }
+            CHECK(waits(SyncKind::Read) == readWaits + (f % 2 == 0 ? 1 : 0));
+            CHECK(waits(SyncKind::Save) == saveWaits + (f % 2 == 1 ? 1 : 0));
+            CHECK(rig.sync.submits == syncs);
+            const std::string diff = rig.CompareFbram("frame " + std::to_string(f));
+            CHECK(diff.empty());
+            rig.vk->PollVdp1Readbacks();
+        }
+        CHECK(rig.vk->Vdp1SyncSubmits() == 0);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("GPU VDP1: detach mid-game syncs, VDP1 continues in software, attach uploads", "[gpu][vdp1][scene]") {
+    auto device = OpenDevice();
+    for (const bool threaded : {false, true}) {
+        DYNAMIC_SECTION("threaded VDP1 " << threaded) {
+            const ymir::vdp::config::Enhancements enhancements{.deinterlace = true, .transparentMeshes = true};
+            AsyncRig rig(*device, enhancements, threaded);
+            REQUIRE(rig.Ready());
+            FrameControl c = AutoSwap(40);
+            c.line = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, uint32_t y) {
+                if (y % 50 == 20) {
+                    for (uint32_t i = 0; i < 32; ++i) {
+                        w.FBRAM16(w.DrawFramebuffer(), (Rand(rng, 0x20000) * 2) & 0x3FFFE, static_cast<uint16_t>(rng()));
+                    }
+                }
+            };
+            const Vdp2Scene scene = Vdp1Scene(
+                [](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); }, c, 12,
+                enhancements, 31);
+            scene.setup(rig.writer);
+            for (uint32_t f = 0; f < scene.frames; ++f) {
+                INFO("frame " << f);
+                if (f == 7) {
+                    // Attach: VDP1 back on the GPU from the inner renderer's framebuffers (uploaded first)
+                    rig.vk->AttachDevice(rig.device, 2);
+                    REQUIRE(rig.Ready());
+                }
+                const auto onLine = [&](Vdp2SceneWriter &w, uint32_t y) {
+                    scene.onLine(w, y);
+                    if ((f == 3 || f == 9) && y == 100) {
+                        // Detach mid-frame, the frame's draw and CPU writes pending: the device idle first, then the
+                        // sync of everything (alt too) into VDPState and the inner renderer
+                        rig.WaitAll();
+                        rig.vk->DetachDevice();
+                        CHECK(!rig.vk->GpuVdp1());
+                    }
+                };
+                rig.writer.RunFrame(onLine, 0, UINT32_MAX, scene.blanking);
+                REQUIRE(rig.Submit());
+                const std::string diff = rig.CompareFbram("frame " + std::to_string(f));
+                CHECK(diff.empty());
+                if (rig.Ready()) {
+                    rig.vk->PollVdp1Readbacks();
+                }
+            }
+            CHECK(Count(rig.vk->Vdp1Sync().syncSubmits, SyncKind::Detach) == 2);
+        }
+    }
+    CloseAndCheckValidation(device);
+}
+
+namespace {
+
+// Abandon mid-frame (frame 4, line 100: the device is gone, no Vulkan call): VDP1 continues in software from the
+// shadow as of the last merged readback. The GPU finished the previous frame before frame 4 started (PollVdp1Readbacks
+// merged it), so exactly frame 4's VDP1 work so far is lost: the framebuffers then equal software's at the start of
+// frame 4. Attached again at frame 7. With `strict` every frame from 4 on is compared with software (the operational
+// exception: frame 4 differs); otherwise only the confined loss and frames 5 on (every lost pixel erased by then:
+// the framebuffer drawn in frame 4 is the display framebuffer of frame 5, erased in its blanking).
+void RunAbandonScene(bool strict) {
+    auto device = OpenDevice();
+    {
+        const ymir::vdp::config::Enhancements enhancements{.transparentMeshes = true};
+        AsyncRig rig(*device, enhancements, false);
+        REQUIRE(rig.Ready());
+        const Vdp2Scene scene = Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40),
+                                          10, enhancements, 32);
+        scene.setup(rig.writer);
+        auto mainAtStartStorage = std::make_unique<std::array<ymir::vdp::SpriteFB, 2>>();
+        auto meshAtStartStorage = std::make_unique<std::array<std::array<ymir::vdp::SpriteFB, 2>, 2>>();
+        auto &mainAtStart = *mainAtStartStorage;
+        auto &meshAtStart = *meshAtStartStorage;
+        for (uint32_t f = 0; f < scene.frames; ++f) {
+            INFO("frame " << f);
+            if (f == 7) {
+                rig.vk->AttachDevice(rig.device, 2);
+                REQUIRE(rig.Ready());
+            }
+            if (rig.Ready()) {
+                rig.WaitLast();
+                rig.vk->PollVdp1Readbacks(); // VulkanOutput::BeginRun
+            }
+            const auto onLine = [&](Vdp2SceneWriter &w, uint32_t y) {
+                if (f == 4 && y == 0) {
+                    mainAtStart = rig.swState->mem1.FBRAM;
+                    for (uint32_t alt = 0; alt < 2; ++alt) {
+                        for (uint32_t fb = 0; fb < 2; ++fb) {
+                            meshAtStart[alt][fb] = rig.sw->GetMeshFBRAM(alt != 0, static_cast<uint8_t>(fb));
+                        }
+                    }
+                }
+                scene.onLine(w, y);
+                if (f == 4 && y == 100) {
+                    rig.vk->AbandonDevice();
+                    CHECK(!rig.vk->Attached());
+                    CHECK(rig.vkState->mem1.FBRAM == mainAtStart);
+                    const ymir::vdp::SoftwareVDPRenderer &inner = rig.vk->InnerVdp1ForTest();
+                    for (uint32_t alt = 0; alt < 2; ++alt) {
+                        for (uint32_t fb = 0; fb < 2; ++fb) {
+                            CHECK(inner.GetMeshFBRAM(alt != 0, static_cast<uint8_t>(fb)) == meshAtStart[alt][fb]);
+                        }
+                    }
+                    // ... and it is a loss: software has frame 4's draw
+                    CHECK(rig.swState->mem1.FBRAM != mainAtStart);
+                }
+            };
+            rig.writer.RunFrame(onLine, 0, UINT32_MAX, scene.blanking);
+            REQUIRE(rig.Submit());
+            if (strict || f != 4) {
+                const std::string diff = rig.CompareFbram("frame " + std::to_string(f));
+                CHECK(diff.empty());
+            }
+        }
+    }
+    CloseAfterLeak(device);
+}
+
+} // namespace
+
+TEST_CASE("GPU VDP1: abandoning the device loses only the current retro_run's VDP1 work", "[gpu][vdp1][scene]") {
+    RunAbandonScene(false);
+}
+
+TEST_CASE("GPU VDP1 exception: abandon loses the frame's VDP1 work (operational exception; frame 4 differs)",
+          "[gpu][vdp1][scene][!shouldfail]") {
+    RunAbandonScene(true);
 }

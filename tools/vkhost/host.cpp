@@ -194,12 +194,13 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         setenv("BRIMIR_VDP1_PROBE", "1", 1);
 #endif
     }
-    if (config.gpuVdp1) {
-        // The core reads BRIMIR_VDP1_GPU when it first attaches the Vulkan VDP renderer.
+    if (config.gpuVdp1 || config.softwareVdp1) {
+        // The core reads BRIMIR_VDP1_GPU when it first attaches the Vulkan VDP renderer (VDP1 on the GPU unless 0).
+        const char* value = config.softwareVdp1 ? "0" : "1";
 #ifdef _WIN32
-        _putenv_s("BRIMIR_VDP1_GPU", "1");
+        _putenv_s("BRIMIR_VDP1_GPU", value);
 #else
-        setenv("BRIMIR_VDP1_GPU", "1", 1);
+        setenv("BRIMIR_VDP1_GPU", value, 1);
 #endif
     }
     if (config.vulkan && !config.refuseHw) {
@@ -327,7 +328,9 @@ bool LibretroHost::StartContext() {
     m_contextLive = true;
     ++m_contextResets;
     if (m_hwRender.context_reset != nullptr) {
+        const CorePhase previous = m_vulkan->SetPhase(CorePhase::Context);
         m_hwRender.context_reset();
+        m_vulkan->SetPhase(previous);
     }
     return true;
 }
@@ -340,7 +343,9 @@ bool LibretroHost::ResetContext() {
     std::fprintf(stderr, "vkhost: vulkan: driver reinit (context_destroy, new device, context_reset)\n");
     ProcessDeferred(0); // the frontend finishes its frames before it tears the driver down
     if (m_hwRender.context_destroy != nullptr) {
+        const CorePhase previous = m_vulkan->SetPhase(CorePhase::Context);
         m_hwRender.context_destroy();
+        m_vulkan->SetPhase(previous);
     }
     m_contextLive = false;
     m_vulkan->DestroyContext();
@@ -354,7 +359,11 @@ void LibretroHost::Unload() {
         if (m_contextLive) {
             ProcessDeferred(0);
             if (m_hwRender.context_destroy != nullptr) {
+                const CorePhase previous = m_vulkan ? m_vulkan->SetPhase(CorePhase::Context) : CorePhase::Other;
                 m_hwRender.context_destroy();
+                if (m_vulkan) {
+                    m_vulkan->SetPhase(previous);
+                }
             }
             m_contextLive = false;
         }
@@ -376,6 +385,7 @@ void LibretroHost::Unload() {
         m_hiddenGpuCalls = m_vulkan->HiddenGpuCalls();
         m_hiddenSubmits = m_vulkan->HiddenSubmits();
         m_maxRunSubmits = m_vulkan->MaxRunSubmits();
+        m_submitWaits = m_vulkan->SubmitWaits();
         m_failedAllocations = m_vulkan->FailedAllocations();
         m_coreMemoryPeak = m_vulkan->CoreMemoryPeak();
         m_coreMemoryAllocations = m_vulkan->CoreMemoryAllocations();
@@ -436,15 +446,38 @@ bool LibretroHost::Serialize(std::vector<uint8_t>& state) {
     if (!m_api || !m_contentLoaded) {
         return false;
     }
+    const CorePhase previous = m_vulkan ? m_vulkan->SetPhase(CorePhase::Serialize) : CorePhase::Other;
+    const auto start = std::chrono::steady_clock::now();
     state.resize(m_api->serialize_size());
-    return !state.empty() && m_api->serialize(state.data(), state.size());
+    const bool ok = !state.empty() && m_api->serialize(state.data(), state.size());
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    m_serializeSeconds += seconds;
+    m_maxSerializeSeconds = std::max(m_maxSerializeSeconds, seconds);
+    ++m_serializeCalls;
+    if (m_vulkan) {
+        m_vulkan->SetPhase(previous);
+    }
+    return ok;
 }
 
 bool LibretroHost::Unserialize(const std::vector<uint8_t>& state) {
-    return m_api && m_contentLoaded && m_api->unserialize(state.data(), state.size());
+    if (!m_api || !m_contentLoaded) {
+        return false;
+    }
+    const CorePhase previous = m_vulkan ? m_vulkan->SetPhase(CorePhase::Unserialize) : CorePhase::Other;
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = m_api->unserialize(state.data(), state.size());
+    m_unserializeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    if (m_vulkan) {
+        m_vulkan->SetPhase(previous);
+    }
+    return ok;
 }
 
 void LibretroHost::CoreLogLine(const char* text) {
+    if (m_vulkan && std::strstr(text, "VDP1 ops-only submit after a refused frame submit") != nullptr) {
+        m_vulkan->NoteOpsOnlyAfterRefused();
+    }
     if (const char* line = std::strstr(text, "Internal resolution: frames at ")) {
         unsigned scale = 0;
         if (std::sscanf(line, "Internal resolution: frames at %ux", &scale) == 1 && scale >= 1 && scale <= 4) {
@@ -514,6 +547,10 @@ void LibretroHost::FillReport(RunReport& report) const {
     report.systemAvInfoCalls += m_systemAvInfoCalls;
     report.geometryCalls += m_geometryCalls;
     report.hiddenGpuCalls += m_hiddenFrames;
+    report.serializeCalls += m_serializeCalls;
+    report.serializeSeconds += m_serializeSeconds;
+    report.maxSerializeSeconds = std::max(report.maxSerializeSeconds, m_maxSerializeSeconds);
+    report.unserializeSeconds += m_unserializeSeconds;
     report.probeFrames.insert(report.probeFrames.end(), m_probeFrames.begin(), m_probeFrames.end());
     report.vdp1ProbeFrames.insert(report.vdp1ProbeFrames.end(), m_vdp1ProbeFrames.begin(), m_vdp1ProbeFrames.end());
     report.problems.insert(report.problems.end(), m_problems.begin(), m_problems.end());
@@ -523,6 +560,7 @@ void LibretroHost::FillReport(RunReport& report) const {
         report.hiddenGpuCalls += m_vulkan->HiddenGpuCalls();
         report.hiddenSubmits += m_vulkan->HiddenSubmits();
         report.maxRunSubmits = std::max(report.maxRunSubmits, m_vulkan->MaxRunSubmits());
+        report.submitWaits.Add(m_vulkan->SubmitWaits());
         report.validation = report.validation || m_vulkan->ValidationEnabled();
         report.validationErrors += m_vulkan->ValidationErrors();
         report.problems.insert(report.problems.end(), m_vulkan->Problems().begin(), m_vulkan->Problems().end());
@@ -532,6 +570,7 @@ void LibretroHost::FillReport(RunReport& report) const {
         report.hiddenGpuCalls += m_hiddenGpuCalls;
         report.hiddenSubmits += m_hiddenSubmits;
         report.maxRunSubmits = std::max(report.maxRunSubmits, m_maxRunSubmits);
+        report.submitWaits.Add(m_submitWaits);
         report.validation = report.validation || m_validation;
         report.validationErrors += m_validationErrors;
     }

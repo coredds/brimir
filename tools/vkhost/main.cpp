@@ -117,8 +117,10 @@ void PrintUsage(std::FILE* out) {
         "                pixel writes, VDP1SyncFB calls (and those after a draw or erase), CPU framebuffer writes\n"
         "                and erases, and the GPU VDP1 front half's draw batches by end reason (zero until the\n"
         "                renderer runs the front half) (median, maximum, mean)\n"
-        "  --gpu-vdp1    with --vulkan/--compare: VDP1 on the GPU in the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=1\n"
-        "                for the core; its log says 'Vulkan VDP1 renderer active')\n"
+        "  --gpu-vdp1    with --vulkan/--compare: VDP1 on the GPU in the Vulkan VDP renderer (the core's default; sets\n"
+        "                BRIMIR_VDP1_GPU=1; its log says 'Vulkan VDP1 renderer active')\n"
+        "  --software-vdp1  with --vulkan/--compare: VDP1 in software inside the Vulkan VDP renderer, as in stage 1\n"
+        "                (sets BRIMIR_VDP1_GPU=0, the core's debug override)\n"
         "  --compare     run the same content on the software and the Vulkan renderer in two child processes and\n"
         "                compare the per-frame hashes; on the first difference report the frame, the first\n"
         "                differing pixel and both values and dump both frames as PPM (into --dump-dir, default a\n"
@@ -242,6 +244,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--gpu-vdp1") {
             args.config.gpuVdp1 = true;
+            continue;
+        }
+        if (opt == "--software-vdp1") {
+            args.config.softwareVdp1 = true;
             continue;
         }
         if (opt == "--save-state-at") { // two values
@@ -822,6 +828,23 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(report.hiddenGpuCalls), report.validation ? "on" : "off",
                      report.validationErrors, static_cast<unsigned long long>(report.hiddenSubmits),
                      static_cast<unsigned long long>(report.maxRunSubmits));
+        const vkhost::SubmitWaitStats& s = report.submitWaits;
+        const auto u = [](uint64_t n) { return static_cast<unsigned long long>(n); };
+        std::fprintf(stderr,
+                     "vkhost: vulkan: submits: sync %llu, context %llu, refused %llu, ops-only after refused %llu, "
+                     "outside %llu; waits: frame %llu, sync %llu, serialize %llu, context %llu, outside the allowed "
+                     "list %llu\n",
+                     u(s.syncSubmits), u(s.contextSubmits), u(s.refusedSubmits), u(s.extraOpsOnlyRuns),
+                     u(s.outsideSubmits), u(s.frameWaits), u(s.syncWaits), u(s.serializeWaits), u(s.contextWaits),
+                     u(s.outsideWaits + s.outsideSubmits));
+    }
+    if (report.serializeCalls > 0) {
+        std::fprintf(stderr,
+                     "vkhost: state: %llu retro_serialize calls, %.3f ms mean, %.3f ms max; retro_unserialize %.3f ms "
+                     "total\n",
+                     static_cast<unsigned long long>(report.serializeCalls),
+                     report.serializeSeconds * 1e3 / static_cast<double>(report.serializeCalls),
+                     report.maxSerializeSeconds * 1e3, report.unserializeSeconds * 1e3);
     }
     std::fprintf(stderr, "vkhost: av: SET_SYSTEM_AV_INFO calls %llu, SET_GEOMETRY calls %llu\n",
                  static_cast<unsigned long long>(report.systemAvInfoCalls),
