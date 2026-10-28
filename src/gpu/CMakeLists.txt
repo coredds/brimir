@@ -22,7 +22,7 @@ add_library(brimir-gpu STATIC
 target_include_directories(brimir-gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_include_directories(brimir-gpu SYSTEM PUBLIC ${PROJECT_SOURCE_DIR}/vendor/volk)
 target_compile_features(brimir-gpu PUBLIC cxx_std_20)
-target_link_libraries(brimir-gpu PUBLIC vulkan_headers brimir-vdp2-front)
+target_link_libraries(brimir-gpu PUBLIC vulkan_headers brimir-vdp2-front brimir-vdp1-front)
 
 # volk symbols live in namespace volk (no clash with a frontend's vk* symbols), device functions only through a
 # VolkDeviceTable (vendor/volk/BRIMIR_VENDOR.md).

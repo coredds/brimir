@@ -9,7 +9,7 @@
 # Needs DXC with SPIR-V support, spirv-val and spirv-cross: from $VULKAN_SDK (Bin/ or bin/), from PATH, or passed as
 # -DDXC=<path> -DSPIRV_VAL=<path> -DSPIRV_CROSS=<path>. The generated headers are committed, so a normal build needs
 # none of them. Every shader is a compute shader with entry point CSMain. Includes are searched in
-# src/gpu/shaders/include and src/gpu/shaders/vdp2/include. Register bindings are shifted per class (all spaces):
+# src/gpu/shaders/include, src/gpu/shaders/vdp2/include and src/gpu/shaders/vdp1/include. Register bindings are shifted per class (all spaces):
 # t -> binding 0+n, u -> binding 16+n, b -> binding 32+n. Declared bindings are kept even when unused
 # (-fspv-preserve-bindings), so a module's interface is what its source declares. Output depends only on the DXC and
 # spirv-cross versions and the sources.
@@ -366,7 +366,7 @@ foreach(source_name IN LISTS shader_sources)
         COMMAND "${DXC}" -T cs_6_0 -E CSMain -HV 2021 -WX
                 -spirv -fspv-target-env=vulkan1.2 -fvk-use-gl-layout -fspv-preserve-bindings
                 -fvk-t-shift 0 all -fvk-u-shift 16 all -fvk-b-shift 32 all
-                -I "${shader_dir}/include" -I "${shader_dir}/vdp2/include"
+                -I "${shader_dir}/include" -I "${shader_dir}/vdp2/include" -I "${shader_dir}/vdp1/include"
                 -Fo "${spv}" "${shader_dir}/${source_name}"
         RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE out)
     if(NOT rc EQUAL 0)

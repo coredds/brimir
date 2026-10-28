@@ -70,6 +70,9 @@ add_executable(brimir_tests
     # VDP2 shaders on the Vulkan 1.2 baseline: SPIR-V checks ([vdp2] runs without Vulkan) and pipeline creation
     # ([gpu], compiled with BRIMIR_VULKAN only)
     unit/test_gpu_vdp2_pipelines.cpp
+    # VDP1 GPU structs, accessors and bindings vs the reflected layouts of the layout probe ([vdp1] runs without
+    # Vulkan; the [gpu] case is compiled with BRIMIR_VULKAN only)
+    unit/test_gpu_vdp1_params.cpp
     # VDP2 front half (parameter packing, CRAM cache, batching, frame records) through the CPU scene harness
     unit/vdp2_scene.cpp
     # CPU reference of the VDP2 sub-pixel rules at internal resolution N (the coordinate-bitmap scenes)
@@ -88,6 +91,7 @@ target_link_libraries(brimir_tests PRIVATE
     brimir-jit
     brimir-core
     brimir-vdp2-front
+    brimir-vdp1-front
 )
 
 # Vulkan GPU renderer (src/gpu)

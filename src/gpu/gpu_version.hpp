@@ -5,10 +5,12 @@
 // extensions, core features, limits); a device that misses any entry falls back to the software renderer with a
 // logged reason.
 
+#include "gpu/vdp1/vdp1_bindings.hpp"
 #include "gpu/vdp2/vdp2_bindings.hpp"
 
 #include <volk.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -39,18 +41,34 @@ struct RequiredLimit {
 };
 
 // Per-stage descriptor counts of the VDP2 pipelines (src/gpu/vdp2/vdp2_bindings.hpp). The background shader's seven
-// storage buffers exceed the guaranteed maxPerStageDescriptorStorageBuffers (4).
+// storage buffers exceed the guaranteed maxPerStageDescriptorStorageBuffers (4). The VDP1 pipelines
+// (src/gpu/vdp1/vdp1_bindings.hpp) use at most five storage buffers and nothing else, so VDP2 sets every maximum.
 inline constexpr uint32_t kRequiredStageStorageBuffers = 7;
 inline constexpr uint32_t kRequiredStageStorageImages = 3;
 inline constexpr uint32_t kRequiredStageSampledImages = 5;
 inline constexpr uint32_t kRequiredStageResources = 11;
-static_assert(kRequiredStageStorageBuffers == vdp2::kMaxStageUsage.storageBuffers &&
-                  kRequiredStageStorageImages == vdp2::kMaxStageUsage.storageImages &&
-                  kRequiredStageSampledImages == vdp2::kMaxStageUsage.sampledImages &&
-                  kRequiredStageResources == vdp2::kMaxStageUsage.resources,
-              "the required limits must match the VDP2 binding table");
+static_assert(kRequiredStageStorageBuffers ==
+                      std::max(vdp2::kMaxStageUsage.storageBuffers, vdp1::kMaxStageUsage.storageBuffers) &&
+                  kRequiredStageStorageImages ==
+                      std::max(vdp2::kMaxStageUsage.storageImages, vdp1::kMaxStageUsage.storageImages) &&
+                  kRequiredStageSampledImages ==
+                      std::max(vdp2::kMaxStageUsage.sampledImages, vdp1::kMaxStageUsage.sampledImages) &&
+                  kRequiredStageResources == std::max(vdp2::kMaxStageUsage.resources, vdp1::kMaxStageUsage.resources),
+              "the required limits must match the VDP2 and VDP1 binding tables");
 
-inline constexpr std::array<RequiredLimit, 7> kRequiredLimits{{
+// The largest of VDP2's and VDP1's workgroups, push-constant blocks and groupshared memory.
+inline constexpr uint32_t kRequiredWorkgroupInvocations =
+    std::max(vdp2::kMaxWorkgroupInvocations, vdp1::kWorkgroupSize);
+inline constexpr uint32_t kRequiredPushConstantSize =
+    std::max(vdp2::kMaxPushConstantSize, vdp1::kMaxPushConstantSize);
+inline constexpr uint32_t kRequiredSharedMemorySize =
+    std::max(vdp2::kMaxComputeSharedMemorySize, vdp1::kMaxComputeSharedMemorySize);
+// One storage buffer binding's range: VDP1's fragment buffer (32 MiB), within the guaranteed 2^27.
+inline constexpr uint32_t kRequiredStorageBufferRange = vdp1::kMaxStorageBufferRange;
+static_assert(kRequiredStorageBufferRange >= vdp2::CompositeBufferSize(vdp2::kMaxRenderScale) &&
+              kRequiredStorageBufferRange <= (1u << 27));
+
+inline constexpr std::array<RequiredLimit, 8> kRequiredLimits{{
     {"maxPerStageDescriptorStorageBuffers", &VkPhysicalDeviceLimits::maxPerStageDescriptorStorageBuffers,
      kRequiredStageStorageBuffers},
     {"maxPerStageDescriptorStorageImages", &VkPhysicalDeviceLimits::maxPerStageDescriptorStorageImages,
@@ -59,11 +77,11 @@ inline constexpr std::array<RequiredLimit, 7> kRequiredLimits{{
      kRequiredStageSampledImages},
     {"maxPerStageResources", &VkPhysicalDeviceLimits::maxPerStageResources, kRequiredStageResources},
     {"maxComputeWorkGroupInvocations", &VkPhysicalDeviceLimits::maxComputeWorkGroupInvocations,
-     vdp2::kMaxWorkgroupInvocations},
-    {"maxPushConstantsSize", &VkPhysicalDeviceLimits::maxPushConstantsSize, vdp2::kMaxPushConstantSize},
+     kRequiredWorkgroupInvocations},
+    {"maxPushConstantsSize", &VkPhysicalDeviceLimits::maxPushConstantsSize, kRequiredPushConstantSize},
     // The NBG fetch pass's groupshared arrays (within the guaranteed 16384)
-    {"maxComputeSharedMemorySize", &VkPhysicalDeviceLimits::maxComputeSharedMemorySize,
-     vdp2::kMaxComputeSharedMemorySize},
+    {"maxComputeSharedMemorySize", &VkPhysicalDeviceLimits::maxComputeSharedMemorySize, kRequiredSharedMemorySize},
+    {"maxStorageBufferRange", &VkPhysicalDeviceLimits::maxStorageBufferRange, kRequiredStorageBufferRange},
 }};
 
 // Empty when `limits` meet kRequiredLimits, else the first unmet one as "<name> <value> < <minimum>".

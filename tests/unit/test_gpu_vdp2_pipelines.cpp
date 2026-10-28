@@ -551,10 +551,11 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
     limits.maxComputeWorkGroupInvocations = kMaxWorkgroupInvocations;
     limits.maxPushConstantsSize = 64;
     limits.maxComputeSharedMemorySize = kNBGFetchSharedMemorySize;
+    limits.maxStorageBufferRange = brimir::gpu::vdp1::kMaxStorageBufferRange; // VDP1's fragment buffer (32 MiB)
     CHECK(gpu::UnmetLimit(limits).empty());
 
     // Every entry, one below its minimum, fails with its name and both values.
-    REQUIRE(gpu::kRequiredLimits.size() == 7);
+    REQUIRE(gpu::kRequiredLimits.size() == 8);
     for (const gpu::RequiredLimit &limit : gpu::kRequiredLimits) {
         INFO(limit.name);
         VkPhysicalDeviceLimits low = limits;
@@ -573,6 +574,11 @@ TEST_CASE("Device limits check: the VDP2 pipelines' per-stage descriptors and pu
     VkPhysicalDeviceLimits shared = limits;
     shared.maxComputeSharedMemorySize = 16384;
     CHECK(gpu::UnmetLimit(shared).empty());
+
+    // The guaranteed maxStorageBufferRange (2^27) covers VDP1's 32 MiB fragment buffer and the 4x composite.
+    VkPhysicalDeviceLimits range = limits;
+    range.maxStorageBufferRange = 1u << 27;
+    CHECK(gpu::UnmetLimit(range).empty());
 
     STATIC_CHECK(gpu::kRequiredStageStorageBuffers == kMaxStageUsage.storageBuffers);
     STATIC_CHECK(gpu::kRequiredStageResources == kMaxStageUsage.resources);
