@@ -42,7 +42,7 @@ struct RequiredLimit {
 
 // Per-stage descriptor counts of the VDP2 pipelines (src/gpu/vdp2/vdp2_bindings.hpp). The background shader's seven
 // storage buffers exceed the guaranteed maxPerStageDescriptorStorageBuffers (4). The VDP1 pipelines
-// (src/gpu/vdp1/vdp1_bindings.hpp) use at most five storage buffers and nothing else, so VDP2 sets every maximum.
+// (src/gpu/vdp1/vdp1_bindings.hpp) use at most six storage buffers and nothing else, so VDP2 sets every maximum.
 inline constexpr uint32_t kRequiredStageStorageBuffers = 7;
 inline constexpr uint32_t kRequiredStageStorageImages = 3;
 inline constexpr uint32_t kRequiredStageSampledImages = 5;
@@ -79,7 +79,8 @@ inline constexpr std::array<RequiredLimit, 8> kRequiredLimits{{
     {"maxComputeWorkGroupInvocations", &VkPhysicalDeviceLimits::maxComputeWorkGroupInvocations,
      kRequiredWorkgroupInvocations},
     {"maxPushConstantsSize", &VkPhysicalDeviceLimits::maxPushConstantsSize, kRequiredPushConstantSize},
-    // The NBG fetch pass's groupshared arrays (within the guaranteed 16384)
+    // The NBG fetch pass's groupshared arrays (14,208 bytes; the VDP1 resolve pass needs 11,536), within the
+    // guaranteed 16384
     {"maxComputeSharedMemorySize", &VkPhysicalDeviceLimits::maxComputeSharedMemorySize, kRequiredSharedMemorySize},
     {"maxStorageBufferRange", &VkPhysicalDeviceLimits::maxStorageBufferRange, kRequiredStorageBufferRange},
 }};

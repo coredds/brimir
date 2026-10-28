@@ -639,6 +639,18 @@ void ReferenceVDP1::DrawBatch(const gpu::Vdp1OpList &ops, const gpu::Vdp1DrawBat
         if (slots != SpanSlots(state, cmd, span)) {
             throw std::logic_error("vdp1ref::DrawBatch: span slots differ from SpanSlots");
         }
+        // The ranges the front half asserts (its asserts compile out in Release builds): the quad step of a 12-bit
+        // quad loop (or a polyline segment), the texel row of QuadStepper::SetupTexture (-1 when CMDSIZE.V is 0) and a
+        // line's slots within the padded raw 16-bit clip box
+        if (span.quadStep > 4095) {
+            throw std::logic_error("vdp1ref::DrawBatch: quad step out of range");
+        }
+        if (static_cast<sint32>(span.texV) < -1 || static_cast<sint32>(span.texV) > 255) {
+            throw std::logic_error("vdp1ref::DrawBatch: texel row out of range");
+        }
+        if (slots > gpu::kMaxSpanSlots) {
+            throw std::logic_error("vdp1ref::DrawBatch: span slots out of range");
+        }
         const size_t first = fragments.size();
         SpanInfo info;
         RasterSpan(state, cmd, span, m_vram.data(), m_options, fragments, &info);

@@ -82,7 +82,11 @@ add_executable(brimir_tests
     # CPU reference of the GPU VDP1 back half (keyed fragments, per-word ordered resolve, erase, CPU writes) fed by the
     # VDP1 front half, against software
     unit/vdp1_raster_reference.cpp
+    unit/vdp1_scenario.cpp
     unit/test_vdp1_raster_reference.cpp
+    # VDP1 shaders on the Vulkan 1.2 baseline: SPIR-V checks ([vdp1] runs without Vulkan) and pipeline creation
+    # ([gpu], compiled with BRIMIR_VULKAN only)
+    unit/test_gpu_vdp1_pipelines.cpp
     # VDP1 front half (commands, spans, op stream, batching, VRAM uploads)
     unit/test_vdp1_front.cpp
     # brimir_vkhost's sample-point mapping and sharpness metric (tools/vkhost/sample_points.hpp, header-only)
@@ -107,6 +111,8 @@ if(BRIMIR_VULKAN)
         unit/test_gpu_frame_output.cpp
         # VulkanVDPRenderer (GPU VDP2 back half, software VDP1) against the software renderer, scene by scene
         unit/test_gpu_vdp2_scenes.cpp
+        # VDP1 passes (raster, bucket, scatter, resolve, erase, CPU writes) on the device against the CPU reference
+        unit/test_gpu_vdp1_passes.cpp
         # CoreWrapper with the Vulkan VDP renderer: install, revert, VDP1 threading, device frames (no device needed)
         unit/test_core_wrapper_vulkan.cpp
     )

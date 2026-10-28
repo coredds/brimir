@@ -51,6 +51,8 @@
 
 namespace brimir::gpu::vdp1 {
 
+static_assert(kVRAMBufferSize == ymir::vdp::kVDP1VRAMSize, "the GPU's VDP1 VRAM copy is all of VDP1 VRAM");
+
 /// @brief Why a batch was closed (diagnostics and tests).
 enum class Vdp1BatchEnd : uint8_t {
     OpKind,        // an erase or a CPU framebuffer write followed

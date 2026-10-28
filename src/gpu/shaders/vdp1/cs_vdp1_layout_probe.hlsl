@@ -3,10 +3,10 @@
 // tests/unit/test_gpu_vdp1_params.cpp compares with the host structs of src/gpu/vdp1/vdp1_hw_params.hpp. It also
 // evaluates every accessor of vdp1_defs.hlsli, so that test can run them against the C++ copies on random words.
 //
-// Thread i (i < batch.spanCount) reads element i of the command, span, fragment, FbWrite, VRAM, bucket, FBRAM and scan
-// sum buffers and writes kVdp1ProbeWords words of results into g_unitCounts at i * kVdp1ProbeWords: the words of the
+// Thread i (i < batch.spanCount) reads element i of the command, span, fragment, FbWrite, VRAM, bucket, FBRAM, scan
+// sum and unit offset buffers and writes kVdp1ProbeWords words of results into g_unitCounts at i * kVdp1ProbeWords: the words of the
 // structs, the accessor results (see the table in the test, ProbeExpected), and the push-constant accessors.
-// Bindings (src/gpu/vdp1/vdp1_bindings.hpp; t -> binding 0+n, u -> binding 16+n): all nine VDP1 buffers.
+// Bindings (src/gpu/vdp1/vdp1_bindings.hpp; t -> binding 0+n, u -> binding 16+n): all ten VDP1 buffers.
 // Push constants: ProbePush, the three push-constant structs one after the other.
 
 #include "vdp1_defs.hlsli"
@@ -30,6 +30,7 @@ RWStructuredBuffer<uint> g_unitCounts : register(u1);
 RWStructuredBuffer<uint> g_bucket : register(u2);
 RWByteAddressBuffer g_fbram : register(u3);
 RWStructuredBuffer<uint> g_scanSums : register(u4);
+RWStructuredBuffer<uint> g_unitOffsets : register(u5);
 
 #define EMIT(value) g_unitCounts[o + k++] = (value)
 
@@ -142,7 +143,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     EMIT(g_vram.Load((i * 4) & (kVRAMBufferSize - 4)));
     EMIT(g_bucket[i]);
     EMIT(g_fbram.Load((i * 4) & (kFbramBufferSize - 4)));
-    EMIT(g_scanSums[i]);
+    EMIT(g_scanSums[i] ^ g_unitOffsets[i]);
     // 85-93: the pack functions on the unpacked flags (their round trips)
     EMIT(Vdp1MakeDrawFlags(df & kCmdpmodMask, Vdp1CmdType(df) | (Vdp1CmdFlipH(df) ? 16u : 0u) | (Vdp1CmdFlipV(df) ? 32u : 0u),
                            Vdp1CmdTextured(df), Vdp1CmdAntiAlias(df)));
