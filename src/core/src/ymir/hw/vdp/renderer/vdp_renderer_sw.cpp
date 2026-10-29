@@ -107,6 +107,10 @@ void SoftwareVDPRenderer::Reset(bool hard) {
     }
     if (m_threadedVDP2Rendering) {
         m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::Reset());
+        // Brimir: the thread copies the VDP state and m_CRAMCache (cleared above on a hard reset); wait so neither
+        // changes before it has.
+        m_vdp2RenderingContext.resetSyncSignal.Wait();
+        m_vdp2RenderingContext.resetSyncSignal.Reset();
     } else {
         m_framebuffer.fill(0xFF000000);
     }
@@ -721,8 +725,15 @@ void SoftwareVDPRenderer::VDP2RenderThread() {
             using EvtType = VDP2RenderEvent::Type;
             switch (event.type) {
             case EvtType::Reset:
-                rctx.Reset();
+                // Brimir: take what the unthreaded renderer reads after the reset (VDPState::Reset has run; a soft
+                // reset keeps VRAM and CRAM) instead of clearing the copies. The emulator thread waits for the signal,
+                // so the state cannot change under the copy.
+                rctx.vdp2.regs = m_state.regs2;
+                rctx.vdp2.mem = m_state.mem2;
+                rctx.vdp2.CRAMCache = m_CRAMCache;
+                rctx.tvmr = m_state.regs1.tvmr;
                 m_framebuffer.fill(0xFF000000);
+                rctx.resetSyncSignal.Set();
                 break;
             case EvtType::OddField: rctx.vdp2.regs.TVSTAT.ODD = event.oddField.odd; break;
             case EvtType::VDP2LatchTVMD: rctx.vdp2.regs.LatchTVMD(); break;

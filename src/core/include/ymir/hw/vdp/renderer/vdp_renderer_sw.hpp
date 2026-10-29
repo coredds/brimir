@@ -572,12 +572,10 @@ private:
 
         VDP1RegTVMR tvmr;
 
-        void Reset() {
-            vdp2.regs.Reset();
-            vdp2.mem.Reset();
-            vdp2.CRAMCache.fill({.u32 = 0});
-            tvmr.Reset();
-        }
+        // Brimir: upstream's Reset() cleared regs, VRAM, CRAM and the colour cache on every reset, though a soft reset
+        // keeps VRAM and CRAM. The Reset event now copies them from the VDP state instead (see VDP2RenderThread) and
+        // signals this when done.
+        util::Event resetSyncSignal{false};
 
         void EnqueueEvent(VDP2RenderEvent &&event) {
             switch (event.type) {

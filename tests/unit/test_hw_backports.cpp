@@ -750,6 +750,160 @@ TEST_CASE("Threaded VDP2 sees VDP1 TVMR changes in order", "[vdp][vdp2][threaded
     CHECK(CountThreadedMismatches(SetupSpriteLayer, script, expected) == 0);
 }
 
+namespace {
+
+// One rendered frame of a reset scenario: the first line's pixels and the line colour and back screen state.
+struct ResetFrame {
+    std::vector<uint32> pixels;
+    uint32 lineColor;
+    uint32 backColor;
+
+    bool operator==(const ResetFrame &) const = default;
+};
+
+// Back screen colour 0x7C1F at VRAM 0x100, line colour from CRAM word 0 (LCTA = 0) = 0x83E0.
+void SetupResetScene(vdp::VDPState &state) {
+    SetupBackScreen(state);
+    state.mem2.WriteCRAM<uint16>(0, 0x83E0);
+}
+
+// Builds the reset scene, starts with or without the threaded VDP2 renderer and runs script(state, renderer, frame),
+// where frame() renders one frame and records it. Returns the recorded frames.
+std::vector<ResetFrame> RunResetScript(bool threaded, auto script) {
+    auto state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    FrameCapture capture;
+    std::vector<ResetFrame> frames;
+
+    SetupResetScene(*state);
+    renderer->PostLoadStateSync();
+    renderer->EnableThreadedVDP2(threaded);
+    capture.Bind(*renderer);
+    const auto frame = [&] {
+        renderer->VDP2SetResolution(320, 224, false);
+        renderer->VDP2BeginFrame();
+        renderer->VDP2RenderLine(0);
+        renderer->VDP2EndFrame();
+        const auto &lineBack = state->state2.lineBackLayerState;
+        frames.push_back({{capture.pixels.begin(), capture.pixels.begin() + capture.width},
+                          lineBack.lineColor.u32,
+                          lineBack.backColor.u32});
+    };
+    script(*state, *renderer, frame);
+    renderer->EnableThreadedVDP2(false);
+    return frames;
+}
+
+// The reset as VDP::Reset does it, then the registers programmed again (the reset cleared them) as the game does.
+void ResetAndReprogram(vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer, bool hard) {
+    state.Reset(hard);
+    renderer.Reset(hard);
+    const auto write = [&](uint32 address, uint16 value) {
+        state.regs2.Write(address, value);
+        renderer.VDP2WriteReg(address, value);
+    };
+    write(0x000, 0x8000); // TVMD: DISP on, 320 pixels wide
+    state.regs2.LatchTVMD();
+    renderer.VDP2LatchTVMD();
+    write(0x020, 0x0000); // BGON
+    write(0x0AC, 0x0000); // BKTAU: single colour
+    write(0x0AE, 0x0080); // BKTAL: 0x100
+}
+
+// CRAM word 0 written again with the value it holds.
+void RewriteCRAMWord0(vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer) {
+    const uint16 value = state.mem2.ReadCRAM<uint16>(0);
+    state.mem2.WriteCRAM<uint16>(0, value);
+    renderer.VDP2WriteCRAM(0, value);
+}
+
+int CountThreadedResetMismatches(auto script, const std::vector<ResetFrame> &expected) {
+    int mismatches = 0;
+    for (int i = 0; i < kThreadedEquivalenceIterations; ++i) {
+        if (RunResetScript(true, script) != expected) {
+            ++mismatches;
+        }
+    }
+    return mismatches;
+}
+
+} // namespace
+
+TEST_CASE("Threaded VDP2 keeps VRAM and CRAM across a soft reset", "[vdp][vdp2][threaded][reset][brimir]") {
+    // Brimir: VDPState::Reset(false) and the unthreaded renderer keep VDP2 VRAM, CRAM and the RGB555 colour cache, but
+    // the VDP2 render thread's Reset event cleared its copies of all three on every reset (as upstream Ymir does). The
+    // threaded renderer then drew from zeroed memory, and CRAM words rewritten with their old value stayed zero in its
+    // colour cache. Found in Daytona USA CE, which soft-resets the VDPs at boot.
+    auto script = [](vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer, auto frame) {
+        frame();
+        ResetAndReprogram(state, renderer, false);
+        frame();
+        RewriteCRAMWord0(state, renderer);
+        frame();
+    };
+
+    const auto expected = RunResetScript(false, script);
+    REQUIRE(expected.size() == 3);
+    for (const auto &frame : expected) {
+        REQUIRE(frame.pixels.size() == 320);
+        REQUIRE(frame.pixels[0] == RGB555to888(0x7C1F));
+        REQUIRE(frame.backColor == vdp::ConvertRGB555to888(vdp::Color555{.u16 = 0x7C1F}).u32);
+        REQUIRE(frame.lineColor == vdp::ConvertRGB555to888(vdp::Color555{.u16 = 0x83E0}).u32);
+    }
+    CHECK(CountThreadedResetMismatches(script, expected) == 0);
+}
+
+TEST_CASE("Threaded VDP2 matches unthreaded after a hard reset", "[vdp][vdp2][threaded][reset][brimir]") {
+    auto script = [](vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer, auto frame) {
+        frame();
+        ResetAndReprogram(state, renderer, true);
+        frame();
+        state.mem2.WriteVRAM<uint16>(0x100, 0x001F);
+        renderer.VDP2WriteVRAM(0x100, uint16{0x001F});
+        state.mem2.WriteCRAM<uint16>(0, 0x801F);
+        renderer.VDP2WriteCRAM(0, uint16{0x801F});
+        frame();
+    };
+
+    const auto expected = RunResetScript(false, script);
+    REQUIRE(expected.size() == 3);
+    REQUIRE(expected[1].pixels[0] == RGB555to888(0x0000));
+    REQUIRE(expected[2].pixels[0] == RGB555to888(0x001F));
+    CHECK(CountThreadedResetMismatches(script, expected) == 0);
+}
+
+TEST_CASE("Toggling threaded VDP2 after a reset keeps the frames identical", "[vdp][vdp2][threaded][reset][brimir]") {
+    // Runs threaded from the start (or unthreaded for the reference) and toggles threading after each reset: every
+    // frame must match a run that never toggles.
+    const auto makeScript = [](bool toggle) {
+        return [=](vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer, auto frame) {
+            ResetAndReprogram(state, renderer, false);
+            frame();
+            if (toggle) {
+                renderer.EnableThreadedVDP2(false);
+            }
+            frame();
+            ResetAndReprogram(state, renderer, false);
+            frame();
+            if (toggle) {
+                renderer.EnableThreadedVDP2(true);
+            }
+            RewriteCRAMWord0(state, renderer);
+            frame();
+            ResetAndReprogram(state, renderer, false);
+            frame();
+        };
+    };
+
+    const auto expected = RunResetScript(false, makeScript(false));
+    REQUIRE(expected.size() == 5);
+    REQUIRE(expected[0].pixels[0] == RGB555to888(0x7C1F));
+    CHECK(CountThreadedResetMismatches(makeScript(true), expected) == 0);
+    CHECK(CountThreadedResetMismatches(makeScript(false), expected) == 0);
+}
+
 TEST_CASE("VDP2 EXTEN read latches HCNT when external latch is disabled", "[vdp][vdp2][hcnt][backport]") {
     // Ymir f9f47595: reading EXTEN with EXLTEN=0 latches the H/V counters. HCNT is approximated near the end of the
     // active display area.
