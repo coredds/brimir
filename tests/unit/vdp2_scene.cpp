@@ -710,12 +710,16 @@ namespace brimir::test {
 namespace {
 
 // The harness's fence wait: vk_util::WaitForFence (a bounded, yielding poll, then a blocking wait), bounded overall:
-// a GPU that never finishes fails the scene with this error instead of hanging the test run.
-constexpr uint64_t kHarnessFenceTimeoutNs = 60ull * 1000 * 1000 * 1000;
+// a device that never finishes fails the scene with this error instead of hanging the test run. The bound is 60 s on
+// a GPU and 600 s on a CPU device: on lavapipe, a submit of thousands of small VDP1 batches (fuzzer programs with tiny
+// batch limits) takes over 60 s when several test processes share the CPU.
 VkResult WaitBounded(gpu::VulkanDevice &device, VkFence fence) {
-    const VkResult result = gpu::vk_util::WaitForFence(device, fence, 2000, kHarnessFenceTimeoutNs);
+    const bool cpu = device.Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+    const uint64_t seconds = cpu ? 600 : 60;
+    const VkResult result = gpu::vk_util::WaitForFence(device, fence, 2000, seconds * 1'000'000'000ull);
     if (result == VK_TIMEOUT) {
-        std::fprintf(stderr, "vdp2_scene: a submit did not complete within 60 s (VK_TIMEOUT)\n");
+        std::fprintf(stderr, "vdp2_scene: a submit did not complete within %llu s (VK_TIMEOUT)\n",
+                     static_cast<unsigned long long>(seconds));
     }
     return result;
 }
