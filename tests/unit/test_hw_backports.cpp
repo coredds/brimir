@@ -16,6 +16,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -834,8 +835,9 @@ int CountThreadedResetMismatches(auto script, const std::vector<ResetFrame> &exp
 TEST_CASE("Threaded VDP2 keeps VRAM and CRAM across a soft reset", "[vdp][vdp2][threaded][reset][brimir]") {
     // Brimir: VDPState::Reset(false) and the unthreaded renderer keep VDP2 VRAM, CRAM and the RGB555 colour cache, but
     // the VDP2 render thread's Reset event cleared its copies of all three on every reset (as upstream Ymir does). The
-    // threaded renderer then drew from zeroed memory, and CRAM words rewritten with their old value stayed zero in its
-    // colour cache. Found in Daytona USA CE, which soft-resets the VDPs at boot.
+    // threaded renderer then drew from zeroed memory: VRAM and the CRAM words the game never rewrote stayed black (a
+    // rewritten word differs from the zeroed copy, so its colour cache entry came back). Found in Daytona USA CE, which
+    // soft-resets the VDPs at boot.
     auto script = [](vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer, auto frame) {
         frame();
         ResetAndReprogram(state, renderer, false);
@@ -902,6 +904,224 @@ TEST_CASE("Toggling threaded VDP2 after a reset keeps the frames identical", "[v
     REQUIRE(expected[0].pixels[0] == RGB555to888(0x7C1F));
     CHECK(CountThreadedResetMismatches(makeScript(true), expected) == 0);
     CHECK(CountThreadedResetMismatches(makeScript(false), expected) == 0);
+}
+
+TEST_CASE("Threaded VDP2 leaves the vertical cell scroll state alone while the display is off",
+          "[vdp][vdp2][threaded][vcellscroll][brimir]") {
+    // Brimir: the unthreaded renderer derives the NBG0/NBG1 vertical cell scroll offset/delay/repeat in
+    // VDP2PrepareLine, only for lines drawn with the display latch on. The threaded VDP2RenderLine also ran
+    // CalcAccessPatterns + CalcVCellScrollDelay on the emulator thread for every queued line, latch on or off (as
+    // upstream Ymir does), writing the shared nbgLayerStates while the render thread could still be drawing earlier
+    // lines. Found in Street Fighter Zero 3: after a display-off stretch the save state held vcellScrollOffset 0
+    // (threaded) instead of 4 (unthreaded).
+    auto run = [](bool threaded) {
+        auto state = std::make_unique<vdp::VDPState>();
+        vdp::config::VDP2DebugRender debug{};
+        vdp::config::VDP2AccessPatternsConfig access{};
+        auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+        FrameCapture capture;
+        auto &regs = state->regs2;
+        regs.WriteTVMD(0x0000); // DISP off
+        regs.LatchTVMD();
+        regs.WriteBGON(0);
+        state->state2.nbgLayerStates[0].vcellScrollOffset = 4; // derived earlier from another configuration
+        regs.vcellScrollDirty = true;                         // the registers changed since
+        renderer->PostLoadStateSync();
+        renderer->EnableThreadedVDP2(threaded);
+        capture.Bind(*renderer);
+        renderer->VDP2SetResolution(320, 224, false);
+        renderer->VDP2BeginFrame();
+        renderer->VDP2RenderLine(0);
+        renderer->VDP2EndFrame();
+        renderer->EnableThreadedVDP2(false);
+        return state->state2.nbgLayerStates[0].vcellScrollOffset;
+    };
+    REQUIRE(run(false) == 4);
+    CHECK(run(true) == 4);
+}
+
+namespace {
+
+// One frame of a vertical cell scroll scenario: the first lines' pixels and the whole VDP save state taken at the end
+// of the frame (or in the middle of it, for the frames that save there).
+struct VCellFrame {
+    std::vector<uint32> pixels;
+    std::vector<uint8> saved;
+    uint32 nbg0VCellOffset; // from the save state, for the scenario checks
+    uint16 rprctl;
+
+    bool operator==(const VCellFrame &) const = default;
+};
+
+VCellFrame SaveVDPState(vdp::VDPState &state, vdp::SoftwareVDPRenderer &renderer, std::vector<uint32> pixels) {
+    auto saved = std::make_unique<savestate::VDPSaveState>();
+    renderer.PreSaveStateSync();
+    state.SaveState(*saved);
+    renderer.SaveState(saved->renderer);
+    const auto *bytes = reinterpret_cast<const uint8 *>(saved.get());
+    return {std::move(pixels),
+            {bytes, bytes + sizeof(savestate::VDPSaveState)},
+            saved->renderer.nbgLayerStates[0].vcellScrollOffset,
+            saved->regs2.RPRCTL};
+}
+
+// Cycle patterns for bank B0 (CYCB0L): vertical cell scroll reads for NBG1 then NBG0 (NBG0's offset is 4), or NBG0
+// alone (offset 0).
+constexpr uint16 kCycB0BothVCell = 0xDCFF;
+constexpr uint16 kCycB0NBG0VCell = 0xCFFF;
+
+// NBG0 and NBG1 as 16-colour cell layers with vertical cell scroll, over VRAM and CRAM filled with distinct values.
+void SetupVCellScene(vdp::VDPState &state) {
+    auto &regs = state.regs2;
+    regs.WriteTVMD(0x8000); // DISP on, 320 pixels wide
+    regs.LatchTVMD();
+    regs.WriteBGON(0x0003);   // NBG0, NBG1
+    regs.WriteCHCTLA(0x0000); // 16 colours, 1x1 cells
+    regs.WriteCYCA0L(0x0145); // PN0, PN1, CP0, CP1
+    regs.WriteCYCA0U(0xFFFF);
+    regs.WriteCYCA1L(0xFFFF);
+    regs.WriteCYCA1U(0xFFFF);
+    regs.WriteCYCB0L(kCycB0BothVCell);
+    regs.WriteCYCB0U(0xFFFF);
+    regs.WriteCYCB1L(0xFFFF);
+    regs.WriteCYCB1U(0xFFFF);
+    regs.WriteSCRCTL(0x0101); // vertical cell scroll on NBG0 and NBG1
+    regs.WriteVCSTAU(0x0000);
+    regs.WriteVCSTAL(0x8000); // table at 0x10000
+    regs.WritePRINA(0x0706);
+    for (uint32 i = 0; i < 1024; ++i) {
+        state.mem2.WriteCRAM<uint16>(i * sizeof(uint16), static_cast<uint16>(i * 31 + 1) & 0x7FFF);
+    }
+    uint32 seed = 12345;
+    for (uint32 address = 0; address < vdp::kVDP2VRAMSize; address += sizeof(uint16)) {
+        seed = seed * 1103515245u + 12345u;
+        state.mem2.WriteVRAM<uint16>(address, static_cast<uint16>(seed >> 16));
+    }
+}
+
+// Builds the vertical cell scroll scene, starts with or without the threaded VDP2 renderer and runs
+// script(state, renderer, write, line, frame): write(address, value) writes a VDP2 register as VDP::VDP2WriteReg does,
+// line(y) renders a line, frame(begin, end) brackets a frame, latching TVMD before it and recording it after it.
+std::vector<VCellFrame> RunVCellScript(bool threaded, auto script) {
+    auto state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    auto renderer = std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    FrameCapture capture;
+    std::vector<VCellFrame> frames;
+
+    SetupVCellScene(*state);
+    renderer->PostLoadStateSync();
+    renderer->EnableThreadedVDP2(threaded);
+    capture.Bind(*renderer);
+    const auto write = [&](uint32 address, uint16 value) {
+        state->VDP2WriteReg<false>(address, value,
+                                   [&](uint32 address, uint16 value) { renderer->VDP2WriteReg(address, value); });
+    };
+    const auto line = [&](uint32 y) { renderer->VDP2RenderLine(y); };
+    const auto frame = [&](auto body) {
+        state->regs2.LatchTVMD();
+        renderer->VDP2LatchTVMD();
+        renderer->VDP2SetResolution(320, 224, false);
+        renderer->VDP2BeginFrame();
+        body();
+        renderer->VDP2EndFrame();
+        frames.push_back(SaveVDPState(*state, *renderer,
+                                      {capture.pixels.begin(), capture.pixels.begin() + capture.width * 4}));
+    };
+    const auto saveMidFrame = [&] { frames.push_back(SaveVDPState(*state, *renderer, {})); };
+    script(*renderer, write, line, frame, saveMidFrame);
+    renderer->EnableThreadedVDP2(false);
+    return frames;
+}
+
+int CountThreadedVCellMismatches(auto script, const std::vector<VCellFrame> &expected) {
+    int mismatches = 0;
+    for (int i = 0; i < kThreadedEquivalenceIterations; ++i) {
+        if (RunVCellScript(true, script) != expected) {
+            ++mismatches;
+        }
+    }
+    return mismatches;
+}
+
+} // namespace
+
+TEST_CASE("Threaded VDP2 matches unthreaded when access patterns and vertical cell scroll change mid-frame",
+          "[vdp][vdp2][threaded][vcellscroll][brimir]") {
+    // Brimir: frames with the display on and off, the cycle patterns, vertical cell scroll enables, BGON and RPRCTL
+    // changed between lines, and save states taken mid-frame and after each frame: the threaded renderer must give the
+    // unthreaded renderer's pixels and whole save state every time. Optionally toggles threading between frames.
+    const auto makeScript = [](bool toggle) {
+        return [=](vdp::SoftwareVDPRenderer &renderer, auto write, auto line, auto frame, auto saveMidFrame) {
+            const auto maybeToggle = [&](bool enable) {
+                if (toggle) {
+                    renderer.EnableThreadedVDP2(enable);
+                }
+            };
+            frame([&] {
+                line(0);
+                line(1);
+                write(0x018, kCycB0NBG0VCell); // CYCB0L
+                line(2);
+                line(3);
+            });
+            write(0x000, 0x0000); // TVMD: display off from the next frame
+            frame([&] {
+                line(0);
+                write(0x018, kCycB0BothVCell);
+                line(1);
+                saveMidFrame();
+                write(0x09A, 0x0001); // SCRCTL: vertical cell scroll on NBG0 only
+                line(2);
+                write(0x020, 0x0013); // BGON: NBG0, NBG1, RBG0
+                write(0x0B2, 0x0707); // RPRCTL: read Xst, Yst and KAst
+                line(3);
+            });
+            maybeToggle(false);
+            frame([&] {
+                line(0);
+                line(1);
+                write(0x09A, 0x0101);
+                line(2);
+                line(3);
+            });
+            write(0x000, 0x8000); // TVMD: display on from the next frame
+            maybeToggle(true);
+            frame([&] {
+                line(0); // draws RBG0, which clears RPRCTL's read flags
+                saveMidFrame();
+                write(0x0B2, 0x0101); // RPRCTL: read Xst
+                write(0x020, 0x0003); // BGON: NBG0, NBG1
+                line(1);
+                write(0x018, kCycB0NBG0VCell);
+                saveMidFrame();
+                line(2);
+                write(0x09A, 0x0100); // SCRCTL: vertical cell scroll on NBG1 only
+                line(3);
+            });
+            write(0x000, 0x0000);
+            frame([&] {
+                write(0x018, kCycB0BothVCell);
+                write(0x09A, 0x0101);
+                line(0);
+                line(1);
+                line(2);
+                line(3);
+            });
+        };
+    };
+
+    const auto expected = RunVCellScript(false, makeScript(false));
+    REQUIRE(expected.size() == 8);
+    REQUIRE(expected[0].pixels.size() == 320 * 4);
+    REQUIRE(expected[1].nbg0VCellOffset == 0); // display off: the CYCB0L change is not derived
+    REQUIRE(expected[2].rprctl == 0x0707);
+    REQUIRE(expected[4].nbg0VCellOffset == 4); // display on again: derived on line 0
+    REQUIRE(expected[4].rprctl == 0x0000);     // line 0 read the rotation tables
+    REQUIRE(expected[7].nbg0VCellOffset == 0);
+    CHECK(CountThreadedVCellMismatches(makeScript(false), expected) == 0);
+    CHECK(CountThreadedVCellMismatches(makeScript(true), expected) == 0);
 }
 
 TEST_CASE("VDP2 EXTEN read latches HCNT when external latch is disabled", "[vdp][vdp2][hcnt][backport]") {

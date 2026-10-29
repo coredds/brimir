@@ -57,6 +57,34 @@ namespace grp {
 
 } // namespace grp
 
+namespace {
+
+// Brimir: the VDP2 register fields the renderer itself writes while preparing a line (VDP2PrepareLine:
+// CalcAccessPatterns, CalcVCellScrollDelay, UpdateRotationPageBaseAddresses, VDP2CalcRotationParameterTables). The
+// unthreaded renderer writes them in m_state.regs2; the VDP2 render thread writes them in its own copy, which receives
+// every register write in order, so once it has caught up its fields hold what the unthreaded renderer's would. Copy
+// them back only then (the thread idle), so that save states (RPRCTL, vcellScrollInc) and a switch to the unthreaded
+// renderer see them.
+void CopyRendererDerivedVDP2Regs(VDP2Regs &dst, const VDP2Regs &src) {
+    dst.accessPatternsDirty = src.accessPatternsDirty;
+    dst.vcellScrollDirty = src.vcellScrollDirty;
+    dst.vcellScrollInc = src.vcellScrollInc;
+    for (size_t i = 0; i < dst.bgParams.size(); ++i) {
+        dst.bgParams[i].patNameAccess = src.bgParams[i].patNameAccess;
+        dst.bgParams[i].charPatAccess = src.bgParams[i].charPatAccess;
+        dst.bgParams[i].charPatDelay = src.bgParams[i].charPatDelay;
+        dst.bgParams[i].vramDataOffset = src.bgParams[i].vramDataOffset;
+        dst.bgParams[i].rbgPageBaseAddressesDirty = src.bgParams[i].rbgPageBaseAddressesDirty;
+    }
+    for (size_t i = 0; i < dst.rotParams.size(); ++i) {
+        dst.rotParams[i].readXst = src.rotParams[i].readXst;
+        dst.rotParams[i].readYst = src.rotParams[i].readYst;
+        dst.rotParams[i].readKAst = src.rotParams[i].readKAst;
+    }
+}
+
+} // namespace
+
 SoftwareVDPRenderer::SoftwareVDPRenderer(VDPState &state, config::VDP2DebugRender &vdp2DebugRenderOptions,
                                          const config::VDP2AccessPatternsConfig &vdp2AccessPatternsConfig)
     : IVDPRenderer(VDPRendererType::Software)
@@ -195,6 +223,8 @@ void SoftwareVDPRenderer::EnableThreadedVDP2(bool enable) {
         if (m_VDP2DeinterlaceRenderThread.joinable()) {
             m_VDP2DeinterlaceRenderThread.join();
         }
+        // Brimir: the unthreaded renderer continues from what the render thread derived
+        CopyRendererDerivedVDP2Regs(m_state.regs2, m_vdp2RenderingContext.vdp2.regs);
 
         VDP2RenderEvent dummy{};
         while (m_vdp2RenderingContext.eventQueue.try_dequeue(dummy)) {
@@ -236,6 +266,8 @@ void SoftwareVDPRenderer::PreSaveStateSync() {
     if (m_threadedVDP2Rendering) {
         m_vdp2RenderingContext.preSaveSyncSignal.Wait();
         m_vdp2RenderingContext.preSaveSyncSignal.Reset();
+        // Brimir: the render thread is idle until the next event; see CopyRendererDerivedVDP2Regs
+        CopyRendererDerivedVDP2Regs(m_state.regs2, m_vdp2RenderingContext.vdp2.regs);
     }
 }
 
@@ -243,7 +275,11 @@ void SoftwareVDPRenderer::PostLoadStateSync() {
     for (uint32 address = 0; address < kVDP2CRAMSize; address += 2) {
         VDP2UpdateCRAMCache<uint16>(address);
     }
-    VDP2UpdateEnabledBGs();
+    // Brimir: while threaded, VDP2GetRegs() is the render thread's copy, which it may still be writing; the thread
+    // updates the enabled layers itself after copying the loaded registers
+    if (!m_threadedVDP2Rendering) {
+        VDP2UpdateEnabledBGs();
+    }
 
     if (m_threadedVDP1Rendering) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::PostLoadStateSync());
@@ -562,9 +598,11 @@ void SoftwareVDPRenderer::VDP2BeginFrame() {
 
 void SoftwareVDPRenderer::VDP2RenderLine(uint32 y) {
     if (m_threadedVDP2Rendering) {
+        // Brimir: upstream also ran CalcAccessPatterns and CalcVCellScrollDelay here, on the emulator thread, for every
+        // line whatever the display latch, writing nbgLayerStates while the render thread may still be drawing earlier
+        // lines. The render thread's VDP2PrepareLine derives them as the unthreaded path does (display on only), and
+        // PreSaveStateSync copies its register-side results back into m_state.regs2.
         m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::VDP2DrawLine(y));
-        m_state.state2.CalcAccessPatterns(m_state.regs2, m_vdp2AccessPatternsConfig);
-        m_state.state2.CalcVCellScrollDelay(m_state.regs2);
     } else {
         const bool interlaced = m_state.regs2.TVMD.IsInterlaced();
         VDP2PrepareLine(y);
