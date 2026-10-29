@@ -1,7 +1,9 @@
 #include "vk_util.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <thread>
 
 namespace brimir::gpu::vk_util {
 
@@ -203,6 +205,22 @@ VkResult SubmitOneShot(VulkanDevice &device, const std::function<void(VkCommandB
     vk.vkDestroyFence(dev, fence, nullptr);
     vk.vkDestroyCommandPool(dev, pool, nullptr); // frees cmd
     return result;
+}
+
+VkResult WaitForFence(const VulkanDevice &device, VkFence fence, uint32_t pollMicroseconds) {
+    const auto &vk = device.Table();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(pollMicroseconds);
+    for (;;) {
+        const VkResult status = vk.vkGetFenceStatus(device.Device(), fence);
+        if (status != VK_NOT_READY) {
+            return status;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        std::this_thread::yield();
+    }
+    return vk.vkWaitForFences(device.Device(), 1, &fence, VK_TRUE, UINT64_MAX);
 }
 
 VkResult CreatePipelineLayout(const VulkanDevice &device, std::span<const VkDescriptorSetLayout> setLayouts,

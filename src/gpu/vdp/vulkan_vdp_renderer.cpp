@@ -645,7 +645,7 @@ void VulkanVDPRenderer::WaitContext(uint32_t context, Vdp1SyncKind kind) {
     const auto start = std::chrono::steady_clock::now();
     const VkFence fence = context < m_contextFences.size() ? m_contextFences[context] : VK_NULL_HANDLE;
     if (fence != VK_NULL_HANDLE && m_device != nullptr) {
-        const VkResult result = m_device->Table().vkWaitForFences(m_device->Device(), 1, &fence, VK_TRUE, UINT64_MAX);
+        const VkResult result = vk_util::WaitForFence(*m_device, fence); // polled, then blocking
         ++m_syncStats.fenceWaits[static_cast<uint32_t>(kind)];
         if (result != VK_SUCCESS) {
             Log("VDP1: waiting for a framebuffer readback failed; the CPU copy stays behind");

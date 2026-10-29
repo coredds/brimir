@@ -11,11 +11,16 @@
 #include <gpu/vk_device.hpp>
 #include <gpu/vk_util.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <functional>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace brimir::gpu;
@@ -311,4 +316,119 @@ TEST_CASE("Validation error counter counts error messages", "[gpu]") {
     CHECK(errors->load() == 1);
     device.reset();
     CHECK(errors->load() == 1);
+}
+
+namespace {
+
+// A sync-submit rig as VulkanOutput::Impl::SyncSubmit has it: one command pool, command buffer and fence, reused; each
+// submit copies `bytes` between two device-local buffers (a readback's size) and then waits with `wait`.
+struct SyncRig {
+    VulkanDevice &device;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    vk_util::Buffer src, dst;
+
+    SyncRig(VulkanDevice &d, VkDeviceSize bytes)
+        : device(d) {
+        const auto &vk = device.Table();
+        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolInfo.queueFamilyIndex = device.QueueFamily();
+        REQUIRE(vk.vkCreateCommandPool(device.Device(), &poolInfo, nullptr, &pool) == VK_SUCCESS);
+        VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocInfo.commandPool = pool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        REQUIRE(vk.vkAllocateCommandBuffers(device.Device(), &allocInfo, &cmd) == VK_SUCCESS);
+        const VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        REQUIRE(vk.vkCreateFence(device.Device(), &fenceInfo, nullptr, &fence) == VK_SUCCESS);
+        REQUIRE(vk_util::CreateBuffer(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, src) == VK_SUCCESS);
+        REQUIRE(vk_util::CreateBuffer(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, dst) == VK_SUCCESS);
+    }
+    ~SyncRig() {
+        const auto &vk = device.Table();
+        vk.vkDeviceWaitIdle(device.Device());
+        vk_util::DestroyBuffer(device, src);
+        vk_util::DestroyBuffer(device, dst);
+        vk.vkDestroyFence(device.Device(), fence, nullptr);
+        vk.vkDestroyCommandPool(device.Device(), pool, nullptr);
+    }
+
+    // Submits the copy `copies` times in one command buffer; returns the wait's result.
+    VkResult Submit(uint32_t copies, const std::function<VkResult()> &wait) {
+        const auto &vk = device.Table();
+        vk.vkResetCommandPool(device.Device(), pool, 0);
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vk.vkBeginCommandBuffer(cmd, &begin);
+        const VkBufferCopy region{0, 0, src.size};
+        for (uint32_t i = 0; i < copies; ++i) {
+            vk.vkCmdCopyBuffer(cmd, src.buffer, dst.buffer, 1, &region);
+            vk_util::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        }
+        vk.vkEndCommandBuffer(cmd);
+        vk.vkResetFences(device.Device(), 1, &fence);
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        if (device.Submit(submit, fence) != VK_SUCCESS) {
+            return VK_ERROR_UNKNOWN;
+        }
+        return wait();
+    }
+};
+
+} // namespace
+
+TEST_CASE("WaitForFence returns once the fence signals, short and long work alike", "[gpu]") {
+    auto device = OpenDevice();
+    {
+        SyncRig rig(*device, 256 * 1024);
+        const auto &vk = device->Table();
+        // Short work (done within the polling budget), long work (past it: the blocking wait), no budget at all
+        for (const auto &[copies, budget] : {std::pair{1u, 2000u}, std::pair{400u, 0u}, std::pair{2000u, 100u}}) {
+            CAPTURE(copies, budget);
+            CHECK(rig.Submit(copies, [&] { return vk_util::WaitForFence(*device, rig.fence, budget); }) == VK_SUCCESS);
+            CHECK(vk.vkGetFenceStatus(device->Device(), rig.fence) == VK_SUCCESS);
+        }
+        // An already signalled fence
+        CHECK(vk_util::WaitForFence(*device, rig.fence) == VK_SUCCESS);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Sync submit latency: blocking wait against WaitForFence", "[gpu][timing][.]") {
+    // A 256 KiB copy (one FBRAM slice's readback) submitted and waited for, 200 times each way; prints the mean and
+    // the worst latency from the submit to the wait's return, with 0, 2 and 8 ms of CPU work between the submits.
+    auto device = OpenDevice({.validation = false});
+    {
+        SyncRig rig(*device, 256 * 1024);
+        const auto &vk = device->Table();
+        const auto measure = [&](const char *name, uint32_t idleMs, const std::function<VkResult()> &wait) {
+            double total = 0, worst = 0;
+            for (int i = 0; i < 200; ++i) {
+                const auto t0 = std::chrono::steady_clock::now();
+                REQUIRE(rig.Submit(1, wait) == VK_SUCCESS);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                total += ms;
+                worst = std::max(worst, ms);
+                // Emulation runs between the reads of a game: the GPU goes idle
+                const auto idle = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - idle < std::chrono::milliseconds(idleMs)) {
+                }
+            }
+            std::printf("sync submit (%s), %s, %u ms between: mean %.3f ms, worst %.3f ms\n",
+                        device->Properties().deviceName, name, idleMs, total / 200, worst);
+        };
+        for (const uint32_t idleMs : {0u, 2u, 8u}) {
+            measure("vkWaitForFences", idleMs, [&] {
+                return vk.vkWaitForFences(device->Device(), 1, &rig.fence, VK_TRUE, UINT64_MAX);
+            });
+            measure("WaitForFence (2 ms polled)", idleMs, [&] { return vk_util::WaitForFence(*device, rig.fence); });
+        }
+    }
+    CloseAndCheckValidation(device);
 }

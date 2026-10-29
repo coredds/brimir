@@ -786,7 +786,8 @@ bool VulkanOutput::Impl::SyncSubmit(const gpu::VulkanVDPRenderer::SyncRecord &re
         ++refusedSyncSubmits;
         return false;
     }
-    if (vk.vkWaitForFences(dev, 1, &sync.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+    // Polled first (gpu::vk_util::WaitForFence): the blocking wait alone sometimes returns milliseconds late.
+    if (gpu::vk_util::WaitForFence(*device, sync.fence) != VK_SUCCESS) {
         // Submitted but not known to be complete: the renderer queues the ops again (harmless only because a failed
         // wait means a lost device, whose work is gone anyway).
         NegotiationLog(RETRO_LOG_ERROR, "VDP1 on the GPU: waiting for a sync submit failed");
