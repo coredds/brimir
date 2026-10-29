@@ -115,6 +115,8 @@ if(BRIMIR_VULKAN)
         unit/test_gpu_vdp1_passes.cpp
         # VulkanVDPRenderer with VDP1 on the GPU against the software renderer: FBRAM and frames, scene by scene
         unit/test_gpu_vdp1_scenes.cpp
+        # The VDP1 parity fuzzer: seeded random programs, FBRAM after every op, GPU against software
+        unit/test_gpu_vdp1_fuzz.cpp
         # CoreWrapper with the Vulkan VDP renderer: install, revert, VDP1 threading, device frames (no device needed)
         unit/test_core_wrapper_vulkan.cpp
     )

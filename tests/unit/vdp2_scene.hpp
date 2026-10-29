@@ -12,10 +12,13 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
+#include <new>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if BRIMIR_VULKAN
@@ -23,6 +26,26 @@
 #endif
 
 namespace brimir::test {
+
+/// @brief Deletes what MakeZeroed made.
+struct ZeroedDelete {
+    template <typename T>
+    void operator()(T *p) const {
+        p->~T();
+        ::operator delete(static_cast<void *>(p), std::align_val_t{alignof(T)});
+    }
+};
+
+/// @brief A T constructed on zeroed memory. VDPState and SoftwareVDPRenderer leave a few members to be written later
+/// (VDP2Regs::vcellScrollInc, SoftwareVDPRenderer::m_VDP1doubleV, RotationParamLineOutput::spriteCoords; reported for a
+/// fix on master in GPU stage 2 Task 7), which a fresh process's large allocations hold as zero; the harness builds
+/// them on zeroed memory so that the comparisons do not depend on what earlier tests left in the heap.
+template <typename T, typename... Args>
+std::unique_ptr<T, ZeroedDelete> MakeZeroed(Args &&...args) {
+    void *p = ::operator new(sizeof(T), std::align_val_t{alignof(T)});
+    std::memset(p, 0, sizeof(T));
+    return std::unique_ptr<T, ZeroedDelete>(new (p) T(std::forward<Args>(args)...));
+}
 
 class Vdp2SceneWriter;
 
@@ -99,6 +122,9 @@ public:
     /// renderers reset, then the resolution update. Called from onLine(y), RunFrame then renders line 0 again instead
     /// of line y (VDP::Reset restarts the active display at VCNT 0) and continues the frame from there.
     void ResetVDP(bool hard = false);
+
+    /// @brief Changes the enhancements of every renderer, as VDP::SetEnhancements does (the frontend's options).
+    void ConfigureEnhancements(const ymir::vdp::config::Enhancements &enhancements);
 
     /// @brief Sets TVSTAT.ODD and notifies the renderers, as the VDP does at VBlank IN.
     void Field(bool odd);

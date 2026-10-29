@@ -4,7 +4,9 @@
 #include <ymir/util/data_ops.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -306,6 +308,14 @@ void Vdp2SceneWriter::ResetVDP(bool hard) {
     m_restartFrame = true;
 }
 
+void Vdp2SceneWriter::ConfigureEnhancements(const config::Enhancements &enhancements) {
+    // VDP::SetEnhancements (vdp.hpp:176-179)
+    m_enhancements = enhancements;
+    for (Target &t : m_targets) {
+        t.renderer->ConfigureEnhancements(enhancements);
+    }
+}
+
 void Vdp2SceneWriter::Field(bool odd) {
     for (Target &t : m_targets) {
         t.state->regs2.TVSTAT.ODD = odd;
@@ -494,10 +504,10 @@ std::vector<uint32_t> RenderSoftware(const Vdp2Scene &scene, uint32_t *outWidth,
         uint32_t height = 0;
     } capture;
 
-    auto state = std::make_unique<VDPState>();
+    auto state = MakeZeroed<VDPState>();
     config::VDP2DebugRender debug{};
     config::VDP2AccessPatternsConfig access{};
-    auto renderer = std::make_unique<SoftwareVDPRenderer>(*state, debug, access);
+    auto renderer = MakeZeroed<SoftwareVDPRenderer>(*state, debug, access);
     renderer->SwCallbacks.FrameComplete.Rebind(&capture, [](uint32 *fb, uint32 w, uint32 h, void *context) {
         auto &out = *static_cast<Capture *>(context);
         out.pixels.assign(fb, fb + static_cast<size_t>(w) * h);
@@ -696,17 +706,123 @@ bool CompareSamplePointPixels(const std::vector<uint32_t> &software, uint32_t wi
 
 namespace brimir::test {
 
+namespace {
+
+// Waits for a fence by polling it: vkWaitForFences sleeps for milliseconds after the work completes on some drivers
+// (about 4 ms per submit on the RX 9060 XT on Windows, against 0.05 ms polled), and scenes submit after every
+// checkpoint.
+VkResult WaitPolled(gpu::VulkanDevice &device, VkFence fence) {
+    const auto &vk = device.Table();
+    for (;;) {
+        const VkResult status = vk.vkGetFenceStatus(device.Device(), fence);
+        if (status != VK_NOT_READY) {
+            return status;
+        }
+    }
+}
+
+// One command pool, command buffer and fence, reused by every submit (each recorded, submitted and waited for with
+// WaitPolled): the first submit of a newly allocated command buffer costs milliseconds on some drivers (about 2.5 ms
+// on the RX 9060 XT on Windows, against 0.05 ms for a reused one).
+class PolledSubmitter {
+public:
+    explicit PolledSubmitter(gpu::VulkanDevice &device)
+        : m_device(device) {
+        const auto &vk = device.Table();
+        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolInfo.queueFamilyIndex = device.QueueFamily();
+        m_ok = vk.vkCreateCommandPool(device.Device(), &poolInfo, nullptr, &m_pool) == VK_SUCCESS;
+        if (m_ok) {
+            VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            allocInfo.commandPool = m_pool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = 1;
+            m_ok = vk.vkAllocateCommandBuffers(device.Device(), &allocInfo, &m_cmd) == VK_SUCCESS;
+        }
+        if (m_ok) {
+            const VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            m_ok = vk.vkCreateFence(device.Device(), &fenceInfo, nullptr, &m_fence) == VK_SUCCESS;
+        }
+    }
+    ~PolledSubmitter() {
+        const auto &vk = m_device.Table();
+        vk.vkDestroyFence(m_device.Device(), m_fence, nullptr);
+        vk.vkDestroyCommandPool(m_device.Device(), m_pool, nullptr); // frees m_cmd
+    }
+    PolledSubmitter(const PolledSubmitter &) = delete;
+    PolledSubmitter &operator=(const PolledSubmitter &) = delete;
+
+    // vk_util::SubmitOneShot's contract: records, submits and waits.
+    VkResult Submit(const std::function<void(VkCommandBuffer)> &record) {
+        return SubmitIf([&](VkCommandBuffer cmd) {
+            record(cmd);
+            return true;
+        });
+    }
+    // The same, but nothing is submitted when `record` returns false (VK_SUCCESS then).
+    VkResult SubmitIf(const std::function<bool(VkCommandBuffer)> &record) {
+        if (!m_ok) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        const auto &vk = m_device.Table();
+        VkResult result = vk.vkResetCommandBuffer(m_cmd, 0);
+        if (result == VK_SUCCESS) {
+            VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            result = vk.vkBeginCommandBuffer(m_cmd, &beginInfo);
+        }
+        bool recorded = false;
+        if (result == VK_SUCCESS) {
+            recorded = record(m_cmd);
+            result = vk.vkEndCommandBuffer(m_cmd);
+        }
+        if (result != VK_SUCCESS || !recorded) {
+            return result;
+        }
+        result = vk.vkResetFences(m_device.Device(), 1, &m_fence);
+        if (result == VK_SUCCESS) {
+            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &m_cmd;
+            result = m_device.Submit(submit, m_fence);
+            if (result == VK_SUCCESS) {
+                result = WaitPolled(m_device, m_fence);
+            }
+        }
+        return result;
+    }
+
+private:
+    gpu::VulkanDevice &m_device;
+    VkCommandPool m_pool = VK_NULL_HANDLE;
+    VkCommandBuffer m_cmd = VK_NULL_HANDLE;
+    VkFence m_fence = VK_NULL_HANDLE;
+    bool m_ok = false;
+};
+
+VkResult SubmitPolled(gpu::VulkanDevice &device, const std::function<void(VkCommandBuffer)> &record) {
+    PolledSubmitter submitter(device);
+    return submitter.Submit(record);
+}
+
+} // namespace
+
 std::vector<uint32_t> ReadbackBuffer(gpu::VulkanDevice &device, VkBuffer buffer, uint32_t words) {
     namespace vu = gpu::vk_util;
     std::vector<uint32_t> out;
     vu::Buffer host;
     const VkDeviceSize bytes = VkDeviceSize{words} * sizeof(uint32_t);
-    if (words == 0 || vu::CreateBuffer(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                       host) != VK_SUCCESS) {
+    // Host-cached memory where there is some (uncached reads are slow)
+    const auto create = [&](VkMemoryPropertyFlags extra) {
+        return vu::CreateBuffer(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | extra,
+                                host) == VK_SUCCESS;
+    };
+    if (words == 0 || (!create(VK_MEMORY_PROPERTY_HOST_CACHED_BIT) && !create(0))) {
         return out;
     }
-    const VkResult result = vu::SubmitOneShot(device, [&](VkCommandBuffer cmd) {
+    const VkResult result = SubmitPolled(device, [&](VkCommandBuffer cmd) {
         vu::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         const VkBufferCopy region{0, 0, bytes};
@@ -723,45 +839,19 @@ std::vector<uint32_t> ReadbackBuffer(gpu::VulkanDevice &device, VkBuffer buffer,
 }
 
 void InstallSyncSubmit(gpu::VulkanVDPRenderer &renderer, gpu::VulkanDevice &device, SyncSubmitCounter *counter) {
-    renderer.SetSyncSubmit([&device, counter](const gpu::VulkanVDPRenderer::SyncRecord &record) {
+    // One submitter for the renderer's lifetime (it holds the callback; the device must outlive the renderer)
+    auto submitter = std::make_shared<PolledSubmitter>(device);
+    renderer.SetSyncSubmit([submitter, counter](const gpu::VulkanVDPRenderer::SyncRecord &record) {
         if (counter != nullptr && !counter->allowed) {
             ++counter->refused;
             return false;
         }
-        const auto &vk = device.Table();
-        const VkDevice dev = device.Device();
-        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        poolInfo.queueFamilyIndex = device.QueueFamily();
-        VkCommandPool pool = VK_NULL_HANDLE;
-        VkFence fence = VK_NULL_HANDLE;
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        const VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        bool ok = vk.vkCreateCommandPool(dev, &poolInfo, nullptr, &pool) == VK_SUCCESS &&
-                  vk.vkCreateFence(dev, &fenceInfo, nullptr, &fence) == VK_SUCCESS;
-        if (ok) {
-            VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-            allocInfo.commandPool = pool;
-            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            allocInfo.commandBufferCount = 1;
-            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            ok = vk.vkAllocateCommandBuffers(dev, &allocInfo, &cmd) == VK_SUCCESS &&
-                 vk.vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS;
-        }
         bool recorded = false;
-        if (ok) {
+        const VkResult result = submitter->SubmitIf([&](VkCommandBuffer cmd) {
             recorded = record(cmd);
-            ok = vk.vkEndCommandBuffer(cmd) == VK_SUCCESS && recorded;
-        }
-        if (ok) {
-            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submit.commandBufferCount = 1;
-            submit.pCommandBuffers = &cmd;
-            ok = device.Submit(submit, fence) == VK_SUCCESS &&
-                 vk.vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
-        }
-        vk.vkDestroyFence(dev, fence, nullptr);
-        vk.vkDestroyCommandPool(dev, pool, nullptr);
+            return recorded;
+        });
+        const bool ok = result == VK_SUCCESS && recorded;
         if (counter != nullptr && (ok || recorded)) {
             ++(ok ? counter->submits : counter->refused);
         }
@@ -872,11 +962,11 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
     } capture;
 
     // Separate states: the front half maintains per-line VDPState fields that the software renderer also maintains.
-    auto swState = std::make_unique<VDPState>();
-    auto vkState = std::make_unique<VDPState>();
+    auto swState = MakeZeroed<VDPState>();
+    auto vkState = MakeZeroed<VDPState>();
     config::VDP2DebugRender swDebug{}, vkDebug{};
     config::VDP2AccessPatternsConfig access{};
-    auto software = std::make_unique<SoftwareVDPRenderer>(*swState, swDebug, access);
+    auto software = MakeZeroed<SoftwareVDPRenderer>(*swState, swDebug, access);
     software->SwCallbacks.FrameComplete.Rebind(&capture, [](uint32 *fb, uint32 w, uint32 h, void *context) {
         auto &out = *static_cast<Capture *>(context);
         out.pixels.assign(fb, fb + static_cast<size_t>(w) * h);
@@ -970,32 +1060,74 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
     };
     // FBRAM checkpoints (RenderBothFBRAM): the pending VDP1 ops in an ops-only submit, then the GPU FBRAM read back and
     // compared with software's.
+    PolledSubmitter submitter(device); // the frames' and checkpoints' submits
     FbramResult *fbram = options.fbram;
     bool fbramFailed = false;
+    // One host buffer for every checkpoint's readback (checkpoints can come after every op of a scene)
+    constexpr uint32_t kSlice = kVDP1FBRAMSize;
+    struct HostBuffer {
+        gpu::VulkanDevice &device;
+        gpu::vk_util::Buffer buffer;
+        ~HostBuffer() {
+            gpu::vk_util::DestroyBuffer(device, buffer);
+        }
+    } fbramHost{device, {}};
+    uint32_t currentFrame = 0;
+    bool frameRecordedByCheckpoint = false;
+    const auto frameContext = [&] {
+        return options.contextForFrame ? options.contextForFrame(currentFrame)
+                                       : currentFrame % std::max(options.frameContexts, 1u);
+    };
     const auto compareFbram = [&](const std::string &label) {
         if (fbram == nullptr || fbramFailed) {
             return;
         }
-        if (vulkan->HasPendingVdp1Work()) {
-            bool recorded = false;
-            if (gpu::vk_util::SubmitOneShot(device, [&](VkCommandBuffer cmd) {
-                    recorded = vulkan->RecordPendingVdp1Work(0, cmd);
-                }) != VK_SUCCESS ||
-                !recorded) {
-                fbram->error = label + ": the ops-only submit failed";
-                fbramFailed = true;
-                return;
-            }
-            vulkan->FrameSubmitted(0, VK_NULL_HANDLE); // completed (SubmitOneShot waits)
-        }
-        constexpr uint32_t kSlice = kVDP1FBRAMSize;
-        const std::vector<uint32_t> words = ReadbackBuffer(device, vulkan->Backend()->SpriteFBBuffer(), 8 * kSlice / 4);
-        if (words.size() * 4 != 8 * kSlice) {
-            fbram->error = label + ": FBRAM readback failed";
+        // Host-cached memory where there is some (the CPU reads all of it at every checkpoint)
+        const auto createHost = [&](VkMemoryPropertyFlags extra) {
+            return gpu::vk_util::CreateBuffer(device, VkDeviceSize{8} * kSlice, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | extra,
+                                              fbramHost.buffer) == VK_SUCCESS;
+        };
+        if (fbramHost.buffer.buffer == VK_NULL_HANDLE && !createHost(VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
+            !createHost(0)) {
+            fbram->error = label + ": no FBRAM readback buffer";
             fbramFailed = true;
             return;
         }
-        const auto *gpuBytes = reinterpret_cast<const uint8_t *>(words.data());
+        // The pending VDP1 ops (an ops-only submit's work) and the readback in one submit. In blanking (after
+        // VDP2EndFrame, the frame not recorded yet) the ops after the frame's end can only follow the frame: the frame
+        // is recorded here then, as a sync submit in blanking records it (FramePolicy::Sync), and the frame loop
+        // compares it.
+        const bool pending = vulkan->HasPendingVdp1Work();
+        const bool withFrame = pending && vulkan->HasPendingFrame();
+        const uint32_t context = withFrame ? frameContext() : 0;
+        bool recorded = !pending;
+        const VkResult submitted = submitter.Submit([&](VkCommandBuffer cmd) {
+            if (pending) {
+                recorded = withFrame ? vulkan->RecordPendingFrame(context, cmd) : vulkan->RecordPendingVdp1Work(0, cmd);
+            }
+            if (!recorded) {
+                return;
+            }
+            gpu::vk_util::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+                                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            const VkBufferCopy region{0, 0, VkDeviceSize{8} * kSlice};
+            device.Table().vkCmdCopyBuffer(cmd, vulkan->Backend()->SpriteFBBuffer(), fbramHost.buffer.buffer, 1,
+                                           &region);
+            gpu::vk_util::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                        VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+        });
+        if (submitted != VK_SUCCESS || !recorded) {
+            fbram->error = label + (pending ? ": the ops-only submit failed" : ": FBRAM readback failed");
+            fbramFailed = true;
+            return;
+        }
+        if (pending) {
+            vulkan->FrameSubmitted(context, VK_NULL_HANDLE); // completed (Submit waits)
+            frameRecordedByCheckpoint |= withFrame;
+        }
+        const auto *gpuBytes = static_cast<const uint8_t *>(fbramHost.buffer.mapped);
         const std::array<const SpriteFB *, 8> sw{&swState->mem1.FBRAM[0],         &swState->mem1.FBRAM[1],
                                                  &software->GetAltFBRAM(0),        &software->GetAltFBRAM(1),
                                                  &software->GetMeshFBRAM(false, 0), &software->GetMeshFBRAM(false, 1),
@@ -1006,8 +1138,17 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         for (uint32_t slice = 0; slice < 8; ++slice) {
             const uint8_t *g = gpuBytes + size_t{slice} * kSlice;
             const SpriteFB &s = *sw[slice];
+            // Non-zero bytes, eight at a time (bit 7 of each byte of t is set when that byte is non-zero)
+            for (uint32_t i = 0; i < kSlice; i += 8) {
+                uint64_t v;
+                std::memcpy(&v, s.data() + i, 8);
+                const uint64_t t = (((v & 0x7F7F7F7F7F7F7F7Full) + 0x7F7F7F7F7F7F7F7Full) | v) & 0x8080808080808080ull;
+                nonZero += static_cast<uint64_t>(std::popcount(t));
+            }
+            if (std::memcmp(s.data(), g, kSlice) == 0) {
+                continue;
+            }
             for (uint32_t i = 0; i < kSlice; ++i) {
-                nonZero += s[i] != 0 ? 1 : 0;
                 if (s[i] != g[i] && fbram->count++ == 0) {
                     fbram->where = label;
                     fbram->slice = slice;
@@ -1029,6 +1170,8 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         scene.setup(writer);
     }
     for (uint32_t frame = 0; frame < scene.frames; ++frame) {
+        currentFrame = frame;
+        frameRecordedByCheckpoint = false;
         if (options.beforeFrame) {
             options.beforeFrame(frame, *vulkan, device);
         }
@@ -1052,7 +1195,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         };
         writer.RunFrame(onLine, 0, UINT32_MAX, scene.blanking);
         // A VDP1 sync submit in blanking (a CPU read or a save after VDP2EndFrame) may have recorded the frame.
-        const bool recordedBySync = vulkan->TakeFrameRecordedBySync();
+        const bool recordedBySync = vulkan->TakeFrameRecordedBySync() || frameRecordedByCheckpoint;
         if (frame + 1 == scene.frames && !vulkan->HasPendingFrame() && !recordedBySync) {
             result.error = "the last frame has no recorded GPU frame";
             return result;
@@ -1080,7 +1223,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 vulkan->RecordedFrameDropped();
                 continue;
             }
-            const VkResult submit = gpu::vk_util::SubmitOneShot(device, [&](VkCommandBuffer cmd) {
+            const VkResult submit = submitter.Submit([&](VkCommandBuffer cmd) {
                 if (timestamps.pool != VK_NULL_HANDLE) {
                     device.Table().vkCmdResetQueryPool(cmd, timestamps.pool, 0, 2);
                     device.Table().vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamps.pool, 0);
@@ -1094,7 +1237,7 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
                 result.error = "frame " + std::to_string(frame) + ": recording or submission failed";
                 return result;
             }
-            vulkan->FrameSubmitted(context, VK_NULL_HANDLE); // completed (SubmitOneShot waits)
+            vulkan->FrameSubmitted(context, VK_NULL_HANDLE); // completed (Submit waits)
             if (hasFrame && vulkan->Backend()->LastRecordStatsForTest().scale != vulkan->InternalScale()) {
                 result.error = "frame " + std::to_string(frame) + " recorded at " +
                                std::to_string(vulkan->Backend()->LastRecordStatsForTest().scale) + "x, expected " +

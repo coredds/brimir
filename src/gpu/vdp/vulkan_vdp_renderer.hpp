@@ -199,6 +199,8 @@ public:
     const vdp1::Vdp1FrontEnd &Vdp1Front() const { return m_vdp1Front; }
     // Test hook: the VDP1 front half's batch capacities.
     void SetVdp1BatchLimitsForTest(const vdp1::Vdp1BatchLimits &limits) { m_vdp1Front.SetBatchLimitsForTesting(limits); }
+    // Test hook: VRAM hazard tracking off (wrong output: shows that a test notices).
+    void SetVdp1HazardTrackingForTest(bool enabled) { m_vdp1Front.SetHazardTrackingForTesting(enabled); }
     // The persistent composite (VK_NULL_HANDLE while detached): InternalScale() x the frame size FrameReady reports,
     // pitch InternalScale() * HRes.
     VkBuffer CompositeBuffer() const;

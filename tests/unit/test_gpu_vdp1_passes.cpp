@@ -1115,6 +1115,68 @@ TEST_CASE("VDP1 resolve pass: synthetic fragment sets of up to 50000 per word eq
     CloseAndCheckValidation(device);
 }
 
+TEST_CASE("VDP1 resolve pass: 250000 fragments on one word finish in bounded time and equal the reference",
+          "[gpu][vdp1][passes]") {
+    // The deep-stack worst case (one batch, every fragment on one word, order-sensitive half-transparency and shadow
+    // with MSB-on, mesh and 8-bpp targets mixed in): bounded GPU time, no device loss. Device-local buffers where the
+    // device has them, as the renderer's.
+    auto device = OpenDevice();
+    INFO("device: " << device->Properties().deviceName);
+    {
+        GpuVdp1 g(*device, GpuVdp1::Memory::DeviceLocal);
+        REQUIRE(g.Ok());
+        TestRng rng{250000};
+        constexpr uint32 kCount = 250000;
+        constexpr uint32 kUnit = 0x20000 | 54321;
+        for (const bool overwriteLate : {false, true}) {
+            CAPTURE(overwriteLate);
+            std::vector<gpu::Vdp1Fragment> slots(kCount + 64, gpu::Vdp1Fragment{0, 0});
+            for (uint32 k = 0; k < kCount; ++k) {
+                const uint32 kind = static_cast<uint32>(rng.Range(0, 99));
+                // overwriteLate: replace-mode fragments (calc 0) appear only in the last 1000, as a reset point late
+                // in the stack
+                const uint32 calc = overwriteLate && k + 1000 >= kCount && kind < 30 ? 0
+                                                                                    : static_cast<uint32>(rng.Range(1, 3));
+                const bool tm = rng.Chance(40);
+                slots[32 + k] = {gpu::Vdp1MakeFragmentTarget(kUnit & gpu::kWordIndexMask, true, rng.Chance(50), calc,
+                                                              tm && rng.Chance(40), kind < 3, kind >= 3 && kind < 10,
+                                                              tm),
+                                 static_cast<uint32>(rng.Next() & 0xFFFF)};
+            }
+            auto initial = ApexInitialFbram();
+            g.Reset(*initial);
+            g.Times().Clear();
+            const auto start = std::chrono::steady_clock::now();
+            REQUIRE(g.ResolveFragments(slots, 1));
+            const double wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            const Timings t = g.Times();
+            UNSCOPED_INFO("250000 fragments on one word: " << t.Format() << "; wall " << wallMs << " ms");
+            if (std::getenv("BRIMIR_VDP1_TIMINGS") != nullptr) {
+                std::printf("VDP1 GPU deep stack (%s, %s): 250000 fragments on one word, %s; wall %.1f ms\n",
+                            device->Properties().deviceName, overwriteLate ? "replace fragments late" : "all blending",
+                            t.Format().c_str(), wallMs);
+            }
+            if (device->Properties().deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                CHECK(wallMs < 1000.0);
+            }
+            std::vector<ref::Fragment> fragments;
+            for (uint32 i = 0; i < slots.size(); ++i) {
+                if (gpu::Vdp1FragLive(slots[i].target)) {
+                    fragments.push_back({i, slots[i].target & ~gpu::kFragLiveBit, slots[i].color});
+                }
+            }
+            auto expected = std::make_unique<ref::Fbram>(*initial);
+            const ref::ResolveStats rs = ref::Resolve(1, fragments, *expected);
+            CHECK(rs.maxPerUnit == kCount);
+            auto got = std::make_unique<ref::Fbram>();
+            g.GetFbram(*got);
+            CHECK(CompareFbram(*expected, *got, "reference", "GPU") == "");
+            CHECK(g.CountsZero());
+        }
+    }
+    CloseAndCheckValidation(device);
+}
+
 TEST_CASE("VDP1 passes: an apex stack of more than 8000 fragments on one word through the raster pass",
           "[gpu][vdp1][passes]") {
     // 9,000 spans (one half-transparent Gouraud command) all ending at the apex: one fragment per span on its word
