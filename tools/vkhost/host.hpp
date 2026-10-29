@@ -60,6 +60,10 @@ struct HostConfig {
     int stateRoundtrip = 0;  // --state-roundtrip N: retro_serialize + retro_unserialize after every Nth frame
     int saveStateAt = -1;    // --save-state-at F <file>: retro_serialize after frame F into saveStatePath
     std::string saveStatePath;
+    // --save-state-every N <dir>: retro_serialize after every Nth recorded frame (recorded frames N-1, 2N-1, ...) into
+    // <dir>/state_<recorded frame, 5 digits>.bin (--compare-state)
+    int saveStateEvery = 0;
+    std::string saveStateDir;
     std::string loadStatePath; // --load-state <file>: retro_unserialize before the first frame
     bool runahead = false; // --runahead: run-ahead simulation (hidden frames, a second instance without context)
     bool preferGl = false; // --preferred-hw gl: GET_PREFERRED_HW_RENDER reports GL (SET_HW_RENDER still accepted)
@@ -112,6 +116,11 @@ struct ProbeFrame {
     uint32_t meshSlices = 0;
     uint32_t cramModeMask = 0;
     double frontMicroseconds = 0;
+    // Gpu VDP1 mode, since the previous VDP2 frame: the VDP1 front half's CPU time, the CPU time recording the VDP1 work,
+    // and the GPU time of the VDP1 work (timestamps, trailing by the frames in flight)
+    double vdp1FrontMicroseconds = 0;
+    double vdp1RecordMicroseconds = 0;
+    double vdp1GpuMicroseconds = 0;
 };
 
 // One retro_run's "VDP1 probe:" line: the VDP1 work the software renderer counted (cores built with

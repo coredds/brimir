@@ -82,7 +82,22 @@ public:
     };
     const RecordStats &StatsForTest() const { return m_stats; }
 
+    // Diagnostics (brimir_vkhost --probe): from now on every Record, RecordFbramUpload and RecordReadback is bracketed
+    // by two timestamps (bottom of pipe: the span from the end of the earlier work to the end of its own), and each
+    // BeginContext adds the context's completed spans to the GPU time TakeGpuSeconds returns (vkGetQueryPoolResults
+    // without waiting; results that are not available are dropped). No-op where the device has no timestamps on its
+    // graphics and compute queues (timestampComputeAndGraphics) or the pool cannot be created.
+    void EnableTimestamps();
+    // The GPU time of the command buffers whose results were collected since the last call, in seconds.
+    double TakeGpuSeconds();
+
 private:
+    static constexpr uint32_t kQueriesPerContext = 64;
+    static constexpr uint32_t kMaxTimedContexts = 16;
+    void StampBegin(uint32_t contextIndex, VkCommandBuffer cmd);
+    void StampEnd(uint32_t contextIndex, VkCommandBuffer cmd);
+    void CollectTimestamps(uint32_t contextIndex);
+
     enum Pass : uint32_t {
         kRaster, kBatchRange, kBucket, kBucketSums, kScatter, kResolve, kErase, kFbWriteMark, kFbWrite, kFbWriteClear,
         kPassCount
@@ -133,6 +148,13 @@ private:
     bool m_pendingZero = true;  // the back half's buffers are zeroed by the next Record
     bool m_recordedZero = false; // ... and the command buffer of the last BeginContext carries it
     RecordStats m_stats{};
+    // EnableTimestamps: kQueriesPerContext queries per context (the first kMaxTimedContexts), the queries the context's
+    // current command buffer used, whether that command buffer reset them yet
+    VkQueryPool m_queries = VK_NULL_HANDLE;
+    std::array<uint32_t, kMaxTimedContexts> m_queryCount{};
+    std::array<bool, kMaxTimedContexts> m_queriesReset{};
+    int32_t m_lastContext = -1;
+    double m_gpuSeconds = 0;
 };
 
 } // namespace brimir::gpu::vdp1

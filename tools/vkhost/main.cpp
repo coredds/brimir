@@ -48,6 +48,7 @@ struct CliArgs {
     bool compare = false;
     int dumpFrame = -1; // --dump-frame I: with --dump-dir, write only recorded frame I
     std::vector<std::pair<std::string, std::string>> compareVulkanOptions;
+    int compareState = 0; // --compare-state N (0: off)
     int hashSample = 0;  // --hash-sample N (0: off)
     int sharpness = 0;   // --sharpness N (0: off)
     Region region;       // --region x,y,w,h
@@ -96,6 +97,8 @@ void PrintUsage(std::FILE* out) {
         "  --state-roundtrip N  retro_serialize + retro_unserialize after every Nth frame\n"
         "  --save-state-at F <file>  retro_serialize after frame F (counting warmup frames from 0) into <file>; with\n"
         "                --compare each child writes <file>.software or <file>.vulkan\n"
+        "  --save-state-every N <dir>  retro_serialize after every Nth recorded frame (recorded frames N-1, 2N-1, ...)\n"
+        "                into <dir>/state_<recorded frame>.bin (not with --compare: see --compare-state)\n"
         "  --load-state <file>  retro_unserialize <file> before the first frame (after the context exists)\n"
         "  --runahead    run-ahead simulation: before each frame one hidden frame (video disabled; not rolled\n"
         "                back, so compare with a software --runahead run), and a second instance of the core\n"
@@ -128,6 +131,11 @@ void PrintUsage(std::FILE* out) {
         "                compute frame output and the Vulkan VDP2 renderer for every frame. Other flags go to both\n"
         "                runs\n"
         "  --compare-vulkan-option key=value  with --compare: core option for the Vulkan run only\n"
+        "  --compare-state N  with --compare: both runs save a state after every Nth recorded frame and each pair is\n"
+        "                diffed with brimir_state_diff (next to this executable): the VDP1 framebuffers (vdp.FBRAM,\n"
+        "                displayFB) strictly, the renderer section (doubleV, mesh FBRAM, ...) up to its allowlist of\n"
+        "                line-local fetcher caches. Any differing pair fails the compare (exit 3); the first one's diff\n"
+        "                is printed and both states are copied into the dump directory\n"
         "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
         "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"
         "  --set-option-at F key=value  a live option change before frame F (counting warmup frames from 0), reported\n"
@@ -259,6 +267,15 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             i += 2;
             continue;
         }
+        if (opt == "--save-state-every") { // two values
+            if (i + 2 >= argc || !ParseInt(argv[i + 1], args.config.saveStateEvery) || args.config.saveStateEvery == 0) {
+                std::fprintf(stderr, "--save-state-every needs a frame count (1 or more) and a directory\n");
+                return ParseResult::Error;
+            }
+            args.config.saveStateDir = argv[i + 2];
+            i += 2;
+            continue;
+        }
         if (opt == "--set-option-at") { // two values
             vkhost::HostConfig::OptionChange change;
             const std::string text = i + 2 < argc ? argv[i + 2] : "";
@@ -301,6 +318,11 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         } else if (opt == "--dump-frame") {
             if (!ParseInt(value, args.dumpFrame)) {
                 std::fprintf(stderr, "Invalid --dump-frame value: %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--compare-state") {
+            if (!ParseInt(value, args.compareState) || args.compareState == 0) {
+                std::fprintf(stderr, "Invalid --compare-state value (1 or more): %s\n", value);
                 return ParseResult::Error;
             }
         } else if (opt == "--compare-vulkan-option") {
@@ -473,6 +495,14 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     }
     if (!args.compare && !args.compareVulkanOptions.empty()) {
         std::fprintf(stderr, "--compare-vulkan-option needs --compare\n");
+        return ParseResult::Error;
+    }
+    if (!args.compare && args.compareState != 0) {
+        std::fprintf(stderr, "--compare-state needs --compare\n");
+        return ParseResult::Error;
+    }
+    if (args.compare && args.config.saveStateEvery != 0) {
+        std::fprintf(stderr, "--save-state-every cannot be combined with --compare (use --compare-state)\n");
         return ParseResult::Error;
     }
     if (args.compare) {
@@ -670,6 +700,9 @@ void PrintProbeSummary(const std::vector<vkhost::ProbeFrame>& frames) {
     printStats("arena_bytes", &vkhost::ProbeFrame::arenaBytes);
     printStats("copy_bytes", &vkhost::ProbeFrame::copyBytes);
     printStats("front_us", &vkhost::ProbeFrame::frontMicroseconds);
+    printStats("vdp1_front_us", &vkhost::ProbeFrame::vdp1FrontMicroseconds);
+    printStats("vdp1_record_us", &vkhost::ProbeFrame::vdp1RecordMicroseconds);
+    printStats("vdp1_gpu_us", &vkhost::ProbeFrame::vdp1GpuMicroseconds);
     const auto printFeature = [&](const char* name, uint32_t vkhost::ProbeFrame::*member) {
         size_t usingFrames = 0;
         uint64_t total = 0;
@@ -765,6 +798,7 @@ int main(int argc, char** argv) {
         compare.dumpDir = args.config.dumpDir;
         compare.frames = args.config.frames;
         compare.vulkanOptions = args.compareVulkanOptions;
+        compare.stateEvery = args.compareState;
         return vkhost::RunCompare(compare);
     }
 

@@ -31,4 +31,6 @@ if(BRIMIR_VULKAN)
     endif()
     # The core is loaded at runtime, not linked: build it alongside.
     add_dependencies(brimir_vkhost brimir_libretro)
+    # --compare-state runs brimir_state_diff from the same directory.
+    add_dependencies(brimir_vkhost brimir_state_diff)
 endif()

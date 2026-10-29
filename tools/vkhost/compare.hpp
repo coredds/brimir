@@ -19,11 +19,13 @@ struct CompareConfig {
     std::string dumpDir;           // --dump-dir: where the differing frames go (default: a kept temp directory)
     int frames = 300;
     std::vector<std::pair<std::string, std::string>> vulkanOptions; // --compare-vulkan-option, Vulkan child only
+    int stateEvery = 0; // --compare-state N: both children save a state after every Nth recorded frame (0: off)
 };
 
-// Returns 0 when every frame is identical, 3 on any difference or failed check (the first differing frame is
-// reported with its first differing pixel and both images are dumped as PPM), 4 when Vulkan is unavailable, 2 on
-// setup failure.
+// Returns 0 when every frame (and with stateEvery every state pair) is identical, 3 on any difference or failed check
+// (the first differing frame is reported with its first differing pixel and both images are dumped as PPM; the first
+// differing state pair's brimir_state_diff output is printed and both states are copied into the dump directory), 4
+// when Vulkan is unavailable, 2 on setup failure.
 int RunCompare(const CompareConfig& config);
 
 } // namespace vkhost

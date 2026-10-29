@@ -295,13 +295,15 @@ static void set_vdp2_probe(brimir::gpu::VulkanVDPRenderer& renderer) {
     if (!requested) {
         return;
     }
-    renderer.FrameProbe = [](const brimir::gpu::vdp2::Vdp2FeatureCounters& f, double frontSeconds) {
+    renderer.FrameProbe = [](const brimir::gpu::vdp2::Vdp2FeatureCounters& f, double frontSeconds,
+                             const brimir::gpu::VulkanVDPRenderer::Vdp1ProbeTimes& vdp1) {
         brimir_log(RETRO_LOG_DEBUG,
                    "VDP2 probe: batches %u arena %u copy %u mosaic %u vcell %u chardelay %u ddlinescroll %u "
-                   "extcc %u shadow %u mesh %u crammodes %u front_us %.1f",
+                   "extcc %u shadow %u mesh %u crammodes %u front_us %.1f vdp1_front_us %.1f vdp1_record_us %.1f "
+                   "vdp1_gpu_us %.1f",
                    f.batches, f.arenaBytes, f.copyBytes, f.mosaicLines, f.vcellLines, f.charPatDelayLines,
                    f.ddLineScrollLines, f.extendedCCLines, f.shadowLines, f.meshSlices, f.cramModeMask,
-                   frontSeconds * 1e6);
+                   frontSeconds * 1e6, vdp1.frontSeconds * 1e6, vdp1.recordSeconds * 1e6, vdp1.gpuSeconds * 1e6);
     };
 }
 

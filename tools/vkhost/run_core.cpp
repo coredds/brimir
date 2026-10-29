@@ -210,6 +210,14 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     uint64_t secondaryFrames = 0;
     uint64_t hiddenFrames = 0;
     uint64_t roundtrips = 0;
+    uint64_t periodicSaves = 0;
+    if (config.saveStateEvery > 0) {
+        std::error_code ec;
+        fs::create_directories(config.saveStateDir, ec);
+        if (ec) {
+            throw std::runtime_error("cannot create " + config.saveStateDir + ": " + ec.message());
+        }
+    }
     std::chrono::steady_clock::time_point recordStart;
     for (int i = 0; i < total; ++i) {
         if (i == config.warmup) {
@@ -255,6 +263,22 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
                              config.saveStatePath.c_str(), state.size());
             }
         }
+        if (config.saveStateEvery > 0 && i >= config.warmup && (i - config.warmup + 1) % config.saveStateEvery == 0) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "state_%05d.bin", i - config.warmup);
+            const fs::path path = fs::path(config.saveStateDir) / name;
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!host.Serialize(state) ||
+                !out.write(reinterpret_cast<const char*>(state.data()), static_cast<std::streamsize>(state.size()))) {
+                stateProblems.push_back("--save-state-every: cannot save the state to " + path.string());
+                break;
+            }
+            ++periodicSaves;
+        }
+    }
+    if (config.saveStateEvery > 0) {
+        std::fprintf(stderr, "vkhost: %llu periodic states saved to %s\n", static_cast<unsigned long long>(periodicSaves),
+                     config.saveStateDir.c_str());
     }
     if (config.hideEvery > 0 || config.runahead) {
         std::fprintf(stderr, "vkhost: %llu hidden frames (video disabled)\n",

@@ -503,11 +503,13 @@ bool LibretroHost::ProbeLine(const char* text) {
     ProbeFrame f;
     const int n = std::sscanf(line,
                               "VDP2 probe: batches %u arena %u copy %u mosaic %u vcell %u chardelay %u ddlinescroll %u "
-                              "extcc %u shadow %u mesh %u crammodes %u front_us %lf",
+                              "extcc %u shadow %u mesh %u crammodes %u front_us %lf vdp1_front_us %lf "
+                              "vdp1_record_us %lf vdp1_gpu_us %lf",
                               &f.batches, &f.arenaBytes, &f.copyBytes, &f.mosaicLines, &f.vcellLines,
                               &f.charPatDelayLines, &f.ddLineScrollLines, &f.extendedCCLines, &f.shadowLines,
-                              &f.meshSlices, &f.cramModeMask, &f.frontMicroseconds);
-    if (n != 12) {
+                              &f.meshSlices, &f.cramModeMask, &f.frontMicroseconds, &f.vdp1FrontMicroseconds,
+                              &f.vdp1RecordMicroseconds, &f.vdp1GpuMicroseconds);
+    if (n != 12 && n != 15) { // 12: a core without the VDP1 times
         return false;
     }
     if (m_sink != nullptr) {

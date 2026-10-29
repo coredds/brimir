@@ -124,7 +124,18 @@ public:
     // Diagnostics (brimir_vkhost --probe): when set, fired at the end of every VDP2 frame, before FrameReady, with the
     // front half's feature counters and the CPU time the frame took in the front half (VDP2BeginFrame, the lines with
     // their sprite captures, VDP2EndFrame; register and memory writes, which only mark state dirty, are not timed).
-    std::function<void(const vdp2::Vdp2FeatureCounters &features, double frontSeconds)> FrameProbe;
+    // In Gpu VDP1 mode also the VDP1 times since the previous call (Vdp1ProbeTimes).
+    struct Vdp1ProbeTimes {
+        // CPU time in the VDP1 front half: commands, erases, CPU framebuffer writes, frame begin/boundary and taking the
+        // ops (VRAM writes, which only mark chunks dirty, are not timed)
+        double frontSeconds = 0;
+        // CPU time recording the VDP1 work into command buffers (uploads, passes, readbacks; Record* of the back half)
+        double recordSeconds = 0;
+        // GPU time of the VDP1 work (timestamps; collected when a context's command buffer is reused, so it trails)
+        double gpuSeconds = 0;
+    };
+    std::function<void(const vdp2::Vdp2FeatureCounters &features, double frontSeconds, const Vdp1ProbeTimes &vdp1)>
+        FrameProbe;
 
     // A recorded frame waits for RecordPendingFrame (only while attached).
     bool HasPendingFrame() const;
@@ -399,6 +410,7 @@ private:
     bool m_slicesCaptured = false;           // the open frame has its main (and mesh0) sprite slices
     bool m_altSlicesCaptured = false;        // the open frame has its alt (and mesh1) sprite slices
     double m_frontSeconds = 0;               // FrameProbe: front-half time of the open frame
+    Vdp1ProbeTimes m_vdp1Times;              // FrameProbe: VDP1 times since the last report (Gpu VDP1 mode)
 };
 
 } // namespace brimir::gpu

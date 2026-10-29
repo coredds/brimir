@@ -171,6 +171,79 @@ void Vdp1VulkanBackend::Destroy() {
         vk_util::DestroyBuffer(m_device, readback);
     }
     m_readbacks.clear();
+    if (m_queries != VK_NULL_HANDLE) {
+        vk.vkDestroyQueryPool(dev, m_queries, nullptr);
+        m_queries = VK_NULL_HANDLE;
+    }
+}
+
+void Vdp1VulkanBackend::EnableTimestamps() {
+    if (m_queries != VK_NULL_HANDLE || !Ok() || !m_device.Properties().limits.timestampComputeAndGraphics) {
+        return;
+    }
+    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    info.queryCount = kQueriesPerContext * kMaxTimedContexts;
+    if (m_device.Table().vkCreateQueryPool(m_device.Device(), &info, nullptr, &m_queries) != VK_SUCCESS) {
+        m_queries = VK_NULL_HANDLE;
+    }
+    m_queryCount.fill(0);
+    m_queriesReset.fill(false);
+}
+
+double Vdp1VulkanBackend::TakeGpuSeconds() {
+    const double seconds = m_gpuSeconds;
+    m_gpuSeconds = 0;
+    return seconds;
+}
+
+void Vdp1VulkanBackend::StampBegin(uint32_t contextIndex, VkCommandBuffer cmd) {
+    if (m_queries == VK_NULL_HANDLE || contextIndex >= kMaxTimedContexts) {
+        return;
+    }
+    const auto &vk = m_device.Table();
+    const uint32_t base = contextIndex * kQueriesPerContext;
+    if (!m_queriesReset[contextIndex]) {
+        vk.vkCmdResetQueryPool(cmd, m_queries, base, kQueriesPerContext);
+        m_queriesReset[contextIndex] = true;
+    }
+    if (m_queryCount[contextIndex] + 2 <= kQueriesPerContext) {
+        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_queries, base + m_queryCount[contextIndex]);
+    }
+}
+
+void Vdp1VulkanBackend::StampEnd(uint32_t contextIndex, VkCommandBuffer cmd) {
+    if (m_queries == VK_NULL_HANDLE || contextIndex >= kMaxTimedContexts ||
+        m_queryCount[contextIndex] + 2 > kQueriesPerContext) {
+        return;
+    }
+    const uint32_t base = contextIndex * kQueriesPerContext;
+    m_device.Table().vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_queries,
+                                         base + m_queryCount[contextIndex] + 1);
+    m_queryCount[contextIndex] += 2;
+}
+
+void Vdp1VulkanBackend::CollectTimestamps(uint32_t contextIndex) {
+    if (m_queries == VK_NULL_HANDLE || contextIndex >= kMaxTimedContexts) {
+        return;
+    }
+    const uint32_t count = m_queryCount[contextIndex];
+    m_queryCount[contextIndex] = 0;
+    m_queriesReset[contextIndex] = false;
+    if (count == 0) {
+        return;
+    }
+    std::array<uint64_t, kQueriesPerContext> stamps{};
+    if (m_device.Table().vkGetQueryPoolResults(m_device.Device(), m_queries, contextIndex * kQueriesPerContext, count,
+                                               sizeof(stamps), stamps.data(), sizeof(uint64_t),
+                                               VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+        return;
+    }
+    uint64_t ticks = 0;
+    for (uint32_t i = 0; i + 1 < count; i += 2) {
+        ticks += stamps[i + 1] >= stamps[i] ? stamps[i + 1] - stamps[i] : 0;
+    }
+    m_gpuSeconds += static_cast<double>(ticks) * m_device.Properties().limits.timestampPeriod * 1e-9;
 }
 
 void Vdp1VulkanBackend::EnsureContexts(uint32_t count) {
@@ -185,6 +258,8 @@ bool Vdp1VulkanBackend::BeginContext(uint32_t contextIndex) {
         return false;
     }
     Context &context = m_contexts[contextIndex];
+    CollectTimestamps(contextIndex);
+    m_lastContext = static_cast<int32_t>(contextIndex);
     // The context's previous command buffer has completed: its blocks are free. Chained blocks are merged into one of
     // the high-water size at the next allocation.
     context.highWater = std::max(context.highWater, context.total);
@@ -349,6 +424,7 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
     const auto beforeCopies = [&] { Barrier(cmd, kCompute | kTransfer, kWrites, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT); };
     const auto afterCopies = [&] { Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, VK_ACCESS_SHADER_READ_BIT); };
 
+    StampBegin(contextIndex, cmd);
     Prologue(cmd);
     std::vector<VkBufferCopy> vramRegions;
     for (uint32_t i = segment.firstOp; i < segment.firstOp + segment.opCount; ++i) {
@@ -436,6 +512,7 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
         }
     }
     Epilogue(cmd);
+    StampEnd(contextIndex, cmd);
     return true;
 }
 
@@ -462,9 +539,11 @@ bool Vdp1VulkanBackend::RecordFbramUpload(std::span<const uint8_t> slices, uint3
             regions[count++] = {upload.offset + offset, VkDeviceSize{slice} * kFbramSliceSize, kFbramSliceSize};
         }
     }
+    StampBegin(contextIndex, cmd);
     Prologue(cmd);
     m_device.Table().vkCmdCopyBuffer(cmd, upload.buffer, m_fbram, count, regions.data());
     Epilogue(cmd);
+    StampEnd(contextIndex, cmd);
     ++m_stats.uploads;
     return true;
 }
@@ -499,9 +578,11 @@ bool Vdp1VulkanBackend::RecordReadback(uint32_t contextIndex, uint32_t mask, VkC
             regions[count++] = {offset, offset, kFbramSliceSize};
         }
     }
+    StampBegin(contextIndex, cmd);
     Barrier(cmd, kCompute | kTransfer, kWrites, kTransfer, VK_ACCESS_TRANSFER_READ_BIT);
     m_device.Table().vkCmdCopyBuffer(cmd, m_fbram, readback.buffer, count, regions.data());
     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+    StampEnd(contextIndex, cmd);
     return true;
 }
 
@@ -510,6 +591,11 @@ const uint8_t *Vdp1VulkanBackend::ReadbackData(uint32_t contextIndex) const {
 }
 
 void Vdp1VulkanBackend::FrameDropped() {
+    if (m_lastContext >= 0 && static_cast<uint32_t>(m_lastContext) < kMaxTimedContexts) {
+        // Its timestamps are never written: drop them (the slots may hold an older command buffer's values)
+        m_queryCount[m_lastContext] = 0;
+        m_queriesReset[m_lastContext] = false;
+    }
     if (m_recordedZero) {
         m_pendingZero = true;
         m_recordedZero = false;

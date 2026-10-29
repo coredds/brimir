@@ -384,6 +384,7 @@ void VulkanVDPRenderer::QueueFbramUpload(uint32_t sliceMask, const SpriteFB *alt
 }
 
 bool VulkanVDPRenderer::ReplayVdp1Work(const Vdp1Work &work, uint32_t context, VkCommandBuffer cmd) {
+    ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.recordSeconds);
     if (work.sliceMask != 0) {
         return m_vdp1Backend->RecordFbramUpload(work.fbram, work.sliceMask, context, cmd);
     }
@@ -396,6 +397,9 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     frameRecorded = false;
     m_vdp1Recorded.clear(); // the previous command buffer was submitted (or reported dropped)
     m_proposed = {};
+    if (FrameProbe) {
+        m_vdp1Backend->EnableTimestamps(); // once (diagnostics)
+    }
     // This context's previous command buffer has completed: its readbacks can be merged before the buffer is reused.
     MergeContext(context);
     if (!m_vdp1Backend->BeginContext(context)) {
@@ -466,6 +470,7 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     m_proposed.context = static_cast<int32_t>(context);
     m_proposed.covered = covered;
     if (mask != 0) {
+        ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.recordSeconds);
         if (m_vdp1Backend->RecordReadback(context, mask, cmd)) {
             m_proposed.mask = mask;
             for (uint32_t slice = 0; slice < 8; ++slice) {
@@ -928,6 +933,7 @@ void VulkanVDPRenderer::VDP1DebugSyncFB() {
 
 void VulkanVDPRenderer::VDP1WriteFB(uint32_t address, uint8_t value) {
     if (m_gpuVdp1) {
+        ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.frontSeconds);
         m_vdp1Front.WriteFB8(address, value);
         CpuWrite(address, 1);
         return;
@@ -937,6 +943,7 @@ void VulkanVDPRenderer::VDP1WriteFB(uint32_t address, uint8_t value) {
 
 void VulkanVDPRenderer::VDP1WriteFB(uint32_t address, uint16_t value) {
     if (m_gpuVdp1) {
+        ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.frontSeconds);
         m_vdp1Front.WriteFB16(address, value);
         CpuWrite(address & ~1u, 2);
         return;
@@ -953,6 +960,7 @@ void VulkanVDPRenderer::VDP1WriteReg(uint32_t address, uint16_t value) {
 
 void VulkanVDPRenderer::VDP1EraseFramebuffer(uint64_t cycles) {
     if (m_gpuVdp1) {
+        ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.frontSeconds);
         // Rule 1: the display framebuffer's main, its alt mirror and its meshes, as VDP1DoEraseFramebuffer writes them
         ++m_vdp1Seq;
         const uint32_t fb = m_state.fbIndex.display & 1u;
@@ -986,6 +994,7 @@ void VulkanVDPRenderer::VDP1SwapFramebuffer() {
 
 void VulkanVDPRenderer::VDP1BeginFrame() {
     if (m_gpuVdp1) {
+        ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.frontSeconds);
         m_vdp1Front.BeginFrame();
         return;
     }
@@ -994,6 +1003,7 @@ void VulkanVDPRenderer::VDP1BeginFrame() {
 
 void VulkanVDPRenderer::VDP1ExecuteCommand(uint32_t cmdAddress, VDP1Command::Control control) {
     if (m_gpuVdp1) {
+        ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.frontSeconds);
         if (static_cast<uint16_t>(control.command) <= 0x7) {
             // Rule 1: a draw command plots into the draw framebuffer's main (alt with deinterlacing, VDP1PlotPixel's
             // altFB) and, with transparent meshes, its meshes
@@ -1122,13 +1132,18 @@ void VulkanVDPRenderer::VDP2EndFrame() {
         m_front.EndFrame();
     }
     if (m_gpuVdp1) {
+        ProbeTimer timer(FrameProbe != nullptr, m_vdp1Times.frontSeconds);
         // Segment boundary: the ops so far are replayed before this frame's VDP2 work, later ones after it.
         m_vdp1Front.MarkFrameBoundary();
         QueueVdp1Ops();
         m_vdp1BeforeFrame = m_vdp1Queue.size();
     }
     if (FrameProbe) {
-        FrameProbe(m_front.Frame().features, m_frontSeconds);
+        if (m_vdp1Backend) {
+            m_vdp1Times.gpuSeconds = m_vdp1Backend->TakeGpuSeconds();
+        }
+        FrameProbe(m_front.Frame().features, m_frontSeconds, m_vdp1Times);
+        m_vdp1Times = {};
     }
     m_slicesCaptured = false;
     m_altSlicesCaptured = false;

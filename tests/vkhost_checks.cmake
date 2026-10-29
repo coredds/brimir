@@ -708,6 +708,28 @@ execute_process(
 if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 300 frames identical")
     message(FATAL_ERROR "--compare --hide-every 3 --state-roundtrip 50: exit ${compare_code}\n${compare_out}\n${compare_err}")
 endif()
+# ... with state compares: both runs save a state every 60 frames, each pair diffed by brimir_state_diff (VDP1
+# framebuffers strictly, the renderer section with doubleV and mesh); a Vulkan run that emulates other frames (hidden
+# frames in the Vulkan child only) must fail on the states too.
+execute_process(
+    COMMAND "${VKHOST}" ${common_args} --compare --compare-state 60
+    OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
+if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 5 state pairs identical \\(every 60 frames\\)")
+    message(FATAL_ERROR "--compare --compare-state 60: exit ${compare_code}\n${compare_out}\n${compare_err}")
+endif()
+set(ENV{BRIMIR_VKHOST_COMPARE_VULKAN_ARGS} "--hide-every 2")
+execute_process(
+    COMMAND "${VKHOST}" --bios "${BIOS}" --warmup 60 --frames 120 --compare --compare-state 60
+    OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
+unset(ENV{BRIMIR_VKHOST_COMPARE_VULKAN_ARGS})
+string(REGEX MATCH "work directory kept: ([^\r\n]*)\\)" ignored "${compare_out}")
+if(CMAKE_MATCH_1)
+    file(REMOVE_RECURSE "${CMAKE_MATCH_1}")
+endif()
+if(NOT compare_code EQUAL 3 OR NOT compare_out MATCHES "the states after recorded frame 59 differ" OR
+   NOT compare_out MATCHES "2 of 2 state pairs differ, first after frame 59")
+    message(FATAL_ERROR "--compare-state with differing runs: exit ${compare_code}\n${compare_out}\n${compare_err}")
+endif()
 execute_process(
     COMMAND "${VKHOST}" --bios "${BIOS}" --warmup 400 --frames 3 --compare --compare-vulkan-option brimir_rotation=180
     OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
@@ -727,8 +749,8 @@ if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 300 frames 
    NOT compare_out MATCHES "vulkan: geometry: SET_GEOMETRY 640x448")
     message(FATAL_ERROR "--compare --internal-resolution 2 --hash-sample 2: exit ${compare_code}\n${compare_out}\n${compare_err}")
 endif()
-message(STATUS "--compare: identical runs pass (also with hidden frames and state round trips, and at 2x through the "
-               "sample points), a difference is reported (exit 3, first pixel)")
+message(STATUS "--compare: identical runs pass (also with hidden frames and state round trips, with state compares, and "
+               "at 2x through the sample points), a difference is reported (exit 3, first pixel; differing states)")
 
 # --compare must not pass when the Vulkan run silently stayed on software or the copy-only output (the comparison
 # would be vacuous). The environment hook adds arguments to the Vulkan child only.

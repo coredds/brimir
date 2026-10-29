@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -43,7 +44,7 @@ const std::set<std::string> kValueless = {"--hash",        "--verbose", "--vulka
                                           "--probe"};
 // Dropped from both children (the compare adds its own).
 const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",       "--dump-dir", "--dump-frame",
-                                        "--system-dir", "--frames", "--compare-vulkan-option"};
+                                        "--system-dir", "--frames", "--compare-vulkan-option", "--compare-state"};
 // Only valid together with --vulkan: dropped from the software child.
 const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--reset-in-present", "--preferred-hw",
                                            "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",
@@ -177,6 +178,9 @@ void PrintSummary(const char* label, const ChildResult& child) {
         }
         if (line.rfind("vkhost: ", 0) == 0) {
             std::printf("compare: %s: %s\n", label, line.c_str() + 8);
+        } else if (line.find("Vulkan VDP1 renderer active") != std::string::npos ||
+                   line.find("VDP1 on the GPU") != std::string::npos) {
+            std::printf("compare: %s: %s\n", label, line.c_str());
         }
     }
 }
@@ -337,6 +341,95 @@ void PrintTail(const char* label, const ChildResult& child) {
     }
 }
 
+// --compare-state: diffs each pair of states the children saved (brimir_state_diff: the VDP1 framebuffers strictly, the
+// renderer section up to its allowlist). Reports every differing pair, prints the first one's diff and copies both of
+// its states into <dumpRoot>/states. Returns the number of identical pairs.
+size_t CompareStates(const fs::path& self, const CompareConfig& config, const fs::path& swStates,
+                     const fs::path& vkStates, const fs::path& work, const fs::path& dumpRoot,
+                     const std::function<void(const std::string&)>& fail) {
+#ifdef _WIN32
+    const fs::path stateDiff = self.parent_path() / "brimir_state_diff.exe";
+#else
+    const fs::path stateDiff = self.parent_path() / "brimir_state_diff";
+#endif
+    std::error_code ec;
+    if (!fs::exists(stateDiff, ec)) {
+        fail("--compare-state: brimir_state_diff not found next to this executable (" + stateDiff.string() + ")");
+        return 0;
+    }
+    const int expected = config.frames / config.stateEvery;
+    size_t identical = 0;
+    size_t differing = 0;
+    int first = -1;
+    // The other sections, informational (brimir_state_diff's first line): the most differing bytes over the pairs.
+    size_t otherMax[5] = {};
+    for (int k = 0; k < expected; ++k) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "state_%05d.bin", (k + 1) * config.stateEvery - 1);
+        const fs::path a = swStates / name;
+        const fs::path b = vkStates / name;
+        if (!fs::exists(a, ec) || !fs::exists(b, ec)) {
+            fail(std::string("--compare-state: missing state ") + name + " (software " +
+                 (fs::exists(a, ec) ? "saved" : "missing") + ", vulkan " + (fs::exists(b, ec) ? "saved" : "missing") +
+                 ")");
+            break;
+        }
+        const fs::path out = work / "state-diff.txt";
+        std::string command = Quote(stateDiff.string()) + " " + Quote(a.string()) + " " + Quote(b.string()) + " > " +
+                              Quote(out.string()) + " 2>&1";
+#ifdef _WIN32
+        command = "\"" + command + "\"";
+#endif
+        const int status = std::system(command.c_str());
+#ifdef _WIN32
+        const int code = status;
+#else
+        const int code = (status != -1 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1;
+#endif
+        const std::string text = ReadAll(out);
+        size_t other[5] = {};
+        const size_t pos = text.find("  system ");
+        if (pos != std::string::npos &&
+            std::sscanf(text.c_str() + pos, "  system %zu, msh2 %zu, ssh2 %zu, scsp %zu, vdp (without renderer) %zu",
+                        &other[0], &other[1], &other[2], &other[3], &other[4]) == 5) {
+            for (int i = 0; i < 5; ++i) {
+                otherMax[i] = std::max(otherMax[i], other[i]);
+            }
+        }
+        if (code == 0) {
+            ++identical;
+            continue;
+        }
+        ++differing;
+        if (first < 0) {
+            first = (k + 1) * config.stateEvery - 1;
+            std::printf("compare: FAILED: the states after recorded frame %d differ (brimir_state_diff exit %d):\n", first,
+                        code);
+            std::istringstream lines(text);
+            std::string line;
+            while (std::getline(lines, line)) {
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                std::printf("compare:   %s\n", line.c_str());
+            }
+            const fs::path dir = dumpRoot / "states";
+            fs::create_directories(dir, ec);
+            fs::copy_file(a, dir / (std::string(name) + ".software"), fs::copy_options::overwrite_existing, ec);
+            fs::copy_file(b, dir / (std::string(name) + ".vulkan"), fs::copy_options::overwrite_existing, ec);
+            std::printf("compare:   states copied to %s\n", dir.string().c_str());
+        }
+    }
+    std::printf("compare: states: %zu of %d pairs identical (every %d recorded frames); other sections "
+                "(informational), most differing bytes: system %zu, msh2 %zu, ssh2 %zu, scsp %zu, vdp %zu\n",
+                identical, expected, config.stateEvery, otherMax[0], otherMax[1], otherMax[2], otherMax[3], otherMax[4]);
+    if (differing > 0) {
+        fail(std::to_string(differing) + " of " + std::to_string(expected) + " state pairs differ, first after frame " +
+             std::to_string(first));
+    }
+    return identical;
+}
+
 } // namespace
 
 int RunCompare(const CompareConfig& config) {
@@ -377,6 +470,12 @@ int RunCompare(const CompareConfig& config) {
     const std::vector<std::string> frameArgs = {"--frames", std::to_string(config.frames), "--hash"};
     swArgs.insert(swArgs.end(), frameArgs.begin(), frameArgs.end());
     vkArgs.insert(vkArgs.end(), frameArgs.begin(), frameArgs.end());
+    const fs::path swStates = work / "states-sw";
+    const fs::path vkStates = work / "states-vk";
+    if (config.stateEvery > 0) {
+        swArgs.insert(swArgs.end(), {"--save-state-every", std::to_string(config.stateEvery), swStates.string()});
+        vkArgs.insert(vkArgs.end(), {"--save-state-every", std::to_string(config.stateEvery), vkStates.string()});
+    }
 
     std::printf("compare: software run (%d frames)...\n", config.frames);
     std::fflush(stdout);
@@ -526,6 +625,11 @@ int RunCompare(const CompareConfig& config) {
         }
     }
 
+    size_t statePairs = 0;
+    if (config.stateEvery > 0) {
+        statePairs = CompareStates(self, config, swStates, vkStates, work, dumpRoot, fail);
+    }
+
     if (failed) {
         workGuard.Keep();
         std::printf("compare: FAILED (work directory kept: %s)\n", work.string().c_str());
@@ -535,6 +639,9 @@ int RunCompare(const CompareConfig& config) {
                 "%lld core submits, validation %s, %lld validation errors)\n",
                 common, facts.hardwareFrames, facts.submits, facts.validationOn ? "on" : "off",
                 facts.validationErrors);
+    if (config.stateEvery > 0) {
+        std::printf("compare: OK, %zu state pairs identical (every %d frames)\n", statePairs, config.stateEvery);
+    }
     return 0;
 }
 
