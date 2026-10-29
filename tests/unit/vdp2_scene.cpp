@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -708,21 +709,18 @@ namespace brimir::test {
 
 namespace {
 
-// Waits for a fence by polling it: vkWaitForFences sleeps for milliseconds after the work completes on some drivers
-// (about 4 ms per submit on the RX 9060 XT on Windows, against 0.05 ms polled), and scenes submit after every
-// checkpoint.
-VkResult WaitPolled(gpu::VulkanDevice &device, VkFence fence) {
-    const auto &vk = device.Table();
-    for (;;) {
-        const VkResult status = vk.vkGetFenceStatus(device.Device(), fence);
-        if (status != VK_NOT_READY) {
-            return status;
-        }
+// The harness's fence wait: vk_util::WaitForFence (a bounded, yielding poll, then a blocking wait), bounded overall:
+// a GPU that never finishes fails the scene with this error instead of hanging the test run.
+constexpr uint64_t kHarnessFenceTimeoutNs = 60ull * 1000 * 1000 * 1000;
+VkResult WaitBounded(gpu::VulkanDevice &device, VkFence fence) {
+    const VkResult result = gpu::vk_util::WaitForFence(device, fence, 2000, kHarnessFenceTimeoutNs);
+    if (result == VK_TIMEOUT) {
+        std::fprintf(stderr, "vdp2_scene: a submit did not complete within 60 s (VK_TIMEOUT)\n");
     }
+    return result;
 }
-
 // One command pool, command buffer and fence, reused by every submit (each recorded, submitted and waited for with
-// WaitPolled): the first submit of a newly allocated command buffer costs milliseconds on some drivers (about 2.5 ms
+// WaitBounded): the first submit of a newly allocated command buffer costs milliseconds on some drivers (about 2.5 ms
 // on the RX 9060 XT on Windows, against 0.05 ms for a reused one).
 class PolledSubmitter {
 public:
@@ -787,7 +785,7 @@ public:
             submit.pCommandBuffers = &m_cmd;
             result = m_device.Submit(submit, m_fence);
             if (result == VK_SUCCESS) {
-                result = WaitPolled(m_device, m_fence);
+                result = WaitBounded(m_device, m_fence);
             }
         }
         return result;

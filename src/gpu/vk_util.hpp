@@ -60,10 +60,11 @@ void DestroyImage(const VulkanDevice &device, Image &image);
 VkResult SubmitOneShot(VulkanDevice &device, const std::function<void(VkCommandBuffer)> &record);
 
 // Waits for one fence: polls vkGetFenceStatus (yielding between polls) for up to `pollMicroseconds`, then blocks in
-// vkWaitForFences. vkWaitForFences sometimes returns milliseconds after the fence signals (worst 4.6 ms against 0.3 ms
-// polled for a 256 KiB copy on an RX 9060 XT on Windows); short waits end as soon as the work does. The same wait otherwise: VK_SUCCESS once
-// signalled, or the error.
-VkResult WaitForFence(const VulkanDevice &device, VkFence fence, uint32_t pollMicroseconds = 2000);
+// vkWaitForFences for up to `timeoutNanoseconds` (VK_TIMEOUT then). vkWaitForFences sometimes returns milliseconds
+// after the fence signals (worst 4.6 ms against 0.3 ms polled for a 256 KiB copy on an RX 9060 XT on Windows); short
+// waits end as soon as the work does. Otherwise the same wait: VK_SUCCESS once signalled, or the error.
+VkResult WaitForFence(const VulkanDevice &device, VkFence fence, uint32_t pollMicroseconds = 2000,
+                      uint64_t timeoutNanoseconds = UINT64_MAX);
 
 VkResult CreatePipelineLayout(const VulkanDevice &device, std::span<const VkDescriptorSetLayout> setLayouts,
                               std::span<const VkPushConstantRange> pushConstants, VkPipelineLayout &out);

@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -40,6 +41,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using brimir::test::FbramResult;
@@ -1115,7 +1117,31 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
     uint64_t checkpoints = 0, nonZero = 0, fragmentSlots = 0, spans = 0, batches = 0;
     std::array<uint64_t, kKinds> ops{};
     std::vector<uint64_t> failing;
+    // A watchdog: a seed that runs longer than BRIMIR_VDP1_FUZZ_SEED_LIMIT seconds (default 600) is reported and the
+    // process exits with an error (a hung submit or wait cannot be interrupted from here).
+    const uint64_t seedLimit = EnvU64("BRIMIR_VDP1_FUZZ_SEED_LIMIT", 600);
+    std::atomic<uint64_t> currentSeed{first};
+    std::atomic<int64_t> seedStartMs{0};
+    std::atomic<bool> done{false};
+    const auto nowMs = [start] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    };
+    std::thread watchdog([&] {
+        while (!done.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            const int64_t running = nowMs() - seedStartMs.load();
+            if (!done.load() && running > static_cast<int64_t>(seedLimit) * 1000) {
+                std::printf("STUCK seed %llu: running for %lld s (limit %llu s); exiting\n",
+                            static_cast<unsigned long long>(currentSeed.load()), static_cast<long long>(running / 1000),
+                            static_cast<unsigned long long>(seedLimit));
+                std::fflush(stdout);
+                std::_Exit(3);
+            }
+        }
+    });
     for (uint64_t seed = first; seed < first + seeds; ++seed) {
+        currentSeed = seed;
+        seedStartMs = nowMs();
         const FuzzProgram p = Generate(seed);
         const FuzzResult r = RunProgram(*device, p);
         checkpoints += r.checkpoints;
@@ -1130,19 +1156,22 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
             failing.push_back(seed);
             std::printf("FAIL seed %llu: %s\n", static_cast<unsigned long long>(seed), r.what.c_str());
             if (minimize && failing.size() <= 3) {
+                seedStartMs = INT64_MAX / 2; // no limit while minimising
                 const FuzzProgram m = Minimize(*device, p);
                 const FuzzResult mr = RunProgram(*device, m);
                 std::printf("minimised (%zu ops): %s\n%s\n", m.ops.size(), mr.what.c_str(), ToCpp(m).c_str());
             }
             std::fflush(stdout);
         }
-        if ((seed - first + 1) % 500 == 0) {
+        if ((seed - first + 1) % 25 == 0) {
             const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-            std::printf("... %llu seeds, %.0f s, %zu failing\n", static_cast<unsigned long long>(seed - first + 1), s,
-                        failing.size());
+            std::printf("... seed %llu (%llu done), %.0f s, %zu failing\n", static_cast<unsigned long long>(seed),
+                        static_cast<unsigned long long>(seed - first + 1), s, failing.size());
             std::fflush(stdout);
         }
     }
+    done = true;
+    watchdog.join();
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::printf("VDP1 fuzz (%s): seeds %llu-%llu, %.1f s, %llu FBRAM checkpoints, %llu fragment slots, %llu spans, "
                 "%llu batches, max %llu non-zero bytes; %zu failing\n",
