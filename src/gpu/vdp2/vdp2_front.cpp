@@ -984,6 +984,16 @@ void Vdp2FrontEnd::ClearComposite(uint32_t color, uint32_t words) {
     }
 }
 
+// Brimir: the shift of the lines a batch closes, from the parameters they were rendered with (the batch's common
+// parameters, which its shaders map rows with). A TVMD write that switches the interlace mode splits the batch at the
+// line it takes effect on, and by then YShift() already follows the new mode; software places each line's rows by the
+// TVMD in effect for it (sw VDP2GetY).
+uint32_t Vdp2FrontEnd::FlushedYShift() const {
+    const auto &display = m_flushedCommon.displayParams;
+    const bool interlaced = display.interlaceMode != static_cast<HLSLuint>(InterlaceMode::None); // TVMD.IsInterlaced
+    return m_flushedCommon.enhancements.deinterlace && interlaced && !display.exclusiveMonitor ? 1u : 0u;
+}
+
 uint32_t Vdp2FrontEnd::YShift() const {
     // Ported from d3d:4309-4310. Brimir: exclusive monitor modes never double rows (480 rows fill the 512-row arrays).
     const bool deinterlace = m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced() && !m_exclusiveMonitor;
@@ -1545,7 +1555,7 @@ void Vdp2FrontEnd::CloseCompose(uint32_t lastY) {
     if (lastY < m_nextComposeLine) {
         return;
     }
-    const uint32_t yShift = YShift();
+    const uint32_t yShift = FlushedYShift();
     const uint32_t startY = m_nextComposeLine;
     m_nextComposeLine = lastY + 1;
     m_pendingComposes.push_back({startY << yShift, (lastY - startY + 1) << yShift, SnapshotComposeParams()});
@@ -1561,7 +1571,7 @@ void Vdp2FrontEnd::CloseCompose(uint32_t lastY) {
 void Vdp2FrontEnd::RenderLayerLines(uint32_t lastY) {
     size_t composeIndex = 0;
     if (lastY >= m_nextLayerRenderLine) {
-        const uint32_t yShift = YShift();
+        const uint32_t yShift = FlushedYShift();
         const uint32_t startY = m_nextLayerRenderLine;
         m_nextLayerRenderLine = lastY + 1;
         const PendingCompose *compose = m_pendingComposes.empty() ? nullptr : &m_pendingComposes[0];

@@ -294,6 +294,7 @@ private:
     void StoreLineColorBackScreens(uint32_t y);
     void CountFeatures();
     uint32_t YShift() const;
+    uint32_t FlushedYShift() const;
     uint32_t AppendArena(const void *data, size_t size, uint32_t alignment = 4); // data == nullptr: reserve only
     uint32_t SnapshotLayerParams();
     uint32_t SnapshotComposeParams();

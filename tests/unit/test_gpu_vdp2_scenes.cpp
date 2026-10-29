@@ -1293,6 +1293,48 @@ TEST_CASE("Scene: a mid-frame switch from progressive to interlaced and back", "
     }));
 }
 
+// A TVMD write that switches the interlace mode inside the active display, without the resolution update (VDP::
+// UpdateResolution runs at the next frame's top border): software places each line's rows by the TVMD in effect for
+// that line (VDP2GetY: 2y and, deinterlacing, 2y + 1 when interlaced, else y) into the frame of the old resolution,
+// so rows past it are not shown, and the rows of the other mode written earlier stay. Every frame is compared: the
+// change comes in frame 1 of 3, and frame 2 starts with the new resolution.
+TEST_CASE("Scene: a mid-frame interlace switch without a resolution change places rows as software",
+          "[gpu][vdp2][scene]") {
+    const auto [from, to] = GENERATE(std::pair{kDisp, static_cast<uint16_t>(kDisp | kLSMDSingle)},
+                                     std::pair{kDisp, static_cast<uint16_t>(kDisp | kLSMDDouble)},
+                                     std::pair{static_cast<uint16_t>(kDisp | kLSMDSingle), kDisp},
+                                     std::pair{static_cast<uint16_t>(kDisp | kLSMDDouble), kDisp},
+                                     std::pair{static_cast<uint16_t>(kDisp | kLSMDSingle),
+                                               static_cast<uint16_t>(kDisp | kLSMDDouble)},
+                                     std::pair{static_cast<uint16_t>(kDisp | kLSMDDouble),
+                                               static_cast<uint16_t>(kDisp | kLSMDSingle)});
+    const uint32_t line = GENERATE(1u, 100u, 150u, 222u);
+    const bool deinterlace = GENERATE(false, true);
+    // With two NBGs, or the back screen alone (nothing else splits the frame's batches)
+    const bool nbgs = GENERATE(true, false);
+    // The switch in the first frame (rows not written in it show nothing yet) or in the second
+    const uint32_t changeFrame = GENERATE(1u, 2u);
+    CAPTURE(from, to, line, deinterlace, nbgs, changeFrame);
+    Vdp2Scene scene = nbgs ? MidFrameScene(from, deinterlace, 3, false, [](Vdp2SceneWriter &, uint32_t) {})
+                           : Make(
+                                 [from](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+                                     Base(w, s, rng, from);
+                                     BackPerLine(w, rng);
+                                 },
+                                 {.deinterlace = deinterlace}, 3);
+    scene.onLine = [to, line, changeFrame, frame = 0u](Vdp2SceneWriter &w, uint32_t y) mutable {
+        if (y == 0) {
+            ++frame;
+        }
+        if (frame == changeFrame && y == line) {
+            w.Reg(TVMD, to);
+        }
+    };
+    RenderBothOptions options;
+    options.compareFrame = [](uint32_t) { return true; };
+    RunScene(scene, options);
+}
+
 // Software indexes its framebuffer with the new HRes from the change on: rows before it were written with the old
 // pitch, then cleared.
 TEST_CASE("Scene: a mid-frame width change", "[gpu][vdp2][scene][lavapipe]") {
