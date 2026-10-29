@@ -16,6 +16,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1122,6 +1123,172 @@ TEST_CASE("Threaded VDP2 matches unthreaded when access patterns and vertical ce
     REQUIRE(expected[7].nbg0VCellOffset == 0);
     CHECK(CountThreadedVCellMismatches(makeScript(false), expected) == 0);
     CHECK(CountThreadedVCellMismatches(makeScript(true), expected) == 0);
+}
+
+namespace {
+
+// A VDP state and software renderer over the vertical cell scroll scene, driven as the VDP drives them.
+struct VCellRig {
+    std::unique_ptr<vdp::VDPState> state = std::make_unique<vdp::VDPState>();
+    vdp::config::VDP2DebugRender debug{};
+    vdp::config::VDP2AccessPatternsConfig access{};
+    std::unique_ptr<vdp::SoftwareVDPRenderer> renderer =
+        std::make_unique<vdp::SoftwareVDPRenderer>(*state, debug, access);
+    FrameCapture capture;
+
+    VCellRig(bool threaded, const savestate::VDPSaveState *load = nullptr) {
+        SetupVCellScene(*state);
+        renderer->PostLoadStateSync();
+        renderer->EnableThreadedVDP2(threaded);
+        capture.Bind(*renderer);
+        if (load != nullptr) {
+            // As VDP::LoadState does
+            state->LoadState(*load);
+            renderer->LoadState(load->renderer);
+            renderer->PostLoadStateSync();
+            renderer->VDP2SetResolution(320, 224, false);
+        }
+    }
+
+    ~VCellRig() {
+        renderer->EnableThreadedVDP2(false);
+    }
+
+    // As VDP::VDP2WriteReg and the bus's 16-bit and 8-bit (read-modify-write) VDP2 register handlers do.
+    void Write(uint32 address, uint16 value) {
+        state->VDP2WriteReg<false>(address, value,
+                                   [&](uint32 address, uint16 value) { renderer->VDP2WriteReg(address, value); });
+    }
+    void WriteByte(uint32 address, uint8 value) {
+        uint16 currValue = state->VDP2ReadReg<true>(address & ~1u);
+        const uint16 shift = (~address & 1u) * 8u;
+        const uint16 mask = ~(0xFF << shift);
+        currValue = (currValue & mask) | (value << shift);
+        state->VDP2WriteReg<true>(address & ~1u, currValue,
+                                  [&](uint32 address, uint16 value) { renderer->VDP2WriteReg(address, value); });
+    }
+    uint16 Read(uint32 address) {
+        return state->VDP2ReadReg<false>(address);
+    }
+    void BeginFrame() {
+        state->regs2.LatchTVMD();
+        renderer->VDP2LatchTVMD();
+        renderer->VDP2SetResolution(320, 224, false);
+        renderer->VDP2BeginFrame();
+    }
+    std::vector<uint32> EndFrame() {
+        renderer->VDP2EndFrame();
+        return {capture.pixels.begin(), capture.pixels.begin() + capture.width * 4};
+    }
+    std::unique_ptr<savestate::VDPSaveState> Save() {
+        auto saved = std::make_unique<savestate::VDPSaveState>();
+        renderer->PreSaveStateSync();
+        state->SaveState(*saved);
+        renderer->SaveState(saved->renderer);
+        return saved;
+    }
+};
+
+std::vector<uint8> SaveStateBytes(const savestate::VDPSaveState &saved) {
+    const auto *bytes = reinterpret_cast<const uint8 *>(&saved);
+    return {bytes, bytes + sizeof(savestate::VDPSaveState)};
+}
+
+} // namespace
+
+TEST_CASE("Threaded VDP2 game CPU reads of RPRCTL match unthreaded", "[vdp][vdp2][threaded][vcellscroll][brimir]") {
+    // Brimir: drawing a rotation background clears RPRCTL's read flags. Unthreaded, the renderer clears them in the VDP
+    // state, so the game CPUs read them cleared (and 8-bit writes, read-modify-write, merge the cleared value); the
+    // render thread only cleared its own copy, so threaded the CPUs read and re-sent stale flags.
+    auto run = [](bool threaded) {
+        VCellRig rig(threaded);
+        std::vector<uint16> reads;
+        rig.Write(0x020, 0x0013); // BGON: NBG0, NBG1, RBG0
+        rig.BeginFrame();
+        rig.Write(0x0B2, 0x0707); // RPRCTL: read Xst, Yst and KAst for both parameter sets
+        reads.push_back(rig.Read(0x0B2));
+        rig.renderer->VDP2RenderLine(0); // clears the flags
+        reads.push_back(rig.Read(0x0B2));
+        rig.WriteByte(0x0B2, 0x01); // upper half: RPB Xst
+        reads.push_back(rig.Read(0x0B2));
+        rig.Write(0x020, 0x0003); // no RBG: the next line keeps the flags
+        rig.renderer->VDP2RenderLine(1);
+        reads.push_back(rig.Read(0x0B2));
+        rig.Write(0x020, 0x0013);
+        rig.renderer->VDP2RenderLine(2);
+        reads.push_back(rig.Read(0x0B2));
+        rig.WriteByte(0x0B3, 0x04); // lower half: RPA KAst
+        reads.push_back(rig.Read(0x0B2));
+        rig.renderer->VDP2RenderLine(3);
+        auto pixels = rig.EndFrame();
+        return std::make_tuple(reads, pixels, SaveStateBytes(*rig.Save()));
+    };
+
+    const auto expected = run(false);
+    REQUIRE(std::get<0>(expected) == std::vector<uint16>{0x0707, 0x0000, 0x0100, 0x0100, 0x0000, 0x0004});
+    int mismatches = 0;
+    for (int i = 0; i < kThreadedEquivalenceIterations; ++i) {
+        if (run(true) != expected) {
+            ++mismatches;
+        }
+    }
+    CHECK(mismatches == 0);
+}
+
+TEST_CASE("Threaded VDP2 continues a loaded state like unthreaded", "[vdp][vdp2][threaded][vcellscroll][brimir]") {
+    // Brimir: a state saved mid-frame with the display off from one renderer and loaded into a new one, which then
+    // finishes the frame and draws two more with mid-frame register changes: threaded must equal unthreaded.
+    auto run = [](bool threaded) {
+        std::unique_ptr<savestate::VDPSaveState> saved;
+        {
+            VCellRig rig(threaded);
+            rig.BeginFrame();
+            rig.renderer->VDP2RenderLine(0);
+            rig.Write(0x018, kCycB0NBG0VCell);
+            rig.renderer->VDP2RenderLine(1);
+            rig.EndFrame();
+            rig.Write(0x000, 0x0000); // display off from the next frame
+            rig.BeginFrame();
+            rig.renderer->VDP2RenderLine(0);
+            rig.Write(0x018, kCycB0BothVCell);
+            rig.Write(0x020, 0x0013);
+            rig.Write(0x0B2, 0x0707);
+            rig.renderer->VDP2RenderLine(1);
+            saved = rig.Save();
+        }
+        VCellRig rig(threaded, saved.get());
+        std::vector<std::vector<uint32>> frames;
+        std::vector<std::vector<uint8>> states;
+        rig.renderer->VDP2RenderLine(2);
+        rig.renderer->VDP2RenderLine(3);
+        frames.push_back(rig.EndFrame());
+        states.push_back(SaveStateBytes(*rig.Save()));
+        rig.Write(0x000, 0x8000); // display on
+        for (int frame = 0; frame < 2; ++frame) {
+            rig.BeginFrame();
+            rig.renderer->VDP2RenderLine(0);
+            rig.Write(0x018, frame == 0 ? kCycB0NBG0VCell : kCycB0BothVCell);
+            rig.Write(0x09A, frame == 0 ? 0x0001 : 0x0101);
+            rig.renderer->VDP2RenderLine(1);
+            states.push_back(SaveStateBytes(*rig.Save()));
+            rig.renderer->VDP2RenderLine(2);
+            rig.renderer->VDP2RenderLine(3);
+            frames.push_back(rig.EndFrame());
+            states.push_back(SaveStateBytes(*rig.Save()));
+        }
+        return std::make_pair(frames, states);
+    };
+
+    const auto expected = run(false);
+    REQUIRE(expected.first.size() == 3);
+    REQUIRE(expected.first[2].size() == 320 * 4);
+    int mismatches = 0;
+    for (int i = 0; i < kThreadedEquivalenceIterations; ++i) {
+        if (run(true) != expected) {
+            ++mismatches;
+        }
+    }
+    CHECK(mismatches == 0);
 }
 
 TEST_CASE("VDP2 EXTEN read latches HCNT when external latch is disabled", "[vdp][vdp2][hcnt][backport]") {

@@ -60,11 +60,11 @@ namespace grp {
 namespace {
 
 // Brimir: the VDP2 register fields the renderer itself writes while preparing a line (VDP2PrepareLine:
-// CalcAccessPatterns, CalcVCellScrollDelay, UpdateRotationPageBaseAddresses, VDP2CalcRotationParameterTables). The
-// unthreaded renderer writes them in m_state.regs2; the VDP2 render thread writes them in its own copy, which receives
-// every register write in order, so once it has caught up its fields hold what the unthreaded renderer's would. Copy
-// them back only then (the thread idle), so that save states (RPRCTL, vcellScrollInc) and a switch to the unthreaded
-// renderer see them.
+// CalcAccessPatterns, CalcVCellScrollDelay, UpdateRotationPageBaseAddresses). The unthreaded renderer writes them in
+// m_state.regs2; the VDP2 render thread writes them in its own copy, which receives every register write in order, so
+// once it has caught up its fields hold what the unthreaded renderer's would. Copy them back only then (the thread
+// idle), so that save states (vcellScrollInc) and a switch to the unthreaded renderer see them. The rotation
+// parameters' read flags (RPRCTL), which the game CPUs read, are cleared on the emulator side in VDP2RenderLine.
 void CopyRendererDerivedVDP2Regs(VDP2Regs &dst, const VDP2Regs &src) {
     dst.accessPatternsDirty = src.accessPatternsDirty;
     dst.vcellScrollDirty = src.vcellScrollDirty;
@@ -75,11 +75,6 @@ void CopyRendererDerivedVDP2Regs(VDP2Regs &dst, const VDP2Regs &src) {
         dst.bgParams[i].charPatDelay = src.bgParams[i].charPatDelay;
         dst.bgParams[i].vramDataOffset = src.bgParams[i].vramDataOffset;
         dst.bgParams[i].rbgPageBaseAddressesDirty = src.bgParams[i].rbgPageBaseAddressesDirty;
-    }
-    for (size_t i = 0; i < dst.rotParams.size(); ++i) {
-        dst.rotParams[i].readXst = src.rotParams[i].readXst;
-        dst.rotParams[i].readYst = src.rotParams[i].readYst;
-        dst.rotParams[i].readKAst = src.rotParams[i].readKAst;
     }
 }
 
@@ -603,6 +598,17 @@ void SoftwareVDPRenderer::VDP2RenderLine(uint32 y) {
         // lines. The render thread's VDP2PrepareLine derives them as the unthreaded path does (display on only), and
         // PreSaveStateSync copies its register-side results back into m_state.regs2.
         m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::VDP2DrawLine(y));
+        // Brimir: except RPRCTL's read flags, which the game CPUs read (and byte writes merge with): clear them on the
+        // emulator side now, under the condition and at the line where VDP2PrepareLine and
+        // VDP2CalcRotationParameterTables clear them in the unthreaded renderer. Emulator-owned registers only.
+        auto &regs2 = m_state.regs2;
+        if (regs2.displayEnabledLatch && (regs2.bgEnabled[4] || regs2.bgEnabled[5])) {
+            for (auto &params : regs2.rotParams) {
+                params.readXst = false;
+                params.readYst = false;
+                params.readKAst = false;
+            }
+        }
     } else {
         const bool interlaced = m_state.regs2.TVMD.IsInterlaced();
         VDP2PrepareLine(y);
