@@ -1,6 +1,6 @@
 // GPU VDP1 parity fuzzer (GPU stage 2, Task 7): seeded random programs run through the software renderer and the
-// Vulkan renderer with VDP1 on the GPU (vdp2_scene.hpp RenderBothFBRAM), comparing all eight FBRAM slices (main fb0/fb1,
-// alt fb0/fb1, mesh[alt][fb]) after every op (half the programs) or after about one op in N (the others: a checkpoint
+// Vulkan renderer with VDP1 on the GPU (vdp2_scene.hpp RenderBothFBRAM), comparing all eight FBRAM slices (main
+// fb0/fb1, alt fb0/fb1, mesh[alt][fb]) after every op (half the programs) or after about one op in N (the others: a checkpoint
 // submits the pending VDP1 work and so ends the batch, and only sparse checkpoints let draws, VRAM and CPU writes share
 // a batch), at every frame's end, and every frame's composite.
 //
@@ -15,7 +15,8 @@
 // after the frame's end).
 //
 // A failing program is minimised (ops removed while it still fails the same way) and printed as C++ for a reproducer
-// scene. [gpu][vdp1][fuzz]: a few seeds in the suite (24 on a GPU, 6 on a CPU device such as lavapipe)
+// scene. [gpu][vdp1][fuzz]: a few seeds in the suite (24 on a GPU, 12 on a CPU device such as lavapipe;
+// every op kind, fragments and a mid-frame interlace switch required)
 // and a check that the fuzzer notices a broken renderer. The long run is hidden:
 //   BRIMIR_VDP1_FUZZ_SEEDS=N (default 1000) BRIMIR_VDP1_FUZZ_FIRST=S brimir_tests "[vdp1-fuzz-long]"
 // (BRIMIR_VDP1_FUZZ_MINIMIZE=1 minimises and prints the first failures; BRIMIR_VDP1_FUZZ_VALIDATION=1 keeps the
@@ -182,8 +183,8 @@ struct Gen {
                                              0x80C0, 0x80C0, 0x80C1, 0x80D0, 0x8080, 0x8090, 0x80C3};
         return rng.Pick(kTVMD);
     }
-    // (The RNG is called once per full expression or in braced lists, which are sequenced, so a seed is the same program
-    // with every compiler.)
+    // (The RNG is called once per full expression or in braced lists, which are sequenced, so a seed is the same
+    // program with every compiler.)
     uint16_t RandomTVMR() {
         const int tvm = rng.Chance(45) ? 0 : rng.Chance(55) ? 1 : rng.Chance(50) ? 3 : rng.Range(0, 7);
         const int vbe = rng.Chance(25) ? 8 : 0;
@@ -720,7 +721,20 @@ struct FuzzLog {
     std::string diff; // the first difference the ops found (CPU reads, SaveState fields)
     std::array<uint64_t, kKinds> ops{};
     uint64_t checkpoints = 0;
+    uint64_t lsmdSwitches = 0; // TVMD writes that switched the interlace mode inside a frame (not in blanking)
 };
+
+ymir::vdp::InterlaceMode CurrentLSMD(Vdp2SceneWriter &w) {
+    ymir::vdp::InterlaceMode lsmd{};
+    bool first = true;
+    w.ForEachState([&](VDPState &s) {
+        if (first) {
+            lsmd = s.regs2.TVMD.LSMDn;
+            first = false;
+        }
+    });
+    return lsmd;
+}
 
 void ApplyDisplay(Vdp2SceneWriter &w, uint32_t seed, uint16_t spctl, uint16_t tvmd) {
     Rng r{seed};
@@ -771,6 +785,10 @@ void Exec(Vdp2SceneWriter &w, const FuzzOp &op, FuzzLog &log, const std::string 
             log.diff = where + ": " + d;
         }
     };
+    // Mid-frame interlace mode switches (coverage)
+    const bool tvmdWrite = op.frame != 0 && op.phase != kBlank &&
+                           ((op.kind == K::VDP2Reg && op.a == TVMD) || op.kind == K::Display);
+    const ymir::vdp::InterlaceMode lsmdBefore = tvmdWrite ? CurrentLSMD(w) : ymir::vdp::InterlaceMode{};
     switch (op.kind) {
     case K::VDP1Reg: w.VDP1Reg(op.a, static_cast<uint16_t>(op.b)); break;
     case K::VDP2Reg: w.Reg(op.a, static_cast<uint16_t>(op.b)); break;
@@ -784,7 +802,9 @@ void Exec(Vdp2SceneWriter &w, const FuzzOp &op, FuzzLog &log, const std::string 
     case K::FB8: w.FBRAM8(fb(), op.b & 0x3FFFF, static_cast<uint8_t>(op.w.empty() ? 0 : op.w[0])); break;
     case K::Read16: {
         const auto v = w.ReadFB16(op.b & 0x3FFFE);
-        if (v.size() == 2 && v[0] != v[1]) {
+        if (v.size() != 2) {
+            note("CPU read16: " + std::to_string(v.size()) + " values, not 2");
+        } else if (v[0] != v[1]) {
             std::ostringstream s;
             s << "CPU read16 0x" << std::hex << (op.b & 0x3FFFE) << ": software 0x" << v[0] << ", gpu 0x" << v[1];
             note(s.str());
@@ -793,7 +813,9 @@ void Exec(Vdp2SceneWriter &w, const FuzzOp &op, FuzzLog &log, const std::string 
     }
     case K::Read8: {
         const auto v = w.ReadFB8(op.b & 0x3FFFF);
-        if (v.size() == 2 && v[0] != v[1]) {
+        if (v.size() != 2) {
+            note("CPU read8: " + std::to_string(v.size()) + " values, not 2");
+        } else if (v[0] != v[1]) {
             std::ostringstream s;
             s << "CPU read8 0x" << std::hex << (op.b & 0x3FFFF) << ": software 0x" << +v[0] << ", gpu 0x" << +v[1];
             note(s.str());
@@ -810,6 +832,9 @@ void Exec(Vdp2SceneWriter &w, const FuzzOp &op, FuzzLog &log, const std::string 
         ApplyDisplay(w, op.a, static_cast<uint16_t>(op.b), op.w.empty() ? uint16_t{0x8000} : op.w[0]);
         break;
     case K::Enhance: w.ConfigureEnhancements(EnhancementsOf(op.a)); break;
+    }
+    if (tvmdWrite && CurrentLSMD(w) != lsmdBefore) {
+        ++log.lsmdSwitches;
     }
 }
 
@@ -908,12 +933,13 @@ Vdp2Scene MakeScene(const FuzzProgram &p, std::shared_ptr<FuzzLog> log) {
 
 struct FuzzResult {
     bool failed = false;
-    std::string kind;        // of the first difference: fbram, frame, the op's (CPU read, SaveState) or harness
+    std::string kind; // of the first difference: fbram, frame, the op's (CPU read, SaveState) or harness
     std::string what;
     uint64_t checkpoints = 0;
     uint64_t maxNonZero = 0;
     std::array<uint64_t, kKinds> ops{};
     uint64_t fragmentSlots = 0, spans = 0, batches = 0;
+    uint64_t lsmdSwitches = 0;
 };
 
 // `hazardTracking` false breaks the GPU renderer on purpose (the front half's VRAM hazard batch splits off): the
@@ -940,6 +966,7 @@ FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool haza
     result.checkpoints = r.checkpoints;
     result.maxNonZero = r.maxNonZero;
     result.ops = log->ops;
+    result.lsmdSwitches = log->lsmdSwitches;
     std::string what;
     if (!r.error.empty() || !r.frame.error.empty() || !r.identical || !r.frame.identical) {
         what = r.Describe();
@@ -1043,22 +1070,35 @@ uint64_t EnvU64(const char *name, uint64_t fallback) {
 TEST_CASE("GPU VDP1 fuzz: seeded random programs, FBRAM after every op and frames equal software",
           "[gpu][vdp1][fuzz]") {
     auto device = OpenDevice();
-    const uint64_t seeds = device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 6 : 24;
-    uint64_t checkpoints = 0, nonZero = 0;
+    const uint64_t seeds = device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 12 : 24;
+    uint64_t checkpoints = 0, nonZero = 0, fragmentSlots = 0, lsmdSwitches = 0;
+    std::array<uint64_t, kKinds> ops{};
     for (uint64_t seed = 1; seed <= seeds; ++seed) {
         const FuzzResult r = RunProgram(*device, Generate(seed));
         INFO("seed " << seed << ": " << r.what);
         CHECK_FALSE(r.failed);
         checkpoints += r.checkpoints;
         nonZero = std::max(nonZero, r.maxNonZero);
+        fragmentSlots += r.fragmentSlots;
+        lsmdSwitches += r.lsmdSwitches;
+        for (uint32_t k = 0; k < kKinds; ++k) {
+            ops[k] += r.ops[k];
+        }
     }
     CHECK(checkpoints > seeds * 10);
     CHECK(nonZero > 0);
+    // Not vacuous: fragments drawn, every op kind run and the interlace mode switched mid-frame
+    CHECK(fragmentSlots > 0);
+    CHECK(lsmdSwitches > 0);
+    for (uint32_t k = 0; k < kKinds; ++k) {
+        INFO(kKindNames[k]);
+        CHECK(ops[k] > 0);
+    }
     brimir::test::CloseAndCheckValidation(device);
 }
 
 // Minimised fuzzer finds (Task 7 fix round 1): a VDP reset in double density with deinterlacing clears doubleV, as
-// software's Reset does since master 60a9280 (the front half kept it): the save state, and the draws that continue
+// software's Reset does (the front half kept it): the save state, and the draws that continue
 // after the reset without a VDP1 frame start.
 TEST_CASE("GPU VDP1 fuzz reproducers: a reset in double density clears doubleV as software", "[gpu][vdp1][fuzz]") {
     const FuzzProgram programs[] = {
@@ -1114,7 +1154,7 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
     const uint64_t first = EnvU64("BRIMIR_VDP1_FUZZ_FIRST", 1);
     const bool minimize = EnvU64("BRIMIR_VDP1_FUZZ_MINIMIZE", 0) != 0;
     const auto start = std::chrono::steady_clock::now();
-    uint64_t checkpoints = 0, nonZero = 0, fragmentSlots = 0, spans = 0, batches = 0;
+    uint64_t checkpoints = 0, nonZero = 0, fragmentSlots = 0, spans = 0, batches = 0, lsmdSwitches = 0;
     std::array<uint64_t, kKinds> ops{};
     std::vector<uint64_t> failing;
     // A watchdog: a seed that runs longer than BRIMIR_VDP1_FUZZ_SEED_LIMIT seconds (default 600) is reported and the
@@ -1149,6 +1189,7 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
         fragmentSlots += r.fragmentSlots;
         spans += r.spans;
         batches += r.batches;
+        lsmdSwitches += r.lsmdSwitches;
         for (uint32_t k = 0; k < kKinds; ++k) {
             ops[k] += r.ops[k];
         }
@@ -1174,12 +1215,13 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
     watchdog.join();
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::printf("VDP1 fuzz (%s): seeds %llu-%llu, %.1f s, %llu FBRAM checkpoints, %llu fragment slots, %llu spans, "
-                "%llu batches, max %llu non-zero bytes; %zu failing\n",
+                "%llu batches, %llu mid-frame interlace switches, max %llu non-zero bytes; %zu failing\n",
                 device->Properties().deviceName, static_cast<unsigned long long>(first),
                 static_cast<unsigned long long>(first + seeds - 1), seconds,
                 static_cast<unsigned long long>(checkpoints), static_cast<unsigned long long>(fragmentSlots),
                 static_cast<unsigned long long>(spans), static_cast<unsigned long long>(batches),
-                static_cast<unsigned long long>(nonZero), failing.size());
+                static_cast<unsigned long long>(lsmdSwitches), static_cast<unsigned long long>(nonZero),
+                failing.size());
     for (uint32_t k = 0; k < kKinds; ++k) {
         std::printf("  %-12s %llu\n", kKindNames[k], static_cast<unsigned long long>(ops[k]));
     }

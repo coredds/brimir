@@ -57,7 +57,7 @@ void Vdp1FrontEnd::SetBatchLimitsForTesting(const Vdp1BatchLimits &limits) {
 void Vdp1FrontEnd::Reset([[maybe_unused]] bool hard) {
     CloseAll(Vdp1BatchEnd::Take);
     ResyncVRAM();
-    m_doubleV = 0; // as software's Reset (Brimir, master 60a9280)
+    m_doubleV = 0; // software's Reset clears m_VDP1doubleV too
 }
 
 void Vdp1FrontEnd::PostLoadStateSync() {

@@ -14,10 +14,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdio>
-#include <functional>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -359,18 +359,23 @@ struct SyncRig {
     // Submits the copy `copies` times in one command buffer; returns the wait's result.
     VkResult Submit(uint32_t copies, const std::function<VkResult()> &wait) {
         const auto &vk = device.Table();
-        vk.vkResetCommandPool(device.Device(), pool, 0);
+        if (vk.vkResetCommandPool(device.Device(), pool, 0) != VK_SUCCESS) {
+            return VK_ERROR_UNKNOWN;
+        }
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vk.vkBeginCommandBuffer(cmd, &begin);
+        if (vk.vkBeginCommandBuffer(cmd, &begin) != VK_SUCCESS) {
+            return VK_ERROR_UNKNOWN;
+        }
         const VkBufferCopy region{0, 0, src.size};
         for (uint32_t i = 0; i < copies; ++i) {
             vk.vkCmdCopyBuffer(cmd, src.buffer, dst.buffer, 1, &region);
             vk_util::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
         }
-        vk.vkEndCommandBuffer(cmd);
-        vk.vkResetFences(device.Device(), 1, &fence);
+        if (vk.vkEndCommandBuffer(cmd) != VK_SUCCESS || vk.vkResetFences(device.Device(), 1, &fence) != VK_SUCCESS) {
+            return VK_ERROR_UNKNOWN;
+        }
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &cmd;
@@ -388,14 +393,29 @@ TEST_CASE("WaitForFence returns once the fence signals, short and long work alik
     {
         SyncRig rig(*device, 256 * 1024);
         const auto &vk = device->Table();
-        // Short work (done within the polling budget), long work (past it: the blocking wait), no budget at all
-        for (const auto &[copies, budget] : {std::pair{1u, 2000u}, std::pair{400u, 0u}, std::pair{2000u, 100u}}) {
-            CAPTURE(copies, budget);
-            CHECK(rig.Submit(copies, [&] { return vk_util::WaitForFence(*device, rig.fence, budget); }) == VK_SUCCESS);
-            CHECK(vk.vkGetFenceStatus(device->Device(), rig.fence) == VK_SUCCESS);
-        }
-        // An already signalled fence
-        CHECK(vk_util::WaitForFence(*device, rig.fence) == VK_SUCCESS);
+        // Long work (2000 copies of 256 KiB, milliseconds) with no budget or a short one: the poll gives up and the
+        // blocking wait runs; short work with a generous budget: the poll alone sees it signal.
+        bool blocked = false;
+        CHECK(rig.Submit(2000, [&] { return vk_util::WaitForFence(*device, rig.fence, 0, UINT64_MAX, &blocked); }) ==
+              VK_SUCCESS);
+        CHECK(vk.vkGetFenceStatus(device->Device(), rig.fence) == VK_SUCCESS);
+        CHECK(blocked);
+        CHECK(rig.Submit(2000, [&] { return vk_util::WaitForFence(*device, rig.fence, 50, UINT64_MAX, &blocked); }) ==
+              VK_SUCCESS);
+        CHECK(vk.vkGetFenceStatus(device->Device(), rig.fence) == VK_SUCCESS);
+        CHECK(blocked);
+        CHECK(rig.Submit(1, [&] {
+            return vk_util::WaitForFence(*device, rig.fence, 2'000'000, UINT64_MAX, &blocked); // 2 s budget
+        }) == VK_SUCCESS);
+        CHECK(vk.vkGetFenceStatus(device->Device(), rig.fence) == VK_SUCCESS);
+        CHECK_FALSE(blocked);
+        // An already signalled fence: the first poll returns
+        CHECK(vk_util::WaitForFence(*device, rig.fence, 2000, UINT64_MAX, &blocked) == VK_SUCCESS);
+        CHECK_FALSE(blocked);
+        // A timeout on an unsignalled fence that nothing will signal
+        REQUIRE(vk.vkResetFences(device->Device(), 1, &rig.fence) == VK_SUCCESS);
+        CHECK(vk_util::WaitForFence(*device, rig.fence, 100, 1'000'000, &blocked) == VK_TIMEOUT);
+        CHECK(blocked);
     }
     CloseAndCheckValidation(device);
 }
@@ -412,7 +432,8 @@ TEST_CASE("Sync submit latency: blocking wait against WaitForFence", "[gpu][timi
             for (int i = 0; i < 200; ++i) {
                 const auto t0 = std::chrono::steady_clock::now();
                 REQUIRE(rig.Submit(1, wait) == VK_SUCCESS);
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                const auto t1 = std::chrono::steady_clock::now();
+                const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                 total += ms;
                 worst = std::max(worst, ms);
                 // Emulation runs between the reads of a game: the GPU goes idle

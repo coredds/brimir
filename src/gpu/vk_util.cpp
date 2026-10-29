@@ -208,8 +208,11 @@ VkResult SubmitOneShot(VulkanDevice &device, const std::function<void(VkCommandB
 }
 
 VkResult WaitForFence(const VulkanDevice &device, VkFence fence, uint32_t pollMicroseconds,
-                      uint64_t timeoutNanoseconds) {
+                      uint64_t timeoutNanoseconds, bool *blocked) {
     const auto &vk = device.Table();
+    if (blocked != nullptr) {
+        *blocked = false;
+    }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(pollMicroseconds);
     for (;;) {
         const VkResult status = vk.vkGetFenceStatus(device.Device(), fence);
@@ -220,6 +223,9 @@ VkResult WaitForFence(const VulkanDevice &device, VkFence fence, uint32_t pollMi
             break;
         }
         std::this_thread::yield();
+    }
+    if (blocked != nullptr) {
+        *blocked = true;
     }
     return vk.vkWaitForFences(device.Device(), 1, &fence, VK_TRUE, timeoutNanoseconds);
 }
