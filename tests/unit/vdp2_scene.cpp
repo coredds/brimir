@@ -504,10 +504,10 @@ std::vector<uint32_t> RenderSoftware(const Vdp2Scene &scene, uint32_t *outWidth,
         uint32_t height = 0;
     } capture;
 
-    auto state = MakeZeroed<VDPState>();
+    auto state = std::make_unique<VDPState>();
     config::VDP2DebugRender debug{};
     config::VDP2AccessPatternsConfig access{};
-    auto renderer = MakeZeroed<SoftwareVDPRenderer>(*state, debug, access);
+    auto renderer = std::make_unique<SoftwareVDPRenderer>(*state, debug, access);
     renderer->SwCallbacks.FrameComplete.Rebind(&capture, [](uint32 *fb, uint32 w, uint32 h, void *context) {
         auto &out = *static_cast<Capture *>(context);
         out.pixels.assign(fb, fb + static_cast<size_t>(w) * h);
@@ -962,11 +962,11 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
     } capture;
 
     // Separate states: the front half maintains per-line VDPState fields that the software renderer also maintains.
-    auto swState = MakeZeroed<VDPState>();
-    auto vkState = MakeZeroed<VDPState>();
+    auto swState = std::make_unique<VDPState>();
+    auto vkState = std::make_unique<VDPState>();
     config::VDP2DebugRender swDebug{}, vkDebug{};
     config::VDP2AccessPatternsConfig access{};
-    auto software = MakeZeroed<SoftwareVDPRenderer>(*swState, swDebug, access);
+    auto software = std::make_unique<SoftwareVDPRenderer>(*swState, swDebug, access);
     software->SwCallbacks.FrameComplete.Rebind(&capture, [](uint32 *fb, uint32 w, uint32 h, void *context) {
         auto &out = *static_cast<Capture *>(context);
         out.pixels.assign(fb, fb + static_cast<size_t>(w) * h);

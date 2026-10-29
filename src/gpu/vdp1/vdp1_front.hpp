@@ -160,7 +160,7 @@ public:
     void SetEnhancements(const ymir::vdp::config::Enhancements &enhancements);
 
     /// @brief After VDPState::Reset (VDP::Reset order): closes the open batch and uploads all of VRAM with the next
-    /// one. doubleV is kept, as software's (sw:94-136 leaves m_VDP1doubleV alone); pending ops are kept.
+    /// one. doubleV is cleared, as software's Reset clears m_VDP1doubleV (Brimir); pending ops are kept.
     void Reset(bool hard);
     /// @brief After a save state load: VRAM changed without WriteVRAM calls; all of it is uploaded with the next batch.
     void PostLoadStateSync();

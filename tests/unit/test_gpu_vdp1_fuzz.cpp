@@ -15,11 +15,11 @@
 // after the frame's end).
 //
 // A failing program is minimised (ops removed while it still fails the same way) and printed as C++ for a reproducer
-// scene. [gpu][vdp1][fuzz]: a few seeds in the suite (24 on a GPU, 6 on a CPU device such as lavapipe; programs
-// filtered by WithoutKnownSoftwareIssues) and a check that the fuzzer notices a broken renderer. The long run is hidden:
+// scene. [gpu][vdp1][fuzz]: a few seeds in the suite (24 on a GPU, 6 on a CPU device such as lavapipe)
+// and a check that the fuzzer notices a broken renderer. The long run is hidden:
 //   BRIMIR_VDP1_FUZZ_SEEDS=N (default 1000) BRIMIR_VDP1_FUZZ_FIRST=S brimir_tests "[vdp1-fuzz-long]"
 // (BRIMIR_VDP1_FUZZ_MINIMIZE=1 minimises and prints the first failures; BRIMIR_VDP1_FUZZ_VALIDATION=1 keeps the
-// validation layer on; BRIMIR_VDP1_FUZZ_FILTER=1 filters the programs), and one seed replays with
+// validation layer on), and one seed replays with
 // BRIMIR_VDP1_FUZZ_SEED=S brimir_tests "[vdp1-fuzz-one]". Several long runs can share the device (one process each).
 #include "catch_amalgamated.hpp"
 
@@ -179,14 +179,6 @@ struct Gen {
         static constexpr uint16_t kTVMD[] = {0x8000, 0x8000, 0x8000, 0x8001, 0x8002, 0x8003, 0x8010,
                                              0x80C0, 0x80C0, 0x80C1, 0x80D0, 0x8080, 0x8090, 0x80C3};
         return rng.Pick(kTVMD);
-    }
-    // A TVMD write in the current phase. The resolution follows TVMD at the top of a frame (VDP::UpdateResolution), so
-    // within a frame (before its first line too) the interlace mode (LSMD) stays: a progressive/interlaced switch with
-    // deinterlacing mid-frame is a VDP2 difference outside this fuzzer (task-7-report.md, stop-and-report item 1).
-    // Blanking writes may change it.
-    uint16_t FrameTVMD() {
-        const uint16_t v = RandomTVMD();
-        return phase == kBlank ? v : static_cast<uint16_t>((v & ~0x00C0) | (tvmd & 0x00C0));
     }
     // (The RNG is called once per full expression or in braced lists, which are sequenced, so a seed is the same program
     // with every compiler.)
@@ -575,14 +567,14 @@ struct Gen {
             Add(K::Reset, rng.Chance(50) ? 1 : 0);
             tvmd = 0; // the reset TVMD (and resolution)
             if (rng.Chance(80)) {
-                tvmd = FrameTVMD();
+                tvmd = RandomTVMD();
                 Display();
                 EraseRegs();
                 Add(K::VDP1Reg, TVMR, RandomTVMR());
                 Add(K::VDP1Reg, FBCR, RandomFBCR());
             }
         } else if (r < 98) {
-            tvmd = FrameTVMD();
+            tvmd = RandomTVMD();
             Add(K::VDP2Reg, TVMD, tvmd);
         } else {
             Add(K::VDP2Reg, SPCTL, static_cast<uint16_t>(rng.Range(0, 0x3F)));
@@ -641,7 +633,7 @@ struct Gen {
                 EraseRegs();
             }
             if (rng.Chance(10)) {
-                tvmd = FrameTVMD();
+                tvmd = RandomTVMD();
                 Add(K::VDP2Reg, TVMD, tvmd);
             }
             if (rng.Chance(6)) {
@@ -719,30 +711,6 @@ FuzzProgram Generate(uint64_t seed) {
     return g.p;
 }
 
-// The program without the save/load points that read members the software renderer and VDPState leave uninitialised
-// (Task 7 report, stop-and-report item 2; reported for a master fix): before the first rendered line after the first
-// VDP1 frame start, SaveState carries SoftwareVDPRenderer::m_VDP1doubleV (set by VDP1BeginFrame) and
-// regs2.vcellScrollInc (computed for displayed lines). The harness builds its states and software renderer on zeroed
-// memory (MakeZeroed), but the GPU renderer's inner software renderer is its own allocation, and entering GPU VDP1
-// mode takes its doubleV. With fresh, zeroed memory (large allocations on Windows) all read zero and both renderers
-// agree; with reused heap memory (glibc, in one process) they hold whatever was there. The suite runs filtered programs
-// so it is deterministic everywhere; the long run does not filter unless BRIMIR_VDP1_FUZZ_FILTER=1.
-FuzzProgram WithoutKnownSoftwareIssues(FuzzProgram p) {
-    uint16_t ready = 0xFFFF; // the first phase of frame 1 after its first draw's line has been rendered
-    for (const FuzzOp &op : p.ops) {
-        if (op.kind == K::Draw && op.frame == 1 && op.a == 0) {
-            ready = static_cast<uint16_t>(op.phase + 1);
-            break;
-        }
-    }
-    std::erase_if(p.ops, [&](const FuzzOp &op) {
-        // (A renderer loading its own save gets its own values back.)
-        const bool state = op.kind == K::SaveCompare || op.kind == K::CrossLoad;
-        return state && (op.frame == 0 || (op.frame == 1 && op.phase < ready));
-    });
-    return p;
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The interpreter: a Vdp2Scene that applies the ops (an FBRAM checkpoint after each) and the VDP's frame control
 
@@ -750,7 +718,6 @@ struct FuzzLog {
     std::string diff; // the first difference the ops found (CPU reads, SaveState fields)
     std::array<uint64_t, kKinds> ops{};
     uint64_t checkpoints = 0;
-    bool outOfScope = false; // a mid-frame interlace mode switch (Exec)
 };
 
 void ApplyDisplay(Vdp2SceneWriter &w, uint32_t seed, uint16_t spctl, uint16_t tvmd) {
@@ -794,35 +761,8 @@ std::string CompareSaves(Vdp2SceneWriter &w) {
     return d.empty() ? d : "SaveState fields differ:" + d;
 }
 
-ymir::vdp::InterlaceMode CurrentLSMD(Vdp2SceneWriter &w) {
-    ymir::vdp::InterlaceMode lsmd{};
-    bool first = true;
-    w.ForEachState([&](VDPState &s) {
-        if (first) {
-            lsmd = s.regs2.TVMD.LSMDn;
-            first = false;
-        }
-    });
-    return lsmd;
-}
-
 void Exec(Vdp2SceneWriter &w, const FuzzOp &op, FuzzLog &log, const std::string &where) {
     ++log.ops[static_cast<uint32_t>(op.kind)];
-    // A TVMD write that switches the interlace mode within a frame is outside the fuzzer (FrameTVMD); a minimised
-    // program that comes to do it (an op removed before it) is not a reproducer.
-    const bool tvmdWrite = (op.kind == K::VDP2Reg && op.a == TVMD) || op.kind == K::Display;
-    const ymir::vdp::InterlaceMode lsmdBefore = tvmdWrite ? CurrentLSMD(w) : ymir::vdp::InterlaceMode{};
-    struct LsmdCheck {
-        bool active;
-        Vdp2SceneWriter &w;
-        ymir::vdp::InterlaceMode before;
-        FuzzLog &log;
-        ~LsmdCheck() {
-            if (active && CurrentLSMD(w) != before) {
-                log.outOfScope = true;
-            }
-        }
-    } lsmdCheck{tvmdWrite && op.frame != 0 && op.phase != kBlank, w, lsmdBefore, log};
     const auto fb = [&] { return op.a == 0 ? w.DrawFramebuffer() : w.DrawFramebuffer() ^ 1; };
     const auto note = [&](const std::string &d) {
         if (log.diff.empty() && !d.empty()) {
@@ -966,7 +906,6 @@ Vdp2Scene MakeScene(const FuzzProgram &p, std::shared_ptr<FuzzLog> log) {
 
 struct FuzzResult {
     bool failed = false;
-    bool outOfScope = false; // never for generated programs (checked); minimised candidates may be
     std::string kind;        // of the first difference: fbram, frame, the op's (CPU read, SaveState) or harness
     std::string what;
     uint64_t checkpoints = 0;
@@ -1006,8 +945,7 @@ FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool haza
     if (!log->diff.empty()) {
         what += (what.empty() ? "" : "; ") + log->diff;
     }
-    result.outOfScope = log->outOfScope;
-    result.failed = !what.empty() && !result.outOfScope;
+    result.failed = !what.empty();
     result.what = what;
     // The kind of the first difference (the minimiser keeps it)
     if (!r.error.empty() || !r.frame.error.empty()) {
@@ -1106,10 +1044,9 @@ TEST_CASE("GPU VDP1 fuzz: seeded random programs, FBRAM after every op and frame
     const uint64_t seeds = device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 6 : 24;
     uint64_t checkpoints = 0, nonZero = 0;
     for (uint64_t seed = 1; seed <= seeds; ++seed) {
-        const FuzzResult r = RunProgram(*device, WithoutKnownSoftwareIssues(Generate(seed)));
+        const FuzzResult r = RunProgram(*device, Generate(seed));
         INFO("seed " << seed << ": " << r.what);
         CHECK_FALSE(r.failed);
-        CHECK_FALSE(r.outOfScope);
         checkpoints += r.checkpoints;
         nonZero = std::max(nonZero, r.maxNonZero);
     }
@@ -1118,11 +1055,50 @@ TEST_CASE("GPU VDP1 fuzz: seeded random programs, FBRAM after every op and frame
     brimir::test::CloseAndCheckValidation(device);
 }
 
+// Minimised fuzzer finds (Task 7 fix round 1): a VDP reset in double density with deinterlacing clears doubleV, as
+// software's Reset does since master 60a9280 (the front half kept it): the save state, and the draws that continue
+// after the reset without a VDP1 frame start.
+TEST_CASE("GPU VDP1 fuzz reproducers: a reset in double density clears doubleV as software", "[gpu][vdp1][fuzz]") {
+    const FuzzProgram programs[] = {
+        {190, 3, 3, 1252, {4194304, 262144, 16384, 262144}, 0, {
+            {K::Display, 0, 0, 0xa59ad3b9, 0x0, {0x80c3}},
+            {K::Draw, 3, 30, 0x0, 0x3, {}},
+            {K::Reset, 3, 110, 0x1, 0x0, {}},
+            {K::SaveCompare, 3, 142, 0x0, 0x0, {}},
+        }},
+        {520, 3, 1, 5640, {4194304, 262144, 16384, 262144}, 26, {
+            {K::Display, 0, 0, 0xf15a72d5, 0xc, {0x80c1}},
+            {K::VRAM, 3, 52, 0x0, 0x0, {0x4300}},
+            {K::VRAM, 3, 52, 0x20, 0x0, {0xb}},
+            {K::VRAM, 3, 52, 0x3a0, 0x0, {0xe12, 0x0, 0x64e, 0x704f, 0x2148, 0x328, 0x53, 0x56}},
+            {K::Draw, 3, 52, 0x0, 0x1a, {}},
+            {K::Reset, 3, 216, 0x0, 0x0, {}},
+            {K::Draw, 3, 216, 0x1d, 0x2, {}},
+        }},
+        {312, 1, 3, 4861, {48, 262144, 16384, 262144}, 0, {
+            {K::Display, 0, 0, 0xef3e3e9c, 0x2f, {0x80d0}},
+            {K::VRAM, 1, 45, 0xa0, 0x0, {0x5}},
+            {K::VRAM, 1, 45, 0xc0, 0x0, {0x4, 0x0, 0xd86, 0x1078, 0xa621, 0x615, 0x13f, 0x46}},
+            {K::Draw, 1, 45, 0x0, 0x5, {}},
+            {K::Reset, 1, 64, 0x0, 0x0, {}},
+            {K::Draw, 1, 64, 0x5, 0x2, {}},
+        }},
+    };
+    auto device = OpenDevice();
+    for (const FuzzProgram &p : programs) {
+        const FuzzResult r = RunProgram(*device, p);
+        INFO("program " << p.seed << ": " << r.what);
+        CHECK_FALSE(r.failed);
+        CHECK(r.checkpoints > 0);
+    }
+    brimir::test::CloseAndCheckValidation(device);
+}
+
 TEST_CASE("GPU VDP1 fuzz: the fuzzer notices a broken GPU renderer (VRAM hazard tracking off)", "[gpu][vdp1][fuzz]") {
     auto device = OpenDevice();
     uint32_t failing = 0, seeds = 0;
     for (uint64_t seed = 1; seed <= 60 && failing < 2; ++seed, ++seeds) {
-        failing += RunProgram(*device, WithoutKnownSoftwareIssues(Generate(seed)), false).failed ? 1 : 0;
+        failing += RunProgram(*device, Generate(seed), false).failed ? 1 : 0;
     }
     INFO(failing << " of " << seeds << " seeds failing");
     CHECK(failing == 2);
@@ -1135,13 +1111,12 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
     const uint64_t seeds = EnvU64("BRIMIR_VDP1_FUZZ_SEEDS", 1000);
     const uint64_t first = EnvU64("BRIMIR_VDP1_FUZZ_FIRST", 1);
     const bool minimize = EnvU64("BRIMIR_VDP1_FUZZ_MINIMIZE", 0) != 0;
-    const bool filter = EnvU64("BRIMIR_VDP1_FUZZ_FILTER", 0) != 0;
     const auto start = std::chrono::steady_clock::now();
     uint64_t checkpoints = 0, nonZero = 0, fragmentSlots = 0, spans = 0, batches = 0;
     std::array<uint64_t, kKinds> ops{};
     std::vector<uint64_t> failing;
     for (uint64_t seed = first; seed < first + seeds; ++seed) {
-        const FuzzProgram p = filter ? WithoutKnownSoftwareIssues(Generate(seed)) : Generate(seed);
+        const FuzzProgram p = Generate(seed);
         const FuzzResult r = RunProgram(*device, p);
         checkpoints += r.checkpoints;
         nonZero = std::max(nonZero, r.maxNonZero);
@@ -1151,11 +1126,8 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
         for (uint32_t k = 0; k < kKinds; ++k) {
             ops[k] += r.ops[k];
         }
-        if (r.failed || r.outOfScope) {
+        if (r.failed) {
             failing.push_back(seed);
-            if (r.outOfScope) {
-                std::printf("OUT OF SCOPE seed %llu (generator bug)\n", static_cast<unsigned long long>(seed));
-            }
             std::printf("FAIL seed %llu: %s\n", static_cast<unsigned long long>(seed), r.what.c_str());
             if (minimize && failing.size() <= 3) {
                 const FuzzProgram m = Minimize(*device, p);
@@ -1192,8 +1164,7 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
 
 TEST_CASE("GPU VDP1 fuzz: replay one seed (BRIMIR_VDP1_FUZZ_SEED)", "[gpu][vdp1][fuzz][vdp1-fuzz-one][.]") {
     auto device = OpenDevice();
-    const FuzzProgram generated = Generate(EnvU64("BRIMIR_VDP1_FUZZ_SEED", 1));
-    const FuzzProgram p = EnvU64("BRIMIR_VDP1_FUZZ_FILTER", 0) != 0 ? WithoutKnownSoftwareIssues(generated) : generated;
+    const FuzzProgram p = Generate(EnvU64("BRIMIR_VDP1_FUZZ_SEED", 1));
     const FuzzResult r = RunProgram(*device, p);
     uint64_t hash = 0xCBF29CE484222325ull; // FNV-1a of the printed program (the same with every compiler)
     for (const char ch : ToCpp(p)) {
