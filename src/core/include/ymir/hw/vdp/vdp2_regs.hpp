@@ -50,6 +50,10 @@ struct VDP2Regs {
 
         vcellScrollTableAddress = 0;
         cellScrollTableAddress = 0;
+        // Brimir: upstream never sets this on reset. It is only computed when a line is drawn with the display on, so a
+        // save state taken before that held whatever the memory held. 0 is what CalcVCellScrollDelay gives with no
+        // vertical cell scroll access.
+        vcellScrollInc = 0;
 
         mosaicH = 1;
         mosaicV = 1;

@@ -101,6 +101,9 @@ void SoftwareVDPRenderer::Reset(bool hard) {
 
     if (m_threadedVDP1Rendering) {
         m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::Reset(hard));
+    } else {
+        // Brimir: the VDP1 thread owns it while threaded; it clears it when it handles the Reset event
+        m_VDP1doubleV = 0;
     }
     if (m_threadedVDP2Rendering) {
         m_vdp2RenderingContext.EnqueueEvent(VDP2RenderEvent::Reset());
@@ -630,7 +633,10 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             const auto &event = events[i];
             using EvtType = VDP1RenderEvent::Type;
             switch (event.type) {
-            case EvtType::Reset: rctx.Reset(event.reset.hard); break;
+            case EvtType::Reset:
+                rctx.Reset(event.reset.hard);
+                m_VDP1doubleV = 0; // Brimir: see SoftwareVDPRenderer::Reset
+                break;
 
             case EvtType::EraseFramebuffer: {
                 if (event.erase.cycles == 0) {

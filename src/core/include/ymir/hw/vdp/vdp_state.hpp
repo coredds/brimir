@@ -239,6 +239,8 @@ struct VDP2State {
         }
         lineBackLayerState.Reset();
         layerEnabled.fill(false);
+        // Brimir: derived by CalcAccessPatterns, which runs before the first drawn line, but nothing set it before
+        coeffAccess.fill(false);
     }
 
     /// @brief Layer states for NBGs 0-3.

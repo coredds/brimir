@@ -27,6 +27,7 @@ add_executable(brimir_tests
     unit/test_vdp_color_calc.cpp
     unit/test_vdp_composite.cpp
     unit/test_vdp_savestate.cpp
+    unit/test_vdp_uninit_state.cpp
     unit/test_vdp_external_renderer.cpp
     # Core wrapper tests (audio volume, rotation, overscan crop)
     unit/test_core_wrapper.cpp

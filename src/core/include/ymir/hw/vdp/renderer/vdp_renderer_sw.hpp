@@ -662,7 +662,9 @@ private:
     // -------------------------------------------------------------------------
     // VDP1
 
-    uint16 m_VDP1doubleV;
+    // Brimir: initialised and cleared by Reset. Upstream leaves it undefined until the first VDP1BeginFrame, but save
+    // states (and the GPU renderer, which copies it) read it before then.
+    uint16 m_VDP1doubleV = 0;
     bool m_VDP1QuadTermination = true; // Brimir: SetVDP1QuadTerminationForTesting
     // Brimir: GetVDP1QuadTerminationsForTesting; not atomic, valid only with unthreaded VDP1 rendering
     uint64 m_VDP1QuadTerminations = 0;
@@ -844,6 +846,9 @@ private:
 
         void Reset() {
             screenCoords.fill({});
+            // Brimir: upstream leaves these out. The sprite layer reads them whenever TVMR.ROTE is set, but they are
+            // only computed while an RBG is enabled.
+            spriteCoords.fill({});
             lineColor.fill({.u32 = 0});
             transparent.fill(false);
         }

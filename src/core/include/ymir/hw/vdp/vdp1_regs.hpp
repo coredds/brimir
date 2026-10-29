@@ -110,6 +110,8 @@ struct VDP1Regs {
         if (hard) {
             currCommandAddress = 0;
             prevCommandAddress = 0;
+            // Brimir: upstream never sets it before the first VDP1BeginFrame, but a save state can read it
+            nextCommandAddress = 0;
         }
 
         returnAddress = kVDP1NoReturn;
