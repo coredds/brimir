@@ -81,6 +81,10 @@ void Event::Wait() {
             if (errno == EAGAIN) {
                 // The state was changed from zero before we could wait.
                 // Must have been changed to 1.
+                // Brimir: an acquire load first, pairing with Set's release store: what the setter wrote before Set
+                // happens before the return (the futex call orders nothing in the C++ memory model; ThreadSanitizer
+                // reported every such read as a race).
+                (void)m_value.load(std::memory_order_acquire);
                 return;
             }
 
@@ -124,6 +128,7 @@ void Event::Wait() {
         int result = _umtx_op(reinterpret_cast<uint32 *>(&m_value), UMTX_OP_WAIT_UINT_PRIVATE, oldValue, nullptr, nullptr);
         if (result == -1) {
             if (errno == EAGAIN) {
+                (void)m_value.load(std::memory_order_acquire); // Brimir: as on Linux
                 return;
             }
         }
