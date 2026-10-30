@@ -11,8 +11,9 @@
 // - flags are packed by explicit shifts, documented below and mirrored by the HLSL accessors of the same names
 //   (a Vdp1Foo accessor here is Vdp1Foo in vdp1_defs.hlsli); tests/unit/test_gpu_vdp1_params.cpp runs both over
 //   random words;
-// - struct sizes are multiples of 16 bytes (the span is the 32 bytes the plan names), except the fragment: one slot of
-//   a buffer of millions, 8 bytes.
+// - sizes: the buffer structs Vdp1CommandParams (80 bytes), Vdp1Span (32, the size the plan names) and Vdp1FbWrite (16)
+//   are multiples of 16 bytes; Vdp1Fragment, one slot of a buffer of millions, is 8 bytes; the push-constant blocks
+//   are Vdp1BatchPushConstants 24, Vdp1ErasePushConstants 32 and Vdp1FbWritePushConstants 8 bytes.
 // Every offset and size is checked against the reflected layouts of src/gpu/shaders/vdp1/cs_vdp1_layout_probe.hlsl,
 // which declares them all (tests/unit/test_gpu_vdp1_params.cpp). No Vulkan header may be included here.
 
@@ -236,7 +237,8 @@ struct Vdp1Span {
     HLSLuint fragBase;       // first fragment slot of the span (the batch's prefix sum of 2 * Length() after SystemClip)
     HLSLuint gouraudLR;      // the Gouraud colours at the left and right end: left Color555 | right << 16
     HLSLuint stepTexV;       // quadStep (bits 15-0: the quad step 0-4095 or polyline segment 0-3) | texel row V << 16
-                             // (textured; int16: -1 to 254, -1 when CMDSIZE.V is 0 with a non-zero width)
+                             // (textured; int16, -1 to 255 as Vdp1FrontEnd::AddSpan asserts: rows 0 to CMDSIZE.V - 1,
+                             // -1 when CMDSIZE.V is 0 with a non-zero width)
 };
 static_assert(sizeof(Vdp1Span) == 32);
 static_assert(offsetof(Vdp1Span, x0) == 0 && offsetof(Vdp1Span, cmdIndex) == 16 &&

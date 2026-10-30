@@ -294,7 +294,8 @@ private:
     uint64_t m_hiddenGpuCalls = 0;
     uint64_t m_coreSubmits = 0;
     uint64_t m_hiddenSubmits = 0;
-    uint64_t m_runSubmits = 0; // accepted frame submits of the current run (sync submits taken out at their wait)
+    // Accepted frame submits of the current run; the core's sync submits (fence == m_syncFence) are not counted
+    uint64_t m_runSubmits = 0;
     uint64_t m_runRefused = 0;
     bool m_runOpsOnlyLine = false;
     uint64_t m_maxRunSubmits = 0;

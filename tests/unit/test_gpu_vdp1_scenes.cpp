@@ -1251,7 +1251,8 @@ TEST_CASE("GPU VDP1: detach mid-game syncs, VDP1 continues in software, attach u
             c.line = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, uint32_t y) {
                 if (y % 50 == 20) {
                     for (uint32_t i = 0; i < 32; ++i) {
-                        w.FBRAM16(w.DrawFramebuffer(), (Rand(rng, 0x20000) * 2) & 0x3FFFE, static_cast<uint16_t>(rng()));
+                        w.FBRAM16(w.DrawFramebuffer(), (Rand(rng, 0x20000) * 2) & 0x3FFFE,
+                                  static_cast<uint16_t>(rng()));
                     }
                 }
             };
@@ -1297,8 +1298,8 @@ namespace {
 // (PollVdp1Readbacks merged it), so exactly frame 4's VDP1 work so far is lost: the framebuffers then equal software's
 // at the start of frame 4. Without it the GPU may still run the earlier frames when they are polled: the loss is
 // bounded by the frame contexts (two here; a context is waited for before it is reused, and merged then), so the
-// framebuffers equal software's at the start of frame 2, 3 or 4 (frame 2 when never polled: the worst case). With `deinterlace` (double density) alt is in the
-// shadow and survives the same way. Attached again at frame 7. With `strict` every frame from 4 on is compared with
+// framebuffers equal software's at the start of frame 2, 3 or 4 (frame 2 when never polled: the worst case). With
+// `deinterlace` (double density) alt is in the shadow and survives the same way. Attached again at frame 7. With `strict` every frame from 4 on is compared with
 // software (the operational exception: frame 4 differs); otherwise the confined loss is checked, software then takes
 // over the renderer's state at the abandon, and frames 0 and 4 on must be identical (the continuation is exact).
 enum class Poll { AfterWait, NoWait, Never };
@@ -1372,7 +1373,8 @@ void RunAbandonScene(bool strict, Poll poll, bool deinterlace) {
                     // ... and it is a loss: software has frame 4's draw
                     CHECK(rig.swState->mem1.FBRAM != atStart[4]->main);
                     if (deinterlace) {
-                        CHECK(rig.sw->GetAltFBRAM(rig.swState->fbIndex.draw) != atStart[4]->alt[rig.swState->fbIndex.draw]);
+                        const uint32_t draw = rig.swState->fbIndex.draw;
+                        CHECK(rig.sw->GetAltFBRAM(draw) != atStart[4]->alt[draw]);
                     }
                     if (!strict) {
                         // The confined loss checked: software takes over the state the renderer continues from (the

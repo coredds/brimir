@@ -185,8 +185,8 @@ static_assert(kMaxPushConstantSize == 32);
 ///   most kScanBlockCount, 4096; none for a batch without fragments); bucket_sums: one group;
 /// - scatter: kScatterSlotsPerThread slots per thread, ceil(fragmentCount / kScatterSlotsPerGroup) groups (at most
 ///   16384; one slot per thread would need 65536 groups for a full batch, beyond the guaranteed 65535);
-/// - resolve: vkCmdDispatchIndirect at kBatchStateResolveArgs: G = ceil((unitHi - unitLo) / 64) groups (at most
-///   kResolveGroupCount, 4096); thread t of group g owns unit unitLo + G t + g;
+/// - resolve: vkCmdDispatchIndirect at kBatchStateResolveArgs: G = min(unitHi - unitLo, kResolveGroupCount = 4096)
+///   groups (batch_range writes it); thread t of group g owns unit unitLo + G t + g;
 /// - erase: kEraseGroupSize x kEraseGroupSize groups over the region (x3 - x1 by y3 - y1 + 1 words);
 /// - fb_write_mark, fb_write, fb_write_clear: one thread per record of the run, ceil(count / 64) groups each (at most
 ///   4096), in that order.

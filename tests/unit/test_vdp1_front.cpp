@@ -512,8 +512,8 @@ TEST_CASE("VDP1 front half: CPU time per span on a polygon-heavy table", "[vdp1]
     WriteHeavyTable(*state, commands, 3000, 7);
     constexpr int kFrames = 60;
 
+    // The table writes no VRAM: only the first timed batch uploads (all of VRAM, marked dirty by the constructor)
     Vdp1FrontEnd front{*state};
-    front.TakeOps(); // the first batch's full VRAM upload aside
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
     uint64_t spans = 0;

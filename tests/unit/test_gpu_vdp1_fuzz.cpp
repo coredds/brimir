@@ -1,8 +1,8 @@
 // GPU VDP1 parity fuzzer (GPU stage 2, Task 7): seeded random programs run through the software renderer and the
 // Vulkan renderer with VDP1 on the GPU (vdp2_scene.hpp RenderBothFBRAM), comparing all eight FBRAM slices (main
-// fb0/fb1, alt fb0/fb1, mesh[alt][fb]) after every op (half the programs) or after about one op in N (the others: a checkpoint
-// submits the pending VDP1 work and so ends the batch, and only sparse checkpoints let draws, VRAM and CPU writes share
-// a batch), at every frame's end, and every frame's composite.
+// fb0/fb1, alt fb0/fb1, mesh[alt][fb]) after every op (half the programs) or after about one op in N (the others: a
+// checkpoint submits the pending VDP1 work and so ends the batch, and only sparse checkpoints let draws, VRAM and CPU
+// writes share a batch), at every frame's end, and every frame's composite.
 //
 // A program is a list of ops, each at a frame and a phase (before the frame's VDP1 frame control, before a line, or in
 // blanking after the VDP2 frame's end): VDP1 command tables and the textures, look-up tables and Gouraud tables they
