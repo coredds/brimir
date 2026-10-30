@@ -1535,6 +1535,45 @@ TEST_CASE("GPU VDP1: abandoning the device loses only the VDP1 work of the runs 
     }
 }
 
+TEST_CASE("GPU VDP1: a detach that discards the state (unload) makes no sync submit and logs no readback failure",
+          "[gpu][vdp1][scene]") {
+    // Mid-frame the GPU holds newer data and the sync submit is refused (outside retro_run, as at retro_unload_game
+    // without context_destroy): a detach keeping the state tries the sync and logs that it failed; one discarding it
+    // tries nothing and logs nothing about it.
+    for (const bool discard : {false, true}) {
+        DYNAMIC_SECTION((discard ? "discarding the state" : "keeping the state")) {
+            auto device = OpenDevice();
+            {
+                AsyncRig rig(*device, {}, false);
+                REQUIRE(rig.Ready());
+                std::vector<std::string> logs;
+                rig.vk->SetLog([&logs](const std::string &text) { logs.push_back(text); });
+                const Vdp2Scene scene = Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); },
+                                                  AutoSwap(40), 3, {}, 33);
+                scene.setup(rig.writer);
+                for (uint32_t f = 0; f < scene.frames; ++f) {
+                    const bool last = f + 1 == scene.frames;
+                    rig.writer.RunFrame(scene.onLine, 0, last ? 100 : UINT32_MAX, scene.blanking);
+                    if (!last) {
+                        REQUIRE(rig.Submit());
+                    }
+                }
+                REQUIRE(rig.vk->HasPendingVdp1Work());
+                rig.sync.allowed = false;
+                rig.WaitAll();
+                rig.vk->DetachDevice(discard);
+                CHECK_FALSE(rig.vk->Attached());
+                CHECK(rig.sync.refused == (discard ? 0u : 1u));
+                const auto failed = std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+                    return text.find("reading the GPU framebuffers back failed") != std::string::npos;
+                });
+                CHECK(failed == (discard ? 0 : 1));
+            }
+            CloseAndCheckValidation(device);
+        }
+    }
+}
+
 TEST_CASE("GPU VDP1 exception: abandon loses the frame's VDP1 work (operational exception; frame 4 differs)",
           "[gpu][vdp1][scene][!shouldfail]") {
     RunAbandonScene(true, Poll::AfterWait, false);

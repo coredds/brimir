@@ -92,8 +92,9 @@ public:
     // detaching another one first. Call between frames. Returns false (renderer not attached) with error on failure.
     bool AttachRenderer(gpu::VulkanVDPRenderer &renderer, std::string &error);
     // Waits for this output's own submissions and detaches the renderer. No-op without one. Call between frames.
-    // Returns false (and still detaches) when a wait failed, with error set.
-    bool DetachRenderer(std::string &error);
+    // Returns false (and still detaches) when a wait failed, with error set. `discardState`: the emulation state is
+    // being thrown away (content unloaded): VDP1 on the GPU is not read back first (VulkanVDPRenderer::DetachDevice).
+    bool DetachRenderer(std::string &error, bool discardState = false);
     bool RendererAttached() const;
 
     // Renderer path: presents the renderer's frame of this retro_run (recorded into the slot's command buffer), or

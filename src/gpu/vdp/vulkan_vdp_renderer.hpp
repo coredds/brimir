@@ -99,8 +99,10 @@ public:
     void AttachDevice(VulkanDevice &device, uint32_t frameContexts, uint32_t maxScale = 4);
     // Drops the pending frame and destroys the GPU resources. The caller has waited for the device to be idle. In Gpu
     // VDP1 mode the pending VDP1 ops are replayed and FBRAM is read back first (a sync submit, see SetSyncSubmit, on the
-    // still valid device), so VDP1 continues in software from the GPU's framebuffers.
-    void DetachDevice();
+    // still valid device), so VDP1 continues in software from the GPU's framebuffers. With `discardState` (the
+    // emulation state is being thrown away, as when the content is unloaded) there is no sync submit: VDP1 continues
+    // from the shadow as of the last merge, and nothing is logged about it.
+    void DetachDevice(bool discardState = false);
     // Grows the back half's frame contexts to at least `frameContexts` in place (a larger sync index mask): the
     // composite (the other field when weaving), the GPU copies of VRAM/CRAM and the pending frame are kept. The work of
     // every context whose index changes meaning must have completed. False when detached.
@@ -345,7 +347,7 @@ private:
 
     // Gpu VDP1 mode
     bool EnterGpuVdp1(VulkanDevice &device, uint32_t contexts);
-    void LeaveGpuVdp1();
+    void LeaveGpuVdp1(bool sync);
     void DestroyGpuVdp1();
     // Replays the pending work into cmd (see FramePolicy), then the readbacks of rule 2 plus the slices of `extra` (when
     // covered). False when recording failed (what was recorded is in m_vdp1Recorded, the rest stays queued).

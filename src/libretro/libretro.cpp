@@ -1214,9 +1214,9 @@ RETRO_API void retro_unload_game(void) {
             g_core->UnloadGame();
 #ifdef BRIMIR_VULKAN
             // The next content chooses its renderer again. The frontend has normally destroyed the context already
-            // (the renderer is detached then).
+            // (the renderer is detached then). The state is discarded: no VDP1 readback.
             std::string error;
-            if (g_vulkanOutput && !g_vulkanOutput->DetachRenderer(error)) {
+            if (g_vulkanOutput && !g_vulkanOutput->DetachRenderer(error, true)) {
                 brimir_log(RETRO_LOG_ERROR, "Vulkan VDP2 renderer detach: %s", error.c_str());
             }
             g_core->UseSoftwareRenderer();

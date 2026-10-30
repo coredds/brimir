@@ -482,7 +482,7 @@ struct VulkanOutput::Impl {
     // The renderer's sync submit (VulkanVDPRenderer::SetSyncSubmit).
     bool SyncSubmit(const gpu::VulkanVDPRenderer::SyncRecord &record);
     bool AttachRendererTo(gpu::VulkanVDPRenderer &target, std::string &error);
-    void DetachRendererIdle();
+    void DetachRendererIdle(bool discardState = false);
     void Withdraw();
     void Teardown();
     void Abandon();
@@ -895,10 +895,11 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
 }
 
 // Detaches the renderer; the device is idle or this output's submissions have completed.
-void VulkanOutput::Impl::DetachRendererIdle() {
+void VulkanOutput::Impl::DetachRendererIdle(bool discardState) {
     if (renderer) {
         const bool gpuVdp1 = renderer->GpuVdp1();
-        renderer->DetachDevice(); // with VDP1 on the GPU: its sync submit (counted below as a detach)
+        // With VDP1 on the GPU: its sync submit (counted below as a detach), unless the state is discarded
+        renderer->DetachDevice(discardState);
         if (gpuVdp1) {
             // Diagnostics (brimir_vkhost checks): the submits and waits VDP1 on the GPU added since the renderer was
             // created, by kind, with their times.
@@ -1426,14 +1427,14 @@ bool VulkanOutput::AttachRenderer(gpu::VulkanVDPRenderer &renderer, std::string 
     return m.AttachRendererTo(renderer, error);
 }
 
-bool VulkanOutput::DetachRenderer(std::string &error) {
+bool VulkanOutput::DetachRenderer(std::string &error, bool discardState) {
     Impl &m = *m_impl;
     if (m.renderer == nullptr) {
         return true;
     }
     // A failed wait means a lost device, whose objects may be destroyed anyway.
     const VkResult result = m.WaitOwnWork();
-    m.DetachRendererIdle();
+    m.DetachRendererIdle(discardState);
     if (result != VK_SUCCESS) {
         error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
         return false;

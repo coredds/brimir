@@ -71,7 +71,7 @@ VulkanVDPRenderer::~VulkanVDPRenderer() {
 
 void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContexts, uint32_t maxScale) {
     if (m_backend) {
-        LeaveGpuVdp1();
+        LeaveGpuVdp1(true);
     }
     m_backend.reset();
     // The requested scale (capped), else the previous effective one, else 1: the back half tries them in that order,
@@ -103,8 +103,8 @@ void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContext
     }
 }
 
-void VulkanVDPRenderer::DetachDevice() {
-    LeaveGpuVdp1();
+void VulkanVDPRenderer::DetachDevice(bool discardState) {
+    LeaveGpuVdp1(!discardState);
     m_front.ConsumeFrame();
     m_front.MarkAllDirty();
     m_backend.reset();
@@ -321,12 +321,12 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     return true;
 }
 
-void VulkanVDPRenderer::LeaveGpuVdp1() {
+void VulkanVDPRenderer::LeaveGpuVdp1(bool sync) {
     if (m_gpuVdp1) {
         // The caller waited for the device: every committed readback is complete. Then one sync submit for what the
         // GPU holds beyond them (alt included, shadowed or not), so software continues from the GPU's framebuffers.
         OwnWorkCompleted();
-        if (!SyncShadow(kMainSlices | kMeshSlices | kAltSlices, Vdp1SyncKind::Detach, FramePolicy::Ignore)) {
+        if (sync && !SyncShadow(kMainSlices | kMeshSlices | kAltSlices, Vdp1SyncKind::Detach, FramePolicy::Ignore)) {
             Log("VDP1: reading the GPU framebuffers back failed; VDP1 continues in software from older ones");
         }
         HandToSoftware();
