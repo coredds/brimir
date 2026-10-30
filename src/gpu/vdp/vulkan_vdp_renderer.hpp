@@ -203,6 +203,12 @@ public:
     // A VDP2 frame was recorded and submitted by a VDP1 sync submit (ordered with the ops after it) since the last
     // call: the composite holds it (the caller presents the composite as it is).
     bool TakeFrameRecordedBySync();
+    // Gpu VDP1 mode: the last PreSaveStateSync could not bring the CPU copy of main and mesh current (the sync submit
+    // refused or failed, the readback buffer not allocated, ops left pending): a state saved now would hold older
+    // framebuffers, and the caller must not use it (CoreWrapper::SaveState fails). Logged once per renderer.
+    bool SaveSyncFailed() const { return m_saveSyncFailed; }
+    // Test hook: every PreSaveStateSync fails as above.
+    void FailSaveSyncForTest(bool fail) { m_failSaveSync = fail; }
     // The inner software renderer (VDP1 in Software mode and while detached), for tests.
     const ymir::vdp::SoftwareVDPRenderer &InnerVdp1ForTest() const { return *m_vdp1; }
     // The VDP1 back half (nullptr unless GpuVdp1()) and front half, for tests.
@@ -413,6 +419,9 @@ private:
     double m_frontSeconds = 0;               // FrameProbe: front-half time of the open frame
     Vdp1ProbeTimes m_vdp1Times;              // FrameProbe: VDP1 times since the last report (Gpu VDP1 mode)
     bool m_timestampsLogged = false;         // FrameProbe: "no GPU timestamps" logged once
+    bool m_saveSyncFailed = false;           // the last PreSaveStateSync left main or mesh behind
+    bool m_saveSyncFailLogged = false;
+    bool m_failSaveSync = false;             // FailSaveSyncForTest
 };
 
 } // namespace brimir::gpu

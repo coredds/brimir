@@ -806,7 +806,7 @@ bool VulkanVDPRenderer::SyncShadow(uint32_t mask, Vdp1SyncKind kind, FramePolicy
         }
         current = current && s.valid >= s.lastTouch;
     }
-    if (!current) {
+    if (!current && kind != Vdp1SyncKind::Save) { // PreSaveStateSync logs its own (once)
         Log("VDP1: the GPU framebuffers could not be read back here; the CPU copy is older");
     }
     return current;
@@ -863,8 +863,12 @@ void VulkanVDPRenderer::UpdateEnhancements() {
 void VulkanVDPRenderer::PreSaveStateSync() {
     m_vdp1->PreSaveStateSync();
     // Rule 5: fence waits in retro_serialize; a sync submit only for a save inside retro_run with newer GPU data.
-    if (m_gpuVdp1 && !SyncShadow(kMainSlices | kMeshSlices, Vdp1SyncKind::Save, FramePolicy::Sync)) {
-        Log("VDP1: the save state holds older framebuffers");
+    const bool current = !m_gpuVdp1 || SyncShadow(kMainSlices | kMeshSlices, Vdp1SyncKind::Save, FramePolicy::Sync);
+    m_saveSyncFailed = !current || m_failSaveSync;
+    if (m_saveSyncFailed && !m_saveSyncFailLogged) {
+        Log("VDP1: the GPU framebuffers could not be read back before a save; a save state fails rather than hold "
+            "older framebuffers");
+        m_saveSyncFailLogged = true;
     }
 }
 

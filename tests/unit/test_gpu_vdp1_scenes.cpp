@@ -956,6 +956,46 @@ TEST_CASE("GPU VDP1 scene: a dropped VDP1-only command buffer after a frame a sy
     CHECK_FALSE(rescalePending);
 }
 
+TEST_CASE("GPU VDP1 scene: a save whose sync submit is refused reports the framebuffers behind",
+          "[gpu][vdp1][scene]") {
+    // Mid-frame the GPU holds newer data: with the sync submit refused PreSaveStateSync cannot bring main and mesh
+    // current (SaveSyncFailed: CoreWrapper::SaveState fails); allowed again, the next save is current. Logged once.
+    SyncSubmitCounter counter;
+    gpu::VulkanVDPRenderer *vulkan = nullptr;
+    std::vector<std::string> logs;
+    uint32_t failed = 0, current = 0;
+    FrameControl c = AutoSwap(40);
+    c.draw = [&](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 40);
+        w.DrawVDP1Partial(0, 25);
+        if (f == 1 || f == 2) {
+            counter.allowed = false;
+            (void)w.SaveStates();
+            failed += vulkan->SaveSyncFailed() ? 1 : 0;
+            counter.allowed = true;
+            (void)w.SaveStates();
+            current += vulkan->SaveSyncFailed() ? 0 : 1;
+        }
+        w.DrawVDP1Partial(25, 64);
+    };
+    RenderBothOptions options;
+    options.syncCounter = &counter;
+    options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &renderer, gpu::VulkanDevice &) {
+        vulkan = &renderer;
+        if (f == 0) {
+            renderer.SetLog([&logs](const std::string &text) { logs.push_back(text); });
+        }
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 4, {}, 31), options);
+    CHECK(failed == 2);
+    CHECK(current == 2);
+    CHECK(counter.refused == 2);
+    CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+              return text.find("a save state fails") != std::string::npos;
+          }) == 1);
+}
+
 TEST_CASE("GPU VDP1 scene: save states equal software's byte for byte; cross-renderer loads both ways",
           "[gpu][vdp1][scene]") {
     // Mid-frame (between commands, the GPU holding newer data) the state of each pair is saved: the VDP part (main

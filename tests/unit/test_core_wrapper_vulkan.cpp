@@ -10,7 +10,10 @@
 
 #include <ymir/sys/saturn.hpp>
 
+#include <cstdint>
 #include <cstring>
+#include <string>
+#include <vector>
 
 using namespace brimir;
 
@@ -61,6 +64,28 @@ TEST_CASE("CoreWrapper SetThreadedVDP1 reaches the installed Vulkan VDP renderer
     REQUIRE(renderer->ThreadedVDP1());
     core.UnloadGame();
     CHECK_FALSE(renderer->ThreadedVDP1());
+}
+
+TEST_CASE("CoreWrapper SaveState fails when the Vulkan VDP renderer's framebuffers are behind", "[core][vulkan]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    gpu::VulkanVDPRenderer *renderer = core.InstallVulkanRenderer();
+    REQUIRE(renderer != nullptr);
+    std::vector<std::string> logs;
+    renderer->SetLog([&logs](const std::string &text) { logs.push_back(text); });
+    core.RunFrame();
+    std::vector<uint8_t> state(core.GetStateSize());
+    REQUIRE(!state.empty());
+    CHECK(core.SaveState(state.data(), state.size()));
+
+    renderer->FailSaveSyncForTest(true);
+    CHECK_FALSE(core.SaveState(state.data(), state.size()));
+    CHECK_FALSE(core.SaveState(state.data(), state.size()));
+    CHECK(logs.size() == 1); // once
+
+    renderer->FailSaveSyncForTest(false);
+    CHECK(core.SaveState(state.data(), state.size()));
+    CHECK(core.LoadState(state.data(), state.size()));
 }
 
 TEST_CASE("CoreWrapper reports the Vulkan VDP renderer's frames as device frames", "[core][vulkan]") {

@@ -1172,6 +1172,12 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         auto& state = Scratch(m_stateScratch);
         ResetSaveState(state);
         m_saturn->SaveState(state);
+#ifdef BRIMIR_VULKAN
+        // VDP1 on the GPU: no state with framebuffers older than the emulation (the renderer logged why)
+        if (m_vulkanRenderer && m_vulkanRenderer->SaveSyncFailed()) {
+            return false;
+        }
+#endif
 
         // The struct holds std::vectors, so it is serialized field by field rather than copied raw.
         if (!EncodeSaveState(state, m_statePayload)) {
