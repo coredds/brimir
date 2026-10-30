@@ -104,7 +104,8 @@ jobs:
   # on the GPU 6 min).
   gpu-lavapipe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    # 4-vCPU runners give lavapipe a quarter of a 16-thread machine's threads
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 

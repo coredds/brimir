@@ -1409,14 +1409,15 @@ TEST_CASE("GPU VDP1: detach mid-game syncs, VDP1 continues in software, attach u
 namespace {
 
 // Abandon mid-frame (frame 4, line 100: the device is gone, no Vulkan call): VDP1 continues in software from the
-// shadow as of the last merge (rule 8). With `waitLast` the GPU finished the previous frame before frame 4 started
-// (PollVdp1Readbacks merged it), so exactly frame 4's VDP1 work so far is lost: the framebuffers then equal software's
-// at the start of frame 4. Without it the GPU may still run the earlier frames when they are polled: the loss is
-// bounded by the frame contexts (two here; a context is waited for before it is reused, and merged then), so the
-// framebuffers equal software's at the start of frame 2, 3 or 4 (frame 2 when never polled: the worst case). With
-// `deinterlace` (double density) alt is in the shadow and survives the same way. Attached again at frame 7. With `strict` every frame from 4 on is compared with
-// software (the operational exception: frame 4 differs); otherwise the confined loss is checked, software then takes
-// over the renderer's state at the abandon, and frames 0 and 4 on must be identical (the continuation is exact).
+// shadow as of the last merge (rule 8). With `poll` = AfterWait the GPU finished the previous frame before frame 4
+// started (PollVdp1Readbacks merged it), so exactly frame 4's VDP1 work so far is lost: the framebuffers then equal
+// software's at the start of frame 4. With NoWait or Never the GPU may still run the earlier frames when they are
+// polled: the loss is bounded by the frame contexts (two here; a context is waited for before it is reused, and
+// merged then), so the framebuffers equal software's at the start of frame 2, 3 or 4 (frame 2 when never polled: the
+// worst case). With `deinterlace` (double density) alt is in the shadow and survives the same way. Attached again at
+// frame 7. With `strict` every frame from 4 on is compared with software (the operational exception: frame 4
+// differs); otherwise the confined loss is checked, software then takes over the renderer's state at the abandon, and
+// frames 0 and 4 on must be identical (the continuation is exact).
 enum class Poll { AfterWait, NoWait, Never };
 
 void RunAbandonScene(bool strict, Poll poll, bool deinterlace) {
