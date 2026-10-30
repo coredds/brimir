@@ -397,8 +397,10 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     frameRecorded = false;
     m_vdp1Recorded.clear(); // the previous command buffer was submitted (or reported dropped)
     m_proposed = {};
-    if (FrameProbe) {
-        m_vdp1Backend->EnableTimestamps(); // once (diagnostics)
+    if (FrameProbe && !m_vdp1Backend->EnableTimestamps() && !m_timestampsLogged) {
+        // Diagnostics: vdp1_gpu_us stays 0
+        Log("VDP1 probe: no GPU timestamps on this queue; the VDP1 GPU time is not measured");
+        m_timestampsLogged = true;
     }
     // This context's previous command buffer has completed: its readbacks can be merged before the buffer is reused.
     MergeContext(context);

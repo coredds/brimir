@@ -7,9 +7,12 @@
 // Decodes two retro_serialize states (BRI2 header, LZ4 payload, savestate_codec.hpp) and compares the renderer section
 // (VDPSaveState::VDPRendererSaveState) field by field. Both renderers save the software renderer's layout, but the
 // Vulkan renderer's NBG fetchers come from its front half, so a few line-local caches may legitimately differ. Exit
-// status: 0 when every difference in the renderer section is on the allowlist below and the VDP1 framebuffers
-// (vdp.FBRAM, displayFB) are identical, 3 otherwise, 2 on a read error. Other sections are only summarized (bytes that
-// differ): two runs of the same content differ in RTC-driven memory.
+// status: 0 when every difference in the renderer section is on the allowlist below and the rest of the VDP section
+// (VDP1 framebuffers vdp.FBRAM and displayFB, VDP1/VDP2 VRAM, CRAM, VDP1/VDP2 registers, VDP1 state, phases) is
+// identical, 3 otherwise, 2 on a read error. Other sections are only summarized (bytes that differ), with the
+// differing work RAM offsets and SMPC output registers named: two runs of the same content started at different host
+// times differ there, because the SMPC RTC follows the host clock (core default) and INTBACK returns the time in
+// OREG, which the BIOS and games copy into work RAM.
 //
 // Allowlist (fields the software renderer re-derives before any use, so their saved value never reaches a pixel):
 // - vramFetchers[*][0..3]: currChar, nextChar, lastCharIndex, lastCellX, charData, charDataAddress. VDP2PrepareLine
@@ -125,11 +128,70 @@ int main(int argc, char **argv) {
                 DifferingBytes(a->system, b->system), DifferingBytes(a->msh2, b->msh2),
                 DifferingBytes(a->ssh2, b->ssh2), DifferingBytes(a->scsp, b->scsp),
                 DifferingBytes(a->vdp, b->vdp) - DifferingBytes(a->vdp.renderer, b->vdp.renderer));
+    // Where they differ: work RAM offsets (first few) and the SMPC output registers and RTC fields.
+    const auto ramOffsets = [](const char *name, const auto &ra, const auto &rb) {
+        size_t n = 0;
+        std::string first;
+        for (size_t i = 0; i < ra.size(); ++i) {
+            if (ra[i] != rb[i]) {
+                if (n < 8) {
+                    char text[40];
+                    std::snprintf(text, sizeof(text), " %05zx (%02x vs %02x)", i, ra[i], rb[i]);
+                    first += text;
+                }
+                ++n;
+            }
+        }
+        if (n != 0) {
+            std::printf("  %s: %zu bytes differ:%s%s\n", name, n, first.c_str(), n > 8 ? " ..." : "");
+        }
+    };
+    ramOffsets("system.WRAMLow", a->system.WRAMLow, b->system.WRAMLow);
+    ramOffsets("system.WRAMHigh", a->system.WRAMHigh, b->system.WRAMHigh);
+    ramOffsets("smpc.OREG", a->smpc.OREG, b->smpc.OREG);
+    if (a->smpc.rtcTimestamp != b->smpc.rtcTimestamp || a->smpc.rtcSysClockCount != b->smpc.rtcSysClockCount) {
+        std::printf("  smpc.rtcTimestamp %lld vs %lld, rtcSysClockCount %llu vs %llu\n",
+                    static_cast<long long>(a->smpc.rtcTimestamp), static_cast<long long>(b->smpc.rtcTimestamp),
+                    static_cast<unsigned long long>(a->smpc.rtcSysClockCount),
+                    static_cast<unsigned long long>(b->smpc.rtcSysClockCount));
+    }
+
+    Report r;
+    // The rest of the VDP section is emulation state the renderers do not own: it must be identical (a difference
+    // means the two runs diverged, e.g. a CPU framebuffer read returned other data).
+    std::printf("VDP section outside the renderer:\n");
+    const auto bytes = [&r](const char *name, const auto &va, const auto &vb) {
+        const size_t n = DifferingBytes(va, vb);
+        if (n != 0) {
+            std::printf("  %s: %zu bytes differ  <-- NOT ALLOWED\n", name, n);
+            ++r.unexpected;
+        }
+    };
+    const auto memory = [&r, &ramOffsets](const char *name, const auto &va, const auto &vb) {
+        if (DifferingBytes(va, vb) != 0) {
+            ramOffsets(name, va, vb);
+            std::printf("    <-- NOT ALLOWED\n");
+            ++r.unexpected;
+        }
+    };
+    memory("vdp.VRAM1", a->vdp.VRAM1, b->vdp.VRAM1);
+    memory("vdp.VRAM2", a->vdp.VRAM2, b->vdp.VRAM2);
+    memory("vdp.CRAM", a->vdp.CRAM, b->vdp.CRAM);
+    bytes("vdp.vdp1State", a->vdp.vdp1State, b->vdp.vdp1State);
+    bytes("vdp.regs1", a->vdp.regs1, b->vdp.regs1);
+    bytes("vdp.regs2", a->vdp.regs2, b->vdp.regs2);
+    bytes("vdp.HPhase", a->vdp.HPhase, b->vdp.HPhase);
+    bytes("vdp.VPhase", a->vdp.VPhase, b->vdp.VPhase);
+    if (r.unexpected != 0 && (a->smpc.OREG != b->smpc.OREG || DifferingBytes(a->system, b->system) != 0)) {
+        // Seen in Fighters Megamix: CPU-written bytes of a VDP1 command table that depend on the time, also between two
+        // software runs.
+        std::printf("  note: work RAM / the SMPC output registers differ too: the runs may have diverged on the host-clock "
+                    "RTC (started at different times); compare from a shared state (brimir_vkhost --load-state)\n");
+    }
 
     // The VDP1 framebuffers are compared strictly too: the checks diff states saved at the same frame of the same
     // content, whose frames are identical, and with VDP1 on the GPU they come from the CPU shadow.
     std::printf("VDP1 framebuffers:\n");
-    Report r;
     for (size_t fb = 0; fb < a->vdp.FBRAM.size(); ++fb) {
         r.Field("vdp.FBRAM[" + std::to_string(fb) + "]", a->vdp.FBRAM[fb], b->vdp.FBRAM[fb], false);
     }

@@ -85,9 +85,10 @@ public:
     // Diagnostics (brimir_vkhost --probe): from now on every Record, RecordFbramUpload and RecordReadback is bracketed
     // by two timestamps (bottom of pipe: the span from the end of the earlier work to the end of its own), and each
     // BeginContext adds the context's completed spans to the GPU time TakeGpuSeconds returns (vkGetQueryPoolResults
-    // without waiting; results that are not available are dropped). No-op where the device has no timestamps on its
-    // graphics and compute queues (timestampComputeAndGraphics) or the pool cannot be created.
-    void EnableTimestamps();
+    // without waiting; results that are not available are dropped). Each pair's difference is taken modulo
+    // 2^timestampValidBits of the device's queue family, so a counter wrap inside a pair is harmless. Returns false (and
+    // stays off) where that queue family has no timestamps (timestampValidBits 0) or the pool cannot be created.
+    bool EnableTimestamps();
     // The GPU time of the command buffers whose results were collected since the last call, in seconds.
     double TakeGpuSeconds();
 
@@ -155,6 +156,8 @@ private:
     std::array<bool, kMaxTimedContexts> m_queriesReset{};
     int32_t m_lastContext = -1;
     double m_gpuSeconds = 0;
+    uint32_t m_timestampBits = 0;
+    bool m_timestampsUnavailable = false;
 };
 
 } // namespace brimir::gpu::vdp1

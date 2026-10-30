@@ -177,18 +177,32 @@ void Vdp1VulkanBackend::Destroy() {
     }
 }
 
-void Vdp1VulkanBackend::EnableTimestamps() {
-    if (m_queries != VK_NULL_HANDLE || !Ok() || !m_device.Properties().limits.timestampComputeAndGraphics) {
-        return;
+bool Vdp1VulkanBackend::EnableTimestamps() {
+    if (m_queries != VK_NULL_HANDLE) {
+        return true;
     }
+    if (!Ok() || m_timestampsUnavailable) {
+        return false;
+    }
+    // The queue family's timestampValidBits (0: no timestamps on this queue); a pair's difference is taken modulo
+    // 2^validBits, so a counter wrap between the two stamps of a pair is harmless.
+    uint32_t families = 0;
+    volk::vkGetPhysicalDeviceQueueFamilyProperties(m_device.Physical(), &families, nullptr);
+    std::vector<VkQueueFamilyProperties> props(families);
+    volk::vkGetPhysicalDeviceQueueFamilyProperties(m_device.Physical(), &families, props.data());
+    m_timestampBits = m_device.QueueFamily() < families ? props[m_device.QueueFamily()].timestampValidBits : 0;
     VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     info.queryType = VK_QUERY_TYPE_TIMESTAMP;
     info.queryCount = kQueriesPerContext * kMaxTimedContexts;
-    if (m_device.Table().vkCreateQueryPool(m_device.Device(), &info, nullptr, &m_queries) != VK_SUCCESS) {
+    if (m_timestampBits == 0 ||
+        m_device.Table().vkCreateQueryPool(m_device.Device(), &info, nullptr, &m_queries) != VK_SUCCESS) {
         m_queries = VK_NULL_HANDLE;
+        m_timestampsUnavailable = true;
+        return false;
     }
     m_queryCount.fill(0);
     m_queriesReset.fill(false);
+    return true;
 }
 
 double Vdp1VulkanBackend::TakeGpuSeconds() {
@@ -239,9 +253,10 @@ void Vdp1VulkanBackend::CollectTimestamps(uint32_t contextIndex) {
                                                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
         return;
     }
+    const uint64_t mask = m_timestampBits >= 64 ? ~uint64_t{0} : (uint64_t{1} << m_timestampBits) - 1;
     uint64_t ticks = 0;
     for (uint32_t i = 0; i + 1 < count; i += 2) {
-        ticks += stamps[i + 1] >= stamps[i] ? stamps[i + 1] - stamps[i] : 0;
+        ticks += (stamps[i + 1] - stamps[i]) & mask;
     }
     m_gpuSeconds += static_cast<double>(ticks) * m_device.Properties().limits.timestampPeriod * 1e-9;
 }

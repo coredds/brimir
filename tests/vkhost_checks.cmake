@@ -689,6 +689,22 @@ foreach(compare_case IN ITEMS "--gpu-vdp1" "--gpu-vdp1|--internal-resolution|2|-
 endforeach()
 message(STATUS "gpu_vdp1: VDP1 on the GPU identical to software (shown, hidden, after a refused submit, state round "
                "trips every frame, run-ahead, a reinit in retro_run, --compare at 1x and 2x); --software-vdp1 too")
+# ... and the probe (diagnostics, synchronization validation on): the VDP1 times of the VDP2 probe line, with the GPU
+# time from timestamp queries (the menu draws and erases every frame), or the core's line saying the queue has no
+# timestamps.
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(gpu_vdp1_probe --vulkan --probe)
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(gpu_vdp1_probe 300)
+check_vulkan_counters(gpu_vdp1_probe)
+require_log(gpu_vdp1_probe "probe: vdp1_front_us +median [0-9.]+ max [0-9.]+ mean [0-9.]+")
+if(NOT "${gpu_vdp1_probe_err}" MATCHES "VDP1 probe: no GPU timestamps on this queue")
+    string(REGEX MATCH "probe: vdp1_gpu_us +median [0-9.]+ max [0-9.]+ mean ([0-9.]+)" ignored "${gpu_vdp1_probe_err}")
+    if(NOT CMAKE_MATCH_1 OR CMAKE_MATCH_1 STREQUAL "0.0")
+        fail(gpu_vdp1_probe "vdp1_gpu_us is not above 0 ('${CMAKE_MATCH_1}') and the core did not log missing timestamps")
+    endif()
+    message(STATUS "gpu_vdp1_probe: VDP1 GPU time mean ${CMAKE_MATCH_1} us per frame (timestamps)")
+endif()
 
 file(REMOVE_RECURSE "${state_dir}")
 
@@ -775,7 +791,8 @@ foreach(case IN ITEMS "--refuse-hw|no \"Vulkan frame output ready\"" "--fake-api
     endif()
 endforeach()
 # ... and the options that would make the Vulkan run leave the compute output are refused up front.
-foreach(rejected IN ITEMS "--refuse-hw" "--fake-api;1.1" "--option;brimir_renderer=software")
+foreach(rejected IN ITEMS "--refuse-hw" "--fake-api;1.1" "--option;brimir_renderer=software"
+                          "--compare-state;2" "--dump-dir;${CMAKE_CURRENT_BINARY_DIR}/vkhost_rejected_dump;--dump-every;2;--dump-frame;0")
     execute_process(
         COMMAND "${VKHOST}" --bios "${BIOS}" --warmup 1 --frames 1 --compare ${rejected}
         OUTPUT_QUIET ERROR_VARIABLE rejected_err RESULT_VARIABLE rejected_code)

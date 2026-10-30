@@ -132,13 +132,13 @@ void PrintUsage(std::FILE* out) {
         "                compute frame output and the Vulkan VDP2 renderer for every frame. Other flags go to both\n"
         "                runs\n"
         "  --compare-vulkan-option key=value  with --compare: core option for the Vulkan run only\n"
-        "  --compare-state N  with --compare: both runs save a state after every Nth recorded frame and each pair is\n"
+        "  --compare-state N  with --compare (N <= --frames): both runs save a state after every Nth recorded frame and each pair is\n"
         "                diffed with brimir_state_diff (next to this executable): the VDP1 framebuffers (vdp.FBRAM,\n"
         "                displayFB) strictly, the renderer section (doubleV, mesh FBRAM, ...) up to its allowlist of\n"
         "                line-local fetcher caches. Any differing pair fails the compare (exit 3); the first one's diff\n"
         "                is printed and both states are copied into the dump directory\n"
         "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
-        "  --dump-every N  with --dump-dir: write only recorded frames 0, N, 2N, ...\n"
+        "  --dump-every N  with --dump-dir: write only recorded frames 0, N, 2N, ... (not with --dump-frame)\n"
         "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"
         "  --set-option-at F key=value  a live option change before frame F (counting warmup frames from 0), reported\n"
         "                to the core by GET_VARIABLE_UPDATE (repeatable)\n"
@@ -508,6 +508,15 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         std::fprintf(stderr, "--compare-state needs --compare\n");
         return ParseResult::Error;
     }
+    if (args.compareState > args.config.frames) {
+        std::fprintf(stderr, "--compare-state %d saves no state in %d recorded frames (needs N <= --frames)\n",
+                     args.compareState, args.config.frames);
+        return ParseResult::Error;
+    }
+    if (args.dumpEvery != 0 && args.dumpFrame >= 0) {
+        std::fprintf(stderr, "--dump-every and --dump-frame cannot be combined\n");
+        return ParseResult::Error;
+    }
     if (args.compare && args.config.saveStateEvery != 0) {
         std::fprintf(stderr, "--save-state-every cannot be combined with --compare (use --compare-state)\n");
         return ParseResult::Error;
@@ -760,10 +769,11 @@ void PrintVdp1ProbeSummary(const std::vector<vkhost::Vdp1ProbeFrame>& frames) {
             usingFrames += v != 0;
         }
         std::sort(values.begin(), values.end());
-        std::fprintf(stderr, "vkhost: probe-vdp1: %-10s median %llu max %llu mean %.1f frames %zu\n", name,
+        std::fprintf(stderr, "vkhost: probe-vdp1: %-10s median %llu max %llu mean %.1f frames %zu total %llu\n", name,
                      static_cast<unsigned long long>(values[values.size() / 2]),
                      static_cast<unsigned long long>(values.back()),
-                     static_cast<double>(sum) / static_cast<double>(values.size()), usingFrames);
+                     static_cast<double>(sum) / static_cast<double>(values.size()), usingFrames,
+                     static_cast<unsigned long long>(sum));
     };
     const auto printStats = [&](const char* name, uint64_t vkhost::Vdp1ProbeFrame::*member) {
         printValues(name, [member](const vkhost::Vdp1ProbeFrame& f) { return f.*member; });

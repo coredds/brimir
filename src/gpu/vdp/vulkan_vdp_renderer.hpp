@@ -411,6 +411,7 @@ private:
     bool m_altSlicesCaptured = false;        // the open frame has its alt (and mesh1) sprite slices
     double m_frontSeconds = 0;               // FrameProbe: front-half time of the open frame
     Vdp1ProbeTimes m_vdp1Times;              // FrameProbe: VDP1 times since the last report (Gpu VDP1 mode)
+    bool m_timestampsLogged = false;         // FrameProbe: "no GPU timestamps" logged once
 };
 
 } // namespace brimir::gpu
