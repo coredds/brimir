@@ -47,6 +47,7 @@ struct CliArgs {
     bool hash = false;
     bool compare = false;
     int dumpFrame = -1; // --dump-frame I: with --dump-dir, write only recorded frame I
+    int dumpEvery = 0;  // --dump-every N: with --dump-dir, write only recorded frames 0, N, 2N, ...
     std::vector<std::pair<std::string, std::string>> compareVulkanOptions;
     int compareState = 0; // --compare-state N (0: off)
     int hashSample = 0;  // --hash-sample N (0: off)
@@ -137,6 +138,7 @@ void PrintUsage(std::FILE* out) {
         "                line-local fetcher caches. Any differing pair fails the compare (exit 3); the first one's diff\n"
         "                is printed and both states are copied into the dump directory\n"
         "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
+        "  --dump-every N  with --dump-dir: write only recorded frames 0, N, 2N, ...\n"
         "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"
         "  --set-option-at F key=value  a live option change before frame F (counting warmup frames from 0), reported\n"
         "                to the core by GET_VARIABLE_UPDATE (repeatable)\n"
@@ -318,6 +320,11 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         } else if (opt == "--dump-frame") {
             if (!ParseInt(value, args.dumpFrame)) {
                 std::fprintf(stderr, "Invalid --dump-frame value: %s\n", value);
+                return ParseResult::Error;
+            }
+        } else if (opt == "--dump-every") {
+            if (!ParseInt(value, args.dumpEvery) || args.dumpEvery == 0) {
+                std::fprintf(stderr, "Invalid --dump-every value (1 or more): %s\n", value);
                 return ParseResult::Error;
             }
         } else if (opt == "--compare-state") {
@@ -542,6 +549,9 @@ public:
         m_region = region;
     }
 
+    // --dump-every N: only recorded frames 0, N, 2N, ... (without --dump-frame)
+    void SetDumpEvery(int n) { m_dumpEvery = n; }
+
     void OnFrame(vkhost::HostFrame&& frame) override {
         if (m_hash && m_hashSample != 0) {
             HashSamples(frame);
@@ -552,8 +562,10 @@ public:
         if (m_sharpness != 0) {
             Sharpness(frame);
         }
-        if (!m_dumpDir.empty() && (m_dumpFrame < 0 || static_cast<size_t>(m_dumpFrame) == m_count) &&
-            !WritePpm(frame)) {
+        const bool dumpThis = m_dumpFrame >= 0 ? static_cast<size_t>(m_dumpFrame) == m_count
+                              : m_dumpEvery > 0 ? m_count % static_cast<size_t>(m_dumpEvery) == 0
+                                                : true;
+        if (!m_dumpDir.empty() && dumpThis && !WritePpm(frame)) {
             m_failed = true;
         }
         ++m_count;
@@ -655,6 +667,7 @@ private:
     bool m_hash;
     fs::path m_dumpDir;
     int m_dumpFrame;
+    int m_dumpEvery = 0;
     size_t m_count = 0;
     bool m_failed = false;
     uint32_t m_hashSample = 0;
@@ -827,6 +840,7 @@ int main(int argc, char** argv) {
     }
 
     CliSink sink(args.hash, args.config.dumpDir, args.dumpFrame);
+    sink.SetDumpEvery(args.dumpEvery);
     sink.SetSampling(static_cast<uint32_t>(args.hashSample), static_cast<uint32_t>(args.sharpness), args.rotation,
                      args.region);
     vkhost::RunReport report;

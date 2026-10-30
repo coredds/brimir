@@ -44,7 +44,8 @@ const std::set<std::string> kValueless = {"--hash",        "--verbose", "--vulka
                                           "--probe"};
 // Dropped from both children (the compare adds its own).
 const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",       "--dump-dir", "--dump-frame",
-                                        "--system-dir", "--frames", "--compare-vulkan-option", "--compare-state"};
+                                        "--system-dir", "--frames", "--compare-vulkan-option", "--compare-state",
+                                        "--dump-every"};
 // Only valid together with --vulkan: dropped from the software child.
 const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--reset-in-present", "--preferred-hw",
                                            "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",

@@ -296,6 +296,7 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--compare-state N` | with `--compare`: both children save a state after every Nth recorded frame (`--save-state-every`) and each pair is diffed by `brimir_state_diff` (next to `brimir_vkhost`): the VDP1 framebuffers (`vdp.FBRAM`, `displayFB`) strictly, the renderer section (`vdp1State` with `doubleV` and the mesh framebuffers, layer and rotation states, ...) up to its allowlist of line-local fetcher caches. A differing pair fails the compare (exit 3); the first one's diff is printed and both states are copied to `<dump-dir>/states`. The other sections' differing bytes are printed for information (`compare: states:` line) |
 | `--save-state-every N <dir>` | `retro_serialize` after every Nth recorded frame (recorded frames N-1, 2N-1, ...) into `<dir>/state_<frame>.bin` (not with `--compare`) |
 | `--dump-frame I` | with `--dump-dir`: write only recorded frame I |
+| `--dump-every N` | with `--dump-dir` (without `--dump-frame`): write only recorded frames 0, N, 2N, ... |
 | `--internal-resolution N` | the same as `--option brimir_internal_resolution=N` (1-4) |
 | `--set-option-at F key=value` | a live option change before frame F (counting warmup frames from 0, as `--reset-at`), reported to the core by the next `GET_VARIABLE_UPDATE` (repeatable); with `--compare` both runs get it |
 | `--hash-sample N` | with `--hash`: hash the sample points instead of the frame (below). With `--compare` the software run gets `--hash-sample 1` |
