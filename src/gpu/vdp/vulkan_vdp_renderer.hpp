@@ -421,6 +421,7 @@ private:
     bool m_timestampsLogged = false;         // FrameProbe: "no GPU timestamps" logged once
     bool m_saveSyncFailed = false;           // the last PreSaveStateSync left main or mesh behind
     bool m_saveSyncFailLogged = false;
+    bool m_readbackMemoryLogged = false;     // the VDP1 back half's readback memory choice (its only log line)
     bool m_failSaveSync = false;             // FailSaveSyncForTest
 };
 

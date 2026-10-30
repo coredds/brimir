@@ -13,7 +13,10 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <cstring>
+#include <optional>
+#include <string>
 
 namespace brimir::gpu::vdp1 {
 
@@ -144,6 +147,7 @@ VkResult Vdp1VulkanBackend::Init(uint32_t frameContexts) {
     }
     m_contexts.resize(frameContexts);
     m_readbacks.resize(frameContexts);
+    m_readbackMemory.resize(frameContexts, ReadbackMemory::None);
     return VK_SUCCESS;
 }
 
@@ -171,6 +175,7 @@ void Vdp1VulkanBackend::Destroy() {
         vk_util::DestroyBuffer(m_device, readback);
     }
     m_readbacks.clear();
+    m_readbackMemory.clear();
     if (m_queries != VK_NULL_HANDLE) {
         vk.vkDestroyQueryPool(dev, m_queries, nullptr);
         m_queries = VK_NULL_HANDLE;
@@ -265,6 +270,7 @@ void Vdp1VulkanBackend::EnsureContexts(uint32_t count) {
     if (count > m_contexts.size()) {
         m_contexts.resize(count);
         m_readbacks.resize(count);
+        m_readbackMemory.resize(count, ReadbackMemory::None);
     }
 }
 
@@ -573,16 +579,49 @@ bool Vdp1VulkanBackend::RecordReadback(uint32_t contextIndex, uint32_t mask, VkC
     }
     vk_util::Buffer &readback = m_readbacks[contextIndex];
     if (readback.buffer == VK_NULL_HANDLE) {
-        constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        if (vk_util::CreateBuffer(m_device, kFbramBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                  kHost | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, readback) != VK_SUCCESS &&
-            vk_util::CreateBuffer(m_device, kFbramBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, kHost, readback) !=
+        // The CPU reads all of it at every merge: cached memory first, coherent or not (non-coherent memory is
+        // invalidated before each read, ReadbackData), then uncached.
+        constexpr VkMemoryPropertyFlags kVisible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        constexpr VkMemoryPropertyFlags kCached = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        constexpr VkMemoryPropertyFlags kCoherent = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        VkMemoryPropertyFlags chosen = 0;
+        for (const VkMemoryPropertyFlags flags :
+             {kVisible | kCached | kCoherent, kVisible | kCached, kVisible | kCoherent}) {
+            if (vk_util::CreateBuffer(m_device, kFbramBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, flags, readback) ==
                 VK_SUCCESS) {
+                chosen = flags;
+                break;
+            }
+        }
+        if (chosen == 0) {
             return false;
         }
         if (readback.mapped == nullptr) {
             vk_util::DestroyBuffer(m_device, readback);
             return false;
+        }
+        // The type CreateBuffer allocated from (the first with the flags): a cached request may get coherent memory
+        VkMemoryRequirements requirements{};
+        m_device.Table().vkGetBufferMemoryRequirements(m_device.Device(), readback.buffer, &requirements);
+        const std::optional<uint32_t> type = vk_util::FindMemoryType(m_device, requirements.memoryTypeBits, chosen);
+        const VkMemoryPropertyFlags actual =
+            type ? m_device.MemoryProperties().memoryTypes[*type].propertyFlags : chosen;
+        const bool cached = (actual & kCached) != 0, coherent = (actual & kCoherent) != 0;
+        ReadbackMemory &memory = m_readbackMemory[contextIndex];
+        memory = !coherent ? ReadbackMemory::CachedNonCoherent
+                           : (cached ? ReadbackMemory::CachedCoherent : ReadbackMemory::Uncached);
+        if (!m_readbackLogged) {
+            m_readbackLogged = true;
+            const char *kind = memory == ReadbackMemory::CachedCoherent      ? "host-cached coherent"
+                               : memory == ReadbackMemory::CachedNonCoherent ? "host-cached non-coherent (invalidated)"
+                                                                             : "uncached host-visible coherent";
+            const std::string text = std::string("VDP1: framebuffer readbacks in ") + kind + " memory (type " +
+                                     (type ? std::to_string(*type) : std::string("?")) + ")";
+            if (m_log) {
+                m_log(text);
+            } else {
+                std::fprintf(stderr, "[vulkan] %s\n", text.c_str());
+            }
         }
     }
     std::array<VkBufferCopy, kFbramSliceCount> regions{};
@@ -601,8 +640,31 @@ bool Vdp1VulkanBackend::RecordReadback(uint32_t contextIndex, uint32_t mask, VkC
     return true;
 }
 
-const uint8_t *Vdp1VulkanBackend::ReadbackData(uint32_t contextIndex) const {
-    return contextIndex < m_readbacks.size() ? static_cast<const uint8_t *>(m_readbacks[contextIndex].mapped) : nullptr;
+const uint8_t *Vdp1VulkanBackend::ReadbackData(uint32_t contextIndex, uint32_t slice) const {
+    if (contextIndex >= m_readbacks.size() || slice >= kFbramSliceCount) {
+        return nullptr;
+    }
+    const vk_util::Buffer &readback = m_readbacks[contextIndex];
+    if (readback.mapped == nullptr) {
+        return nullptr;
+    }
+    const VkDeviceSize offset = VkDeviceSize{slice} * kFbramSliceSize;
+    if (m_readbackMemory[contextIndex] == ReadbackMemory::CachedNonCoherent || m_invalidateForTest) {
+        // The range must be a multiple of nonCoherentAtomSize (a slice is, for every atom size up to 256 KiB)
+        const VkDeviceSize atom = std::max<VkDeviceSize>(m_device.Properties().limits.nonCoherentAtomSize, 1);
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = readback.memory;
+        range.offset = kFbramSliceSize % atom == 0 ? offset : 0;
+        range.size = kFbramSliceSize % atom == 0 ? kFbramSliceSize : VK_WHOLE_SIZE;
+        if (m_device.Table().vkInvalidateMappedMemoryRanges(m_device.Device(), 1, &range) != VK_SUCCESS) {
+            return nullptr;
+        }
+    }
+    return static_cast<const uint8_t *>(readback.mapped) + offset;
+}
+
+Vdp1VulkanBackend::ReadbackMemory Vdp1VulkanBackend::ReadbackMemoryForTest(uint32_t contextIndex) const {
+    return contextIndex < m_readbackMemory.size() ? m_readbackMemory[contextIndex] : ReadbackMemory::None;
 }
 
 void Vdp1VulkanBackend::FrameDropped() {

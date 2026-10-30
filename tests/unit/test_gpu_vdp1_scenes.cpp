@@ -956,6 +956,42 @@ TEST_CASE("GPU VDP1 scene: a dropped VDP1-only command buffer after a frame a sy
     CHECK_FALSE(rescalePending);
 }
 
+TEST_CASE("GPU VDP1 scene: readbacks from invalidated memory; the readback memory logged once", "[gpu][vdp1][scene]") {
+    // ReadbackData invalidates every slice it hands out (the non-coherent path, also on coherent memory, under
+    // validation); the shadow still equals software's at every read and save.
+    std::vector<std::string> logs;
+    gpu::vdp1::Vdp1VulkanBackend::ReadbackMemory memory = gpu::vdp1::Vdp1VulkanBackend::ReadbackMemory::None;
+    FrameControl c = AutoSwap(40);
+    c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 40);
+        w.DrawVDP1Partial(0, 25);
+        for (uint32_t i = 0; i < 8; ++i) {
+            const auto v = w.ReadFB16((Rand(rng, 0x20000) * 2) & 0x3FFFE);
+            CHECK(v[0] == v[1]);
+        }
+        const auto saved = w.SaveStates();
+        REQUIRE(saved.size() == 2);
+        CHECK(saved[0]->FBRAM == saved[1]->FBRAM);
+        w.DrawVDP1Partial(25, 64);
+    };
+    RenderBothOptions options;
+    options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (f == 0) {
+            vulkan.SetLog([&logs](const std::string &text) { logs.push_back(text); });
+            REQUIRE(vulkan.Vdp1Backend() != nullptr);
+            vulkan.Vdp1Backend()->SetInvalidateReadbacksForTest(true);
+        } else {
+            memory = vulkan.Vdp1Backend()->ReadbackMemoryForTest(vulkan.Vdp1Backend()->FrameContexts() - 1);
+        }
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 3, {}, 32), options);
+    CHECK(memory != gpu::vdp1::Vdp1VulkanBackend::ReadbackMemory::None);
+    CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+              return text.find("framebuffer readbacks in") != std::string::npos;
+          }) == 1);
+}
+
 TEST_CASE("GPU VDP1 scene: a save whose sync submit is refused reports the framebuffers behind",
           "[gpu][vdp1][scene]") {
     // Mid-frame the GPU holds newer data: with the sync submit refused PreSaveStateSync cannot bring main and mesh

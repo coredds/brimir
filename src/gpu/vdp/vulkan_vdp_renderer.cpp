@@ -288,6 +288,12 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     if (!backend->Ok()) {
         return false;
     }
+    backend->SetLog([this](const std::string &text) {
+        if (!m_readbackMemoryLogged) { // once per renderer, not per back half
+            m_readbackMemoryLogged = true;
+            Log(text);
+        }
+    });
     m_device = &device;
     m_vdp1Backend = std::move(backend);
     m_backend->SetSpriteFBExternal(true);
@@ -593,10 +599,9 @@ void VulkanVDPRenderer::CommitReadback(uint32_t context) {
 void VulkanVDPRenderer::MergeEntry(uint32_t slice, size_t index) {
     SliceSync &s = m_slices[slice];
     const PendingReadback &p = s.pending[index];
-    const uint8_t *data = m_vdp1Backend ? m_vdp1Backend->ReadbackData(p.context) : nullptr;
-    if (data != nullptr && p.seq > s.valid) {
+    const uint8_t *src = m_vdp1Backend && p.seq > s.valid ? m_vdp1Backend->ReadbackData(p.context, slice) : nullptr;
+    if (src != nullptr) {
         const auto start = std::chrono::steady_clock::now();
-        const uint8_t *src = data + size_t{slice} * kSliceSize;
         if (slice < 2) {
             // Main: bytes the CPU wrote since the readback was committed keep the CPU's value.
             uint8_t *dst = m_state.mem1.FBRAM[slice].data();

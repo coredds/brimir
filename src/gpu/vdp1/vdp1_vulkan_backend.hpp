@@ -27,7 +27,9 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace brimir::gpu::vdp1 {
@@ -59,13 +61,22 @@ public:
     // Copies the slices in `mask` (bit i: slice i of vdp1_hw_params.hpp) from `slices` (kFbramBufferSize bytes, slice
     // i at i * kFbramSliceSize) into the GPU FBRAM, ordered with the Records around it. All or nothing, as Record.
     bool RecordFbramUpload(std::span<const uint8_t> slices, uint32_t mask, uint32_t context, VkCommandBuffer cmd);
-    // Copies the slices in `mask` of the GPU FBRAM into `context`'s readback buffer (host-cached; ReadbackData once cmd
-    // has completed), after the work recorded before it. Each context has its own buffer, so a readback stays readable
+    // Copies the slices in `mask` of the GPU FBRAM into `context`'s readback buffer (ReadbackData once cmd has
+    // completed), after the work recorded before it. Each context has its own buffer, so a readback stays readable
     // until the context's next command buffer begins. False when the buffer cannot be allocated (nothing recorded).
+    // The buffer's memory, by preference: host-cached and coherent, host-cached (ReadbackData invalidates the slice
+    // before the CPU reads it), then host-visible and coherent (uncached); the first choice is logged once.
     bool RecordReadback(uint32_t context, uint32_t mask, VkCommandBuffer cmd);
-    // `context`'s readback buffer (kFbramBufferSize bytes, slice i at i * kFbramSliceSize); null before its first
-    // RecordReadback.
-    const uint8_t *ReadbackData(uint32_t context) const;
+    // Slice `slice` (kFbramSliceSize bytes) of `context`'s readback buffer, made visible to the CPU (invalidated in
+    // non-coherent memory); null before the context's first RecordReadback, or when the invalidation fails.
+    const uint8_t *ReadbackData(uint32_t context, uint32_t slice) const;
+    enum class ReadbackMemory { None, CachedCoherent, CachedNonCoherent, Uncached };
+    // The memory of `context`'s readback buffer (None before its first RecordReadback).
+    ReadbackMemory ReadbackMemoryForTest(uint32_t context) const;
+    // Test hook: ReadbackData invalidates even coherent memory (the non-coherent path under validation).
+    void SetInvalidateReadbacksForTest(bool invalidate) { m_invalidateForTest = invalidate; }
+    // Where the readback memory choice is logged; stderr when unset.
+    void SetLog(std::function<void(const std::string &)> log) { m_log = std::move(log); }
 
     // The command buffer of the last BeginContext will not be submitted: the one-time work it carried (zeroing the
     // back half's buffers) is pending again. Its op lists are the caller's to replay.
@@ -146,6 +157,10 @@ private:
     VkDescriptorPool m_pool = VK_NULL_HANDLE;
     std::vector<Context> m_contexts;
     std::vector<vk_util::Buffer> m_readbacks; // per context
+    std::vector<ReadbackMemory> m_readbackMemory; // per context
+    bool m_readbackLogged = false;
+    bool m_invalidateForTest = false;
+    std::function<void(const std::string &)> m_log;
     bool m_pendingZero = true;  // the back half's buffers are zeroed by the next Record
     bool m_recordedZero = false; // ... and the command buffer of the last BeginContext carries it
     RecordStats m_stats{};
