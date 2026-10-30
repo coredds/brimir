@@ -100,8 +100,11 @@ jobs:
 
   # The [gpu] tests on Mesa's lavapipe (software Vulkan) with the Khronos validation layer: headless device, compute
   # helpers, zero validation errors. BRIMIR_REQUIRE_VULKAN=1 makes a missing device or layer fail instead of SKIP.
+  # The timeout is about 1.5x a local run (16 threads, 2026-10-30: build 3 min, [gpu] 32 min, the VDP2 scenes with VDP1
+  # on the GPU 6 min).
   gpu-lavapipe:
     runs-on: ubuntu-24.04
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
 
@@ -131,6 +134,16 @@ jobs:
           export VK_DRIVER_FILES="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)"
           echo "VK_DRIVER_FILES=$VK_DRIVER_FILES"
           ./build/bin/brimir_tests "[gpu]"
+
+      # Every VDP2 scene again with VDP1 on the GPU (RenderBoth's BRIMIR_VDP1_MODE).
+      - name: Test VDP2 scenes with VDP1 on the GPU
+        env:
+          BRIMIR_REQUIRE_VULKAN: 1
+          BRIMIR_VDP1_MODE: gpu
+        run: |
+          export VK_DRIVER_FILES="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)"
+          echo "VK_DRIVER_FILES=$VK_DRIVER_FILES"
+          ./build/bin/brimir_tests "[gpu][vdp2][scene]"
 
   # The committed SPIR-V and layout headers (src/gpu/shaders/generated) must match the HLSL sources. Uses DXC,
   # spirv-val and spirv-cross from the LunarG Vulkan SDK the headers were generated with; the build jobs never need the
