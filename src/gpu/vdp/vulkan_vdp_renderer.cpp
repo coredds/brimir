@@ -141,6 +141,7 @@ void VulkanVDPRenderer::AbandonDevice() {
     m_gpuVdp1 = false;
     m_vdp1Queue.clear();
     m_vdp1Recorded.clear();
+    m_vdp2FrameRecorded = false;
     m_vdp1BeforeFrame = 0;
     m_proposed = {};
     m_contextFences.clear();
@@ -164,10 +165,12 @@ bool VulkanVDPRenderer::RecordPendingFrame(uint32_t context, VkCommandBuffer cmd
         return frameRecorded;
     }
     m_vdp1Recorded.clear();
+    m_vdp2FrameRecorded = false;
     if (!HasPendingFrame()) {
         return false;
     }
     const bool recorded = m_backend->Record(m_front.Frame(), context, cmd);
+    m_vdp2FrameRecorded = recorded;
     m_front.ConsumeFrame();
     if (!recorded) {
         // The frame's snapshots never reached the GPU.
@@ -195,6 +198,7 @@ bool VulkanVDPRenderer::HasPendingVdp1Work() const {
 bool VulkanVDPRenderer::RecordPendingVdp1Work(uint32_t context, VkCommandBuffer cmd) {
     if (!HasPendingVdp1Work()) {
         m_vdp1Recorded.clear();
+        m_vdp2FrameRecorded = false;
         return false;
     }
     bool frameRecorded = false;
@@ -208,9 +212,12 @@ bool VulkanVDPRenderer::TakeFrameRecordedBySync() {
 }
 
 void VulkanVDPRenderer::RecordedFrameDropped() {
-    if (m_backend) {
+    // Only a dropped command buffer that holds a VDP2 frame re-arms its one-time work: after a frame a sync submit
+    // recorded (and submitted), the backend's last Record is not the dropped one.
+    if (m_backend && m_vdp2FrameRecorded) {
         m_backend->FrameDropped();
     }
+    m_vdp2FrameRecorded = false;
     m_front.MarkAllDirty();
     if (m_vdp1Backend) {
         m_vdp1Backend->FrameDropped();
@@ -396,6 +403,7 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
                                        bool &frameRecorded, uint32_t extra) {
     frameRecorded = false;
     m_vdp1Recorded.clear(); // the previous command buffer was submitted (or reported dropped)
+    m_vdp2FrameRecorded = false;
     m_proposed = {};
     if (FrameProbe && !m_vdp1Backend->EnableTimestamps() && !m_timestampsLogged) {
         // Diagnostics: vdp1_gpu_us stays 0
@@ -430,6 +438,7 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     replay(before);
     if (ok && recordFrame) {
         frameRecorded = m_backend->Record(m_front.Frame(), context, cmd);
+        m_vdp2FrameRecorded = frameRecorded;
         m_front.ConsumeFrame();
         if (!frameRecorded) {
             m_front.MarkAllDirty(); // the frame's snapshots never reached the GPU
@@ -667,6 +676,7 @@ void VulkanVDPRenderer::WaitContext(uint32_t context, Vdp1SyncKind kind) {
 }
 
 void VulkanVDPRenderer::FrameSubmitted(uint32_t context, VkFence fence) {
+    m_vdp2FrameRecorded = false;
     if (!m_gpuVdp1) {
         return;
     }

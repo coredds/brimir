@@ -384,6 +384,7 @@ private:
     std::unique_ptr<MeshFBRAM> m_meshShadow;  // Gpu mode: the CPU shadow of the mesh framebuffers
     bool m_stateLoaded = false;               // LoadState since the last PostLoadStateSync
     bool m_frameRecordedBySync = false;
+    bool m_vdp2FrameRecorded = false;         // the last record call recorded a VDP2 frame (for RecordedFrameDropped)
     VulkanDevice *m_device = nullptr;
     uint32_t m_frameContexts = 0;             // the caller's; Gpu mode adds the sync context (index m_frameContexts)
     // CPU shadow

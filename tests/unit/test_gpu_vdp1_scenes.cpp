@@ -917,6 +917,45 @@ TEST_CASE("GPU VDP1 scene: a read and a save in blanking with the trailing displ
     CHECK(counter.submits == 6);
 }
 
+TEST_CASE("GPU VDP1 scene: a dropped VDP1-only command buffer after a frame a sync submit recorded",
+          "[gpu][vdp1][scene][scale]") {
+    // Double density without deinterlacing: each frame draws one field, the other is the previous frame's. In frame 3
+    // the scale changes and a read in blanking makes a sync submit record the frame (with the rescale); a CPU write
+    // after it is VDP1 work alone, whose command buffer is dropped. Only the VDP1 ops are queued again: the frame (its
+    // rescale) was submitted, so frame 4 keeps frame 3's field and every frame but 3 equals software's.
+    constexpr uint32_t kChange = 3;
+    SyncSubmitCounter counter;
+    Vdp2Scene scene = Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); },
+                                AutoSwap(40), 6, {}, 30);
+    const auto blanking = scene.blanking;
+    auto frame = std::make_shared<uint32_t>(0);
+    scene.blanking = [blanking, frame, &counter](Vdp2SceneWriter &w) {
+        blanking(w);
+        if ((*frame)++ != kChange) {
+            return;
+        }
+        const uint64_t before = counter.submits;
+        const auto v = w.ReadFB16(0x100);
+        CHECK(v[0] == v[1]);
+        CHECK(counter.submits == before + 1);
+        w.FBRAM16(w.DrawFramebuffer(), 0x200, 0x8421);
+    };
+    bool rescalePending = true;
+    RenderBothOptions options;
+    options.syncCounter = &counter;
+    options.scale = 1;
+    options.dropFrame = kChange;
+    options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
+        if (f == kChange) {
+            REQUIRE(vulkan.SetInternalScale(2));
+        } else if (f == kChange + 1) {
+            rescalePending = vulkan.Backend()->RescalePendingForTest();
+        }
+    };
+    RunFbramScene(scene, options, true, kChange);
+    CHECK_FALSE(rescalePending);
+}
+
 TEST_CASE("GPU VDP1 scene: save states equal software's byte for byte; cross-renderer loads both ways",
           "[gpu][vdp1][scene]") {
     // Mid-frame (between commands, the GPU holding newer data) the state of each pair is saved: the VDP part (main
