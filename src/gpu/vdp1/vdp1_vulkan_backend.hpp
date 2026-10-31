@@ -90,8 +90,12 @@ public:
         uint32_t uploads = 0; // RecordFbramUpload calls
         VkDeviceSize uploadBytes = 0;
         uint32_t uploadBlocks = 0; // blocks the context holds
+        uint32_t malformed = 0;    // ops and VRAM copies skipped as malformed (data out of range)
     };
     const RecordStats &StatsForTest() const { return m_stats; }
+    // Ops and VRAM copies Record skipped as malformed since creation (the front half never produces one; the first is
+    // logged through SetLog).
+    uint64_t MalformedTotal() const { return m_malformedTotal; }
 
     // Diagnostics (brimir_vkhost --probe): from now on every Record, RecordFbramUpload and RecordReadback is bracketed
     // by two timestamps (bottom of pipe: the span from the end of the earlier work to the end of its own), and each
@@ -164,6 +168,9 @@ private:
     bool m_pendingZero = true;  // the back half's buffers are zeroed by the next Record
     bool m_recordedZero = false; // ... and the command buffer of the last BeginContext carries it
     RecordStats m_stats{};
+    uint64_t m_malformedTotal = 0;
+    void Malformed(const char *what, uint32_t index);
+    void Log(const std::string &text) const;
     // EnableTimestamps: kQueriesPerContext queries per context (the first kMaxTimedContexts), the queries the context's
     // current command buffer used, whether that command buffer reset them yet
     VkQueryPool m_queries = VK_NULL_HANDLE;

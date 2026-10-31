@@ -359,6 +359,22 @@ void Vdp1VulkanBackend::Epilogue(VkCommandBuffer cmd) const {
     Barrier(cmd, kCompute | kTransfer, kWrites, kCompute | kTransfer, kAll);
 }
 
+void Vdp1VulkanBackend::Log(const std::string &text) const {
+    if (m_log) {
+        m_log(text);
+    } else {
+        std::fprintf(stderr, "[vulkan] %s\n", text.c_str());
+    }
+}
+
+void Vdp1VulkanBackend::Malformed(const char *what, uint32_t index) {
+    ++m_stats.malformed;
+    if (m_malformedTotal++ == 0) {
+        Log(std::string("VDP1: skipped a malformed op (") + what + " " + std::to_string(index) +
+            ": data out of range); later ones are only counted");
+    }
+}
+
 void Vdp1VulkanBackend::PassBarrier(VkCommandBuffer cmd) const {
     // A pass's writes before the next pass's shader accesses and indirect argument reads
     Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
@@ -453,13 +469,18 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
         switch (op.kind) {
         case Vdp1OpKind::Draw: {
             if (op.index >= ops.batches.size() || !batchOk(ops.batches[op.index])) {
+                Malformed("draw batch", op.index);
                 break;
             }
             const Vdp1DrawBatch &b = ops.batches[op.index];
             vramRegions.clear();
             for (uint32_t k = 0; k < b.copyCount; ++k) {
                 const Vdp1VramCopy &c = ops.vramCopies[b.firstCopy + k];
-                if (c.size == 0 || !copyOk(c)) {
+                if (c.size == 0) {
+                    continue;
+                }
+                if (!copyOk(c)) {
+                    Malformed("VRAM copy", b.firstCopy + k);
                     continue;
                 }
                 vramRegions.push_back({put(ops.arena.data() + c.arenaOffset, c.size), c.vramOffset, c.size});
@@ -500,6 +521,7 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
         }
         case Vdp1OpKind::Erase: {
             if (op.index >= ops.erases.size()) {
+                Malformed("erase", op.index);
                 break;
             }
             const Vdp1ErasePushConstants &e = ops.erases[op.index];
@@ -511,6 +533,7 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
         }
         case Vdp1OpKind::FbWrites: {
             if (op.index >= ops.fbWriteRuns.size() || !runOk(ops.fbWriteRuns[op.index])) {
+                Malformed("framebuffer write run", op.index);
                 break;
             }
             const Vdp1FbWritePushConstants &run = ops.fbWriteRuns[op.index];
@@ -617,11 +640,7 @@ bool Vdp1VulkanBackend::RecordReadback(uint32_t contextIndex, uint32_t mask, VkC
                                                                              : "uncached host-visible coherent";
             const std::string text = std::string("VDP1: framebuffer readbacks in ") + kind + " memory (type " +
                                      (type ? std::to_string(*type) : std::string("?")) + ")";
-            if (m_log) {
-                m_log(text);
-            } else {
-                std::fprintf(stderr, "[vulkan] %s\n", text.c_str());
-            }
+            Log(text);
         }
     }
     std::array<VkBufferCopy, kFbramSliceCount> regions{};

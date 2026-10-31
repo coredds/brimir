@@ -45,6 +45,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#elif !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 using brimir::test::FbramResult;
 using brimir::test::OpenDevice;
 using brimir::test::RenderBothFBRAM;
@@ -1147,9 +1153,74 @@ TEST_CASE("GPU VDP1 fuzz: the fuzzer notices a broken GPU renderer (VRAM hazard 
     brimir::test::CloseAndCheckValidation(device);
 }
 
+namespace {
+
+// The first line of `command`'s output (stderr included), or "?" when it cannot run.
+std::string CommandLine(const std::string &command) {
+#ifdef _WIN32
+    FILE *pipe = _popen(command.c_str(), "r");
+#else
+    FILE *pipe = popen(command.c_str(), "r");
+#endif
+    if (pipe == nullptr) {
+        return "?";
+    }
+    char line[512] = {};
+    const bool got = std::fgets(line, sizeof(line), pipe) != nullptr;
+#ifdef _WIN32
+    _pclose(pipe);
+#else
+    pclose(pipe);
+#endif
+    std::string text = got ? line : "?";
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+        text.pop_back();
+    }
+    return text;
+}
+
+std::string ExecutablePath() {
+#ifdef _WIN32
+    char *path = nullptr;
+    return _get_pgmptr(&path) == 0 && path != nullptr ? std::string(path) : "?";
+#elif defined(__APPLE__)
+    char buffer[4096];
+    uint32_t size = sizeof(buffer);
+    return _NSGetExecutablePath(buffer, &size) == 0 ? std::string(buffer) : "?";
+#else
+    char buffer[4096];
+    const ssize_t n = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    return n > 0 ? std::string(buffer, static_cast<size_t>(n)) : "?";
+#endif
+}
+
+// The long run's log header, so a log says what produced it: the source tree's commit (git at run time; "-dirty" with
+// local changes), the binary and its build time, the device and the environment that steers the run.
+void PrintFuzzHeader(const VkPhysicalDeviceProperties &device) {
+    std::printf("[vdp1-fuzz-long] source %s: %s (git at run time)\n", BRIMIR_SOURCE_DIR,
+                CommandLine(std::string("git -C \"") + BRIMIR_SOURCE_DIR + "\" describe --always --dirty --abbrev=12 2>&1")
+                    .c_str());
+    std::printf("[vdp1-fuzz-long] binary %s, built %s %s\n", ExecutablePath().c_str(), __DATE__, __TIME__);
+    std::printf("[vdp1-fuzz-long] device %s (API %u.%u.%u, driver 0x%x)\n", device.deviceName,
+                VK_API_VERSION_MAJOR(device.apiVersion), VK_API_VERSION_MINOR(device.apiVersion),
+                VK_API_VERSION_PATCH(device.apiVersion), device.driverVersion);
+    std::string env;
+    for (const char *name : {"BRIMIR_VDP1_FUZZ_SEEDS", "BRIMIR_VDP1_FUZZ_FIRST", "BRIMIR_VDP1_FUZZ_MINIMIZE",
+                             "BRIMIR_VDP1_FUZZ_VALIDATION", "BRIMIR_VDP1_FUZZ_SEED_LIMIT", "BRIMIR_VK_DEVICE",
+                             "VK_DRIVER_FILES", "VK_ICD_FILENAMES"}) {
+        const char *value = std::getenv(name);
+        env += std::string(" ") + name + "=" + (value != nullptr ? value : "(unset)");
+    }
+    std::printf("[vdp1-fuzz-long] env%s\n", env.c_str());
+    std::fflush(stdout);
+}
+
+} // namespace
+
 TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]") {
     const bool validation = EnvU64("BRIMIR_VDP1_FUZZ_VALIDATION", 0) != 0;
     auto device = OpenDevice({.validation = validation});
+    PrintFuzzHeader(device->Properties());
     const uint64_t seeds = EnvU64("BRIMIR_VDP1_FUZZ_SEEDS", 1000);
     const uint64_t first = EnvU64("BRIMIR_VDP1_FUZZ_FIRST", 1);
     const bool minimize = EnvU64("BRIMIR_VDP1_FUZZ_MINIMIZE", 0) != 0;
@@ -1179,6 +1250,18 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
             }
         }
     });
+    // An exception leaving the loop (a failed REQUIRE in RunProgram, bad_alloc) must not destroy a joinable thread
+    // (std::terminate): stop and join the watchdog on every exit from this scope.
+    struct StopWatchdog {
+        std::atomic<bool> &done;
+        std::thread &thread;
+        ~StopWatchdog() {
+            done = true;
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    } stopWatchdog{done, watchdog};
     for (uint64_t seed = first; seed < first + seeds; ++seed) {
         currentSeed = seed;
         seedStartMs = nowMs();
@@ -1212,7 +1295,9 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
         }
     }
     done = true;
-    watchdog.join();
+    if (watchdog.joinable()) {
+        watchdog.join();
+    }
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::printf("VDP1 fuzz (%s): seeds %llu-%llu, %.1f s, %llu FBRAM checkpoints, %llu fragment slots, %llu spans, "
                 "%llu batches, %llu mid-frame interlace switches, max %llu non-zero bytes; %zu failing\n",

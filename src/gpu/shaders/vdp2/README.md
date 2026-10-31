@@ -22,7 +22,7 @@ its header comment. Ymir is GPL-3.0, as Brimir.
 | `include/vdp2_defs.hlsli` | `vdp2_defs.hlsli`; Brimir additions at the end |
 | `include/vdp2_common_params.hlsli`, `include/vdp2_compose_params.hlsli` | same names; layout changes marked |
 | `include/vdp2_render_params_layer.hlsli`, `include/vdp2_render_params_rotation.hlsli`, `include/vdp2_window_params.hlsli` | same names, unchanged |
-| `include/util/bit_ops.hlsli`, `include/util/data_ops.hlsli` | `include/util/`, unchanged |
+| `../include/util/bit_ops.hlsli`, `../include/util/data_ops.hlsli` (shared with VDP1) | `include/util/`, unchanged |
 | `include/vdp2_nbg_line.hlsli` | Brimir only (per-row NBG state from the front half) |
 | `include/vdp2_nbg_chars.hlsli` | Brimir only (the NBG character table's layout and which NBGs use it) |
 | `../include/int64_emu.hlsli` | Brimir only (32-bit emulation of Ymir's 64-bit rotation arithmetic) |

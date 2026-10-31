@@ -129,6 +129,8 @@ target_include_directories(brimir_tests PRIVATE
 )
 
 target_compile_definitions(brimir_tests PRIVATE BRIMIR_BUILD_TESTS)
+# The VDP1 fuzzer's long-run log header names the source tree's commit (tests/unit/test_gpu_vdp1_fuzz.cpp).
+target_compile_definitions(brimir_tests PRIVATE BRIMIR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 # Register with CTest (enable_testing() is called from the top-level CMakeLists).
 # The amalgamated Catch2 build has no catch_discover_tests, so the whole suite

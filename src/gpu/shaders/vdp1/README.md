@@ -29,7 +29,7 @@ which is itself written from the software renderer (`src/core/src/ymir/hw/vdp/re
 targeted cases, apex stacks, erase grids). Ymir's Direct3D 12 VDP1 shaders (`libs/ymir-core/res/shaders/src/vdp/` at
 `8cdf0a53`) were consulted for the overall pass structure only; no file is derived from them, and their
 `vdp1_*_params.hlsli` bitfield layouts were not used. Every file says so in its header comment. Shared with VDP2:
-`../vdp2/include/util/bit_ops.hlsli` (included by `vdp1_defs.hlsli`).
+`../include/util/bit_ops.hlsli` (the shared include directory; included by `vdp1_defs.hlsli` and `vdp1_fbram.hlsli`).
 
 The structs have host mirrors in `src/gpu/vdp1/vdp1_hw_params.hpp`; their offsets and every accessor are checked
 against the SPIR-V reflection and the probe shader (`tests/unit/test_gpu_vdp1_params.cpp`), and the modules against the

@@ -383,22 +383,25 @@ TEST_CASE("The layout probe declares every VDP1 struct, binding and push-constan
     const auto uses = [](std::span<const Binding> table, uint32_t binding) {
         return std::any_of(table.begin(), table.end(), [&](const Binding &b) { return b.binding == binding; });
     };
-    // Every pipeline's bindings are among the probe's; each probe binding is used by some pipeline.
-    for (const std::span<const Binding> table :
-         {std::span<const Binding>(kRasterBindings), std::span<const Binding>(kBucketBindings),
-          std::span<const Binding>(kBucketSumsBindings), std::span<const Binding>(kScatterBindings),
-          std::span<const Binding>(kResolveBindings),
-          std::span<const Binding>(kEraseBindings), std::span<const Binding>(kFbWriteBindings)}) {
+    // Every pipeline's bindings are among the probe's; each probe binding is used by some pipeline. The pipelines are
+    // the backend's ten passes (vdp1_vulkan_backend.cpp), the tables MaxStageUsage counts.
+    const std::array<std::span<const Binding>, 10> pipelines{
+        std::span<const Binding>(kRasterBindings),      std::span<const Binding>(kBatchRangeBindings),
+        std::span<const Binding>(kBucketBindings),      std::span<const Binding>(kBucketSumsBindings),
+        std::span<const Binding>(kScatterBindings),     std::span<const Binding>(kResolveBindings),
+        std::span<const Binding>(kEraseBindings),       std::span<const Binding>(kFbWriteMarkBindings),
+        std::span<const Binding>(kFbWriteBindings),     std::span<const Binding>(kFbWriteClearBindings)};
+    for (const std::span<const Binding> table : pipelines) {
         for (const Binding &b : table) {
+            INFO("binding " << b.binding);
             CHECK(uses(kLayoutProbeBindings, b.binding));
             CHECK(b.kind == DescriptorKind::StorageBuffer);
         }
     }
     for (const Binding &b : kLayoutProbeBindings) {
         INFO("binding " << b.binding);
-        CHECK((uses(kRasterBindings, b.binding) || uses(kBucketBindings, b.binding) ||
-               uses(kScatterBindings, b.binding) || uses(kResolveBindings, b.binding) ||
-               uses(kEraseBindings, b.binding) || uses(kFbWriteBindings, b.binding)));
+        CHECK(std::any_of(pipelines.begin(), pipelines.end(),
+                          [&](std::span<const Binding> table) { return uses(table, b.binding); }));
     }
 }
 

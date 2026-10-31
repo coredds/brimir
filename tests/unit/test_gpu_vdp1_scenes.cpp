@@ -992,6 +992,45 @@ TEST_CASE("GPU VDP1 scene: readbacks from invalidated memory; the readback memor
           }) == 1);
 }
 
+TEST_CASE("GPU VDP1 back half: malformed ops are skipped, counted and logged once", "[gpu][vdp1]") {
+    // The front half never produces one; a malformed op (data out of range) is skipped by Record, counted in the
+    // stats and the total, and the first one is logged.
+    auto device = OpenDevice();
+    gpu::vk_util::Buffer fbram;
+    REQUIRE(gpu::vk_util::CreateBuffer(*device, gpu::vdp1::kFbramBufferSize,
+                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, fbram) == VK_SUCCESS);
+    {
+        gpu::vdp1::Vdp1VulkanBackend backend(*device, 1, fbram.buffer);
+        REQUIRE(backend.Ok());
+        std::vector<std::string> logs;
+        backend.SetLog([&logs](const std::string &text) { logs.push_back(text); });
+        gpu::vdp1::Vdp1OpList ops;
+        ops.batches.resize(1);
+        ops.batches[0].cmdCount = 1; // no commands in the list
+        ops.ops = {{gpu::vdp1::Vdp1OpKind::Draw, 0},
+                   {gpu::vdp1::Vdp1OpKind::Draw, 7},
+                   {gpu::vdp1::Vdp1OpKind::Erase, 0},
+                   {gpu::vdp1::Vdp1OpKind::FbWrites, 0}};
+        for (int round = 0; round < 2; ++round) {
+            REQUIRE(backend.BeginContext(0));
+            bool recorded = false;
+            REQUIRE(gpu::vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
+                        recorded = backend.Record(ops, {0, 4}, 0, cmd);
+                    }) == VK_SUCCESS);
+            CHECK(recorded);
+            CHECK(backend.StatsForTest().malformed == 4);
+            CHECK(backend.StatsForTest().batches == 0);
+        }
+        CHECK(backend.MalformedTotal() == 8);
+        REQUIRE(logs.size() == 1);
+        CHECK(logs[0] == "VDP1: skipped a malformed op (draw batch 0: data out of range); later ones are only counted");
+    }
+    gpu::vk_util::DestroyBuffer(*device, fbram);
+    CloseAndCheckValidation(device);
+}
+
 TEST_CASE("GPU VDP1 scene: a save whose sync submit is refused reports the framebuffers behind",
           "[gpu][vdp1][scene]") {
     // Mid-frame the GPU holds newer data: with the sync submit refused PreSaveStateSync cannot bring main and mesh
