@@ -1195,12 +1195,14 @@ std::string ExecutablePath() {
 }
 
 // The long run's log header, so a log says what produced it: the source tree's commit (git at run time; "-dirty" with
-// local changes), the binary and its build time, the device and the environment that steers the run.
+// local changes) and the one the build was configured at, the binary, the device and the environment that steers the
+// run.
 void PrintFuzzHeader(const VkPhysicalDeviceProperties &device) {
-    std::printf("[vdp1-fuzz-long] source %s: %s (git at run time)\n", BRIMIR_SOURCE_DIR,
+    std::printf("[vdp1-fuzz-long] commit %s (git at run time in %s), %s at configure time\n",
                 CommandLine(std::string("git -C \"") + BRIMIR_SOURCE_DIR + "\" describe --always --dirty --abbrev=12 2>&1")
-                    .c_str());
-    std::printf("[vdp1-fuzz-long] binary %s, built %s %s\n", ExecutablePath().c_str(), __DATE__, __TIME__);
+                    .c_str(),
+                BRIMIR_SOURCE_DIR, BRIMIR_GIT_DESCRIBE);
+    std::printf("[vdp1-fuzz-long] binary %s\n", ExecutablePath().c_str());
     std::printf("[vdp1-fuzz-long] device %s (API %u.%u.%u, driver 0x%x)\n", device.deviceName,
                 VK_API_VERSION_MAJOR(device.apiVersion), VK_API_VERSION_MINOR(device.apiVersion),
                 VK_API_VERSION_PATCH(device.apiVersion), device.driverVersion);

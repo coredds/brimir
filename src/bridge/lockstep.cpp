@@ -440,13 +440,86 @@ void PrepareLockstepCore(CoreWrapper &core) {
     }
 }
 
-bool ApplyFixedRtc(CoreWrapper &core, const ::util::datetime::DateTime &date) {
+namespace {
+
+using ::util::datetime::DateTime;
+
+// Days since 1970-01-01 of a proleptic Gregorian date, and back (Howard Hinnant's algorithms): zone-independent, to
+// measure the difference between two wall-clock dates without going through the host's mktime.
+int64_t DaysFromCivil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = y - era * 400;
+    const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+int64_t WallSeconds(const DateTime &t) {
+    return DaysFromCivil(t.year, t.month, t.day) * 86400 + int64_t{t.hour} * 3600 + int64_t{t.minute} * 60 + t.second;
+}
+
+DateTime FromWallSeconds(int64_t seconds) {
+    int64_t days = seconds / 86400;
+    int64_t rest = seconds % 86400;
+    if (rest < 0) {
+        rest += 86400;
+        --days;
+    }
+    const int64_t z = days + 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const int64_t doe = z - era * 146097;
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int64_t mp = (5 * doy + 2) / 153;
+    const int64_t d = doy - (153 * mp + 2) / 5 + 1;
+    const int64_t m = mp + (mp < 10 ? 3 : -9);
+    const int64_t y = yoe + era * 400 + (m <= 2);
+    const int64_t weekday = ((days % 7) + 11) % 7; // 1970-01-01 was a Thursday (4)
+    return {static_cast<int32_t>(y),
+            static_cast<uint8_t>(m),
+            static_cast<uint8_t>(d),
+            static_cast<uint8_t>(weekday),
+            static_cast<uint8_t>(rest / 3600),
+            static_cast<uint8_t>(rest % 3600 / 60),
+            static_cast<uint8_t>(rest % 60)};
+}
+
+bool SameWallClock(const DateTime &a, const DateTime &b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day && a.hour == b.hour && a.minute == b.minute &&
+           a.second == b.second;
+}
+
+} // namespace
+
+bool ApplyFixedRtc(CoreWrapper &core, const ::util::datetime::DateTime &date, ::util::datetime::DateTime *guest) {
     ymir::Saturn *saturn = core.GetSaturn();
     if (saturn == nullptr) {
         return false;
     }
+    auto &rtc = saturn->SMPC.GetRTC();
+    const auto previousMode = *saturn->configuration.rtc.mode;
     saturn->configuration.rtc.mode = ymir::core::config::rtc::Mode::Virtual;
-    saturn->SMPC.GetRTC().SetDateTime(date);
+    // The RTC stores a timestamp: SetDateTime goes through the host's mktime (tm_isdst 0) and GetDateTime through
+    // localtime, so the guest can read another hour in a zone with daylight saving time on that date, and a date the zone
+    // or the C library cannot represent (mktime fails with -1; MSVC stops at year 3000) reads as something else. Read back
+    // what the guest sees; if it differs by a whole wall-clock offset, shift the request by it once.
+    rtc.SetDateTime(date);
+    DateTime read = rtc.GetDateTime();
+    if (!SameWallClock(read, date)) {
+        const int64_t offset = WallSeconds(read) - WallSeconds(date);
+        if (offset > -86400 && offset < 86400) {
+            rtc.SetDateTime(FromWallSeconds(WallSeconds(date) - offset));
+            read = rtc.GetDateTime();
+        }
+    }
+    if (guest != nullptr) {
+        *guest = read;
+    }
+    if (!SameWallClock(read, date)) {
+        saturn->configuration.rtc.mode = previousMode;
+        return false;
+    }
     return true;
 }
 
@@ -479,7 +552,9 @@ bool ParseFixedRtcDate(const char *text, ::util::datetime::DateTime &out) {
     }
     static constexpr int kDays[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    // The SMPC holds a 4-digit BCD year; 1970 on keeps the timestamp non-negative.
+    // The SMPC holds a 4-digit BCD year. From 1970 on is a sanity bound only: whether the host zone and C library can
+    // represent the date as a timestamp is ApplyFixedRtc's check (east of UTC the first hours of 1970 are not
+    // representable, MSVC stops at year 3000).
     if (year < 1970 || month < 1 || month > 12 || day < 1 || day > kDays[month - 1] ||
         (month == 2 && day == 29 && !leap) || hour > 23 || minute > 59 || second > 59) {
         return false;

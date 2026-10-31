@@ -129,8 +129,15 @@ target_include_directories(brimir_tests PRIVATE
 )
 
 target_compile_definitions(brimir_tests PRIVATE BRIMIR_BUILD_TESTS)
-# The VDP1 fuzzer's long-run log header names the source tree's commit (tests/unit/test_gpu_vdp1_fuzz.cpp).
-target_compile_definitions(brimir_tests PRIVATE BRIMIR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+# The VDP1 fuzzer's long-run log header names the source tree's commit (tests/unit/test_gpu_vdp1_fuzz.cpp): the one at
+# configure time here (stale after later commits until the next configure), the one at run time from git when it can run.
+execute_process(COMMAND git -C "${PROJECT_SOURCE_DIR}" describe --always --dirty --abbrev=12
+                OUTPUT_VARIABLE brimir_git_describe OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT brimir_git_describe)
+    set(brimir_git_describe "unknown")
+endif()
+target_compile_definitions(brimir_tests PRIVATE BRIMIR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+                                                BRIMIR_GIT_DESCRIBE="${brimir_git_describe}")
 
 # Register with CTest (enable_testing() is called from the top-level CMakeLists).
 # The amalgamated Catch2 build has no catch_discover_tests, so the whole suite

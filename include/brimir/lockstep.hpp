@@ -37,8 +37,15 @@ inline constexpr ::util::datetime::DateTime kDeterministicRtcDate{1994, 11, 22, 
 
 // Switches the RTC to the virtual (emulated-time) clock and sets its date. Call after the content is loaded
 // (LoadGame loads the persisted RTC file) and before the first frame. A save state carries its own RTC time.
-// Returns false if the core is not initialized.
-bool ApplyFixedRtc(CoreWrapper &core, const ::util::datetime::DateTime &date);
+// The RTC keeps a timestamp that the upstream date conversions derive through the host's local time zone, so the date
+// the guest reads can differ from the request (an hour off in a zone with daylight saving time on that date) or be
+// unrepresentable (east of UTC near 1970, years beyond 3000 on MSVC). The effective date is read back (also into
+// *guest when given); an offset is corrected once, so the guest reads the request when the host zone can represent it.
+// Returns false (the RTC mode is left as it was) if the core is not initialized or the guest cannot be made to read
+// the request. The timestamp itself still depends on the host zone: runs are comparable on one machine; a zone-
+// independent pin would need the fork's date conversions to use timegm/gmtime in virtual mode.
+bool ApplyFixedRtc(CoreWrapper &core, const ::util::datetime::DateTime &date,
+                   ::util::datetime::DateTime *guest = nullptr);
 
 // Parses a BRIMIR_RTC_FIXED value: "" or "1" is kDeterministicRtcDate; otherwise "YYYY-MM-DD" (midnight) or
 // "YYYY-MM-DDTHH:MM:SS" (also with a space instead of 'T'). Returns false for anything else or an invalid date.

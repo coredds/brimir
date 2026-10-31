@@ -80,17 +80,18 @@ VkResult Vdp1VulkanBackend::Init(uint32_t frameContexts) {
         std::span<const Binding> bindings;
         uint32_t pushSize;
     };
+    static_assert(kPassCount == kPipelineBindings.size(), "kPipelineBindings must list every pass, in Pass order");
     const std::array<PassDesc, kPassCount> passes{{
-        {shaders::kVdp1RasterSpv, kRasterBindings, sizeof(Vdp1BatchPushConstants)},
-        {shaders::kVdp1BatchRangeSpv, kBatchRangeBindings, 0},
-        {shaders::kVdp1BucketSpv, kBucketBindings, 0},
-        {shaders::kVdp1BucketSumsSpv, kBucketSumsBindings, 0},
-        {shaders::kVdp1ScatterSpv, kScatterBindings, sizeof(Vdp1BatchPushConstants)},
-        {shaders::kVdp1ResolveSpv, kResolveBindings, sizeof(Vdp1BatchPushConstants)},
-        {shaders::kVdp1EraseSpv, kEraseBindings, sizeof(Vdp1ErasePushConstants)},
-        {shaders::kVdp1FbWriteMarkSpv, kFbWriteMarkBindings, sizeof(Vdp1FbWritePushConstants)},
-        {shaders::kVdp1FbWriteSpv, kFbWriteBindings, sizeof(Vdp1FbWritePushConstants)},
-        {shaders::kVdp1FbWriteClearSpv, kFbWriteClearBindings, sizeof(Vdp1FbWritePushConstants)},
+        {shaders::kVdp1RasterSpv, kPipelineBindings[kRaster], sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1BatchRangeSpv, kPipelineBindings[kBatchRange], 0},
+        {shaders::kVdp1BucketSpv, kPipelineBindings[kBucket], 0},
+        {shaders::kVdp1BucketSumsSpv, kPipelineBindings[kBucketSums], 0},
+        {shaders::kVdp1ScatterSpv, kPipelineBindings[kScatter], sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1ResolveSpv, kPipelineBindings[kResolve], sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1EraseSpv, kPipelineBindings[kErase], sizeof(Vdp1ErasePushConstants)},
+        {shaders::kVdp1FbWriteMarkSpv, kPipelineBindings[kFbWriteMark], sizeof(Vdp1FbWritePushConstants)},
+        {shaders::kVdp1FbWriteSpv, kPipelineBindings[kFbWrite], sizeof(Vdp1FbWritePushConstants)},
+        {shaders::kVdp1FbWriteClearSpv, kPipelineBindings[kFbWriteClear], sizeof(Vdp1FbWritePushConstants)},
     }};
     uint32_t descriptors = 0;
     for (const PassDesc &p : passes) {

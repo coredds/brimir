@@ -451,18 +451,36 @@ TEST_CASE("ParseFixedRtcDate: BRIMIR_RTC_FIXED values", "[lockstep][rtc]") {
     }
 }
 
-TEST_CASE("ApplyFixedRtc: virtual clock at the date", "[lockstep][rtc]") {
+TEST_CASE("ApplyFixedRtc: the guest reads the requested date", "[lockstep][rtc]") {
     auto core = std::make_unique<CoreWrapper>();
     CHECK_FALSE(brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate));
     REQUIRE(core->Initialize());
-    REQUIRE(brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate));
     ymir::Saturn& saturn = *core->GetSaturn();
-    CHECK(*saturn.configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual);
-    // The RTC converts through the host's local time (mktime with tm_isdst 0, localtime), so in a time zone with daylight
-    // saving time on that date (Brazil in 1994) it reads an hour later: compare with the same round trip.
-    const util::datetime::DateTime d = saturn.SMPC.GetRTC().GetDateTime();
-    const util::datetime::DateTime e =
-        util::datetime::from_timestamp(util::datetime::to_timestamp(brimir::kDeterministicRtcDate));
-    CHECK((d.year == 1994 && d.month == 11 && d.day == 22 && d.weekday == 2));
-    CHECK((d.hour == e.hour && d.minute == e.minute && d.second == e.second && e.minute == 0 && e.second == 0));
+    const auto previous = *saturn.configuration.rtc.mode;
+    // The effective (read-back) date, not the request: the RTC converts through the host's local time zone (mktime with
+    // tm_isdst 0, localtime), so without the correction the guest would read an hour later where daylight saving time
+    // applies (Brazil in 1994), which the WSL suite once showed. Dates in both halves of the year.
+    for (const char* text : {"", "1994-07-01T12:00:00", "1995-01-15T23:30:15", "2026-10-31T12:34:56", "2000-02-29",
+                             "1999-12-31T23:59:59"}) {
+        INFO(text);
+        util::datetime::DateTime request{};
+        REQUIRE(brimir::ParseFixedRtcDate(text, request));
+        util::datetime::DateTime effective{};
+        REQUIRE(brimir::ApplyFixedRtc(*core, request, &effective));
+        CHECK(*saturn.configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual);
+        const util::datetime::DateTime guest = saturn.SMPC.GetRTC().GetDateTime();
+        for (const util::datetime::DateTime& d : {effective, guest}) {
+            CHECK((d.year == request.year && d.month == request.month && d.day == request.day &&
+                   d.weekday == request.weekday && d.hour == request.hour && d.minute == request.minute &&
+                   d.second == request.second));
+        }
+    }
+    // A date the RTC cannot be made to read (month 13 is normalised by mktime): false, the effective date reported, the
+    // mode left as it was.
+    saturn.configuration.rtc.mode = previous;
+    const util::datetime::DateTime invalid{1994, 13, 40, 0, 0, 0, 0};
+    util::datetime::DateTime effective{};
+    CHECK_FALSE(brimir::ApplyFixedRtc(*core, invalid, &effective));
+    CHECK(effective.month != 13);
+    CHECK(*saturn.configuration.rtc.mode == previous);
 }

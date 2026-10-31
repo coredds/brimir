@@ -146,6 +146,8 @@ void PrintUsage(std::FILE* out) {
         "                the --compare children), which switches the RTC to the virtual clock at the date after loading\n"
         "                the content (log: 'RTC fixed to ...'). Without a date (or 1) brimir_bench's lockstep date,\n"
         "                1994-11-22 00:00:00; or YYYY-MM-DD[THH:MM:SS]. A --load-state state carries its own RTC.\n"
+        "                The timestamp depends on the host time zone (comparable on one machine); a --system-dir keeps\n"
+        "                the pinned 1994 timestamp in its RTC file, so use a scratch copy (tools/README.md).\n"
         "                With --compare-state every section of each state pair must match (brimir_state_diff --strict)\n"
         "  --dump-every N  with --dump-dir: write only recorded frames 0, N, 2N, ... (not with --dump-frame)\n"
         "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"

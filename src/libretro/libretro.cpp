@@ -1010,13 +1010,23 @@ static void apply_fixed_rtc(void) {
         brimir_log(RETRO_LOG_ERROR, "BRIMIR_RTC_FIXED=%s is not 1 or YYYY-MM-DD[THH:MM:SS]; RTC not fixed", env);
         return;
     }
-    if (!brimir::ApplyFixedRtc(*g_core, date)) {
-        brimir_log(RETRO_LOG_ERROR, "BRIMIR_RTC_FIXED: the core is not initialized; RTC not fixed");
+    util::datetime::DateTime guest{};
+    const bool fixed = brimir::ApplyFixedRtc(*g_core, date, &guest);
+    const auto text = [](const util::datetime::DateTime& t) {
+        char buffer[48];
+        std::snprintf(buffer, sizeof(buffer), "%04d-%02u-%02u %02u:%02u:%02u", static_cast<int>(t.year),
+                      unsigned{t.month}, unsigned{t.day}, unsigned{t.hour}, unsigned{t.minute}, unsigned{t.second});
+        return std::string(buffer);
+    };
+    if (!fixed) {
+        brimir_log(RETRO_LOG_ERROR,
+                   "BRIMIR_RTC_FIXED=%s: the RTC cannot be fixed to %s (the guest would read %s: not representable in "
+                   "this host's time zone, or the core is not initialized); RTC not fixed",
+                   env, text(date).c_str(), text(guest).c_str());
         return;
     }
-    brimir_log(RETRO_LOG_INFO, "RTC fixed to %04d-%02u-%02u %02u:%02u:%02u (virtual clock)", static_cast<int>(date.year),
-               unsigned{date.month}, unsigned{date.day}, unsigned{date.hour}, unsigned{date.minute},
-               unsigned{date.second});
+    brimir_log(RETRO_LOG_INFO, "RTC fixed to %s (virtual clock, guest time %s)", text(date).c_str(),
+               text(guest).c_str());
 }
 
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {

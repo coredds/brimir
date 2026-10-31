@@ -754,7 +754,7 @@ endif()
 foreach(run IN ITEMS 1 2)
     run_vkhost(fixed_${run} --warmup 300 --fixed-date --save-state-at 599 "${state_dir}/fixed_${run}.state")
     check_software_reference(fixed_${run})
-    require_log(fixed_${run} "RTC fixed to 1994-11-22 00:00:00 \\(virtual clock\\)")
+    require_log(fixed_${run} "RTC fixed to 1994-11-22 00:00:00 \\(virtual clock, guest time 1994-11-22 00:00:00\\)")
 endforeach()
 if(NOT "${fixed_1_hashes}" STREQUAL "${fixed_2_hashes}")
     fail(fixed_2 "the frames differ from the first --fixed-date run")
@@ -765,9 +765,25 @@ if(NOT state_diff_code EQUAL 0 OR NOT state_diff_out MATCHES "strict: every sect
    state_diff_out MATCHES "smpc\\.rtc")
     fail(fixed_2 "the two --fixed-date states differ (exit ${state_diff_code}):\n${state_diff_out}${state_diff_err}")
 endif()
+# ... a negative control for the strict diff: two runs with different explicit dates must differ under --strict (exit 3,
+# the SMPC RTC fields named), and the date must reach the guest: the BIOS copies the time into work RAM, whose bytes then
+# differ too.
+run_vkhost(fixed_a --fixed-date 2026-10-31T12:00:00 --save-state-at 299 "${state_dir}/fixed_a.state")
+run_vkhost(fixed_b --fixed-date 2026-11-30T18:30:00 --save-state-at 299 "${state_dir}/fixed_b.state")
+check_software_reference(fixed_a)
+check_software_reference(fixed_b)
+require_log(fixed_a "RTC fixed to 2026-10-31 12:00:00 \\(virtual clock, guest time 2026-10-31 12:00:00\\)")
+require_log(fixed_b "RTC fixed to 2026-11-30 18:30:00 \\(virtual clock, guest time 2026-11-30 18:30:00\\)")
+execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/fixed_a.state" "${state_dir}/fixed_b.state"
+                OUTPUT_VARIABLE state_diff_out ERROR_VARIABLE state_diff_err RESULT_VARIABLE state_diff_code)
+if(NOT state_diff_code EQUAL 3 OR NOT state_diff_out MATCHES "strict: [^\r\n]*NOT ALLOWED" OR
+   NOT state_diff_out MATCHES "smpc\\.rtcTimestamp" OR NOT state_diff_out MATCHES "system\\.WRAM(Low|High): [0-9]+ bytes differ")
+    fail(fixed_b "state_diff --strict on runs with different --fixed-date dates must exit 3 with the RTC and work RAM "
+                 "differences (exit ${state_diff_code}):\n${state_diff_out}${state_diff_err}")
+endif()
 # ... a date given explicitly, and a malformed one (logged, the RTC left alone).
 run_vkhost(fixed_date --frames 1 --warmup 1 --fixed-date 2026-10-31T12:34:56)
-require_log(fixed_date "RTC fixed to 2026-10-31 12:34:56 \\(virtual clock\\)")
+require_log(fixed_date "RTC fixed to 2026-10-31 12:34:56 \\(virtual clock, guest time 2026-10-31 12:34:56\\)")
 run_vkhost(fixed_bad --frames 1 --warmup 1 --fixed-date 2026-02-30)
 require_log(fixed_bad "BRIMIR_RTC_FIXED=2026-02-30 is not 1 or YYYY-MM-DD\\[THH:MM:SS\\]; RTC not fixed")
 # ... and software vs Vulkan with the clock pinned: frames identical and every section of each state pair identical.

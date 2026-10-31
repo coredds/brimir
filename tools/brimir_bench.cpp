@@ -514,7 +514,10 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             // so lockstep runs are reproducible (the core's BRIMIR_RTC_FIXED uses the same date). A save state
             // carries its own RTC time.
             for (brimir::CoreWrapper* core : {&jitCore, &refCore}) {
-                brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate);
+                if (!brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate)) {
+                    std::fprintf(stderr, "Failed to fix the lockstep cores' RTC date\n");
+                    return 2;
+                }
             }
         }
         // Start the JIT core from the reference core's exact state: some upstream fields are never

@@ -306,19 +306,21 @@ inline constexpr std::array<Binding, 12> kLayoutProbeBindings{{
     {kBindingFbWinners, DescriptorKind::StorageBuffer},
 }};
 
+/// @brief The binding tables of the VDP1 pipelines, in the back half's pass order (Vdp1VulkanBackend::Pass: raster,
+/// batch range, bucket, bucket sums, scatter, resolve, erase, fb write mark, fb write, fb write clear). The backend
+/// builds its passes from this table and static_asserts its pass count against the size, so a pass added to one and not
+/// the other fails to compile; MaxStageUsage and the params test iterate it.
+inline constexpr std::array<std::span<const Binding>, 10> kPipelineBindings{
+    std::span<const Binding>(kRasterBindings),     std::span<const Binding>(kBatchRangeBindings),
+    std::span<const Binding>(kBucketBindings),     std::span<const Binding>(kBucketSumsBindings),
+    std::span<const Binding>(kScatterBindings),    std::span<const Binding>(kResolveBindings),
+    std::span<const Binding>(kEraseBindings),      std::span<const Binding>(kFbWriteMarkBindings),
+    std::span<const Binding>(kFbWriteBindings),    std::span<const Binding>(kFbWriteClearBindings)};
+
 /// @brief The largest per-stage use over the VDP1 pipelines (gpu_version.hpp takes the maximum with VDP2's).
 constexpr StageUsage MaxStageUsage() {
     StageUsage usage;
-    for (std::span<const Binding> bindings : {std::span<const Binding>(kRasterBindings),
-                                              std::span<const Binding>(kBatchRangeBindings),
-                                              std::span<const Binding>(kBucketBindings),
-                                              std::span<const Binding>(kFbWriteMarkBindings),
-                                              std::span<const Binding>(kFbWriteClearBindings),
-                                              std::span<const Binding>(kBucketSumsBindings),
-                                              std::span<const Binding>(kScatterBindings),
-                                              std::span<const Binding>(kResolveBindings),
-                                              std::span<const Binding>(kEraseBindings),
-                                              std::span<const Binding>(kFbWriteBindings)}) {
+    for (std::span<const Binding> bindings : kPipelineBindings) {
         const uint32_t storageBuffers =
             vdp2::CountBindings(bindings, DescriptorKind::StorageBuffer, DescriptorKind::StorageBufferDynamic);
         const uint32_t storageImages =
