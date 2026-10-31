@@ -2,7 +2,7 @@
 // Copyright (C) 2026 coredds
 // Licensed under GPL-3.0
 //
-//   brimir_state_diff <a.state> <b.state>
+//   brimir_state_diff [--strict] <a.state> <b.state>
 //
 // Decodes two retro_serialize states (BRI2 header, LZ4 payload, savestate_codec.hpp) and compares the renderer section
 // (VDPSaveState::VDPRendererSaveState) field by field. Both renderers save the software renderer's layout, but the
@@ -12,7 +12,8 @@
 // identical, 3 otherwise, 2 on a read error. Other sections are only summarized (bytes that differ), with the
 // differing work RAM offsets and SMPC output registers named: two runs of the same content started at different host
 // times differ there, because the SMPC RTC follows the host clock (core default) and INTBACK returns the time in
-// OREG, which the BIOS and games copy into work RAM.
+// OREG, which the BIOS and games copy into work RAM. With --strict (runs with the RTC pinned: brimir_vkhost
+// --fixed-date) every other section must be identical too (brimir::DiffSaveStates; the first difference is printed).
 //
 // Allowlist (fields the software renderer re-derives before any use, so their saved value never reaches a pixel):
 // - vramFetchers[*][0..3]: currChar, nextChar, lastCharIndex, lastCellX, charData, charDataAddress. VDP2PrepareLine
@@ -23,6 +24,7 @@
 // Anything else (vdp1State, nbgLayerStates, rotParamStates, lineBackLayerState, vcellScrollInc and NBG0/1
 // lastVCellScroll, which is carried from line to line) must be identical.
 
+#include <brimir/lockstep.hpp>
 #include <brimir/savestate_codec.hpp>
 
 #include <ymir/savestate/savestate.hpp>
@@ -113,13 +115,16 @@ bool CharEq(const Renderer::CharacterSaveState &a, const Renderer::CharacterSave
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "Usage: brimir_state_diff <a.state> <b.state>\n");
+    const bool strict = argc == 4 && std::strcmp(argv[1], "--strict") == 0;
+    if (argc != 3 && !strict) {
+        std::fprintf(stderr, "Usage: brimir_state_diff [--strict] <a.state> <b.state>\n");
         return 1;
     }
+    const char *pathA = argv[argc - 2];
+    const char *pathB = argv[argc - 1];
     auto a = std::make_unique<SaveState>();
     auto b = std::make_unique<SaveState>();
-    if (!Load(argv[1], *a) || !Load(argv[2], *b)) {
+    if (!Load(pathA, *a) || !Load(pathB, *b)) {
         return 2;
     }
 
@@ -225,6 +230,17 @@ int main(int argc, char **argv) {
             r.Field(name + "charData", fa.charData, fb.charData, true);
             r.Field(name + "charDataAddress", fa.charDataAddress, fb.charDataAddress, true);
             r.Field(name + "lastVCellScroll", fa.lastVCellScroll, fb.lastVCellScroll, rbg || i >= 2);
+        }
+    }
+    if (strict) {
+        // Every other section too (the renderer section was compared above, up to its allowlist).
+        std::memcpy(static_cast<void *>(&b->vdp.renderer), &a->vdp.renderer, sizeof(Renderer));
+        const std::string d = brimir::DiffSaveStates(*a, *b);
+        if (d.empty()) {
+            std::printf("strict: every section identical (renderer section as above)\n");
+        } else {
+            std::printf("strict: %s  <-- NOT ALLOWED\n", d.c_str());
+            ++r.unexpected;
         }
     }
     std::printf("%u allowed and %u unexpected renderer differences\n", r.allowed, r.unexpected);

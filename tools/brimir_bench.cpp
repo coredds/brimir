@@ -511,12 +511,10 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         if (args.state.empty()) {
             // The virtual RTC would otherwise start at the persisted RTC file's timestamp, which
             // moves between runs. Start both cores at the same fixed date (the Saturn's JP launch)
-            // so lockstep runs are reproducible. A save state carries its own RTC time.
-            constexpr util::datetime::DateTime kLockstepDate{1994, 11, 22, 2, 0, 0, 0}; // Tuesday
+            // so lockstep runs are reproducible (the core's BRIMIR_RTC_FIXED uses the same date). A save state
+            // carries its own RTC time.
             for (brimir::CoreWrapper* core : {&jitCore, &refCore}) {
-                if (ymir::Saturn* saturn = core->GetSaturn(); saturn != nullptr) {
-                    saturn->SMPC.GetRTC().SetDateTime(kLockstepDate);
-                }
+                brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate);
             }
         }
         // Start the JIT core from the reference core's exact state: some upstream fields are never

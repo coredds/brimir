@@ -5,6 +5,7 @@
 #include "libretro.h"
 #include "options.hpp"
 #include "brimir/core_wrapper.hpp"
+#include "brimir/lockstep.hpp"
 
 #ifdef BRIMIR_VULKAN
 #include "libretro_vulkan.hpp"
@@ -996,6 +997,28 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code) {
     (void)code;
 }
 
+// Deterministic runs (brimir_vkhost --fixed-date): BRIMIR_RTC_FIXED pins the RTC to the virtual clock at a fixed date
+// ("" or "1": brimir_bench's lockstep date; "YYYY-MM-DD[THH:MM:SS]"). Called after the content is loaded, which loads
+// the persisted RTC file, and before the first frame. No user-facing option.
+static void apply_fixed_rtc(void) {
+    const char* env = std::getenv("BRIMIR_RTC_FIXED");
+    if (env == nullptr || !g_core) {
+        return;
+    }
+    util::datetime::DateTime date{};
+    if (!brimir::ParseFixedRtcDate(env, date)) {
+        brimir_log(RETRO_LOG_ERROR, "BRIMIR_RTC_FIXED=%s is not 1 or YYYY-MM-DD[THH:MM:SS]; RTC not fixed", env);
+        return;
+    }
+    if (!brimir::ApplyFixedRtc(*g_core, date)) {
+        brimir_log(RETRO_LOG_ERROR, "BRIMIR_RTC_FIXED: the core is not initialized; RTC not fixed");
+        return;
+    }
+    brimir_log(RETRO_LOG_INFO, "RTC fixed to %04d-%02u-%02u %02u:%02u:%02u (virtual clock)", static_cast<int>(date.year),
+               unsigned{date.month}, unsigned{date.day}, unsigned{date.hour}, unsigned{date.minute},
+               unsigned{date.second});
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // No content (SET_SUPPORT_NO_GAME): the BIOS runs on its own, like brimir_bench without --game.
     const bool no_content = game == nullptr;
@@ -1140,6 +1163,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
         brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
     }
+
+    apply_fixed_rtc();
 
     // Apply core options after the disc is loaded. Region autodetection happens
     // during disc loading, so options that disable it must not be applied until

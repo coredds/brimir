@@ -748,6 +748,39 @@ if(NOT "${gpu_vdp1_probe_err}" MATCHES "VDP1 probe: no GPU timestamps on this qu
     message(STATUS "gpu_vdp1_probe: VDP1 GPU time mean ${CMAKE_MATCH_1} us per frame (timestamps)")
 endif()
 
+# Deterministic runs: --fixed-date pins the RTC (BRIMIR_RTC_FIXED: the virtual clock at brimir_bench's lockstep date).
+# Two software BIOS runs of 600 frames, started at different host times, are identical: every frame, and the states
+# after the last frame in every section (brimir_state_diff --strict), the SMPC RTC fields included.
+foreach(run IN ITEMS 1 2)
+    run_vkhost(fixed_${run} --warmup 300 --fixed-date --save-state-at 599 "${state_dir}/fixed_${run}.state")
+    check_software_reference(fixed_${run})
+    require_log(fixed_${run} "RTC fixed to 1994-11-22 00:00:00 \\(virtual clock\\)")
+endforeach()
+if(NOT "${fixed_1_hashes}" STREQUAL "${fixed_2_hashes}")
+    fail(fixed_2 "the frames differ from the first --fixed-date run")
+endif()
+execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/fixed_1.state" "${state_dir}/fixed_2.state"
+                OUTPUT_VARIABLE state_diff_out ERROR_VARIABLE state_diff_err RESULT_VARIABLE state_diff_code)
+if(NOT state_diff_code EQUAL 0 OR NOT state_diff_out MATCHES "strict: every section identical" OR
+   state_diff_out MATCHES "smpc\\.rtc")
+    fail(fixed_2 "the two --fixed-date states differ (exit ${state_diff_code}):\n${state_diff_out}${state_diff_err}")
+endif()
+# ... a date given explicitly, and a malformed one (logged, the RTC left alone).
+run_vkhost(fixed_date --frames 1 --warmup 1 --fixed-date 2026-10-31T12:34:56)
+require_log(fixed_date "RTC fixed to 2026-10-31 12:34:56 \\(virtual clock\\)")
+run_vkhost(fixed_bad --frames 1 --warmup 1 --fixed-date 2026-02-30)
+require_log(fixed_bad "BRIMIR_RTC_FIXED=2026-02-30 is not 1 or YYYY-MM-DD\\[THH:MM:SS\\]; RTC not fixed")
+# ... and software vs Vulkan with the clock pinned: frames identical and every section of each state pair identical.
+execute_process(
+    COMMAND "${VKHOST}" ${common_args} --compare --fixed-date --compare-state 60
+    OUTPUT_VARIABLE compare_out ERROR_VARIABLE compare_err RESULT_VARIABLE compare_code)
+if(NOT compare_code EQUAL 0 OR NOT compare_out MATCHES "compare: OK, 5 state pairs identical" OR
+   NOT compare_out MATCHES "strict: every section")
+    message(FATAL_ERROR "--compare --fixed-date --compare-state 60: exit ${compare_code}\n${compare_out}\n${compare_err}")
+endif()
+message(STATUS "fixed_date: two --fixed-date runs identical (frames, every state section, SMPC RTC); software vs "
+               "Vulkan identical with strict state compares")
+
 file(REMOVE_RECURSE "${state_dir}")
 
 # --compare: software and Vulkan in two child processes. Identical content passes; a Vulkan run that is rotated 180

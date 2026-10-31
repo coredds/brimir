@@ -10,6 +10,7 @@
 #include <brimir/lockstep.hpp>
 
 #include <ymir/savestate/savestate.hpp>
+#include <ymir/sys/saturn.hpp>
 
 #include <cstdint>
 #include <cstdio>
@@ -423,4 +424,41 @@ TEST_CASE("Lockstep control: synthetic workload on two interpreter cores", "[loc
     const auto result = brimir::RunLockstep(*a, *b, 240);
     INFO("frame " << result.framesRun << ": " << result.divergence);
     REQUIRE(result.divergence.empty());
+}
+
+TEST_CASE("ParseFixedRtcDate: BRIMIR_RTC_FIXED values", "[lockstep][rtc]") {
+    util::datetime::DateTime d{};
+    for (const char* bench : {"", "1"}) {
+        REQUIRE(brimir::ParseFixedRtcDate(bench, d));
+        CHECK(d.year == 1994);
+        CHECK(d.month == 11);
+        CHECK(d.day == 22);
+        CHECK(d.weekday == 2);
+        CHECK(d.hour == 0);
+    }
+    REQUIRE(brimir::ParseFixedRtcDate(nullptr, d));
+    CHECK(d.day == 22);
+    REQUIRE(brimir::ParseFixedRtcDate("2000-02-29", d));
+    CHECK((d.year == 2000 && d.month == 2 && d.day == 29 && d.weekday == 2 && d.hour == 0 && d.second == 0));
+    REQUIRE(brimir::ParseFixedRtcDate("1994-11-22T02:03:04", d));
+    CHECK((d.weekday == 2 && d.hour == 2 && d.minute == 3 && d.second == 4));
+    REQUIRE(brimir::ParseFixedRtcDate("2026-10-31 23:59:59", d));
+    CHECK((d.weekday == 6 && d.hour == 23 && d.minute == 59 && d.second == 59));
+    for (const char* bad : {"0", "2", "yes", "1994-11-2", "1994-13-01", "1994-11-31", "1900-02-29", "1969-12-31",
+                            "1994-11-22T24:00:00", "1994-11-22T02:00", "1994-11-22X02:00:00", "1994/11/22"}) {
+        INFO(bad);
+        CHECK_FALSE(brimir::ParseFixedRtcDate(bad, d));
+    }
+}
+
+TEST_CASE("ApplyFixedRtc: virtual clock at the date", "[lockstep][rtc]") {
+    auto core = std::make_unique<CoreWrapper>();
+    CHECK_FALSE(brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate));
+    REQUIRE(core->Initialize());
+    REQUIRE(brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate));
+    ymir::Saturn& saturn = *core->GetSaturn();
+    CHECK(*saturn.configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual);
+    const util::datetime::DateTime d = saturn.SMPC.GetRTC().GetDateTime();
+    CHECK((d.year == 1994 && d.month == 11 && d.day == 22 && d.weekday == 2 && d.hour == 0 && d.minute == 0 &&
+           d.second == 0));
 }

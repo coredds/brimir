@@ -161,6 +161,8 @@ std::string DiffSMPC(const ymir::savestate::SMPCSaveState &a, const ymir::savest
 
 // Compares the save state of every subsystem other than the SH-2s (compared field by field by
 // CompareCores) and the disc hash (identical by construction). Returns the first difference.
+std::string DiffSubsystemStates(const ymir::savestate::SaveState &a, const ymir::savestate::SaveState &b);
+
 std::string DiffSaturnState(const ymir::Saturn &sa, const ymir::Saturn &sb) {
     // Several MB each; kept per thread so lockstep runs do not allocate every frame.
     static thread_local std::unique_ptr<ymir::savestate::SaveState> xa = std::make_unique<ymir::savestate::SaveState>();
@@ -171,7 +173,10 @@ std::string DiffSaturnState(const ymir::Saturn &sa, const ymir::Saturn &sb) {
     ClearSaveState(b);
     sa.SaveState(a);
     sb.SaveState(b);
+    return DiffSubsystemStates(a, b);
+}
 
+std::string DiffSubsystemStates(const ymir::savestate::SaveState &a, const ymir::savestate::SaveState &b) {
     if (std::string d = DiffBytes("scheduler", a.scheduler, b.scheduler); !d.empty()) {
         return d;
     }
@@ -225,6 +230,20 @@ std::string DiffSaturnState(const ymir::Saturn &sa, const ymir::Saturn &sb) {
     }
     return {};
 }
+
+} // namespace
+
+std::string DiffSaveStates(const ymir::savestate::SaveState &a, const ymir::savestate::SaveState &b) {
+    if (std::string d = DiffBytes("msh2", a.msh2, b.msh2); !d.empty()) {
+        return d;
+    }
+    if (std::string d = DiffBytes("ssh2", a.ssh2, b.ssh2); !d.empty()) {
+        return d;
+    }
+    return DiffSubsystemStates(a, b);
+}
+
+namespace {
 
 // A BackupMemory without an image (never loaded or created) has no data container: Size() and
 // ReadAll() would dereference null. Its block size is set together with the container.
@@ -419,6 +438,64 @@ void PrepareLockstepCore(CoreWrapper &core) {
         saturn->configuration.audio.threadedSCSP = false;
         // Internal backup RAM needs no setup: CoreWrapper always provides a formatted image.
     }
+}
+
+bool ApplyFixedRtc(CoreWrapper &core, const ::util::datetime::DateTime &date) {
+    ymir::Saturn *saturn = core.GetSaturn();
+    if (saturn == nullptr) {
+        return false;
+    }
+    saturn->configuration.rtc.mode = ymir::core::config::rtc::Mode::Virtual;
+    saturn->SMPC.GetRTC().SetDateTime(date);
+    return true;
+}
+
+bool ParseFixedRtcDate(const char *text, ::util::datetime::DateTime &out) {
+    if (text == nullptr || text[0] == '\0' || std::strcmp(text, "1") == 0) {
+        out = kDeterministicRtcDate;
+        return true;
+    }
+    const auto digits = [&](size_t pos, size_t count, int &value) {
+        value = 0;
+        for (size_t i = pos; i < pos + count; ++i) {
+            if (text[i] < '0' || text[i] > '9') {
+                return false;
+            }
+            value = value * 10 + (text[i] - '0');
+        }
+        return true;
+    };
+    const size_t length = std::strlen(text);
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (length != 10 && length != 19) {
+        return false;
+    }
+    if (!digits(0, 4, year) || text[4] != '-' || !digits(5, 2, month) || text[7] != '-' || !digits(8, 2, day)) {
+        return false;
+    }
+    if (length == 19 && ((text[10] != 'T' && text[10] != ' ') || !digits(11, 2, hour) || text[13] != ':' ||
+                         !digits(14, 2, minute) || text[16] != ':' || !digits(17, 2, second))) {
+        return false;
+    }
+    static constexpr int kDays[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    // The SMPC holds a 4-digit BCD year; 1970 on keeps the timestamp non-negative.
+    if (year < 1970 || month < 1 || month > 12 || day < 1 || day > kDays[month - 1] ||
+        (month == 2 && day == 29 && !leap) || hour > 23 || minute > 59 || second > 59) {
+        return false;
+    }
+    // Weekday from the date (Sakamoto); the RTC derives its own from the timestamp.
+    static constexpr int kMonthOffset[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    const int y = month < 3 ? year - 1 : year;
+    const int weekday = (y + y / 4 - y / 100 + y / 400 + kMonthOffset[month - 1] + day) % 7;
+    out = {year,
+           static_cast<uint8_t>(month),
+           static_cast<uint8_t>(day),
+           static_cast<uint8_t>(weekday),
+           static_cast<uint8_t>(hour),
+           static_cast<uint8_t>(minute),
+           static_cast<uint8_t>(second)};
+    return true;
 }
 
 namespace {

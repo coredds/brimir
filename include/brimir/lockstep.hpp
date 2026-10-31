@@ -4,6 +4,7 @@
 // SH-2 state diffs (used by the isolated SH-2 test rig and by whole-system lockstep runs).
 
 #include <ymir/savestate/savestate_sh2.hpp>
+#include <ymir/util/date_time.hpp>
 
 #include <string>
 
@@ -29,6 +30,19 @@ class CoreWrapper;
 // so frames are produced on the emulation thread, the RTC is switched from the host clock to
 // the virtual (emulated-time) clock so both cores read the same date and time.
 void PrepareLockstepCore(CoreWrapper &core);
+
+// The fixed RTC date of deterministic runs (brimir_bench --lockstep from boot, the core's BRIMIR_RTC_FIXED):
+// the Saturn's JP launch day, Tuesday 1994-11-22 00:00:00 (fields: year, month, day, weekday, hour, minute, second).
+inline constexpr ::util::datetime::DateTime kDeterministicRtcDate{1994, 11, 22, 2, 0, 0, 0};
+
+// Switches the RTC to the virtual (emulated-time) clock and sets its date. Call after the content is loaded
+// (LoadGame loads the persisted RTC file) and before the first frame. A save state carries its own RTC time.
+// Returns false if the core is not initialized.
+bool ApplyFixedRtc(CoreWrapper &core, const ::util::datetime::DateTime &date);
+
+// Parses a BRIMIR_RTC_FIXED value: "" or "1" is kDeterministicRtcDate; otherwise "YYYY-MM-DD" (midnight) or
+// "YYYY-MM-DDTHH:MM:SS" (also with a space instead of 'T'). Returns false for anything else or an invalid date.
+bool ParseFixedRtcDate(const char *text, ::util::datetime::DateTime &out);
 
 // Starts two lockstep cores from identical emulated state. Call once, after both cores are fully set
 // up (Initialize, PrepareLockstepCore, content/BIOS loading, any test workload installation) and
@@ -65,6 +79,12 @@ bool LoadLockstepState(CoreWrapper &a, CoreWrapper &b, const ymir::savestate::Sa
 // fractional cycle counters), or "<subsystem> state differs (byte offset N)" for the byte-compared
 // subsystem save states. Frame and audio mismatches use their own messages ("frame row N differs").
 std::string CompareCores(CoreWrapper &a, CoreWrapper &b);
+
+// Compares two save states section by section, bytewise (padding included: both must come from zero-filled states,
+// as retro_serialize's and brimir_state_diff's are): both SH-2s, then every other subsystem as CompareCores does. The
+// disc hash is not compared. Returns "" if identical, otherwise the first difference ("<subsystem> state differs (byte
+// offset N)" or "<field> differs: a=0x.. b=0x..").
+std::string DiffSaveStates(const ymir::savestate::SaveState &a, const ymir::savestate::SaveState &b);
 
 struct LockstepResult {
     int framesRun = 0;      // frames run on both cores (including the diverging one)

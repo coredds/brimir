@@ -20,7 +20,17 @@ struct CompareConfig {
     int frames = 300;
     std::vector<std::pair<std::string, std::string>> vulkanOptions; // --compare-vulkan-option, Vulkan child only
     int stateEvery = 0; // --compare-state N: both children save a state after every Nth recorded frame (0: off)
+    bool strictStates = false; // --fixed-date: brimir_state_diff --strict (every section of each pair identical)
 };
+
+// Whether the argument after --fixed-date is its (optional) value: "1" or a date starting YYYY-; the core validates
+// the date itself.
+inline bool IsFixedDateValue(const std::string& text) {
+    if (text == "1") {
+        return true;
+    }
+    return text.size() >= 5 && text[4] == '-' && text.find_first_not_of("0123456789") == 4;
+}
 
 // Returns 0 when every frame (and with stateEvery every state pair) is identical, 3 on any difference or failed check
 // (the first differing frame is reported with its first differing pixel and both images are dumped as PPM; the first

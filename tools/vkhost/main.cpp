@@ -55,6 +55,7 @@ struct CliArgs {
     Region region;       // --region x,y,w,h
     bool hasRegion = false;
     uint32_t rotation = 0; // brimir_rotation from --option (for the sample-point mapping)
+    std::string fixedDate; // --fixed-date [date]: the BRIMIR_RTC_FIXED value ("" = off)
 };
 
 void PrintUsage(std::FILE* out) {
@@ -138,6 +139,11 @@ void PrintUsage(std::FILE* out) {
         "                line-local fetcher caches. Any differing pair fails the compare (exit 3); the first one's diff\n"
         "                is printed and both states are copied into the dump directory\n"
         "  --dump-frame I  with --dump-dir: write only recorded frame I\n"
+        "  --fixed-date [date]  pin the RTC for deterministic runs from boot: sets BRIMIR_RTC_FIXED for the core (and\n"
+        "                the --compare children), which switches the RTC to the virtual clock at the date after loading\n"
+        "                the content (log: 'RTC fixed to ...'). Without a date (or 1) brimir_bench's lockstep date,\n"
+        "                1994-11-22 00:00:00; or YYYY-MM-DD[THH:MM:SS]. A --load-state state carries its own RTC.\n"
+        "                With --compare-state every section of each state pair must match (brimir_state_diff --strict)\n"
         "  --dump-every N  with --dump-dir: write only recorded frames 0, N, 2N, ... (not with --dump-frame)\n"
         "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"
         "  --set-option-at F key=value  a live option change before frame F (counting warmup frames from 0), reported\n"
@@ -258,6 +264,13 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--software-vdp1") {
             args.config.softwareVdp1 = true;
+            continue;
+        }
+        if (opt == "--fixed-date") { // an optional value
+            args.fixedDate = "1";
+            if (i + 1 < argc && vkhost::IsFixedDateValue(argv[i + 1])) {
+                args.fixedDate = argv[++i];
+            }
             continue;
         }
         if (opt == "--save-state-at") { // two values
@@ -814,6 +827,15 @@ int main(int argc, char** argv) {
         break;
     }
 
+    if (!args.fixedDate.empty()) {
+        // Read by the core in retro_load_game; inherited by the --compare children (which also get the flag).
+#ifdef _WIN32
+        _putenv_s("BRIMIR_RTC_FIXED", args.fixedDate.c_str());
+#else
+        setenv("BRIMIR_RTC_FIXED", args.fixedDate.c_str(), 1);
+#endif
+    }
+
     if (args.compare) {
         vkhost::CompareConfig compare;
         compare.args.assign(argv + 1, argv + argc);
@@ -822,6 +844,7 @@ int main(int argc, char** argv) {
         compare.frames = args.config.frames;
         compare.vulkanOptions = args.compareVulkanOptions;
         compare.stateEvery = args.compareState;
+        compare.strictStates = !args.fixedDate.empty();
         return vkhost::RunCompare(compare);
     }
 

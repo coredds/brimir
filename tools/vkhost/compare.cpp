@@ -58,6 +58,8 @@ const std::string kSaveStateAt = "--save-state-at";
 const std::string kSetOptionAt = "--set-option-at";
 // The software child samples its 1x frames (the same excluded lattice); the Vulkan child the given N.
 const std::string kHashSample = "--hash-sample";
+// Takes an optional date (IsFixedDateValue); both children get it.
+const std::string kFixedDate = "--fixed-date";
 
 fs::path SelfPath() {
 #ifdef _WIN32
@@ -226,6 +228,13 @@ std::vector<std::string> BuildArgs(const std::vector<std::string>& in, bool vulk
             i += 2;
             continue;
         }
+        if (arg == kFixedDate) { // an optional value; both children get it
+            out.push_back(arg);
+            if (i + 1 < in.size() && IsFixedDateValue(in[i + 1])) {
+                out.push_back(in[++i]);
+            }
+            continue;
+        }
         if (arg == kHashSample && i + 1 < in.size()) {
             out.insert(out.end(), {arg, vulkan ? in[i + 1] : std::string("1")});
             i += 1;
@@ -376,8 +385,8 @@ size_t CompareStates(const fs::path& self, const CompareConfig& config, const fs
             break;
         }
         const fs::path out = work / "state-diff.txt";
-        std::string command = Quote(stateDiff.string()) + " " + Quote(a.string()) + " " + Quote(b.string()) + " > " +
-                              Quote(out.string()) + " 2>&1";
+        std::string command = Quote(stateDiff.string()) + (config.strictStates ? " --strict " : " ") +
+                              Quote(a.string()) + " " + Quote(b.string()) + " > " + Quote(out.string()) + " 2>&1";
 #ifdef _WIN32
         command = "\"" + command + "\"";
 #endif
@@ -421,9 +430,11 @@ size_t CompareStates(const fs::path& self, const CompareConfig& config, const fs
             std::printf("compare:   states copied to %s\n", dir.string().c_str());
         }
     }
-    std::printf("compare: states: %zu of %d pairs identical (every %d recorded frames); other sections "
-                "(informational), most differing bytes: system %zu, msh2 %zu, ssh2 %zu, scsp %zu, vdp %zu\n",
-                identical, expected, config.stateEvery, otherMax[0], otherMax[1], otherMax[2], otherMax[3], otherMax[4]);
+    std::printf("compare: states: %zu of %d pairs identical (every %d recorded frames%s); other sections "
+                "(%s), most differing bytes: system %zu, msh2 %zu, ssh2 %zu, scsp %zu, vdp %zu\n",
+                identical, expected, config.stateEvery, config.strictStates ? ", strict: every section" : "",
+                config.strictStates ? "compared" : "informational", otherMax[0], otherMax[1], otherMax[2], otherMax[3],
+                otherMax[4]);
     if (differing > 0) {
         fail(std::to_string(differing) + " of " + std::to_string(expected) + " state pairs differ, first after frame " +
              std::to_string(first));
