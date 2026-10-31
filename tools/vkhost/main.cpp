@@ -156,7 +156,7 @@ void PrintUsage(std::FILE* out) {
         "  --fail-alloc-above MiB  with --vulkan: the core's vkAllocateMemory fails for larger allocations (fault\n"
         "                injection: a GPU short of memory)\n"
         "  --fail-output-images-above N  with --vulkan: the core's vkCreateImage fails for its output images\n"
-        "                (MUTABLE_FORMAT) wider than 704 x N\n"
+        "                (MUTABLE_FORMAT) wider than 352 x N (a low-res frame's maximum width at N x)\n"
         "  --fail-output-images-on-grow  with --grow-mask and --fail-output-images-above: the limit applies only\n"
         "                once the mask has grown\n"
         "  --fail-submit-at F [--fail-submits N]  with --vulkan: the core's frame submit fails in runs F .. F+N-1\n"

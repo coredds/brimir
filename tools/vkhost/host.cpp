@@ -811,6 +811,9 @@ void LibretroHost::ProcessDeferred(size_t keep) {
 }
 
 void LibretroHost::Video(const void* data, unsigned width, unsigned height, size_t pitch) {
+    if (data == RETRO_HW_FRAME_BUFFER_VALID && m_vulkan && m_contextLive) {
+        m_vulkan->CheckFrameExtent(width, height);
+    }
     if (data == nullptr && m_deferImageRead > 0 && m_contextLive) {
         ++m_duplicate;
         // A frontend repeats the image it holds (the last set_image) and reads it again on its own schedule.

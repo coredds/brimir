@@ -126,6 +126,14 @@ public:
 
     // Reads back the image of the last set_image (top-left w x h) as XRGB8888. Returns false when there is none.
     bool ReadImage(unsigned w, unsigned h, HostFrame& out);
+    // A hardware frame (video_cb with RETRO_HW_FRAME_BUFFER_VALID, w x h): the image of the last set_image must have
+    // exactly that extent (RetroArch's filter chain samples the whole image as a w x h frame). A mismatch, or an image
+    // the core did not create through the wrapped vkCreateImage, is a problem.
+    void CheckFrameExtent(unsigned w, unsigned h);
+    uint64_t ExtentMismatches() const { return m_extentMismatches; }
+    // The core created / destroyed an image (wrapped vkCreateImage / vkDestroyImage): its extent, for CheckFrameExtent.
+    void OnCreateImage(uint64_t image, uint32_t w, uint32_t h);
+    void OnDestroyImage(uint64_t image);
 
     // --defer-image-read: the image of the last set_image as a frontend keeps it to read later (the handles copied
     // from the struct, as RetroArch's threaded video path does), pinned: destroying the image or its view before
@@ -209,7 +217,7 @@ public:
     uint64_t CoreMemoryAllocations() const { return m_memoryAllocations; }
     // --fail-output-images-above N: the core's vkCreateImage fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for images created
     // MUTABLE_FORMAT (the images it hands to set_image; libretro_vulkan.h requires the bit, its internal images do not
-    // use it) wider than 704 * N (0: never).
+    // use it) wider than 352 * N (0: never): the widest low-res frame at internal resolution N.
     // --fail-submit-at F --fail-submits N: the core's command-buffer submits (vkQueueSubmit with command buffers) fail
     // in the runs F .. F + N - 1 (the host arms it in BeginRun); the core then repeats the previous frame.
     void SetFailSubmits(int firstRun, int count) {
@@ -272,6 +280,9 @@ private:
     int m_failSubmitCount = 1;
     bool m_failSubmitArmed = false;
     std::multiset<uint64_t> m_pinned; // handles of captured images and views not read yet
+    std::mutex m_imageMutex;
+    std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> m_imageExtents; // live core images: VkImage -> w, h
+    uint64_t m_extentMismatches = 0;
 
     bool ReadHandles(uint64_t image, int format, uint32_t baseMip, uint32_t baseLayer, unsigned w, unsigned h,
                      HostFrame& out);

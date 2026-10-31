@@ -51,6 +51,14 @@ enum class VulkanOutputMode {
 // a command buffer and fence per slot. Every call must come from the libretro thread (retro_run, context_reset or
 // context_destroy).
 //
+// The image handed to set_image always has exactly the extent of the frame reported to video_cb (after crop, rotation
+// and internal resolution, in both modes): a frontend samples the whole image as that frame. The output images are
+// created for the current output size; a change (a resolution switch, a rotation or overscan change, an internal
+// resolution change) creates images of the new size at that frame and retires the old ones (freed only after
+// wait_sync_index for every sync index they were handed at, as for an internal resolution change below). When the new
+// images cannot be created the frame is not handed over (the frontend repeats the image it holds, at its size), or
+// above 1x with a frame to record a lower internal resolution is used (logged).
+//
 // In compute mode it can carry the Vulkan VDP renderer (VDP2 on the GPU): the renderer gets one frame context per
 // sync slot (guarded by the slot fences) plus kHiddenContexts contexts for frames with video disabled, each with a
 // command buffer and fence of this class, used round-robin. The output owns the device order: the renderer is
@@ -125,8 +133,9 @@ public:
     // attach creates output images for it first and attaches the renderer at most at their scale (the renderer tries
     // n, its previous effective scale, then 1; logged). A change applies at the next shown frame that has a VDP2 frame
     // to record (PresentRenderer), before it is recorded: wait for this output's slot and hidden-context fences (a
-    // failed wait keeps the change pending), output images of 704 n created, the renderer's SetInternalScale (its
-    // composite is rescaled into the new one by that frame, so a woven field survives), then the new images replace
+    // failed wait keeps the change pending), output images of n x the frame's size created, the renderer's
+    // SetInternalScale (its composite is rescaled into the new one by that frame, so a woven field survives), then the
+    // new images replace
     // the old ones, which are retired, not destroyed: each goes only after wait_sync_index (and this output's fence)
     // has returned for the sync index it was handed at, and never while it is the frontend's current image (its dupes
     // stay valid even if this frame's record fails). Either allocation failing keeps both at the previous n (logged);

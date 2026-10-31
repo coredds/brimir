@@ -29,8 +29,6 @@ struct PushConstants {
     uint32_t outWidth;
     uint32_t outHeight;
     uint32_t rotation;
-    uint32_t writeWidth;
-    uint32_t writeHeight;
 };
 
 uint32_t EffectiveRotation(uint32_t rotation) {
@@ -64,12 +62,11 @@ OutputSize ComputeOutputSize(uint32_t w, uint32_t h, const OutputSettings &setti
     return {size.width * scale, size.height * scale};
 }
 
-OutputSize WrittenSize(OutputSize size, uint32_t maxSize) {
-    return {std::min(size.width + 1, maxSize), std::min(size.height + 1, maxSize)};
-}
-
-FramePresenter::FramePresenter(VulkanDevice &device, uint32_t slotCount, uint32_t scale) : m_device(device) {
-    m_result = scale >= 1 && scale <= kMaxScale ? Init(slotCount, scale) : VK_ERROR_INITIALIZATION_FAILED;
+FramePresenter::FramePresenter(VulkanDevice &device, uint32_t slotCount, OutputSize extent, uint32_t scale)
+    : m_device(device), m_scale(scale), m_extent(extent) {
+    const bool valid = scale >= 1 && scale <= kMaxScale && extent.width != 0 && extent.height != 0 &&
+                       extent.width <= kMaxOutputSize * scale && extent.height <= kMaxOutputSize * scale;
+    m_result = valid ? Init(slotCount) : VK_ERROR_INITIALIZATION_FAILED;
     if (m_result != VK_SUCCESS) {
         Destroy();
     }
@@ -79,11 +76,10 @@ FramePresenter::~FramePresenter() {
     Destroy();
 }
 
-VkResult FramePresenter::Init(uint32_t slotCount, uint32_t scale) {
+VkResult FramePresenter::Init(uint32_t slotCount) {
     if (slotCount == 0) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    m_scale = scale;
 
     const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
         {kSourceBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
@@ -114,8 +110,8 @@ VkResult FramePresenter::Init(uint32_t slotCount, uint32_t scale) {
 
     // libretro output images: MUTABLE_FORMAT, SAMPLED | TRANSFER_SRC | STORAGE (stage1-libretro-vulkan.md).
     const vk_util::ImageDesc imageDesc{
-        .width = MaxOutputSize(),
-        .height = MaxOutputSize(),
+        .width = m_extent.width,
+        .height = m_extent.height,
         .format = kOutputFormat,
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
@@ -187,7 +183,8 @@ void FramePresenter::Destroy() {
 bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t w, uint32_t h,
                              const OutputSettings &settings, VkCommandBuffer cmd) {
     if (!Ok() || slotIndex >= m_slots.size() || xbgr == nullptr || w == 0 || h == 0 || w > kMaxSourceWidth ||
-        h > kMaxSourceHeight || std::max<uint32_t>(settings.scale, 1) != 1) {
+        h > kMaxSourceHeight || std::max<uint32_t>(settings.scale, 1) != 1 ||
+        ComputeOutputSize(w, h, settings) != m_extent) {
         return false;
     }
     const auto &vk = m_device.Table();
@@ -222,7 +219,8 @@ bool FramePresenter::Present(uint32_t slotIndex, const uint32_t *xbgr, uint32_t 
 bool FramePresenter::PresentDevice(uint32_t slotIndex, VkBuffer source, uint32_t w, uint32_t h,
                                    const OutputSettings &settings, VkCommandBuffer cmd) {
     if (!Ok() || slotIndex >= m_slots.size() || source == VK_NULL_HANDLE || w == 0 || h == 0 ||
-        w > kMaxSourceWidth || h > kMaxSourceHeight || settings.scale > m_scale) {
+        w > kMaxSourceWidth || h > kMaxSourceHeight || std::max<uint32_t>(settings.scale, 1) != m_scale ||
+        ComputeOutputSize(w, h, settings) != m_extent) {
         return false;
     }
     Slot &slot = m_slots[slotIndex];
@@ -260,7 +258,6 @@ void FramePresenter::RecordConversion(Slot &slot, VkDescriptorSet set, uint32_t 
     // At internal resolution N every quantity is N x the native one; the crop guard is native.
     const uint32_t n = std::max<uint32_t>(settings.scale, 1);
     const OutputSize size = ComputeOutputSize(w, h, settings);
-    const OutputSize written = WrittenSize(size, MaxOutputSize());
     const bool crop = CropApplies(w, h, settings);
     const PushConstants push{
         .srcWidth = n * w,
@@ -270,14 +267,11 @@ void FramePresenter::RecordConversion(Slot &slot, VkDescriptorSet set, uint32_t 
         .outWidth = size.width,
         .outHeight = size.height,
         .rotation = EffectiveRotation(settings.rotation),
-        .writeWidth = written.width,
-        .writeHeight = written.height,
     };
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
     vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &set, 0, nullptr);
     vk.vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    vk.vkCmdDispatch(cmd, (written.width + kGroupSize - 1) / kGroupSize, (written.height + kGroupSize - 1) / kGroupSize,
-                     1);
+    vk.vkCmdDispatch(cmd, (size.width + kGroupSize - 1) / kGroupSize, (size.height + kGroupSize - 1) / kGroupSize, 1);
 
     // Make the writes available to whatever reads the image next (frontend sampling or blit, a readback).
     vk_util::ImageBarrier(m_device, cmd, slot.output.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -296,17 +290,17 @@ VkImageView FramePresenter::OutputView(uint32_t slot) const {
 std::vector<uint32_t> FramePresenter::ReadbackXRGB(uint32_t slotIndex, OutputSize size) {
     std::vector<uint32_t> pixels;
     if (!Ok() || slotIndex >= m_slots.size() || !m_slots[slotIndex].presented || size.width == 0 || size.height == 0 ||
-        size.width > MaxOutputSize() || size.height > MaxOutputSize()) {
+        size.width > m_extent.width || size.height > m_extent.height) {
         return pixels;
     }
     const auto &vk = m_device.Table();
     const Slot &slot = m_slots[slotIndex];
 
-    // Created on first use (only tests and vkhost read back), sized for the largest output. Host-cached when the
-    // device has such memory: CPU reads from uncached (write-combined) memory are very slow.
+    // Created on first use (only tests read back), sized for the whole image. Host-cached when the device has such
+    // memory: CPU reads from uncached (write-combined) memory are very slow.
     vk_util::Buffer &readback = m_readback;
     if (readback.buffer == VK_NULL_HANDLE) {
-        const VkDeviceSize maxBytes = VkDeviceSize{MaxOutputSize()} * MaxOutputSize() * sizeof(uint32_t);
+        const VkDeviceSize maxBytes = VkDeviceSize{m_extent.width} * m_extent.height * sizeof(uint32_t);
         constexpr VkMemoryPropertyFlags coherent =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         if (vk_util::CreateBuffer(m_device, maxBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,

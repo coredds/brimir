@@ -304,7 +304,7 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--region x,y,w,h` | with `--sharpness`: only these native output pixels (after crop and rotation; clamped to the frame) |
 | `--fail-alloc-above MiB` | with `--vulkan`: the core's `vkAllocateMemory` fails (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) for allocations above MiB (fault injection: a GPU short of memory); the summary counts the refused allocations |
 | `--fail-submit-at F` / `--fail-submits N` | with `--vulkan`: the core's command-buffer submit (`vkQueueSubmit`) fails (`VK_ERROR_OUT_OF_DEVICE_MEMORY`, nothing reaches the queue) in runs F .. F+N-1 (frame numbers count warmup frames from 0; N defaults to 1): the core logs the failure and repeats the frontend's image (`video_refresh(NULL)`). With `--defer-image-read` the repeat reads the held image again at its own time |
-| `--fail-output-images-above N` | with `--vulkan`: the core's `vkCreateImage` fails (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) for its output images (created `MUTABLE_FORMAT`, which `libretro_vulkan.h` requires for `set_image` images; its internal images do not use it) wider than 704 x N (N = 1-3): the output images of an internal resolution fail while the renderer's resources do not |
+| `--fail-output-images-above N` | with `--vulkan`: the core's `vkCreateImage` fails (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) for its output images (created `MUTABLE_FORMAT`, which `libretro_vulkan.h` requires for `set_image` images; its internal images do not use it; they are exactly the frame size) wider than 352 x N (N = 1-3; the widest low-res frame at N x): the output images of an internal resolution fail while the renderer's resources do not |
 | `--fail-output-images-on-grow` | with `--grow-mask` and `--fail-output-images-above N`: the limit applies only once the sync index mask has grown (the output images re-created for the larger ring fail above N) |
 | `--defer-image-read N` | with `--vulkan` (not with `--grow-mask`): read each `set_image` image N (1-2) displayed frames later, from the handles copied at `video_refresh` as RetroArch's threaded video path keeps them (the latest legal read: before the core's next `wait_sync_index` for that sync index on the 3-slot ring). The core destroying such an image or its view before the read (wrapped `vkDestroyImage` / `vkDestroyImageView`) fails the run; reads still pending are done before a reinit, a sync-mask change and at the end. Dupes repeat the frame before them, in order |
 
@@ -331,7 +331,9 @@ through the interface's `get_device_proc_addr`/`get_instance_proc_addr`) without
 (`set_image`, `get_sync_index`, `wait_sync_index`, `vkQueueWaitIdle`) or hardware frames in frames with video disabled
 (submits are allowed there and counted: the Vulkan VDP2 renderer still submits a hidden frame's VDP2 work), more than
 one command-buffer submit in one `retro_run`, `set_image` outside `GENERAL`/`VK_QUEUE_FAMILY_IGNORED` or with
-semaphores, features requested through `VkPhysicalDeviceVulkan1xFeatures`, a `create_device2` refusal (RetroArch may be
+semaphores, a hardware frame whose `set_image` image (its extent recorded by the wrapped `vkCreateImage`) is not
+exactly the `video_refresh` width x height (RetroArch's filter chain samples the whole image as a frame of that size),
+features requested through `VkPhysicalDeviceVulkan1xFeatures`, a `create_device2` refusal (RetroArch may be
 left without a GPU after its retry), unreadable frames, failed state saves/loads and validation errors. The
 queue-lock check runs a self-test each time a context is created. The summary line reports context resets, the
 core's submits and each counter. A second line, `vkhost: vulkan: core device memory: X MiB after the last frame, peak

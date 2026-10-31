@@ -1534,18 +1534,18 @@ TEST_CASE("PresentDevice of the composite equals Present of its readback", "[gpu
         const std::vector<uint32_t> composite = ReadbackBuffer(*device, vulkan->CompositeBuffer(), width * height);
         REQUIRE(composite.size() == width * height);
 
-        gpu::FramePresenter presenter(*device, 2);
-        REQUIRE(presenter.Ok());
         using gpu::OutputSettings;
         const OutputSettings settings =
             GENERATE(OutputSettings{}, OutputSettings{.cropH = 16, .cropV = 8}, OutputSettings{.rotation = 90},
                      OutputSettings{.cropH = 8, .cropV = 16, .rotation = 270});
         CAPTURE(settings.cropH, settings.cropV, settings.rotation);
+        const gpu::OutputSize size = gpu::ComputeOutputSize(width, height, settings);
+        gpu::FramePresenter presenter(*device, 2, size);
+        REQUIRE(presenter.Ok());
         REQUIRE(gpu::vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
                     REQUIRE(presenter.Present(0, composite.data(), width, height, settings, cmd));
                     REQUIRE(presenter.PresentDevice(1, vulkan->CompositeBuffer(), width, height, settings, cmd));
                 }) == VK_SUCCESS);
-        const gpu::OutputSize size = gpu::WrittenSize(gpu::ComputeOutputSize(width, height, settings));
         const std::vector<uint32_t> uploaded = presenter.ReadbackXRGB(0, size);
         const std::vector<uint32_t> direct = presenter.ReadbackXRGB(1, size);
         REQUIRE(uploaded.size() == size.width * size.height);
@@ -1590,7 +1590,7 @@ TEST_CASE("PresentDevice across detach and attach", "[gpu][vdp2][scene][lavapipe
         vdp::config::VDP2DebugRender debug{};
         vdp::config::VDP2AccessPatternsConfig access{};
         auto vulkan = std::make_unique<gpu::VulkanVDPRenderer>(*state, debug, access);
-        gpu::FramePresenter presenter(*device, 1);
+        gpu::FramePresenter presenter(*device, 1, {320, 224});
         REQUIRE(presenter.Ok());
         Vdp2SceneWriter writer;
         writer.Attach(*state, *vulkan);

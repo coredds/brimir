@@ -266,6 +266,48 @@ check_run(vulkan_transformed 300 REFERENCE software_transformed)
 check_vulkan_counters(vulkan_transformed)
 check_vdp2_renderer(vulkan_transformed)
 
+# Every Vulkan run checks that the image of each set_image has exactly the extent of the frame reported to video_cb
+# (vkhost's problem "set_image: image extent ... differs from the frame size": RetroArch samples the whole image as the
+# frame). These runs change the output size mid-run (rotation 90, the medium overscan crop, rotation back to 0): new
+# output images at the frame of the change, the old ones retired; compute output with the Vulkan VDP2 renderer at 1x
+# and 2x, copy-only output, and a frontend reading the images late (the retired ones must stay alive until then).
+set(size_changes --set-option-at 100 brimir_rotation=90 --set-option-at 150 brimir_overscan=2
+                 --set-option-at 200 brimir_rotation=0)
+run_vkhost(software_size_changes ${size_changes})
+check_software_reference(software_size_changes)
+run_vkhost(size_changes --vulkan ${size_changes})
+run_vkhost(size_changes_copy_only --vulkan --fake-api 1.1 ${size_changes})
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(size_changes_deferred --vulkan --defer-image-read 2 ${size_changes})
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+foreach(name IN ITEMS size_changes size_changes_copy_only size_changes_deferred)
+    check_run(${name} 300 REFERENCE software_size_changes)
+    check_vulkan_counters(${name})
+    string(REGEX MATCHALL "SET_GEOMETRY [0-9]+x[0-9]+" geometries "${${name}_err}")
+    if(NOT "${geometries}" STREQUAL "SET_GEOMETRY 320x224;SET_GEOMETRY 224x320;SET_GEOMETRY 192x288;SET_GEOMETRY 288x192")
+        fail(${name} "SET_GEOMETRY sequence '${geometries}', expected 320x224, 224x320, 192x288, 288x192")
+    endif()
+endforeach()
+check_vdp2_renderer(size_changes)
+check_vdp2_renderer(size_changes_deferred)
+require_log(size_changes_copy_only "using copy-only frame output")
+# ... with a live 1x -> 2x change between them (rotated 90 from the start: --hash-sample maps the sample points through
+# the --option rotation only).
+set(scale_size_changes --option brimir_rotation=90 --set-option-at 180 brimir_overscan=2)
+run_vkhost(software_scale_size_changes ${scale_size_changes})
+check_software_reference(software_scale_size_changes)
+run_vkhost(size_changes_scale2 --vulkan --hash-sample 1 ${scale_size_changes}
+           --set-option-at 120 brimir_internal_resolution=2)
+check_run(size_changes_scale2 300 REFERENCE software_scale_size_changes)
+check_vulkan_counters(size_changes_scale2)
+check_vdp2_renderer(size_changes_scale2)
+string(REGEX MATCHALL "SET_GEOMETRY [0-9]+x[0-9]+" geometries "${size_changes_scale2_err}")
+if(NOT "${geometries}" STREQUAL "SET_GEOMETRY 224x320;SET_GEOMETRY 448x640;SET_GEOMETRY 384x576")
+    fail(size_changes_scale2 "SET_GEOMETRY sequence '${geometries}', expected 224x320, 448x640, 384x576")
+endif()
+message(STATUS "size_changes: output size changes mid-run (compute 1x and 2x, copy-only, late reads), every image "
+               "exactly the frame size, frames identical to software")
+
 # A driver reinit mid-run: context_destroy, a new device, context_reset; the renderer stays installed and is attached
 # to the new device (everything uploaded again, the composite cleared).
 run_vkhost(reset --vulkan --reset-at 120)
@@ -491,9 +533,9 @@ run_vkhost(output_images_fail --vulkan --internal-resolution 2 --hash-sample 2 -
 check_run(output_images_fail 300)
 check_vulkan_counters(output_images_fail)
 check_vdp2_renderer(output_images_fail)
-require_log(output_images_fail "vkCreateImage of a 2816x2816 output image refused")
+require_log(output_images_fail "vkCreateImage of a 1280x896 output image refused")
 require_log(output_images_fail
-    "Internal resolution 4x: creating the 2816 px output images failed: VK_ERROR_OUT_OF_DEVICE_MEMORY; staying at 2x")
+    "Internal resolution 4x: creating the 1280x896 output images failed: VK_ERROR_OUT_OF_DEVICE_MEMORY; staying at 2x")
 string(REGEX MATCHALL "frames at [0-9]x" output_scales "${output_images_fail_err}")
 if(NOT "${output_scales}" STREQUAL "frames at 2x;frames at 3x")
     fail(output_images_fail "presented scales '${output_scales}', expected 2x then 3x")
@@ -518,7 +560,7 @@ unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
 check_run(output_images_fail_grow 300)
 check_vulkan_counters(output_images_fail_grow)
 check_vdp2_renderer(output_images_fail_grow)
-require_log(output_images_fail_grow "vkCreateImage of a 2112x2112 output image refused")
+require_log(output_images_fail_grow "vkCreateImage of a 960x672 output image refused")
 require_log(output_images_fail_grow
     "Internal resolution 4x: recreating the output images for the new sync index mask failed; using 2x")
 forbid_log(output_images_fail_grow "copy-only")
@@ -527,7 +569,7 @@ if(NOT "${grow_scales}" STREQUAL "frames at 4x;frames at 2x")
     fail(output_images_fail_grow "presented scales '${grow_scales}', expected 4x then 2x")
 endif()
 
-# The renderer cannot be attached at any scale (allocations above 8 MiB fail: the 2x output images, 7.6 MiB each, are
+# The renderer cannot be attached at any scale (allocations above 8 MiB fail: the 2x output images, 1.1 MiB each, are
 # created, the renderer's resources at 2x and at 1x are not): software renderer with the GPU output, and the output
 # images shrink back to 1x for its native frames (the memory left equals a 1x request's under the same limit).
 run_vkhost(attach_fail --vulkan --internal-resolution 2 --fail-alloc-above 8)
@@ -535,7 +577,7 @@ check_run(attach_fail 300)
 check_vulkan_counters(attach_fail)
 check_software_renderer(attach_fail)
 require_log(attach_fail "creating the VDP2 GPU resources failed")
-forbid_log(attach_fail "creating the 1408 px output images failed")
+forbid_log(attach_fail "creating the 640x448 output images failed")
 run_vkhost(attach_fail_native --vulkan --internal-resolution 1 --fail-alloc-above 8)
 check_run(attach_fail_native 300)
 require_log(attach_fail_native "creating the VDP2 GPU resources failed")

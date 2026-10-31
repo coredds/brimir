@@ -384,22 +384,36 @@ struct VulkanOutput::Impl {
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         bool pending = false; // submitted, fence not waited yet
-        // Copy-only mode: the slot's output image and the staging buffer the CPU frame is uploaded from.
-        gpu::vk_util::Image copyImage;
+        // Copy-only mode: the staging buffer the CPU frame is uploaded from (sized for the largest native frame).
         gpu::vk_util::Buffer staging;
-        // Copy-only mode. Persistent: the frontend keeps the pointer from set_image (and dereferences it for dupes).
-        retro_vulkan_image image{};
     };
 
-    // A replaced compute presenter and the image structs it handed over (the frontend keeps those pointers, also for
-    // dupes, and reads the images on its own schedule). Kept until the frontend is done with every image it got: for
-    // each sync index in `awaiting` (the ones its images were handed at) wait_sync_index and this output's fence of
-    // that slot have returned since the retirement, and none of its images is the frontend's current one
-    // (libretro_vulkan.h: an image must not be destroyed before wait_sync_index for the sync index it was handed at).
-    // A retired image that is the frontend's current one is repeated by it, possibly in frames at later sync indices
-    // (after a failed record, present or submit): when it stops being current, `awaiting` becomes every sync index.
-    struct RetiredPresenter {
+    // Copy-only mode: one output image per slot, of exactly the frame size (as the presenter's images).
+    struct CopyImages {
+        gpu::VulkanDevice *device = nullptr;
+        gpu::OutputSize extent{};
+        std::vector<gpu::vk_util::Image> images;
+        CopyImages() = default;
+        CopyImages(const CopyImages &) = delete;
+        CopyImages &operator=(const CopyImages &) = delete;
+        ~CopyImages() {
+            for (gpu::vk_util::Image &image : images) {
+                gpu::vk_util::DestroyImage(*device, image);
+            }
+        }
+    };
+
+    // Replaced output images (a compute presenter, or copy-only images) and the image structs handed over for them (the
+    // frontend keeps those pointers, also for dupes, and reads the images on its own schedule). Kept until the
+    // frontend is done with every image it got: for each sync index in `awaiting` (the ones its images were handed
+    // at) wait_sync_index and this output's fence of that slot have returned since the retirement, and none of its
+    // images is the frontend's current one (libretro_vulkan.h: an image must not be destroyed before wait_sync_index
+    // for the sync index it was handed at). A retired image that is the frontend's current one is repeated by it,
+    // possibly in frames at later sync indices (after a failed record, present or submit): when it stops being
+    // current, `awaiting` becomes every sync index.
+    struct RetiredOutput {
         std::unique_ptr<gpu::FramePresenter> presenter;
+        std::unique_ptr<CopyImages> copy;
         std::unique_ptr<retro_vulkan_image[]> images;
         uint32_t count = 0;
         uint32_t awaiting = 0;
@@ -420,11 +434,18 @@ struct VulkanOutput::Impl {
     std::unique_ptr<gpu::VulkanDevice> device;
     VulkanOutputMode mode = VulkanOutputMode::None;
     std::unique_ptr<gpu::FramePresenter> presenter; // compute mode
-    // Compute mode: the image struct handed over for each slot (one per presenter, never changed in place), and the
-    // sync indices they were handed at (bit i).
-    std::unique_ptr<retro_vulkan_image[]> presenterImages;
-    uint32_t presenterHanded = 0;
-    std::vector<RetiredPresenter> retiredPresenters;
+    std::unique_ptr<CopyImages> copyImages;         // copy-only mode
+    // The image struct handed over for each slot (one array per presenter or set of copy-only images, never changed
+    // in place), how many, and the sync indices they were handed at (bit i).
+    std::unique_ptr<retro_vulkan_image[]> outputImages;
+    uint32_t outputCount = 0;
+    uint32_t outputHanded = 0;
+    std::vector<RetiredOutput> retiredOutputs;
+    // The native output size (overscan crop and rotation applied, at 1x) of the latest frame to present: the output
+    // images are created for it (N x it for a presenter at internal resolution N), so the image handed to set_image
+    // always has the extent of the frame reported to video_cb. A change (resolution, rotation or overscan, internal
+    // resolution) creates new images; the old ones are retired.
+    gpu::OutputSize nativeOutput{320, 224};
     // The image struct the frontend holds (the last set_image), null after a withdrawal.
     const retro_vulkan_image *currentImage = nullptr;
     std::vector<Slot> slots;
@@ -456,14 +477,33 @@ struct VulkanOutput::Impl {
     uint32_t presentedScale = 1;
 
     VkResult CreateSlots(uint32_t count, VulkanOutputMode wanted);
-    // The image structs of the current presenter's slots.
-    void FillPresenterImages();
-    // A new presenter at `scale` (images of 704 * scale) for the current slots, or null with error set. The current
-    // one is untouched.
+    // The image structs of the current presenter's or copy-only images.
+    void FillOutputImages();
+    // nativeOutput at internal resolution `scale`.
+    gpu::OutputSize ScaledOutput(uint32_t scale) const;
+    // A new presenter at `scale` (images of ScaledOutput(scale)) for the current slots, or null with error set. The
+    // current one is untouched.
     std::unique_ptr<gpu::FramePresenter> CreatePresenter(uint32_t scale, std::string &error);
-    // Makes `created` the current presenter; the previous one is retired (RetiredPresenter), not destroyed.
+    // Copy-only images of `extent` for `count` slots, or null with result set.
+    std::unique_ptr<CopyImages> CreateCopyImages(uint32_t count, gpu::OutputSize extent, VkResult &result);
+    // Moves the current output images (and their image structs) to the retired list, if there are any.
+    void RetireOutput();
+    // Makes `created` the current presenter (or copy-only images); the previous ones are retired (RetiredOutput), not
+    // destroyed.
     void InstallPresenter(std::unique_ptr<gpu::FramePresenter> created);
-    // A sync index the frontend is done with (after wait_sync_index and the slot's fence): frees the retired presenters
+    void InstallCopyImages(std::unique_ptr<CopyImages> created);
+    // Whether the current output images are those of a frame of ScaledOutput(scale) (compute: at internal resolution
+    // `scale`; copy-only: scale 1).
+    bool OutputFits(uint32_t scale) const;
+    // Makes the output images fit (OutputFits) by creating new ones of that size, the old ones retired; false with
+    // error when they cannot be created (the current ones are kept). No wait.
+    bool FitOutput(uint32_t scale, std::string &error);
+    // The renderer path when FitOutput failed above 1x: waits for this output's work, then the first lower internal
+    // resolution whose output images and renderer resources can be created is used (the renderer's
+    // FallBackInternalScale; the pending frame is recorded at it). False (nothing changed) when none can, or a wait
+    // failed (error set then).
+    bool FallBackOutput(uint32_t scale, const std::string &reason, std::string &error);
+    // A sync index the frontend is done with (after wait_sync_index and the slot's fence): frees the retired outputs
     // that waited only for it (pass UINT32_MAX to only re-check after a set_image).
     void ReleaseRetired(uint32_t syncIndex);
     void DestroyRetired();
@@ -532,35 +572,26 @@ VkResult VulkanOutput::Impl::CreateCommandContext(VkCommandPool &pool, VkCommand
 }
 
 VkResult VulkanOutput::Impl::CreateSlots(uint32_t count, VulkanOutputMode wanted) {
-    const auto &vk = device->Table();
-    const VkDevice dev = device->Device();
+    VkResult result = VK_SUCCESS;
     if (wanted == VulkanOutputMode::Compute) {
-        presenter = std::make_unique<gpu::FramePresenter>(*device, count, presenterScale);
+        presenter = std::make_unique<gpu::FramePresenter>(*device, count, ScaledOutput(presenterScale), presenterScale);
         if (!presenter->Ok()) {
             return presenter->Result();
         }
-    }
-    slots.resize(count);
-    if (wanted == VulkanOutputMode::Compute) {
-        FillPresenterImages();
-    }
-    for (uint32_t i = 0; i < count; ++i) {
-        Slot &slot = slots[i];
-        VkResult result = CreateCommandContext(slot.pool, slot.cmd, slot.fence);
-        if (result != VK_SUCCESS) {
+    } else {
+        copyImages = CreateCopyImages(count, nativeOutput, result);
+        if (!copyImages) {
             return result;
         }
-
-        VkImageViewCreateInfo &view = slot.image.create_info;
-        view = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                           VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-        view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        if (wanted == VulkanOutputMode::Compute) {
-            // The presenter's image structs (FillPresenterImages) are handed over instead.
-        } else {
-            // Vulkan 1.0 transfer operations only: a staging buffer and an image the frontend samples.
+    }
+    mode = wanted; // for FillOutputImages; DestroySlots resets it on failure
+    slots.resize(count);
+    FillOutputImages();
+    for (uint32_t i = 0; i < count; ++i) {
+        Slot &slot = slots[i];
+        result = CreateCommandContext(slot.pool, slot.cmd, slot.fence);
+        if (result == VK_SUCCESS && wanted == VulkanOutputMode::CopyOnly) {
+            // Vulkan 1.0 transfer operations only: a staging buffer the frame is copied into the image from.
             result = gpu::vk_util::CreateBuffer(*device, VkDeviceSize{kCopyMaxSize} * kCopyMaxSize * 4,
                                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -569,81 +600,178 @@ VkResult VulkanOutput::Impl::CreateSlots(uint32_t count, VulkanOutputMode wanted
             if (result == VK_SUCCESS && slot.staging.mapped == nullptr) {
                 result = VK_ERROR_MEMORY_MAP_FAILED;
             }
-            if (result == VK_SUCCESS) {
-                const gpu::vk_util::ImageDesc desc{
-                    .width = kCopyMaxSize,
-                    .height = kCopyMaxSize,
-                    .format = kCopyFormat,
-                    .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                    .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
-                    .createView = false,
-                };
-                result = gpu::vk_util::CreateImage2D(*device, desc, slot.copyImage);
-            }
-            if (result == VK_SUCCESS) {
-                view.image = slot.copyImage.image;
-                view.format = kCopyFormat;
-                view.components.a = VK_COMPONENT_SWIZZLE_ONE;
-                result = vk.vkCreateImageView(dev, &view, nullptr, &slot.copyImage.view);
-            }
-            if (result != VK_SUCCESS) {
-                return result;
-            }
-            slot.image.image_view = slot.copyImage.view;
         }
-        slot.image.image_layout = VK_IMAGE_LAYOUT_GENERAL;
+        if (result != VK_SUCCESS) {
+            return result;
+        }
     }
-    mode = wanted;
     return VK_SUCCESS;
 }
 
-void VulkanOutput::Impl::FillPresenterImages() {
-    const uint32_t count = presenter->SlotCount();
-    presenterImages = std::make_unique<retro_vulkan_image[]>(count);
-    presenterHanded = 0;
+std::unique_ptr<VulkanOutput::Impl::CopyImages>
+VulkanOutput::Impl::CreateCopyImages(uint32_t count, gpu::OutputSize extent, VkResult &result) {
+    const auto &vk = device->Table();
+    auto created = std::make_unique<CopyImages>();
+    created->device = device.get();
+    created->extent = extent;
+    created->images.resize(count);
+    result = VK_SUCCESS;
+    for (gpu::vk_util::Image &image : created->images) {
+        const gpu::vk_util::ImageDesc desc{
+            .width = extent.width,
+            .height = extent.height,
+            .format = kCopyFormat,
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+            .createView = false,
+        };
+        result = gpu::vk_util::CreateImage2D(*device, desc, image);
+        if (result == VK_SUCCESS) {
+            VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            view.image = image.image;
+            view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view.format = kCopyFormat;
+            view.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE};
+            view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            result = vk.vkCreateImageView(device->Device(), &view, nullptr, &image.view);
+        }
+        if (result != VK_SUCCESS) {
+            return nullptr; // destroys what was created
+        }
+    }
+    return created;
+}
+
+void VulkanOutput::Impl::FillOutputImages() {
+    const bool compute = mode == VulkanOutputMode::Compute;
+    const uint32_t count =
+        compute ? presenter->SlotCount() : static_cast<uint32_t>(copyImages ? copyImages->images.size() : 0);
+    outputImages = std::make_unique<retro_vulkan_image[]>(count);
+    outputCount = count;
+    outputHanded = 0;
     for (uint32_t i = 0; i < count; ++i) {
-        retro_vulkan_image &image = presenterImages[i];
+        retro_vulkan_image &image = outputImages[i];
         VkImageViewCreateInfo &view = image.create_info;
         view = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         view.viewType = VK_IMAGE_VIEW_TYPE_2D;
         view.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
         view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        view.image = presenter->OutputImage(i);
-        view.format = VK_FORMAT_R8G8B8A8_UNORM;
-        image.image_view = presenter->OutputView(i);
+        if (compute) {
+            view.image = presenter->OutputImage(i);
+            view.format = VK_FORMAT_R8G8B8A8_UNORM;
+            image.image_view = presenter->OutputView(i);
+        } else {
+            // B8G8R8A8 with alpha read as one (the X byte is 0), as the view was created.
+            view.image = copyImages->images[i].image;
+            view.format = kCopyFormat;
+            view.components.a = VK_COMPONENT_SWIZZLE_ONE;
+            image.image_view = copyImages->images[i].view;
+        }
         image.image_layout = VK_IMAGE_LAYOUT_GENERAL;
     }
 }
 
+gpu::OutputSize VulkanOutput::Impl::ScaledOutput(uint32_t scale) const {
+    return {nativeOutput.width * scale, nativeOutput.height * scale};
+}
+
 std::unique_ptr<gpu::FramePresenter> VulkanOutput::Impl::CreatePresenter(uint32_t scale, std::string &error) {
-    auto created = std::make_unique<gpu::FramePresenter>(*device, static_cast<uint32_t>(slots.size()), scale);
+    const gpu::OutputSize extent = ScaledOutput(scale);
+    auto created =
+        std::make_unique<gpu::FramePresenter>(*device, static_cast<uint32_t>(slots.size()), extent, scale);
     if (!created->Ok()) {
-        error = std::string("creating the ") + std::to_string(scale * gpu::FramePresenter::kMaxOutputSize) +
-                " px output images failed: " + gpu::vk_util::ResultName(created->Result());
+        error = "creating the " + std::to_string(extent.width) + "x" + std::to_string(extent.height) +
+                " output images failed: " + gpu::vk_util::ResultName(created->Result());
         return nullptr;
     }
     return created;
 }
 
-void VulkanOutput::Impl::InstallPresenter(std::unique_ptr<gpu::FramePresenter> created) {
-    RetiredPresenter old;
+void VulkanOutput::Impl::RetireOutput() {
+    RetiredOutput old;
     old.presenter = std::move(presenter);
-    old.images = std::move(presenterImages);
-    old.count = old.presenter ? old.presenter->SlotCount() : 0;
-    old.awaiting = presenterHanded;
-    presenter = std::move(created);
-    presenterScale = presenter->Scale();
-    FillPresenterImages();
-    if (old.presenter) {
-        retiredPresenters.push_back(std::move(old));
-        ReleaseRetired(UINT32_MAX); // one never handed over goes now
+    old.copy = std::move(copyImages);
+    old.images = std::move(outputImages);
+    old.count = outputCount;
+    old.awaiting = outputHanded;
+    outputCount = 0;
+    outputHanded = 0;
+    if (old.presenter || old.copy) {
+        retiredOutputs.push_back(std::move(old));
     }
 }
 
+void VulkanOutput::Impl::InstallPresenter(std::unique_ptr<gpu::FramePresenter> created) {
+    RetireOutput();
+    presenter = std::move(created);
+    presenterScale = presenter->Scale();
+    FillOutputImages();
+    ReleaseRetired(UINT32_MAX); // one never handed over goes now
+}
+
+void VulkanOutput::Impl::InstallCopyImages(std::unique_ptr<CopyImages> created) {
+    RetireOutput();
+    copyImages = std::move(created);
+    FillOutputImages();
+    ReleaseRetired(UINT32_MAX);
+}
+
+bool VulkanOutput::Impl::OutputFits(uint32_t scale) const {
+    if (mode == VulkanOutputMode::Compute) {
+        return presenter && presenter->Scale() == scale && presenter->Extent() == ScaledOutput(scale);
+    }
+    return copyImages && copyImages->extent == nativeOutput;
+}
+
+bool VulkanOutput::Impl::FitOutput(uint32_t scale, std::string &error) {
+    if (OutputFits(scale)) {
+        return true;
+    }
+    if (mode == VulkanOutputMode::Compute) {
+        auto created = CreatePresenter(scale, error);
+        if (!created) {
+            return false;
+        }
+        InstallPresenter(std::move(created));
+        return true;
+    }
+    VkResult result = VK_SUCCESS;
+    auto created = CreateCopyImages(static_cast<uint32_t>(slots.size()), nativeOutput, result);
+    if (!created) {
+        error = "creating the " + std::to_string(nativeOutput.width) + "x" + std::to_string(nativeOutput.height) +
+                " output images failed: " + gpu::vk_util::ResultName(result);
+        return false;
+    }
+    InstallCopyImages(std::move(created));
+    return true;
+}
+
+bool VulkanOutput::Impl::FallBackOutput(uint32_t scale, const std::string &reason, std::string &error) {
+    // FallBackInternalScale's contract: no submitted work of this output uses the renderer's resources (nothing of
+    // this run is recorded yet). The frontend's use of the output images needs no wait: they are retired.
+    if (const VkResult result = WaitOwnWork(); result != VK_SUCCESS) {
+        error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
+        return false;
+    }
+    for (uint32_t n = scale - 1; n >= 1; --n) {
+        std::string presenterError;
+        auto created = CreatePresenter(n, presenterError);
+        if (!created || !renderer->FallBackInternalScale(n)) {
+            continue; // the renderer keeps its scale when its resources cannot be allocated
+        }
+        InstallPresenter(std::move(created));
+        compositeValid = false; // rescaled by this run's record
+        NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(scale) + "x: " + reason + "; using " +
+                                           std::to_string(n) + "x");
+        return true;
+    }
+    return false;
+}
+
 void VulkanOutput::Impl::ReleaseRetired(uint32_t syncIndex) {
-    for (auto it = retiredPresenters.begin(); it != retiredPresenters.end();) {
+    for (auto it = retiredOutputs.begin(); it != retiredOutputs.end();) {
         bool current = false;
         for (uint32_t i = 0; i < it->count; ++i) {
             current = current || currentImage == &it->images[i];
@@ -662,7 +790,7 @@ void VulkanOutput::Impl::ReleaseRetired(uint32_t syncIndex) {
             it->awaiting &= ~(1u << syncIndex);
         }
         if (it->awaiting == 0 && !current) {
-            it = retiredPresenters.erase(it); // destroys the presenter (its images and views)
+            it = retiredOutputs.erase(it); // destroys the presenter or copy-only images (images and views)
         } else {
             ++it;
         }
@@ -670,7 +798,7 @@ void VulkanOutput::Impl::ReleaseRetired(uint32_t syncIndex) {
 }
 
 void VulkanOutput::Impl::DestroyRetired() {
-    retiredPresenters.clear();
+    retiredOutputs.clear();
 }
 
 VkResult VulkanOutput::Impl::WaitSlots() {
@@ -808,7 +936,7 @@ bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::s
     // scale, so it never renders more than can be presented. The renderer tries the request, then its previous
     // effective scale, then 1, each allocated directly (fallbacks logged by the renderer).
     target.SetInternalScale(requestedScale);
-    if (presenter->Scale() < requestedScale) {
+    if (presenter->Scale() != requestedScale) {
         std::string presenterError;
         if (auto created = CreatePresenter(requestedScale, presenterError)) {
             InstallPresenter(std::move(created));
@@ -834,8 +962,9 @@ bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::s
     }
     renderer = &target;
     scaleChangePending = false;
-    if (presenter->Scale() > renderer->InternalScale()) {
-        // The renderer fell back: smaller output images (if they cannot be created the larger ones still present it).
+    if (presenter->Scale() != renderer->InternalScale()) {
+        // The renderer fell back: smaller output images (if they cannot be created now, the first frame tries again:
+        // FitOutput).
         std::string presenterError;
         if (auto created = CreatePresenter(renderer->InternalScale(), presenterError)) {
             InstallPresenter(std::move(created));
@@ -877,10 +1006,10 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
     }
     const uint32_t effective = renderer->InternalScale();
     // 3. The presenter follows: the grown one when the renderer got there (otherwise it is dropped, never handed
-    // over), or smaller images when the scale went down (a failure keeps the larger ones, which still present it).
+    // over), or smaller images when the scale went down (a failure is retried by the frame's FitOutput).
     if (grown && grown->Scale() == effective) {
         InstallPresenter(std::move(grown));
-    } else if (presenter->Scale() > effective) {
+    } else if (presenter->Scale() != effective) {
         std::string presenterError;
         if (auto created = CreatePresenter(effective, presenterError)) {
             InstallPresenter(std::move(created));
@@ -960,7 +1089,6 @@ void VulkanOutput::Impl::DestroySlots() {
         for (Slot &slot : slots) {
             vk.vkDestroyFence(dev, slot.fence, nullptr);
             vk.vkDestroyCommandPool(dev, slot.pool, nullptr); // frees the command buffer
-            gpu::vk_util::DestroyImage(*device, slot.copyImage);
             gpu::vk_util::DestroyBuffer(*device, slot.staging);
         }
     }
@@ -968,8 +1096,10 @@ void VulkanOutput::Impl::DestroySlots() {
     // Every caller has withdrawn the image and waited for the device (or the frontend's queue) first.
     DestroyRetired();
     presenter.reset();
-    presenterImages.reset();
-    presenterHanded = 0;
+    copyImages.reset();
+    outputImages.reset();
+    outputCount = 0;
+    outputHanded = 0;
     mode = VulkanOutputMode::None;
 }
 
@@ -1015,13 +1145,16 @@ void VulkanOutput::Impl::Abandon() {
     hiddenCreated = false;
     slots.clear();
     (void)presenter.release();
-    (void)presenterImages.release();
-    for (RetiredPresenter &retired : retiredPresenters) {
+    (void)copyImages.release();
+    (void)outputImages.release();
+    for (RetiredOutput &retired : retiredOutputs) {
         (void)retired.presenter.release();
+        (void)retired.copy.release();
         (void)retired.images.release();
     }
-    retiredPresenters.clear();
-    presenterHanded = 0;
+    retiredOutputs.clear();
+    outputCount = 0;
+    outputHanded = 0;
     currentImage = nullptr;
     (void)device.release();
     mode = VulkanOutputMode::None;
@@ -1168,11 +1301,8 @@ bool VulkanOutput::Impl::SubmitFrame(Slot &slot, uint32_t index, std::string &er
     }
     runSubmitted = true;
     slot.pending = true;
-    const retro_vulkan_image *image = &slot.image;
-    if (mode == VulkanOutputMode::Compute) {
-        image = &presenterImages[index];
-        presenterHanded |= 1u << index;
-    }
+    const retro_vulkan_image *image = &outputImages[index];
+    outputHanded |= 1u << index;
     iface->set_image(iface->handle, image, 0, nullptr, VK_QUEUE_FAMILY_IGNORED);
     currentImage = image;
     ReleaseRetired(UINT32_MAX); // a retired presenter that held the previous current image may go now
@@ -1330,12 +1460,23 @@ bool VulkanOutput::Present(const uint32_t *xbgr, uint32_t w, uint32_t h, const V
         error = "the compute frame output is not active";
         return false;
     }
+    const gpu::OutputSettings output{settings.cropH, settings.cropV, settings.rotation};
+    if (xbgr == nullptr || w == 0 || h == 0 || w > gpu::FramePresenter::kMaxSourceWidth ||
+        h > gpu::FramePresenter::kMaxSourceHeight) {
+        error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
+        return false;
+    }
+    m.nativeOutput = gpu::ComputeOutputSize(w, h, output);
     uint32_t index = 0;
     Impl::Slot *slot = m.BeginFrame(index, error);
     if (!slot) {
         return false;
     }
-    const gpu::OutputSettings output{settings.cropH, settings.cropV, settings.rotation};
+    // Output images of this frame's size (a size change creates new ones; the old ones are retired).
+    if (!m.FitOutput(1, error)) {
+        m.device->Table().vkEndCommandBuffer(slot->cmd);
+        return false;
+    }
     if (!m.presenter->Present(index, xbgr, w, h, output, slot->cmd)) {
         error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
         m.device->Table().vkEndCommandBuffer(slot->cmd);
@@ -1361,40 +1502,35 @@ bool VulkanOutput::PresentCopy(const void *xrgb, uint32_t w, uint32_t h, size_t 
         error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
         return false;
     }
+    m.nativeOutput = {w, h};
     uint32_t index = 0;
     Impl::Slot *slot = m.BeginFrame(index, error);
     if (!slot) {
         return false;
     }
+    // Images of exactly the frame size (a size change creates new ones; the old ones are retired).
+    if (!m.FitOutput(1, error)) {
+        m.device->Table().vkEndCommandBuffer(slot->cmd);
+        return false;
+    }
 
-    // Host-coherent: visible to the device at vkQueueSubmit. The frame plus a border column and row repeating its last
-    // column and row (as the compute output, gpu::WrittenSize): a frontend sampling bilinearly at the right and
-    // bottom edges never reads undefined texels.
-    const gpu::OutputSize written = gpu::WrittenSize({w, h});
+    // Host-coherent: visible to the device at vkQueueSubmit.
     const auto *src = static_cast<const uint8_t *>(xrgb);
     auto *dst = static_cast<uint8_t *>(slot->staging.mapped);
     const size_t rowBytes = size_t{w} * 4;
-    const size_t stagingPitch = size_t{written.width} * 4;
     for (uint32_t y = 0; y < h; ++y) {
-        uint8_t *row = dst + y * stagingPitch;
-        std::memcpy(row, src + y * pitch, rowBytes);
-        if (written.width > w) {
-            std::memcpy(row + rowBytes, row + rowBytes - 4, 4);
-        }
-    }
-    if (written.height > h) {
-        std::memcpy(dst + h * stagingPitch, dst + (h - 1) * stagingPitch, stagingPitch);
+        std::memcpy(dst + y * rowBytes, src + y * pitch, rowBytes);
     }
 
     // Earlier readers of the image (the frontend) finish before the copy; the old contents are not needed. The
     // image stays in GENERAL, which the frontend samples without a transition.
-    const VkImage image = slot->copyImage.image;
+    const VkImage image = m.copyImages->images[index].image;
     gpu::vk_util::ImageBarrier(*m.device, slot->cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                VK_ACCESS_TRANSFER_WRITE_BIT);
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {written.width, written.height, 1};
+    region.imageExtent = {w, h, 1};
     m.device->Table().vkCmdCopyBufferToImage(slot->cmd, slot->staging.buffer, image, VK_IMAGE_LAYOUT_GENERAL, 1,
                                              &region);
     gpu::vk_util::ImageBarrier(*m.device, slot->cmd, image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -1454,6 +1590,12 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
         error = "the Vulkan VDP renderer is not attached";
         return false;
     }
+    if (w == 0 || h == 0 || w > gpu::FramePresenter::kMaxSourceWidth || h > gpu::FramePresenter::kMaxSourceHeight) {
+        error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
+        return false;
+    }
+    // The output images are created for this frame's size from here on (ApplyInternalScale, FitOutput).
+    m.nativeOutput = gpu::ComputeOutputSize(w, h, {settings.cropH, settings.cropV, settings.rotation});
     // A new internal resolution applies with a frame to record: the composite is rescaled by that record (a re-present
     // without one would show a composite nothing was written to yet). Before BeginFrame: nothing of this run is
     // recorded, so SetInternalScale may rewrite the renderer's descriptor sets.
@@ -1471,6 +1613,21 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
         m.device->Table().vkEndCommandBuffer(slot->cmd);
         error = "the Vulkan VDP renderer was detached";
         return false;
+    }
+    // Output images of this frame's size at the renderer's internal resolution, before anything is recorded (a size
+    // change creates new ones; the old ones are retired). When they cannot be created above 1x and there is a frame
+    // to record, a lower internal resolution is used (FallBackOutput); otherwise nothing is handed over (the frontend
+    // repeats the image it holds, at its size).
+    if (const uint32_t scale = renderer->InternalScale(); !m.OutputFits(scale)) {
+        std::string fitError;
+        if (!m.FitOutput(scale, fitError)) {
+            std::string fallBackError;
+            if (scale <= 1 || !renderer->HasPendingFrame() || !m.FallBackOutput(scale, fitError, fallBackError)) {
+                m.device->Table().vkEndCommandBuffer(slot->cmd);
+                error = fallBackError.empty() ? fitError : fallBackError;
+                return false;
+            }
+        }
     }
     // This retro_run's VDP2 frame, if one ended; else the composite as it is (the last frame, at the last size). With
     // VDP1 on the GPU the pending VDP1 ops go in the same command buffer, around the frame (with or without one). A

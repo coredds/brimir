@@ -11,8 +11,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace brimir::gpu;
@@ -59,20 +62,6 @@ size_t CountMismatches(const std::vector<uint32_t> &gpu, const std::vector<uint3
         }
     }
     return mismatches;
-}
-
-// The bridge's w x h frame as the output image holds it (gpu::WrittenSize): plus a border column and row repeating
-// the last column and row, where the image has room for them.
-std::vector<uint32_t> WithBorder(const std::vector<uint32_t> &frame, uint32_t w, uint32_t h) {
-    const OutputSize written = WrittenSize({w, h});
-    std::vector<uint32_t> out(static_cast<size_t>(written.width) * written.height);
-    for (uint32_t y = 0; y < written.height; ++y) {
-        for (uint32_t x = 0; x < written.width; ++x) {
-            out[static_cast<size_t>(y) * written.width + x] =
-                frame[static_cast<size_t>(std::min(y, h - 1)) * w + std::min(x, w - 1)];
-        }
-    }
-    return out;
 }
 
 bool PresentBatch(VulkanDevice &device, FramePresenter &presenter, const std::vector<const FramePathCase *> &batch,
@@ -161,19 +150,6 @@ std::vector<uint32_t> ScaledFramePath(const std::vector<uint32_t> &source, const
     return frame;
 }
 
-// As WithBorder, with the border clamped to an image of `maxSize`.
-std::vector<uint32_t> WithBorderIn(const std::vector<uint32_t> &frame, uint32_t w, uint32_t h, uint32_t maxSize) {
-    const OutputSize written = WrittenSize({w, h}, maxSize);
-    std::vector<uint32_t> out(static_cast<size_t>(written.width) * written.height);
-    for (uint32_t y = 0; y < written.height; ++y) {
-        for (uint32_t x = 0; x < written.width; ++x) {
-            out[static_cast<size_t>(y) * written.width + x] =
-                frame[static_cast<size_t>(std::min(y, h - 1)) * w + std::min(x, w - 1)];
-        }
-    }
-    return out;
-}
-
 std::vector<FramePathCase> ScaledCases() {
     std::vector<FramePathCase> cases;
     for (uint32_t w : {320u, 704u}) {
@@ -210,9 +186,6 @@ TEST_CASE("ComputeOutputSize at internal resolution N is N x the native output s
     CHECK(ComputeOutputSize(320, 224, {.cropH = 287, .cropV = 0, .scale = 2}) == OutputSize{66, 448});
     // Scale 0 is treated as 1.
     CHECK(ComputeOutputSize(320, 224, {.scale = 0}) == OutputSize{320, 224});
-    // The border clamps to the image (704 N).
-    CHECK(WrittenSize({2816, 2048}, 2816) == OutputSize{2816, 2049});
-    CHECK(WrittenSize({2048, 2816}, 2816) == OutputSize{2049, 2816});
 }
 
 TEST_CASE("The N x reference of the frame output is the bridge at 1x", "[gpu][frame-output]") {
@@ -233,10 +206,6 @@ TEST_CASE("Frame output pass at internal resolution N equals the N x reference",
     CAPTURE(n);
     auto device = OpenDevice();
     {
-        FramePresenter presenter(*device, kSlots, n);
-        REQUIRE(presenter.Ok());
-        REQUIRE(presenter.Scale() == n);
-        REQUIRE(presenter.MaxOutputSize() == 704 * n);
         vk_util::Buffer source;
         REQUIRE(vk_util::CreateBuffer(*device, VkDeviceSize{704 * n} * (512 * n) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -250,29 +219,35 @@ TEST_CASE("Frame output pass at internal resolution N equals the N x reference",
             std::memcpy(source.mapped, frame.data(), frame.size() * sizeof(uint32_t));
             OutputSettings settings = SettingsOf(c);
             settings.scale = n;
+            OutputSize size;
+            const std::vector<uint32_t> expected = ScaledFramePath(frame, c, n, size);
+            REQUIRE(ComputeOutputSize(c.w, c.h, settings) == size);
+            // Images of exactly the N x output size.
+            FramePresenter presenter(*device, kSlots, size, n);
+            REQUIRE(presenter.Ok());
+            REQUIRE(presenter.Scale() == n);
+            REQUIRE(presenter.Extent() == size);
             bool presented = false;
             REQUIRE(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
                         presented = presenter.PresentDevice(slot, source.buffer, c.w, c.h, settings, cmd);
                     }) == VK_SUCCESS);
             REQUIRE(presented);
-            OutputSize size;
-            const std::vector<uint32_t> expected = ScaledFramePath(frame, c, n, size);
-            REQUIRE(ComputeOutputSize(c.w, c.h, settings) == size);
-            const OutputSize written = WrittenSize(size, presenter.MaxOutputSize());
-            const size_t mismatches =
-                CountMismatches(presenter.ReadbackXRGB(slot, written),
-                                WithBorderIn(expected, size.width, size.height, presenter.MaxOutputSize()),
-                                written.width);
+            const size_t mismatches = CountMismatches(presenter.ReadbackXRGB(slot, size), expected, size.width);
             CHECK(mismatches == 0);
             failures += mismatches != 0;
+            CHECK(presenter.ReadbackXRGB(slot, {size.width + 1, size.height}).empty());
             slot = (slot + 1) % kSlots;
         }
         CHECK(failures == 0);
-        // More than the presenter's scale, and an upload (native only) at N x, are refused.
-        const std::vector<uint32_t> native = MakePatternFrame(320, 224);
+        // Another scale (even with the same output size), and an upload (native only) at N x, are refused.
+        FramePresenter presenter(*device, kSlots, {320 * n, 224 * n}, n);
+        REQUIRE(presenter.Ok());
+        const std::vector<uint32_t> native = MakePatternFrame(320 * n, 224 * n);
         CHECK(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
-                  CHECK_FALSE(presenter.PresentDevice(0, source.buffer, 320, 224, {.scale = n + 1}, cmd));
+                  CHECK_FALSE(presenter.PresentDevice(0, source.buffer, 320, 224, {.scale = n - 1}, cmd));
+                  CHECK_FALSE(presenter.PresentDevice(0, source.buffer, 320 * n, 224 * n, {.scale = 1}, cmd));
                   CHECK_FALSE(presenter.Present(0, native.data(), 320, 224, {.scale = n}, cmd));
+                  CHECK(presenter.PresentDevice(0, source.buffer, 320, 224, {.scale = n}, cmd));
               }) == VK_SUCCESS);
         vk_util::DestroyBuffer(*device, source);
     }
@@ -292,20 +267,29 @@ TEST_CASE("Frame output pass equals the software bridge for every frame path cas
         cases.push_back(c);
     }
 
-    {
-        FramePresenter presenter(*device, kSlots);
+    // The images are exactly the output size: one presenter per output size, for the cases of that size.
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<FramePathCase>> bySize;
+    for (const FramePathCase &c : cases) {
+        const OutputSize size = ComputeOutputSize(c.w, c.h, SettingsOf(c));
+        bySize[{size.width, size.height}].push_back(c);
+    }
+
+    size_t failures = 0;
+    for (const auto &[key, group] : bySize) {
+        const OutputSize extent{key.first, key.second};
+        FramePresenter presenter(*device, kSlots, extent);
         REQUIRE(presenter.Ok());
         REQUIRE(presenter.SlotCount() == kSlots);
+        REQUIRE(presenter.Extent() == extent);
 
         // Fill every slot in one command buffer, then read all of them back: a slot mix-up in the uploads, the
         // descriptors or the images shows up as another case's pixels. Successive batches start at different slots.
-        size_t failures = 0;
-        for (size_t first = 0; first < cases.size(); first += kSlots) {
+        for (size_t first = 0; first < group.size(); first += kSlots) {
             std::vector<const FramePathCase *> batch(kSlots);
             std::vector<std::vector<uint32_t>> frames(kSlots);
             const size_t rotate = (first / kSlots) % kSlots;
             for (uint32_t slot = 0; slot < kSlots; ++slot) {
-                batch[slot] = &cases[(first + (slot + rotate) % kSlots) % cases.size()];
+                batch[slot] = &group[(first + (slot + rotate) % kSlots) % group.size()];
                 frames[slot] = MakePatternFrame(batch[slot]->w, batch[slot]->h);
             }
             REQUIRE(PresentBatch(*device, presenter, batch, frames));
@@ -315,28 +299,28 @@ TEST_CASE("Frame output pass equals the software bridge for every frame path cas
                 uint32_t w = 0;
                 uint32_t h = 0;
                 const std::vector<uint32_t> expected = CpuFramePath(c, &w, &h);
-                const OutputSize size = ComputeOutputSize(c.w, c.h, SettingsOf(c));
-                // The frame and its replicated border.
-                const OutputSize written = WrittenSize(size);
-                const std::vector<uint32_t> actual = presenter.ReadbackXRGB(slot, written);
                 INFO(Describe(c) << " in slot " << slot);
-                REQUIRE(size == OutputSize{w, h});
-                CHECK(written == OutputSize{std::min(w + 1, FramePresenter::kMaxOutputSize),
-                                            std::min(h + 1, FramePresenter::kMaxOutputSize)});
-                const size_t mismatches = CountMismatches(actual, WithBorder(expected, w, h), written.width);
+                REQUIRE(extent == OutputSize{w, h});
+                // The whole image is the frame.
+                const size_t mismatches = CountMismatches(presenter.ReadbackXRGB(slot, extent), expected, w);
                 CHECK(mismatches == 0);
                 failures += mismatches != 0;
             }
         }
-        CHECK(failures == 0);
     }
+    CHECK(failures == 0);
     CloseAndCheckValidation(device);
 }
 
 TEST_CASE("Frame output slots keep their own frames", "[gpu][frame-output]") {
     auto device = OpenDevice();
     {
-        FramePresenter presenter(*device, kSlots);
+        // Same case, a different pattern per slot: XOR with a salt whose R and B bytes are equal, so the salt
+        // survives the XBGR -> XRGB swap unchanged and the expected output is the bridge's XOR the salt.
+        const FramePathCase c{352, 240, 16, 16, 90, false};
+        const OutputSettings settings = SettingsOf(c);
+        const OutputSize size = ComputeOutputSize(c.w, c.h, settings);
+        FramePresenter presenter(*device, kSlots, size);
         REQUIRE(presenter.Ok());
         for (uint32_t slot = 0; slot < kSlots; ++slot) {
             CHECK(presenter.OutputImage(slot) != VK_NULL_HANDLE);
@@ -345,11 +329,6 @@ TEST_CASE("Frame output slots keep their own frames", "[gpu][frame-output]") {
         CHECK(presenter.OutputImage(kSlots) == VK_NULL_HANDLE);
         CHECK(presenter.OutputView(kSlots) == VK_NULL_HANDLE);
 
-        // Same case, a different pattern per slot: XOR with a salt whose R and B bytes are equal, so the salt
-        // survives the XBGR -> XRGB swap unchanged and the expected output is the bridge's XOR the salt.
-        const FramePathCase c{352, 240, 16, 16, 90, false};
-        const OutputSettings settings = SettingsOf(c);
-        const OutputSize size = ComputeOutputSize(c.w, c.h, settings);
         const std::vector<uint32_t> base = CpuFramePath(c);
         auto salt = [](uint32_t slot, uint32_t round) { return ((slot + 1) * 0x00250025u) ^ (round * 0x00004000u); };
         auto expectedFor = [&](uint32_t s) {
@@ -379,9 +358,7 @@ TEST_CASE("Frame output slots keep their own frames", "[gpu][frame-output]") {
         for (uint32_t slot = 0; slot < kSlots; ++slot) {
             INFO("slot " << slot);
             const uint32_t round = slot == 1 ? 1 : 0;
-            CHECK(CountMismatches(presenter.ReadbackXRGB(slot, WrittenSize(size)),
-                                  WithBorder(expectedFor(salt(slot, round)), size.width, size.height),
-                                  WrittenSize(size).width) == 0);
+            CHECK(CountMismatches(presenter.ReadbackXRGB(slot, size), expectedFor(salt(slot, round)), size.width) == 0);
         }
     }
     CloseAndCheckValidation(device);
@@ -390,7 +367,7 @@ TEST_CASE("Frame output slots keep their own frames", "[gpu][frame-output]") {
 TEST_CASE("FramePresenter::Present rejects invalid input without recording", "[gpu][frame-output]") {
     auto device = OpenDevice();
     {
-        FramePresenter presenter(*device, 2);
+        FramePresenter presenter(*device, 2, {320, 224});
         REQUIRE(presenter.Ok());
         const std::vector<uint32_t> frame = MakePatternFrame(FramePresenter::kMaxSourceWidth + 1,
                                                              FramePresenter::kMaxSourceHeight + 1);
@@ -401,30 +378,43 @@ TEST_CASE("FramePresenter::Present rejects invalid input without recording", "[g
             CHECK_FALSE(presenter.Present(0, frame.data(), 320, 0, {}, cmd));
             CHECK_FALSE(presenter.Present(0, frame.data(), FramePresenter::kMaxSourceWidth + 1, 224, {}, cmd));
             CHECK_FALSE(presenter.Present(0, frame.data(), 320, FramePresenter::kMaxSourceHeight + 1, {}, cmd));
+            // Output sizes other than the images' extent.
+            CHECK_FALSE(presenter.Present(0, frame.data(), 352, 224, {}, cmd));
+            CHECK_FALSE(presenter.Present(0, frame.data(), 320, 240, {}, cmd));
+            CHECK_FALSE(presenter.Present(0, frame.data(), 320, 224, {.rotation = 90}, cmd));
+            CHECK_FALSE(presenter.Present(0, frame.data(), 352, 240, {.cropH = 16, .cropV = 16, .rotation = 90}, cmd));
         });
         CHECK(result == VK_SUCCESS);
-        // The largest frame is accepted.
+        // The same output size through a crop is accepted.
         CHECK(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
-                  CHECK(presenter.Present(1, frame.data(), FramePresenter::kMaxSourceWidth,
-                                          FramePresenter::kMaxSourceHeight, {.rotation = 270}, cmd));
+                  CHECK(presenter.Present(1, frame.data(), 352, 240, {.cropH = 32, .cropV = 16}, cmd));
               }) == VK_SUCCESS);
-        CHECK(presenter.ReadbackXRGB(1, {512, 704}).size() == 512u * 704u);
-        // Its border: a column only (the image is 704 high), and the pixels with it equal the bridge's.
-        {
-            const FramePathCase c{FramePresenter::kMaxSourceWidth, FramePresenter::kMaxSourceHeight, 0, 0, 270, false};
-            const std::vector<uint32_t> largest = MakePatternFrame(c.w, c.h);
-            REQUIRE(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
-                        CHECK(presenter.Present(0, largest.data(), c.w, c.h, SettingsOf(c), cmd));
-                    }) == VK_SUCCESS);
-            uint32_t w = 0;
-            uint32_t h = 0;
-            const std::vector<uint32_t> expected = CpuFramePath(c, &w, &h);
-            REQUIRE(OutputSize{w, h} == OutputSize{512, 704});
-            REQUIRE(WrittenSize({w, h}) == OutputSize{513, 704});
-            CHECK(CountMismatches(presenter.ReadbackXRGB(0, {513, 704}), WithBorder(expected, w, h), 513) == 0);
-        }
-        CHECK(presenter.ReadbackXRGB(1, {705, 1}).empty());
+        CHECK(presenter.ReadbackXRGB(1, {320, 224}).size() == 320u * 224u);
+        CHECK(presenter.ReadbackXRGB(1, {321, 224}).empty());
+        CHECK(presenter.ReadbackXRGB(1, {320, 225}).empty());
         CHECK(presenter.ReadbackXRGB(2, {1, 1}).empty());
     }
+    {
+        // The largest frame, rotated: images of 512 x 704, the whole image equal to the bridge's frame.
+        const FramePathCase c{FramePresenter::kMaxSourceWidth, FramePresenter::kMaxSourceHeight, 0, 0, 270, false};
+        FramePresenter presenter(*device, 1, {512, 704});
+        REQUIRE(presenter.Ok());
+        const std::vector<uint32_t> largest = MakePatternFrame(c.w, c.h);
+        REQUIRE(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
+                    CHECK(presenter.Present(0, largest.data(), c.w, c.h, SettingsOf(c), cmd));
+                }) == VK_SUCCESS);
+        uint32_t w = 0;
+        uint32_t h = 0;
+        const std::vector<uint32_t> expected = CpuFramePath(c, &w, &h);
+        REQUIRE(OutputSize{w, h} == OutputSize{512, 704});
+        CHECK(CountMismatches(presenter.ReadbackXRGB(0, {512, 704}), expected, 512) == 0);
+    }
+    // Extents the presenter cannot have: empty, or above 704 N on an axis.
+    CHECK_FALSE(FramePresenter(*device, 1, {0, 224}).Ok());
+    CHECK_FALSE(FramePresenter(*device, 1, {320, 0}).Ok());
+    CHECK_FALSE(FramePresenter(*device, 1, {705, 224}).Ok());
+    CHECK_FALSE(FramePresenter(*device, 1, {320, 1409}, 2).Ok());
+    CHECK(FramePresenter(*device, 1, {1408, 1408}, 2).Ok());
+    CHECK_FALSE(FramePresenter(*device, 1, {320, 224}, FramePresenter::kMaxScale + 1).Ok());
     CloseAndCheckValidation(device);
 }

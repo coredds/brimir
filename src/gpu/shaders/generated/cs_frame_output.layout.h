@@ -13,8 +13,6 @@ inline constexpr uint32_t kCsFrameOutput_Params_cropWidth = 12;
 inline constexpr uint32_t kCsFrameOutput_Params_outWidth = 16;
 inline constexpr uint32_t kCsFrameOutput_Params_outHeight = 20;
 inline constexpr uint32_t kCsFrameOutput_Params_rotation = 24;
-inline constexpr uint32_t kCsFrameOutput_Params_writeWidth = 28;
-inline constexpr uint32_t kCsFrameOutput_Params_writeHeight = 32;
-inline constexpr uint32_t kCsFrameOutput_Params_size = 36;
+inline constexpr uint32_t kCsFrameOutput_Params_size = 28;
 
 } // namespace brimir::gpu::shaders

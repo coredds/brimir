@@ -200,23 +200,29 @@ VKAPI_ATTR void VKAPI_CALL HookFreeMemory(VkDevice device, VkDeviceMemory memory
 }
 
 // --fail-output-images-above: the images the core hands to set_image (MUTABLE_FORMAT, which libretro_vulkan.h
-// requires for them) fail to be created above 704 * N px.
+// requires for them; they are exactly the frame size) fail to be created wider than 352 * N px (the widest low-res
+// frame at N x). Every image's extent is recorded for CheckFrameExtent.
 VKAPI_ATTR VkResult VKAPI_CALL HookCreateImage(VkDevice device, const VkImageCreateInfo* info,
                                                const VkAllocationCallbacks* allocator, VkImage* image) {
     const uint32_t scale = g_provider->FailOutputImagesAbove();
     if (scale != 0 && info != nullptr && (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0 &&
-        info->extent.width > 704 * scale) {
+        info->extent.width > 352 * scale) {
         g_provider->CountFailedAllocation();
         std::fprintf(stderr, "vkhost: vulkan: vkCreateImage of a %ux%u output image refused (--fail-output-images-above)\n",
                      info->extent.width, info->extent.height);
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
-    return g_provider->Real().createImage(device, info, allocator, image);
+    const VkResult result = g_provider->Real().createImage(device, info, allocator, image);
+    if (result == VK_SUCCESS && info != nullptr && image != nullptr) {
+        g_provider->OnCreateImage(HandleValue(*image), info->extent.width, info->extent.height);
+    }
+    return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL HookDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator) {
     if (image != VK_NULL_HANDLE) {
         g_provider->OnDestroy(HandleValue(image), "image");
+        g_provider->OnDestroyImage(HandleValue(image));
     }
     g_provider->Real().destroyImage(device, image, allocator);
 }
@@ -926,6 +932,41 @@ void VulkanProvider::EndFrame() {
         slot.pending = false;
     }
     m_syncIndex = (m_syncIndex + 1) % m_syncSlots;
+}
+
+void VulkanProvider::OnCreateImage(uint64_t image, uint32_t w, uint32_t h) {
+    std::lock_guard lock(m_imageMutex);
+    m_imageExtents[image] = {w, h};
+}
+
+void VulkanProvider::OnDestroyImage(uint64_t image) {
+    std::lock_guard lock(m_imageMutex);
+    m_imageExtents.erase(image);
+}
+
+void VulkanProvider::CheckFrameExtent(unsigned w, unsigned h) {
+    const auto* image = static_cast<const retro_vulkan_image*>(m_image);
+    if (!m_live || image == nullptr) {
+        return;
+    }
+    std::pair<uint32_t, uint32_t> extent{};
+    {
+        std::lock_guard lock(m_imageMutex);
+        const auto it = m_imageExtents.find(HandleValue(image->create_info.image));
+        if (it == m_imageExtents.end()) {
+            ++m_extentMismatches;
+            AddProblem("set_image: the image was not created through the host's vkCreateImage (size unknown)");
+            return;
+        }
+        extent = it->second;
+    }
+    if (extent.first != w || extent.second != h) {
+        // RetroArch samples the whole image as if it were the video_cb size: the frame would fill only part of it.
+        ++m_extentMismatches;
+        AddProblem("set_image: image extent " + std::to_string(extent.first) + "x" + std::to_string(extent.second) +
+                   " differs from the frame size " + std::to_string(w) + "x" + std::to_string(h) +
+                   " reported to video_cb");
+    }
 }
 
 bool VulkanProvider::ReadImage(unsigned w, unsigned h, HostFrame& out) {

@@ -1,6 +1,6 @@
 // Frame output pass (gpu/frame_presenter.cpp): native Ymir XBGR8888 frame -> R8G8B8A8 output image, with the
-// bridge's overscan crop and rotation (CoreWrapper::OnFrameComplete). One thread per output pixel, plus a replicated
-// 1-pixel border right of and below the frame (a frontend sampling bilinearly at the edge reads it).
+// bridge's overscan crop and rotation (CoreWrapper::OnFrameComplete). One thread per output pixel; the output image is
+// exactly the output size (the frontend samples the whole image as the frame).
 // Bindings (tools/shaders/build_shaders.cmake shifts t by 0, u by 16): t0 -> binding 0, u0 -> binding 16.
 
 // At internal resolution N (device frames) every field is N x the native value: the host scales them (the crop guard
@@ -13,8 +13,6 @@ struct Params {
     uint outWidth;  // output (post-rotation) size
     uint outHeight;
     uint rotation;  // 0, 90 (clockwise), 180, 270 (counter-clockwise)
-    uint writeWidth;  // outWidth/outHeight + 1 for the border, clamped to the image size
-    uint writeHeight;
 };
 
 [[vk::push_constant]] Params gParams;
@@ -26,12 +24,11 @@ StructuredBuffer<uint> gSource : register(t0); // 0xAABBGGRR = bytes R, G, B, A
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= gParams.writeWidth || id.y >= gParams.writeHeight) {
+    if (id.x >= gParams.outWidth || id.y >= gParams.outHeight) {
         return;
     }
-    // The border column and row repeat the frame's last column and row.
-    const uint x = min(id.x, gParams.outWidth - 1);
-    const uint y = min(id.y, gParams.outHeight - 1);
+    const uint x = id.x;
+    const uint y = id.y;
 
     // Output pixel -> cropped-frame pixel, the inverse of the bridge's rotation loops.
     uint sx = x;

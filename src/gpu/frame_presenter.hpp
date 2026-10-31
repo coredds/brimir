@@ -1,8 +1,9 @@
 #pragma once
 
 // The GPU frame output pass: takes a native Ymir frame (XBGR8888, 0xAABBGGRR, pitch = width) and produces the
-// frame the libretro layer presents, in an R8G8B8A8_UNORM image per sync slot. The transforms are the bridge's
-// (CoreWrapper::OnFrameComplete): XBGR -> RGB, overscan crop, then rotation. At 1x the RGB channels equal the
+// frame the libretro layer presents, in an R8G8B8A8_UNORM image per sync slot whose extent is exactly the output size
+// (a frontend samples the whole image it gets from set_image as the frame video_cb reports). The transforms are the
+// bridge's (CoreWrapper::OnFrameComplete): XBGR -> RGB, overscan crop, then rotation. At 1x the RGB channels equal the
 // software path's XRGB8888 output byte for byte; alpha is 0xFF (the software path leaves 0x00). The shader stores
 // the packed words through an R32_UINT view of each image, so no float conversion is involved. At internal resolution
 // N (device frames only) the same transforms apply to the N x frame: crop decided natively, offsets N * (crop / 2).
@@ -36,23 +37,20 @@ struct OutputSize {
 // exceeds it by more than 32 px on both axes; otherwise the frame passes through uncropped. 90/270 swap the axes.
 OutputSize ComputeOutputSize(uint32_t w, uint32_t h, const OutputSettings &settings);
 
-// The part of the output image a Present writes for an output of `size`: the frame plus a 1-pixel border column and
-// row (clamped to the image size, maxSize: FramePresenter::MaxOutputSize()) repeating its last column and row, so a
-// frontend sampling bilinearly at the right and bottom edges never reads undefined texels.
-OutputSize WrittenSize(OutputSize size, uint32_t maxSize = 704);
-
 class FramePresenter {
 public:
-    // Largest native frame (VDP2 hi-res interlaced) and native output image size (square so 90/270 fit).
+    // Largest native frame (VDP2 hi-res interlaced) and largest native output size per axis (704 either way after a
+    // 90/270 rotation).
     static constexpr uint32_t kMaxSourceWidth = 704;
     static constexpr uint32_t kMaxSourceHeight = 512;
     static constexpr uint32_t kMaxOutputSize = 704;
-    // Largest internal resolution: output images of 704 * 4 = 2816 px.
+    // Largest internal resolution: outputs up to 704 * 4 = 2816 px per axis.
     static constexpr uint32_t kMaxScale = 4;
 
-    // Creates slotCount output images (square, MaxOutputSize() = 704 * scale) and upload buffers. A presenter at scale
-    // N presents device frames of internal resolution up to N; uploads (Present) are native. Check Ok() afterwards.
-    FramePresenter(VulkanDevice &device, uint32_t slotCount, uint32_t scale = 1);
+    // Creates slotCount output images of exactly `extent` and upload buffers: the presenter presents frames whose
+    // output size (ComputeOutputSize) is `extent`, at internal resolution `scale` (uploads, Present, are native: scale
+    // 1). extent must be non-zero and at most 704 * scale per axis. Check Ok() afterwards.
+    FramePresenter(VulkanDevice &device, uint32_t slotCount, OutputSize extent, uint32_t scale = 1);
     // Destroys everything immediately: the GPU (and the frontend) must be done with every slot first, e.g. after
     // vkDeviceWaitIdle in context_destroy.
     ~FramePresenter();
@@ -63,23 +61,24 @@ public:
     // VK_SUCCESS, or the result of the creation step that failed.
     VkResult Result() const { return m_result; }
     uint32_t SlotCount() const { return static_cast<uint32_t>(m_slots.size()); }
+    // The internal resolution of the frames the images are sized for.
     uint32_t Scale() const { return m_scale; }
-    // The output images' size (square): 704 * Scale().
-    uint32_t MaxOutputSize() const { return kMaxOutputSize * m_scale; }
+    // The output images' extent.
+    OutputSize Extent() const { return m_extent; }
 
     // Copies the frame into the slot's upload buffer now and records the upload copy, the conversion dispatch and
     // the barriers into cmd. The slot's previous frame must no longer be in use (GPU or frontend). Afterwards the
-    // image is in VK_IMAGE_LAYOUT_GENERAL with the compute writes available to any later read; its top-left
-    // ComputeOutputSize(w, h, settings) pixels hold the frame, followed by the replicated border (WrittenSize).
+    // image is in VK_IMAGE_LAYOUT_GENERAL with the compute writes available to any later read, holding the frame.
     // Returns false and records nothing when the presenter failed to initialize, slot is out of range, xbgr is null,
-    // w x h is zero or exceeds 704 x 512, or settings.scale is not 1 (uploads are native).
+    // w x h is zero or exceeds 704 x 512, settings.scale is not 1 (uploads are native), or the output size
+    // ComputeOutputSize(w, h, settings) is not Extent().
     bool Present(uint32_t slot, const uint32_t *xbgr, uint32_t w, uint32_t h, const OutputSettings &settings,
                  VkCommandBuffer cmd);
 
     // As Present, but the frame is already on the device: the shader reads `source` (a storage buffer, e.g. the VDP2
     // composite: XBGR8888, the N x frame of the native w x h at N = settings.scale, pitch N * w) through the slot's
     // second descriptor set, with no upload. Writes to `source` recorded earlier in cmd or in earlier submissions are
-    // made visible here. Also false for a settings.scale above Scale().
+    // made visible here. Also false when settings.scale is not Scale() (the output size must be Extent()).
     bool PresentDevice(uint32_t slot, VkBuffer source, uint32_t w, uint32_t h, const OutputSettings &settings,
                        VkCommandBuffer cmd);
 
@@ -87,9 +86,8 @@ public:
     VkImage OutputImage(uint32_t slot) const;
     VkImageView OutputView(uint32_t slot) const;
 
-    // Test/vkhost helper: reads the top-left size pixels (up to MaxOutputSize() square) of the slot's image back as
-    // XRGB8888 (0x00RRGGBB, tightly packed) in a one-shot submit (pass WrittenSize(..., MaxOutputSize()) to include the
-    // border). Call after the Present for the slot has completed; empty on failure.
+    // Test helper: reads the top-left size pixels (up to Extent()) of the slot's image back as XRGB8888 (0x00RRGGBB,
+    // tightly packed) in a one-shot submit. Call after the Present for the slot has completed; empty on failure.
     std::vector<uint32_t> ReadbackXRGB(uint32_t slot, OutputSize size);
 
 private:
@@ -103,7 +101,7 @@ private:
         bool presented = false; // a Present was recorded (ReadbackXRGB's precondition only)
     };
 
-    VkResult Init(uint32_t slotCount, uint32_t scale);
+    VkResult Init(uint32_t slotCount);
     void Destroy();
     // The image transition, conversion dispatch and final barrier shared by Present and PresentDevice.
     void RecordConversion(Slot &slot, VkDescriptorSet set, uint32_t w, uint32_t h, const OutputSettings &settings,
@@ -112,6 +110,7 @@ private:
     VulkanDevice &m_device;
     VkResult m_result = VK_ERROR_INITIALIZATION_FAILED;
     uint32_t m_scale = 1;
+    OutputSize m_extent{};
     std::vector<Slot> m_slots;
     vk_util::Buffer m_readback; // ReadbackXRGB only
     VkDescriptorSetLayout m_setLayout = VK_NULL_HANDLE;
