@@ -197,7 +197,7 @@ jobs:
             -DBRIMIR_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench --parallel $(sysctl -n hw.ncpu)
+        run: cmake --build build --target brimir_libretro brimir_tests brimir_bench brimir_vkhost --parallel $(sysctl -n hw.ncpu)
 
       - name: Test
         run: ctest --test-dir build --output-on-failure

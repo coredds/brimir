@@ -30,6 +30,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 namespace vkhost {
 
@@ -67,6 +70,14 @@ fs::path SelfPath() {
     const DWORD n = GetModuleFileNameA(nullptr, buffer, static_cast<DWORD>(sizeof(buffer)));
     if (n > 0 && n < sizeof(buffer)) {
         return fs::path(std::string(buffer, n));
+    }
+#elif defined(__APPLE__)
+    char buffer[4096];
+    uint32_t size = sizeof(buffer);
+    if (_NSGetExecutablePath(buffer, &size) == 0) {
+        std::error_code ec;
+        const fs::path exe = fs::canonical(buffer, ec);
+        return ec ? fs::path(buffer) : exe;
     }
 #else
     std::error_code ec;

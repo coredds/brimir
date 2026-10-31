@@ -33,6 +33,9 @@
 #else
 #include <unistd.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 namespace {
 
@@ -194,6 +197,14 @@ fs::path ExecutableDir() {
     const DWORD n = GetModuleFileNameA(nullptr, buffer, static_cast<DWORD>(sizeof(buffer)));
     if (n > 0 && n < sizeof(buffer)) {
         return fs::path(std::string(buffer, n)).parent_path();
+    }
+#elif defined(__APPLE__)
+    char buffer[4096];
+    uint32_t size = sizeof(buffer);
+    if (_NSGetExecutablePath(buffer, &size) == 0) {
+        std::error_code ec;
+        const fs::path exe = fs::canonical(buffer, ec);
+        return (ec ? fs::path(buffer) : exe).parent_path();
     }
 #else
     std::error_code ec;
