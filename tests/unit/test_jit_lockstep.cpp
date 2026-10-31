@@ -458,7 +458,11 @@ TEST_CASE("ApplyFixedRtc: virtual clock at the date", "[lockstep][rtc]") {
     REQUIRE(brimir::ApplyFixedRtc(*core, brimir::kDeterministicRtcDate));
     ymir::Saturn& saturn = *core->GetSaturn();
     CHECK(*saturn.configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual);
+    // The RTC converts through the host's local time (mktime with tm_isdst 0, localtime), so in a time zone with daylight
+    // saving time on that date (Brazil in 1994) it reads an hour later: compare with the same round trip.
     const util::datetime::DateTime d = saturn.SMPC.GetRTC().GetDateTime();
-    CHECK((d.year == 1994 && d.month == 11 && d.day == 22 && d.weekday == 2 && d.hour == 0 && d.minute == 0 &&
-           d.second == 0));
+    const util::datetime::DateTime e =
+        util::datetime::from_timestamp(util::datetime::to_timestamp(brimir::kDeterministicRtcDate));
+    CHECK((d.year == 1994 && d.month == 11 && d.day == 22 && d.weekday == 2));
+    CHECK((d.hour == e.hour && d.minute == e.minute && d.second == e.second && e.minute == 0 && e.second == 0));
 }
