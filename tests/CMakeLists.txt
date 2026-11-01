@@ -164,7 +164,9 @@ if(BRIMIR_VULKAN)
         COMMAND brimir_tests "[gpu][vdp2][scene]"
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-    set_tests_properties(brimir_tests_gpu_vdp1 PROPERTIES ENVIRONMENT "BRIMIR_VDP1_MODE=gpu")
+    # Every case in this entry is [gpu]: without a Vulkan device they all SKIP and Catch2 exits with 4 ("all test cases
+    # skipped"), which counts as skipped here. With BRIMIR_REQUIRE_VULKAN=1 (the lavapipe job) the cases fail instead.
+    set_tests_properties(brimir_tests_gpu_vdp1 PROPERTIES ENVIRONMENT "BRIMIR_VDP1_MODE=gpu" SKIP_RETURN_CODE 4)
 endif()
 
 # The libretro Vulkan context through brimir_vkhost (tests/vkhost_checks.cmake): BIOS menu frames, software vs

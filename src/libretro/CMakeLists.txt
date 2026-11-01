@@ -10,6 +10,9 @@ target_include_directories(brimir_libretro_api PUBLIC
 )
 
 target_compile_features(brimir_libretro_api PUBLIC cxx_std_20)
+# The core's headers (include/brimir/lockstep.hpp includes ymir/savestate/...); Vulkan builds also got them through
+# brimir-gpu. Usage requirements only: brimir_libretro links the core itself.
+target_link_libraries(brimir_libretro_api PRIVATE brimir::brimir-core)
 
 # Propagate the project version so retro_get_system_info reports the same
 # version as CMake / the .info file.
