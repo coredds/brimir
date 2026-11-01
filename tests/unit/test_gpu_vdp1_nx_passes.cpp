@@ -746,13 +746,14 @@ gpu::Vdp1OpList SingleOp(const gpu::Vdp1OpList &ops, size_t i) {
 }
 
 struct NxSceneStats {
-    uint64 ops = 0, batches = 0, subBatches = 0, slots = 0, fragments = 0, erases = 0, fbWriteRuns = 0;
+    uint64 ops = 0, batches = 0, splitBatches = 0, subBatches = 0, slots = 0, fragments = 0, erases = 0, fbWriteRuns = 0;
     std::array<uint64, 3> spans{};
     uint32 maxPerUnit = 0;
     void Merge(const NxSceneStats &o) {
         ops += o.ops;
         batches += o.batches;
         subBatches += o.subBatches;
+        splitBatches += o.splitBatches;
         slots += o.slots;
         fragments += o.fragments;
         erases += o.erases;
@@ -888,6 +889,7 @@ private:
         const uint32 batchIndex = static_cast<uint32>(&b - ops.batches.data());
         m_arena.Clear();
         const auto subs = gpu::GenerateNx(ops, batchIndex, m_n, m_arena);
+        stats.splitBatches += subs.size() > 1;
         for (size_t s = 0; s < subs.size(); ++s) {
             const gpu::Vdp1NxSubBatch &sb = subs[s];
             ++stats.subBatches;
@@ -1129,7 +1131,8 @@ TEST_CASE("VDP1 N x passes: hand-made scenes equal the reference pass by pass at
     INFO("device: " << device->Properties().deviceName);
     {
         NxSceneStats total;
-        for (uint32 n = 2; n <= gpu::kMaxNxScale; ++n) {
+        // N = 3 only on a GPU (a CPU device such as lavapipe runs 2 and 4; the random tables cover 3 there)
+        for (uint32 n = 2; n <= gpu::kMaxNxScale; n += IsCpuDevice(*device) ? 2 : 1) {
             GpuVdp1Nx g(*device, n);
             REQUIRE(g.Ok());
             for (const auto &[name, s] : HandScenes()) {
@@ -1143,7 +1146,7 @@ TEST_CASE("VDP1 N x passes: hand-made scenes equal the reference pass by pass at
             CAPTURE(n);
             NxSceneStats split;
             CHECK(RunScene(g, HandScenes()[0].second, true, &split, {4000, 16}) == "");
-            CHECK(split.subBatches > split.batches);
+            CHECK(split.splitBatches > 0);
             total.Merge(split);
             UNSCOPED_INFO("N=" << n << " timings: " << g.Times().Format());
         }
@@ -1198,7 +1201,7 @@ TEST_CASE("VDP1 N x passes: random command tables through the generator equal th
                                << stats.fragments << ", erases " << stats.erases << ", write runs "
                                << stats.fbWriteRuns << ", max per N x unit " << stats.maxPerUnit);
         CHECK(mismatches == 0);
-        CHECK(stats.subBatches > stats.batches);
+        CHECK(stats.splitBatches > 0);
         CHECK(stats.erases > 0);
         CHECK(stats.fbWriteRuns > 0);
         CHECK(stats.spans[0] > 0);
