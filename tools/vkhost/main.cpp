@@ -843,6 +843,14 @@ void PrintVdp1ProbeSummary(const std::vector<vkhost::Vdp1ProbeFrame>& frames) {
     for (int i = 0; i < 6; ++i) {
         printValues(kEnds[i], [i](const vkhost::Vdp1ProbeFrame& f) { return f.batchEnds[i]; });
     }
+    // N x generator (VDP1 upscaling): spans by kind, slots, sub-batches and its CPU time per retro_run
+    static constexpr const char* kNxKinds[3] = {"nx_rect", "nx_quad", "nx_repl"};
+    for (int i = 0; i < 3; ++i) {
+        printValues(kNxKinds[i], [i](const vkhost::Vdp1ProbeFrame& f) { return f.nxSpans[i]; });
+    }
+    printStats("nx_slots", &vkhost::Vdp1ProbeFrame::nxSlots);
+    printStats("nx_subb", &vkhost::Vdp1ProbeFrame::nxSubBatches);
+    printValues("nx_gen_us", [](const vkhost::Vdp1ProbeFrame& f) { return f.nxGenerateNanos / 1000; });
 }
 
 } // namespace

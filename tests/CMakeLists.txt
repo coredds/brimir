@@ -89,6 +89,8 @@ add_executable(brimir_tests
     unit/vdp1_nx_reference.cpp
     unit/test_vdp1_nx_reference.cpp
     unit/test_vdp1_nx_render.cpp
+    # The front half's N x span generator (vdp1_nx_front.hpp) against the reference generator
+    unit/test_vdp1_nx_front.cpp
     # VDP1 shaders on the Vulkan 1.2 baseline: SPIR-V checks ([vdp1] runs without Vulkan) and pipeline creation
     # ([gpu], compiled with BRIMIR_VULKAN only)
     unit/test_gpu_vdp1_pipelines.cpp

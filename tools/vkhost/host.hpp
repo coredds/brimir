@@ -136,6 +136,12 @@ struct Vdp1ProbeFrame {
     // draw batches the GPU VDP1 front half closed, by end reason (op kind, VRAM hazard, framebuffer swap, capacity,
     // frame boundary, take; zero in older cores and without a front half)
     uint64_t batchEnds[6] = {};
+    // the N x VDP1 generator (GPU stage 3): spans by kind (rect, quad, replicate), slots, sub-batches and its time;
+    // zero in older cores and with VDP1 upscaling off
+    uint64_t nxSpans[3] = {};
+    uint64_t nxSlots = 0;
+    uint64_t nxSubBatches = 0;
+    uint64_t nxGenerateNanos = 0;
 };
 
 // What a run did, for the CLI summary and the checks.

@@ -520,12 +520,14 @@ bool LibretroHost::ProbeLine(const char* text) {
 
 bool LibretroHost::Vdp1ProbeLine(const char* text) {
     const char* line = std::strstr(text, "VDP1 probe: ");
-    unsigned long long v[13] = {};
+    unsigned long long v[19] = {};
     const int n = std::sscanf(line,
                               "VDP1 probe: commands %llu lines %llu pixels %llu syncs %llu dirtysyncs %llu fbwrites %llu "
-                              "erases %llu batches opkind %llu hazard %llu swap %llu capacity %llu boundary %llu take %llu",
-                              &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12]);
-    if (n != 7 && n != 13) { // 7: a core without the batch counters
+                              "erases %llu batches opkind %llu hazard %llu swap %llu capacity %llu boundary %llu take %llu "
+                              "nx rect %llu quad %llu replicate %llu slots %llu subbatches %llu gen_ns %llu",
+                              &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12],
+                              &v[13], &v[14], &v[15], &v[16], &v[17], &v[18]);
+    if (n != 7 && n != 13 && n != 19) { // 7: a core without the batch counters; 13: without the N x counters
         return false;
     }
     if (m_sink != nullptr) {
@@ -533,6 +535,12 @@ bool LibretroHost::Vdp1ProbeLine(const char* text) {
         for (int i = 0; i < 6; ++i) {
             f.batchEnds[i] = v[7 + i];
         }
+        for (int i = 0; i < 3; ++i) {
+            f.nxSpans[i] = v[13 + i];
+        }
+        f.nxSlots = v[16];
+        f.nxSubBatches = v[17];
+        f.nxGenerateNanos = v[18];
         m_vdp1ProbeFrames.push_back(f);
     }
     return true;

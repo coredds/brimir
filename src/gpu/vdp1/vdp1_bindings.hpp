@@ -152,6 +152,9 @@ inline constexpr uint32_t kFbWriteBufferSize = kMaxFbWritesPerBatch * sizeof(Vdp
 static_assert(kMaxSpansPerBatch <= kMaxFragmentsPerBatch); // span indices fit the fragment-indexed passes
 static_assert(kMaxCommandsPerBatch * 0x20 == kVRAMBufferSize); // 32-byte command tables in 512 KiB of VDP1 VRAM
 static_assert(kMaxFbWritesPerBatch == kFbramSliceSize);
+// N x sub-batches use the same fragment and span buffers (vdp1_hw_params.hpp, Vdp1NxSpan)
+static_assert(kMaxNxSlotsPerSubBatch == kMaxFragmentsPerBatch && kMaxNxSpansPerSubBatch == kMaxSpansPerBatch);
+static_assert(sizeof(Vdp1NxSpan) == sizeof(Vdp1Span));
 
 /// @brief The raster pass's `scale` push constant (Vdp1BatchPushConstants::scale): stage 2 draws at native resolution.
 inline constexpr uint32_t kRasterScale = 1;

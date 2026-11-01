@@ -6,6 +6,8 @@
 
 add_library(brimir-vdp1-front STATIC
     vdp1_front.cpp
+    # N x span generator (GPU stage 3: native batches into N x sub-batches of rect / quad / replicate spans)
+    vdp1_nx_front.cpp
     # Frame captures of the op lists (brimir_vkhost --dump-vdp1-ops; read by the N x reference tools)
     vdp1_op_dump.cpp
 )

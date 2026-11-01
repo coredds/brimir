@@ -11,8 +11,8 @@
 // - flags are packed by explicit shifts, documented below and mirrored by the HLSL accessors of the same names
 //   (a Vdp1Foo accessor here is Vdp1Foo in vdp1_defs.hlsli); tests/unit/test_gpu_vdp1_params.cpp runs both over
 //   random words;
-// - sizes: the buffer structs Vdp1CommandParams (80 bytes), Vdp1Span (32, the size the plan names) and Vdp1FbWrite (16)
-//   are multiples of 16 bytes; Vdp1Fragment, one slot of a buffer of millions, is 8 bytes; the push-constant blocks
+// - sizes: the buffer structs Vdp1CommandParams (80 bytes), Vdp1Span (32, the size the plan names), Vdp1NxSpan (32)
+//   and Vdp1FbWrite (16) are multiples of 16 bytes; Vdp1Fragment, one slot of a buffer of millions, is 8 bytes; the push-constant blocks
 //   are Vdp1BatchPushConstants 24, Vdp1ErasePushConstants 32 and Vdp1FbWritePushConstants 8 bytes.
 // Every offset and size is checked against the reflected layouts of src/gpu/shaders/vdp1/cs_vdp1_layout_probe.hlsl,
 // which declares them all (tests/unit/test_gpu_vdp1_params.cpp). No Vulkan header may be included here.
@@ -253,6 +253,68 @@ constexpr uint32_t Vdp1SpanQuadStep(uint32_t stepTexV) {
 constexpr uint32_t Vdp1SpanTexV(uint32_t stepTexV) {
     return static_cast<uint32_t>(static_cast<int32_t>(stepTexV) >> 16);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// N x span (GPU stage 3; StructuredBuffer<NxSpan>, 32 bytes): one span of an N x sub-batch, as the N x generator
+// (vdp1_nx_front.hpp) emits it from a native batch. Three kinds (tests/unit/vdp1_nx_reference.hpp is the spec):
+//   Rect       one N x sub-row of a native rect row: x0..y1 the native span's end points, subRow the sub-row in
+//              stepping order, texV the sub-row's texel row and gouraudLR its edge colours; N * native Length() slots
+//   Quad       an N x line: x0..y1 the N x end points (quads, thin quads and parallel lines), texV the texel row of the
+//              N x quad step; 2 * Length() slots after the N x system clip, key slotBase + 2 * step + isAA
+//   Replicate  a native span whose fragments become N x N blocks: x0..y1, texV and gouraudLR the native span's;
+//              N^2 * native slots, key slotBase + N^2 * nativeKey + j * N + i
+// A sub-batch's spans have contiguous slot ranges in emission order starting at 0: a span's slots end at the next
+// span's slotBase (the last one's at the sub-batch's slot count), so the slot order is the drawing order.
+//
+// flags:
+//   bits 1-0    kind (kNxSpanRect, kNxSpanQuad, kNxSpanReplicate)
+//   bit 2       antialiased (Quad)
+//   bits 4-3    sub-row 0..N-1 (Rect)
+//   bits 31-16  texel row (int16)
+
+inline constexpr uint32_t kMaxNxScale = 4;
+inline constexpr uint32_t kNxSpanRect = 0;
+inline constexpr uint32_t kNxSpanQuad = 1;
+inline constexpr uint32_t kNxSpanReplicate = 2;
+/// @brief Sub-batch capacities: the slots of the fragment buffer and the spans of the span buffer (equal to
+/// kMaxFragmentsPerBatch and kMaxSpansPerBatch, vdp1_bindings.hpp); one span over the slot capacity goes alone.
+inline constexpr uint32_t kMaxNxSlotsPerSubBatch = 4u * 1024 * 1024;
+inline constexpr uint32_t kMaxNxSpansPerSubBatch = 256u * 1024;
+
+struct Vdp1NxSpan {
+    HLSLuint x0, y0, x1, y1; // end points (int32): native (Rect, Replicate) or N x (Quad)
+    HLSLuint cmdIndex;       // Vdp1CommandParams index (relative to Vdp1BatchPushConstants::cmdOffset)
+    HLSLuint slotBase;       // first slot in the sub-batch
+    HLSLuint gouraudLR;      // left Color555 | right << 16
+    HLSLuint flags;          // see above
+};
+static_assert(sizeof(Vdp1NxSpan) == 32);
+static_assert(offsetof(Vdp1NxSpan, x0) == 0 && offsetof(Vdp1NxSpan, y0) == 4 && offsetof(Vdp1NxSpan, x1) == 8 &&
+              offsetof(Vdp1NxSpan, y1) == 12 && offsetof(Vdp1NxSpan, cmdIndex) == 16 &&
+              offsetof(Vdp1NxSpan, slotBase) == 20 && offsetof(Vdp1NxSpan, gouraudLR) == 24 &&
+              offsetof(Vdp1NxSpan, flags) == 28);
+static_assert(std::is_trivially_copyable_v<Vdp1NxSpan> && std::is_standard_layout_v<Vdp1NxSpan>);
+
+constexpr uint32_t Vdp1MakeNxSpanFlags(uint32_t kind, bool antiAlias, uint32_t subRow, int32_t texV) {
+    return (kind & 3u) | (antiAlias ? 4u : 0u) | ((subRow & 3u) << 3) | (static_cast<uint32_t>(texV) << 16);
+}
+constexpr uint32_t Vdp1NxSpanKind(uint32_t f) {
+    return f & 3u;
+}
+constexpr bool Vdp1NxSpanAntiAlias(uint32_t f) {
+    return ((f >> 2) & 1u) != 0;
+}
+constexpr uint32_t Vdp1NxSpanSubRow(uint32_t f) {
+    return (f >> 3) & 3u;
+}
+/// @brief The texel row, sign-extended from 16 bits (as Vdp1SpanTexV).
+constexpr uint32_t Vdp1NxSpanTexV(uint32_t f) {
+    return static_cast<uint32_t>(static_cast<int32_t>(f) >> 16);
+}
+static_assert(Vdp1NxSpanTexV(Vdp1MakeNxSpanFlags(kNxSpanQuad, true, 3, -1)) == 0xFFFFFFFFu &&
+              Vdp1NxSpanKind(Vdp1MakeNxSpanFlags(kNxSpanReplicate, false, 0, 255)) == kNxSpanReplicate &&
+              Vdp1NxSpanSubRow(Vdp1MakeNxSpanFlags(kNxSpanRect, false, 3, 7)) == 3 &&
+              Vdp1NxSpanAntiAlias(Vdp1MakeNxSpanFlags(kNxSpanQuad, true, 0, 0)));
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Fragment (RWStructuredBuffer<Fragment>, 8 bytes): one write VDP1PlotPixel would make. The fragment buffer is indexed
