@@ -332,69 +332,112 @@ private:
     CoordS32 m_finalL{}, m_finalR{};
 };
 
-// Rect-kind texture stepping. The native TextureStepper rounds (texel = round(u) of the end-point mapping), so its
-// accumulator read at sub-pixel positions would move every texel boundary about half a texel into the block (1:1
-// sprites would not be the nearest upscale and the last block would read past the sprite). Instead the texel count at
-// sub-step s of native pixel P (from the line's start) is
-//   K(P, s) = max(c(P), floor((N * P + s) * num / (N * den)))
-// with c(P) the native stepper's count at P: the floor of the same mapping, never below the native texel and never
-// above the next native one (the native offset is >= 0), and exactly c(P) at s = 0. 1:1 gives c(P) at every s.
-FORCE_INLINE uint32 FloorTexelCount(const ref::port::Texture &t, uint32 n, uint32 P, uint32 s) {
-    if (t.den <= 0) {
+// Rect-kind sub-steps (textures and Gouraud). Sub-step s of native pixel (or row) P is the position x = P + s / N
+// along the line from its start. The native steppers round (texel = round(u) of the end-point mapping), so reading
+// their accumulators at sub-positions would move every texel or colour step about half a pixel into the block (1:1
+// sprites would not be the nearest upscale, and the last block would read past the sprite). Instead the step count at
+// sub-step s is the same linear mapping, num / den per native pixel, rounded towards the native pixel that owns the
+// block, and clamped between the native counts:
+//   K(P, s) = clamp(phase((N * P + s) * num / (N * den)), c(P), c(P + 1))
+// phase = floor when the line (or the rows) runs towards larger coordinates: the block of pixel P holds positions
+// [P, P + 1); ceil when it runs towards smaller ones: the block holds (P - 1, P] (the previous-pixel mapping in
+// RasterRect). K = c(P) at s = 0, so the sample points are native; a mapping of one step per pixel keeps every block
+// constant (1:1 sprites and one-step-per-pixel Gouraud are the nearest upscale); shrinks show the steps natively
+// skipped.
+FORCE_INLINE uint32 PhaseCount(uint32 num, uint32 den, uint32 n, uint32 P, uint32 s, bool ceil) {
+    if (den == 0) {
         return 0;
     }
-    return ((n * P + s) * static_cast<uint32>(t.num)) / (n * static_cast<uint32>(t.den));
+    const uint32 numerator = (n * P + s) * num;
+    const uint32 denominator = n * den;
+    return (numerator + (ceil ? denominator - 1 : 0)) / denominator;
 }
 
-struct SubGouraudChannel {
-    sint32 value = 0, fracInc = 0, num = 0, den = 0, accum = 0;
+// The native texture stepper's texel count at the next pixel (the catch-up loop of P + 1), without changing `t`
+FORCE_INLINE uint32 NextTexelCount(ref::port::Texture t, uint32 count) {
+    t.StepPixel();
+    while (t.ShouldStepTexel()) {
+        t.StepTexel();
+        ++count;
+    }
+    return count;
+}
 
-    static SubGouraudChannel From(const ref::port::GouraudChannel &g, sint32 n) {
-        // value advances by intInc + num / den per native pixel; intInc is a multiple k >= 0 of fracInc
-        const sint32 k = std::abs(g.intInc);
-        return {g.value, g.fracInc, k * g.den + g.num, g.den * n, g.accum * n};
+// Rect-kind Gouraud sub-steps by the same rule per channel: v(P) from the native stepper, U(P) = (v(P) - v0) /
+// fracInc the steps from the value after Setup, and num / den = (|intInc| * den + num) / den of the reduced stepper
+//   U = clamp(phase((N * P + s) * num / (N * den)), U(P), U(P + 1))
+class SubGouraud {
+public:
+    SubGouraud() = default;
+    // `setup`: the native stepper right after Setup; `skip`: the native pixels skipped before the first one; `ceil`:
+    // the line runs towards smaller coordinates
+    SubGouraud(const ref::port::Gouraud &setup, uint32 n, uint32 skip, bool ceil)
+        : m_n(n)
+        , m_P(skip)
+        , m_ceil(ceil)
+        , m_cur(setup)
+        , m_next(setup) {
+        const ref::port::GouraudChannel *chs[3] = {&setup.r, &setup.g, &setup.b};
+        for (uint32 c = 0; c < 3; ++c) {
+            m_v0[c] = chs[c]->value;
+            m_f[c] = chs[c]->fracInc;
+            m_rateNum[c] = static_cast<uint32>(std::abs(chs[c]->intInc) * chs[c]->den + chs[c]->num);
+            m_rateDen[c] = static_cast<uint32>(chs[c]->den);
+        }
+        m_cur.Skip(skip);
+        m_next = m_cur;
+        m_next.Step();
+        Update();
     }
     void Step() {
-        if (den == 0) {
-            return;
+        if (++m_s == m_n) {
+            m_s = 0;
+            ++m_P;
+            m_cur = m_next;
+            m_next.Step();
         }
-        accum -= num;
-        while (accum < 0) {
-            value += fracInc;
-            accum += den;
-        }
-    }
-    uint16 Blend(uint16 color) const {
-        return static_cast<uint16>(std::clamp<sint32>(value + static_cast<sint32>(color) - 16, 0, 31));
-    }
-};
-
-struct SubGouraud {
-    SubGouraudChannel r, g, b;
-
-    static SubGouraud From(const ref::port::Gouraud &s, sint32 n) {
-        return {SubGouraudChannel::From(s.r, n), SubGouraudChannel::From(s.g, n), SubGouraudChannel::From(s.b, n)};
-    }
-    void Step() {
-        r.Step();
-        g.Step();
-        b.Step();
+        Update();
     }
     Color555 Value() const {
         Color555 c{.u16 = 0};
-        c.r = static_cast<uint16>(r.value);
-        c.g = static_cast<uint16>(g.value);
-        c.b = static_cast<uint16>(b.value);
+        c.r = static_cast<uint16>(m_value[0]);
+        c.g = static_cast<uint16>(m_value[1]);
+        c.b = static_cast<uint16>(m_value[2]);
         return c;
     }
     Color555 Blend(Color555 base) const {
+        auto blend = [](sint32 v, uint16 color) {
+            return static_cast<uint16>(std::clamp<sint32>(v + static_cast<sint32>(color) - 16, 0, 31));
+        };
         Color555 out{.u16 = 0};
-        out.r = r.Blend(base.r);
-        out.g = g.Blend(base.g);
-        out.b = b.Blend(base.b);
+        out.r = blend(m_value[0], base.r);
+        out.g = blend(m_value[1], base.g);
+        out.b = blend(m_value[2], base.b);
         out.msb = base.msb;
         return out;
     }
+
+private:
+    void Update() {
+        const ref::port::GouraudChannel *cur[3] = {&m_cur.r, &m_cur.g, &m_cur.b};
+        const ref::port::GouraudChannel *next[3] = {&m_next.r, &m_next.g, &m_next.b};
+        for (uint32 c = 0; c < 3; ++c) {
+            if (m_s == 0 || m_rateDen[c] == 0) {
+                m_value[c] = cur[c]->value;
+                continue;
+            }
+            const sint32 u0 = (cur[c]->value - m_v0[c]) * m_f[c];
+            const sint32 u1 = std::max(u0, (next[c]->value - m_v0[c]) * m_f[c]);
+            const sint32 fl = static_cast<sint32>(PhaseCount(m_rateNum[c], m_rateDen[c], m_n, m_P, m_s, m_ceil));
+            m_value[c] = m_v0[c] + m_f[c] * std::clamp(fl, u0, u1);
+        }
+    }
+
+    uint32 m_n = 1, m_P = 0, m_s = 0;
+    bool m_ceil = false;
+    ref::port::Gouraud m_cur{}, m_next{};
+    sint32 m_v0[3]{}, m_f[3]{}, m_value[3]{};
+    uint32 m_rateNum[3]{}, m_rateDen[3]{};
 };
 
 // -----------------------------------------------------------------------------
@@ -591,8 +634,39 @@ bool IsCollinear(const std::array<CoordS32, 4> &v) {
     return true;
 }
 
+constexpr sint32 kMaxNativeLineMajor = 1364; // longer native lines wrap LineStepper's 13-bit counters (vdp1_clip.hpp)
+
+FORCE_INLINE bool LongLine(CoordS32 a, CoordS32 b) {
+    return std::max(std::abs(b.x() - a.x()), std::abs(b.y() - a.y())) > kMaxNativeLineMajor;
+}
+
+// Whether any native line of the command can be longer than kMaxNativeLineMajor: every polyline segment, or every quad
+// step's line (the native QuadStepper's edges, which the 32-bit stepper reproduces at N = 1 for quads that do not
+// wrap). Decided from the command alone, so a command split over batches gets one kind; conservative (lines the
+// native termination or line clip drops count too).
+bool NativeLinesWrap(const ref::CommandParams &cmd) {
+    const auto &v = cmd.vertices;
+    if (IsLineCommand(cmd)) {
+        if ((static_cast<uint32>(cmd.control.command) & 0xF) == 6) {
+            return LongLine(v[0], v[1]);
+        }
+        return LongLine(v[0], v[1]) || LongLine(v[1], v[2]) || LongLine(v[2], v[3]) || LongLine(v[3], v[0]);
+    }
+    NxQuad quad{v[0], v[1], v[2], v[3]};
+    for (; quad.CanStep(); quad.StepCoordinates()) {
+        if (LongLine(quad.left.Coord(), quad.right.Coord())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Kind Classify(const Options &o, const ref::CommandParams &cmd, CommandCounts::Class &cls) {
     if (IsLineCommand(cmd)) {
+        if (NativeLinesWrap(cmd)) {
+            cls = CommandCounts::ReplicateWrap;
+            return Kind::Replicate;
+        }
         if (o.rules.line == LineRule::Parallel && o.quadPath) {
             cls = CommandCounts::LineParallel;
             return Kind::LineParallel;
@@ -605,8 +679,8 @@ Kind Classify(const Options &o, const ref::CommandParams &cmd, CommandCounts::Cl
         return Kind::Replicate;
     }
     if (IsRect(cmd.vertices)) {
-        // The rows are the native lines: wider than 1364 their LineStepper counters may wrap (vdp1_clip.hpp)
-        if (std::abs(cmd.vertices[1].x() - cmd.vertices[0].x()) > 1364) {
+        // The rows are the native lines
+        if (std::abs(cmd.vertices[1].x() - cmd.vertices[0].x()) > kMaxNativeLineMajor) {
             cls = CommandCounts::ReplicateWrap;
             return Kind::Replicate;
         }
@@ -619,6 +693,10 @@ Kind Classify(const Options &o, const ref::CommandParams &cmd, CommandCounts::Cl
     }
     if (!o.quadPath) {
         cls = CommandCounts::ReplicateNoQuadPath;
+        return Kind::Replicate;
+    }
+    if (NativeLinesWrap(cmd)) {
+        cls = CommandCounts::ReplicateWrap;
         return Kind::Replicate;
     }
     if (IsCollinear(cmd.vertices)) {
@@ -702,9 +780,14 @@ public:
                     native.StepTexel();
                     ++count;
                 }
+                const uint32 next = NextTexelCount(native, count);
                 native.StepPixel();
                 for (uint32 j = 0; j < static_cast<uint32>(m_n); ++j) {
-                    const uint32 K = std::max(count, FloorTexelCount(native, static_cast<uint32>(m_n), k, j));
+                    const uint32 K =
+                        j == 0 ? count
+                               : std::clamp(PhaseCount(static_cast<uint32>(native.num), static_cast<uint32>(native.den),
+                                                       static_cast<uint32>(m_n), k, j, !rowsDown),
+                                            count, std::max(count, next));
                     m_texV[k * m_n + j] = v0 + native.inc * static_cast<sint32>(K);
                 }
             }
@@ -713,7 +796,7 @@ public:
             ref::port::Gouraud nl, nr;
             nl.Setup(rows, cmd.gouraud[0], cmd.gouraud[3]);
             nr.Setup(rows, cmd.gouraud[1], cmd.gouraud[2]);
-            SubGouraud gl = SubGouraud::From(nl, m_n), gr = SubGouraud::From(nr, m_n);
+            SubGouraud gl{nl, static_cast<uint32>(m_n), 0, !rowsDown}, gr{nr, static_cast<uint32>(m_n), 0, !rowsDown};
             for (uint32 r = 0; r < subRows; ++r) {
                 m_gouraudL[r] = gl.Value();
                 m_gouraudR[r] = gr.Value();
@@ -934,8 +1017,7 @@ void RasterRect(uint32 n, const ref::RasterState &state, const ref::CommandParam
     SubGouraud gouraud{};
     if (mode.gouraudEnable) {
         nativeGouraud.Setup(line.dmaj + 1, span.gouraudL, span.gouraudR);
-        nativeGouraud.Skip(skip);
-        gouraud = SubGouraud::From(nativeGouraud, sn);
+        gouraud = SubGouraud{nativeGouraud, n, skip, !forward};
     }
 
     if (!cmd.textured) {
@@ -972,8 +1054,12 @@ void RasterRect(uint32 n, const ref::RasterState &state, const ref::CommandParam
                 u.StepTexel();
                 ++count;
             }
+            const uint32 next = NextTexelCount(u, count);
             for (uint32 s = 0; s < n; ++s) {
-                const uint32 K = s == 0 ? count : std::max(count, FloorTexelCount(u, n, P, s));
+                const uint32 K = s == 0 ? count
+                                        : std::clamp(PhaseCount(static_cast<uint32>(u.num), static_cast<uint32>(u.den), n, P,
+                                                                s, !forward),
+                                                     count, std::max(count, next));
                 while (read < K) {
                     ++read;
                     texel.Read(static_cast<uint32>(v0 + u.inc * static_cast<sint32>(read)));
@@ -1348,6 +1434,7 @@ NxResolveStats Resolve(uint32 drawFB, std::vector<NxFragment> fragments, NxFbram
                 continue;
             }
             const bool toMesh = (f.target & ref::kTargetMeshBit) != 0;
+            stats.mesh += toMesh;
             const bool transparentMeshes = (f.target & ref::kTargetTransparentMeshesBit) != 0;
             if (f.target & ref::kTargetPixel8Bit) {
                 const uint32 shift = (f.target & ref::kTargetOddBit) ? 0 : 8;
@@ -1610,6 +1697,7 @@ void ReferenceNx::DrawBatch(const gpu::Vdp1OpList &ops, const gpu::Vdp1DrawBatch
         m_stats.multiHalfTransparent += rs.multiHalfTransparent;
         m_stats.halfTransparent += rs.halfTransparent;
         m_stats.overwrite += rs.overwrite;
+        m_stats.mesh += rs.mesh;
         m_stats.resolveSeconds += Seconds(t0);
     }
 

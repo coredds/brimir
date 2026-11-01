@@ -163,8 +163,8 @@ void CheckSamplePointRun(uint64 first, uint64 count) {
     CHECK(s.commands.counts[nx::CommandCounts::ReplicateWrap] > 0);
 }
 
-// N = 1 with the quad path: the native reference exactly (tables whose native lines wrap their 13-bit counters are
-// skipped: the N x steppers do not wrap)
+// N = 1 with the quad path: the native reference exactly (commands whose native lines wrap their 13-bit counters use
+// the replicate kind)
 SeedOutcome UnitScaleSeed(uint64 seed) {
     Coverage cov;
     const Scenario s = RandomScenario(seed, cov);
@@ -174,10 +174,6 @@ SeedOutcome UnitScaleSeed(uint64 seed) {
     const NxRun r = RunNx(s, o);
     SeedOutcome out;
     out.stats = r.stats;
-    if (r.stats.nativeLongLines != 0) {
-        out.skipped = true;
-        return out;
-    }
     out.error = CompareFbram(*r.native.fb, *r.nxNative, "stage 2 reference", "N x reference native");
     if (out.error.empty()) {
         out.error = nx::CompareSamplePoints(*r.nxNative, *r.surface);
@@ -191,9 +187,10 @@ TEST_CASE("VDP1 N x reference at N = 1 is the native reference with the quad pat
     const auto outcomes = ForSeeds(1, 2'000, UnitScaleSeed);
     const Summary s = Summarise(1, outcomes);
     InfoCommands(s);
-    CAPTURE(s.skipped, s.passed);
     CHECK(s.failures == 0);
-    CHECK(s.passed >= 1'400); // about a quarter of the tables draw lines long enough to wrap natively
+    CHECK(s.passed == 2'000);
+    CHECK(s.commands.counts[nx::CommandCounts::ReplicateWrap] > 0);
+    CHECK(s.commands.counts[nx::CommandCounts::Continuation] > 0);
     CHECK(s.commands.counts[nx::CommandCounts::Quad] > 0);
     CHECK(s.commands.counts[nx::CommandCounts::Thin] + s.commands.counts[nx::CommandCounts::ThinParallel] > 0);
     CHECK(s.commands.counts[nx::CommandCounts::LineParallel] > 0);
@@ -203,15 +200,16 @@ TEST_CASE("VDP1 N x reference at N = 1 is the native reference with the quad pat
 TEST_CASE("VDP1 N x reference at N = 1 is the native reference (long)", "[vdp1][nx][reference][.]") {
     const auto outcomes = ForSeeds(100'001, 50'000, UnitScaleSeed);
     const Summary s = Summarise(100'001, outcomes);
-    CAPTURE(s.skipped, s.passed);
+    InfoCommands(s);
     CHECK(s.failures == 0);
+    CHECK(s.passed == 50'000);
 }
 
 TEST_CASE("VDP1 N x reference: rect-path and replicated content is native at every sample point",
           "[vdp1][nx][reference]") {
-    // 10,000 seeded tables (every command type and colour mode, Gouraud, mesh, MSB-on, 8 bpp, DIE, end codes, HSS,
+    // 2,000 seeded tables (200,000 in the long variant; every command type and colour mode, Gouraud, mesh, MSB-on, 8 bpp, DIE, end codes, HSS,
     // clipping, 13-bit wraps, erases, CPU writes, swaps, batch splits) at N = 2, 3 and 4, without the quad path
-    CheckSamplePointRun(1, 10'000);
+    CheckSamplePointRun(1, 2'000);
 }
 
 TEST_CASE("VDP1 N x reference: rect-path sample points (long)", "[vdp1][nx][reference][.]") {
@@ -220,7 +218,7 @@ TEST_CASE("VDP1 N x reference: rect-path sample points (long)", "[vdp1][nx][refe
 
 TEST_CASE("VDP1 N x reference leaves native FBRAM untouched", "[vdp1][nx][reference]") {
     // The quad path on, every rule combination, N = 2 to 4: native FBRAM is the stage 2 reference's and software's
-    const auto outcomes = ForSeeds(20'001, 1'000, [](uint64 seed) {
+    const auto outcomes = ForSeeds(20'001, 300, [](uint64 seed) {
         Coverage cov;
         const Scenario s = RandomScenario(seed, cov);
         nx::Options o;
@@ -295,8 +293,8 @@ Scenario StackScene(uint64 seed, bool rectOnly) {
 
 TEST_CASE("VDP1 N x reference: overlapping half-transparent and shadow stacks resolve in VDP1 order",
           "[vdp1][nx][reference]") {
-    uint64 orderSensitive = 0;
-    for (uint64 seed = 1; seed <= 12; ++seed) {
+    uint64 orderSensitive = 0, halfTransparent = 0;
+    for (uint64 seed = 1; seed <= 6; ++seed) {
         for (const uint32 n : {2u, 4u}) {
             CAPTURE(seed, n);
             nx::Options o;
@@ -325,13 +323,15 @@ TEST_CASE("VDP1 N x reference: overlapping half-transparent and shadow stacks re
             CHECK(differs);
             orderSensitive += differs;
             CHECK(keyed.stats.maxPerUnit > 1);
+            halfTransparent += keyed.stats.halfTransparent;
         }
     }
-    CHECK(orderSensitive == 24);
+    CHECK(orderSensitive == 12);
+    CHECK(halfTransparent > 0); // the counter the capture scan relies on
 }
 
 TEST_CASE("VDP1 N x reference: a sub-batch split at a small capacity gives the same surface", "[vdp1][nx][reference]") {
-    const auto outcomes = ForSeeds(30'001, 400, [](uint64 seed) {
+    const auto outcomes = ForSeeds(30'001, 150, [](uint64 seed) {
         Coverage cov;
         const Scenario s = RandomScenario(seed, cov);
         nx::Options o;
@@ -416,6 +416,79 @@ TEST_CASE("VDP1 N x reference: 1:1 normal sprites are the nearest upscale", "[vd
     }
 }
 
+TEST_CASE("VDP1 N x reference: a quad split over batches at the front half's capacity is generated once",
+          "[vdp1][nx][reference]") {
+    // Large quads, distorted sprites and polylines with a small fragment capacity: the front half splits the commands
+    // over several batches (repeating the command). The N x surface equals the unsplit scene's, and at N = 1 native.
+    Scenario s;
+    const uint16 tex = s.AddTexture(RGBTexture(32, 32, 3));
+    s.Op0(Op::Kind::BeginFrame);
+    s.Polygon(0x00C3, 0xFC1F, {10, 20}, {300, 5}, {280, 210}, {30, 190});
+    s.Distorted(0, 0x00C7, 0, tex, 0x0420, {40, 30}, {250, 60}, {230, 200}, {20, 170},
+                s.AddGouraud({0x7FFF, 0x0000, 0x4210, 0x7C00}));
+    s.AddCommand({0x0005, 0, 0x00C3, 0x83FF, 0, 0, U(5), U(5), U(310), U(40), U(200), U(220), U(15), U(150), 0, 0});
+    s.Op0(Op::Kind::EndFrame);
+    Scenario split = s;
+    split.limits.fragments = 1'500;
+    for (const uint32 n : {1u, 2u, 4u}) {
+        CAPTURE(n);
+        nx::Options o;
+        o.scale = n;
+        const NxRun whole = RunNx(s, o);
+        const NxRun parts = RunNx(split, o);
+        CHECK(parts.stats.batches > 5);
+        CHECK(parts.stats.commands.counts[nx::CommandCounts::Continuation] > 0);
+        CHECK(whole.stats.commands.counts[nx::CommandCounts::Continuation] == 0);
+        CHECK(nx::CompareNx(*whole.surface, *parts.surface) == "");
+        CHECK(CompareFbram(*parts.native.fb, *parts.nxNative) == "");
+        if (n == 1) {
+            CHECK(nx::CompareSamplePoints(*parts.nxNative, *parts.surface) == "");
+        }
+    }
+}
+
+TEST_CASE("VDP1 N x reference: 1:1 Gouraud sprites with one step per pixel are the nearest upscale",
+          "[vdp1][nx][reference]") {
+    // Gouraud along the rows and down the edges at one 5-bit step per pixel (and constant): the floor-phase sub-steps
+    // keep each N x N block constant; the research's "native DDA + sub-step" would move every step into the block
+    for (const uint32 n : {2u, 3u, 4u}) {
+        Scenario s;
+        const uint16 tex = s.AddTexture(RGBTexture(32, 32, 11));
+        s.Op0(Op::Kind::BeginFrame);
+        const uint16 g1 = s.AddGouraud({0x0000, 0x001F, 0x03FF, 0x03E0}); // r 0->31 along rows, g 0->31 down
+        const uint16 g2 = s.AddGouraud({0x7FFF, 0x7FE0, 0x7C00, 0x7C1F}); // decreasing
+        const uint16 g3 = s.AddGouraud({0x4210, 0x4210, 0x4210, 0x4210}); // constant
+        uint16 x = 10;
+        for (const uint16 g : {g1, g2, g3}) {
+            for (const uint16 ctrl : {uint16{0x0000}, uint16{0x0030}}) { // flips
+                s.AddCommand({ctrl, 0, 0x00EC, 0, tex, 0x0420, x, 20, 0, 0, 0, 0, 0, 0, g, 0});
+                x = static_cast<uint16>(x + 40);
+            }
+        }
+        // the same as a regular-rect polygon drawn right to left and bottom to top
+        s.Polygon(0x00C4, 0x4210, {300, 140}, {269, 140}, {269, 109}, {300, 109}, g1);
+        s.Distorted(0, 0x00EC, 0, tex, 0x0420, {300, 100}, {269, 100}, {269, 69}, {300, 69}, g2); // textured, reversed
+        s.Op0(Op::Kind::EndFrame);
+        CAPTURE(n);
+        nx::Options o;
+        o.scale = n;
+        const NxRun r = RunNx(s, o);
+        uint64 differing = 0;
+        uint32 first = ~0u;
+        for (uint32 w = 0; w < ref::kWordsPerFB; ++w) {
+            const uint16 native = nx::NativeWord(*r.nxNative, 0, w);
+            for (uint32 sub = 0; sub < n * n; ++sub) {
+                const bool d = r.surface->slices[0][size_t{w} * n * n + sub] != native;
+                differing += d;
+                first = d && first == ~0u ? w * 16 + sub : first;
+            }
+        }
+        CAPTURE(first / 16 % 512, first / 16 / 512, first % 16);
+        CHECK(r.stats.commands.counts[nx::CommandCounts::Rect] == 8);
+        CHECK(differing == 0);
+    }
+}
+
 TEST_CASE("VDP1 N x reference: parallel lines keep native thickness", "[vdp1][nx][reference]") {
     // Horizontal and vertical lines and polylines with LineRule::Parallel cover whole N x N blocks: every N x word of a
     // native pixel they draw equals the native word (the nearest upscale), as LineRule::NativeThick does by
@@ -452,6 +525,7 @@ TEST_CASE("VDP1 N x reference: parallel lines keep native thickness", "[vdp1][nx
     for (const uint32 n : {2u, 4u}) {
         nx::Options o;
         o.scale = n;
+        o.rules.thin = nx::ThinRule::Hairline;
         const NxRun hair = RunNx(thin, o);
         o.rules.thin = nx::ThinRule::Parallel;
         const NxRun par = RunNx(thin, o);

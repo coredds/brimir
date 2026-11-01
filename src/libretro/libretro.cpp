@@ -322,8 +322,13 @@ static void set_vdp1_op_dump(brimir::gpu::VulkanVDPRenderer& renderer) {
         return;
     }
     done = true;
-    renderer.SetVdp1OpDump(static_cast<uint32_t>(std::strtoul(text.substr(0, bar).c_str(), nullptr, 10)),
-                           text.substr(bar + 1));
+    // Frame F >= 1: the start state is taken at the end of frame F - 1
+    const unsigned long long frame = std::strtoull(text.substr(0, bar).c_str(), nullptr, 10);
+    if (frame < 1 || frame > 0xFFFFFFFFull) {
+        brimir_log(RETRO_LOG_WARN, "VDP1 op dump: frame must be 1 or more (BRIMIR_VDP1_DUMP_OPS=%s)", env);
+        return;
+    }
+    renderer.SetVdp1OpDump(static_cast<uint32_t>(frame), text.substr(bar + 1));
 }
 
 // VDP1 runs on the GPU (GPU stage 2) whenever the Vulkan VDP renderer is attached; the debug override

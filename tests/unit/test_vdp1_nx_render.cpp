@@ -212,6 +212,41 @@ struct Crop {
 
 } // namespace
 
+TEST_CASE("VDP1 N x scan of captured frames for non-overwrite fragments (BRIMIR_VDP1_CAPTURES)", "[.][nx-scan]") {
+    // Per capture: native fragments, half-transparency fragments and every other non-overwrite fragment (shadow,
+    // MSB-on), from the N = 1 replay
+    const char *capDir = std::getenv("BRIMIR_VDP1_CAPTURES");
+    if (capDir == nullptr) {
+        SKIP("BRIMIR_VDP1_CAPTURES not set");
+    }
+    std::vector<fs::path> files;
+    for (const auto &e : fs::recursive_directory_iterator(capDir)) {
+        if (e.path().extension() == ".bin" && e.path().filename().string().rfind("vdp1ops_", 0) == 0) {
+            files.push_back(e.path());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    for (const fs::path &file : files) {
+        gpu::Vdp1OpDump d;
+        REQUIRE(gpu::ReadVdp1OpDump(file.string(), d));
+        auto native = std::make_unique<ref::Fbram>();
+        ToFbram(d.fbramStart, *native);
+        auto surface = std::make_unique<nx::NxFbram>(1);
+        surface->ReplicateFrom(*native);
+        nx::ReferenceNx r{*native, *surface, nx::Options{.scale = 1}, d.vramStart};
+        for (const auto &l : d.lists) {
+            r.Replay(l);
+        }
+        const nx::Stats &s = r.GetStats();
+        std::printf("scan %s/%s: batches %llu fragments %llu half-transparency %llu other non-overwrite %llu mesh %llu\n",
+                    file.parent_path().filename().string().c_str(), file.filename().string().c_str(),
+                    static_cast<unsigned long long>(s.batches), static_cast<unsigned long long>(s.Fragments()),
+                    static_cast<unsigned long long>(s.halfTransparent),
+                    static_cast<unsigned long long>(s.Fragments() - s.overwrite - s.halfTransparent),
+                    static_cast<unsigned long long>(s.mesh));
+    }
+}
+
 TEST_CASE("VDP1 N x renders of a half-transparent mesh scene (BRIMIR_NX_RENDER_OUT)", "[.][nx-render]") {
     // Seams: a rotated 6 x 4 mesh of half-transparent Gouraud quads sharing vertices, a shadow-mode mesh and a fan of
     // thin quads, over an opaque textured background, 16 bpp RGB (decoded directly)
@@ -321,6 +356,7 @@ TEST_CASE("VDP1 N x renders of captured frames (BRIMIR_VDP1_CAPTURES, BRIMIR_NX_
         {"R1-L2", {R::FloorHalfDown, nx::ThinRule::Hairline, nx::LineRule::Parallel}},
         {"R3-T2", {R::CentroidSign, nx::ThinRule::Parallel, nx::LineRule::NativeThick}},
         {"R3-L2", {R::CentroidSign, nx::ThinRule::Hairline, nx::LineRule::Parallel}},
+        {"R1-T2-L2", {R::FloorHalfDown, nx::ThinRule::Parallel, nx::LineRule::Parallel}}, // the chosen rules
     };
 
     std::ofstream table(out / "workload.md");
@@ -405,6 +441,23 @@ TEST_CASE("VDP1 N x renders of captured frames (BRIMIR_VDP1_CAPTURES, BRIMIR_NX_
             }
         }
         CHECK(endDiff == 0);
+        {
+            // Where the frame wrote the mesh plane (transparent meshes: VDP2 blends it), by 16 x 16 cells of FB pixels
+            const uint32 meshSlice = gpu::Vdp1MeshSlice(0, drawFB);
+            const uint32 rowWords = state.pixel8Bits ? state.fbSizeH / 2 : state.fbSizeH;
+            std::map<uint32, uint32> cells;
+            for (uint32 w = 0; w < ref::kWordsPerFB; ++w) {
+                if (nx::NativeWord(*native, meshSlice, w) != 0) {
+                    ++cells[(w / rowWords / 16) << 16 | (w % rowWords / 16)];
+                }
+            }
+            std::vector<std::pair<uint32, uint32>> top(cells.begin(), cells.end());
+            std::sort(top.begin(), top.end(), [](auto &a, auto &b) { return a.second > b.second; });
+            for (size_t i = 0; i < std::min<size_t>(top.size(), 5); ++i) {
+                std::printf("mesh %s: FB cell x %u y %u: %u words\n", game.c_str(), (top[i].first & 0xFFFF) * 16,
+                            (top[i].first >> 16) * 16, top[i].second);
+            }
+        }
         const Image nativeImg = DecodeSprites(dec, drawFB, 1, [&](uint32 s, uint32 w, uint32, uint32) {
             return nx::NativeWord(*native, s, w);
         });
@@ -517,7 +570,7 @@ TEST_CASE("VDP1 N x renders of captured frames (BRIMIR_VDP1_CAPTURES, BRIMIR_NX_
                     return sf.Word(s, w, i, j);
                 });
                 const std::string prefix = game + "_" + std::to_string(n) + "x_";
-                const bool full = v.tag == "R1" || v.tag == "R2" || v.tag == "R3";
+                const bool full = v.tag == "R1" || v.tag == "R2" || v.tag == "R3" || v.tag == "R1-T2-L2";
                 if (full) {
                     WritePpm(out / (prefix + v.tag + ".ppm"), img);
                     bases.insert_or_assign(v.tag, img);

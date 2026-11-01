@@ -7,41 +7,47 @@
 //   - the N x surface: the same eight slices with every native FBRAM word stored as an N x N block of raw words,
 //     N x word index = nativeWord * N^2 + j * N + i for the sub-texel (i, j) (research 1.1).
 //
+// Rules: the developer chose R1 + T2 + L2 (stage 3 Ruling 3), the default of Rules below; the other candidates stay
+// selectable for tests and renders.
+//
 // Generator (per native batch, Vulkan-free; what Task 3 moves into the front half). Every command of the batch becomes
 // N x spans of one of three kinds, in command order:
 //   - Rect (normal sprites, scaled sprites, distorted sprites and polygons with xa == xd, xb == xc, ya == yb, yc == yd):
 //     area mapping. Native row k (a native span) gives N sub-rows and native pixel p of the row N sub-steps, so the
 //     native pixel's N x N block is covered and the min vertex maps to N * v, the max vertex to N * v + N - 1 per axis.
-//     Sub-step s of pixel p (s = 0..N-1, in the line's direction) is the position p + s / N:
-//       - texture (U per pixel, V per row): texel count K = max(c(P), floor((N * P + s) * num / (N * den))) with c(P)
-//         the native TextureStepper's count at pixel P from the line start and (num, den) its increments. The native
-//         stepper rounds; reading its accumulator at sub-positions would put every texel boundary about half a texel
-//         into the block (1:1 sprites would not be the nearest upscale and the last block would read past the
-//         sprite), so the sub-steps use the floor of the same mapping, which never falls below the native texel nor
-//         passes the next one, and is c(P) at s = 0. Texels are read in order (end codes as natively; HSS decided
-//         natively);
-//       - Gouraud (along the row, and on the edges per row): "native DDA + sub-step", the channel advancing by
-//         (|intInc| * den + num) / (N * den) per sub-step from N times the native accumulator.
-//     Rows and pixels stepping towards smaller coordinates map sub-step 0 to sub-texel 0 too: sub-texel i > 0 of a block
+//     Sub-step s of pixel (or row) P counted from the line's start is the position P + s / N. Texture (U per pixel, V
+//     per row) and Gouraud (along the row, and on the edges per row) take the step count
+//       K = clamp(phase((N * P + s) * num / (N * den)), c(P), c(P + 1)),   K = c(P) at s = 0,
+//     with c(P) the native stepper's count (texels stepped; Gouraud: 5-bit steps from the value after Setup) and
+//     num / den its steps per native pixel (Gouraud: (|intInc| * den + num) / den of the reduced channel). phase is
+//     floor when the line (rows) runs towards larger coordinates and ceil when it runs towards smaller ones: rounding
+//     towards the native pixel that owns the block. The native steppers round (round(u) of the end-point mapping);
+//     reading their accumulators at sub-positions ("native DDA + sub-step", research 1.4) would put every step about
+//     half a pixel into the block: 1:1 sprites would not be the nearest upscale and the last block would read past the
+//     sprite. Texels are read in order (end codes as natively; HSS decided natively). A mapping of one step per pixel
+//     keeps every block constant; shrinks show the steps natively skipped.
+//     Rows and pixels running towards smaller coordinates map sub-step 0 to sub-texel 0 too: sub-texel i > 0 of a block
 //     lies between the previous native pixel (or row) and this one, so it takes sub-step N - i of the previous one
 //     (the first pixel or row repeats itself there). At sub-texel (0, 0) every value is native. One slot per N x pixel.
-//   - Quad (other polygons and distorted sprites): N x vertices v_N = N * v + c per axis (VertexRule), then a 32-bit
-//     QuadStepper / Edge / LineStepper over them (no 13-bit wrap), antialiased as natively; texture and Gouraud
-//     steppers over the N x lengths; HSS from the native-equivalent length dmaj_N / N. Clipping, mesh, double interlace,
-//     the alternate field and the FB address come from the native coordinates (floor(X / N), floor(Y / N)) of every N x
-//     pixel. Lines are rejected as VDP1IsLineSystemClipped does, at native coordinates; the N x quad termination (a
-//     box with a margin) and LineStepper::SystemClip over the N x extent of the clip area drop no pixel the native clip
-//     would keep. Two slots per N x line step: key = base + 2 * step + isAA. Degenerate quads
-//     (all four vertices collinear) follow ThinRule. A quad command is generated whole in the first native batch that
-//     holds one of its spans (a command the front half split at a batch capacity is skipped in the next batch).
-//   - Replicate (commands whose native geometry wraps the 13-bit counters: an edge delta outside [-4096, 4095] or a
-//     quad major delta of 2048 or more, or rect rows wider than 1364 pixels, where the native LineStepper's counters
-//     can wrap; lines and polylines with LineRule::NativeThick; every non-rect quad without the
-//     quad path): each native fragment of a native span becomes its N x N block, key = base + N^2 * nativeKey + j * N + i.
-//   Lines and polylines with LineRule::Parallel become N parallel N x lines (offset 0..N-1 on the minor axis, the major
-//     axis area-mapped to cover both end pixels' blocks), quad-kind spans without antialiasing.
-//
-// Sub-batches: a native batch's N x spans are cut into sub-batches at a slot (and span) capacity, between spans; each
+//   - Quad (other polygons and distorted sprites): N x vertices v_N = N * v + c per axis (VertexRule; R1: c =
+//     floor((N - 1) / 2)), then a 32-bit QuadStepper / Edge / LineStepper over them (no 13-bit wrap), antialiased as
+//     natively; texture and Gouraud steppers over the N x lengths; HSS from the native-equivalent length dmaj_N / N.
+//     Clipping, mesh, double interlace, the alternate field and the FB address come from the native coordinates
+//     (floor(X / N), floor(Y / N)) of every N x pixel. Lines are rejected as VDP1IsLineSystemClipped does, at native
+//     coordinates; the N x quad termination (a box with a margin) and LineStepper::SystemClip over the N x extent of the
+//     clip area drop no pixel the native clip would keep. Two slots per N x line step: key = base + 2 * step + isAA.
+//     Degenerate quads (all four vertices collinear) follow ThinRule (T2: N copies offset 0..N-1 on the minor axis). A
+//     quad command is generated whole in the first native batch that holds one of its spans (a command the front half
+//     split at a batch capacity is skipped in the next batch: CommandCounts::Continuation).
+//   - Replicate: each native fragment of a native span becomes its N x N block, key = base + N^2 * nativeKey + j * N + i.
+//     For the commands whose native geometry wraps the 13-bit counters, decided from the command alone (so a command
+//     split over batches keeps one kind): an edge delta outside [-4096, 4095], a quad major delta of 2048 or more, or
+//     any native line longer than 1364 pixels (LineStepper's counters, vdp1_clip.hpp: every quad step's line of the
+//     native QuadStepper, rect rows, polyline segments); lines and polylines with LineRule::NativeThick; every non-rect
+//     quad without the quad path.
+//   Lines and polylines with LineRule::Parallel (L2) become N parallel N x lines (offset 0..N-1 on the minor axis, the
+//     major axis area-mapped to cover both end pixels' blocks), quad-kind spans without antialiasing.
+//// Sub-batches: a native batch's N x spans are cut into sub-batches at a slot (and span) capacity, between spans; each
 // sub-batch has its own slot range from 0 and resolves on its own, in order. The order inside a sub-batch is the
 // command order, then quad step / row, sub-row, pixel, sub-step, main before antialias: VDP1's drawing order at N x.
 //
@@ -64,7 +70,7 @@ namespace ref = brimir::test::vdp1ref;
 using ymir::vdp::Color555;
 using ymir::vdp::CoordS32;
 
-// Candidate rules (Task 1 renders them; the developer picks)
+// Candidate rules (Task 1 rendered them; the developer chose R1 + T2 + L2)
 enum class VertexRule : uint8 {
     FloorHalfDown, // R1: c = floor((N - 1) / 2)
     FloorHalf,     // R2: c = floor(N / 2)
@@ -79,10 +85,11 @@ enum class LineRule : uint8 {
     Parallel,    // N parallel N x lines
 };
 
+// The default is the rule set the developer chose (stage 3 Ruling 3): R1 + T2 + L2
 struct Rules {
     VertexRule vertex = VertexRule::FloorHalfDown;
-    ThinRule thin = ThinRule::Hairline;
-    LineRule line = LineRule::NativeThick;
+    ThinRule thin = ThinRule::Parallel;
+    LineRule line = LineRule::Parallel;
 };
 
 const char *Name(VertexRule rule);
@@ -194,6 +201,7 @@ struct NxResolveStats {
     uint64 multiHalfTransparent = 0; // units given two or more half-transparency fragments (double blending)
     uint64 halfTransparent = 0;      // half-transparency fragments
     uint64 overwrite = 0;            // overwrite-class fragments (replace, half-luminance, Gouraud, 8 bpp; not MSB-on)
+    uint64 mesh = 0;                 // fragments written to the mesh plane (transparent meshes)
 };
 // Applies fragments sorted by (unit, key) (or in emission order) to the draw framebuffer of the N x surface
 enum class ResolveOrder : uint8 { Key, Emission, KeyDescendingForTesting };
@@ -215,6 +223,7 @@ struct Stats {
     uint64 multiHalfTransparent = 0; // N x units given two or more half-transparency fragments in one sub-batch
     uint64 halfTransparent = 0;
     uint64 overwrite = 0; // overwrite-class fragments (research 1.6 fast path)
+    uint64 mesh = 0;      // fragments written to the mesh plane
     CommandCounts commands;
     uint64 nativeLongLines = 0; // native spans with a major delta above 1364 (their native counters wrap)
     double generateSeconds = 0, rasterSeconds = 0, resolveSeconds = 0, nativeSeconds = 0;

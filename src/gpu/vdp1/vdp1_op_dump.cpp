@@ -1,6 +1,7 @@
 #include "gpu/vdp1/vdp1_op_dump.hpp"
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <type_traits>
 
@@ -79,9 +80,11 @@ void Fail(std::string *error, const std::string &text) {
 } // namespace
 
 bool WriteVdp1OpDump(const std::string &path, const Vdp1OpDump &d, std::string *error) {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    // Written to <path>.tmp and renamed, so a reader never sees a partial file; the temporary is removed on failure
+    const std::string tmp = path + ".tmp";
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
     if (!out) {
-        Fail(error, "cannot create " + path);
+        Fail(error, "cannot create " + tmp);
         return false;
     }
     out.write(kMagic, sizeof(kMagic));
@@ -114,9 +117,18 @@ bool WriteVdp1OpDump(const std::string &path, const Vdp1OpDump &d, std::string *
     w.Value(d.fbcr);
     w.Value(d.vdp2Regs);
     w.Value(d.palette);
-    out.flush();
+    out.close();
+    std::error_code ec;
     if (!out) {
-        Fail(error, "write failed: " + path);
+        Fail(error, "write failed: " + tmp);
+        std::filesystem::remove(tmp, ec);
+        return false;
+    }
+    std::filesystem::remove(path, ec); // rename does not replace an existing file everywhere
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        Fail(error, "cannot rename " + tmp + " to " + path + ": " + ec.message());
+        std::filesystem::remove(tmp, ec);
         return false;
     }
     return true;
