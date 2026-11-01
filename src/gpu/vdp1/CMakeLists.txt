@@ -6,6 +6,8 @@
 
 add_library(brimir-vdp1-front STATIC
     vdp1_front.cpp
+    # Frame captures of the op lists (brimir_vkhost --dump-vdp1-ops; read by the N x reference tools)
+    vdp1_op_dump.cpp
 )
 
 # Consumers include "gpu/vdp1/..." and "gpu/shaders/generated/*.layout.h".

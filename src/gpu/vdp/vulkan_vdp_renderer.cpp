@@ -368,6 +368,9 @@ void VulkanVDPRenderer::DestroyGpuVdp1() {
 void VulkanVDPRenderer::QueueVdp1Ops() {
     if (m_vdp1Front.HasPendingOps()) {
         m_vdp1Queue.push_back({m_vdp1Front.TakeOps(), {}, 0, m_vdp1Seq});
+        if (m_opDumpCollecting) {
+            m_opDump->lists.push_back(m_vdp1Queue.back().ops);
+        }
     } else {
         (void)m_vdp1Front.TakeOps(); // op-less frame boundaries
     }
@@ -375,6 +378,11 @@ void VulkanVDPRenderer::QueueVdp1Ops() {
 
 void VulkanVDPRenderer::QueueFbramUpload(uint32_t sliceMask, const SpriteFB *alt0, const SpriteFB *alt1) {
     QueueVdp1Ops(); // the ops so far come first
+    if (m_opDumpCollecting) {
+        Log("VDP1 op dump: abandoned (an FBRAM upload during the captured frame)");
+        m_opDump.reset();
+        m_opDumpCollecting = false;
+    }
     Vdp1Work work;
     work.sliceMask = sliceMask;
     work.seq = m_vdp1Seq;
@@ -1077,6 +1085,96 @@ void VulkanVDPRenderer::DumpExtraVDP1Framebuffers(std::ostream &out) const {
     }
 }
 
+void VulkanVDPRenderer::SetVdp1OpDump(uint32_t frame, std::string path) {
+    m_opDump = std::make_unique<vdp1::Vdp1OpDump>();
+    m_opDump->frame = frame;
+    m_opDumpPath = std::move(path);
+    m_opDumpFrames = 0;
+    m_opDumpCollecting = false;
+}
+
+std::vector<uint8_t> VulkanVDPRenderer::OpDumpSlices() {
+    if (!SyncShadow(0xFF, Vdp1SyncKind::Dump, FramePolicy::Sync)) {
+        return {};
+    }
+    std::vector<uint8_t> out(vdp1::kFbramBufferSize);
+    const auto put = [&](uint32_t slice, const SpriteFB &fb) {
+        std::memcpy(out.data() + size_t{slice} * kSliceSize, fb.data(), kSliceSize);
+    };
+    for (uint32_t fb = 0; fb < 2; ++fb) {
+        put(vdp1::Vdp1MainSlice(fb), m_state.mem1.FBRAM[fb]);
+        put(vdp1::Vdp1AltSlice(fb), (*m_altShadow)[fb]);
+        for (uint32_t alt = 0; alt < 2; ++alt) {
+            put(vdp1::Vdp1MeshSlice(alt, fb), (*m_meshShadow)[alt][fb]);
+        }
+    }
+    return out;
+}
+
+void VulkanVDPRenderer::OpDumpFrameEnd() {
+    const uint32_t frame = m_opDumpFrames++;
+    vdp1::Vdp1OpDump &d = *m_opDump;
+    if (!m_gpuVdp1) {
+        if (m_opDumpCollecting || frame + 1 == d.frame) {
+            Log("VDP1 op dump: abandoned (VDP1 is not on the GPU)");
+            m_opDump.reset();
+            m_opDumpCollecting = false;
+        }
+        return;
+    }
+    if (frame + 1 == d.frame) {
+        d.fbramStart = OpDumpSlices();
+        if (d.fbramStart.empty()) {
+            Log("VDP1 op dump: abandoned (the start framebuffers could not be read back)");
+            m_opDump.reset();
+            return;
+        }
+        d.vramStart.assign(m_state.mem1.VRAM.begin(), m_state.mem1.VRAM.end());
+        m_opDumpCollecting = true;
+        return;
+    }
+    if (frame != d.frame || !m_opDumpCollecting) {
+        return;
+    }
+    m_opDumpCollecting = false;
+    d.fbramEnd = OpDumpSlices();
+    if (d.fbramEnd.empty()) {
+        Log("VDP1 op dump: abandoned (the end framebuffers could not be read back)");
+        m_opDump.reset();
+        return;
+    }
+    d.drawFB = m_state.fbIndex.draw & 1u;
+    d.displayFB = m_state.fbIndex.display & 1u;
+    d.hres = m_HRes;
+    d.vres = m_VRes;
+    d.exclusiveMonitor = m_exclusiveMonitor ? 1u : 0u;
+    d.deinterlace = m_enhancements.deinterlace ? 1u : 0u;
+    d.transparentMeshes = m_enhancements.transparentMeshes ? 1u : 0u;
+    d.tvmr = m_state.regs1.ReadTVMR();
+    d.fbcr = m_state.regs1.ReadFBCR();
+    for (uint32_t i = 0; i < d.vdp2Regs.size(); ++i) {
+        d.vdp2Regs[i] = m_state.regs2.Read<true>(i * 2u);
+    }
+    const uint32_t cramMode = m_state.regs2.vramControl.colorRAMMode;
+    for (uint32_t i = 0; i < d.palette.size(); ++i) {
+        if (cramMode == 2) {
+            d.palette[i] = m_state.mem2.ReadCRAM<uint32>((i * 4u) & 0xFFC) & 0xFFFFFFu; // Color888: R low
+        } else {
+            const Color555 c{.u16 = m_state.mem2.ReadCRAM<uint16>((i * 2u) & (cramMode == 0 ? 0x7FE : 0xFFE))};
+            const auto x8 = [](uint32_t v5) { return (v5 << 3) | (v5 >> 2); };
+            d.palette[i] = x8(c.r) | (x8(c.g) << 8) | (x8(c.b) << 16);
+        }
+    }
+    std::string error;
+    if (vdp1::WriteVdp1OpDump(m_opDumpPath, d, &error)) {
+        Log("VDP1 op dump: frame " + std::to_string(d.frame) + ", " + std::to_string(d.lists.size()) +
+            " op lists written to " + m_opDumpPath);
+    } else {
+        Log("VDP1 op dump: " + error);
+    }
+    m_opDump.reset();
+}
+
 // -----------------------------------------------------------------------------
 // VDP2 (front half, then the GPU)
 
@@ -1158,6 +1256,9 @@ void VulkanVDPRenderer::VDP2EndFrame() {
         m_vdp1Front.MarkFrameBoundary();
         QueueVdp1Ops();
         m_vdp1BeforeFrame = m_vdp1Queue.size();
+    }
+    if (m_opDump) {
+        OpDumpFrameEnd();
     }
     if (FrameProbe) {
         if (m_vdp1Backend) {

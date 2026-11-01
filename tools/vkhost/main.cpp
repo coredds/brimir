@@ -59,6 +59,8 @@ struct CliArgs {
     bool hasRegion = false;
     uint32_t rotation = 0; // brimir_rotation from --option (for the sample-point mapping)
     std::string fixedDate; // --fixed-date [date]: the BRIMIR_RTC_FIXED value ("" = off)
+    int dumpVdp1OpsFrame = 0;   // --dump-vdp1-ops F <dir> (0: off)
+    std::string dumpVdp1OpsDir;
 };
 
 void PrintUsage(std::FILE* out) {
@@ -150,6 +152,11 @@ void PrintUsage(std::FILE* out) {
         "                the pinned 1994 timestamp in its RTC file, so use a scratch copy (tools/README.md).\n"
         "                With --compare-state every section of each state pair must match (brimir_state_diff --strict)\n"
         "  --dump-every N  with --dump-dir: write only recorded frames 0, N, 2N, ... (not with --dump-frame)\n"
+        "  --dump-vdp1-ops F <dir>  with --vulkan and VDP1 on the GPU: capture the VDP1 work of the core's VDP2 frame F\n"
+        "                (1 or more, counted from the renderer's attach, about frame F counting warmup frames from 0)\n"
+        "                into <dir>/vdp1ops_<F>.bin: the op lists, all FBRAM slices before and after them, VDP1 VRAM,\n"
+        "                the VDP2 registers and colours (src/gpu/vdp1/vdp1_op_dump.hpp; sets BRIMIR_VDP1_DUMP_OPS).\n"
+        "                Exit 2 when the file was not written (the core logs why)\n"
         "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"
         "  --set-option-at F key=value  a live option change before frame F (counting warmup frames from 0), reported\n"
         "                to the core by GET_VARIABLE_UPDATE (repeatable)\n"
@@ -292,6 +299,15 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 return ParseResult::Error;
             }
             args.config.saveStatePath = argv[i + 2];
+            i += 2;
+            continue;
+        }
+        if (opt == "--dump-vdp1-ops") { // two values
+            if (i + 2 >= argc || !ParseInt(argv[i + 1], args.dumpVdp1OpsFrame) || args.dumpVdp1OpsFrame == 0) {
+                std::fprintf(stderr, "--dump-vdp1-ops needs a frame number (1 or more) and a directory\n");
+                return ParseResult::Error;
+            }
+            args.dumpVdp1OpsDir = argv[i + 2];
             i += 2;
             continue;
         }
@@ -541,6 +557,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     }
     if (args.dumpEvery != 0 && args.dumpFrame >= 0) {
         std::fprintf(stderr, "--dump-every and --dump-frame cannot be combined\n");
+        return ParseResult::Error;
+    }
+    if (args.dumpVdp1OpsFrame != 0 && (!args.config.vulkan || args.compare || args.config.refuseHw)) {
+        std::fprintf(stderr, "--dump-vdp1-ops needs --vulkan (not --compare or --refuse-hw)\n");
         return ParseResult::Error;
     }
     if (args.compare && args.config.saveStateEvery != 0) {
@@ -849,6 +869,21 @@ int main(int argc, char** argv) {
 #endif
     }
 
+    fs::path vdp1OpsFile;
+    if (args.dumpVdp1OpsFrame != 0) {
+        std::error_code ec;
+        fs::create_directories(args.dumpVdp1OpsDir, ec);
+        vdp1OpsFile = fs::path(args.dumpVdp1OpsDir) / ("vdp1ops_" + std::to_string(args.dumpVdp1OpsFrame) + ".bin");
+        fs::remove(vdp1OpsFile, ec);
+        // Read by the core when the Vulkan VDP renderer attaches.
+        const std::string value = std::to_string(args.dumpVdp1OpsFrame) + "|" + vdp1OpsFile.string();
+#ifdef _WIN32
+        _putenv_s("BRIMIR_VDP1_DUMP_OPS", value.c_str());
+#else
+        setenv("BRIMIR_VDP1_DUMP_OPS", value.c_str(), 1);
+#endif
+    }
+
     if (args.compare) {
         vkhost::CompareConfig compare;
         compare.args.assign(argv + 1, argv + argc);
@@ -962,6 +997,15 @@ int main(int argc, char** argv) {
     }
     if (sink.Failed()) {
         return 2;
+    }
+    if (!vdp1OpsFile.empty()) {
+        std::error_code ec;
+        if (!fs::exists(vdp1OpsFile, ec)) {
+            std::fprintf(stderr, "vkhost: VDP1 op dump: %s was not written\n", vdp1OpsFile.string().c_str());
+            return 2;
+        }
+        std::fprintf(stderr, "vkhost: VDP1 op dump: %s (%llu bytes)\n", vdp1OpsFile.string().c_str(),
+                     static_cast<unsigned long long>(fs::file_size(vdp1OpsFile, ec)));
     }
     return report.problems.empty() ? 0 : 3;
 }

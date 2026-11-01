@@ -59,6 +59,7 @@
 //    caller has frame contexts (sync slots plus hidden contexts; typically 1-3 frames). Avoiding it would need waits.
 
 #include "gpu/vdp1/vdp1_front.hpp"
+#include "gpu/vdp1/vdp1_op_dump.hpp"
 #include "gpu/vdp1/vdp1_vulkan_backend.hpp"
 #include "gpu/vdp2/vdp2_front.hpp"
 #include "gpu/vdp2/vdp2_vulkan_backend.hpp"
@@ -138,6 +139,12 @@ public:
     };
     std::function<void(const vdp2::Vdp2FeatureCounters &features, double frontSeconds, const Vdp1ProbeTimes &vdp1)>
         FrameProbe;
+    // Diagnostics (brimir_vkhost --dump-vdp1-ops): in Gpu VDP1 mode, captures the VDP1 work of VDP2 frame `frame`
+    // (counting VDP2EndFrame calls from this call, from 0) into the file `path` (vdp1_op_dump.hpp): at the end of frame
+    // frame - 1 a Dump sync makes every slice current (the start state), the op lists taken until the end of `frame`
+    // are kept, and a second Dump sync gives the end state. An FBRAM upload in between (reset, state load, mode change)
+    // abandons the capture. Logged either way.
+    void SetVdp1OpDump(uint32_t frame, std::string path);
 
     // A recorded frame waits for RecordPendingFrame (only while attached).
     bool HasPendingFrame() const;
@@ -376,6 +383,9 @@ private:
     bool SyncSubmit(Vdp1SyncKind kind, FramePolicy policy, uint32_t extra);
     // Hands VDP1 to the inner renderer: doubleV, mesh and alt from the shadow (VDPState holds main).
     void HandToSoftware();
+    // SetVdp1OpDump: at the end of every VDP2 frame in Gpu VDP1 mode
+    void OpDumpFrameEnd();
+    std::vector<uint8_t> OpDumpSlices(); // all eight slices after a Dump sync
 
     ymir::vdp::VDPState &m_state;
     std::unique_ptr<ymir::vdp::SoftwareVDPRenderer> m_vdp1; // the software VDP1 backend
@@ -425,6 +435,11 @@ private:
     bool m_saveSyncFailLogged = false;
     bool m_readbackMemoryLogged = false;     // the VDP1 back half's readback memory choice (its only log line)
     bool m_failSaveSync = false;             // FailSaveSyncForTest
+    // SetVdp1OpDump
+    std::unique_ptr<vdp1::Vdp1OpDump> m_opDump; // set while a capture is requested
+    std::string m_opDumpPath;
+    uint32_t m_opDumpFrames = 0;                // VDP2EndFrame calls since SetVdp1OpDump
+    bool m_opDumpCollecting = false;
 };
 
 } // namespace brimir::gpu

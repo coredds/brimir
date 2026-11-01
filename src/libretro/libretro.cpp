@@ -308,6 +308,24 @@ static void set_vdp2_probe(brimir::gpu::VulkanVDPRenderer& renderer) {
     };
 }
 
+// Diagnostics: BRIMIR_VDP1_DUMP_OPS="<frame>|<file>" (brimir_vkhost --dump-vdp1-ops) captures the GPU VDP1 work of
+// one VDP2 frame, counted from the renderer's attach (VulkanVDPRenderer::SetVdp1OpDump). Once per process.
+static void set_vdp1_op_dump(brimir::gpu::VulkanVDPRenderer& renderer) {
+    static bool done = false;
+    const char* env = std::getenv("BRIMIR_VDP1_DUMP_OPS");
+    if (done || env == nullptr) {
+        return;
+    }
+    const std::string text = env;
+    const size_t bar = text.find('|');
+    if (bar == std::string::npos || bar == 0 || bar + 1 == text.size()) {
+        return;
+    }
+    done = true;
+    renderer.SetVdp1OpDump(static_cast<uint32_t>(std::strtoul(text.substr(0, bar).c_str(), nullptr, 10)),
+                           text.substr(bar + 1));
+}
+
 // VDP1 runs on the GPU (GPU stage 2) whenever the Vulkan VDP renderer is attached; the debug override
 // BRIMIR_VDP1_GPU=0 (brimir_vkhost --software-vdp1) keeps it in software inside the Vulkan VDP renderer, as in stage 1
 // (also the fallback when the VDP1 back half cannot be created, and VDP1 while the renderer is detached).
@@ -342,6 +360,7 @@ static void sync_vdp_renderer(void) {
             renderer->SetVdp1Mode(vdp1_mode_requested() ? brimir::gpu::Vdp1Mode::Gpu : brimir::gpu::Vdp1Mode::Software);
             if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
                 set_vdp2_probe(*renderer);
+                set_vdp1_op_dump(*renderer);
                 brimir_log(RETRO_LOG_INFO, "Vulkan VDP2 renderer active");
                 if (renderer->GpuVdp1()) {
                     brimir_log(RETRO_LOG_INFO, "Vulkan VDP1 renderer active (VDP1 on the GPU)");
