@@ -21,9 +21,11 @@
 //   their own). Each thread evaluates its sample as "native value + (sub-position * step) / span" (NBGSubPosition,
 //   RBGSubPosition; stage1c-upscaling-research.md sections 1.2-1.4), which is the native value at sub-position 0:
 //   NBG scroll, zoom, line zoom, vertical scroll and vertical cell scroll; RBG screen coordinates along the line and
-//   between lines with the line's own increments. Windows, mosaic (NBGs per axis), coefficient addresses and values,
-//   rotation parameter selection, and NBGs using the character table stay native. The colour calculation window and
-//   the RBG line colours are native and written by the first thread of the pixel only.
+//   between lines with the line's own increments; RBG scale coefficients between a line's entry and the entry one
+//   dKAst on (guarded, stage3-research.md section 4). Windows, mosaic (NBGs per axis), coefficient addresses,
+//   transparency, line colour data and viewpoint X, rotation parameter selection, and NBGs using the character table
+//   stay native. The colour calculation window and the RBG line colours are native and written by the first thread
+//   of the pixel only.
 // Where Ymir differs from Brimir's software renderer (the reference), the software semantics are ported, each marked
 // "// Brimir: matches software (sw:<lines>)": RBG line colours read the RGB555 table of CRAM word (address & 0x7FF);
 // NBG scroll, mosaic, vertical cell scroll and character pattern delay; RBG mosaic.
@@ -467,6 +469,14 @@ RotCoefficient ReadRotCoefficient(const uint coeffDataSize, const uint coeffData
     return coeff;
 }
 
+// Brimir: the discontinuity guard of the coefficient interpolation between lines: same sign and a difference of at most
+// half the larger magnitude. In VF2's and Panzer Dragoon II Zwei's floor tables it rejects only the clamped horizon
+// entry and passes every other pair of the 1 / distance progression (a fixed threshold would also reject the steep
+// pairs just below the horizon). Scale values are signed 24-bit, so neither this nor the interpolation overflows.
+bool CoefficientsInterpolable(const int c0, const int c1) {
+    return (c0 ^ c1) >= 0 && 2 * abs(c1 - c0) <= max(abs(c0), abs(c1));
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Rotation parameter calculation
 
@@ -531,7 +541,18 @@ uint2 CalcRotationScreenCoords(uint2 pos, int2 sub, int2 span, uint index) {
         const uint KA = base.KA + KAxofs;
 
         // Read and apply rotation coefficient
-        const RotCoefficient coeff = ReadRotCoefficient(coeffDataSize, coeffDataMode, KA);
+        RotCoefficient coeff = ReadRotCoefficient(coeffDataSize, coeffDataMode, KA);
+
+        // Brimir: a sub-line in a scale mode takes the coefficient between the line's entry and the entry one dKAst
+        // on (the line's own increment, not the next line's KA, which may be a reload), when that entry is fetchable
+        // and opaque and the pair passes the discontinuity guard (stage3-research.md section 4); the address,
+        // transparency and line colour data stay native, and so does viewpoint X.
+        if (sub.y != 0 && coeffDataMode != kCoeffDataModeViewpointX && !coeff.transparent) {
+            const RotCoefficient next = ReadRotCoefficient(coeffDataSize, coeffDataMode, KA + uint(t.dKAst));
+            if (!next.transparent && CoefficientsInterpolable(coeff.value, next.value)) {
+                coeff.value += ((next.value - coeff.value) * sub.y) / span.y;
+            }
+        }
 
         switch (coeffDataMode) {
             case kCoeffDataModeScaleCoeffXY:

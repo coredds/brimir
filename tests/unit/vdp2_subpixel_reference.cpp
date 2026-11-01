@@ -84,8 +84,18 @@ Dot RBGDotAt(const RBGFrame &frame, uint32_t X, uint32_t Y) {
     const int64_t lines = reloaded ? line - frame.reloadLine : line;
     const int64_t baseXst = T.Xst + lines * T.deltaXst;
     const int64_t baseYst = T.Yst + lines * T.deltaYst;
-    // KA is never re-read: it accumulates from line 0 (both tables have the same dKAst)
-    const int64_t KA = frame.table.KAst + int64_t{line} * frame.table.dKAst + x * T.dKAx;
+    // KA accumulates by the dKAst of each line's table (the reload line's own included), or is re-read
+    int64_t lineKA;
+    if (!reloaded) {
+        lineKA = frame.table.KAst + int64_t{line} * frame.table.dKAst;
+    } else if (frame.reloadKAst) {
+        lineKA = frame.reloaded.KAst + lines * frame.reloaded.dKAst;
+    } else {
+        lineKA = frame.table.KAst + (int64_t{frame.reloadLine} - 1) * frame.table.dKAst +
+                 (lines + 1) * frame.reloaded.dKAst;
+    }
+    // 16.10, unsigned 26 bits as the hardware's register
+    const int64_t KA = (lineKA + x * T.dKAx) & 0x3FFFFFF;
 
     const int64_t Xst = baseXst + SubOffset(t, T.deltaXst, spanT);
     const int64_t Yst = baseYst + SubOffset(t, T.deltaYst, spanT);
@@ -94,19 +104,43 @@ Dot RBGDotAt(const RBGFrame &frame, uint32_t X, uint32_t Y) {
     const int64_t Tz = T.Zst - (T.Pz << 10);
     const int64_t Xsp = (T.A * Tx + T.B * Ty + T.C * Tz) >> 10;
     const int64_t Ysp = (T.D * Tx + T.E * Ty + T.F * Tz) >> 10;
-    const int64_t Xp = T.A * (T.Px - T.Cx) + T.B * (T.Py - T.Cy) + T.C * (T.Pz - T.Cz) + (T.Cx << 10) + T.Mx;
+    int64_t Xp = T.A * (T.Px - T.Cx) + T.B * (T.Py - T.Cy) + T.C * (T.Pz - T.Cz) + (T.Cx << 10) + T.Mx;
     const int64_t Yp = T.D * (T.Px - T.Cx) + T.E * (T.Py - T.Cy) + T.F * (T.Pz - T.Cz) + (T.Cy << 10) + T.My;
     const int64_t dXh = (T.A * T.deltaX + T.B * T.deltaY) >> 10;
     const int64_t dYh = (T.D * T.deltaX + T.E * T.deltaY) >> 10;
 
     int64_t kx = T.kx, ky = T.ky;
     if (frame.coefficient) {
-        kx = ky = frame.coefficient(static_cast<uint32_t>(KA >> 10));
+        const Coefficient c0 = frame.coefficient(static_cast<uint32_t>(KA >> 10));
+        if (!c0.fetchable || c0.transparent) {
+            return {0, 0, true};
+        }
+        int64_t c = c0.value;
+        if (t != 0 && frame.coeffMode != CoeffMode::ViewpointX) {
+            const int64_t KA1 = (KA + T.dKAst) & 0x3FFFFFF;
+            const Coefficient c1 = frame.coefficient(static_cast<uint32_t>(KA1 >> 10));
+            if (c1.fetchable && !c1.transparent && CoefficientsInterpolable(c0.value, c1.value)) {
+                c = c0.value + SubOffset(t, c1.value - c0.value, spanT);
+            }
+        }
+        switch (frame.coeffMode) {
+        case CoeffMode::ScaleXY: kx = ky = c; break;
+        case CoeffMode::ScaleX: kx = c; break;
+        case CoeffMode::ScaleY: ky = c; break;
+        case CoeffMode::ViewpointX: Xp = c * 4; break;
+        }
     }
 
     const int64_t scrX = Xsp + x * dXh + SubOffset(s, dXh, spanS);
     const int64_t scrY = Ysp + x * dYh + SubOffset(s, dYh, spanS);
     return {((kx * scrX >> 16) + Xp) >> 10, ((ky * scrY >> 16) + Yp) >> 10};
+}
+
+bool CoefficientsInterpolable(int64_t c0, int64_t c1) {
+    const int64_t a0 = c0 < 0 ? -c0 : c0;
+    const int64_t a1 = c1 < 0 ? -c1 : c1;
+    const int64_t d = c1 > c0 ? c1 - c0 : c0 - c1;
+    return (c0 < 0) == (c1 < 0) && 2 * d <= (a0 > a1 ? a0 : a1);
 }
 
 } // namespace brimir::test::subpixel

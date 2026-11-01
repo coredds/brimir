@@ -3921,29 +3921,35 @@ bool DecodeCoord(uint32_t pixel, uint32_t &u, uint32_t &v) {
 using CoordExpect = std::function<sp::Dot(uint32_t n, uint32_t X, uint32_t Y)>;
 
 struct CoordCheck {
-    uint64_t pixels = 0, mismatches = 0;
+    uint64_t pixels = 0, mismatches = 0, transparent = 0;
     uint32_t x = 0, y = 0, pixel = 0; // the first mismatch
     int64_t wantU = 0, wantV = 0;
+    bool wantTransparent = false;
 
     std::string Describe() const {
         std::ostringstream out;
-        out << pixels << " pixels decoded, " << mismatches << " differ from the reference";
+        out << pixels << " pixels decoded (" << transparent << " transparent), " << mismatches
+            << " differ from the reference";
         if (mismatches != 0) {
             uint32_t u = 0, v = 0;
             const bool decoded = DecodeCoord(pixel, u, v);
-            out << "; first at (" << x << ", " << y << "): reference (" << (wantU & 127) << ", " << (wantV & 255)
-                << "), frame " << (decoded ? "(" + std::to_string(u) + ", " + std::to_string(v) + ")" : "not a texel")
+            out << "; first at (" << x << ", " << y << "): reference "
+                << (wantTransparent ? std::string("transparent")
+                                    : "(" + std::to_string(wantU & 127) + ", " + std::to_string(wantV & 255) + ")")
+                << ", frame " << (decoded ? "(" + std::to_string(u) + ", " + std::to_string(v) + ")" : "not a texel")
                 << " (0x" << std::hex << (pixel & 0xFFFFFF) << ")";
         }
         return out.str();
     }
 };
 
-// Every pixel of an n x frame (n * width x n * height) against the reference.
+// Every pixel of an n x frame (n * width x n * height) against the reference. Where the reference has no texel (a
+// transparent coefficient), the pixel is the 1x frame's (the back screen) at its native position.
 CoordCheck CheckCoords(const std::vector<uint32_t> &frame, uint32_t width, uint32_t height, uint32_t n,
-                       const CoordExpect &expect) {
+                       const CoordExpect &expect, const std::vector<uint32_t> &native) {
     CoordCheck check;
-    if (frame.size() != static_cast<size_t>(width) * height * n * n) {
+    if (frame.size() != static_cast<size_t>(width) * height * n * n ||
+        native.size() != static_cast<size_t>(width) * height) {
         return check;
     }
     const uint32_t pitch = width * n;
@@ -3953,13 +3959,21 @@ CoordCheck CheckCoords(const std::vector<uint32_t> &frame, uint32_t width, uint3
             const sp::Dot want = expect(n, X, Y);
             uint32_t u = 0, v = 0;
             ++check.pixels;
-            if (!DecodeCoord(pixel, u, v) || u != (want.u & 127) || v != (want.v & 255)) {
+            const bool match =
+                want.transparent
+                    ? (pixel & 0xFFFFFF) == (native[static_cast<size_t>(Y / n) * width + X / n] & 0xFFFFFF)
+                    : DecodeCoord(pixel, u, v) && u == (want.u & 127) && v == (want.v & 255);
+            if (want.transparent) {
+                ++check.transparent;
+            }
+            if (!match) {
                 if (check.mismatches++ == 0) {
                     check.x = X;
                     check.y = Y;
                     check.pixel = pixel;
                     check.wantU = want.u;
                     check.wantV = want.v;
+                    check.wantTransparent = want.transparent;
                 }
             }
         }
@@ -3973,6 +3987,8 @@ struct CoordScene {
     CoordExpect expect;
     // v never decreases from one N x row to the next (woven interlace: both fields from the same bases)
     bool monotoneV = false;
+    // the scene has transparent coefficients (pixels the reference expects to show the back screen)
+    bool transparency = false;
 };
 
 // The backward vertical steps of an n x frame: pixels (X, Y + 1) whose decoded v is below that of (X, Y) (mod 256,
@@ -4210,20 +4226,55 @@ struct CoordRBG {
     uint16_t tvmd = 0;
     bool deinterlace = false;
     RotTable table = Rotated(0.3, 0.9);
-    bool coefficients = false; // mode 0 (kx = ky), two words, from VRAM bank B0
+    bool coefficients = false; // mode 0 (kx = ky), two words, from VRAM bank B0 (CoordCoefficient)
     bool perDot = true;
     uint32_t reloadLine = UINT32_MAX; // the table becomes `reloaded` here, Xst and Yst re-read (RPRCTL)
     RotTable reloaded;
+    bool reloadKAst = false; // KAst re-read at reloadLine too
+    // A coefficient table of its own (enables coefficients, with the tables' kast, dkast and dkax as given): the data
+    // word of each entry (two-word, or the low 16 bits one-word) for entries coeffFirst .. coeffFirst + coeffCount - 1
+    // (relative to the table's address offset), from bank B0 (bank B1 is not designated: per-dot reads there fail).
+    std::function<uint32_t(uint32_t entry)> coeffData;
+    uint32_t coeffFirst = 0, coeffCount = 1024;
+    bool oneWord = false;
+    sp::CoeffMode coeffMode = sp::CoeffMode::ScaleXY;
+    bool transparency = false; // some entries are transparent
 };
 
+// The VRAM address of coefficient entry `entry` (KTAOF = 1 two-word, 2 one-word: the table starts at 0x40000).
+uint32_t CoordCoefficientAddress(uint32_t entry, bool oneWord) {
+    return oneWord ? ((0x20000 + entry) * 2) & 0x7FFFF : ((0x10000 + entry) * 4) & 0x7FFFF;
+}
+
+// A coefficient entry as the hardware decodes it (two-word: 8.16 value in bits 0-23, transparency bit 31; one-word:
+// 1.5.10 value, transparency bit 15; viewpoint X shifts the data by 8 or 14 instead of 0 or 6).
+sp::Coefficient DecodeCoordCoefficient(uint32_t data, bool oneWord, sp::CoeffMode mode, uint32_t entry) {
+    sp::Coefficient c;
+    const uint32_t address = CoordCoefficientAddress(entry, oneWord);
+    c.fetchable = address >= 0x40000 && address < 0x60000;
+    const bool vpx = mode == sp::CoeffMode::ViewpointX;
+    if (oneWord) {
+        const int64_t value = static_cast<int16_t>(static_cast<uint16_t>(data << 1)) >> 1; // 15 bits, signed
+        c.value = value * (vpx ? 1 << 14 : 1 << 6);
+        c.transparent = (data & 0x8000) != 0;
+    } else {
+        const int64_t value = static_cast<int32_t>(data << 8) >> 8; // 24 bits, signed
+        c.value = value * (vpx ? 1 << 8 : 1);
+        c.transparent = (data & 0x80000000u) != 0;
+    }
+    return c;
+}
+
 CoordScene CoordRBGScene(std::string name, CoordRBG c) {
-    for (RotTable *t : {&c.table, &c.reloaded}) {
-        if (c.coefficients) {
+    if (c.coefficients && !c.coeffData) {
+        for (RotTable *t : {&c.table, &c.reloaded}) {
             t->kast = 0;
             t->dkast = c.perDot ? 0.25 : 1.0;
             t->dkax = c.perDot ? 1.0 : 0.0;
         }
+        c.coeffData = [](uint32_t entry) { return static_cast<uint32_t>(CoordCoefficient(entry)) & 0xFFFFFF; };
     }
+    c.coefficients = static_cast<bool>(c.coeffData);
     Vdp2Scene scene = Make(
         [c](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
             Base(w, s, rng, static_cast<uint16_t>(kDisp | c.tvmd));
@@ -4240,10 +4291,19 @@ CoordScene CoordRBGScene(std::string name, CoordRBG c) {
             w.Reg(RPTAL, static_cast<uint16_t>((kRotTableAddress >> 1) & 0xFFFE));
             w.Reg(RPMD, 0);
             if (c.coefficients) {
-                w.Reg(KTCTL, 0x0001);
-                w.Reg(KTAOF, 0x0101);
-                for (uint32_t i = 0; i < 1024; ++i) {
-                    w.VRAM32(0x40000 + i * 4, static_cast<uint32_t>(CoordCoefficient(i)) & 0xFFFFFF);
+                w.Reg(KTCTL, static_cast<uint16_t>(0x0001 | (c.oneWord ? 0x0002 : 0) |
+                                                   (static_cast<uint32_t>(c.coeffMode) << 2)));
+                w.Reg(KTAOF, c.oneWord ? 0x0202 : 0x0101);
+                for (uint32_t i = c.coeffFirst; i < c.coeffFirst + c.coeffCount; ++i) {
+                    const uint32_t address = CoordCoefficientAddress(i, c.oneWord);
+                    if (address < 0x40000 || address >= 0x60000) {
+                        continue;
+                    }
+                    if (c.oneWord) {
+                        w.VRAM16(address, static_cast<uint16_t>(c.coeffData(i)));
+                    } else {
+                        w.VRAM32(address, c.coeffData(i));
+                    }
                 }
             }
         },
@@ -4254,7 +4314,7 @@ CoordScene CoordRBGScene(std::string name, CoordRBG c) {
                 WriteRotTable(w, kRotTableAddress, c.table);
             } else if (y == c.reloadLine) {
                 WriteRotTable(w, kRotTableAddress, c.reloaded);
-                w.Reg(RPRCTL, 0x0003); // re-read Xst and Yst
+                w.Reg(RPRCTL, c.reloadKAst ? 0x0007 : 0x0003); // re-read Xst and Yst (and KAst)
             }
         };
     }
@@ -4264,15 +4324,49 @@ CoordScene CoordRBGScene(std::string name, CoordRBG c) {
     frame.table = ToRotParams(c.table);
     frame.reloadLine = c.reloadLine;
     frame.reloaded = ToRotParams(c.reloaded);
+    frame.reloadKAst = c.reloadKAst;
+    frame.coeffMode = c.coeffMode;
     if (c.coefficients) {
-        frame.coefficient = CoordCoefficient;
+        frame.coefficient = [data = c.coeffData, oneWord = c.oneWord, mode = c.coeffMode, first = c.coeffFirst,
+                             count = c.coeffCount](uint32_t entry) {
+            // Entries outside the written range hold 0 (the scenes start from a hard reset)
+            const uint32_t word = entry >= first && entry - first < count ? data(entry) : 0;
+            return DecodeCoordCoefficient(word, oneWord, mode, entry);
+        };
     }
     CoordExpect expect = [frame](uint32_t n, uint32_t X, uint32_t Y) {
         sp::RBGFrame f = frame;
         f.geometry.n = n;
         return sp::RBGDotAt(f, X, Y);
     };
-    return {std::move(name), std::move(scene), std::move(expect)};
+    CoordScene scene_{std::move(name), std::move(scene), std::move(expect)};
+    scene_.transparency = c.transparency;
+    return scene_;
+}
+
+// Coefficient tables of the interpolation scenes (stage3-research.md section 4), two-word data words.
+uint32_t CoeffWord(int64_t value, bool transparent = false) {
+    return (static_cast<uint32_t>(value) & 0xFFFFFF) | (transparent ? 0x80000000u : 0);
+}
+
+// A perspective floor as VF2 and Panzer Dragoon II Zwei write theirs, one entry per line: transparent sky (entries
+// 0-29), a clamped horizon entry (8.0, which fails the guard against the next), then k = 40 / (e - 20) falling to
+// about 0.17 (consecutive entries pass).
+uint32_t FloorCoefficient(uint32_t e) {
+    if (e < 30) {
+        return CoeffWord(0x10000, true);
+    }
+    if (e == 30) {
+        return CoeffWord(0x80000);
+    }
+    return CoeffWord(std::lround(65536.0 * 40.0 / (static_cast<double>(e) - 20.0)));
+}
+
+// The guard's cases in a 6-entry cycle: 1 -> 2 and 2 -> 1 (difference exactly half the larger: interpolated),
+// 1 -> 2 + 2^-16 (just over: native), a sign flip either way (native), -1 -> -1.25 (interpolated).
+uint32_t GuardCoefficient(uint32_t e) {
+    static constexpr int64_t kCycle[6] = {0x10000, 0x20000, 0x10000, 0x20001, -0x10000, -0x14000};
+    return CoeffWord(kCycle[e % 6]);
 }
 
 std::vector<CoordScene> CoordScenes() {
@@ -4351,6 +4445,98 @@ std::vector<CoordScene> CoordScenes() {
                                        {.tvmd = static_cast<uint16_t>(2 | kLSMDDouble), .deinterlace = true,
                                         .table = t}));
     }
+    // Coefficient interpolation between lines (stage 3 Task 2): the sub-lines of a line in a scale mode take
+    // c0 + ((c1 - c0) t) / (R N) between the line's entry and the one dKAst on, when both are opaque and fetchable
+    // and the guard passes; KA, transparency, per-dot steps and viewpoint X stay native.
+    {
+        RotTable floor = Rotated(0.3, 0.9);
+        floor.kast = 0;
+        floor.dkast = 1;
+        floor.dkax = 0;
+        const CoordRBG perLine = {.table = floor, .coeffData = FloorCoefficient, .coeffCount = 256,
+                                  .transparency = true};
+        scenes.push_back(CoordRBGScene("RBG0 perspective floor coefficients per line", perLine));
+        CoordRBG c = perLine;
+        c.table.dkast = 0.75; // fractional: KA + dKAst is sometimes the same entry
+        scenes.push_back(CoordRBGScene("RBG0 perspective floor, fractional dKAst", c));
+        c = perLine;
+        c.tvmd = kLSMDDouble;
+        c.deinterlace = true;
+        scenes.push_back(CoordRBGScene("RBG0 perspective floor, double density deinterlaced", c));
+        c.deinterlace = false;
+        scenes.push_back(CoordRBGScene("RBG0 perspective floor, double density woven", c));
+        c = perLine;
+        c.tvmd = 3; // 704 wide
+        scenes.push_back(CoordRBGScene("RBG0 perspective floor, hi-res 704", c));
+
+        c = perLine;
+        c.coeffData = GuardCoefficient;
+        c.transparency = false;
+        scenes.push_back(CoordRBGScene("RBG0 coefficient discontinuity guard", c));
+
+        // Per dot, every 7th entry transparent: transparent own entries show the back screen, transparent next
+        // entries keep the native coefficient.
+        c = perLine;
+        c.table.dkast = 2;
+        c.table.dkax = 1;
+        c.coeffData = [](uint32_t e) { return CoeffWord(CoordCoefficient(e), e % 7 == 3); };
+        c.coeffCount = 1024;
+        scenes.push_back(CoordRBGScene("RBG0 per-dot coefficients with transparent entries", c));
+
+        // Scale X only, per dot with half-entry horizontal steps and a 3-entry vertical step
+        c = perLine;
+        c.table.dkast = 3;
+        c.table.dkax = 0.5;
+        c.coeffMode = sp::CoeffMode::ScaleX;
+        c.coeffData = [](uint32_t e) { return CoeffWord(CoordCoefficient(e)); };
+        c.coeffCount = 1024;
+        c.transparency = false;
+        scenes.push_back(CoordRBGScene("RBG0 per-dot scale X coefficients", c));
+
+        // Scale Y only, one-word data (1.5.10), every 11th entry transparent
+        c = perLine;
+        c.oneWord = true;
+        c.coeffMode = sp::CoeffMode::ScaleY;
+        c.coeffData = [](uint32_t e) {
+            const auto value = static_cast<uint32_t>(std::lround((0.6 + e / 300.0) * 1024)) & 0x7FFF;
+            return value | (e % 11 == 5 ? 0x8000u : 0);
+        };
+        scenes.push_back(CoordRBGScene("RBG0 one-word scale Y coefficients", c));
+
+        // Viewpoint X per line: Xp = the coefficient (integer dots here) on every sub-line, never interpolated
+        c = perLine;
+        c.coeffMode = sp::CoeffMode::ViewpointX;
+        c.coeffData = [](uint32_t e) { return CoeffWord(int64_t{e} * 3 + 7); };
+        c.transparency = false;
+        scenes.push_back(CoordRBGScene("RBG0 viewpoint X coefficients", c));
+
+        // The table at the end of bank B0 (per-dot mode): line 149's next entry is in bank B1, not designated for
+        // coefficients (native); from line 150 on its own entry is (transparent).
+        c = perLine;
+        c.table.kast = 0x8000 - 150;
+        c.coeffData = [](uint32_t e) { return CoeffWord(CoordCoefficient(e)); };
+        c.coeffFirst = 0x8000 - 200;
+        c.coeffCount = 200;
+        scenes.push_back(CoordRBGScene("RBG0 coefficients at the end of the coefficient bank", c));
+
+        // Mid-frame reloads at line 100: KAst re-read (a new place in the table, a half-entry dKAst), or KA continuing
+        // with the reloaded table's 3-entry dKAst. Line 99's sub-lines use line 99's own dKAst either way.
+        c = perLine;
+        c.coeffData = [](uint32_t e) { return CoeffWord(CoordCoefficient(e)); };
+        c.coeffCount = 1024;
+        c.transparency = false;
+        c.reloadLine = 100;
+        c.reloaded = floor;
+        c.reloaded.xst = 37.25;
+        c.reloaded.yst = -12.5;
+        c.reloaded.kast = 600;
+        c.reloaded.dkast = 0.5;
+        c.reloadKAst = true;
+        scenes.push_back(CoordRBGScene("RBG0 mid-frame KAst reload", c));
+        c.reloaded.dkast = 3;
+        c.reloadKAst = false;
+        scenes.push_back(CoordRBGScene("RBG0 mid-frame dKAst change without a KAst reload", c));
+    }
     return scenes;
 }
 
@@ -4362,14 +4548,17 @@ void CheckCoordScene(gpu::VulkanDevice &device, const CoordScene &c, uint32_t n,
     INFO(result.Describe());
     REQUIRE(result.error.empty());
     CHECK(result.identical);
-    const CoordCheck native = CheckCoords(result.software, result.width, result.height, 1, c.expect);
+    // (Software's transparent pixels are its own back screen; the GPU's must equal them.)
+    const CoordCheck native = CheckCoords(result.software, result.width, result.height, 1, c.expect, result.software);
     INFO("software at 1x: " << native.Describe());
     CHECK(native.pixels == uint64_t{result.width} * result.height);
     CHECK(native.mismatches == 0);
-    const CoordCheck scaled = CheckCoords(result.gpuScaled, result.width, result.height, n, c.expect);
+    const CoordCheck scaled =
+        CheckCoords(result.gpuScaled, result.width, result.height, n, c.expect, result.software);
     INFO("GPU at " << n << "x: " << scaled.Describe());
     CHECK(scaled.pixels == uint64_t{result.width} * result.height * n * n);
     CHECK(scaled.mismatches == 0);
+    CHECK((scaled.transparent > 0) == c.transparency);
     CHECK(NonConstantBlocks(result.gpuScaled, result.width, result.height, n) > 0);
     if (c.monotoneV) {
         uint64_t compared = 0;

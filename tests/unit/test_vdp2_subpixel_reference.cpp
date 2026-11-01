@@ -181,3 +181,65 @@ TEST_CASE("The sub-pixel reference is monotone with sub-pixel steps", "[vdp2][sc
         }
     }
 }
+
+TEST_CASE("The sub-pixel reference interpolates scale coefficients between lines", "[vdp2][scale]") {
+    // The guard: same sign, the difference at most half the larger magnitude (2:1 passes, just over fails)
+    CHECK(sp::CoefficientsInterpolable(0x10000, 0x20000));
+    CHECK(sp::CoefficientsInterpolable(0x20000, 0x10000));
+    CHECK_FALSE(sp::CoefficientsInterpolable(0x10000, 0x20001));
+    CHECK(sp::CoefficientsInterpolable(-0x10000, -0x14000));
+    CHECK_FALSE(sp::CoefficientsInterpolable(0x8000, -0x8000));
+    CHECK_FALSE(sp::CoefficientsInterpolable(0, 0x100));
+    CHECK(sp::CoefficientsInterpolable(0, 0));
+
+    // The identity rotation, per-line coefficients (one entry per line): line l's coefficient is 2 + l / 4 (8.16),
+    // entry 3 is transparent, entry 6 jumps (fails the guard), and u = (k scrX) >> 16 with scrX = 64 dots.
+    sp::RBGFrame f;
+    f.table = sp::RotParams{};
+    f.table.A = f.table.E = 1024;
+    f.table.Xst = 64 << 10;
+    f.table.deltaX = 1024;
+    f.table.deltaYst = 1024;
+    f.table.dKAst = 1024;
+    f.coefficient = [](uint32_t e) {
+        sp::Coefficient c;
+        c.value = e == 6 ? 0x80000 : 0x20000 + e * 0x4000;
+        c.transparent = e == 3;
+        return c;
+    };
+    const auto u = [&](uint32_t n, uint32_t Y) {
+        f.geometry.n = n;
+        return sp::RBGDotAt(f, 0, Y);
+    };
+    // 1x and the sample points: the native coefficient
+    CHECK(u(1, 0).u == 128);
+    CHECK(u(1, 1).u == 144);
+    CHECK(u(4, 4).u == 144);
+    // Sub-lines between line 0 (2.0) and line 1 (2.25): 2.0625, 2.125, 2.1875
+    CHECK(u(4, 1).u == 132);
+    CHECK(u(4, 2).u == 136);
+    CHECK(u(4, 3).u == 140);
+    CHECK(u(3, 1).u == ((64 * (0x20000 + 0x4000 / 3)) >> 16));
+    // Next entry transparent: native; own entry transparent: transparent
+    CHECK(u(4, 2 * 4 + 2).u == u(1, 2).u);
+    CHECK(u(4, 3 * 4 + 1).transparent);
+    CHECK(u(1, 3).transparent);
+    // The guard: line 5 -> 6 jumps, so line 5's sub-lines stay native; line 6 -> 7 (8.0 -> 2.0 + 7/4) fails too
+    CHECK(u(4, 5 * 4 + 3).u == u(1, 5).u);
+    CHECK(u(4, 6 * 4 + 1).u == u(1, 6).u);
+    // Viewpoint X: never interpolated
+    f.coeffMode = sp::CoeffMode::ViewpointX;
+    f.coefficient = [](uint32_t e) { return sp::Coefficient{.value = int64_t{e} * 40 << 8}; };
+    f.geometry.n = 4;
+    CHECK(sp::RBGDotAt(f, 0, 2).u == sp::RBGDotAt(f, 0, 0).u);
+    // A KAst reload at line 10: line 9's sub-lines use line 9's own dKAst, not the reloaded address
+    f.coeffMode = sp::CoeffMode::ScaleXY;
+    f.coefficient = [](uint32_t e) { return sp::Coefficient{.value = 0x10000 + int64_t{e} * 0x800}; };
+    f.reloadLine = 10;
+    f.reloaded = f.table;
+    f.reloaded.KAst = 100 << 10;
+    f.reloadKAst = true;
+    f.geometry.n = 2;
+    CHECK(sp::RBGDotAt(f, 0, 9 * 2 + 1).u == (64 * (0x10000 + 9 * 0x800 + 0x400)) >> 16);
+    CHECK(sp::RBGDotAt(f, 0, 10 * 2).u == (64 * (0x10000 + 100 * 0x800)) >> 16);
+}

@@ -93,24 +93,26 @@ checks every module's Workgroup variables against it.
     hi-res (s = (x & 1) N + i), R = 2 in interlaced modes outside exclusive monitor modes (t = (composite row & 1) N
     + j, deinterlaced or woven: both fields share the line's rotation bases, so the woven pair is monotone too); the
     RBG line colour is stored by sub-pixel (0, 0) with the native screen coordinates;
+  - RBG scale coefficients between lines (`CalcRotationScreenCoords`, stage3-research.md section 4; design Ruling 11):
+    on a sub-line (t != 0) in a scale mode (not viewpoint X), with c0 the native coefficient at KA and c1 the entry at
+    KA + dKAst (the line's own dKAst, not the next line's KA, which may be a reload), the value is
+    `c0 + ((c1 - c0) * t) / (R N)` when c0 is opaque, c1 is fetchable and opaque, and the pair passes the guard
+    (`CoefficientsInterpolable`: same sign and 2 |c1 - c0| <= max(|c0|, |c1|), which in Virtua Fighter 2's and Panzer
+    Dragoon II Zwei's floor tables rejects only the clamped horizon entry); otherwise c0;
   - native: windows, NBG mosaic per axis (i = 0 when the mosaic is wider than one dot, the vertical position when it
-    is taller than one line), RBG mosaic (the whole layer), coefficient addresses and values, rotation parameter
-    selection, NBGs using the character table (character pattern delay, vertical cell scroll on 2x2 characters).
+    is taller than one line), RBG mosaic (the whole layer), coefficient addresses, transparency, line colour data,
+    per-dot steps (dKAx) and viewpoint X, rotation parameter selection, NBGs using the character table (character
+    pattern delay, vertical cell scroll on 2x2 characters).
 
 Sample points: at N = 2-4 the composite at (N x, N y) equals the 1x output at (x, y) for every native pixel, except
 where the span rules above deliberately move the sample point (correct by design, excluded from the comparisons in
 `tests/unit/vdp2_scene.*` and, conservatively from the frame size alone, in `brimir_vkhost --hash-sample`): odd native
 columns where an RBG is enabled in a hi-res mode; odd composite rows where an RBG is drawn in an interlaced mode
 (deinterlaced or woven); the second row of each identical pair for NBGs in single-density interlace. Known limits:
-- a perspective floor whose depth comes from per-line coefficients gains detail mostly along x, and stays vertically
-  stepped at N > 1. This is accepted (design Ruling 11): the design keeps per-line tables, the coefficient tables that
-  give floors their perspective included, per native line, so the sub-lines of a line only step by the line's own
-  deltaXst/deltaYst (stage 1C validation: on the dumped frames 0.07-8% of the blocks of Virtua Fighter 2's and Panzer
-  Dragoon II Zwei's floors have vertical sub-pixel detail, against 34-55% on Panzer Dragoon II's zoomed sky; the
-  plan's 25% figure was an estimate, and the magnified texels near the camera are content, not a rule). 1C still meets
-  "visibly sharper on VDP2 layers" (horizontal detail, rotation, zoomed NBGs, sky). Follow-up, a design change:
-  sub-line coefficient interpolation (scale-mode coefficients between KA(l) and KA(l) + dKAst when both entries are
-  non-transparent) would make floors vertically smoother;
+- perspective floors from per-line coefficients were vertically stepped at N > 1 in stage 1C (design Ruling 11);
+  the coefficient interpolation above closes that (non-constant blocks on Virtua Fighter 2's floor 7.5% -> 22.9% at
+  2x, 11.0% -> 31.4% at 4x; Panzer Dragoon II Zwei's floor 12.9% -> 39.1% and 18.9% -> 50.7%). The horizon line and
+  coefficient plateaus from a fractional dKAst still step;
 - a double-density bitmap NBG with vertical line scroll (alternate-line off) can show a sub-row sawtooth at N > 1
   (parked; the sample points are unchanged);
 - exception W5 is unchanged at N (its NBG does not use the character table).

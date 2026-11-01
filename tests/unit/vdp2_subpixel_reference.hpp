@@ -29,9 +29,11 @@ struct Geometry {
 /// @brief value(sub) = (sub * step) / span, truncated toward zero.
 int64_t SubOffset(int64_t sub, int64_t step, int64_t span);
 
-/// @brief A dot position, before the layer's wrap (the caller masks it to the bitmap size).
+/// @brief A dot position, before the layer's wrap (the caller masks it to the bitmap size). `transparent`: the layer
+/// shows nothing there (an RBG dot whose coefficient is transparent).
 struct Dot {
     int64_t u = 0, v = 0;
+    bool transparent = false;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -79,14 +81,28 @@ struct RotParams {
     int64_t KAst = 0, dKAst = 0, dKAx = 0;   // 16.10, 10.10, 10.10 (relative to the table's address offset)
 };
 
+enum class CoeffMode { ScaleXY, ScaleX, ScaleY, ViewpointX };
+
+/// @brief A coefficient table entry as the hardware decodes it: the value (8.16 in the scale modes; in viewpoint X
+/// mode the data shifted as the hardware does before Xp = value * 4) and the transparency bit. `fetchable` false: the
+/// entry is in a VRAM bank not designated for coefficients (per-dot mode), read as transparent.
+struct Coefficient {
+    int64_t value = 0;
+    bool transparent = false;
+    bool fetchable = true;
+};
+
 struct RBGFrame {
     Geometry geometry;
     RotParams table;
-    // From this VDP line on (Xst and Yst re-read at that line, as RPRCTL requests), the table is `reloaded`.
+    // From this VDP line on (Xst and Yst re-read at that line, as RPRCTL requests), the table is `reloaded`; with
+    // reloadKAst also KA (re-read from reloaded.KAst), else KA keeps accumulating, by the dKAst of each line's table.
     uint32_t reloadLine = UINT32_MAX;
     RotParams reloaded;
-    // Coefficients (mode 0: kx = ky = the coefficient, 8.16) by entry index (KA >> 10), when set.
-    std::function<int64_t(uint32_t entry)> coefficient;
+    bool reloadKAst = false;
+    // Coefficients by entry index (KA >> 10, relative to the table's address offset), when set.
+    std::function<Coefficient(uint32_t entry)> coefficient;
+    CoeffMode coeffMode = CoeffMode::ScaleXY;
 };
 
 /// @brief The RBG dot of N x composite pixel (X, Y).
@@ -100,9 +116,18 @@ struct RBGFrame {
 ///   Xsp = (A (Xst' - Px 2^10) + B (Yst' - Py 2^10) + C (Zst - Pz 2^10)) >> 10, Ysp with D, E, F
 ///   Xp = A (Px - Cx) + B (Py - Cy) + C (Pz - Cz) + Cx 2^10 + Mx, Yp likewise
 ///   dXh = (A deltaX + B deltaY) >> 10, dYh = (D deltaX + E deltaY) >> 10
-///   k = the coefficient of entry (KAst + l dKAst + x dKAx) >> 10 (native x and l), else kx/ky
+///   KA = KA(l) + x dKAx (native x and l; KA(l) accumulated per line by each line's dKAst, re-read on a KAst reload)
+///   c0 = the coefficient of entry KA >> 10; a transparent (or unfetchable) c0 makes the dot transparent
+///   c = c0, or between lines (stage3-research.md section 4), when t != 0, the mode is a scale mode and the entry
+///   c1 of (KA + T.dKAst) >> 10 is fetchable and not transparent and the pair passes the discontinuity guard (same
+///   sign, 2 |c1 - c0| <= max(|c0|, |c1|)): c = c0 + ((c1 - c0) t) / (R N)
+///   kx, ky = c per the mode (else T.kx/ky); viewpoint X: Xp = c0 * 4 (native)
 ///   scrX = Xsp + x dXh + (s dXh) / (S N), scrY likewise
 ///   u = ((kx scrX >> 16) + Xp) >> 10, v likewise.
 Dot RBGDotAt(const RBGFrame &frame, uint32_t X, uint32_t Y);
+
+/// @brief The discontinuity guard of the coefficient interpolation: c0 and c1 have the same sign and differ by at
+/// most half the larger magnitude.
+bool CoefficientsInterpolable(int64_t c0, int64_t c1);
 
 } // namespace brimir::test::subpixel
