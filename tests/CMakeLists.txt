@@ -84,6 +84,11 @@ add_executable(brimir_tests
     unit/vdp1_raster_reference.cpp
     unit/vdp1_scenario.cpp
     unit/test_vdp1_raster_reference.cpp
+    # CPU reference of the N x VDP1 rasteriser (GPU stage 3: rect / quad / replicate spans, N x resolve) on the same
+    # op lists, against the native reference; plus the render mode for captured frames ([.][nx-render])
+    unit/vdp1_nx_reference.cpp
+    unit/test_vdp1_nx_reference.cpp
+    unit/test_vdp1_nx_render.cpp
     # VDP1 shaders on the Vulkan 1.2 baseline: SPIR-V checks ([vdp1] runs without Vulkan) and pipeline creation
     # ([gpu], compiled with BRIMIR_VULKAN only)
     unit/test_gpu_vdp1_pipelines.cpp
