@@ -1,4 +1,4 @@
-# VDP1 compute shaders (GPU stage 2)
+# VDP1 compute shaders (GPU stages 2 and 3)
 
 The compute shaders of the Vulkan VDP1 back half (`src/gpu/vdp1/vdp1_vulkan_backend.*`). They replay, in emulation
 order, the op lists of the Vulkan-free front half (`src/gpu/vdp1/vdp1_front.*`): draw batches, erases and CPU
@@ -17,9 +17,28 @@ reads it at the display framebuffer); its slice layout (main fb0/fb1, alt fb0/fb
 | `cs_vdp1_fb_write_mark.hlsl`, `cs_vdp1_fb_write.hlsl`, `cs_vdp1_fb_write_clear.hlsl` | a run of CPU framebuffer writes (`VDP1WriteFB`) in order: mark the last writer of each byte, write the winners, clear the marks | ceil(records / 64) each |
 | `cs_vdp1_layout_probe.hlsl` | not dispatched: declares every struct so the build reflects the std430 layouts for `tests/unit/test_gpu_vdp1_params.cpp` | — |
 
+N x passes (GPU stage 3, research `docs/ymir-hw-renderer-notes/stage3-research.md` §1.4 and §2; the CPU reference
+`tests/unit/vdp1_nx_reference.*` is their specification). They draw each N x sub-batch of the front half's N x
+generator (`src/gpu/vdp1/vdp1_nx_front.*`) into the N x surface (binding 24: the eight slices, native word w as the
+N×N block of words w·N² + j·N + i), with `batch_range`, `bucket` and `scatter` reused on N x units (N²·262,144):
+
+| Shader | Does | Dispatch |
+|---|---|---|
+| `cs_vdp1_raster_nx.hlsl` | one thread per N x span: rect (native row, N sub-rows, clamp-and-phase sub-steps, reversed mapping backwards), quad (32-bit steppers over N x end points) or replicate (the native line loop, each fragment as its N×N block); N x targets (unit in bits 21-0, flags 28-22) | ceil(spans / 64) |
+| `cs_vdp1_bucket_sums_nx.hlsl`, `cs_vdp1_bucket_sums_nx_add.hlsl` | the second scan level for up to N²·4096 block totals: chunks of 4096 scanned in place with their totals stored after the blocks, then each chunk adds the totals before it | N² groups each |
+| `cs_vdp1_resolve_nx.hlsl` | the native ordered resolve (`include/vdp1_resolve.hlsli`) with the N x unit decode, in rounds of 64·G units per group | indirect, ≤ 4096 groups |
+| `cs_vdp1_erase_nx.hlsl` | the native erase's region and write limit, each erased word's N×N blocks (main, alt, mesh) | 8×8 over the region |
+| `cs_vdp1_fb_write_nx.hlsl` | after the native run: each record's blocks take its mask's bits of the final native word (main, alt mirror) | ceil(records / 64) |
+| `cs_vdp1_rebuild_nx.hlsl` | the slices of a mask replicated from native FBRAM (attach, reset, load, scale change) | N²·1024 × 8 |
+| `cs_vdp1_nx_layout_probe.hlsl` | not dispatched: the N x structs' layouts and accessors for the params test | — |
+
 Headers: `include/vdp1_defs.hlsli` (constants and packed-field accessors), `include/vdp1_params.hlsli` (the uint-only
-structs), `include/vdp1_steppers.hlsli` (32-bit ports of `LineStepper<13>`, `TextureStepper`, the Gouraud steppers),
-`include/vdp1_fbram.hlsli` (16-bit word access and `ApplyFragment`), `include/vdp1_fb_write.hlsli` (the FB-write runs).
+structs), `include/vdp1_steppers.hlsli` (32-bit ports of `LineStepper<13>`, `TextureStepper`, the Gouraud steppers;
+the line stepper also without the 13-bit shift for the N x quad path), `include/vdp1_raster_line.hlsli` (the native
+line loop and slot writer, shared by both rasters), `include/vdp1_resolve.hlsli` (the ordered resolve, shared by both
+resolves), `include/vdp1_apply_fragment.hlsli` (`ApplyFragment`), `include/vdp1_fbram_words.hlsli` (atomic 16-bit word
+access on an FBRAM-layout buffer), `include/vdp1_fbram.hlsli` and `include/vdp1_fbram_nx.hlsli` (FBRAM and N x surface
+access), `include/vdp1_fb_write.hlsli` (the FB-write runs).
 
 ## Provenance
 

@@ -5,7 +5,7 @@
 // the order key). After the pass g_unitOffsets[unit] is the end of the unit's bucket within its block.
 // Group g handles the kScatterSlotsPerGroup (256) slots from 256 g, thread t the slots 256 g + t + 64 k (k < 4).
 // Bindings (vdp1_bindings.hpp kScatterBindings): fragments (16), bucket (18), scan sums (20), unit offsets (21).
-// Push constants: BatchParams (fragmentCount).
+// Push constants: BatchParams (fragmentCount; scale above 1: an N x sub-batch, whose targets hold the N x unit).
 
 #include "vdp1_defs.hlsli"
 #include "vdp1_params.hlsli"
@@ -27,6 +27,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
     g_scanSums.GetDimensions(sums, stride);
     g_unitOffsets.GetDimensions(offsets, stride);
     const uint count = min(g_batch.fragmentCount, fragCapacity);
+    const bool nx = g_batch.scale > 1; // N x targets (GPU stage 3)
 
     for (uint k = 0; k < kSlotsPerThread; ++k) {
         const uint slot = gid.x * (64 * kSlotsPerThread) + k * 64 + tid.x;
@@ -37,7 +38,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
         if (!Vdp1FragLive(target)) {
             continue;
         }
-        const uint unit = Vdp1FragUnit(target);
+        const uint unit = nx ? Vdp1NxFragUnit(target) : Vdp1FragUnit(target);
         if (unit >= offsets || (unit >> 6) >= sums) {
             continue;
         }

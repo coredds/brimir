@@ -25,7 +25,15 @@ struct LineStepper {
     bool antiAlias;
 };
 
+// `shift`: kLineShift for LineStepper<13> (the native counters wrap at 13 bits); 0 for the N x quad path's 32-bit stepper
+// (vdp1_nx_reference.cpp NxLine: no wrap, and LineSystemClip's never-ending case needs den = 2^31, impossible there)
+LineStepper MakeLineStepperShifted(int x1, int y1, int x2, int y2, bool aa, uint shift);
+
 LineStepper MakeLineStepper(int x1, int y1, int x2, int y2, bool aa) {
+    return MakeLineStepperShifted(x1, y1, x2, y2, aa, kLineShift);
+}
+
+LineStepper MakeLineStepperShifted(int x1, int y1, int x2, int y2, bool aa, uint shift) {
     LineStepper l;
     l.x = x1;
     l.y = y1;
@@ -86,10 +94,10 @@ LineStepper MakeLineStepper(int x1, int y1, int x2, int y2, bool aa) {
         }
     }
 
-    l.num = l.num << kLineShift;
-    l.den = l.den << kLineShift;
-    l.accum = l.accum << kLineShift;
-    l.accumTarget = l.accumTarget << kLineShift;
+    l.num = l.num << shift;
+    l.den = l.den << shift;
+    l.accum = l.accum << shift;
+    l.accumTarget = l.accumTarget << shift;
     return l;
 }
 

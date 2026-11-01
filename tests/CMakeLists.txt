@@ -120,6 +120,9 @@ if(BRIMIR_VULKAN)
         unit/test_gpu_vdp2_scenes.cpp
         # VDP1 passes (raster, bucket, scatter, resolve, erase, CPU writes) on the device against the CPU reference
         unit/test_gpu_vdp1_passes.cpp
+        # N x VDP1 passes (raster_nx, bucket chain, resolve_nx, erase_nx, fb_write_nx, rebuild_nx) against the N x
+        # reference at N = 2, 3, 4
+        unit/test_gpu_vdp1_nx_passes.cpp
         # VulkanVDPRenderer with VDP1 on the GPU against the software renderer: FBRAM and frames, scene by scene
         unit/test_gpu_vdp1_scenes.cpp
         # The VDP1 parity fuzzer: seeded random programs, FBRAM after every op, GPU against software

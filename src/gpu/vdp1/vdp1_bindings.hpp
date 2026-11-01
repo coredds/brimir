@@ -45,6 +45,31 @@
 //                                                      resolve dispatches                       resolve
 //       23  u7        g_fbWinners     STORAGE_BUFFER   uint[kFbWinnerCount] (4 MiB)             fb_write_mark, fb_write,
 //                                                                                              fb_write_clear
+//       24  u8        g_fbramNx       STORAGE_BUFFER   the N x surface, Vdp1NxFbramBufferSize   resolve_nx, erase_nx,
+//                                                      (8 / 18 / 32 MiB at 2x / 3x / 4x)        fb_write_nx, rebuild_nx
+//
+// N x passes (GPU stage 3; research section 1.4 and 2), per N x sub-batch of a native batch (vdp1_nx_front.hpp), in this
+// order: raster_nx, batch_range, bucket, bucket_sums_nx, bucket_sums_nx_add, scatter, resolve_nx. batch_range, bucket
+// and scatter are the native passes: the unit range, bucket blocks and scatter units are then N x units (scatter reads
+// N x targets when the push constants' scale is above 1). The N x buffers: unit counts and offsets
+// uint[Vdp1NxUnitCount(N)], scan sums uint[Vdp1NxScanSumsCount(N)], the N x surface; fragments, bucket, spans, commands
+// and VRAM are the native ones (a sub-batch has at most kMaxNxSlotsPerSubBatch slots and kMaxNxSpansPerSubBatch spans).
+//   raster_nx            one thread per N x span (Vdp1NxSpan): the rect, quad or replicate raster of the span kind
+//                        (tests/unit/vdp1_nx_reference.hpp); every slot of the span written (a fragment with an N x
+//                        target, or 0), counts per N x unit, the range accumulator
+//   bucket_sums_nx       N^2 groups: group c scans its chunk of kNxScanChunkBlocks block totals of the range in place
+//                        and writes the chunk's total after the blocks (g_scanSums[Vdp1NxScanBlockCount(N) + c])
+//   bucket_sums_nx_add   N^2 groups: group c adds the totals of the chunks before it to its chunk's sums (the two levels
+//                        give the range's exclusive prefix, as bucket_sums does for kScanBlockCount blocks)
+//   resolve_nx           the native resolve (the same ordered core, units in rounds of 64 G per group) with the N x unit
+//                        decode, on the N x surface
+// and the consistency passes, after the native pass of the same op:
+//   erase_nx             the erase region, one thread per native word: its N x blocks (main, alt, mesh as the native
+//                        erase)
+//   fb_write_nx          one thread per record of the run (after fb_write_clear): each N x word of the record's blocks
+//                        takes the bits of the record's mask from the final native word (main, and alt when mirrored)
+//   rebuild_nx           one thread per N x buffer uint of the slices in the mask: the N x words become their native
+//                        words (attach, reset, state load, scale change)
 //
 // The unit range makes a batch's fixed cost proportional to the FBRAM area it touched instead of all 262,144 units
 // (exact by construction: it is the hull of the units the raster pass counted). Units outside it have no fragments, a
@@ -96,6 +121,7 @@ inline constexpr uint32_t kBindingScanSums = 20;
 inline constexpr uint32_t kBindingUnitOffsets = 21;
 inline constexpr uint32_t kBindingBatchState = 22;
 inline constexpr uint32_t kBindingFbWinners = 23;
+inline constexpr uint32_t kBindingFbramNx = 24;
 
 /// @brief g_fbWinners: per (field, framebuffer, FBRAM word, byte) the last CPU write record of the current run that
 /// writes it (record index + 1; 0 none). Index Vdp1FbWinnerIndex. 4 MiB.
@@ -159,11 +185,13 @@ static_assert(sizeof(Vdp1NxSpan) == sizeof(Vdp1Span));
 /// @brief The raster pass's `scale` push constant (Vdp1BatchPushConstants::scale): stage 2 draws at native resolution.
 inline constexpr uint32_t kRasterScale = 1;
 
-/// @brief The largest range of one storage buffer binding (the device limit maxStorageBufferRange must cover it).
+/// @brief The largest range of one storage buffer binding (the device limit maxStorageBufferRange must cover it); the N x
+/// surface and unit buffers at 4x (32 and 16 MiB) are within the fragment buffer's 32 MiB.
 inline constexpr uint32_t kMaxStorageBufferRange =
     std::max({kFragmentBufferSize, kBucketBufferSize, kUnitCountsBufferSize, kUnitOffsetsBufferSize, kFbramBufferSize,
               kVRAMBufferSize, kSpanBufferSize, kCommandBufferSize, kFbWriteBufferSize, kFbWinnersBufferSize,
-              kBatchStateBufferSize});
+              kBatchStateBufferSize, Vdp1NxFbramBufferSize(kMaxNxScale), Vdp1NxUnitCount(kMaxNxScale) * 4u,
+              (kMaxNxUnitCount / 64u + kMaxNxScale * kMaxNxScale) * 4u});
 static_assert(kMaxStorageBufferRange <= (1u << 27));
 
 /// @brief Workgroup size of the VDP1 passes (one dimension, or 8 x 8 for the erase pass): 64 invocations, within the
@@ -175,21 +203,26 @@ inline constexpr uint32_t kScanBlockCount = kUnitCount / kScanBlockSize;
 inline constexpr uint32_t kScanSumsBufferSize = kScanBlockCount * sizeof(uint32_t);
 static_assert(kUnitCount % kScanBlockSize == 0);
 
-/// @brief Push-constant blocks per pipeline: the largest is the erase pass's 32 bytes, below VDP2's 64.
+/// @brief Push-constant blocks per pipeline: the largest is the N x erase pass's 36 bytes, below VDP2's 64.
 inline constexpr uint32_t kMaxPushConstantSize =
     std::max({static_cast<uint32_t>(sizeof(Vdp1BatchPushConstants)), static_cast<uint32_t>(sizeof(Vdp1ErasePushConstants)),
-              static_cast<uint32_t>(sizeof(Vdp1FbWritePushConstants))});
-static_assert(kMaxPushConstantSize == 32);
+              static_cast<uint32_t>(sizeof(Vdp1FbWritePushConstants)),
+              static_cast<uint32_t>(sizeof(Vdp1EraseNxPushConstants)),
+              static_cast<uint32_t>(sizeof(Vdp1FbWriteNxPushConstants)),
+              static_cast<uint32_t>(sizeof(Vdp1RebuildNxPushConstants))});
+static_assert(kMaxPushConstantSize == 36);
 
 /// @brief Dispatch shapes (all 64 x 1 x 1 workgroups except the erase pass):
 /// - raster: one thread per span, ceil(spanCount / 64) groups (at most 4096);
 /// - batch_range: one group;
-/// - bucket: vkCmdDispatchIndirect at kBatchStateBucketArgs: one group per 64-unit block of the batch's unit range (at
-///   most kScanBlockCount, 4096; none for a batch without fragments); bucket_sums: one group;
+/// - bucket: vkCmdDispatchIndirect at kBatchStateBucketArgs: one group per 64-unit block of the batch's unit range, at
+///   most kScanBlockCount (4096) groups that take every kScanBlockCount-th block of a larger (N x) range; none for a
+///   batch without fragments; bucket_sums: one group;
 /// - scatter: kScatterSlotsPerThread slots per thread, ceil(fragmentCount / kScatterSlotsPerGroup) groups (at most
 ///   16384; one slot per thread would need 65536 groups for a full batch, beyond the guaranteed 65535);
 /// - resolve: vkCmdDispatchIndirect at kBatchStateResolveArgs: G = min(unitHi - unitLo, kResolveGroupCount = 4096)
-///   groups (batch_range writes it); thread t of group g owns unit unitLo + G t + g;
+///   groups (batch_range writes it); thread t of group g owns units unitLo + G (t + 64 r) + g, round r = 0 for the
+///   native range (at most 64 G units) and up to N^2 - 1 for an N x range (resolve_nx);
 /// - erase: kEraseGroupSize x kEraseGroupSize groups over the region (x3 - x1 by y3 - y1 + 1 words);
 /// - fb_write_mark, fb_write, fb_write_clear: one thread per record of the run, ceil(count / 64) groups each (at most
 ///   4096), in that order.
@@ -202,6 +235,37 @@ static_assert(kMaxFragmentsPerBatch / kScatterSlotsPerGroup <= 65535 && kMaxSpan
 static_assert(kEraseGroupSize * kEraseGroupSize == kWorkgroupSize);
 /// @brief The bucket_sums pass scans kScanBlockCount sums with one group, kWorkgroupSize sums per thread.
 static_assert(kScanBlockCount == kWorkgroupSize * kWorkgroupSize);
+
+/// @brief N x sizes (GPU stage 3). Units: Vdp1NxUnitCount(N) = N^2 * kUnitCount (at most kMaxNxUnitCount, 4 Mi, the
+/// range batch_range clamps to); their 64-unit blocks, Vdp1NxScanBlockCount(N) = N^2 * kScanBlockCount, are scanned by
+/// bucket_sums_nx in N^2 chunks of kNxScanChunkBlocks, the chunk totals stored after the blocks.
+inline constexpr uint32_t kNxScanChunkBlocks = kScanBlockCount;
+inline constexpr uint32_t kMaxNxScanChunks = kMaxNxScale * kMaxNxScale;
+constexpr uint32_t Vdp1NxScanBlockCount(uint32_t scale) {
+    return scale * scale * kScanBlockCount;
+}
+constexpr uint32_t Vdp1NxScanSumsCount(uint32_t scale) {
+    return Vdp1NxScanBlockCount(scale) + scale * scale;
+}
+constexpr uint32_t Vdp1NxUnitCountsBufferSize(uint32_t scale) {
+    return Vdp1NxUnitCount(scale) * sizeof(uint32_t);
+}
+constexpr uint32_t Vdp1NxScanSumsBufferSize(uint32_t scale) {
+    return Vdp1NxScanSumsCount(scale) * sizeof(uint32_t);
+}
+inline constexpr uint32_t kMaxNxFbramBufferSize = Vdp1NxFbramBufferSize(kMaxNxScale);
+inline constexpr uint32_t kMaxNxUnitCountsBufferSize = Vdp1NxUnitCountsBufferSize(kMaxNxScale);
+static_assert(kMaxNxFbramBufferSize == 32u * 1024 * 1024 && kMaxNxUnitCountsBufferSize == 16u * 1024 * 1024);
+static_assert(Vdp1NxScanBlockCount(kMaxNxScale) == kMaxNxScanChunks * kNxScanChunkBlocks);
+/// @brief An N x range of up to kMaxNxUnitCount units: bucket groups (capped at kScanBlockCount) take at most
+/// kMaxNxScanChunks blocks each and resolve_nx threads at most kMaxNxScanChunks rounds.
+static_assert(kMaxNxUnitCount / kWorkgroupSize == kMaxNxScanChunks * kScanBlockCount &&
+              kMaxNxUnitCount == kMaxNxScanChunks * kWorkgroupSize * kResolveGroupCount);
+/// @brief rebuild_nx: one thread per uint of an N x slice, (N^2 kFbramSliceSize / 4 / 64) x 8 groups (16384 x 8 at 4x).
+constexpr uint32_t Vdp1RebuildNxGroups(uint32_t scale) {
+    return Vdp1NxFbramSliceSize(scale) / 4u / kWorkgroupSize;
+}
+static_assert(Vdp1RebuildNxGroups(kMaxNxScale) <= 65535);
 
 /// @brief The resolve pass. A unit with at most kResolveSmallMax fragments is sorted by its thread in registers; a
 /// larger one by the whole workgroup, in windows of at most kResolveSortCapacity keys: each window is the next key
@@ -221,6 +285,7 @@ static_assert((kResolveSortCapacity & (kResolveSortCapacity - 1)) == 0 && kResol
 /// - resolve: the window's keys, the histogram, the workgroup's large units, one fold chunk of fragments (target,
 ///   colour) and four scalars;
 /// - the others: none.
+/// The N x passes: raster_nx as raster, bucket_sums_nx as bucket_sums, resolve_nx as resolve, the others none.
 inline constexpr uint32_t kRasterSharedMemorySize = 2 * 4;
 inline constexpr uint32_t kScanSharedMemorySize = kWorkgroupSize * 4;
 inline constexpr uint32_t kResolveSharedMemorySize =
@@ -320,10 +385,65 @@ inline constexpr std::array<std::span<const Binding>, 10> kPipelineBindings{
     std::span<const Binding>(kEraseBindings),      std::span<const Binding>(kFbWriteMarkBindings),
     std::span<const Binding>(kFbWriteBindings),    std::span<const Binding>(kFbWriteClearBindings)};
 
-/// @brief The largest per-stage use over the VDP1 pipelines (gpu_version.hpp takes the maximum with VDP2's).
+// N x pipelines (GPU stage 3). raster_nx has the native raster's bindings; batch_range, bucket and scatter are the
+// native pipelines.
+inline constexpr std::array<Binding, 6> kRasterNxBindings = kRasterBindings;
+
+inline constexpr std::array<Binding, 2> kBucketSumsNxBindings{{
+    {kBindingScanSums, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
+}};
+
+inline constexpr std::array<Binding, 7> kResolveNxBindings{{
+    {kBindingFragments, DescriptorKind::StorageBuffer},
+    {kBindingUnitCounts, DescriptorKind::StorageBuffer},
+    {kBindingBucket, DescriptorKind::StorageBuffer},
+    {kBindingScanSums, DescriptorKind::StorageBuffer},
+    {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
+    {kBindingFbramNx, DescriptorKind::StorageBuffer},
+}};
+
+inline constexpr std::array<Binding, 1> kEraseNxBindings{{
+    {kBindingFbramNx, DescriptorKind::StorageBuffer},
+}};
+
+inline constexpr std::array<Binding, 3> kFbWriteNxBindings{{
+    {kBindingFbWrites, DescriptorKind::StorageBuffer},
+    {kBindingFbram, DescriptorKind::StorageBuffer},
+    {kBindingFbramNx, DescriptorKind::StorageBuffer},
+}};
+
+inline constexpr std::array<Binding, 2> kRebuildNxBindings{{
+    {kBindingFbram, DescriptorKind::StorageBuffer},
+    {kBindingFbramNx, DescriptorKind::StorageBuffer},
+}};
+
+/// @brief The N x layout probe (cs_vdp1_nx_layout_probe.hlsl): the N x span buffer, fragments, the result buffer and
+/// the N x surface, with every N x push-constant struct.
+inline constexpr std::array<Binding, 4> kNxLayoutProbeBindings{{
+    {kBindingSpans, DescriptorKind::StorageBuffer},
+    {kBindingFragments, DescriptorKind::StorageBuffer},
+    {kBindingUnitCounts, DescriptorKind::StorageBuffer},
+    {kBindingFbramNx, DescriptorKind::StorageBuffer},
+}};
+
+/// @brief The binding tables of the N x pipelines (raster_nx, bucket_sums_nx, bucket_sums_nx_add, resolve_nx, erase_nx,
+/// fb_write_nx, rebuild_nx), for the back half's N x passes (Task 5).
+inline constexpr std::array<std::span<const Binding>, 7> kNxPipelineBindings{
+    std::span<const Binding>(kRasterNxBindings),   std::span<const Binding>(kBucketSumsNxBindings),
+    std::span<const Binding>(kBucketSumsNxBindings), std::span<const Binding>(kResolveNxBindings),
+    std::span<const Binding>(kEraseNxBindings),    std::span<const Binding>(kFbWriteNxBindings),
+    std::span<const Binding>(kRebuildNxBindings)};
+
+/// @brief The largest per-stage use over the VDP1 pipelines, native and N x (gpu_version.hpp takes the maximum with
+/// VDP2's).
 constexpr StageUsage MaxStageUsage() {
     StageUsage usage;
-    for (std::span<const Binding> bindings : kPipelineBindings) {
+    std::array<std::span<const Binding>, kPipelineBindings.size() + kNxPipelineBindings.size()> all{};
+    std::copy(kPipelineBindings.begin(), kPipelineBindings.end(), all.begin());
+    std::copy(kNxPipelineBindings.begin(), kNxPipelineBindings.end(), all.begin() + kPipelineBindings.size());
+    for (std::span<const Binding> bindings : all) {
         const uint32_t storageBuffers =
             vdp2::CountBindings(bindings, DescriptorKind::StorageBuffer, DescriptorKind::StorageBufferDynamic);
         const uint32_t storageImages =

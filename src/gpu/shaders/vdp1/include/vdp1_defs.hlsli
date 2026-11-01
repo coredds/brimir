@@ -114,6 +114,40 @@ uint Vdp1FbWinnerIndex(bool alt, uint fb, uint word, bool lowByte) {
     return ((((alt ? 2u : 0u) + (fb & 1)) * kWordsPerFramebuffer + (word & kWordIndexMask)) << 1) | (lowByte ? 1u : 0u);
 }
 
+// N x (GPU stage 3; vdp1_hw_params.hpp "N x span" and "N x surface and N x fragments")
+static const uint kMaxNxScale = 4;
+static const uint kMaxNxUnitCount = kMaxNxScale * kMaxNxScale * kUnitCount;
+static const uint kNxSpanRect = 0;
+static const uint kNxSpanQuad = 1;
+static const uint kNxSpanReplicate = 2;
+uint Vdp1MakeNxSpanFlags(uint kind, bool antiAlias, uint subRow, uint texV) {
+    return (kind & 3) | (antiAlias ? 4u : 0u) | ((subRow & 3) << 3) | (texV << 16);
+}
+uint Vdp1NxSpanKind(uint f) { return f & 3; }
+bool Vdp1NxSpanAntiAlias(uint f) { return BitTest(f, 2); }
+uint Vdp1NxSpanSubRow(uint f) { return BitExtract(f, 3, 2); }
+uint Vdp1NxSpanTexV(uint f) { return uint(int(f) >> 16); }
+
+static const uint kNxFragUnitMask = (1u << 22) - 1;
+static const uint kFragFlagMask = 0x7Fu << 18;
+static const uint kNxFragFlagShift = 4;
+uint Vdp1NxUnitCount(uint scale) { return scale * scale * kUnitCount; }
+uint Vdp1NxFbramSliceSize(uint scale) { return kFbramSliceSize * scale * scale; }
+uint Vdp1NxFbramBufferSize(uint scale) { return kFbramBufferSize * scale * scale; }
+uint Vdp1NxFbramByteAddress(uint slice, uint index, uint scale) {
+    return (slice & 7) * Vdp1NxFbramSliceSize(scale) + index * 2;
+}
+uint Vdp1NxUnit(uint nativeUnit, uint sub, uint scale) { return nativeUnit * scale * scale + sub; }
+uint Vdp1MakeNxFragmentTarget(uint nxUnit, uint nativeTarget) {
+    return (nxUnit & kNxFragUnitMask) | ((nativeTarget & kFragFlagMask) << kNxFragFlagShift) | kFragLiveBit;
+}
+uint Vdp1NxFragUnit(uint t) { return t & kNxFragUnitMask; }
+uint Vdp1NxFragNativeTarget(uint t) { return ((t >> kNxFragFlagShift) & kFragFlagMask) | (t & kFragLiveBit); }
+// The N x scan: block totals in chunks of kNxScanChunkBlocks, chunk totals after the N^2 kScanBlockCount blocks
+static const uint kScanBlockCount = kUnitCount / 64;
+static const uint kNxScanChunkBlocks = kScanBlockCount;
+uint Vdp1NxScanBlockCount(uint scale) { return scale * scale * kScanBlockCount; }
+
 // ErasePushConstants::flags
 uint Vdp1MakeEraseFlags(uint fb, bool mirrorAlt, bool clearMesh) {
     return (fb & 1) | (mirrorAlt ? 2u : 0u) | (clearMesh ? 4u : 0u);

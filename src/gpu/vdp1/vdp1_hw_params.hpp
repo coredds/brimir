@@ -13,9 +13,11 @@
 //   random words;
 // - sizes: the buffer structs Vdp1CommandParams (80 bytes), Vdp1Span (32, the size the plan names), Vdp1NxSpan (32)
 //   and Vdp1FbWrite (16) are multiples of 16 bytes; Vdp1Fragment, one slot of a buffer of millions, is 8 bytes; the push-constant blocks
-//   are Vdp1BatchPushConstants 24, Vdp1ErasePushConstants 32 and Vdp1FbWritePushConstants 8 bytes.
-// Every offset and size is checked against the reflected layouts of src/gpu/shaders/vdp1/cs_vdp1_layout_probe.hlsl,
-// which declares them all (tests/unit/test_gpu_vdp1_params.cpp). No Vulkan header may be included here.
+//   are Vdp1BatchPushConstants 24, Vdp1ErasePushConstants 32 and Vdp1FbWritePushConstants 8 bytes, and the N x
+//   passes' Vdp1EraseNxPushConstants 36, Vdp1FbWriteNxPushConstants 12 and Vdp1RebuildNxPushConstants 8 bytes.
+// Every offset and size is checked against the reflected layouts of src/gpu/shaders/vdp1/cs_vdp1_layout_probe.hlsl and
+// cs_vdp1_nx_layout_probe.hlsl (the N x structs), which declare them all (tests/unit/test_gpu_vdp1_params.cpp). No
+// Vulkan header may be included here.
 
 #include <cstddef>
 #include <cstdint>
@@ -383,6 +385,56 @@ constexpr uint32_t Vdp1FragUnit(uint32_t t) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// N x surface and N x fragments (GPU stage 3; research section 1.1 and 1.4)
+//
+// The N x surface is a storage buffer of the same eight slices as FBRAM, each N^2 times as large: native word w of a
+// slice is the N x N block of N x words w * N^2 + j * N + i for the sub-texel (i, j), stored as FBRAM stores its words
+// (N x word k of a slice is the half k & 1 of buffer uint k >> 1, big-endian bytes). 2 MiB * N^2: 8, 18, 32 MiB.
+//
+// The N x resolve unit is (native unit) * N^2 + j * N + i, the native unit being word | alt << 17: 22 bits at 4x. An N x
+// fragment target keeps the unit in bits 21-0, the native target's flags (bits 24-18: odd byte, colour calculation,
+// mesh, MSB on, 8 bpp, transparent meshes) four bits up in bits 28-22, and `live` in bit 31.
+
+inline constexpr uint32_t kMaxNxUnitCount = kMaxNxScale * kMaxNxScale * kUnitCount;
+inline constexpr uint32_t kNxFragUnitBits = 22;
+inline constexpr uint32_t kNxFragUnitMask = (1u << kNxFragUnitBits) - 1;
+inline constexpr uint32_t kFragFlagMask = 0x7Fu << 18; // the native target's flags (bits 24-18)
+inline constexpr uint32_t kNxFragFlagShift = 4;
+static_assert(kMaxNxUnitCount == (1u << kNxFragUnitBits) && (kFragFlagMask << kNxFragFlagShift) >> 29 == 0);
+
+constexpr uint32_t Vdp1NxUnitCount(uint32_t scale) {
+    return scale * scale * kUnitCount;
+}
+constexpr uint32_t Vdp1NxFbramSliceSize(uint32_t scale) {
+    return kFbramSliceSize * scale * scale;
+}
+constexpr uint32_t Vdp1NxFbramBufferSize(uint32_t scale) {
+    return kFbramBufferSize * scale * scale;
+}
+/// @brief Byte address in the N x surface of N x word `index` (native word * N^2 + sub) of slice `slice`.
+constexpr uint32_t Vdp1NxFbramByteAddress(uint32_t slice, uint32_t index, uint32_t scale) {
+    return (slice & 7u) * Vdp1NxFbramSliceSize(scale) + index * 2u;
+}
+/// @brief The N x unit of sub-texel `sub` (j * N + i) of a native unit (word | alt << 17).
+constexpr uint32_t Vdp1NxUnit(uint32_t nativeUnit, uint32_t sub, uint32_t scale) {
+    return nativeUnit * scale * scale + sub;
+}
+/// @brief The N x fragment target of N x unit `nxUnit` with the flags of the native target `nativeTarget`.
+constexpr uint32_t Vdp1MakeNxFragmentTarget(uint32_t nxUnit, uint32_t nativeTarget) {
+    return (nxUnit & kNxFragUnitMask) | ((nativeTarget & kFragFlagMask) << kNxFragFlagShift) | kFragLiveBit;
+}
+constexpr uint32_t Vdp1NxFragUnit(uint32_t t) {
+    return t & kNxFragUnitMask;
+}
+/// @brief The flags and `live` of an N x target in the native layout (word and field 0): what ApplyFragment reads.
+constexpr uint32_t Vdp1NxFragNativeTarget(uint32_t t) {
+    return ((t >> kNxFragFlagShift) & kFragFlagMask) | (t & kFragLiveBit);
+}
+static_assert(Vdp1NxFragNativeTarget(Vdp1MakeNxFragmentTarget(kNxFragUnitMask, 0xFFFFFFFFu)) ==
+                  (kFragFlagMask | kFragLiveBit) &&
+              Vdp1NxFragUnit(Vdp1MakeNxFragmentTarget(kNxFragUnitMask, 0xFFFFFFFFu)) == kNxFragUnitMask);
+
+// ---------------------------------------------------------------------------------------------------------------------
 // CPU framebuffer write (StructuredBuffer<FbWrite>, 16 bytes), captured when the CPU wrote (the shadow can change
 // before the GPU replays it): the word is replaced where `mask` is set. Software's write mirrors to the alternate field
 // under deinterlacing in interlace modes and leaves the mesh framebuffer alone.
@@ -462,5 +514,29 @@ struct Vdp1FbWritePushConstants {
     HLSLuint count;
 };
 static_assert(sizeof(Vdp1FbWritePushConstants) == 8);
+
+/// @brief N x erase pass (erase_nx): the native erase's region, value and write limit; each erased native word's N x
+/// block gets the value (mesh blocks 0).
+struct Vdp1EraseNxPushConstants {
+    Vdp1ErasePushConstants erase;
+    HLSLuint scale; // N, 2 to kMaxNxScale
+};
+static_assert(sizeof(Vdp1EraseNxPushConstants) == 36 && offsetof(Vdp1EraseNxPushConstants, scale) == 32);
+
+/// @brief N x CPU framebuffer write pass (fb_write_nx, after the native run): each record's N x blocks take the bits of
+/// its mask from the final native word.
+struct Vdp1FbWriteNxPushConstants {
+    Vdp1FbWritePushConstants run;
+    HLSLuint scale;
+};
+static_assert(sizeof(Vdp1FbWriteNxPushConstants) == 12 && offsetof(Vdp1FbWriteNxPushConstants, scale) == 8);
+
+/// @brief N x rebuild pass (rebuild_nx): every N x word of the slices in sliceMask (bit s: slice s) becomes its native
+/// word.
+struct Vdp1RebuildNxPushConstants {
+    HLSLuint sliceMask;
+    HLSLuint scale;
+};
+static_assert(sizeof(Vdp1RebuildNxPushConstants) == 8);
 
 } // namespace brimir::gpu::vdp1

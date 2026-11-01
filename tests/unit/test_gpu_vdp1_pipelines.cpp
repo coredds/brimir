@@ -6,7 +6,7 @@
 //   the pass's struct, and the groupshared bytes vdp1_bindings.hpp states. The check rejects modules altered to break
 //   the rules. These run without a Vulkan device ([vdp1]).
 // - The device limits check covers the VDP1 maxima ([vdp1][limits], BRIMIR_VULKAN builds).
-// - The ten pipelines are created on the headless device from their binding tables and push-constant ranges, with
+// - The ten native and seven N x (GPU stage 3) pipelines are created on the headless device from their binding tables and push-constant ranges, with
 //   zero validation errors ([gpu][vdp1]; SKIP without a device).
 // The passes' results against the CPU reference are in test_gpu_vdp1_passes.cpp.
 #include "catch_amalgamated.hpp"
@@ -14,16 +14,29 @@
 #include <gpu/shaders/generated/vdp1_batch_range.spv.h>
 #include <gpu/shaders/generated/vdp1_bucket.spv.h>
 #include <gpu/shaders/generated/vdp1_bucket_sums.spv.h>
+#include <gpu/shaders/generated/vdp1_bucket_sums_nx.layout.h>
+#include <gpu/shaders/generated/vdp1_bucket_sums_nx.spv.h>
+#include <gpu/shaders/generated/vdp1_bucket_sums_nx_add.spv.h>
 #include <gpu/shaders/generated/vdp1_erase.layout.h>
 #include <gpu/shaders/generated/vdp1_erase.spv.h>
+#include <gpu/shaders/generated/vdp1_erase_nx.layout.h>
+#include <gpu/shaders/generated/vdp1_erase_nx.spv.h>
 #include <gpu/shaders/generated/vdp1_fb_write.layout.h>
 #include <gpu/shaders/generated/vdp1_fb_write.spv.h>
 #include <gpu/shaders/generated/vdp1_fb_write_clear.spv.h>
 #include <gpu/shaders/generated/vdp1_fb_write_mark.spv.h>
+#include <gpu/shaders/generated/vdp1_fb_write_nx.layout.h>
+#include <gpu/shaders/generated/vdp1_fb_write_nx.spv.h>
 #include <gpu/shaders/generated/vdp1_raster.layout.h>
 #include <gpu/shaders/generated/vdp1_raster.spv.h>
+#include <gpu/shaders/generated/vdp1_raster_nx.layout.h>
+#include <gpu/shaders/generated/vdp1_raster_nx.spv.h>
+#include <gpu/shaders/generated/vdp1_rebuild_nx.layout.h>
+#include <gpu/shaders/generated/vdp1_rebuild_nx.spv.h>
 #include <gpu/shaders/generated/vdp1_resolve.layout.h>
 #include <gpu/shaders/generated/vdp1_resolve.spv.h>
+#include <gpu/shaders/generated/vdp1_resolve_nx.layout.h>
+#include <gpu/shaders/generated/vdp1_resolve_nx.spv.h>
 #include <gpu/shaders/generated/vdp1_scatter.layout.h>
 #include <gpu/shaders/generated/vdp1_scatter.spv.h>
 #include <gpu/vdp1/vdp1_bindings.hpp>
@@ -76,9 +89,24 @@ const std::vector<ShaderCase> &Shaders() {
         {"vdp1_fb_write", sh::kVdp1FbWriteSpv, kFbWriteBindings, sizeof(Vdp1FbWritePushConstants), 64, 1, 0},
         {"vdp1_fb_write_clear", sh::kVdp1FbWriteClearSpv, kFbWriteClearBindings, sizeof(Vdp1FbWritePushConstants), 64,
          1, 0},
+        // N x passes (GPU stage 3), in kNxPipelineBindings order
+        {"vdp1_raster_nx", sh::kVdp1RasterNxSpv, kRasterNxBindings, sizeof(Vdp1BatchPushConstants), 64, 1,
+         kRasterSharedMemorySize},
+        {"vdp1_bucket_sums_nx", sh::kVdp1BucketSumsNxSpv, kBucketSumsNxBindings, sizeof(Vdp1BatchPushConstants), 64, 1,
+         kScanSharedMemorySize},
+        {"vdp1_bucket_sums_nx_add", sh::kVdp1BucketSumsNxAddSpv, kBucketSumsNxBindings, sizeof(Vdp1BatchPushConstants),
+         64, 1, 0},
+        {"vdp1_resolve_nx", sh::kVdp1ResolveNxSpv, kResolveNxBindings, sizeof(Vdp1BatchPushConstants), 64, 1,
+         kResolveSharedMemorySize},
+        {"vdp1_erase_nx", sh::kVdp1EraseNxSpv, kEraseNxBindings, sizeof(Vdp1EraseNxPushConstants), kEraseGroupSize,
+         kEraseGroupSize, 0},
+        {"vdp1_fb_write_nx", sh::kVdp1FbWriteNxSpv, kFbWriteNxBindings, sizeof(Vdp1FbWriteNxPushConstants), 64, 1, 0},
+        {"vdp1_rebuild_nx", sh::kVdp1RebuildNxSpv, kRebuildNxBindings, sizeof(Vdp1RebuildNxPushConstants), 64, 1, 0},
     };
     return shaders;
 }
+
+constexpr size_t kNativeShaderCount = 10;
 
 // SPIR-V opcodes and enumerants used below (SPIR-V 1.5 specification)
 constexpr uint32_t kSpvMagic = 0x07230203;
@@ -326,6 +354,21 @@ TEST_CASE("VDP1 push-constant blocks are the host structs", "[vdp1][pipelines]")
     STATIC_CHECK(sh::kVdp1Raster_Span_size == sizeof(Vdp1Span));
     STATIC_CHECK(sh::kVdp1Raster_CommandParams_size == sizeof(Vdp1CommandParams));
     STATIC_CHECK(sh::kVdp1Raster_Fragment_size == sizeof(Vdp1Fragment));
+    // N x passes
+    STATIC_CHECK(sh::kVdp1RasterNx_BatchParams_size == sizeof(Vdp1BatchPushConstants));
+    STATIC_CHECK(sh::kVdp1RasterNx_BatchParams_scale == offsetof(Vdp1BatchPushConstants, scale));
+    STATIC_CHECK(sh::kVdp1RasterNx_NxSpan_size == sizeof(Vdp1NxSpan));
+    STATIC_CHECK(sh::kVdp1RasterNx_NxSpan_flags == offsetof(Vdp1NxSpan, flags));
+    STATIC_CHECK(sh::kVdp1RasterNx_NxSpan_slotBase == offsetof(Vdp1NxSpan, slotBase));
+    STATIC_CHECK(sh::kVdp1BucketSumsNx_BatchParams_scale == offsetof(Vdp1BatchPushConstants, scale));
+    STATIC_CHECK(sh::kVdp1ResolveNx_BatchParams_scale == offsetof(Vdp1BatchPushConstants, scale));
+    STATIC_CHECK(sh::kVdp1ResolveNx_BatchParams_drawFB == offsetof(Vdp1BatchPushConstants, drawFB));
+    STATIC_CHECK(sh::kVdp1EraseNx_EraseNxParams_size == sizeof(Vdp1EraseNxPushConstants));
+    STATIC_CHECK(sh::kVdp1EraseNx_EraseNxParams_scale == offsetof(Vdp1EraseNxPushConstants, scale));
+    STATIC_CHECK(sh::kVdp1FbWriteNx_FbWriteNxParams_size == sizeof(Vdp1FbWriteNxPushConstants));
+    STATIC_CHECK(sh::kVdp1FbWriteNx_FbWriteNxParams_scale == offsetof(Vdp1FbWriteNxPushConstants, scale));
+    STATIC_CHECK(sh::kVdp1RebuildNx_RebuildNxParams_size == sizeof(Vdp1RebuildNxPushConstants));
+    STATIC_CHECK(sh::kVdp1RebuildNx_RebuildNxParams_scale == offsetof(Vdp1RebuildNxPushConstants, scale));
 }
 
 TEST_CASE("VDP1 dispatch shapes and groupshared sizes stay within the baseline", "[vdp1][pipelines]") {
@@ -352,6 +395,13 @@ TEST_CASE("VDP1 dispatch shapes and groupshared sizes stay within the baseline",
     STATIC_CHECK(kResolveSortCapacity == 2048);
     STATIC_CHECK(kResolveHistogramBins == 256);
     STATIC_CHECK(kResolveFoldChunk == 256);
+    // N x: the bucket groups (capped at 4096) take up to 16 blocks of a 4x range, resolve_nx up to 16 rounds, the two
+    // bucket_sums_nx levels N^2 groups, rebuild_nx 16384 x 8 groups at 4x
+    STATIC_CHECK(kMaxNxUnitCount == 16 * kUnitCount);
+    STATIC_CHECK(Vdp1NxScanBlockCount(kMaxNxScale) / kScanBlockCount == 16);
+    STATIC_CHECK(kMaxNxUnitCount / (kWorkgroupSize * kResolveGroupCount) == 16);
+    STATIC_CHECK(Vdp1RebuildNxGroups(4) == 16384);
+    STATIC_CHECK(kMaxPushConstantSize == sizeof(Vdp1EraseNxPushConstants));
 }
 
 TEST_CASE("The VDP1 SPIR-V check rejects modules that depart from the rules", "[vdp1][pipelines]") {
@@ -410,10 +460,25 @@ TEST_CASE("Every VDP1 binding is used by a pass and declared by the layout probe
         }
         CHECK(used);
     }
-    for (const ShaderCase &shader : Shaders()) {
+    // The native passes' bindings are the native probe's; the N x passes' are among the native and N x probes'
+    for (size_t i = 0; i < Shaders().size(); ++i) {
+        const ShaderCase &shader = Shaders()[i];
+        INFO("shader: " << shader.name);
         for (const Binding &b : shader.bindings) {
-            CHECK(uses(kLayoutProbeBindings, b.binding));
+            CHECK((uses(kLayoutProbeBindings, b.binding) ||
+                   (i >= kNativeShaderCount && uses(kNxLayoutProbeBindings, b.binding))));
         }
+    }
+    bool nxSurface = false;
+    for (size_t i = kNativeShaderCount; i < Shaders().size(); ++i) {
+        nxSurface = nxSurface || uses(Shaders()[i].bindings, kBindingFbramNx);
+    }
+    CHECK(nxSurface);
+    CHECK(uses(kNxLayoutProbeBindings, kBindingFbramNx));
+    // The N x shader cases are kNxPipelineBindings, in order
+    REQUIRE(Shaders().size() == kNativeShaderCount + kNxPipelineBindings.size());
+    for (size_t i = 0; i < kNxPipelineBindings.size(); ++i) {
+        CHECK(Shaders()[kNativeShaderCount + i].bindings.data() == kNxPipelineBindings[i].data());
     }
 }
 

@@ -8,6 +8,7 @@
 // - The flag bit positions equal the hardware's (CMDPMOD, CMDCTRL) and Task 1's reference constants, and the structs
 //   hold every field of the reference's command parameters, spans and fragments over random commands.
 // - On a device, the probe evaluates every HLSL accessor over random words and the results equal the C++ copies.
+// - The same for the N x structs and accessors (GPU stage 3) through cs_vdp1_nx_layout_probe.hlsl.
 // The CPU cases are tagged [vdp1] only, so they also run in BRIMIR_VULKAN=OFF builds; the GPU case is [gpu] and SKIPs
 // without a Vulkan device.
 #include "catch_amalgamated.hpp"
@@ -16,6 +17,8 @@
 
 #include <gpu/shaders/generated/vdp1_layout_probe.layout.h>
 #include <gpu/shaders/generated/vdp1_layout_probe.spv.h>
+#include <gpu/shaders/generated/vdp1_nx_layout_probe.layout.h>
+#include <gpu/shaders/generated/vdp1_nx_layout_probe.spv.h>
 #include <gpu/vdp1/vdp1_bindings.hpp>
 #include <gpu/vdp1/vdp1_front.hpp>
 #include <gpu/vdp1/vdp1_hw_params.hpp>
@@ -458,6 +461,173 @@ TEST_CASE("The VDP1 probe check rejects modules that depart from the rules", "[v
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// N x structs (GPU stage 3): cs_vdp1_nx_layout_probe.hlsl
+
+namespace {
+
+// The N x probe's push-constant block: BatchParams and the N x push-constant structs one after the other.
+struct NxProbePush {
+    Vdp1BatchPushConstants batch;
+    Vdp1EraseNxPushConstants erase;
+    Vdp1FbWriteNxPushConstants fbWrite;
+    Vdp1RebuildNxPushConstants rebuild;
+};
+
+} // namespace
+
+TEST_CASE("VDP1 N x host structs match the reflected std430 layouts", "[vdp1][params][nx]") {
+    SECTION("NxSpan") {
+        CHECK_OFFSET(Vdp1NxSpan, x0, kVdp1NxLayoutProbe_NxSpan_x0);
+        CHECK_OFFSET(Vdp1NxSpan, y0, kVdp1NxLayoutProbe_NxSpan_y0);
+        CHECK_OFFSET(Vdp1NxSpan, x1, kVdp1NxLayoutProbe_NxSpan_x1);
+        CHECK_OFFSET(Vdp1NxSpan, y1, kVdp1NxLayoutProbe_NxSpan_y1);
+        CHECK_OFFSET(Vdp1NxSpan, cmdIndex, kVdp1NxLayoutProbe_NxSpan_cmdIndex);
+        CHECK_OFFSET(Vdp1NxSpan, slotBase, kVdp1NxLayoutProbe_NxSpan_slotBase);
+        CHECK_OFFSET(Vdp1NxSpan, gouraudLR, kVdp1NxLayoutProbe_NxSpan_gouraudLR);
+        CHECK_OFFSET(Vdp1NxSpan, flags, kVdp1NxLayoutProbe_NxSpan_flags);
+        CHECK_SIZE(Vdp1NxSpan, kVdp1NxLayoutProbe_NxSpan_size);
+        STATIC_CHECK(sizeof(Vdp1NxSpan) == 8 * sizeof(HLSLuint) && sizeof(Vdp1NxSpan) % 16 == 0);
+        CHECK_SIZE(Vdp1Fragment, kVdp1NxLayoutProbe_Fragment_size);
+    }
+    SECTION("Push constants") {
+        CHECK_OFFSET(Vdp1EraseNxPushConstants, erase, kVdp1NxLayoutProbe_EraseNxParams_erase);
+        CHECK_OFFSET(Vdp1EraseNxPushConstants, scale, kVdp1NxLayoutProbe_EraseNxParams_scale);
+        CHECK_SIZE(Vdp1EraseNxPushConstants, kVdp1NxLayoutProbe_EraseNxParams_size);
+        CHECK_OFFSET(Vdp1ErasePushConstants, flags, kVdp1NxLayoutProbe_EraseParams_flags);
+        CHECK_OFFSET(Vdp1ErasePushConstants, writeLimit, kVdp1NxLayoutProbe_EraseParams_writeLimit);
+        CHECK_SIZE(Vdp1ErasePushConstants, kVdp1NxLayoutProbe_EraseParams_size);
+        CHECK_OFFSET(Vdp1FbWriteNxPushConstants, run, kVdp1NxLayoutProbe_FbWriteNxParams_run);
+        CHECK_OFFSET(Vdp1FbWriteNxPushConstants, scale, kVdp1NxLayoutProbe_FbWriteNxParams_scale);
+        CHECK_SIZE(Vdp1FbWriteNxPushConstants, kVdp1NxLayoutProbe_FbWriteNxParams_size);
+        CHECK_OFFSET(Vdp1FbWritePushConstants, count, kVdp1NxLayoutProbe_FbWriteParams_count);
+        CHECK_OFFSET(Vdp1RebuildNxPushConstants, sliceMask, kVdp1NxLayoutProbe_RebuildNxParams_sliceMask);
+        CHECK_OFFSET(Vdp1RebuildNxPushConstants, scale, kVdp1NxLayoutProbe_RebuildNxParams_scale);
+        CHECK_SIZE(Vdp1RebuildNxPushConstants, kVdp1NxLayoutProbe_RebuildNxParams_size);
+        CHECK_OFFSET(Vdp1BatchPushConstants, scale, kVdp1NxLayoutProbe_BatchParams_scale);
+        CHECK_SIZE(Vdp1BatchPushConstants, kVdp1NxLayoutProbe_BatchParams_size);
+        CHECK_OFFSET(NxProbePush, batch, kVdp1NxLayoutProbe_NxProbePush_batch);
+        CHECK_OFFSET(NxProbePush, erase, kVdp1NxLayoutProbe_NxProbePush_erase);
+        CHECK_OFFSET(NxProbePush, fbWrite, kVdp1NxLayoutProbe_NxProbePush_fbWrite);
+        CHECK_OFFSET(NxProbePush, rebuild, kVdp1NxLayoutProbe_NxProbePush_rebuild);
+        CHECK_SIZE(NxProbePush, kVdp1NxLayoutProbe_NxProbePush_size);
+        CHECK(sizeof(NxProbePush) <= 128); // the push-constant minimum
+        STATIC_CHECK(std::is_standard_layout_v<Vdp1EraseNxPushConstants> &&
+                     std::is_standard_layout_v<Vdp1FbWriteNxPushConstants> &&
+                     std::is_standard_layout_v<Vdp1RebuildNxPushConstants>);
+    }
+}
+
+TEST_CASE("The N x layout probe declares the N x structs and bindings", "[vdp1][params][nx]") {
+    const std::span<const uint32_t> probe(sh::kVdp1NxLayoutProbeSpv);
+    const std::vector<std::string> errors = CheckProbe(probe, kNxLayoutProbeBindings);
+    for (const std::string &error : errors) {
+        UNSCOPED_INFO(error);
+    }
+    CHECK(errors.empty());
+    const SpvModule m = ParseSpirv(probe);
+    REQUIRE(m.valid);
+    for (const char *name : {"NxSpan", "Fragment", "BatchParams", "EraseParams", "EraseNxParams", "FbWriteParams",
+                             "FbWriteNxParams", "RebuildNxParams", "type.PushConstant.NxProbePush"}) {
+        INFO(name);
+        CHECK(m.names.count(name) == 1);
+    }
+    // Every N x pipeline binding is declared by one of the probes, and the N x surface by the N x probe
+    const auto uses = [](std::span<const Binding> table, uint32_t binding) {
+        return std::any_of(table.begin(), table.end(), [&](const Binding &b) { return b.binding == binding; });
+    };
+    for (const std::span<const Binding> table : kNxPipelineBindings) {
+        for (const Binding &b : table) {
+            INFO("binding " << b.binding);
+            CHECK((uses(kLayoutProbeBindings, b.binding) || uses(kNxLayoutProbeBindings, b.binding)));
+            CHECK(b.kind == DescriptorKind::StorageBuffer);
+        }
+    }
+    CHECK(uses(kNxLayoutProbeBindings, kBindingFbramNx));
+    STATIC_CHECK(kBindingFbramNx >= 16);
+    // The probe rejects a missing binding
+    CHECK_FALSE(CheckProbe(probe, kLayoutProbeBindings).empty());
+}
+
+TEST_CASE("N x targets, units and surface addresses", "[vdp1][params][nx]") {
+    // The N x unit of every native unit and sub-texel fits 22 bits at every scale and is distinct
+    for (uint32_t n = 2; n <= kMaxNxScale; ++n) {
+        CHECK(Vdp1NxUnit(kFragUnitMask, n * n - 1, n) == Vdp1NxUnitCount(n) - 1);
+        CHECK(Vdp1NxUnitCount(n) <= kMaxNxUnitCount);
+        CHECK(Vdp1NxFbramByteAddress(7, kWordsPerFramebuffer * n * n - 1, n) == Vdp1NxFbramBufferSize(n) - 2);
+        CHECK(Vdp1NxScanSumsCount(n) == n * n * (kScanBlockCount + 1));
+    }
+    STATIC_CHECK(kMaxNxUnitCount == 1u << 22);
+    // Flags round-trip through the N x target, the unit is kept, the native fields (word, field) are not
+    std::mt19937 rng(0x5EED);
+    for (int k = 0; k < 10000; ++k) {
+        const uint32_t native = rng() | kFragLiveBit;
+        const uint32_t unit = rng() & kNxFragUnitMask;
+        const uint32_t t = Vdp1MakeNxFragmentTarget(unit, native);
+        REQUIRE(Vdp1NxFragUnit(t) == unit);
+        REQUIRE(Vdp1FragLive(t));
+        const uint32_t back = Vdp1NxFragNativeTarget(t);
+        REQUIRE(Vdp1FragOddByte(back) == Vdp1FragOddByte(native));
+        REQUIRE(Vdp1FragColorCalc(back) == Vdp1FragColorCalc(native));
+        REQUIRE(Vdp1FragMesh(back) == Vdp1FragMesh(native));
+        REQUIRE(Vdp1FragMsbOn(back) == Vdp1FragMsbOn(native));
+        REQUIRE(Vdp1FragPixel8(back) == Vdp1FragPixel8(native));
+        REQUIRE(Vdp1FragTransparentMeshes(back) == Vdp1FragTransparentMeshes(native));
+        REQUIRE(Vdp1FragUnit(back) == 0);
+        REQUIRE((t & (3u << 29)) == 0);
+    }
+    CHECK(Vdp1NxFragNativeTarget(0) == 0); // an empty slot stays empty
+}
+
+namespace {
+
+constexpr uint32_t kNxProbeWords = 30;
+
+// What cs_vdp1_nx_layout_probe.hlsl writes for one case, in the shader's order
+std::array<uint32_t, kNxProbeWords> NxProbeExpected(const Vdp1NxSpan &s, const Vdp1Fragment &f, const NxProbePush &p,
+                                                    uint32_t surfaceWord) {
+    std::array<uint32_t, kNxProbeWords> out{};
+    size_t k = 0;
+    const auto emit = [&](uint32_t value) { out[k++] = value; };
+    const uint32_t scale = p.batch.scale;
+    emit(s.x0);
+    emit(s.y0);
+    emit(s.x1);
+    emit(s.y1);
+    emit(s.cmdIndex);
+    emit(s.slotBase);
+    emit(s.gouraudLR);
+    emit(s.flags);
+    emit(Vdp1NxSpanKind(s.flags));
+    emit(Vdp1NxSpanAntiAlias(s.flags));
+    emit(Vdp1NxSpanSubRow(s.flags));
+    emit(Vdp1NxSpanTexV(s.flags));
+    emit(Vdp1MakeNxSpanFlags(Vdp1NxSpanKind(s.flags), Vdp1NxSpanAntiAlias(s.flags), Vdp1NxSpanSubRow(s.flags),
+                             static_cast<int32_t>(Vdp1NxSpanTexV(s.flags))));
+    emit(Vdp1NxFragUnit(f.target));
+    emit(Vdp1NxFragNativeTarget(f.target));
+    emit(Vdp1MakeNxFragmentTarget(f.color, f.target));
+    emit(Vdp1MakeNxFragmentTarget(Vdp1NxFragUnit(f.target), Vdp1NxFragNativeTarget(f.target)));
+    emit(Vdp1NxUnit(f.target & kFragUnitMask, f.color & 15, scale));
+    emit(Vdp1NxUnitCount(scale));
+    emit(Vdp1NxFbramSliceSize(scale));
+    emit(Vdp1NxFbramBufferSize(scale));
+    emit(Vdp1NxFbramByteAddress(s.cmdIndex, s.slotBase, scale));
+    emit(Vdp1NxScanBlockCount(scale));
+    emit(surfaceWord);
+    emit(p.erase.erase.x1 + p.erase.erase.x3 + p.erase.erase.y1 + p.erase.erase.y3);
+    emit(p.erase.erase.value ^ p.erase.erase.offsetShift ^ p.erase.erase.writeLimit ^ p.erase.erase.flags);
+    emit(p.erase.scale);
+    emit(p.fbWrite.run.offset + p.fbWrite.run.count);
+    emit(p.fbWrite.scale);
+    emit((p.rebuild.sliceMask * 3) ^ p.rebuild.scale ^ p.batch.spanOffset ^ p.batch.cmdOffset ^ p.batch.fragmentCount ^
+         p.batch.drawFB);
+    REQUIRE(k == kNxProbeWords);
+    return out;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Bindings and limits
 
 TEST_CASE("VDP1 bindings stay within the VDP2 maxima the device limits are set from", "[vdp1][params][limits]") {
@@ -468,7 +638,7 @@ TEST_CASE("VDP1 bindings stay within the VDP2 maxima the device limits are set f
     // VDP2's maxima (7 storage buffers, 3 storage images, 5 sampled images, 11 resources) cover them
     STATIC_CHECK(kMaxStageUsage.storageBuffers <= brimir::gpu::vdp2::kMaxStageUsage.storageBuffers);
     STATIC_CHECK(kMaxStageUsage.resources <= brimir::gpu::vdp2::kMaxStageUsage.resources);
-    STATIC_CHECK(kMaxPushConstantSize == 32);
+    STATIC_CHECK(kMaxPushConstantSize == 36); // the N x erase pass's
     STATIC_CHECK(kMaxPushConstantSize <= brimir::gpu::vdp2::kMaxPushConstantSize);
     STATIC_CHECK(kWorkgroupSize <= brimir::gpu::vdp2::kMaxWorkgroupInvocations);
     STATIC_CHECK(kMaxComputeSharedMemorySize == kResolveSharedMemorySize);
@@ -1141,6 +1311,107 @@ TEST_CASE("The probe's HLSL accessors equal the C++ copies on random words", "[g
                                             batchState[i & 15], winners[i]);
         for (uint32_t word = 0; word < kProbeWords; ++word) {
             const uint32_t got = results[static_cast<size_t>(i) * kProbeWords + word];
+            if (got != expected[word] && failures++ < 10) {
+                UNSCOPED_INFO("case " << i << " word " << word << ": GPU " << got << ", expected " << expected[word]);
+            }
+        }
+    }
+    CHECK(failures == 0);
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("The N x probe's HLSL accessors equal the C++ copies on random words", "[gpu][vdp1][params][nx]") {
+    auto device = OpenDevice();
+    INFO("device: " << device->Properties().deviceName);
+    const auto &vk = device->Table();
+
+    constexpr uint32_t kCases = 4096;
+    constexpr uint32_t kSurfaceWords = 16384;
+    std::mt19937 rng(0x4E58u);
+    std::vector<Vdp1NxSpan> spans(kCases);
+    std::vector<Vdp1Fragment> fragments(kCases);
+    std::vector<uint32_t> surface(kSurfaceWords);
+    FillRandom(spans, rng);
+    FillRandom(fragments, rng);
+    FillRandom(surface, rng);
+    NxProbePush push{};
+    push.batch = {Rand32(rng), kCases, Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng)};
+    push.erase = {{Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng), Rand32(rng),
+                   Rand32(rng)},
+                  Rand32(rng)};
+    push.fbWrite = {{Rand32(rng), Rand32(rng)}, Rand32(rng)};
+    push.rebuild = {Rand32(rng), Rand32(rng)};
+
+    struct Resource {
+        uint32_t binding;
+        const void *data;
+        VkDeviceSize size;
+        vu::Buffer buffer;
+    };
+    std::vector<uint32_t> results(static_cast<size_t>(kCases) * kNxProbeWords, 0xCDCDCDCDu);
+    std::array<Resource, 4> resources{{
+        {kBindingSpans, spans.data(), spans.size() * sizeof(Vdp1NxSpan), {}},
+        {kBindingFragments, fragments.data(), fragments.size() * sizeof(Vdp1Fragment), {}},
+        {kBindingUnitCounts, results.data(), results.size() * 4, {}},
+        {kBindingFbramNx, surface.data(), surface.size() * 4, {}},
+    }};
+    constexpr VkMemoryPropertyFlags kHost = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    bool ok = true;
+    for (Resource &r : resources) {
+        ok = ok && vu::CreateBuffer(*device, r.size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, kHost, r.buffer) ==
+                       VK_SUCCESS;
+        ok = ok && r.buffer.mapped != nullptr;
+        if (ok) {
+            std::memcpy(r.buffer.mapped, r.data, r.size);
+        }
+    }
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    for (const Binding &b : kNxLayoutProbeBindings) {
+        bindings.push_back({b.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+    }
+    const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<uint32_t>(bindings.size())};
+    const VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(NxProbePush)};
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    ok = ok && vu::CreateDescriptorSetLayout(*device, bindings, setLayout) == VK_SUCCESS;
+    ok = ok && vu::CreateDescriptorPool(*device, {&poolSize, 1}, 1, pool) == VK_SUCCESS;
+    ok = ok && vu::AllocateDescriptorSet(*device, pool, setLayout, set) == VK_SUCCESS;
+    ok = ok && vu::CreatePipelineLayout(*device, {&setLayout, 1}, {&pushRange, 1}, pipelineLayout) == VK_SUCCESS;
+    ok = ok && vu::CreateComputePipeline(*device, sh::kVdp1NxLayoutProbeSpv, pipelineLayout, pipeline) == VK_SUCCESS;
+    if (ok) {
+        for (const Resource &r : resources) {
+            vu::WriteStorageBuffer(*device, set, r.binding, r.buffer);
+        }
+        ok = vu::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
+                 vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+                 vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &set, 0,
+                                            nullptr);
+                 vk.vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+                 vk.vkCmdDispatch(cmd, (kCases + kWorkgroupSize - 1) / kWorkgroupSize, 1, 1);
+                 vu::GlobalBarrier(*device, cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+             }) == VK_SUCCESS;
+    }
+    if (ok) {
+        std::memcpy(results.data(), resources[2].buffer.mapped, results.size() * 4);
+    }
+    vk.vkDestroyPipeline(device->Device(), pipeline, nullptr);
+    vk.vkDestroyPipelineLayout(device->Device(), pipelineLayout, nullptr);
+    vk.vkDestroyDescriptorPool(device->Device(), pool, nullptr);
+    vk.vkDestroyDescriptorSetLayout(device->Device(), setLayout, nullptr);
+    for (Resource &r : resources) {
+        vu::DestroyBuffer(*device, r.buffer);
+    }
+    REQUIRE(ok);
+
+    size_t failures = 0;
+    for (uint32_t i = 0; i < kCases; ++i) {
+        const auto expected = NxProbeExpected(spans[i], fragments[i], push, surface[i % kSurfaceWords]);
+        for (uint32_t word = 0; word < kNxProbeWords; ++word) {
+            const uint32_t got = results[static_cast<size_t>(i) * kNxProbeWords + word];
             if (got != expected[word] && failures++ < 10) {
                 UNSCOPED_INFO("case " << i << " word " << word << ": GPU " << got << ", expected " << expected[word]);
             }

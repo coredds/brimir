@@ -1,6 +1,7 @@
 // Brimir: VDP1 GPU structs, all uint (std430; no vec3, no bitfields). Brimir only.
-// Host mirror: src/gpu/vdp1/vdp1_hw_params.hpp (Vdp1CommandParams, Vdp1Span, Vdp1Fragment, Vdp1FbWrite and the push
-// constants; offsets are checked against the reflection of cs_vdp1_layout_probe.hlsl). The fields, flag bit positions and
+// Host mirror: src/gpu/vdp1/vdp1_hw_params.hpp (Vdp1CommandParams, Vdp1Span, Vdp1Fragment, Vdp1FbWrite, Vdp1NxSpan and
+// the push constants; offsets are checked against the reflection of cs_vdp1_layout_probe.hlsl and
+// cs_vdp1_nx_layout_probe.hlsl). The fields, flag bit positions and
 // units are documented there; signed values (coordinates) are int32 stored as uint: use asint().
 #ifndef BRIMIR_VDP1_PARAMS_HLSLI
 #define BRIMIR_VDP1_PARAMS_HLSLI
@@ -68,6 +69,33 @@ struct EraseParams {
 struct FbWriteParams {
     uint offset;
     uint count;
+};
+
+// StructuredBuffer<NxSpan>, 32 bytes (the N x span of a sub-batch; flags: Vdp1NxSpan*)
+struct NxSpan {
+    uint x0, y0, x1, y1;
+    uint cmdIndex;
+    uint slotBase;
+    uint gouraudLR;
+    uint flags;
+};
+
+// Push constants of the N x erase pass
+struct EraseNxParams {
+    EraseParams erase;
+    uint scale;
+};
+
+// Push constants of the N x CPU framebuffer write pass
+struct FbWriteNxParams {
+    FbWriteParams run;
+    uint scale;
+};
+
+// Push constants of the N x rebuild pass
+struct RebuildNxParams {
+    uint sliceMask;
+    uint scale;
 };
 
 #endif
