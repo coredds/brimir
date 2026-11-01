@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -505,6 +506,7 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
             afterCopies();
 
             Vdp1BatchPushConstants pc = Vdp1BatchConstants(b);
+            assert(pc.scale == kRasterScale && pc.scale == 1); // the native scatter reads scale > 1 as N x units
             pc.cmdOffset = 0;
             pc.spanOffset = 0;
             if (const uint32_t groups = Groups(pc.spanCount, kWorkgroupSize); groups != 0) {

@@ -131,7 +131,7 @@ constexpr uint32_t Vdp1FbWinnerIndex(bool alt, uint32_t fb, uint32_t word, bool 
     return ((((alt ? 2u : 0u) + (fb & 1u)) * kWordsPerFramebuffer + (word & kWordIndexMask)) << 1) | (lowByte ? 1u : 0u);
 }
 
-/// @brief g_batchState words: the bucket pass's VkDispatchIndirectCommand (x, 1, 1), the resolve pass's, the batch's
+/// @brief g_batchState words: the bucket pass's VkDispatchIndirectCommand (x, y, 1), the resolve pass's, the batch's
 /// unit range [unitLo, unitHi) (written by batch_range) and the raster pass's accumulator (InterlockedMax of ~unit and
 /// of unit + 1, so that zero means no unit).
 inline constexpr uint32_t kBatchStateBucketArgs = 0;
@@ -140,6 +140,10 @@ inline constexpr uint32_t kBatchStateUnitLo = 6;
 inline constexpr uint32_t kBatchStateUnitHi = 7;
 inline constexpr uint32_t kBatchStateAccLoInv = 8;
 inline constexpr uint32_t kBatchStateAccHi = 9;
+/// @brief raster_nx's diagnostic counter: the rect spans skipped because their native line was not horizontal (the
+/// reference throws on them: the generator never emits one). Only raster_nx adds to it and nothing resets it; the
+/// back half reads and clears it when it wants the signal (tests check it stays 0).
+inline constexpr uint32_t kBatchStateBadRectSpans = 10;
 inline constexpr uint32_t kBatchStateWords = 16;
 inline constexpr uint32_t kBatchStateBufferSize = kBatchStateWords * sizeof(uint32_t);
 
@@ -215,9 +219,9 @@ static_assert(kMaxPushConstantSize == 36);
 /// @brief Dispatch shapes (all 64 x 1 x 1 workgroups except the erase pass):
 /// - raster: one thread per span, ceil(spanCount / 64) groups (at most 4096);
 /// - batch_range: one group;
-/// - bucket: vkCmdDispatchIndirect at kBatchStateBucketArgs: one group per 64-unit block of the batch's unit range, at
-///   most kScanBlockCount (4096) groups that take every kScanBlockCount-th block of a larger (N x) range; none for a
-///   batch without fragments; bucket_sums: one group;
+/// - bucket: vkCmdDispatchIndirect at kBatchStateBucketArgs: one group per 64-unit block of the batch's unit range,
+///   (x, y) = (min(blocks, kScanBlockCount), ceil(blocks / kScanBlockCount)) groups (y is 1 for a native range, up to 16
+///   for an N x range); none for a batch without fragments; bucket_sums: one group;
 /// - scatter: kScatterSlotsPerThread slots per thread, ceil(fragmentCount / kScatterSlotsPerGroup) groups (at most
 ///   16384; one slot per thread would need 65536 groups for a full batch, beyond the guaranteed 65535);
 /// - resolve: vkCmdDispatchIndirect at kBatchStateResolveArgs: G = min(unitHi - unitLo, kResolveGroupCount = 4096)
@@ -257,8 +261,8 @@ inline constexpr uint32_t kMaxNxFbramBufferSize = Vdp1NxFbramBufferSize(kMaxNxSc
 inline constexpr uint32_t kMaxNxUnitCountsBufferSize = Vdp1NxUnitCountsBufferSize(kMaxNxScale);
 static_assert(kMaxNxFbramBufferSize == 32u * 1024 * 1024 && kMaxNxUnitCountsBufferSize == 16u * 1024 * 1024);
 static_assert(Vdp1NxScanBlockCount(kMaxNxScale) == kMaxNxScanChunks * kNxScanChunkBlocks);
-/// @brief An N x range of up to kMaxNxUnitCount units: bucket groups (capped at kScanBlockCount) take at most
-/// kMaxNxScanChunks blocks each and resolve_nx threads at most kMaxNxScanChunks rounds.
+/// @brief An N x range of up to kMaxNxUnitCount units: bucket takes up to kMaxNxScanChunks rows of kScanBlockCount
+/// groups and resolve_nx threads at most kMaxNxScanChunks rounds.
 static_assert(kMaxNxUnitCount / kWorkgroupSize == kMaxNxScanChunks * kScanBlockCount &&
               kMaxNxUnitCount == kMaxNxScanChunks * kWorkgroupSize * kResolveGroupCount);
 /// @brief rebuild_nx: one thread per uint of an N x slice, (N^2 kFbramSliceSize / 4 / 64) x 8 groups (16384 x 8 at 4x).

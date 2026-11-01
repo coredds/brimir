@@ -688,7 +688,9 @@ std::string CompareBuckets(const std::map<uint32, std::vector<uint32>> &units, u
     if (state[gpu::kBatchStateAccLoInv] != 0 || state[gpu::kBatchStateAccHi] != 0) {
         return "the range accumulator was not reset";
     }
-    if (state[gpu::kBatchStateBucketArgs] != std::min(((hi + 63) >> 6) - (lo >> 6), gpu::kScanBlockCount) ||
+    const uint32 blocks = ((hi + 63) >> 6) - (lo >> 6);
+    if (state[gpu::kBatchStateBucketArgs] != std::min(blocks, gpu::kScanBlockCount) ||
+        state[gpu::kBatchStateBucketArgs + 1] != (blocks + gpu::kScanBlockCount - 1) / gpu::kScanBlockCount ||
         state[gpu::kBatchStateResolveArgs] != std::min(hi - lo, gpu::kResolveGroupCount)) {
         return "indirect dispatch arguments do not match the range";
     }
@@ -1494,6 +1496,51 @@ TEST_CASE("VDP1 N x passes on captured frames (BRIMIR_VDP1_CAPTURES)", "[gpu][vd
                         static_cast<unsigned long long>(stats.slots), static_cast<unsigned long long>(stats.fragments),
                         stats.maxPerUnit, t.Total(), t.Format().c_str());
             std::fflush(stdout);
+        }
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("VDP1 raster_nx skips a rect span whose native line is not horizontal and counts it", "[gpu][vdp1][nx][passes]") {
+    // The reference throws on such a span (the generator never emits one); the shader writes its slots empty, draws
+    // nothing for it and adds to g_batchState[kBatchStateBadRectSpans]; the valid rect row next to it is unaffected
+    auto device = OpenDevice();
+    INFO("device: " << device->Properties().deviceName);
+    {
+        for (const uint32 n : {2u, 3u}) {
+            CAPTURE(n);
+            GpuVdp1Nx g(*device, n);
+            REQUIRE(g.Ok());
+            auto native = std::make_unique<ref::Fbram>();
+            nx::NxFbram surface(n);
+            g.Reset(*native, surface);
+            gpu::Vdp1CommandParams c{};
+            c.drawFlags = gpu::Vdp1MakeDrawFlags(0x00C0, 4, false, false);
+            c.color = 0x83E0;
+            c.sysClip = gpu::Vdp1Pack16(352, 255);
+            g.Copy(GpuVdp1Nx::Commands, &c, sizeof(c));
+            auto span = [&](CoordS32 a, CoordS32 b, uint32 slotBase) {
+                return gpu::Vdp1NxSpan{static_cast<uint32>(a.x()), static_cast<uint32>(a.y()), static_cast<uint32>(b.x()),
+                                       static_cast<uint32>(b.y()), 0, slotBase, 0,
+                                       gpu::Vdp1MakeNxSpanFlags(gpu::kNxSpanRect, false, 0, 0)};
+            };
+            const uint32 slots = 16 * n;
+            const gpu::Vdp1NxSpan spans[2] = {span({5, 10}, {20, 10}, 0), span({5, 5}, {5, 20}, slots)};
+            g.Copy(GpuVdp1Nx::Spans, spans, sizeof(spans));
+            const gpu::Vdp1BatchPushConstants pc{0, 2, 0, 2 * slots, 0, n};
+            for (uint32 run = 1; run <= 2; ++run) {
+                CAPTURE(run);
+                REQUIRE(g.SubBatch(pc));
+                const auto *fragments = g.Map<gpu::Vdp1Fragment>(GpuVdp1Nx::Fragments);
+                for (uint32 i = 0; i < slots; ++i) {
+                    CHECK(gpu::Vdp1FragLive(fragments[i].target));
+                }
+                for (uint32 i = slots; i < 2 * slots; ++i) {
+                    CHECK(fragments[i].target == 0);
+                }
+                CHECK(g.Map<uint32>(GpuVdp1Nx::BatchState)[gpu::kBatchStateBadRectSpans] == run);
+                CHECK(g.CountsZero());
+            }
         }
     }
     CloseAndCheckValidation(device);

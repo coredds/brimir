@@ -22,8 +22,9 @@
 //   one coalesced pass over the bucket (the gather) plus the histograms; every pass loads four keys per thread at a
 //   time.
 //
-// The including shader declares g_batch, g_fragments, g_unitCounts, g_bucket, g_scanSums, g_unitOffsets and
-// g_batchState, and defines before including this file:
+// The including shader defines VDP1_RESOLVE_NATIVE (1: the native resolve, whose range is one round of 64 G units and
+// is compiled without the round loop; 0: N x) and declares g_batch, g_fragments, g_unitCounts, g_bucket, g_scanSums,
+// g_unitOffsets and g_batchState before including this file, and defines before including it:
 //   uint ResolveUnitLimit()                                    units at or above it are not resolved
 //   void ResolveUnitWords(uint unit, uint fb, out uint mainAddress, out uint meshAddress)   the unit's word pair
 //   uint ResolveReadWord(uint address)
@@ -317,12 +318,18 @@ void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
     const uint limit = ResolveUnitLimit();
     uint counts, stride;
     g_unitCounts.GetDimensions(counts, stride);
+#if VDP1_RESOLVE_NATIVE
+    // A native range (at most 64 G units) is one round: no loop, as before the N x passes
+    const uint rounds = 1;
+    [unroll] for (uint r = 0; r < 1; ++r) {
+#else
     // Rounds of 64 G units (uniform over the group)
     const uint range = unitHi > unitLo ? unitHi - unitLo : 0;
     const uint perRound = groups * 64;
     const uint rounds = perRound != 0 ? (range + perRound - 1) / perRound : 0;
 
     for (uint r = 0; r < rounds; ++r) {
+#endif
         if (t == 0) {
             gs_largeCount = 0;
         }
@@ -347,7 +354,11 @@ void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
         for (uint li = 0; li < large; ++li) {
             ResolveLarge(gs_large[li], fb, t);
         }
-        GroupMemoryBarrierWithGroupSync();
+        // Before the next round resets gs_largeCount (uniform: rounds is the group's); a native range has one round and
+        // pays no extra barrier
+        if (r + 1 < rounds) {
+            GroupMemoryBarrierWithGroupSync();
+        }
     }
 }
 

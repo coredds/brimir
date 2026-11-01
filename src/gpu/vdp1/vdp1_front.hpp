@@ -119,7 +119,10 @@ struct Vdp1OpList {
     }
 };
 
-/// @brief The raster, bucket, scatter and resolve passes' push constants for a batch.
+/// @brief The raster, bucket, scatter and resolve passes' push constants for a batch (native resolution). The native
+/// scatter and resolve passes read scale to tell native units from N x units (an N x sub-batch pushes N, 2 to 4, to
+/// the scatter and resolve_nx passes), so a native batch must push exactly 1.
+static_assert(kRasterScale == 1, "the native scatter pass treats any scale above 1 as an N x sub-batch");
 constexpr Vdp1BatchPushConstants Vdp1BatchConstants(const Vdp1DrawBatch &batch) {
     return {batch.spanOffset, batch.spanCount, batch.cmdOffset, batch.fragmentCount, batch.drawFB, kRasterScale};
 }

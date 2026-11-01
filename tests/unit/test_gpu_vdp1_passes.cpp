@@ -687,7 +687,7 @@ std::string CompareBuckets(const RasterExpectation &e, GpuVdp1 &g) {
     if (state[gpu::kBatchStateAccLoInv] != 0 || state[gpu::kBatchStateAccHi] != 0) {
         return "the range accumulator was not reset";
     }
-    if (state[gpu::kBatchStateBucketArgs] != ((hi + 63) >> 6) - (lo >> 6) ||
+    if (state[gpu::kBatchStateBucketArgs] != ((hi + 63) >> 6) - (lo >> 6) || state[gpu::kBatchStateBucketArgs + 1] != (hi != lo ? 1u : 0u) ||
         state[gpu::kBatchStateResolveArgs] != std::min(hi - lo, gpu::kResolveGroupCount)) {
         return "indirect dispatch arguments do not match the range";
     }

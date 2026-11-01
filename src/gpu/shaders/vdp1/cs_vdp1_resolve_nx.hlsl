@@ -10,6 +10,8 @@
 // Bindings (vdp1_bindings.hpp kResolveNxBindings): fragments (16), unit counts (17), bucket (18), scan sums (20), unit
 // offsets (21), batch state (22), N x surface (24). Push constants: BatchParams (drawFB, scale = N, 2 to 4).
 
+#define VDP1_RESOLVE_NATIVE 0
+
 #include "vdp1_defs.hlsli"
 #include "vdp1_params.hlsli"
 

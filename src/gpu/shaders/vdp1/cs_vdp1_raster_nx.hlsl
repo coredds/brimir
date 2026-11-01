@@ -7,7 +7,7 @@
 // are [slotBase, the next span's slotBase) (the last span's end at fragmentCount, the sub-batch's slot count); every slot
 // is written once, in increasing order: a fragment, or 0. A fragment's target is the N x one (vdp1_hw_params.hpp): N x
 // unit (native unit) * N^2 + j * N + i, the native target's flags in bits 28-22. By kind:
-// - Rect: N x row N * y + subRow of the native row (x0, y0) - (x1, y1): the native LineStepper and SystemClip; native
+// - Rect (a row that is not horizontal is skipped and counted in g_batchState[kBatchStateBadRectSpans], as the reference throws): N x row N * y + subRow of the native row (x0, y0) - (x1, y1): the native LineStepper and SystemClip; native
 //   pixel p gives N sub-steps (textures and Gouraud by K = clamp(phase((N P + s) num / (N den)), c(P), c(P + 1)), phase
 //   floor forwards and ceil backwards) and its N x N block's row: slot N p + s is sub-texel i = s forwards, and
 //   backwards i = 0 for s = 0 and i = N - s (sub-step s of the previous pixel; pixel 0 repeats itself) otherwise;
@@ -281,6 +281,15 @@ void RasterRect(NxSpan span, CommandParams cmd, inout SlotWriter w, uint n) {
     const uint rf = cmd.rasterFlags;
     LineStepper ln = MakeLineStepper(ax, ay, bx, by, Vdp1CmdAntiAlias(df));
     const uint skip = LineSystemClip(ln, p.clip.sysH, p.clip.sysV);
+    if (ln.xMajInc == 0) {
+        // not a horizontal row (the reference throws; the generator never emits one): skipped, counted
+        uint words, stride;
+        g_batchState.GetDimensions(words, stride);
+        if (kBatchStateBadRectSpans < words) {
+            InterlockedAdd(g_batchState[kBatchStateBadRectSpans], 1);
+        }
+        return;
+    }
     const bool forward = ln.xMajInc > 0;
     const int Y = int(n) * ay + int(Vdp1NxSpanSubRow(span.flags));
 

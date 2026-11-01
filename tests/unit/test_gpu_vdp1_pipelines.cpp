@@ -106,7 +106,19 @@ const std::vector<ShaderCase> &Shaders() {
     return shaders;
 }
 
-constexpr size_t kNativeShaderCount = 10;
+// The native passes come first, in kPipelineBindings order, then the N x passes in kNxPipelineBindings order
+constexpr size_t kNativeShaderCount = kPipelineBindings.size();
+
+// The case of the shader with the given name (the cases are looked up by name, not position)
+const ShaderCase &ShaderNamed(const char *name) {
+    for (const ShaderCase &shader : Shaders()) {
+        if (std::string(shader.name) == name) {
+            return shader;
+        }
+    }
+    FAIL("no shader case named " << name);
+    return Shaders().front();
+}
 
 // SPIR-V opcodes and enumerants used below (SPIR-V 1.5 specification)
 constexpr uint32_t kSpvMagic = 0x07230203;
@@ -405,8 +417,7 @@ TEST_CASE("VDP1 dispatch shapes and groupshared sizes stay within the baseline",
 }
 
 TEST_CASE("The VDP1 SPIR-V check rejects modules that depart from the rules", "[vdp1][pipelines]") {
-    const ShaderCase &resolve = Shaders()[5];
-    REQUIRE(std::string(resolve.name) == "vdp1_resolve");
+    const ShaderCase &resolve = ShaderNamed("vdp1_resolve");
     const std::vector<uint32_t> words(resolve.spirv.begin(), resolve.spirv.end());
     REQUIRE(CheckModule(words, resolve).empty());
 
@@ -475,7 +486,10 @@ TEST_CASE("Every VDP1 binding is used by a pass and declared by the layout probe
     }
     CHECK(nxSurface);
     CHECK(uses(kNxLayoutProbeBindings, kBindingFbramNx));
-    // The N x shader cases are kNxPipelineBindings, in order
+    // The native shader cases are kPipelineBindings and the N x ones kNxPipelineBindings, in order
+    for (size_t i = 0; i < kPipelineBindings.size(); ++i) {
+        CHECK(Shaders()[i].bindings.data() == kPipelineBindings[i].data());
+    }
     REQUIRE(Shaders().size() == kNativeShaderCount + kNxPipelineBindings.size());
     for (size_t i = 0; i < kNxPipelineBindings.size(); ++i) {
         CHECK(Shaders()[kNativeShaderCount + i].bindings.data() == kNxPipelineBindings[i].data());

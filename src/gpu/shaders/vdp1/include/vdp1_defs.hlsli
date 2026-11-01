@@ -108,6 +108,8 @@ static const uint kBatchStateUnitLo = 6;
 static const uint kBatchStateUnitHi = 7;
 static const uint kBatchStateAccLoInv = 8;
 static const uint kBatchStateAccHi = 9;
+// raster_nx's diagnostic counter: rect spans whose native line was not horizontal (skipped; never reset by the shaders)
+static const uint kBatchStateBadRectSpans = 10;
 
 // g_fbWinners index (vdp1_bindings.hpp Vdp1FbWinnerIndex)
 uint Vdp1FbWinnerIndex(bool alt, uint fb, uint word, bool lowByte) {
