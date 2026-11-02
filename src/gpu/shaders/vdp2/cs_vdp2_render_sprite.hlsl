@@ -133,10 +133,17 @@ uint NxByteAddress(uint address, uint sliceBase, uint sub) {
     return (sliceBase / kVDP1FBRAMSize) * kVDP1FBRAMSize * n2 + ((address >> 1) * n2 + sub) * 2 + (address & 1);
 }
 
-uint LoadSpriteFBNx(uint address) {
+uint SpriteFBNxSize() {
     uint size;
     g_spriteFBNx.GetDimensions(size);
-    return address < (size & ~3u) ? g_spriteFBNx.Load(address) : 0;
+    return size & ~3u;
+}
+
+// The buffer's size, queried once per invocation instead of per read
+static const uint kSpriteFBNxSize = SpriteFBNxSize();
+
+uint LoadSpriteFBNx(uint address) {
+    return address < kSpriteFBNxSize ? g_spriteFBNx.Load(address) : 0;
 }
 
 uint ReadFB8(uint address, uint sliceBase, uint sub) {

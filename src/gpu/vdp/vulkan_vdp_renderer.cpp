@@ -137,6 +137,10 @@ void VulkanVDPRenderer::AbandonDevice() {
         HandToSoftware();
     }
     (void)m_vdp1Backend.release();
+    (void)m_passProfile.release();
+    if (m_backend) {
+        m_backend->SetPassProfile(nullptr);
+    }
     NotifyVdp1Rescale(0);
     m_device = nullptr;
     m_gpuVdp1 = false;
@@ -230,6 +234,9 @@ void VulkanVDPRenderer::RecordedFrameDropped() {
     m_front.MarkAllDirty();
     if (m_vdp1Backend) {
         m_vdp1Backend->FrameDropped();
+    }
+    if (m_passProfile) {
+        m_passProfile->Dropped();
     }
     m_proposed = {}; // its readbacks never happen
     m_vdp1OneTimeRecorded = false; // re-armed by the back half's FrameDropped
@@ -373,6 +380,13 @@ void VulkanVDPRenderer::SetVdp1NxAllocationLimitForTest(VkDeviceSize bytes) {
     }
 }
 
+void VulkanVDPRenderer::SetVdp1OverwritePath(bool enabled) {
+    m_vdp1OverwritePath = enabled;
+    if (m_vdp1Backend) {
+        m_vdp1Backend->SetNxOverwritePath(enabled);
+    }
+}
+
 void VulkanVDPRenderer::SetLog(std::function<void(const std::string &)> log) {
     m_log = std::move(log);
     if (m_backend) {
@@ -412,6 +426,16 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     m_device = &device;
     m_vdp1Backend = std::move(backend);
     m_backend->SetSpriteFBExternal(true);
+    if (PassProfileProbe) {
+        auto profile = std::make_unique<GpuPassProfile>(device);
+        if (profile->Ok()) {
+            m_passProfile = std::move(profile);
+            m_vdp1Backend->SetPassProfile(m_passProfile.get());
+            m_backend->SetPassProfile(m_passProfile.get());
+        } else {
+            Log("GPU pass profile: no timestamps on this queue");
+        }
+    }
 
     // The software VDP1 state becomes the GPU's: FBRAM (VDPState main, the inner renderer's alt and mesh), doubleV,
     // and the front half's VRAM copy (uploaded whole with the first batch).
@@ -435,6 +459,7 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     m_frameRecordedBySync = false;
     // VDP1 upscaling: the N x surface, rebuilt from the uploaded FBRAM
     m_vdp1Backend->SetNxAllocationLimitForTest(m_vdp1NxAllocationLimit);
+    m_vdp1Backend->SetNxOverwritePath(m_vdp1OverwritePath);
     ApplyVdp1NxScale(Vdp1NxTarget(m_internalScale));
     return true;
 }
@@ -471,8 +496,10 @@ void VulkanVDPRenderer::HandToSoftware() {
 void VulkanVDPRenderer::DestroyGpuVdp1() {
     if (m_backend) {
         m_backend->SetSpriteSurfaceNx(VK_NULL_HANDLE); // the N x surface dies with the VDP1 back half
+        m_backend->SetPassProfile(nullptr);
     }
     m_vdp1Backend.reset();
+    m_passProfile.reset();
     NotifyVdp1Rescale(0); // the N x surface dies with the back half
     m_device = nullptr;
     m_gpuVdp1 = false;
@@ -552,6 +579,9 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     MergeContext(context);
     if (!m_vdp1Backend->BeginContext(context)) {
         return false;
+    }
+    if (m_passProfile) {
+        m_passProfile->Begin(context);
     }
     // A new N x surface's rebuild, even without ops (the surface is current at the end of every command buffer)
     m_vdp1OneTimeRecorded = m_vdp1Backend->NxScale() != 0 && m_vdp1Backend->RecordPendingWork(context, cmd);
@@ -1404,6 +1434,17 @@ void VulkanVDPRenderer::VDP2EndFrame() {
         }
         FrameProbe(m_front.Frame().features, m_frontSeconds, m_vdp1Times);
         m_vdp1Times = {};
+    }
+    if (m_passProfile && PassProfileProbe) {
+        const auto micros = m_passProfile->Take();
+        std::string line = "GPU passes:";
+        char value[32];
+        for (uint32_t i = GpuPassProfile::kBoundary + 1; i < GpuPassProfile::kLabelCount; ++i) {
+            std::snprintf(value, sizeof(value), " %.1f", micros[i]);
+            line += std::string(" ") + GpuPassProfile::Name(static_cast<GpuPassProfile::Label>(i)) + value;
+        }
+        line += " overflow " + std::to_string(m_passProfile->TakeOverflow());
+        PassProfileProbe(line);
     }
     m_slicesCaptured = false;
     m_altSlicesCaptured = false;

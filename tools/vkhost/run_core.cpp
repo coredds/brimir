@@ -306,11 +306,13 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     const uint64_t coreMemoryAtEnd = host.CoreMemoryLive();
     host.Unload();
     host.FillReport(report);
-    if (config.failAllocAboveMiB != 0 || config.failOutputImagesAbove != 0 || config.failOutputImagesFirst >= 0) {
+    if (config.failAllocAboveMiB != 0 || config.failAllocTotalAboveMiB != 0 || config.failOutputImagesAbove != 0 ||
+        config.failOutputImagesFirst >= 0) {
         std::fprintf(stderr, "vkhost: vulkan: %llu allocations refused (--fail-alloc-above %llu, "
-                             "--fail-output-images-above %u)\n",
+                             "--fail-output-images-above %u, --fail-alloc-total-above %llu)\n",
                      static_cast<unsigned long long>(host.FailedAllocations()),
-                     static_cast<unsigned long long>(config.failAllocAboveMiB), config.failOutputImagesAbove);
+                     static_cast<unsigned long long>(config.failAllocAboveMiB), config.failOutputImagesAbove,
+                     static_cast<unsigned long long>(config.failAllocTotalAboveMiB));
     }
     if (config.vulkan) {
         std::fprintf(stderr,

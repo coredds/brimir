@@ -191,6 +191,9 @@ public:
     // than `bytes` (0: never); FailedAllocations() counts them.
     void SetFailAllocAbove(uint64_t bytes) { m_failAllocAbove = bytes; }
     uint64_t FailAllocAbove() const { return m_failAllocAbove; }
+    // --fail-alloc-total-above: ... for allocations that would take the live bytes (CoreMemoryLive) above `bytes`.
+    void SetFailAllocTotalAbove(uint64_t bytes) { m_failAllocTotalAbove = bytes; }
+    uint64_t FailAllocTotalAbove() const { return m_failAllocTotalAbove; }
     void CountFailedAllocation() { ++m_failedAllocations; }
     uint64_t FailedAllocations() const { return m_failedAllocations; }
     // The core's device memory (wrapped vkAllocateMemory / vkFreeMemory): live bytes, the peak and the number of
@@ -286,6 +289,7 @@ private:
     uint32_t m_contextsCreated = 0;
     bool m_failPipelines = false;
     uint64_t m_failAllocAbove = 0;
+    uint64_t m_failAllocTotalAbove = 0;
     uint64_t m_failedAllocations = 0;
     std::mutex m_memoryMutex;
     std::unordered_map<uint64_t, uint64_t> m_memory; // live core allocations: VkDeviceMemory -> bytes

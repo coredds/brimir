@@ -63,7 +63,12 @@
 //                        give the range's exclusive prefix, as bucket_sums does for kScanBlockCount blocks)
 //   resolve_nx           the native resolve (the same ordered core, units in rounds of 64 G per group) with the N x unit
 //                        decode, on the N x surface
-// and the consistency passes, after the native pass of the same op:
+// An overwrite-class sub-batch (vdp1_hw_params.hpp kBatchOverwrite; research section 1.6) runs raster_nx (keeping each
+// unit's last slot + 1 instead of counting), batch_range and resolve_fast_nx (one thread per unit applies that one
+// fragment) instead; a hybrid one (kBatchHybrid) runs raster_nx (each unit's last overwrite-class slot + 1 in the unit
+// offsets), batch_range, filter_nx (counts that fragment and the later ones, marks the others dead), then the ordered
+// passes from bucket on.
+// And the consistency passes, after the native pass of the same op:
 //   erase_nx             the erase region, one thread per native word: its N x blocks (main, alt, mesh as the native
 //                        erase)
 //   fb_write_nx          one thread per record of the run (after fb_write_clear): each N x word of the record's blocks
@@ -198,11 +203,11 @@ static_assert(sizeof(Vdp1NxSpan) == sizeof(Vdp1Span));
 inline constexpr uint32_t kRasterScale = 1;
 
 /// @brief The largest range of one storage buffer binding (the device limit maxStorageBufferRange must cover it); the N x
-/// surface and unit buffers at 4x (32 and 16 MiB) are within the fragment buffer's 32 MiB.
+/// surface, unit counts and unit offsets at 4x (32, 16 and 32 MiB) are within the fragment buffer's 32 MiB.
 inline constexpr uint32_t kMaxStorageBufferRange =
     std::max({kFragmentBufferSize, kBucketBufferSize, kUnitCountsBufferSize, kUnitOffsetsBufferSize, kFbramBufferSize,
               kVRAMBufferSize, kSpanBufferSize, kCommandBufferSize, kFbWriteBufferSize, kFbWinnersBufferSize,
-              kBatchStateBufferSize, Vdp1NxFbramBufferSize(kMaxNxScale), Vdp1NxUnitCount(kMaxNxScale) * 4u,
+              kBatchStateBufferSize, Vdp1NxFbramBufferSize(kMaxNxScale), Vdp1NxUnitCount(kMaxNxScale) * 8u,
               (kMaxNxUnitCount / 64u + kMaxNxScale * kMaxNxScale) * 4u});
 static_assert(kMaxStorageBufferRange <= (1u << 27));
 
@@ -261,6 +266,12 @@ constexpr uint32_t Vdp1NxScanSumsCount(uint32_t scale) {
 }
 constexpr uint32_t Vdp1NxUnitCountsBufferSize(uint32_t scale) {
     return Vdp1NxUnitCount(scale) * sizeof(uint32_t);
+}
+/// @brief The N x unit offsets: the bucket pass's offsets in the first Vdp1NxUnitCount(N) words; the second half holds
+/// the 8 bpp odd bytes' winners of the overwrite-class fast path (vdp1_hw_params.hpp kBatchOverwrite*, kBatchHybrid),
+/// whose even bytes' (and a 16 bpp hybrid sub-batch's) winners use the first half before the bucket pass.
+constexpr uint32_t Vdp1NxUnitOffsetsBufferSize(uint32_t scale) {
+    return 2u * Vdp1NxUnitCountsBufferSize(scale);
 }
 constexpr uint32_t Vdp1NxScanSumsBufferSize(uint32_t scale) {
     return Vdp1NxScanSumsCount(scale) * sizeof(uint32_t);
@@ -397,9 +408,17 @@ inline constexpr std::array<std::span<const Binding>, 10> kPipelineBindings{
     std::span<const Binding>(kEraseBindings),      std::span<const Binding>(kFbWriteMarkBindings),
     std::span<const Binding>(kFbWriteBindings),    std::span<const Binding>(kFbWriteClearBindings)};
 
-// N x pipelines (GPU stage 3). raster_nx has the native raster's bindings; batch_range, bucket and scatter are the
-// native pipelines.
-inline constexpr std::array<Binding, 6> kRasterNxBindings = kRasterBindings;
+// N x pipelines (GPU stage 3). raster_nx has the native raster's bindings and the unit offsets (the 8 bpp odd bytes'
+// winners of an overwrite-class sub-batch); batch_range, bucket and scatter are the native pipelines.
+inline constexpr std::array<Binding, 7> kRasterNxBindings{{
+    {kBindingCommands, DescriptorKind::StorageBuffer},
+    {kBindingSpans, DescriptorKind::StorageBuffer},
+    {kBindingVRAM, DescriptorKind::StorageBuffer},
+    {kBindingFragments, DescriptorKind::StorageBuffer},
+    {kBindingUnitCounts, DescriptorKind::StorageBuffer},
+    {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
+}};
 
 inline constexpr std::array<Binding, 2> kBucketSumsNxBindings{{
     {kBindingScanSums, DescriptorKind::StorageBuffer},
@@ -414,6 +433,24 @@ inline constexpr std::array<Binding, 7> kResolveNxBindings{{
     {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
     {kBindingBatchState, DescriptorKind::StorageBuffer},
     {kBindingFbramNx, DescriptorKind::StorageBuffer},
+}};
+
+/// @brief resolve_fast_nx (the overwrite-class fast path, research section 1.6): the winners in the unit counts (and
+/// the 8 bpp odd bytes' in the unit offsets), the fragments, the range and the N x surface.
+inline constexpr std::array<Binding, 5> kResolveFastNxBindings{{
+    {kBindingFragments, DescriptorKind::StorageBuffer},
+    {kBindingUnitCounts, DescriptorKind::StorageBuffer},
+    {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
+    {kBindingBatchState, DescriptorKind::StorageBuffer},
+    {kBindingFbramNx, DescriptorKind::StorageBuffer},
+}};
+
+/// @brief filter_nx (a hybrid sub-batch, kBatchHybrid): the fragments, the unit counts and the winners in the unit
+/// offsets.
+inline constexpr std::array<Binding, 3> kFilterNxBindings{{
+    {kBindingFragments, DescriptorKind::StorageBuffer},
+    {kBindingUnitCounts, DescriptorKind::StorageBuffer},
+    {kBindingUnitOffsets, DescriptorKind::StorageBuffer},
 }};
 
 inline constexpr std::array<Binding, 1> kEraseNxBindings{{
@@ -441,16 +478,17 @@ inline constexpr std::array<Binding, 4> kNxLayoutProbeBindings{{
 }};
 
 /// @brief The binding tables of the N x pipelines (raster_nx, bucket_sums_nx, bucket_sums_nx_add, resolve_nx, erase_nx,
-/// fb_write_nx, rebuild_nx), in Vdp1VulkanBackend::NxPass order: the back half builds them at its first
-/// SetNxScale(N > 1). The N x unit counts, offsets and scan sums are the back half's own N-sized buffers (bound at
-/// kBindingUnitCounts, kBindingUnitOffsets and kBindingScanSums of raster_nx, bucket_sums_nx(_add), resolve_nx and of
-/// N x sets of the native bucket and scatter pipelines); the counts are zero at creation and between sub-batches, as
-/// the native ones between batches.
-inline constexpr std::array<std::span<const Binding>, 7> kNxPipelineBindings{
+/// fb_write_nx, rebuild_nx, resolve_fast_nx, filter_nx), in Vdp1VulkanBackend::NxPass order: the back half builds them
+/// at its first SetNxScale(N > 1). The N x unit counts, offsets and scan sums are the back half's own N-sized buffers
+/// (bound at kBindingUnitCounts, kBindingUnitOffsets and kBindingScanSums of raster_nx, bucket_sums_nx(_add),
+/// resolve_nx, resolve_fast_nx, filter_nx and of N x sets of the native bucket and scatter pipelines); the counts are
+/// zero at creation and between sub-batches, as the native ones between batches.
+inline constexpr std::array<std::span<const Binding>, 9> kNxPipelineBindings{
     std::span<const Binding>(kRasterNxBindings),   std::span<const Binding>(kBucketSumsNxBindings),
     std::span<const Binding>(kBucketSumsNxBindings), std::span<const Binding>(kResolveNxBindings),
     std::span<const Binding>(kEraseNxBindings),    std::span<const Binding>(kFbWriteNxBindings),
-    std::span<const Binding>(kRebuildNxBindings)};
+    std::span<const Binding>(kRebuildNxBindings),  std::span<const Binding>(kResolveFastNxBindings),
+    std::span<const Binding>(kFilterNxBindings)};
 
 /// @brief The largest per-stage use over the VDP1 pipelines, native and N x (gpu_version.hpp takes the maximum with
 /// VDP2's).

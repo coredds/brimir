@@ -20,6 +20,7 @@
 // The caller guarantees that the GPU work of the context's previous Record has finished by then (its slot fence).
 // Record never waits.
 
+#include "gpu/gpu_pass_profile.hpp"
 #include "gpu/vdp2/vdp2_front.hpp"
 #include "gpu/vk_device.hpp"
 #include "gpu/vk_util.hpp"
@@ -123,6 +124,8 @@ public:
     static VkDeviceSize SpriteNxImageBytes(uint32_t n);
     // Test hook: SetSpriteSurfaceNx's allocations fail.
     void FailSpriteNxAllocationForTest(bool fail) { m_failSpriteNx = fail; }
+    // Diagnostics (GpuPassProfile): stamps around the sprite passes (null: none; the passes then overlap as usual).
+    void SetPassProfile(GpuPassProfile *profile) { m_profile = profile; }
 
     // Where failures (scale and large upload block allocations) are logged; stderr when unset.
     void SetLog(std::function<void(const std::string &)> log) { m_log = std::move(log); }
@@ -267,6 +270,7 @@ private:
     vk_util::Image m_colorCalcWindow; // R32_UINT 704x512
     // VDP1 upscaling (SetSpriteSurfaceNx): the N x VDP1 surface (not owned) and the N x sprite images
     VkBuffer m_spriteSurfaceNx = VK_NULL_HANDLE;
+    GpuPassProfile *m_profile = nullptr;
     vk_util::Image m_spriteLayersNx; // R8G8B8A8_UINT 704Nx512N, 2 layers (sprite, mesh)
     vk_util::Image m_spriteAttrsNx;  // R32_UINT 704Nx512N, 2 layers
     bool m_failSpriteNx = false;

@@ -2144,7 +2144,7 @@ TEST_CASE("GPU VDP1 N x consistency: a dropped command buffer replays the surfac
 
 TEST_CASE("GPU VDP1 N x: a surface that cannot be allocated turns VDP1 upscaling off at that scale",
           "[gpu][vdp1][scene][nx]") {
-    // N x resources above 20 MiB fail: 2x (16 MiB) works, 3x (36 MiB) is refused (logged; VDP1 stays on the GPU,
+    // N x resources above 24 MiB fail: 2x (20 MiB) works, 3x (45 MiB) is refused (logged; VDP1 stays on the GPU,
     // native and identical to software), back at 2x the surface is allocated again.
     std::vector<std::string> logs;
     std::vector<uint32_t> effective;
@@ -2152,7 +2152,7 @@ TEST_CASE("GPU VDP1 N x: a surface that cannot be allocated turns VDP1 upscaling
     options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
         if (f == 0) {
             vk.SetLog([&logs](const std::string &text) { logs.push_back(text); });
-            vk.SetVdp1NxAllocationLimitForTest(20u * 1024 * 1024);
+            vk.SetVdp1NxAllocationLimitForTest(24u * 1024 * 1024);
         } else if (f == 2) {
             REQUIRE(vk.SetInternalScale(3));
         } else if (f == 4) {
@@ -2168,7 +2168,7 @@ TEST_CASE("GPU VDP1 N x: a surface that cannot be allocated turns VDP1 upscaling
               return text.find("3x sprite surface could not be allocated") != std::string::npos;
           }) == 1);
     CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
-              return text.find("VDP1 upscaling: sprite surface at 2x (16 MiB)") != std::string::npos;
+              return text.find("VDP1 upscaling: sprite surface at 2x (20 MiB)") != std::string::npos;
           }) == 1);
 }
 

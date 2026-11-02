@@ -11,6 +11,7 @@ add_library(brimir-gpu STATIC
     vk_device.cpp
     vk_util.cpp
     frame_presenter.cpp
+    gpu_pass_profile.cpp
     # VDP2 and VDP1 on the GPU: the Vulkan back halves and the renderer (VDP1 in software or on the GPU)
     vdp2/vdp2_vulkan_backend.cpp
     vdp1/vdp1_vulkan_backend.cpp

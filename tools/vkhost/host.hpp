@@ -75,6 +75,8 @@ struct HostConfig {
     // --probe: collect the core's per-frame VDP2 probe lines (BRIMIR_VDP2_PROBE) and per-retro_run VDP1 probe lines
     // (BRIMIR_VDP1_PROBE) while recording
     bool probe = false;
+    // --probe-passes: collect the core's per-frame GPU pass times (BRIMIR_GPU_PASS_PROFILE, "GPU passes:" lines)
+    bool probePasses = false;
     // --gpu-vdp1: VDP1 on the GPU in the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=1 for the core; the default)
     bool gpuVdp1 = false;
     // --software-vdp1: VDP1 in software inside the Vulkan VDP renderer (sets BRIMIR_VDP1_GPU=0, the debug override)
@@ -89,6 +91,8 @@ struct HostConfig {
     // --fail-alloc-above MiB: with --vulkan, the core's vkAllocateMemory fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for
     // allocations above this size (0: never).
     uint64_t failAllocAboveMiB = 0;
+    // --fail-alloc-total-above MiB: ... for allocations that would take the core's live device memory above this.
+    uint64_t failAllocTotalAboveMiB = 0;
     // --fail-output-images-above N: with --vulkan, the core's output images (set_image) wider than 704 * N fail.
     uint32_t failOutputImagesAbove = 0;
     // --fail-output-images-on-grow: with --grow-mask, that limit applies only once the mask has grown.
@@ -148,6 +152,12 @@ struct Vdp1ProbeFrame {
     uint64_t nxGenerateNanos = 0;
 };
 
+// One VDP2 frame's "GPU passes:" line (--probe-passes): microseconds per pass kind, in the core's order.
+struct PassFrame {
+    std::vector<double> micros;
+    uint64_t overflow = 0;
+};
+
 // What a run did, for the CLI summary and the checks.
 struct RunReport {
     uint64_t recordedFrames = 0;
@@ -174,6 +184,8 @@ struct RunReport {
     uint64_t geometryCalls = 0;     // SET_GEOMETRY
     std::vector<ProbeFrame> probeFrames; // --probe: the VDP2 frames that ended while recording
     std::vector<Vdp1ProbeFrame> vdp1ProbeFrames; // --probe: the recorded retro_run calls' VDP1 counters
+    std::vector<std::string> passNames;          // --probe-passes: the pass kinds of the core's lines
+    std::vector<PassFrame> passFrames;           // --probe-passes: the VDP2 frames that ended while recording
     std::vector<std::string> problems; // anything that fails the run
 };
 
@@ -237,6 +249,8 @@ public:
     bool ProbeLine(const char* text);
     // A "VDP1 probe:" log line (--probe); kept only while recording. False if it does not parse.
     bool Vdp1ProbeLine(const char* text);
+    // A "GPU passes:" log line (--probe-passes); kept only while recording. False if it does not parse.
+    bool PassLine(const char* text);
     // A core log line; follows "Internal resolution: frames at Nx" (HostFrame::scale).
     void CoreLogLine(const char* text);
 
@@ -345,6 +359,8 @@ private:
     double m_readbackSeconds = 0;
     std::vector<ProbeFrame> m_probeFrames;
     std::vector<Vdp1ProbeFrame> m_vdp1ProbeFrames;
+    std::vector<std::string> m_passNames;
+    std::vector<PassFrame> m_passFrames;
 };
 
 // Loads the core per `config`, runs `warmup` unrecorded frames then `frames` recorded ones, and returns the recorded

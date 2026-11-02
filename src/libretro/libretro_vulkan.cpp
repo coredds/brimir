@@ -511,6 +511,9 @@ struct VulkanOutput::Impl {
     gpu::ScaleRestoreSchedule restore;
     gpu::OutputSize restoreNative{};
     uint64_t restoresSucceeded = 0;
+    // WaitOwnWork calls of option changes (ApplyInternalScale) and fallbacks (FallBackOutput), logged with the counts
+    uint64_t optionChangeWaits = 0;
+    uint64_t fallBackWaits = 0;
 
     VkResult CreateSlots(uint32_t count, VulkanOutputMode wanted);
     // The image structs of the current compute or copy-only images.
@@ -815,7 +818,8 @@ void VulkanOutput::Impl::LogOutputCounts() const {
                                        count(imagesReused) + ", failed " + count(backoff.Failures()) +
                                        ", retries backed off " + count(backoff.BackedOff()) +
                                        "; internal resolution restores tried " + count(restore.Attempts()) +
-                                       ", succeeded " + count(restoresSucceeded));
+                                       ", succeeded " + count(restoresSucceeded) + "; waits for option changes " +
+                                       count(optionChangeWaits) + ", fallbacks " + count(fallBackWaits));
 }
 
 void VulkanOutput::Impl::InstallCopyImages(std::unique_ptr<CopyImages> created) {
@@ -867,8 +871,22 @@ bool VulkanOutput::Impl::FitOutput(uint32_t scale, std::string &error) {
 }
 
 bool VulkanOutput::Impl::FallBackOutput(uint32_t scale, const std::string &reason, std::string &error) {
+    // While every lower scale's images are backed off (their creation failed lately) there is nothing to try: no wait.
+    const uint32_t count = static_cast<uint32_t>(slots.size());
+    bool anyTry = false;
+    for (uint32_t n = scale - 1; n >= 1 && !anyTry; --n) {
+        const gpu::OutputSize extent = ScaledOutput(n);
+        anyTry = backoff.WouldTry(extent, n, runs) ||
+                 std::any_of(imageCache.begin(), imageCache.end(), [&](const auto &cached) {
+                     return cached->Extent() == extent && cached->Scale() == n && cached->SlotCount() == count;
+                 });
+    }
+    if (!anyTry) {
+        return false;
+    }
     // FallBackInternalScale's contract: no submitted work of this output uses the renderer's resources (nothing of
     // this run is recorded yet). The frontend's use of the output images needs no wait: they are retired.
+    ++fallBackWaits;
     if (const VkResult result = WaitOwnWork(); result != VK_SUCCESS) {
         error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
         return false;
@@ -1112,9 +1130,16 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
         scaleChangePending = false;
         return true;
     }
+    if (before == 1 && target == 1 && computeImages->Scale() == 1 && renderer->Vdp1UpscaleScale() == 0) {
+        // Only VDP1 upscaling changes, at 1x: no N x resources either way, so nothing to wait for
+        scaleChangePending = false;
+        renderer->SetVdp1Upscaling(vdp1Upscaling);
+        return true;
+    }
     // SetInternalScale's contract: no submitted work of this output uses the renderer's resources (and no command
     // buffer is recorded yet in this run). The frontend's use of the output images needs no wait: the old images are
     // retired, not destroyed (InstallImages). A failed wait keeps the change pending for the next frame.
+    ++optionChangeWaits;
     if (const VkResult result = WaitOwnWork(); result != VK_SUCCESS) {
         error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
         return false;

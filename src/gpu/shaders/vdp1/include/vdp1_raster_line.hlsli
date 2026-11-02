@@ -101,7 +101,11 @@ void WriteSlot(inout SlotWriter w, uint slot, uint unit, uint target, uint color
     f.color = color;
     g_fragments[w.fragBase + slot] = f;
     w.next = slot + 1;
+#if VDP1_RASTER_NX
+    NxCountFragment(unit, w.fragBase + slot, target); // cs_vdp1_raster_nx.hlsl (the overwrite-class fast path)
+#else
     InterlockedAdd(g_unitCounts[unit], 1);
+#endif
     s_unitLo = min(s_unitLo, unit);
     s_unitHi = max(s_unitHi, unit + 1);
 }

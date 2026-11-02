@@ -182,6 +182,15 @@ if(BRIMIR_VULKAN)
     set_tests_properties(brimir_tests_gpu_vdp1 PROPERTIES
         ENVIRONMENT "BRIMIR_VDP1_MODE=gpu"
         SKIP_REGULAR_EXPRESSION "test cases: +[0-9]+ [|] +0 passed [|] +[0-9]+ skipped")
+    # ... and with VDP1 upscaling at 2x (GPU stage 3): VDP2 decodes the N x VDP1 surface, compared at the sample points.
+    # Not in the CI lavapipe job (which runs brimir_tests directly): it costs several minutes there.
+    add_test(NAME brimir_tests_gpu_vdp1_upscaled
+        COMMAND brimir_tests "[gpu][vdp2][scene]"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+    set_tests_properties(brimir_tests_gpu_vdp1_upscaled PROPERTIES
+        ENVIRONMENT "BRIMIR_VDP1_MODE=gpu;BRIMIR_VDP1_UPSCALING=1;BRIMIR_VDP2_SCALE=2"
+        SKIP_REGULAR_EXPRESSION "test cases: +[0-9]+ [|] +0 passed [|] +[0-9]+ skipped")
 endif()
 
 # The libretro Vulkan context through brimir_vkhost (tests/vkhost_checks.cmake): BIOS menu frames, software vs

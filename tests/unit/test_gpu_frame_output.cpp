@@ -497,17 +497,44 @@ TEST_CASE("Output image retry backoff: 1, 2, 4 ... 120 frames between tries of t
     CHECK(tries == std::vector<uint64_t>{100, 101, 103, 107, 115, 131, 163, 227, 347, 467, 587});
     CHECK(backoff.Failures() == tries.size());
     CHECK(backoff.BackedOff() == 500 - tries.size());
-    // Another request is tried at once (and is a new failure); the first one is then no longer backed off.
+    // Another scale is tried at once (and is a new failure); the first scale stays backed off (its own entry: a failed
+    // 4x and the fallback's failed 3x cannot make each other fresh every frame).
     CHECK(backoff.MayTry({960, 672}, 3, 600));
     CHECK(backoff.Failed({960, 672}, 3, 600));
-    CHECK(backoff.MayTry(big, 4, 600));
+    CHECK_FALSE(backoff.MayTry(big, 4, 600));
     CHECK_FALSE(backoff.MayTry({960, 672}, 3, 600));
     CHECK(backoff.MayTry({960, 672}, 3, 601));
-    // A success forgets the backoff.
+    CHECK(backoff.MayTry(big, 4, 707)); // 587 + 120
+    // Another extent at a scale is a new request there (tried at once, a new failure).
+    CHECK(backoff.MayTry({1408, 960}, 4, 650));
+    CHECK(backoff.Failed({1408, 960}, 4, 650));
+    CHECK(backoff.MayTry(big, 4, 650));
+    // A success forgets the backoff, at every scale.
     CHECK(backoff.Failed({960, 672}, 3, 601) == false);
     backoff.Succeeded();
     CHECK(backoff.MayTry({960, 672}, 3, 602));
+    CHECK(backoff.MayTry({1408, 960}, 4, 651));
     CHECK(backoff.Failed({960, 672}, 3, 602));
+}
+
+TEST_CASE("Output image retry backoff: alternating failures of a size change and its fallback are both backed off",
+          "[frame-output]") {
+    // Every frame the output tries the new size at 4x, then (FallBackOutput) 3x, 2x and 1x, and every one fails: each
+    // scale is tried at its own 1, 2, 4 ... frames, never every frame.
+    OutputRetryBackoff backoff;
+    std::array<std::vector<uint64_t>, 5> tries;
+    for (uint64_t frame = 0; frame < 40; ++frame) {
+        for (uint32_t scale = 4; scale >= 1; --scale) {
+            const OutputSize extent{352 * scale, 240 * scale};
+            if (backoff.MayTry(extent, scale, frame)) {
+                tries[scale].push_back(frame);
+                (void)backoff.Failed(extent, scale, frame);
+            }
+        }
+    }
+    for (uint32_t scale = 1; scale <= 4; ++scale) {
+        CHECK(tries[scale] == std::vector<uint64_t>{0, 1, 3, 7, 15, 31});
+    }
 }
 
 TEST_CASE("Scale restore after a downgrade: after 600, 1200, 2400 frames or at a size change, at most 3 attempts",

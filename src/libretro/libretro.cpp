@@ -320,6 +320,24 @@ static void set_vdp2_probe(brimir::gpu::VulkanVDPRenderer& renderer) {
     };
 }
 
+// Diagnostics: with BRIMIR_GPU_PASS_PROFILE set (brimir_vkhost --probe-passes), the GPU time of every pass kind, one
+// debug line per VDP2 frame ("GPU passes: ...", VulkanVDPRenderer::PassProfileProbe).
+static void set_pass_profile(brimir::gpu::VulkanVDPRenderer& renderer) {
+    static const bool requested = [] {
+        const char* env = std::getenv("BRIMIR_GPU_PASS_PROFILE");
+        return env != nullptr && *env != '\0' && std::strcmp(env, "0") != 0;
+    }();
+    if (requested) {
+        renderer.PassProfileProbe = [](const std::string& line) { brimir_log(RETRO_LOG_DEBUG, "%s", line.c_str()); };
+    }
+    // Diagnostics: BRIMIR_VDP1_NX_OVERWRITE=0 turns the VDP1 upscaling fast path off (every N x sub-batch ordered)
+    const char* overwrite = std::getenv("BRIMIR_VDP1_NX_OVERWRITE");
+    if (overwrite != nullptr && std::strcmp(overwrite, "0") == 0) {
+        renderer.SetVdp1OverwritePath(false);
+        brimir_log(RETRO_LOG_INFO, "VDP1 upscaling: overwrite-class fast path off (BRIMIR_VDP1_NX_OVERWRITE=0)");
+    }
+}
+
 // Diagnostics: BRIMIR_VDP1_DUMP_OPS="<frame>|<file>" (brimir_vkhost --dump-vdp1-ops) captures the GPU VDP1 work of
 // one VDP2 frame, counted from the renderer's attach (VulkanVDPRenderer::SetVdp1OpDump). Once per process.
 static void set_vdp1_op_dump(brimir::gpu::VulkanVDPRenderer& renderer) {
@@ -375,6 +393,7 @@ static void sync_vdp_renderer(void) {
             error = "installing it failed";
         } else {
             renderer->SetVdp1Mode(vdp1_mode_requested() ? brimir::gpu::Vdp1Mode::Gpu : brimir::gpu::Vdp1Mode::Software);
+            set_pass_profile(*renderer); // before the attach: the profile starts with Gpu VDP1 mode
             if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
                 set_vdp2_probe(*renderer);
                 set_vdp1_op_dump(*renderer);

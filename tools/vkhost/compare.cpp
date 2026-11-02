@@ -52,7 +52,7 @@ const std::set<std::string> kDropped = {"--compare", "--hash",   "--vulkan",    
 // Only valid together with --vulkan: dropped from the software child.
 const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--reset-in-present", "--preferred-hw",
                                            "--fake-api",   "--grow-mask",    "--fail-compute-on-grow", "--fail-compute-on-reset", "--no-validation",
-                                           "--sharpness",  "--region",       "--fail-alloc-above",
+                                           "--sharpness",  "--region",       "--fail-alloc-above", "--fail-alloc-total-above",
                                            "--fail-output-images-above", "--defer-image-read", "--fail-submit-at",
                                            "--fail-submits", "--fail-output-images-on-grow"};
 // Takes a frame number and a file; each child writes its own file (<file>.software, <file>.vulkan).

@@ -32,6 +32,7 @@
 // GPU FBRAM at the next Record (one-time work, as the zero fill: re-armed by FrameDropped). The op lists replayed after a
 // dropped command buffer carry their N x passes with them.
 
+#include "gpu/gpu_pass_profile.hpp"
 #include "gpu/vdp1/vdp1_bindings.hpp"
 #include "gpu/vdp1/vdp1_front.hpp"
 #include "gpu/vdp1/vdp1_nx_front.hpp"
@@ -117,6 +118,23 @@ public:
     void SetNxAllocationLimitForTest(VkDeviceSize bytes) { m_nxAllocationLimit = bytes; }
     // Test hook: the N x sub-batch capacities (Vdp1NxLimits).
     void SetNxLimitsForTest(const Vdp1NxLimits &limits) { m_nxArena.limits = limits; }
+    // The overwrite-class fast path (kBatchOverwrite; on by default): off, every N x sub-batch takes the ordered resolve
+    // (tests, measurements).
+    void SetNxOverwritePath(bool enabled) { m_nxOverwritePath = enabled; }
+    // A command's fast-path key: 0 when its fragments may read what they write (MSB-on, shadow, half-transparency, mesh
+    // framebuffer writes), else kKeyOverwrite with kKeyPixel8 (8 bpp) and kKeyMeshes (transparent meshes). A draw batch
+    // whose commands all have one non-zero key is overwrite-class (kBatchOverwrite).
+    static constexpr uint8_t kKeyOverwrite = 1, kKeyPixel8 = 2, kKeyMeshes = 4;
+    static uint8_t OverwriteKey(const Vdp1CommandParams &command);
+    // The path of a draw batch's N x sub-batches: ordered, overwrite-class (the common key), or hybrid (kBatchHybrid:
+    // one pixel depth and transparent-meshes setting, some overwrite-class command)
+    enum class NxPath : uint8_t { Ordered, Overwrite, OverwriteOddBytes, Hybrid, HybridPixel8 };
+    static NxPath ClassifyNx(std::span<const Vdp1CommandParams> commands);
+    // N x sub-batches recorded since creation: on the fast path (of them 8 bpp) and ordered (tests).
+    struct NxPathTotals {
+        uint64_t overwrite = 0, overwriteOddBytes = 0, hybrid = 0, ordered = 0;
+    };
+    const NxPathTotals &NxPathTotalsForTest() const { return m_nxPathTotals; }
 
     // What the Records since the last BeginContext recorded.
     struct RecordStats {
@@ -135,6 +153,9 @@ public:
         uint32_t nxErases = 0;
         uint32_t nxFbWriteRuns = 0;
         uint32_t nxRebuilds = 0; // rebuild_nx dispatches (new surface, uploads)
+        uint32_t nxOverwriteSubBatches = 0; // N x sub-batches on the overwrite-class fast path (resolve_fast_nx)
+        uint32_t nxOverwriteOddBytes = 0;   // ... of them 8 bpp (odd-byte winners in the unit offsets)
+        uint32_t nxHybridSubBatches = 0;    // N x sub-batches on the hybrid path (filter_nx, then ordered)
         // N x spans whose slots alone exceed a sub-batch's slot capacity (Vdp1NxStats::oversizedSpans)
         uint32_t nxOversizedSpans = 0;
     };
@@ -152,6 +173,8 @@ public:
     bool EnableTimestamps();
     // The GPU time of the command buffers whose results were collected since the last call, in seconds.
     double TakeGpuSeconds();
+    // Diagnostics (GpuPassProfile): a stamp after every pass and copy group (null: none). Owned by the caller.
+    void SetPassProfile(GpuPassProfile *profile) { m_profile = profile; }
 
 private:
     static constexpr uint32_t kQueriesPerContext = 64;
@@ -190,7 +213,8 @@ private:
     // The N x pipelines (vdp1_bindings.hpp kNxPipelineBindings order); batch_range, bucket and scatter are the native
     // pipelines, bucket and scatter with N x descriptor sets.
     enum NxPass : uint32_t {
-        kNxRaster, kNxBucketSums, kNxBucketSumsAdd, kNxResolve, kNxErase, kNxFbWrite, kNxRebuild, kNxPassCount
+        kNxRaster, kNxBucketSums, kNxBucketSumsAdd, kNxResolve, kNxErase, kNxFbWrite, kNxRebuild, kNxResolveFast,
+        kNxFilter, kNxPassCount
     };
     enum NxBuf : uint32_t { kNxUnitCounts, kNxUnitOffsets, kNxScanSums, kNxSurface, kNxBufCount };
 
@@ -214,6 +238,8 @@ private:
                               uint32_t argsWord) const;
     void PassBarrier(VkCommandBuffer cmd) const;
     void RecordNxRebuild(VkCommandBuffer cmd, uint32_t sliceMask);
+    void ProfileStamp(VkCommandBuffer cmd, GpuPassProfile::Label label) const;
+    GpuPassProfile::Label ProfileLabel(const Pipe &pipe) const;
 
     VulkanDevice &m_device;
     VkResult m_result = VK_ERROR_INITIALIZATION_FAILED;
@@ -242,6 +268,8 @@ private:
     double m_gpuSeconds = 0;
     uint32_t m_timestampBits = 0;
     bool m_timestampsUnavailable = false;
+    GpuPassProfile *m_profile = nullptr;
+    bool m_profileNx = false; // the passes being recorded are an N x sub-batch's
 
     // N x (SetNxScale)
     uint32_t m_nxScale = 0;
@@ -256,10 +284,18 @@ private:
     bool m_nxRecordedZero = false;  // ... and the command buffer of the last BeginContext carries it
     uint32_t m_nxPendingRebuild = 0;  // slices rebuilt from the GPU FBRAM by the next Record
     uint32_t m_nxRecordedRebuild = 0; // ... and the ones the command buffer of the last BeginContext carries
+    bool m_nxOverwritePath = true;
+    NxPathTotals m_nxPathTotals;
+    // The halves of the N x unit offsets (Vdp1NxUnitOffsetsBufferSize) may hold non-zero words (the bucket pass wrote
+    // the first, a hybrid sub-batch left winners, or a command buffer was dropped): a sub-batch that keeps winners in a
+    // half zeroes it first
+    bool m_nxOffsetsDirty = false;
+    bool m_nxOddWinnersDirty = false;
     Vdp1NxArena m_nxArena;
     struct NxDraw {
         uint32_t firstSubBatch = 0; // into m_nxArena.subBatches
         uint32_t subBatches = 0;
+        NxPath path = NxPath::Ordered;
     };
     std::vector<NxDraw> m_nxDraws; // per op of the segment being recorded
 };

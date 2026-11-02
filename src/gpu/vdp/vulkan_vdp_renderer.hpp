@@ -139,6 +139,10 @@ public:
     };
     std::function<void(const vdp2::Vdp2FeatureCounters &features, double frontSeconds, const Vdp1ProbeTimes &vdp1)>
         FrameProbe;
+    // Diagnostics (brimir_vkhost --probe-passes): when set before Gpu VDP1 mode starts, the back halves time every
+    // pass (GpuPassProfile) and this is fired at the end of every VDP2 frame with "GPU passes:" and the microseconds
+    // per pass kind collected since the previous call ("name value" pairs, then "overflow" stamps that did not fit).
+    std::function<void(const std::string &line)> PassProfileProbe;
     // Diagnostics (brimir_vkhost --dump-vdp1-ops): in Gpu VDP1 mode, captures the VDP1 work of VDP2 frame `frame`
     // (counting VDP2EndFrame calls from this call, from 0) into the file `path` (vdp1_op_dump.hpp): at the end of frame
     // frame - 1 a Dump sync makes every slice current (the start state), the op lists taken until the end of `frame`
@@ -257,6 +261,9 @@ public:
     }
     // Test hook: the VDP1 back half's N x resources fail to allocate above `bytes` (0: no limit), kept across attaches.
     void SetVdp1NxAllocationLimitForTest(VkDeviceSize bytes);
+    // The VDP1 back half's overwrite-class fast path at N x (Vdp1VulkanBackend::SetNxOverwritePath; on by default),
+    // kept across back halves. Diagnostics and tests (BRIMIR_VDP1_NX_OVERWRITE=0).
+    void SetVdp1OverwritePath(bool enabled);
 
     // The inner software renderer (VDP1 in Software mode and while detached), for tests.
     const ymir::vdp::SoftwareVDPRenderer &InnerVdp1ForTest() const { return *m_vdp1; }
@@ -443,6 +450,7 @@ private:
     bool m_gpuVdp1 = false;
     vdp1::Vdp1FrontEnd m_vdp1Front;
     std::unique_ptr<vdp1::Vdp1VulkanBackend> m_vdp1Backend;
+    std::unique_ptr<GpuPassProfile> m_passProfile; // PassProfileProbe, with the VDP1 back half
     std::vector<Vdp1Work> m_vdp1Queue;        // pending, in emulation order
     size_t m_vdp1BeforeFrame = 0;             // m_vdp1Queue[0, this) precede the pending VDP2 frame's end
     std::vector<Vdp1Work> m_vdp1Recorded;     // what the last record call recorded (for RecordedFrameDropped)
@@ -468,6 +476,7 @@ private:
     bool m_vdp1OneTimeRecorded = false; // the last record call recorded the VDP1 back half's one-time work
     uint32_t m_vdp1NxNotified = 0; // the last scale reported to m_vdp1WorkObserver
     VkDeviceSize m_vdp1NxAllocationLimit = 0;
+    bool m_vdp1OverwritePath = true;
     std::function<void(const Vdp1WorkEvent &)> m_vdp1WorkObserver;
 
     uint32_t m_HRes = ymir::vdp::kDefaultResH;

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <type_traits>
 
 #ifdef _WIN32
@@ -105,6 +106,9 @@ void RETRO_CALLCONV LogCallback(enum retro_log_level level, const char* fmt, ...
         g_hosts[Slot]->Vdp1ProbeLine(text)) {
         return;
     }
+    if (std::strstr(text, "GPU passes: ") != nullptr && g_hosts[Slot] != nullptr && g_hosts[Slot]->PassLine(text)) {
+        return;
+    }
     if (g_hosts[Slot] != nullptr) {
         g_hosts[Slot]->CoreLogLine(text);
     }
@@ -183,6 +187,16 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_frameIndex = 0;
     m_probeFrames.clear();
     m_vdp1ProbeFrames.clear();
+    m_passNames.clear();
+    m_passFrames.clear();
+    if (config.probePasses) {
+        // Read by the core when it installs the Vulkan VDP renderer
+#ifdef _WIN32
+        _putenv_s("BRIMIR_GPU_PASS_PROFILE", "1");
+#else
+        setenv("BRIMIR_GPU_PASS_PROFILE", "1", 1);
+#endif
+    }
     if (config.probe) {
         // The core reads BRIMIR_VDP2_PROBE when it installs the Vulkan VDP renderer, BRIMIR_VDP1_PROBE on its first
         // retro_run (only cores built with BRIMIR_VDP1_PROBE=ON count VDP1 work).
@@ -212,6 +226,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
         m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
         m_vulkan->SetFailAllocAbove(config.failAllocAboveMiB << 20);
+    m_vulkan->SetFailAllocTotalAbove(config.failAllocTotalAboveMiB << 20);
         if (config.failOutputImagesOnGrow) {
             m_vulkan->SetFailOutputImagesOnGrow(config.failOutputImagesAbove);
         } else {
@@ -549,6 +564,35 @@ bool LibretroHost::Vdp1ProbeLine(const char* text) {
     return true;
 }
 
+bool LibretroHost::PassLine(const char* text) {
+    // "GPU passes: name value name value ... overflow N"
+    std::istringstream in(std::strstr(text, "GPU passes: ") + std::strlen("GPU passes: "));
+    std::vector<std::string> names;
+    PassFrame f;
+    std::string name;
+    double value = 0;
+    while (in >> name >> value) {
+        if (name == "overflow") {
+            f.overflow = static_cast<uint64_t>(value);
+            break;
+        }
+        names.push_back(name);
+        f.micros.push_back(value);
+    }
+    if (names.empty()) {
+        return false;
+    }
+    if (m_sink != nullptr) {
+        if (m_passNames.empty()) {
+            m_passNames = names;
+        }
+        if (names == m_passNames) {
+            m_passFrames.push_back(std::move(f));
+        }
+    }
+    return true;
+}
+
 void LibretroHost::Problem(const std::string& text) {
     // Each kind once; the counters carry the totals.
     if (std::find(m_problems.begin(), m_problems.end(), text) == m_problems.end()) {
@@ -572,6 +616,12 @@ void LibretroHost::FillReport(RunReport& report) const {
     report.unserializeSeconds += m_unserializeSeconds;
     report.probeFrames.insert(report.probeFrames.end(), m_probeFrames.begin(), m_probeFrames.end());
     report.vdp1ProbeFrames.insert(report.vdp1ProbeFrames.end(), m_vdp1ProbeFrames.begin(), m_vdp1ProbeFrames.end());
+    if (report.passNames.empty() || report.passNames == m_passNames) {
+        if (report.passNames.empty()) {
+            report.passNames = m_passNames;
+        }
+        report.passFrames.insert(report.passFrames.end(), m_passFrames.begin(), m_passFrames.end());
+    }
     report.problems.insert(report.problems.end(), m_problems.begin(), m_problems.end());
     if (m_vulkan) {
         report.coreSubmits += m_vulkan->CoreSubmits();

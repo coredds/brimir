@@ -168,6 +168,10 @@ void Sort(FuzzProgram &p) {
 // ---------------------------------------------------------------------------------------------------------------------
 // The generator
 
+// Most draw commands overwrite-class (no MSB-on, replace or half-luminance): the programs of the fast-path fuzz case
+// (VDP1 upscaling's overwrite-class sub-batches). Off: the programs are as before.
+bool g_overwriteBias = false;
+
 struct Texture {
     uint16_t srca;
     uint32_t bytes;
@@ -195,7 +199,10 @@ struct Gen {
     // (The RNG is called once per full expression or in braced lists, which are sequenced, so a seed is the same
     // program with every compiler.)
     uint16_t RandomTVMR() {
-        const int tvm = rng.Chance(45) ? 0 : rng.Chance(55) ? 1 : rng.Chance(50) ? 3 : rng.Range(0, 7);
+        int tvm = rng.Chance(45) ? 0 : rng.Chance(55) ? 1 : rng.Chance(50) ? 3 : rng.Range(0, 7);
+        if (g_overwriteBias && rng.Chance(75)) {
+            tvm &= ~1; // mostly 16 bpp: the fast path's mixed (hybrid) sub-batches are 16 bpp only
+        }
         const int vbe = rng.Chance(25) ? 8 : 0;
         return static_cast<uint16_t>(tvm | vbe);
     }
@@ -371,6 +378,10 @@ struct Gen {
         }
         if (!rng.Chance(12)) {
             pmod &= ~0x8000; // MSB on mostly off
+        }
+        if (g_overwriteBias && !rng.Chance(20)) {
+            // Overwrite-class commands (VDP1 upscaling's fast path): replace or half-luminance, no MSB-on
+            pmod = static_cast<uint16_t>((pmod & ~0x8003) | (rng.Chance(50) ? 2 : 0));
         }
         const uint32_t cm = (pmod >> 3) & 7;
         uint16_t colr = static_cast<uint16_t>(rng.Next());
@@ -950,6 +961,7 @@ struct FuzzResult {
     uint64_t fragmentSlots = 0, spans = 0, batches = 0;
     uint64_t lsmdSwitches = 0;
     uint64_t nxCompares = 0, nxDetailBlocks = 0;
+    uint64_t nxOverwrite = 0, nxOverwriteOddBytes = 0, nxHybrid = 0, nxOrdered = 0; // N x sub-batches by path
 };
 
 uint64_t EnvU64(const char *name, uint64_t fallback) {
@@ -986,6 +998,13 @@ FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool haza
         result.fragmentSlots = s.fragmentSlots;
         result.spans = s.spans;
         result.batches = s.batches;
+        if (vk.Vdp1Backend() != nullptr) {
+            const auto &t = vk.Vdp1Backend()->NxPathTotalsForTest();
+            result.nxOverwrite = std::max(result.nxOverwrite, t.overwrite);
+            result.nxOverwriteOddBytes = std::max(result.nxOverwriteOddBytes, t.overwriteOddBytes);
+            result.nxHybrid = std::max(result.nxHybrid, t.hybrid);
+            result.nxOrdered = std::max(result.nxOrdered, t.ordered);
+        }
     };
     const FbramResult r = RenderBothFBRAM(MakeScene(p, log), device, options);
     result.checkpoints = r.checkpoints;
@@ -1189,6 +1208,39 @@ TEST_CASE("GPU VDP1 fuzz: VDP1 upscaling, the N x surface equal to the N x refer
     brimir::test::CloseAndCheckValidation(device);
 }
 
+TEST_CASE("GPU VDP1 fuzz: VDP1 upscaling's overwrite-class fast path equal to the N x reference at 2x, 3x and 4x",
+          "[gpu][vdp1][fuzz][nx]") {
+    // Programs whose draw commands are mostly overwrite-class, so many sub-batches take the fast path (8 bpp ones too,
+    // their odd bytes' winners in the unit offsets) between ordered ones: the N x surface equals the reference at every
+    // checkpoint, native FBRAM equals software
+    struct Bias {
+        Bias() { g_overwriteBias = true; }
+        ~Bias() { g_overwriteBias = false; }
+    } bias;
+    auto device = OpenDevice();
+    const uint64_t seeds = device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 3 : 12;
+    for (const uint32_t n : {2u, 3u, 4u}) {
+        uint64_t compares = 0, overwrite = 0, oddBytes = 0, hybrid = 0, ordered = 0;
+        for (uint64_t seed = 1; seed <= seeds; ++seed) {
+            const FuzzResult r = RunProgram(*device, Generate(seed), true, n);
+            INFO(n << "x, seed " << seed << ": " << r.what);
+            CHECK_FALSE(r.failed);
+            compares += r.nxCompares;
+            overwrite += r.nxOverwrite;
+            oddBytes += r.nxOverwriteOddBytes;
+            hybrid += r.nxHybrid;
+            ordered += r.nxOrdered;
+        }
+        INFO(n << "x: " << overwrite << " fast sub-batches (" << oddBytes << " 8 bpp), " << hybrid << " hybrid, " << ordered
+                 << " ordered");
+        CHECK(compares > seeds * 5);
+        CHECK(overwrite > 0);
+        CHECK(hybrid > 0);
+        CHECK(ordered > 0);
+    }
+    brimir::test::CloseAndCheckValidation(device);
+}
+
 TEST_CASE("GPU VDP1 fuzz: the fuzzer notices a broken GPU renderer (VRAM hazard tracking off)", "[gpu][vdp1][fuzz]") {
     auto device = OpenDevice();
     uint32_t failing = 0, seeds = 0;
@@ -1256,7 +1308,7 @@ void PrintFuzzHeader(const VkPhysicalDeviceProperties &device) {
     std::string env;
     for (const char *name : {"BRIMIR_VDP1_FUZZ_SEEDS", "BRIMIR_VDP1_FUZZ_FIRST", "BRIMIR_VDP1_FUZZ_MINIMIZE",
                              "BRIMIR_VDP1_FUZZ_VALIDATION", "BRIMIR_VDP1_FUZZ_SEED_LIMIT", "BRIMIR_VDP1_FUZZ_NX",
-                             "BRIMIR_VDP1_FUZZ_NX_EVERY", "BRIMIR_VK_DEVICE",
+                             "BRIMIR_VDP1_FUZZ_NX_EVERY", "BRIMIR_VDP1_FUZZ_OVERWRITE", "BRIMIR_VK_DEVICE",
                              "VK_DRIVER_FILES", "VK_ICD_FILENAMES"}) {
         const char *value = std::getenv(name);
         env += std::string(" ") + name + "=" + (value != nullptr ? value : "(unset)");
@@ -1277,7 +1329,9 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
     // VDP1 upscaling at N (2-4) with the N x surface compared at every BRIMIR_VDP1_FUZZ_NX_EVERY-th checkpoint
     const uint32_t nx = static_cast<uint32_t>(EnvU64("BRIMIR_VDP1_FUZZ_NX", 0));
     const uint32_t nxEvery = static_cast<uint32_t>(EnvU64("BRIMIR_VDP1_FUZZ_NX_EVERY", 1));
-    uint64_t nxCompares = 0, nxDetail = 0;
+    // Mostly overwrite-class draw commands (VDP1 upscaling's fast path)
+    g_overwriteBias = EnvU64("BRIMIR_VDP1_FUZZ_OVERWRITE", 0) != 0;
+    uint64_t nxCompares = 0, nxDetail = 0, nxOverwrite = 0, nxOddBytes = 0, nxHybrid = 0, nxOrdered = 0;
     const auto start = std::chrono::steady_clock::now();
     uint64_t checkpoints = 0, nonZero = 0, fragmentSlots = 0, spans = 0, batches = 0, lsmdSwitches = 0;
     std::array<uint64_t, kKinds> ops{};
@@ -1323,6 +1377,10 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
         const FuzzResult r = RunProgram(*device, p, true, nx, nxEvery);
         nxCompares += r.nxCompares;
         nxDetail = std::max(nxDetail, r.nxDetailBlocks);
+        nxOverwrite += r.nxOverwrite;
+        nxOddBytes += r.nxOverwriteOddBytes;
+        nxHybrid += r.nxHybrid;
+        nxOrdered += r.nxOrdered;
         checkpoints += r.checkpoints;
         nonZero = std::max(nonZero, r.maxNonZero);
         fragmentSlots += r.fragmentSlots;
@@ -1370,6 +1428,10 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
         std::printf("  N x surface at %ux: %llu compares with the reference (every %u checkpoints and frame ends), up to "
                     "%llu blocks with detail\n",
                     nx, static_cast<unsigned long long>(nxCompares), nxEvery, static_cast<unsigned long long>(nxDetail));
+        std::printf("  N x sub-batches: %llu overwrite-class (%llu 8 bpp), %llu hybrid, %llu ordered%s\n",
+                    static_cast<unsigned long long>(nxOverwrite), static_cast<unsigned long long>(nxOddBytes),
+                    static_cast<unsigned long long>(nxHybrid), static_cast<unsigned long long>(nxOrdered),
+                    g_overwriteBias ? " (overwrite-biased programs)" : "");
         CHECK(nxCompares > seeds * 5);
     }
     std::fflush(stdout);

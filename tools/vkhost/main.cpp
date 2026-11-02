@@ -126,7 +126,10 @@ void PrintUsage(std::FILE* out) {
         "                renderer; sets BRIMIR_VDP1_PROBE), per retro_run the software VDP1 work: commands, lines,\n"
         "                pixel writes, VDP1SyncFB calls (and those after a draw or erase), CPU framebuffer writes\n"
         "                and erases, and the GPU VDP1 front half's draw batches by end reason (zero until the\n"
-        "                renderer runs the front half) (median, maximum, mean)\n"
+        "                renderer runs the front half) (median, maximum, mean). Times also give the 99th percentile\n"
+        "  --probe-passes  with --vulkan: the GPU time of every VDP1 and VDP2 pass kind per VDP2 frame (sets\n"
+        "                BRIMIR_GPU_PASS_PROFILE; a timestamp after each pass, so it perturbs the timing a little):\n"
+        "                mean, median, 99th percentile and maximum per kind, and the VDP1 total\n"
         "  --gpu-vdp1    with --vulkan/--compare: VDP1 on the GPU in the Vulkan VDP renderer (the core's default; sets\n"
         "                BRIMIR_VDP1_GPU=1; its log says 'Vulkan VDP1 renderer active')\n"
         "  --software-vdp1  with --vulkan/--compare: VDP1 in software inside the Vulkan VDP renderer, as in stage 1\n"
@@ -173,6 +176,8 @@ void PrintUsage(std::FILE* out) {
         "  --region x,y,w,h  with --sharpness: only these native output pixels\n"
         "  --fail-alloc-above MiB  with --vulkan: the core's vkAllocateMemory fails for larger allocations (fault\n"
         "                injection: a GPU short of memory)\n"
+        "  --fail-alloc-total-above MiB  with --vulkan: ... fails when the core's live device memory would exceed this\n"
+        "                (a GPU with that much memory for the core)\n"
         "  --fail-output-images-above N  with --vulkan: the core's vkCreateImage fails for its output images\n"
         "                (MUTABLE_FORMAT) wider than 352 x N (a low-res frame's maximum width at N x)\n"
         "  --fail-output-images-on-grow  with --grow-mask and --fail-output-images-above: the limit applies only\n"
@@ -278,6 +283,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--probe") {
             args.config.probe = true;
+            continue;
+        }
+        if (opt == "--probe-passes") {
+            args.config.probePasses = true;
             continue;
         }
         if (opt == "--gpu-vdp1") {
@@ -490,6 +499,13 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 return ParseResult::Error;
             }
             args.config.failAllocAboveMiB = static_cast<uint64_t>(mib);
+        } else if (opt == "--fail-alloc-total-above") {
+            int mib = 0;
+            if (!ParseInt(value, mib) || mib == 0) {
+                std::fprintf(stderr, "Invalid --fail-alloc-total-above value (MiB, 1 or more): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.config.failAllocTotalAboveMiB = static_cast<uint64_t>(mib);
         } else if (opt == "--option") {
             const std::string text = value;
             const size_t eq = text.find('=');
@@ -515,11 +531,11 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         std::fprintf(stderr, "--preferred-hw, --fake-api, --grow-mask and --fail-compute-on-grow need --vulkan\n");
         return ParseResult::Error;
     }
-    if ((args.config.failAllocAboveMiB != 0 || args.config.failOutputImagesAbove != 0 ||
-         args.config.deferImageRead != 0 || args.config.failSubmitAt >= 0) &&
+    if ((args.config.failAllocAboveMiB != 0 || args.config.failAllocTotalAboveMiB != 0 ||
+         args.config.failOutputImagesAbove != 0 || args.config.deferImageRead != 0 || args.config.failSubmitAt >= 0) &&
         !vulkanRun) {
-        std::fprintf(stderr, "--fail-alloc-above, --fail-output-images-above, --fail-submit-at and "
-                             "--defer-image-read need --vulkan or --compare\n");
+        std::fprintf(stderr, "--fail-alloc-above, --fail-alloc-total-above, --fail-output-images-above, "
+                             "--fail-submit-at and --defer-image-read need --vulkan or --compare\n");
         return ParseResult::Error;
     }
     if (args.config.failOutputImagesFirst >= 0 &&
@@ -553,6 +569,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
     }
     if (args.config.probe && args.compare) {
         std::fprintf(stderr, "--probe cannot be combined with --compare\n");
+        return ParseResult::Error;
+    }
+    if (args.config.probePasses && (args.compare || !args.config.vulkan)) {
+        std::fprintf(stderr, "--probe-passes needs --vulkan (and no --compare)\n");
         return ParseResult::Error;
     }
     if (args.config.noValidation && !vulkanRun) {
@@ -755,6 +775,61 @@ private:
     double m_sumMeanDiff = 0;
 };
 
+// The 99th percentile of n sorted values (nearest rank).
+size_t Percentile99Index(size_t n) {
+    const size_t rank = (99 * n + 99) / 100; // ceil(0.99 n), 1-based
+    return rank == 0 ? 0 : std::min(rank, n) - 1;
+}
+
+// --probe-passes summary: per pass kind with any time, mean, median, p99 and max microseconds per VDP2 frame; then the
+// VDP1 total (every vdp1_* and nx_* kind) and the N x part.
+void PrintPassSummary(const std::vector<std::string>& names, const std::vector<vkhost::PassFrame>& frames) {
+    std::fprintf(stderr, "vkhost: passes: %zu VDP2 frames\n", frames.size());
+    if (frames.empty()) {
+        return;
+    }
+    uint64_t overflow = 0;
+    for (const vkhost::PassFrame& f : frames) {
+        overflow += f.overflow;
+    }
+    const auto print = [&](const std::string& name, std::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        double sum = 0;
+        for (double v : values) {
+            sum += v;
+        }
+        if (sum == 0) {
+            return;
+        }
+        // Frames with this kind of work (games drawing at 30 fps have none every other frame) and their mean
+        const size_t active = static_cast<size_t>(values.end() - std::upper_bound(values.begin(), values.end(), 0.0));
+        std::fprintf(stderr,
+                     "vkhost: passes: %-16s mean %.1f median %.1f p99 %.1f max %.1f active %zu active_mean %.1f\n",
+                     name.c_str(), sum / static_cast<double>(values.size()), values[values.size() / 2],
+                     values[Percentile99Index(values.size())], values.back(), active,
+                     sum / static_cast<double>(active));
+    };
+    std::vector<double> vdp1(frames.size()), nx(frames.size());
+    for (size_t k = 0; k < names.size(); ++k) {
+        std::vector<double> values;
+        values.reserve(frames.size());
+        for (size_t i = 0; i < frames.size(); ++i) {
+            const double v = k < frames[i].micros.size() ? frames[i].micros[k] : 0;
+            values.push_back(v);
+            if (names[k].rfind("vdp1_", 0) == 0 || names[k].rfind("nx_", 0) == 0) {
+                vdp1[i] += v;
+            }
+            if (names[k].rfind("nx_", 0) == 0) {
+                nx[i] += v;
+            }
+        }
+        print(names[k], std::move(values));
+    }
+    print("vdp1_total", std::move(vdp1));
+    print("nx_total", std::move(nx));
+    std::fprintf(stderr, "vkhost: passes: overflow %llu\n", static_cast<unsigned long long>(overflow));
+}
+
 // --probe summary: one line per measure.
 void PrintProbeSummary(const std::vector<vkhost::ProbeFrame>& frames) {
     std::fprintf(stderr, "vkhost: probe: %zu VDP2 frames\n", frames.size());
@@ -773,13 +848,15 @@ void PrintProbeSummary(const std::vector<vkhost::ProbeFrame>& frames) {
             sum += v;
         }
         struct {
-            double median, max, mean;
-        } s{values[values.size() / 2], values.back(), sum / static_cast<double>(values.size())};
+            double median, max, mean, p99;
+        } s{values[values.size() / 2], values.back(), sum / static_cast<double>(values.size()),
+            values[Percentile99Index(values.size())]};
         return s;
     };
     const auto printStats = [&](const char* name, auto member) {
         const auto s = stats(member);
-        std::fprintf(stderr, "vkhost: probe: %-14s median %.1f max %.1f mean %.1f\n", name, s.median, s.max, s.mean);
+        std::fprintf(stderr, "vkhost: probe: %-14s median %.1f max %.1f mean %.1f p99 %.1f\n", name, s.median, s.max,
+                     s.mean, s.p99);
     };
     printStats("batches", &vkhost::ProbeFrame::batches);
     printStats("arena_bytes", &vkhost::ProbeFrame::arenaBytes);
@@ -832,11 +909,13 @@ void PrintVdp1ProbeSummary(const std::vector<vkhost::Vdp1ProbeFrame>& frames) {
             usingFrames += v != 0;
         }
         std::sort(values.begin(), values.end());
-        std::fprintf(stderr, "vkhost: probe-vdp1: %-10s median %llu max %llu mean %.1f frames %zu total %llu\n", name,
+        std::fprintf(stderr,
+                     "vkhost: probe-vdp1: %-10s median %llu max %llu mean %.1f frames %zu total %llu p99 %llu\n", name,
                      static_cast<unsigned long long>(values[values.size() / 2]),
                      static_cast<unsigned long long>(values.back()),
                      static_cast<double>(sum) / static_cast<double>(values.size()), usingFrames,
-                     static_cast<unsigned long long>(sum));
+                     static_cast<unsigned long long>(sum),
+                     static_cast<unsigned long long>(values[Percentile99Index(values.size())]));
     };
     const auto printStats = [&](const char* name, uint64_t vkhost::Vdp1ProbeFrame::*member) {
         printValues(name, [member](const vkhost::Vdp1ProbeFrame& f) { return f.*member; });
@@ -1010,6 +1089,9 @@ int main(int argc, char** argv) {
             PrintProbeSummary(report.probeFrames);
         }
         PrintVdp1ProbeSummary(report.vdp1ProbeFrames);
+    }
+    if (args.config.probePasses) {
+        PrintPassSummary(report.passNames, report.passFrames);
     }
     if (args.config.runahead) {
         std::fprintf(stderr, "vkhost: runahead: second instance ran %llu frames, %llu hardware frames, context %s\n",

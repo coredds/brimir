@@ -482,6 +482,22 @@ struct Vdp1BatchPushConstants {
 };
 static_assert(sizeof(Vdp1BatchPushConstants) == 24);
 
+/// @brief Vdp1BatchPushConstants::drawFB of an N x sub-batch (GPU stage 3, the overwrite-class fast path of research
+/// section 1.6): bit 0 the framebuffer; kBatchOverwrite: every fragment of the sub-batch replaces what it writes
+/// (no MSB-on, 16 bpp replace or half-luminance or 8 bpp, no write to the mesh framebuffer, one pixel depth and transparent
+/// meshes setting), so a unit's result is its last fragment's: raster_nx keeps the highest slot + 1 per N x unit
+/// (InterlockedMax into the unit counts) instead of counting, and resolve_fast_nx applies that one fragment;
+/// kBatchOverwriteOddBytes (8 bpp): the odd bytes' winners go to the unit offsets (a word's two bytes are written
+/// independently). kBatchHybrid: a 16 bpp sub-batch mixing overwrite-class fragments with ones that read what they write
+/// (MSB-on, shadow, half-transparency, mesh framebuffer writes), with one transparent-meshes setting (an overwrite-class
+/// fragment then replaces every bit any fragment writes, the mesh word too when transparent meshes clear it): raster_nx
+/// keeps each unit's last overwrite-class slot + 1 in the unit offsets, filter_nx counts only that fragment and the later
+/// ones (the others are marked dead), then the ordered passes run.
+inline constexpr uint32_t kBatchDrawFbMask = 1u;
+inline constexpr uint32_t kBatchOverwrite = 2u;
+inline constexpr uint32_t kBatchOverwriteOddBytes = 4u;
+inline constexpr uint32_t kBatchHybrid = 8u;
+
 /// @brief Erase pass (VDP1DoEraseFramebuffer): the region is `x1 <= x < x3`, `y1 <= y <= y3` (software's inclusive y3),
 /// as software computes it from the latched erase registers, clamped and with y already shifted for double density.
 struct Vdp1ErasePushConstants {

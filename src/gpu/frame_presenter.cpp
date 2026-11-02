@@ -403,21 +403,26 @@ FramePresenter::FramePresenter(VulkanDevice &device, uint32_t slotCount, OutputS
 // OutputRetryBackoff, ScaleRestoreSchedule
 
 bool OutputRetryBackoff::MayTry(OutputSize extent, uint32_t scale, uint64_t frame) {
-    if (m_active && extent == m_extent && scale == m_scale && frame < m_retryAt) {
+    if (!WouldTry(extent, scale, frame)) {
         ++m_backedOff;
         return false;
     }
     return true;
 }
 
+bool OutputRetryBackoff::WouldTry(OutputSize extent, uint32_t scale, uint64_t frame) const {
+    const Entry &e = At(scale);
+    return !(e.active && extent == e.extent && frame < e.retryAt);
+}
+
 bool OutputRetryBackoff::Failed(OutputSize extent, uint32_t scale, uint64_t frame) {
     ++m_failures;
-    const bool fresh = !m_active || extent != m_extent || scale != m_scale;
-    m_delay = fresh ? 1 : std::min(m_delay * 2, kMaxDelay);
-    m_active = true;
-    m_extent = extent;
-    m_scale = scale;
-    m_retryAt = frame + m_delay;
+    Entry &e = At(scale);
+    const bool fresh = !e.active || extent != e.extent;
+    e.delay = fresh ? 1 : std::min(e.delay * 2, kMaxDelay);
+    e.active = true;
+    e.extent = extent;
+    e.retryAt = frame + e.delay;
     return fresh;
 }
 

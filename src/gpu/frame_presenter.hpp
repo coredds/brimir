@@ -11,6 +11,8 @@
 #include "vk_device.hpp"
 #include "vk_util.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -212,29 +214,38 @@ private:
 };
 
 // Retry backoff for output images that could not be created: after a failure of (extent, scale) the identical request
-// is refused without trying for 1, 2, 4 ... kMaxDelay frames (doubling per failure), until another request is made or
-// one succeeds. Frames are the caller's counter (retro_run calls).
+// is refused without trying for 1, 2, 4 ... kMaxDelay frames (doubling per failure), until another extent is requested
+// at that scale or a creation succeeds. Each scale keeps its own last failure, so a failed size change and the
+// fallback to lower scales after it (each failing too) are all backed off, instead of each failure making the others
+// fresh again every frame. Frames are the caller's counter (retro_run calls).
 class OutputRetryBackoff {
 public:
     static constexpr uint64_t kMaxDelay = 120;
+    static constexpr uint32_t kScales = 8; // scales 1 .. kScales - 1 have their own entry; larger ones share the last
 
     // Whether creating images of (extent, scale) may be tried at `frame` (counted as backed off when not).
     bool MayTry(OutputSize extent, uint32_t scale, uint64_t frame);
+    // The same without counting (a caller's check before work that only pays off with a try).
+    bool WouldTry(OutputSize extent, uint32_t scale, uint64_t frame) const;
     // A creation of (extent, scale) failed at `frame`. True when it is a new failure (another request than the last
-    // failed one): the caller logs it, once.
+    // failed one at that scale): the caller logs it, once.
     bool Failed(OutputSize extent, uint32_t scale, uint64_t frame);
-    // A creation succeeded: the backoff is forgotten.
-    void Succeeded() { m_active = false; }
+    // A creation succeeded: the backoff is forgotten (at every scale).
+    void Succeeded() { m_entries = {}; }
 
     uint64_t Failures() const { return m_failures; }
     uint64_t BackedOff() const { return m_backedOff; }
 
 private:
-    bool m_active = false;
-    OutputSize m_extent{};
-    uint32_t m_scale = 0;
-    uint64_t m_delay = 0;
-    uint64_t m_retryAt = 0;
+    struct Entry {
+        bool active = false;
+        OutputSize extent{};
+        uint64_t delay = 0;
+        uint64_t retryAt = 0;
+    };
+    Entry &At(uint32_t scale) { return m_entries[std::min(scale, kScales - 1)]; }
+    const Entry &At(uint32_t scale) const { return m_entries[std::min(scale, kScales - 1)]; }
+    std::array<Entry, kScales> m_entries{};
     uint64_t m_failures = 0;
     uint64_t m_backedOff = 0;
 };

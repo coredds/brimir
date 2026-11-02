@@ -758,6 +758,81 @@ if(NOT "${restore_scales}" STREQUAL "frames at 4x;frames at 3x;frames at 4x")
     fail(restore_after_fallback "presented scales '${restore_scales}', expected 4x, 3x, 4x")
 endif()
 
+# GPU stage 3 Task 8 (fallback paths). A restore whose first attempt fails: at 4x the output images above 3x fail in runs
+# 100 .. 299 and the overscan crop changes at run 100 (the fallback to 3x); the native size changes at runs 200 (rotation
+# 90) and 350 (back): the attempt at 200 fails (still inside the window, "staying at 3x"), the one at 350 restores 4x.
+set(restore_retry --set-option-at 100 brimir_overscan=2 --set-option-at 200 brimir_rotation=90
+                  --set-option-at 350 brimir_rotation=0 --frames 400)
+run_vkhost(software_restore_retry ${restore_retry})
+list(LENGTH software_restore_retry_hashes restore_retry_count)
+if(NOT restore_retry_count EQUAL 400)
+    fail(software_restore_retry "${restore_retry_count} frames recorded, expected 400")
+endif()
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(restore_retry --vulkan --internal-resolution 4 --hash-sample 4 --fail-output-images-above 3
+           --fail-output-images-runs 100 300 ${restore_retry})
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(restore_retry 400 REFERENCE software_restore_retry FRAMES 400)
+check_vulkan_counters(restore_retry)
+check_vdp2_renderer(restore_retry)
+require_log(restore_retry "Internal resolution: trying 4x again \\(attempt 1 of 3\\)")
+require_log(restore_retry "Internal resolution: trying 4x again \\(attempt 2 of 3\\)")
+require_log(restore_retry "Internal resolution: restored 4x")
+require_log(restore_retry "internal resolution restores tried 2, succeeded 1")
+require_log(restore_retry "SET_SYSTEM_AV_INFO calls 0,")
+string(REGEX MATCHALL "frames at [0-9]x" restore_retry_scales "${restore_retry_err}")
+if(NOT "${restore_retry_scales}" STREQUAL "frames at 4x;frames at 3x;frames at 4x")
+    fail(restore_retry "presented scales '${restore_retry_scales}', expected 4x, 3x, 4x")
+endif()
+
+# ... the fallback of a failed size change is backed off too (each scale keeps its own backoff): at 4x every output
+# image creation fails in runs 100 .. 159 and the rotation changes at run 100, so the new size fails at 4x and then in
+# the fallback at 3x, 2x and 1x. Each scale is tried only in runs 100, 101, 103, 107, 115 and 131 (24 failures; the
+# fallback waits for the output's work only in those runs), not every run; run 163 creates the 4x images. Recorded
+# frames 40 .. 102 repeat frame 39, the others equal software at the sample points.
+run_vkhost(output_images_backoff_4x --vulkan --internal-resolution 4 --hash-sample 4 --fail-output-images-runs 100 160
+           ${rotate_at_100})
+check_vulkan_counters(output_images_backoff_4x)
+forbid_log(output_images_backoff_4x "Vulkan VDP2 renderer (unavailable|off)")
+require_log(output_images_backoff_4x "recorded 300 frames \\(237 hardware\\)")
+require_log(output_images_backoff_4x "output images created 2, reused 0, failed 24, ")
+require_log(output_images_backoff_4x "waits for option changes [0-9]+, fallbacks 6")
+list(GET output_images_backoff_4x_hashes 39 backoff_4x_before)
+string(REGEX REPLACE "^frame [0-9]+ " "" backoff_4x_before "${backoff_4x_before}")
+foreach(i RANGE 299)
+    list(GET output_images_backoff_4x_hashes ${i} got)
+    list(GET software_rotate_at_100_hashes ${i} want)
+    if(i GREATER_EQUAL 40 AND i LESS_EQUAL 102)
+        string(REGEX REPLACE "^frame [0-9]+ " "" got_pixels "${got}")
+        if(NOT got_pixels STREQUAL backoff_4x_before)
+            fail(output_images_backoff_4x "recorded frame ${i} is not a repeat of frame 39 ('${got}')")
+        endif()
+    elseif(NOT got STREQUAL want)
+        fail(output_images_backoff_4x "recorded frame ${i} differs from software ('${got}' vs '${want}')")
+    endif()
+endforeach()
+
+# ... a fast size ping-pong: the rotation changes every 1 to 3 frames (8 changes) with a frontend reading each image two
+# displayed frames late, under synchronization validation. Images are retired while the frontend still holds them, so a
+# change may find nothing reusable and create images; the run fails if the core destroys or rewrites an image before its
+# late read, and every frame equals software.
+set(fast_pingpong --set-option-at 100 brimir_rotation=90 --set-option-at 101 brimir_rotation=0
+                  --set-option-at 103 brimir_rotation=90 --set-option-at 104 brimir_rotation=0
+                  --set-option-at 106 brimir_rotation=90 --set-option-at 109 brimir_rotation=0
+                  --set-option-at 110 brimir_rotation=90 --set-option-at 112 brimir_rotation=0)
+run_vkhost(software_fast_pingpong ${fast_pingpong})
+check_software_reference(software_fast_pingpong)
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(fast_pingpong_deferred --vulkan --defer-image-read 2 ${fast_pingpong})
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(fast_pingpong_deferred 300 REFERENCE software_fast_pingpong)
+check_vulkan_counters(fast_pingpong_deferred)
+check_vdp2_renderer(fast_pingpong_deferred)
+require_log(fast_pingpong_deferred "Vulkan frame output: presenter cores 1, output images created [0-9]+, reused [0-9]+, failed 0,")
+string(REGEX MATCH "output images created ([0-9]+), reused ([0-9]+)" fast_counts "${fast_pingpong_deferred_err}")
+message(STATUS "fallbacks: a restore retried after a failed first attempt, per-scale backoff of a fallback (24 tries in "
+               "63 runs), a ping-pong every 1-3 frames with late reads (${fast_counts})")
+
 # An internal resolution change and a size change in the same frame (2x and the overscan crop at run 120, rotated 90),
 # with late reads under synchronization validation: both apply at that frame (one new set of images, 384 x 576).
 set(scale_and_size --option brimir_rotation=90 --set-option-at 120 brimir_overscan=2)
@@ -898,8 +973,8 @@ check_sync_counts(vdp1_nx_live)
 require_log(vdp1_nx_live "Vulkan VDP1 renderer active")
 require_log(vdp1_nx_live "SET_SYSTEM_AV_INFO calls 0,")
 string(REGEX MATCHALL "VDP1 upscaling: sprite surface at [0-9]x \\([0-9]+ MiB\\)" nx_surfaces "${vdp1_nx_live_err}")
-if(NOT "${nx_surfaces}" STREQUAL "VDP1 upscaling: sprite surface at 2x (16 MiB);VDP1 upscaling: sprite surface at 4x (64 MiB)")
-    fail(vdp1_nx_live "sprite surfaces '${nx_surfaces}', expected 2x (16 MiB) then 4x (64 MiB)")
+if(NOT "${nx_surfaces}" STREQUAL "VDP1 upscaling: sprite surface at 2x (20 MiB);VDP1 upscaling: sprite surface at 4x (80 MiB)")
+    fail(vdp1_nx_live "sprite surfaces '${nx_surfaces}', expected 2x (20 MiB) then 4x (80 MiB)")
 endif()
 require_log(vdp1_nx_live "VDP1 upscaling: N x sprite frames shown [1-9][0-9]*, hidden 0; N x VDP1 passes shown [1-9]")
 execute_process(COMMAND "${STATE_DIFF}" "${sw_state}" "${nx_state}"
@@ -912,7 +987,7 @@ check_run(vdp1_nx_hidden 300 REFERENCE software_hidden_bob)
 check_vulkan_counters(vdp1_nx_hidden)
 check_vdp2_renderer(vdp1_nx_hidden)
 require_log(vdp1_nx_hidden "180 hidden frames")
-require_log(vdp1_nx_hidden "VDP1 upscaling: sprite surface at 2x \\(16 MiB\\)")
+require_log(vdp1_nx_hidden "VDP1 upscaling: sprite surface at 2x \\(20 MiB\\)")
 # Every hidden submit carried the N x work: its VDP1 N x passes and the N x sprite pass (180 hidden frames, each with a
 # VDP2 frame)
 string(REGEX MATCH "N x sprite frames shown ([0-9]+), hidden ([0-9]+); N x VDP1 passes shown ([0-9]+), hidden ([0-9]+)"
@@ -951,7 +1026,7 @@ foreach(name IN ITEMS vdp1_nx_toggle_weave vdp1_nx_toggle_runahead)
     require_log(${name} "SET_SYSTEM_AV_INFO calls 0, SET_GEOMETRY calls 3")
     string(REGEX MATCHALL "VDP1 upscaling: sprite surface at [0-9]x \\([0-9]+ MiB\\)" nx_surfaces "${${name}_err}")
     if(NOT "${nx_surfaces}" STREQUAL
-       "VDP1 upscaling: sprite surface at 2x (16 MiB);VDP1 upscaling: sprite surface at 2x (16 MiB);VDP1 upscaling: sprite surface at 4x (64 MiB);VDP1 upscaling: sprite surface at 3x (36 MiB)")
+       "VDP1 upscaling: sprite surface at 2x (20 MiB);VDP1 upscaling: sprite surface at 2x (20 MiB);VDP1 upscaling: sprite surface at 4x (80 MiB);VDP1 upscaling: sprite surface at 3x (45 MiB)")
         fail(${name} "sprite surfaces '${nx_surfaces}', expected 2x, 2x (off and on), 4x, 3x (off, 3x, on)")
     endif()
     string(REGEX MATCHALL "frames at [0-9]x" scales "${${name}_err}")
@@ -963,6 +1038,14 @@ require_log(vdp1_nx_toggle_runahead "second instance ran 360 frames, 0 hardware 
 require_log(vdp1_nx_toggle_runahead "N x sprite frames shown [1-9][0-9]*, hidden [1-9][0-9]*; N x VDP1 passes shown [1-9][0-9]*, hidden [1-9]")
 message(STATUS "vdp1_nx_toggle: live VDP1 upscaling off/on and 2x -> 4x -> 3x with weave and run-ahead, identical to "
                "software at the sample points, no SET_SYSTEM_AV_INFO")
+require_log(vdp1_nx_toggle_weave "waits for option changes [1-9]")
+# ... VDP1 upscaling toggled at 1x: no N x resources either way, so the changes wait for nothing
+run_vkhost(vdp1_nx_toggle_1x --vulkan --gpu-vdp1 --set-option-at 80 brimir_vdp1_upscaling=disabled
+           --set-option-at 120 brimir_vdp1_upscaling=enabled --set-option-at 160 brimir_vdp1_upscaling=disabled)
+check_run(vdp1_nx_toggle_1x 300)
+check_vulkan_counters(vdp1_nx_toggle_1x)
+forbid_log(vdp1_nx_toggle_1x "sprite surface at")
+require_log(vdp1_nx_toggle_1x "waits for option changes 0, fallbacks 0")
 
 # Deterministic runs: --fixed-date pins the RTC (BRIMIR_RTC_FIXED: the virtual clock at brimir_bench's lockstep date).
 # Two software BIOS runs of 600 frames, started at different host times, are identical: every frame, and the states

@@ -766,6 +766,9 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
 
     // Earlier frames' accesses to everything below (shader reads and writes, copies, the presenter's composite read)
     // finish before this frame's uploads overwrite it.
+    if (m_profile != nullptr) {
+        m_profile->Stamp(cmd, GpuPassProfile::kBoundary);
+    }
     Barrier(cmd, kCompute | kTransfer, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, kTransfer,
             VK_ACCESS_TRANSFER_WRITE_BIT);
 
@@ -929,9 +932,17 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
         if (batch.layerLines > 0) {
             const uint32_t layerOffset = static_cast<uint32_t>(arenaBase) + batch.layerParamsOffset;
             const uint32_t spriteLayers = batch.common.enhancements.transparentMeshes ? 2 : 1;
+            if (m_profile != nullptr) {
+                m_profile->Stamp(cmd, GpuPassProfile::kVdp2Other);
+            }
             Dispatch(cmd, kSprite, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines,
                      groupsX, spriteLayers, outputSize, 1);
             if (nxSprites) {
+                if (m_profile != nullptr) {
+                    // Diagnostics only: the two sprite passes one after the other, each timed
+                    Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
+                    m_profile->Stamp(cmd, GpuPassProfile::kVdp2Sprite);
+                }
                 // VDP1 upscaling: the N x sprite pass (the native one above still feeds the sprite windows)
                 Dispatch(cmd, kSprite, arenaBlock, layerOffset, batch.common, batch.layerStartY,
                          batch.layerLines * scale, scaledGroupsX, spriteLayers, outputSize, scale, scale,
@@ -939,6 +950,9 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
                 ++stats.nxSpritePasses;
             }
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
+            if (m_profile != nullptr) {
+                m_profile->Stamp(cmd, nxSprites ? GpuPassProfile::kVdp2SpriteNx : GpuPassProfile::kVdp2Sprite);
+            }
             if (batch.needsFetchPass) {
                 // After the sprite pass (the sprite window), before bgs (the character table).
                 DispatchNBGFetch(cmd, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines,
@@ -977,6 +991,9 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
     // The composite is complete: readable by later compute (the presenter) and transfer (readbacks) commands.
     Barrier(cmd, kCompute | kTransfer, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, kCompute | kTransfer,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+    if (m_profile != nullptr) {
+        m_profile->Stamp(cmd, GpuPassProfile::kVdp2Other);
+    }
     m_lastStats = stats;
     return true;
 }

@@ -188,6 +188,15 @@ VKAPI_ATTR VkResult VKAPI_CALL HookAllocateMemory(VkDevice device, const VkMemor
                      static_cast<unsigned long long>(info->allocationSize >> 20));
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
+    if (const uint64_t total = g_provider->FailAllocTotalAbove();
+        total != 0 && info != nullptr && g_provider->CoreMemoryLive() + info->allocationSize > total) {
+        g_provider->CountFailedAllocation();
+        std::fprintf(stderr, "vkhost: vulkan: vkAllocateMemory of %llu MiB refused at %llu MiB live "
+                             "(--fail-alloc-total-above)\n",
+                     static_cast<unsigned long long>(info->allocationSize >> 20),
+                     static_cast<unsigned long long>(g_provider->CoreMemoryLive() >> 20));
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
     const VkResult result = g_provider->Real().allocateMemory(device, info, allocator, memory);
     if (result == VK_SUCCESS && info != nullptr && memory != nullptr) {
         g_provider->OnAllocateMemory(HandleValue(*memory), info->allocationSize);

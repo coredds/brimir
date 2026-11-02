@@ -15,8 +15,10 @@
 #include "gpu/shaders/generated/vdp1_bucket_sums_nx_add.spv.h"
 #include "gpu/shaders/generated/vdp1_erase_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_fb_write_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_filter_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_raster_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_rebuild_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_resolve_fast_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_resolve_nx.spv.h"
 
 #include <algorithm>
@@ -193,6 +195,8 @@ VkResult Vdp1VulkanBackend::CreateNxPipelines() {
         {shaders::kVdp1EraseNxSpv, sizeof(Vdp1EraseNxPushConstants)},
         {shaders::kVdp1FbWriteNxSpv, sizeof(Vdp1FbWriteNxPushConstants)},
         {shaders::kVdp1RebuildNxSpv, sizeof(Vdp1RebuildNxPushConstants)},
+        {shaders::kVdp1ResolveFastNxSpv, sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1FilterNxSpv, sizeof(Vdp1BatchPushConstants)},
     }};
     for (uint32_t i = 0; i < kNxPassCount; ++i) {
         Pipe &pipe = m_nxPipes[i];
@@ -225,7 +229,7 @@ VkResult Vdp1VulkanBackend::CreateNxPipelines() {
 
 VkResult Vdp1VulkanBackend::AllocateNx(uint32_t scale) {
     const std::array<VkDeviceSize, kNxBufCount> sizes{Vdp1NxUnitCountsBufferSize(scale),
-                                                      Vdp1NxUnitCountsBufferSize(scale),
+                                                      Vdp1NxUnitOffsetsBufferSize(scale),
                                                       Vdp1NxScanSumsBufferSize(scale), Vdp1NxFbramBufferSize(scale)};
     VkDeviceSize total = 0;
     for (const VkDeviceSize s : sizes) {
@@ -289,6 +293,53 @@ void Vdp1VulkanBackend::DestroyNxResources() {
     m_nxScale = 0;
     m_nxPendingZero = m_nxRecordedZero = false;
     m_nxPendingRebuild = m_nxRecordedRebuild = 0;
+    m_nxOffsetsDirty = m_nxOddWinnersDirty = false; // new buffers are zeroed before their first use
+}
+
+uint8_t Vdp1VulkanBackend::OverwriteKey(const Vdp1CommandParams &c) {
+    // Every fragment of the command replaces the bits it writes whatever they held (ApplyFragment without a read of the
+    // destination): no MSB-on, 16 bpp replace or half-luminance (8 bpp ignores the colour calculation), no write to
+    // the mesh framebuffer (transparent meshes with a mesh command). Commands with one key write (and clear) the same
+    // bits of a unit, so its last fragment decides it.
+    const uint32_t calc = Vdp1CmdColorCalc(c.drawFlags);
+    const bool pixel8 = Vdp1RasPixel8(c.rasterFlags);
+    const bool transparentMeshes = Vdp1RasTransparentMeshes(c.rasterFlags);
+    if (Vdp1CmdMsbOn(c.drawFlags) || (transparentMeshes && Vdp1CmdMesh(c.drawFlags)) ||
+        (!pixel8 && calc != 0 && calc != 2)) {
+        return 0;
+    }
+    return static_cast<uint8_t>(kKeyOverwrite | (pixel8 ? kKeyPixel8 : 0u) | (transparentMeshes ? kKeyMeshes : 0u));
+}
+
+Vdp1VulkanBackend::NxPath Vdp1VulkanBackend::ClassifyNx(std::span<const Vdp1CommandParams> commands) {
+    // One path for all of a draw's sub-batches. (Cutting sub-batches where the commands' key changes was measured
+    // slower: smaller raster dispatches and more resolves.)
+    if (commands.empty()) {
+        return NxPath::Ordered;
+    }
+    const uint8_t first = OverwriteKey(commands.front());
+    bool same = first != 0;
+    bool anyOverwrite = false;
+    // Hybrid: one pixel depth and transparent-meshes setting, so an overwrite-class fragment replaces every bit any
+    // fragment of the batch writes at its word (8 bpp: its byte): the main word's, and with transparent meshes on also
+    // the mesh word's (it clears them; mesh framebuffer writes, possible only then, count as fragments that read)
+    bool hybrid = true;
+    const bool pixel8 = Vdp1RasPixel8(commands.front().rasterFlags);
+    const bool transparentMeshes = Vdp1RasTransparentMeshes(commands.front().rasterFlags);
+    for (const Vdp1CommandParams &c : commands) {
+        const uint8_t key = OverwriteKey(c);
+        same = same && key == first;
+        anyOverwrite = anyOverwrite || key != 0;
+        hybrid = hybrid && Vdp1RasPixel8(c.rasterFlags) == pixel8 &&
+                 Vdp1RasTransparentMeshes(c.rasterFlags) == transparentMeshes;
+    }
+    if (same) {
+        return (first & kKeyPixel8) != 0 ? NxPath::OverwriteOddBytes : NxPath::Overwrite;
+    }
+    if (hybrid && anyOverwrite) {
+        return pixel8 ? NxPath::HybridPixel8 : NxPath::Hybrid;
+    }
+    return NxPath::Ordered;
 }
 
 bool Vdp1VulkanBackend::SetNxScale(uint32_t scale) {
@@ -322,8 +373,10 @@ bool Vdp1VulkanBackend::RecordPendingWork(uint32_t contextIndex, VkCommandBuffer
         return false;
     }
     StampBegin(contextIndex, cmd);
+    ProfileStamp(cmd, GpuPassProfile::kBoundary);
     Prologue(cmd);
     Epilogue(cmd);
+    ProfileStamp(cmd, GpuPassProfile::kVdp1Other);
     StampEnd(contextIndex, cmd);
     return true;
 }
@@ -627,6 +680,48 @@ void Vdp1VulkanBackend::DispatchWith(VkCommandBuffer cmd, const Pipe &p, VkDescr
     }
     vk.vkCmdDispatch(cmd, x, y, 1);
     PassBarrier(cmd);
+    ProfileStamp(cmd, ProfileLabel(p));
+}
+
+void Vdp1VulkanBackend::ProfileStamp(VkCommandBuffer cmd, GpuPassProfile::Label label) const {
+    if (m_profile != nullptr) {
+        m_profile->Stamp(cmd, label);
+    }
+}
+
+GpuPassProfile::Label Vdp1VulkanBackend::ProfileLabel(const Pipe &p) const {
+    using P = GpuPassProfile;
+    const bool nx = m_profileNx;
+    for (uint32_t i = 0; i < kPassCount; ++i) {
+        if (&p == &m_pipes[i]) {
+            switch (i) {
+            case kRaster: return nx ? P::kVdp1NxRaster : P::kVdp1Raster;
+            case kBatchRange: return nx ? P::kVdp1NxBatchRange : P::kVdp1BatchRange;
+            case kBucket: return nx ? P::kVdp1NxBucket : P::kVdp1Bucket;
+            case kBucketSums: return nx ? P::kVdp1NxBucketSums : P::kVdp1BucketSums;
+            case kScatter: return nx ? P::kVdp1NxScatter : P::kVdp1Scatter;
+            case kResolve: return nx ? P::kVdp1NxResolve : P::kVdp1Resolve;
+            case kErase: return P::kVdp1Erase;
+            default: return P::kVdp1FbWrite;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < kNxPassCount; ++i) {
+        if (&p == &m_nxPipes[i]) {
+            switch (i) {
+            case kNxRaster: return P::kVdp1NxRaster;
+            case kNxBucketSums:
+            case kNxBucketSumsAdd: return P::kVdp1NxBucketSums;
+            case kNxResolve: return P::kVdp1NxResolve;
+            case kNxErase: return P::kVdp1NxErase;
+            case kNxFbWrite: return P::kVdp1NxFbWrite;
+            case kNxResolveFast: return P::kVdp1NxResolveFast;
+            case kNxFilter: return P::kVdp1NxFilter;
+            default: return P::kVdp1NxRebuild;
+            }
+        }
+    }
+    return P::kVdp1Other;
 }
 
 void Vdp1VulkanBackend::DispatchIndirectWith(VkCommandBuffer cmd, const Pipe &p, VkDescriptorSet set, const void *push,
@@ -639,6 +734,7 @@ void Vdp1VulkanBackend::DispatchIndirectWith(VkCommandBuffer cmd, const Pipe &p,
     }
     vk.vkCmdDispatchIndirect(cmd, m_buffers[kBatchState].buffer, argsWord * sizeof(uint32_t));
     PassBarrier(cmd);
+    ProfileStamp(cmd, ProfileLabel(p));
 }
 
 bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment, uint32_t contextIndex,
@@ -685,7 +781,10 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
                 NxDraw &draw = m_nxDraws[i - segment.firstOp];
                 draw.firstSubBatch = static_cast<uint32_t>(m_nxArena.subBatches.size() - subs.size());
                 draw.subBatches = static_cast<uint32_t>(subs.size());
-                for (const Vdp1NxSubBatch &sb : subs) {
+                draw.path = m_nxOverwritePath ? ClassifyNx(std::span(ops.commands).subspan(b.cmdOffset, b.cmdCount))
+                                              : NxPath::Ordered;
+                for (uint32_t s = 0; s < draw.subBatches; ++s) {
+                    const Vdp1NxSubBatch &sb = m_nxArena.subBatches[draw.firstSubBatch + s];
                     bytes += AlignUp(VkDeviceSize{sb.spanCount} * sizeof(Vdp1NxSpan), kUploadAlignment);
                 }
             }
@@ -723,9 +822,13 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
     };
     // Earlier reads of the back half's buffers (the previous batch's passes) before the copies overwrite them.
     const auto beforeCopies = [&] { Barrier(cmd, kCompute | kTransfer, kWrites, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT); };
-    const auto afterCopies = [&] { Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, VK_ACCESS_SHADER_READ_BIT); };
+    const auto afterCopies = [&] {
+        Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, VK_ACCESS_SHADER_READ_BIT);
+        ProfileStamp(cmd, m_profileNx ? GpuPassProfile::kVdp1NxCopy : GpuPassProfile::kVdp1Copy);
+    };
 
     StampBegin(contextIndex, cmd);
+    ProfileStamp(cmd, GpuPassProfile::kBoundary);
     Prologue(cmd);
     std::vector<VkBufferCopy> vramRegions;
     for (uint32_t i = segment.firstOp; i < segment.firstOp + segment.opCount; ++i) {
@@ -785,8 +888,14 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
             if (nx != 0) {
                 // The same batch at N x: its sub-batches in order (each resolves on its own; a continuation has none)
                 const NxDraw &draw = m_nxDraws[i - segment.firstOp];
+                m_profileNx = true;
                 for (uint32_t s = 0; s < draw.subBatches; ++s) {
                     const Vdp1NxSubBatch &sb = m_nxArena.subBatches[draw.firstSubBatch + s];
+                    // The overwrite-class fast path (research section 1.6): a unit's last fragment is its result
+                    const bool overwrite = draw.path == NxPath::Overwrite || draw.path == NxPath::OverwriteOddBytes;
+                    const bool oddBytes = draw.path == NxPath::OverwriteOddBytes;
+                    const bool hybrid = draw.path == NxPath::Hybrid || draw.path == NxPath::HybridPixel8;
+                    const bool oddWinners = oddBytes || draw.path == NxPath::HybridPixel8;
                     const VkDeviceSize nxSpanBytes = VkDeviceSize{sb.spanCount} * sizeof(Vdp1NxSpan);
                     const VkBufferCopy nxSpanCopy{put(m_nxArena.spans.data() + sb.spanOffset, nxSpanBytes), 0,
                                                   nxSpanBytes};
@@ -794,12 +903,56 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
                     if (nxSpanBytes != 0) {
                         vk.vkCmdCopyBuffer(cmd, upload.buffer, m_buffers[kSpans].buffer, 1, &nxSpanCopy);
                     }
+                    // The winners in the unit offsets start from zero (the copies' barrier orders the fills after the
+                    // earlier passes' accesses; the raster's atomics come after them)
+                    const VkDeviceSize half = Vdp1NxUnitCountsBufferSize(nx);
+                    const bool fillFirst = hybrid && m_nxOffsetsDirty;
+                    const bool fillSecond = oddWinners && m_nxOddWinnersDirty;
+                    if (fillFirst) {
+                        vk.vkCmdFillBuffer(cmd, m_nxBuffers[kNxUnitOffsets].buffer, 0, half, 0);
+                        m_nxOffsetsDirty = false;
+                    }
+                    if (fillSecond) {
+                        vk.vkCmdFillBuffer(cmd, m_nxBuffers[kNxUnitOffsets].buffer, half, half, 0);
+                        m_nxOddWinnersDirty = false;
+                    }
+                    if (fillFirst || fillSecond) {
+                        Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute,
+                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                    }
                     afterCopies();
-                    const Vdp1BatchPushConstants npc{0, sb.spanCount, 0, sb.slotCount, b.drawFB & 1u, nx};
+                    const uint32_t drawFB = (b.drawFB & kBatchDrawFbMask) | (overwrite ? kBatchOverwrite : 0u) |
+                                            (oddBytes ? kBatchOverwriteOddBytes : 0u) | (hybrid ? kBatchHybrid : 0u);
+                    const Vdp1BatchPushConstants npc{0, sb.spanCount, 0, sb.slotCount, drawFB, nx};
                     if (const uint32_t groups = Groups(sb.spanCount, kWorkgroupSize); groups != 0) {
                         DispatchWith(cmd, m_nxPipes[kNxRaster], m_nxPipes[kNxRaster].set, &npc, groups, 1);
                     }
                     Dispatch(cmd, kBatchRange, nullptr, 1);
+                    ++m_stats.nxSubBatches;
+                    m_stats.nxSpans += sb.spanCount;
+                    m_stats.nxSlots += sb.slotCount;
+                    if (overwrite) {
+                        DispatchIndirectWith(cmd, m_nxPipes[kNxResolveFast], m_nxPipes[kNxResolveFast].set, &npc,
+                                             kBatchStateResolveArgs);
+                        ++m_stats.nxOverwriteSubBatches;
+                        m_stats.nxOverwriteOddBytes += oddBytes ? 1 : 0;
+                        ++m_nxPathTotals.overwrite;
+                        m_nxPathTotals.overwriteOddBytes += oddBytes ? 1 : 0;
+                        continue;
+                    }
+                    if (hybrid) {
+                        // Only each unit's last overwrite-class fragment and the later ones are counted
+                        if (const uint32_t groups = Groups(sb.slotCount, kScatterSlotsPerGroup); groups != 0) {
+                            DispatchWith(cmd, m_nxPipes[kNxFilter], m_nxPipes[kNxFilter].set, &npc, groups, 1);
+                        }
+                        ++m_stats.nxHybridSubBatches;
+                        ++m_nxPathTotals.hybrid;
+                        // filter_nx leaves the odd bytes' winners
+                        m_nxOddWinnersDirty = m_nxOddWinnersDirty || oddWinners;
+                    } else {
+                        ++m_nxPathTotals.ordered;
+                    }
+                    m_nxOffsetsDirty = true; // the bucket pass writes the range's offsets
                     DispatchIndirectWith(cmd, m_pipes[kBucket], m_nxBucketSet, nullptr, kBatchStateBucketArgs);
                     DispatchWith(cmd, m_nxPipes[kNxBucketSums], m_nxPipes[kNxBucketSums].set, &npc, nx * nx, 1);
                     DispatchWith(cmd, m_nxPipes[kNxBucketSumsAdd], m_nxPipes[kNxBucketSumsAdd].set, &npc, nx * nx, 1);
@@ -808,10 +961,8 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
                     }
                     DispatchIndirectWith(cmd, m_nxPipes[kNxResolve], m_nxPipes[kNxResolve].set, &npc,
                                          kBatchStateResolveArgs);
-                    ++m_stats.nxSubBatches;
-                    m_stats.nxSpans += sb.spanCount;
-                    m_stats.nxSlots += sb.slotCount;
                 }
+                m_profileNx = false;
                 m_stats.nxMaxSubBatchesPerBatch = std::max(m_stats.nxMaxSubBatchesPerBatch, draw.subBatches);
             }
             break;
@@ -894,8 +1045,10 @@ bool Vdp1VulkanBackend::RecordFbramUpload(std::span<const uint8_t> slices, uint3
         }
     }
     StampBegin(contextIndex, cmd);
+    ProfileStamp(cmd, GpuPassProfile::kBoundary);
     Prologue(cmd);
     m_device.Table().vkCmdCopyBuffer(cmd, upload.buffer, m_fbram, count, regions.data());
+    ProfileStamp(cmd, GpuPassProfile::kVdp1Copy);
     if (m_nxScale != 0) {
         // The uploaded slices' N x blocks become their native words
         Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, VK_ACCESS_SHADER_READ_BIT);
@@ -967,9 +1120,11 @@ bool Vdp1VulkanBackend::RecordReadback(uint32_t contextIndex, uint32_t mask, VkC
         }
     }
     StampBegin(contextIndex, cmd);
+    ProfileStamp(cmd, GpuPassProfile::kBoundary);
     Barrier(cmd, kCompute | kTransfer, kWrites, kTransfer, VK_ACCESS_TRANSFER_READ_BIT);
     m_device.Table().vkCmdCopyBuffer(cmd, m_fbram, readback.buffer, count, regions.data());
     Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+    ProfileStamp(cmd, GpuPassProfile::kVdp1Other);
     StampEnd(contextIndex, cmd);
     return true;
 }
@@ -1017,6 +1172,7 @@ void Vdp1VulkanBackend::FrameDropped() {
     }
     m_nxPendingRebuild |= m_nxRecordedRebuild;
     m_nxRecordedRebuild = 0;
+    m_nxOffsetsDirty = m_nxOddWinnersDirty = true; // a zero fill it carried never ran
 }
 
 } // namespace brimir::gpu::vdp1
