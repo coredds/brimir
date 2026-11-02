@@ -549,6 +549,41 @@ if(NOT "${alloc_scales}" STREQUAL "frames at 1x;frames at 2x")
     fail(alloc_fail "presented scales '${alloc_scales}', expected 1x then 2x")
 endif()
 
+# GPU stage 3 (low VRAM at 4x): the core's live device memory capped (--fail-alloc-total-above) relative to M, a 4x run's
+# memory after its last frame with VDP1 upscaling off. M + 24 MiB: the N x VDP1 buffers do not fit; M + 100 MiB: they
+# fit, VDP2's N x sprite layers do not. Both: VDP1 upscaling off at 4x (logged), the renderers and the scale stay.
+# M - 40 MiB: 4x does not fit next to the VDP1 back half: a lower internal resolution with VDP1 still on the GPU. The
+# frames stay correct at the sample points.
+run_vkhost(lowvram_base --vulkan --internal-resolution 4 --hash-sample 4 --option brimir_vdp1_upscaling=disabled)
+check_run(lowvram_base 300)
+string(REGEX MATCH "core device memory: ([0-9]+)\\.[0-9] MiB after the last frame" ignored "${lowvram_base_err}")
+set(lowvram_m "${CMAKE_MATCH_1}")
+if(lowvram_m STREQUAL "")
+    fail(lowvram_base "no core device memory line")
+endif()
+math(EXPR lowvram_cap_a "${lowvram_m} + 24")
+math(EXPR lowvram_cap_b "${lowvram_m} + 100")
+math(EXPR lowvram_cap_c "${lowvram_m} - 40")
+foreach(cap IN ITEMS a b c)
+    run_vkhost(lowvram_${cap} --vulkan --internal-resolution 4 --hash-sample 4 --fail-alloc-total-above ${lowvram_cap_${cap}})
+    check_run(lowvram_${cap} 300)
+    check_vulkan_counters(lowvram_${cap})
+    check_vdp2_renderer(lowvram_${cap})
+    require_log(lowvram_${cap} "Vulkan VDP1 renderer active")
+endforeach()
+require_log(lowvram_a "the 4x sprite surface could not be allocated")
+require_log(lowvram_b "the 4x sprite layers \\([0-9]+ MiB\\) could not be allocated")
+foreach(cap IN ITEMS a b)
+    require_log(lowvram_${cap} "N x sprite frames shown 0, hidden 0")
+    require_log(lowvram_${cap} "VDP1 upscaling off at this internal resolution")
+    require_log(lowvram_${cap} "frames at 4x")
+endforeach()
+require_log(lowvram_c "VDP1 on the GPU unavailable at 4x; trying 3x")
+require_log(lowvram_c "VDP2 internal resolution: requested 4x, using [123]x")
+forbid_log(lowvram_c "frames at 4x")
+message(STATUS "lowvram: M ${lowvram_m} MiB at 4x; caps M + 24 and M + 100: upscaling off at 4x; M - 40: a lower scale, "
+               "VDP1 still on the GPU")
+
 # The output images (the ones handed to set_image) cannot be created above 3x: a live 2x -> 4x keeps the renderer and the
 # output at 2x (the images are created before the renderer changes, so the two never differ); a live 3x then works.
 run_vkhost(output_images_fail --vulkan --internal-resolution 2 --hash-sample 2 --fail-output-images-above 3
@@ -759,10 +794,11 @@ if(NOT "${restore_scales}" STREQUAL "frames at 4x;frames at 3x;frames at 4x")
 endif()
 
 # GPU stage 3 Task 8 (fallback paths). A restore whose first attempt fails: at 4x the output images above 3x fail in runs
-# 100 .. 299 and the overscan crop changes at run 100 (the fallback to 3x); the native size changes at runs 200 (rotation
-# 90) and 350 (back): the attempt at 200 fails (still inside the window, "staying at 3x"), the one at 350 restores 4x.
-set(restore_retry --set-option-at 100 brimir_overscan=2 --set-option-at 200 brimir_rotation=90
-                  --set-option-at 350 brimir_rotation=0 --frames 400)
+# 100 .. 299 and the overscan crop changes at run 100 (the fallback to 3x); the native size changes at runs 200 (no crop,
+# 1280 px wide at 4x) and 350 (the crop again): the attempt at 200 fails (still inside the window, "staying at 3x"), the
+# one at 350 restores 4x.
+set(restore_retry --set-option-at 100 brimir_overscan=2 --set-option-at 200 brimir_overscan=0
+                  --set-option-at 350 brimir_overscan=2 --frames 400)
 run_vkhost(software_restore_retry ${restore_retry})
 list(LENGTH software_restore_retry_hashes restore_retry_count)
 if(NOT restore_retry_count EQUAL 400)
@@ -786,22 +822,25 @@ if(NOT "${restore_retry_scales}" STREQUAL "frames at 4x;frames at 3x;frames at 4
 endif()
 
 # ... the fallback of a failed size change is backed off too (each scale keeps its own backoff): at 4x every output
-# image creation fails in runs 100 .. 159 and the rotation changes at run 100, so the new size fails at 4x and then in
+# image creation fails in runs 100 .. 159 and the overscan crop changes at run 100, so the new size fails at 4x and then in
 # the fallback at 3x, 2x and 1x. Each scale is tried only in runs 100, 101, 103, 107, 115 and 131 (24 failures; the
 # fallback waits for the output's work only in those runs), not every run; run 163 creates the 4x images. Recorded
 # frames 40 .. 102 repeat frame 39, the others equal software at the sample points.
+set(overscan_at_100_300 --set-option-at 100 brimir_overscan=2)
+run_vkhost(software_overscan_at_100_300 ${overscan_at_100_300})
+check_software_reference(software_overscan_at_100_300)
 run_vkhost(output_images_backoff_4x --vulkan --internal-resolution 4 --hash-sample 4 --fail-output-images-runs 100 160
-           ${rotate_at_100})
+           ${overscan_at_100_300})
 check_vulkan_counters(output_images_backoff_4x)
 forbid_log(output_images_backoff_4x "Vulkan VDP2 renderer (unavailable|off)")
 require_log(output_images_backoff_4x "recorded 300 frames \\(237 hardware\\)")
-require_log(output_images_backoff_4x "output images created 2, reused 0, failed 24, ")
+require_log(output_images_backoff_4x "output images created 3, reused 0, failed 24, ")
 require_log(output_images_backoff_4x "waits for option changes [0-9]+, fallbacks 6")
 list(GET output_images_backoff_4x_hashes 39 backoff_4x_before)
 string(REGEX REPLACE "^frame [0-9]+ " "" backoff_4x_before "${backoff_4x_before}")
 foreach(i RANGE 299)
     list(GET output_images_backoff_4x_hashes ${i} got)
-    list(GET software_rotate_at_100_hashes ${i} want)
+    list(GET software_overscan_at_100_300_hashes ${i} want)
     if(i GREATER_EQUAL 40 AND i LESS_EQUAL 102)
         string(REGEX REPLACE "^frame [0-9]+ " "" got_pixels "${got}")
         if(NOT got_pixels STREQUAL backoff_4x_before)

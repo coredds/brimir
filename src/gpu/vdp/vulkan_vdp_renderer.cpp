@@ -77,29 +77,41 @@ void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContext
     // The requested scale (capped), else the previous effective one, else 1: the back half tries them in that order,
     // each allocated directly (failures logged by it).
     const uint32_t cap = std::clamp<uint32_t>(maxScale, 1, vdp2::kMaxRenderScale);
-    const uint32_t wanted = std::min(m_requestedScale, cap);
+    uint32_t wanted = std::min(m_requestedScale, cap);
     const uint32_t previous = std::min(m_internalScale, cap);
     const bool gpuVdp1 = m_vdp1Mode == Vdp1Mode::Gpu;
     // Gpu VDP1 mode: one more upload context, the sync submits'
     const uint32_t contexts = frameContexts + (gpuVdp1 ? 1u : 0u);
-    auto backend = std::make_unique<vdp2::Vdp2VulkanBackend>(device, contexts, wanted, m_scaleAllocationLimit, m_log,
-                                                             previous < wanted ? previous : 1);
-    if (!backend->Ok()) {
-        return;
+    for (;;) {
+        auto backend = std::make_unique<vdp2::Vdp2VulkanBackend>(device, contexts, wanted, m_scaleAllocationLimit,
+                                                                 m_log, previous < wanted ? previous : 1);
+        if (!backend->Ok()) {
+            return;
+        }
+        m_internalScale = backend->Scale();
+        m_backend = std::move(backend);
+        m_frameContexts = frameContexts;
+        // A new back half has none of the state: everything is uploaded with the next frame, and its composite starts
+        // cleared (Vdp2VulkanBackend clears it on first use).
+        m_front.ConsumeFrame();
+        m_front.MarkAllDirty();
+        if (!gpuVdp1 || EnterGpuVdp1(device, contexts)) {
+            break;
+        }
+        if (m_internalScale <= 1) {
+            Log("VDP1 on the GPU unavailable; VDP1 stays in software");
+            break;
+        }
+        // The VDP1 back half did not fit next to this internal resolution's resources (a GPU short of memory): a lower
+        // internal resolution, so VDP1 stays on the GPU (nothing was recorded with this back half yet)
+        Log("VDP1 on the GPU unavailable at " + std::to_string(m_internalScale) + "x; trying " +
+            std::to_string(m_internalScale - 1) + "x");
+        wanted = m_internalScale - 1;
+        m_backend.reset();
     }
-    m_internalScale = backend->Scale();
     if (m_internalScale != m_requestedScale) {
         Log("VDP2 internal resolution: requested " + std::to_string(m_requestedScale) + "x, using " +
             std::to_string(m_internalScale) + "x");
-    }
-    m_backend = std::move(backend);
-    m_frameContexts = frameContexts;
-    // A new back half has none of the state: everything is uploaded with the next frame, and its composite starts
-    // cleared (Vdp2VulkanBackend clears it on first use).
-    m_front.ConsumeFrame();
-    m_front.MarkAllDirty();
-    if (gpuVdp1 && !EnterGpuVdp1(device, contexts)) {
-        Log("VDP1 on the GPU unavailable; VDP1 stays in software");
     }
 }
 
