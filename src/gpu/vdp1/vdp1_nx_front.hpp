@@ -64,6 +64,9 @@ struct Vdp1NxStats {
     uint64_t batches = 0;
     std::array<uint64_t, static_cast<size_t>(Vdp1NxCommandClass::Count)> commands{};
     uint64_t nanoseconds = 0; // time in GenerateNx
+    // Native spans skipped as malformed (the front half never makes one): a rect command's span that is not one of its
+    // rows, or a span whose command index is out of the batch
+    uint64_t malformedSpans = 0;
 };
 
 struct Vdp1NxArena {

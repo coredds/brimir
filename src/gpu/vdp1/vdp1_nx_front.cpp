@@ -517,7 +517,7 @@ public:
     }
     uint32_t NativeSlots(uint32_t s) const {
         const uint32_t end = s + 1 < m_batch.spanCount ? NativeSpan(s + 1).fragBase : m_batch.fragmentCount;
-        return end - NativeSpan(s).fragBase;
+        return end >= NativeSpan(s).fragBase ? end - NativeSpan(s).fragBase : 0; // (a malformed batch: none)
     }
 
     void Push(uint32_t kind, bool aa, uint32_t cmdIndex, Point a, Point b, uint32_t subRow, int32_t texV,
@@ -594,7 +594,11 @@ public:
         for (uint32_t s = first; s < end; ++s) {
             const Vdp1Span &span = NativeSpan(s);
             const uint32_t quadStep = Vdp1SpanQuadStep(span.stepTexV);
-            assert(quadStep < rows && span.y0 == span.y1); // a rect command's spans are its rows
+            if (quadStep >= rows || span.y0 != span.y1) {
+                // Not one of the command's rows (the front half never makes one): skipped, counted
+                ++m_arena.stats.malformedSpans;
+                continue;
+            }
             const uint32_t r0 = quadStep * m_n;
             const uint32_t slots = (NativeSlots(s) / 2) * m_n;
             const Point a{static_cast<int32_t>(span.x0), static_cast<int32_t>(span.y0)};
@@ -790,7 +794,7 @@ std::span<const Vdp1NxSubBatch> GenerateNx(const Vdp1OpList &ops, uint32_t batch
             ++end;
         }
         if (cmdIndex >= batch.cmdCount) {
-            assert(false && "N x generator: span command index out of range");
+            arena.stats.malformedSpans += end - first;
             first = end;
             continue;
         }

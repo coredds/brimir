@@ -254,6 +254,10 @@ public:
     uint32 LastDrawFB() const {
         return m_lastDrawFB;
     }
+    // VDP1 VRAM as the batches' uploads left it
+    std::span<const uint8> Vram() const {
+        return m_vram;
+    }
 
 private:
     void DrawBatch(const brimir::gpu::vdp1::Vdp1OpList &ops, const brimir::gpu::vdp1::Vdp1DrawBatch &batch);

@@ -610,6 +610,53 @@ TEST_CASE("VDP1 N x generator: an invalid scale or batch gives nothing", "[vdp1]
     CHECK(arena.stats.batches == 0);
 }
 
+TEST_CASE("VDP1 N x generator: malformed native spans are skipped and counted (also in Release)", "[vdp1][nx][front]") {
+    // The front half never makes them: a rect command's span past its rows or not horizontal, and a span whose command
+    // index is out of the batch. Each is skipped (no read past the rect's per-row tables), counted, and the batch's
+    // other spans are generated as before.
+    Scenario s;
+    s.Op0(Op::Kind::BeginFrame);
+    s.Polygon(0x00C0, 0x7FFF, {10, 10}, {50, 10}, {50, 40}, {10, 40}); // rect: 31 rows
+    s.Op0(Op::Kind::EndFrame);
+    std::vector<gpu::Vdp1OpList> lists;
+    RunReference(s, {}, 0, [&](const gpu::Vdp1OpList &ops) { lists.push_back(ops); });
+    const auto list = std::find_if(lists.begin(), lists.end(), [](const auto &l) { return !l.batches.empty(); });
+    REQUIRE(list != lists.end());
+    for (const uint32 n : {2u, 4u}) {
+        gpu::Vdp1NxArena good;
+        REQUIRE(gpu::GenerateNx(*list, 0, n, good).size() == 1);
+        REQUIRE(good.stats.malformedSpans == 0);
+        REQUIRE(good.spans.size() == 31u * n);
+        const uint32 first = list->batches[0].spanOffset;
+        for (const uint32 which : {0u, 1u, 2u}) {
+            CAPTURE(n, which);
+            gpu::Vdp1OpList bad = *list;
+            gpu::Vdp1Span &span = bad.spans[first + 5];
+            if (which == 0) {
+                span.stepTexV = gpu::Vdp1Pack16(4000, gpu::Vdp1Hi16(span.stepTexV)); // quad step past the rows
+            } else if (which == 1) {
+                span.y1 = span.y0 + 3; // not a row
+            } else {
+                span.cmdIndex = 9; // no such command
+            }
+            gpu::Vdp1NxArena arena;
+            const auto subs = gpu::GenerateNx(bad, 0, n, arena);
+            CHECK(arena.stats.malformedSpans == 1);
+            REQUIRE(subs.size() == 1);
+            CHECK(arena.spans.size() == 30u * n);
+            // The spans before and after the bad one as generated from the good batch
+            for (uint32 i = 0; i < 5 * n; ++i) {
+                CHECK(arena.spans[i].y0 == good.spans[i].y0);
+                CHECK(arena.spans[i].flags == good.spans[i].flags);
+            }
+            for (uint32 i = 5 * n; i < 30 * n; ++i) {
+                CHECK(arena.spans[i].y0 == good.spans[i + n].y0);
+                CHECK(arena.spans[i].flags == good.spans[i + n].flags);
+            }
+        }
+    }
+}
+
 TEST_CASE("VDP1 N x generator on captured frames (BRIMIR_VDP1_CAPTURES)", "[vdp1][nx][front][.captures]") {
     // Every vdp1ops_*.bin under the directory at N = 2, 3, 4: equal to the reference generator, and the generator's CPU
     // time per frame (best of BRIMIR_NX_REPEAT runs, default 5) next to the reference generator's

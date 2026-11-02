@@ -1,5 +1,7 @@
 #include "vdp2_scene.hpp"
 
+#include "vdp1_nx_reference.hpp"
+
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/util/data_ops.hpp>
 
@@ -890,6 +892,80 @@ bool RecordWithoutSubmit(gpu::VulkanDevice &device, const std::function<void(VkC
     return ok;
 }
 
+// The N x reference of RenderBothOptions::vdp1Upscaling: native FBRAM and (while the renderer has one) the N x surface,
+// following what the GPU replayed (VulkanVDPRenderer::Vdp1WorkEvent). Without a surface it replays at N = 1 so the
+// native FBRAM (and VDP1 VRAM) stay current for the next surface.
+class NxModel {
+public:
+    NxModel()
+        : m_native(std::make_unique<vdp1ref::Fbram>()) {
+        Rescale(0);
+    }
+    void OnEvent(const gpu::VulkanVDPRenderer::Vdp1WorkEvent &e) {
+        using Kind = gpu::VulkanVDPRenderer::Vdp1WorkEvent::Kind;
+        switch (e.kind) {
+        case Kind::Ops: m_ref->Replay(*e.ops); break;
+        case Kind::Upload:
+            for (uint32_t slice = 0; slice < 8; ++slice) {
+                if (((e.sliceMask >> slice) & 1u) == 0) {
+                    continue;
+                }
+                std::memcpy(Slice(slice).data(), e.fbram.data() + size_t{slice} * kVDP1FBRAMSize, kVDP1FBRAMSize);
+                ReplicateSlice(slice);
+            }
+            break;
+        case Kind::Rescale: Rescale(e.scale); break;
+        }
+    }
+    uint32_t Scale() const {
+        return m_scale;
+    }
+    const vdp1nx::NxFbram &Surface() const {
+        return *m_surface;
+    }
+    SpriteFB &Slice(uint32_t slice) {
+        vdp1ref::Fbram &f = *m_native;
+        switch (slice) {
+        case 0: return f.main[0];
+        case 1: return f.main[1];
+        case 2: return f.alt[0];
+        case 3: return f.alt[1];
+        default: return f.mesh[(slice - 4) >> 1][slice & 1];
+        }
+    }
+
+private:
+    void Rescale(uint32_t n) {
+        std::vector<uint8> vram;
+        if (m_ref) {
+            vram.assign(m_ref->Vram().begin(), m_ref->Vram().end());
+        }
+        m_ref.reset();
+        m_scale = n;
+        m_surface = std::make_unique<vdp1nx::NxFbram>(std::max(n, 1u));
+        m_surface->ReplicateFrom(*m_native);
+        vdp1nx::Options o;
+        o.scale = std::max(n, 1u);
+        m_ref = std::make_unique<vdp1nx::ReferenceNx>(*m_native, *m_surface, o, vram);
+    }
+    void ReplicateSlice(uint32_t slice) {
+        const uint32_t sub = m_surface->Sub();
+        uint16 *out = m_surface->slices[slice].data();
+        const SpriteFB &s = Slice(slice);
+        for (uint32_t w = 0; w < kVDP1FBRAMSize / 2; ++w) {
+            const uint16 v = static_cast<uint16>((s[2 * w] << 8) | s[2 * w + 1]);
+            for (uint32_t i = 0; i < sub; ++i) {
+                *out++ = v;
+            }
+        }
+    }
+
+    std::unique_ptr<vdp1ref::Fbram> m_native;
+    std::unique_ptr<vdp1nx::NxFbram> m_surface;
+    std::unique_ptr<vdp1nx::ReferenceNx> m_ref;
+    uint32_t m_scale = 0;
+};
+
 // Compares the software frame with the composite (RGB) into result, at the renderer's internal resolution (N > 1:
 // `compare` with `lattice`). False (result.error set) when the harness failed.
 bool CompareFrame(gpu::VulkanDevice &device, gpu::VulkanVDPRenderer &vulkan, const std::vector<uint32_t> &software,
@@ -991,6 +1067,17 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         vdp1 = Vdp1Path::Gpu;
     }
     vulkan->SetVdp1Mode(vdp1 == Vdp1Path::Gpu ? gpu::Vdp1Mode::Gpu : gpu::Vdp1Mode::Software);
+    // VDP1 upscaling: the N x reference follows what the GPU replays
+    // (shared with the observer: the renderer reports the surface's end when it is destroyed, after this scope's model)
+    std::shared_ptr<NxModel> nxModel;
+    if (options.vdp1Upscaling) {
+        vulkan->SetVdp1Upscaling(true);
+        if (options.fbram != nullptr) {
+            nxModel = std::make_shared<NxModel>();
+            vulkan->SetVdp1WorkObserverForTest(
+                [nxModel](const gpu::VulkanVDPRenderer::Vdp1WorkEvent &e) { nxModel->OnEvent(e); });
+        }
+    }
     InstallSyncSubmit(*vulkan, device, options.syncCounter);
     vulkan->AttachDevice(device, options.frameContexts);
     if (!vulkan->Attached()) {
@@ -1073,7 +1160,8 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         ~HostBuffer() {
             gpu::vk_util::DestroyBuffer(device, buffer);
         }
-    } fbramHost{device, {}};
+    } fbramHost{device, {}}, nxHost{device, {}};
+    uint32_t nxCheckpoint = 0;
     uint32_t currentFrame = 0;
     bool frameRecordedByCheckpoint = false;
     const auto frameContext = [&] {
@@ -1097,6 +1185,25 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
             fbramFailed = true;
             return;
         }
+        // VDP1 upscaling: the N x surface too (every nxCompareEvery-th checkpoint and at each frame's end)
+        const uint32_t nxScale = nxModel ? vulkan->Vdp1UpscaleScale() : 0;
+        const bool frameEnd = label.rfind("frame ", 0) == 0;
+        const bool nxDue = nxScale > 1 && (frameEnd || nxCheckpoint++ % std::max(options.nxCompareEvery, 1u) == 0);
+        const VkDeviceSize nxBytes = nxDue ? gpu::vdp1::Vdp1NxFbramBufferSize(nxScale) : 0;
+        if (nxDue && nxHost.buffer.size != nxBytes) {
+            gpu::vk_util::DestroyBuffer(device, nxHost.buffer);
+            const auto create = [&](VkMemoryPropertyFlags extra) {
+                return gpu::vk_util::CreateBuffer(device, nxBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | extra,
+                                                  nxHost.buffer) == VK_SUCCESS;
+            };
+            if (!create(VK_MEMORY_PROPERTY_HOST_CACHED_BIT) && !create(0)) {
+                fbram->error = label + ": no N x surface readback buffer";
+                fbramFailed = true;
+                return;
+            }
+        }
         // The pending VDP1 ops (an ops-only submit's work) and the readback in one submit. In blanking (after
         // VDP2EndFrame, the frame not recorded yet) the ops after the frame's end can only follow the frame: the frame
         // is recorded here then, as a sync submit in blanking records it (FramePolicy::Sync), and the frame loop
@@ -1117,6 +1224,11 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
             const VkBufferCopy region{0, 0, VkDeviceSize{8} * kSlice};
             device.Table().vkCmdCopyBuffer(cmd, vulkan->Backend()->SpriteFBBuffer(), fbramHost.buffer.buffer, 1,
                                            &region);
+            if (nxDue) {
+                const VkBufferCopy nxRegion{0, 0, nxBytes};
+                device.Table().vkCmdCopyBuffer(cmd, vulkan->Vdp1Backend()->NxSurfaceBuffer(), nxHost.buffer.buffer, 1,
+                                               &nxRegion);
+            }
             gpu::vk_util::GlobalBarrier(device, cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                                         VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
         });
@@ -1164,6 +1276,71 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         }
         ++fbram->checkpoints;
         fbram->maxNonZero = std::max(fbram->maxNonZero, nonZero);
+        if (!nxDue) {
+            return;
+        }
+        // The N x surface against the reference (which has seen every submitted op list and upload), and the
+        // reference's native FBRAM against the GPU's
+        ++fbram->nxCompares;
+        fbram->nxScales |= 1u << nxScale;
+        if (nxModel->Scale() != nxScale) {
+            fbram->error = label + ": the N x reference is at " + std::to_string(nxModel->Scale()) + "x, the renderer at " +
+                           std::to_string(nxScale) + "x";
+            fbramFailed = true;
+            return;
+        }
+        for (uint32_t slice = 0; slice < 8; ++slice) {
+            if (std::memcmp(nxModel->Slice(slice).data(), gpuBytes + size_t{slice} * kSlice, kSlice) != 0) {
+                if (fbram->nxNativeCount++ == 0) {
+                    fbram->nxNativeWhere = label + ", slice " + std::to_string(slice);
+                }
+                break;
+            }
+        }
+        const auto *nxBytesGpu = static_cast<const uint8_t *>(nxHost.buffer.mapped);
+        const vdp1nx::NxFbram &want = nxModel->Surface();
+        const uint32_t sub = nxScale * nxScale;
+        uint64_t detail = 0;
+        for (uint32_t slice = 0; slice < 8; ++slice) {
+            const std::vector<uint16> &words = want.slices[slice];
+            const uint8_t *g = nxBytesGpu + gpu::vdp1::Vdp1NxFbramByteAddress(slice, 0, nxScale);
+            for (size_t k = 0; k < words.size(); k += 4) {
+                // Four words at a time (the GPU's big-endian halves swapped), word by word only where they differ
+                uint64_t g4 = 0, w4 = 0;
+                std::memcpy(&g4, g + 2 * k, 8);
+                std::memcpy(&w4, words.data() + k, 8);
+                if (((g4 & 0x00FF00FF00FF00FFull) << 8 | ((g4 >> 8) & 0x00FF00FF00FF00FFull)) == w4) {
+                    continue;
+                }
+                for (size_t j = k; j < k + 4; ++j) {
+                    const uint16 got = static_cast<uint16>((g[2 * j] << 8) | g[2 * j + 1]);
+                    if (got != words[j] && fbram->nxCount++ == 0) {
+                        const uint32_t w = static_cast<uint32_t>(j / sub);
+                        std::ostringstream s;
+                        s << label << ", slice " << slice << " native word 0x" << std::hex << w << std::dec << " (x "
+                          << w % 512 << ", y " << w / 512 << " at 512) sub " << j % sub << ": GPU 0x" << std::hex
+                          << got << ", reference 0x" << words[j];
+                        fbram->nxWhere = s.str();
+                    }
+                }
+            }
+            if (!frameEnd || slice >= 2) {
+                continue; // detail (non-vacuity): main slices at frame ends
+            }
+            for (size_t b = 0; b < words.size(); b += sub) {
+                for (uint32_t i = 1; i < sub; ++i) {
+                    if (words[b + i] != words[b]) {
+                        ++detail;
+                        break;
+                    }
+                }
+            }
+        }
+        fbram->nxDetailBlocks = std::max(fbram->nxDetailBlocks, detail);
+        if (options.nxInspect) {
+            options.nxInspect(label, nxScale, std::span<const uint8_t>(nxBytesGpu, static_cast<size_t>(nxBytes)),
+                              std::span<const uint8_t>(gpuBytes, size_t{8} * kSlice));
+        }
     };
     uint32_t checkpointIndex = 0;
     writer.checkpoint = [&](Vdp2SceneWriter &) { compareFbram("checkpoint " + std::to_string(checkpointIndex++)); };
@@ -1326,7 +1503,8 @@ FbramResult RenderBothFBRAM(const Vdp2Scene &scene, gpu::VulkanDevice &device, R
     if (result.error.empty() && result.checkpoints == 0) {
         result.error = "no FBRAM checkpoint";
     }
-    result.identical = result.error.empty() && result.frame.error.empty() && result.count == 0;
+    result.identical = result.error.empty() && result.frame.error.empty() && result.count == 0 &&
+                       result.nxCount == 0 && result.nxNativeCount == 0;
     return result;
 }
 
@@ -1346,6 +1524,21 @@ std::string FbramResult::Describe() const {
         out << count << " bytes differ; first at " << where << ", " << kSlices[slice & 7] << " byte 0x" << std::hex
             << address << std::dec << " (x " << x << ", y " << y << "): software 0x" << std::hex
             << static_cast<uint32_t>(software) << ", gpu 0x" << static_cast<uint32_t>(gpu) << std::dec;
+    }
+    if (nxCompares > 0) {
+        out << "; N x surface: " << nxCompares << " compares (scales mask 0x" << std::hex << nxScales << std::dec
+            << "), up to " << nxDetailBlocks << " blocks with detail, ";
+        if (nxCount == 0 && nxNativeCount == 0) {
+            out << "identical to the reference";
+        } else {
+            if (nxCount != 0) {
+                out << nxCount << " words differ from the reference; first at " << nxWhere;
+            }
+            if (nxNativeCount != 0) {
+                out << (nxCount != 0 ? "; " : "") << "the reference's native FBRAM differs from the GPU's at "
+                    << nxNativeCount << " compares, first at " << nxNativeWhere;
+            }
+        }
     }
     return out.str();
 }

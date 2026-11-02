@@ -327,6 +327,19 @@ struct RenderBothOptions {
     std::vector<double> *gpuMilliseconds = nullptr;
     // The Vulkan renderer's sync submits (InstallSyncSubmit) are counted here when set.
     struct SyncSubmitCounter *syncCounter = nullptr;
+    // VDP1 upscaling (GPU stage 3): VulkanVDPRenderer::SetVdp1Upscaling(true) before the attach. With `fbram` the N x
+    // sprite surface is then read back at every FBRAM checkpoint where the renderer has one (every nxCompareEvery-th
+    // checkpoint and every frame's end) and compared with the N x reference (vdp1_nx_reference.hpp ReferenceNx)
+    // replaying what the GPU replayed (VulkanVDPRenderer::SetVdp1WorkObserverForTest: submitted op lists and FBRAM
+    // uploads; a new surface is the reference's native FBRAM replicated); the reference's native FBRAM is compared with
+    // the GPU's there too.
+    bool vdp1Upscaling = false;
+    uint32_t nxCompareEvery = 1;
+    // Called at each N x comparison (after it) with the checkpoint's label, the scale and the GPU's N x surface and
+    // FBRAM bytes as read back.
+    std::function<void(const std::string &label, uint32_t scale, std::span<const uint8_t> surface,
+                       std::span<const uint8_t> fbram)>
+        nxInspect;
 };
 
 /// @brief Runs the scene into a software and a Vulkan renderer pair (separate VDPStates, the same writes), replays each
@@ -348,6 +361,16 @@ struct FbramResult {
     uint32_t slice = 0, address = 0, x = 0, y = 0;
     uint8_t software = 0, gpu = 0;
     uint64_t count = 0;
+    // VDP1 upscaling (RenderBothOptions::vdp1Upscaling): N x comparisons made, the scales seen (bit N), N x words that
+    // differed from the reference (first: nxWhere), checkpoints where the reference's native FBRAM differed from the
+    // GPU's (first: nxNativeWhere), and the most N x blocks with sub-texel detail (not all one word) at one comparison
+    uint32_t nxCompares = 0;
+    uint32_t nxScales = 0;
+    uint64_t nxCount = 0;
+    std::string nxWhere;
+    uint64_t nxNativeCount = 0;
+    std::string nxNativeWhere;
+    uint64_t nxDetailBlocks = 0;
     std::string Describe() const;
 };
 

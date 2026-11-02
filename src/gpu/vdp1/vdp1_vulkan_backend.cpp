@@ -10,6 +10,14 @@
 #include "gpu/shaders/generated/vdp1_raster.spv.h"
 #include "gpu/shaders/generated/vdp1_resolve.spv.h"
 #include "gpu/shaders/generated/vdp1_scatter.spv.h"
+// N x (GPU stage 3)
+#include "gpu/shaders/generated/vdp1_bucket_sums_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_bucket_sums_nx_add.spv.h"
+#include "gpu/shaders/generated/vdp1_erase_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_fb_write_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_raster_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_rebuild_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_resolve_nx.spv.h"
 
 #include <algorithm>
 #include <bit>
@@ -38,6 +46,11 @@ uint32_t Groups(uint32_t count, uint32_t perGroup) {
     return (count + perGroup - 1) / perGroup;
 }
 
+// The binding of each native buffer (Vdp1VulkanBackend::Buf order)
+constexpr std::array<uint32_t, 11> kBufBindings{
+    kBindingCommands,  kBindingSpans,    kBindingVRAM,        kBindingFbWrites,   kBindingFragments, kBindingUnitCounts,
+    kBindingBucket,    kBindingScanSums, kBindingUnitOffsets, kBindingBatchState, kBindingFbWinners};
+
 } // namespace
 
 Vdp1VulkanBackend::Vdp1VulkanBackend(VulkanDevice &device, uint32_t frameContexts, VkBuffer fbram)
@@ -56,10 +69,7 @@ VkResult Vdp1VulkanBackend::Init(uint32_t frameContexts) {
     if (frameContexts == 0 || m_fbram == VK_NULL_HANDLE) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    const auto &vk = m_device.Table();
-    static constexpr std::array<uint32_t, kBufCount> kBindings{
-        kBindingCommands,  kBindingSpans,    kBindingVRAM,        kBindingFbWrites,   kBindingFragments, kBindingUnitCounts,
-        kBindingBucket,    kBindingScanSums, kBindingUnitOffsets, kBindingBatchState, kBindingFbWinners};
+    static_assert(kBufBindings.size() == kBufCount);
     static constexpr std::array<uint32_t, kBufCount> kSizes{
         kCommandBufferSize,    kSpanBufferSize,        kVRAMBufferSize,       kFbWriteBufferSize,
         kFragmentBufferSize,   kUnitCountsBufferSize,  kBucketBufferSize,     kScanSumsBufferSize,
@@ -127,30 +137,207 @@ VkResult Vdp1VulkanBackend::Init(uint32_t frameContexts) {
         if (result != VK_SUCCESS) {
             return result;
         }
-        for (const Binding &b : p.bindings) {
-            VkDescriptorBufferInfo info{VK_NULL_HANDLE, 0, VK_WHOLE_SIZE};
-            if (b.binding == kBindingFbram) {
-                info.buffer = m_fbram;
-            } else {
-                for (uint32_t k = 0; k < kBufCount; ++k) {
-                    if (kBindings[k] == b.binding) {
-                        info.buffer = m_buffers[k].buffer;
-                    }
-                }
-            }
-            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            write.dstSet = pipe.set;
-            write.dstBinding = b.binding;
-            write.descriptorCount = 1;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.pBufferInfo = &info;
-            vk.vkUpdateDescriptorSets(m_device.Device(), 1, &write, 0, nullptr);
-        }
+        WriteSet(pipe.set, p.bindings, false);
     }
     m_contexts.resize(frameContexts);
     m_readbacks.resize(frameContexts);
     m_readbackMemory.resize(frameContexts, ReadbackMemory::None);
     return VK_SUCCESS;
+}
+
+void Vdp1VulkanBackend::WriteSet(VkDescriptorSet set, std::span<const Binding> bindings, bool nx) const {
+    for (const Binding &b : bindings) {
+        VkDescriptorBufferInfo info{VK_NULL_HANDLE, 0, VK_WHOLE_SIZE};
+        if (b.binding == kBindingFbram) {
+            info.buffer = m_fbram;
+        } else if (b.binding == kBindingFbramNx) {
+            info.buffer = m_nxBuffers[kNxSurface].buffer;
+        } else if (nx && b.binding == kBindingUnitCounts) {
+            info.buffer = m_nxBuffers[kNxUnitCounts].buffer;
+        } else if (nx && b.binding == kBindingUnitOffsets) {
+            info.buffer = m_nxBuffers[kNxUnitOffsets].buffer;
+        } else if (nx && b.binding == kBindingScanSums) {
+            info.buffer = m_nxBuffers[kNxScanSums].buffer;
+        } else {
+            for (uint32_t k = 0; k < kBufCount; ++k) {
+                if (kBufBindings[k] == b.binding) {
+                    info.buffer = m_buffers[k].buffer;
+                }
+            }
+        }
+        assert(info.buffer != VK_NULL_HANDLE);
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = set;
+        write.dstBinding = b.binding;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &info;
+        m_device.Table().vkUpdateDescriptorSets(m_device.Device(), 1, &write, 0, nullptr);
+    }
+}
+
+VkResult Vdp1VulkanBackend::CreateNxPipelines() {
+    if (m_nxPipes[0].pipeline != VK_NULL_HANDLE) {
+        return VK_SUCCESS;
+    }
+    struct PassDesc {
+        std::span<const uint32_t> spirv;
+        uint32_t pushSize;
+    };
+    static_assert(kNxPassCount == kNxPipelineBindings.size(), "kNxPipelineBindings must list every N x pass, in order");
+    const std::array<PassDesc, kNxPassCount> passes{{
+        {shaders::kVdp1RasterNxSpv, sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1BucketSumsNxSpv, sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1BucketSumsNxAddSpv, sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1ResolveNxSpv, sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1EraseNxSpv, sizeof(Vdp1EraseNxPushConstants)},
+        {shaders::kVdp1FbWriteNxSpv, sizeof(Vdp1FbWriteNxPushConstants)},
+        {shaders::kVdp1RebuildNxSpv, sizeof(Vdp1RebuildNxPushConstants)},
+    }};
+    for (uint32_t i = 0; i < kNxPassCount; ++i) {
+        Pipe &pipe = m_nxPipes[i];
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        for (const Binding &b : kNxPipelineBindings[i]) {
+            bindings.push_back({b.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        }
+        const VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, passes[i].pushSize};
+        pipe.pushSize = passes[i].pushSize;
+        VkResult result = vk_util::CreateDescriptorSetLayout(m_device, bindings, pipe.setLayout);
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreatePipelineLayout(m_device, {&pipe.setLayout, 1}, std::span(&range, 1), pipe.layout);
+        }
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreateComputePipeline(m_device, passes[i].spirv, pipe.layout, pipe.pipeline);
+        }
+        if (result != VK_SUCCESS) {
+            const auto &vk = m_device.Table();
+            for (Pipe &p : m_nxPipes) {
+                vk.vkDestroyPipeline(m_device.Device(), p.pipeline, nullptr);
+                vk.vkDestroyPipelineLayout(m_device.Device(), p.layout, nullptr);
+                vk.vkDestroyDescriptorSetLayout(m_device.Device(), p.setLayout, nullptr);
+                p = Pipe{};
+            }
+            return result;
+        }
+    }
+    return VK_SUCCESS;
+}
+
+VkResult Vdp1VulkanBackend::AllocateNx(uint32_t scale) {
+    const std::array<VkDeviceSize, kNxBufCount> sizes{Vdp1NxUnitCountsBufferSize(scale),
+                                                      Vdp1NxUnitCountsBufferSize(scale),
+                                                      Vdp1NxScanSumsBufferSize(scale), Vdp1NxFbramBufferSize(scale)};
+    VkDeviceSize total = 0;
+    for (const VkDeviceSize s : sizes) {
+        total += s;
+    }
+    if (m_nxAllocationLimit != 0 && total > m_nxAllocationLimit) {
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    if (const VkResult result = CreateNxPipelines(); result != VK_SUCCESS) {
+        return result;
+    }
+    for (uint32_t b = 0; b < kNxBufCount; ++b) {
+        // TRANSFER_DST for the zero fill; the surface is also read by copies (tests, readbacks of the N x image)
+        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                         (b == kNxSurface ? VkBufferUsageFlags{VK_BUFFER_USAGE_TRANSFER_SRC_BIT} : 0u);
+        if (const VkResult result =
+                vk_util::CreateBuffer(m_device, sizes[b], usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_nxBuffers[b]);
+            result != VK_SUCCESS) {
+            return result;
+        }
+    }
+    // One set per N x pipeline plus the N x sets of the native bucket and scatter pipelines
+    uint32_t descriptors = static_cast<uint32_t>(kBucketBindings.size() + kScatterBindings.size());
+    for (const std::span<const Binding> bindings : kNxPipelineBindings) {
+        descriptors += static_cast<uint32_t>(bindings.size());
+    }
+    const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptors};
+    if (const VkResult result = vk_util::CreateDescriptorPool(m_device, {&poolSize, 1}, kNxPassCount + 2, m_nxPool);
+        result != VK_SUCCESS) {
+        return result;
+    }
+    for (uint32_t i = 0; i < kNxPassCount; ++i) {
+        if (const VkResult result =
+                vk_util::AllocateDescriptorSet(m_device, m_nxPool, m_nxPipes[i].setLayout, m_nxPipes[i].set);
+            result != VK_SUCCESS) {
+            return result;
+        }
+        WriteSet(m_nxPipes[i].set, kNxPipelineBindings[i], true);
+    }
+    for (const auto &[pass, set] : {std::pair{kBucket, &m_nxBucketSet}, std::pair{kScatter, &m_nxScatterSet}}) {
+        if (const VkResult result = vk_util::AllocateDescriptorSet(m_device, m_nxPool, m_pipes[pass].setLayout, *set);
+            result != VK_SUCCESS) {
+            return result;
+        }
+        WriteSet(*set, kPipelineBindings[pass], true);
+    }
+    return VK_SUCCESS;
+}
+
+void Vdp1VulkanBackend::DestroyNxResources() {
+    m_device.Table().vkDestroyDescriptorPool(m_device.Device(), m_nxPool, nullptr); // frees the sets
+    m_nxPool = VK_NULL_HANDLE;
+    for (Pipe &p : m_nxPipes) {
+        p.set = VK_NULL_HANDLE;
+    }
+    m_nxBucketSet = VK_NULL_HANDLE;
+    m_nxScatterSet = VK_NULL_HANDLE;
+    for (vk_util::Buffer &b : m_nxBuffers) {
+        vk_util::DestroyBuffer(m_device, b);
+    }
+    m_nxScale = 0;
+    m_nxPendingZero = m_nxRecordedZero = false;
+    m_nxPendingRebuild = m_nxRecordedRebuild = 0;
+}
+
+bool Vdp1VulkanBackend::SetNxScale(uint32_t scale) {
+    if (scale <= 1) {
+        scale = 0;
+    }
+    if (!Ok() || scale > kMaxNxScale) {
+        return false;
+    }
+    if (scale == m_nxScale) {
+        return true;
+    }
+    // Free first, allocate second: the contents are regenerable from the GPU FBRAM, so the peak is the larger of the two
+    DestroyNxResources();
+    if (scale == 0) {
+        return true;
+    }
+    if (const VkResult result = AllocateNx(scale); result != VK_SUCCESS) {
+        DestroyNxResources();
+        m_nxFailure = result;
+        return false;
+    }
+    m_nxScale = scale;
+    m_nxPendingZero = true;
+    m_nxPendingRebuild = (1u << kFbramSliceCount) - 1;
+    return true;
+}
+
+bool Vdp1VulkanBackend::RecordPendingWork(uint32_t contextIndex, VkCommandBuffer cmd) {
+    if (!Ok() || contextIndex >= m_contexts.size() || cmd == VK_NULL_HANDLE || !HasPendingWork()) {
+        return false;
+    }
+    StampBegin(contextIndex, cmd);
+    Prologue(cmd);
+    Epilogue(cmd);
+    StampEnd(contextIndex, cmd);
+    return true;
+}
+
+VkBuffer Vdp1VulkanBackend::NxSurfaceBuffer() const {
+    return m_nxBuffers[kNxSurface].buffer;
+}
+
+VkDeviceSize Vdp1VulkanBackend::NxMemoryBytes() const {
+    VkDeviceSize total = 0;
+    for (const vk_util::Buffer &b : m_nxBuffers) {
+        total += b.buffer != VK_NULL_HANDLE ? b.size : 0;
+    }
+    return total;
 }
 
 void Vdp1VulkanBackend::Destroy() {
@@ -162,6 +349,13 @@ void Vdp1VulkanBackend::Destroy() {
         }
     }
     m_contexts.clear();
+    DestroyNxResources();
+    for (Pipe &p : m_nxPipes) {
+        vk.vkDestroyPipeline(dev, p.pipeline, nullptr);
+        vk.vkDestroyPipelineLayout(dev, p.layout, nullptr);
+        vk.vkDestroyDescriptorSetLayout(dev, p.setLayout, nullptr);
+        p = Pipe{};
+    }
     for (Pipe &p : m_pipes) {
         vk.vkDestroyPipeline(dev, p.pipeline, nullptr);
         vk.vkDestroyPipelineLayout(dev, p.layout, nullptr);
@@ -295,6 +489,8 @@ bool Vdp1VulkanBackend::BeginContext(uint32_t contextIndex) {
     context.used = 0;
     context.total = 0;
     m_recordedZero = false;
+    m_nxRecordedZero = false;
+    m_nxRecordedRebuild = 0;
     m_stats = {};
     m_stats.uploadBlocks = static_cast<uint32_t>(context.blocks.size());
     return true;
@@ -353,6 +549,33 @@ void Vdp1VulkanBackend::Prologue(VkCommandBuffer cmd) {
         m_pendingZero = false;
         m_recordedZero = true;
     }
+    if (m_nxScale == 0) {
+        return;
+    }
+    if (m_nxPendingZero) {
+        // The N x unit counts start zeroed (the raster counts into them, the resolve clears what it consumed); the
+        // offsets and sums are written before they are read, zeroed so nothing reads uninitialised memory
+        const auto &vk = m_device.Table();
+        for (const NxBuf b : {kNxUnitCounts, kNxUnitOffsets, kNxScanSums}) {
+            vk.vkCmdFillBuffer(cmd, m_nxBuffers[b].buffer, 0, VK_WHOLE_SIZE, 0);
+        }
+        Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute | kTransfer, kAll);
+        m_nxPendingZero = false;
+        m_nxRecordedZero = true;
+    }
+    if (m_nxPendingRebuild != 0) {
+        // A new surface: rebuilt from the GPU FBRAM as the work before this command buffer left it
+        RecordNxRebuild(cmd, m_nxPendingRebuild);
+        m_nxRecordedRebuild |= m_nxPendingRebuild;
+        m_nxPendingRebuild = 0;
+    }
+}
+
+void Vdp1VulkanBackend::RecordNxRebuild(VkCommandBuffer cmd, uint32_t sliceMask) {
+    const Vdp1RebuildNxPushConstants pc{sliceMask, m_nxScale};
+    DispatchWith(cmd, m_nxPipes[kNxRebuild], m_nxPipes[kNxRebuild].set, &pc, Vdp1RebuildNxGroups(m_nxScale),
+                 kFbramSliceCount);
+    ++m_stats.nxRebuilds;
 }
 
 void Vdp1VulkanBackend::Epilogue(VkCommandBuffer cmd) const {
@@ -384,10 +607,18 @@ void Vdp1VulkanBackend::PassBarrier(VkCommandBuffer cmd) const {
 }
 
 void Vdp1VulkanBackend::Dispatch(VkCommandBuffer cmd, Pass pass, const void *push, uint32_t x, uint32_t y) const {
+    DispatchWith(cmd, m_pipes[pass], m_pipes[pass].set, push, x, y);
+}
+
+void Vdp1VulkanBackend::DispatchIndirect(VkCommandBuffer cmd, Pass pass, const void *push, uint32_t argsWord) const {
+    DispatchIndirectWith(cmd, m_pipes[pass], m_pipes[pass].set, push, argsWord);
+}
+
+void Vdp1VulkanBackend::DispatchWith(VkCommandBuffer cmd, const Pipe &p, VkDescriptorSet set, const void *push,
+                                     uint32_t x, uint32_t y) const {
     const auto &vk = m_device.Table();
-    const Pipe &p = m_pipes[pass];
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
-    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &p.set, 0, nullptr);
+    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &set, 0, nullptr);
     if (p.pushSize != 0) {
         vk.vkCmdPushConstants(cmd, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, p.pushSize, push);
     }
@@ -395,11 +626,11 @@ void Vdp1VulkanBackend::Dispatch(VkCommandBuffer cmd, Pass pass, const void *pus
     PassBarrier(cmd);
 }
 
-void Vdp1VulkanBackend::DispatchIndirect(VkCommandBuffer cmd, Pass pass, const void *push, uint32_t argsWord) const {
+void Vdp1VulkanBackend::DispatchIndirectWith(VkCommandBuffer cmd, const Pipe &p, VkDescriptorSet set, const void *push,
+                                             uint32_t argsWord) const {
     const auto &vk = m_device.Table();
-    const Pipe &p = m_pipes[pass];
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
-    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &p.set, 0, nullptr);
+    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &set, 0, nullptr);
     if (p.pushSize != 0) {
         vk.vkCmdPushConstants(cmd, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, p.pushSize, push);
     }
@@ -428,6 +659,12 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
     const auto runOk = [&](const Vdp1FbWritePushConstants &r) {
         return uint64_t{r.offset} + r.count <= ops.fbWrites.size() && r.count <= kMaxFbWritesPerBatch;
     };
+    // At N x: the N x sub-batches of every draw first (their spans are uploaded with the rest)
+    const uint32_t nx = m_nxScale;
+    if (nx != 0) {
+        m_nxArena.Clear();
+        m_nxDraws.assign(segment.opCount, NxDraw{});
+    }
     VkDeviceSize bytes = 0;
     for (uint32_t i = segment.firstOp; i < segment.firstOp + segment.opCount; ++i) {
         const Vdp1Op &op = ops.ops[i];
@@ -438,6 +675,15 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
             }
             bytes += AlignUp(VkDeviceSize{b.cmdCount} * sizeof(Vdp1CommandParams), kUploadAlignment);
             bytes += AlignUp(VkDeviceSize{b.spanCount} * sizeof(Vdp1Span), kUploadAlignment);
+            if (nx != 0) {
+                const std::span<const Vdp1NxSubBatch> subs = GenerateNx(ops, op.index, nx, m_nxArena);
+                NxDraw &draw = m_nxDraws[i - segment.firstOp];
+                draw.firstSubBatch = static_cast<uint32_t>(m_nxArena.subBatches.size() - subs.size());
+                draw.subBatches = static_cast<uint32_t>(subs.size());
+                for (const Vdp1NxSubBatch &sb : subs) {
+                    bytes += AlignUp(VkDeviceSize{sb.spanCount} * sizeof(Vdp1NxSpan), kUploadAlignment);
+                }
+            }
         } else if (op.kind == Vdp1OpKind::FbWrites && op.index < ops.fbWriteRuns.size() &&
                    runOk(ops.fbWriteRuns[op.index])) {
             bytes += AlignUp(VkDeviceSize{ops.fbWriteRuns[op.index].count} * sizeof(Vdp1FbWrite), kUploadAlignment);
@@ -520,6 +766,38 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
             }
             DispatchIndirect(cmd, kResolve, &pc, kBatchStateResolveArgs);
             ++m_stats.batches;
+            if (nx != 0) {
+                // The same batch at N x: its sub-batches in order (each resolves on its own; a continuation has none)
+                const NxDraw &draw = m_nxDraws[i - segment.firstOp];
+                for (uint32_t s = 0; s < draw.subBatches; ++s) {
+                    const Vdp1NxSubBatch &sb = m_nxArena.subBatches[draw.firstSubBatch + s];
+                    const VkDeviceSize nxSpanBytes = VkDeviceSize{sb.spanCount} * sizeof(Vdp1NxSpan);
+                    const VkBufferCopy nxSpanCopy{put(m_nxArena.spans.data() + sb.spanOffset, nxSpanBytes), 0,
+                                                  nxSpanBytes};
+                    beforeCopies();
+                    if (nxSpanBytes != 0) {
+                        vk.vkCmdCopyBuffer(cmd, upload.buffer, m_buffers[kSpans].buffer, 1, &nxSpanCopy);
+                    }
+                    afterCopies();
+                    const Vdp1BatchPushConstants npc{0, sb.spanCount, 0, sb.slotCount, b.drawFB & 1u, nx};
+                    if (const uint32_t groups = Groups(sb.spanCount, kWorkgroupSize); groups != 0) {
+                        DispatchWith(cmd, m_nxPipes[kNxRaster], m_nxPipes[kNxRaster].set, &npc, groups, 1);
+                    }
+                    Dispatch(cmd, kBatchRange, nullptr, 1);
+                    DispatchIndirectWith(cmd, m_pipes[kBucket], m_nxBucketSet, nullptr, kBatchStateBucketArgs);
+                    DispatchWith(cmd, m_nxPipes[kNxBucketSums], m_nxPipes[kNxBucketSums].set, &npc, nx * nx, 1);
+                    DispatchWith(cmd, m_nxPipes[kNxBucketSumsAdd], m_nxPipes[kNxBucketSumsAdd].set, &npc, nx * nx, 1);
+                    if (const uint32_t groups = Groups(sb.slotCount, kScatterSlotsPerGroup); groups != 0) {
+                        DispatchWith(cmd, m_pipes[kScatter], m_nxScatterSet, &npc, groups, 1);
+                    }
+                    DispatchIndirectWith(cmd, m_nxPipes[kNxResolve], m_nxPipes[kNxResolve].set, &npc,
+                                         kBatchStateResolveArgs);
+                    ++m_stats.nxSubBatches;
+                    m_stats.nxSpans += sb.spanCount;
+                    m_stats.nxSlots += sb.slotCount;
+                }
+                m_stats.nxMaxSubBatchesPerBatch = std::max(m_stats.nxMaxSubBatchesPerBatch, draw.subBatches);
+            }
             break;
         }
         case Vdp1OpKind::Erase: {
@@ -529,7 +807,14 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
             }
             const Vdp1ErasePushConstants &e = ops.erases[op.index];
             if (e.x3 > e.x1 && e.y3 >= e.y1) {
-                Dispatch(cmd, kErase, &e, Groups(e.x3 - e.x1, kEraseGroupSize), Groups(e.y3 - e.y1 + 1, kEraseGroupSize));
+                const uint32_t gx = Groups(e.x3 - e.x1, kEraseGroupSize), gy = Groups(e.y3 - e.y1 + 1, kEraseGroupSize);
+                Dispatch(cmd, kErase, &e, gx, gy);
+                if (nx != 0) {
+                    // The same region, value and write limit on the N x blocks
+                    const Vdp1EraseNxPushConstants npc{e, nx};
+                    DispatchWith(cmd, m_nxPipes[kNxErase], m_nxPipes[kNxErase].set, &npc, gx, gy);
+                    ++m_stats.nxErases;
+                }
             }
             ++m_stats.erases;
             break;
@@ -553,6 +838,12 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
             Dispatch(cmd, kFbWriteMark, &pc, groups);
             Dispatch(cmd, kFbWrite, &pc, groups);
             Dispatch(cmd, kFbWriteClear, &pc, groups);
+            if (nx != 0) {
+                // After the native run: each record's N x blocks take its mask's bits of the final native word
+                const Vdp1FbWriteNxPushConstants npc{pc, nx};
+                DispatchWith(cmd, m_nxPipes[kNxFbWrite], m_nxPipes[kNxFbWrite].set, &npc, groups, 1);
+                ++m_stats.nxFbWriteRuns;
+            }
             ++m_stats.fbWriteRuns;
             break;
         }
@@ -589,6 +880,11 @@ bool Vdp1VulkanBackend::RecordFbramUpload(std::span<const uint8_t> slices, uint3
     StampBegin(contextIndex, cmd);
     Prologue(cmd);
     m_device.Table().vkCmdCopyBuffer(cmd, upload.buffer, m_fbram, count, regions.data());
+    if (m_nxScale != 0) {
+        // The uploaded slices' N x blocks become their native words
+        Barrier(cmd, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT, kCompute, VK_ACCESS_SHADER_READ_BIT);
+        RecordNxRebuild(cmd, mask);
+    }
     Epilogue(cmd);
     StampEnd(contextIndex, cmd);
     ++m_stats.uploads;
@@ -699,6 +995,12 @@ void Vdp1VulkanBackend::FrameDropped() {
         m_pendingZero = true;
         m_recordedZero = false;
     }
+    if (m_nxRecordedZero) {
+        m_nxPendingZero = true;
+        m_nxRecordedZero = false;
+    }
+    m_nxPendingRebuild |= m_nxRecordedRebuild;
+    m_nxRecordedRebuild = 0;
 }
 
 } // namespace brimir::gpu::vdp1

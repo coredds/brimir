@@ -357,6 +357,44 @@ TEST_CASE("VDP1 front half: batches split at swaps and capacities, not at mode c
     }
 }
 
+TEST_CASE("VDP1 front half: a capacity split's continuation is the next op and batch of the same list",
+          "[vdp1][front][nx]") {
+    // The N x generator (vdp1_nx_front.cpp) finds a continued command by reading the previous batch: every batch closed
+    // at a capacity is followed directly by the batch continuing it, whatever comes around the split (erases, CPU
+    // writes, swaps, takes), and never ends a list.
+    for (const Vdp1BatchLimits limits : {Vdp1BatchLimits{.spans = 5}, Vdp1BatchLimits{.fragments = 300},
+                                         Vdp1BatchLimits{.commands = 1}}) {
+        Fixture f;
+        f.front->SetBatchLimitsForTesting(limits);
+        std::vector<Vdp1OpList> lists;
+        uint32_t splits = 0;
+        for (int i = 0; i < 40; ++i) {
+            f.Execute(f.Polygon(static_cast<int16_t>(i * 7 % 280), static_cast<int16_t>(i * 5 % 190), 12));
+            switch (i % 5) {
+            case 1: f.front->Erase(i % 2 == 0 ? 0 : 50, 224); break;
+            case 2: f.front->WriteFB16(static_cast<uint32_t>(i * 64), 0x8421); break;
+            case 3: f.state->fbIndex.Flip(); break;
+            case 4: lists.push_back(f.front->TakeOps()); break;
+            default: break;
+            }
+        }
+        lists.push_back(f.front->TakeOps());
+        for (const Vdp1OpList &ops : lists) {
+            for (size_t j = 0; j < ops.ops.size(); ++j) {
+                const Vdp1Op &op = ops.ops[j];
+                if (op.kind != K::Draw || ops.batches[op.index].end != Vdp1BatchEnd::Capacity) {
+                    continue;
+                }
+                ++splits;
+                REQUIRE(j + 1 < ops.ops.size());
+                CHECK(ops.ops[j + 1].kind == K::Draw);
+                CHECK(ops.ops[j + 1].index == op.index + 1);
+            }
+        }
+        CHECK(splits >= 5);
+    }
+}
+
 TEST_CASE("VDP1 front half: doubleV, clip commands, local coordinates and the sprite layer", "[vdp1][front]") {
     SECTION("doubleV is software's at every frame start") {
         for (const bool deinterlace : {false, true}) {

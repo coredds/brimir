@@ -19,9 +19,22 @@
 // command buffers it records read from. BeginContext starts a command buffer of a context (its previous one has
 // completed); the Records into that command buffer then append to the context's blocks (chaining another block when
 // one is full; the next BeginContext merges them into one block of the high-water size). Record never waits.
+//
+// N x sprite surface (GPU stage 3; docs/ymir-hw-renderer-notes/stage3-research.md sections 1.4 and 2): with SetNxScale
+// (N > 1) the back half also owns the N x surface (Vdp1NxFbramBufferSize) and its N x unit counts, offsets and scan
+// sums. Every op is then replayed at N x too, in the same Record and right after its native passes:
+// - a draw batch: the generator's sub-batches (vdp1_nx_front.hpp; none for a continuation, several for a large batch at
+//   4x), each through raster_nx, batch_range, bucket, bucket_sums_nx, bucket_sums_nx_add, scatter and resolve_nx (the
+//   N x spans into the span buffer, the other per-batch buffers shared with the native passes);
+// - an erase: erase_nx;
+// - a CPU write run: fb_write_nx after fb_write_clear (it reads the run's final native words).
+// RecordFbramUpload rebuilds the uploaded slices (rebuild_nx), and a new surface (SetNxScale) is rebuilt whole from the
+// GPU FBRAM at the next Record (one-time work, as the zero fill: re-armed by FrameDropped). The op lists replayed after a
+// dropped command buffer carry their N x passes with them.
 
 #include "gpu/vdp1/vdp1_bindings.hpp"
 #include "gpu/vdp1/vdp1_front.hpp"
+#include "gpu/vdp1/vdp1_nx_front.hpp"
 #include "gpu/vk_device.hpp"
 #include "gpu/vk_util.hpp"
 
@@ -79,8 +92,31 @@ public:
     void SetLog(std::function<void(const std::string &)> log) { m_log = std::move(log); }
 
     // The command buffer of the last BeginContext will not be submitted: the one-time work it carried (zeroing the
-    // back half's buffers) is pending again. Its op lists are the caller's to replay.
+    // back half's buffers, an N x rebuild) is pending again. Its op lists are the caller's to replay.
     void FrameDropped();
+
+    // The N x sprite surface (the top of this file). N > 1 (up to kMaxNxScale): frees the N x resources first, then
+    // allocates them for N (the N x pipelines are created once, at the first N > 1); the next Record rebuilds the whole
+    // surface from the GPU FBRAM. 0 or 1: frees them (Records are native only). The same N again keeps the surface.
+    // Contract: no command buffer this back half recorded is pending or waiting to be submitted (the caller waited for
+    // its fences; a dropped one was reported with FrameDropped). False when the resources cannot be allocated: the
+    // N x path is then off (NxScale() 0; NxFailure() says why); the native path is unaffected.
+    bool SetNxScale(uint32_t scale);
+    VkResult NxFailure() const { return m_nxFailure; }
+    // One-time work (zero fills, the rebuild of a new N x surface) waits for the next Record. RecordPendingWork records
+    // only it (with the barriers of a Record), for a command buffer without ops; false when nothing was recorded.
+    bool HasPendingWork() const { return m_pendingZero || m_nxPendingZero || m_nxPendingRebuild != 0; }
+    bool RecordPendingWork(uint32_t context, VkCommandBuffer cmd);
+    // The N x scale (0: no N x surface).
+    uint32_t NxScale() const { return m_nxScale; }
+    // The N x surface (VK_NULL_HANDLE without one): STORAGE | TRANSFER_SRC, the layout of vdp1_hw_params.hpp.
+    VkBuffer NxSurfaceBuffer() const;
+    // The device memory of the N x resources (0 without them).
+    VkDeviceSize NxMemoryBytes() const;
+    // Test hook: SetNxScale fails when its resources need more than `bytes` (0: no limit).
+    void SetNxAllocationLimitForTest(VkDeviceSize bytes) { m_nxAllocationLimit = bytes; }
+    // Test hook: the N x sub-batch capacities (Vdp1NxLimits).
+    void SetNxLimitsForTest(const Vdp1NxLimits &limits) { m_nxArena.limits = limits; }
 
     // What the Records since the last BeginContext recorded.
     struct RecordStats {
@@ -91,6 +127,14 @@ public:
         VkDeviceSize uploadBytes = 0;
         uint32_t uploadBlocks = 0; // blocks the context holds
         uint32_t malformed = 0;    // ops and VRAM copies skipped as malformed (data out of range)
+        // N x passes
+        uint32_t nxSubBatches = 0;
+        uint32_t nxMaxSubBatchesPerBatch = 0;
+        uint64_t nxSpans = 0;
+        uint64_t nxSlots = 0;
+        uint32_t nxErases = 0;
+        uint32_t nxFbWriteRuns = 0;
+        uint32_t nxRebuilds = 0; // rebuild_nx dispatches (new surface, uploads)
     };
     const RecordStats &StatsForTest() const { return m_stats; }
     // Ops and VRAM copies Record skipped as malformed since creation (the front half never produces one; the first is
@@ -141,8 +185,19 @@ private:
         uint8_t *mapped = nullptr;
     };
 
+    // The N x pipelines (vdp1_bindings.hpp kNxPipelineBindings order); batch_range, bucket and scatter are the native
+    // pipelines, bucket and scatter with N x descriptor sets.
+    enum NxPass : uint32_t {
+        kNxRaster, kNxBucketSums, kNxBucketSumsAdd, kNxResolve, kNxErase, kNxFbWrite, kNxRebuild, kNxPassCount
+    };
+    enum NxBuf : uint32_t { kNxUnitCounts, kNxUnitOffsets, kNxScanSums, kNxSurface, kNxBufCount };
+
     VkResult Init(uint32_t frameContexts);
     void Destroy();
+    VkResult CreateNxPipelines();
+    VkResult AllocateNx(uint32_t scale);
+    void DestroyNxResources();
+    void WriteSet(VkDescriptorSet set, std::span<const Binding> bindings, bool nx) const;
     bool Allocate(Context &context, VkDeviceSize size, Allocation &out);
     // Pending one-time work and the barrier from earlier work, at the start of every Record call.
     void Prologue(VkCommandBuffer cmd);
@@ -151,7 +206,12 @@ private:
                  VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) const;
     void Dispatch(VkCommandBuffer cmd, Pass pass, const void *push, uint32_t x, uint32_t y = 1) const;
     void DispatchIndirect(VkCommandBuffer cmd, Pass pass, const void *push, uint32_t argsWord) const;
+    void DispatchWith(VkCommandBuffer cmd, const Pipe &pipe, VkDescriptorSet set, const void *push, uint32_t x,
+                      uint32_t y) const;
+    void DispatchIndirectWith(VkCommandBuffer cmd, const Pipe &pipe, VkDescriptorSet set, const void *push,
+                              uint32_t argsWord) const;
     void PassBarrier(VkCommandBuffer cmd) const;
+    void RecordNxRebuild(VkCommandBuffer cmd, uint32_t sliceMask);
 
     VulkanDevice &m_device;
     VkResult m_result = VK_ERROR_INITIALIZATION_FAILED;
@@ -180,6 +240,26 @@ private:
     double m_gpuSeconds = 0;
     uint32_t m_timestampBits = 0;
     bool m_timestampsUnavailable = false;
+
+    // N x (SetNxScale)
+    uint32_t m_nxScale = 0;
+    std::array<Pipe, kNxPassCount> m_nxPipes{}; // created once; sets from m_nxPool
+    VkDescriptorSet m_nxBucketSet = VK_NULL_HANDLE;  // the native bucket and scatter pipelines on the N x buffers
+    VkDescriptorSet m_nxScatterSet = VK_NULL_HANDLE;
+    VkDescriptorPool m_nxPool = VK_NULL_HANDLE;      // per allocation
+    std::array<vk_util::Buffer, kNxBufCount> m_nxBuffers{};
+    VkDeviceSize m_nxAllocationLimit = 0;
+    VkResult m_nxFailure = VK_SUCCESS; // the last SetNxScale failure
+    bool m_nxPendingZero = false;   // the N x unit counts (and offsets, sums) are zeroed by the next Record
+    bool m_nxRecordedZero = false;  // ... and the command buffer of the last BeginContext carries it
+    uint32_t m_nxPendingRebuild = 0;  // slices rebuilt from the GPU FBRAM by the next Record
+    uint32_t m_nxRecordedRebuild = 0; // ... and the ones the command buffer of the last BeginContext carries
+    Vdp1NxArena m_nxArena;
+    struct NxDraw {
+        uint32_t firstSubBatch = 0; // into m_nxArena.subBatches
+        uint32_t subBatches = 0;
+    };
+    std::vector<NxDraw> m_nxDraws; // per op of the segment being recorded
 };
 
 } // namespace brimir::gpu::vdp1

@@ -230,6 +230,9 @@ private:
     bool m_batchOpen = false;
     Vdp1DrawBatch m_batch{};
     bool m_fbRunOpen = false;
+    // The open batch continues a batch closed at a capacity (the N x generator, vdp1_nx_front.cpp, reads the split
+    // batch as the continuation's previous op and batch)
+    bool m_continuesCapacity = false;
 
     // The command being executed
     Vdp1CommandParams m_cmd{};

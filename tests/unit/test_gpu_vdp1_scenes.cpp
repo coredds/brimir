@@ -30,8 +30,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -330,9 +332,11 @@ void RandomErase(Vdp2SceneWriter &w, std::mt19937 &rng) {
     w.VDP1Reg(EWRR, static_cast<uint16_t>(((x3 & 0x7F) << 9) | (y3 & 0x1FF)));
 }
 
-// Checks a scene: FBRAM after every frame and checkpoint, every frame's composite (skipFrame: one not compared).
-void RunFbramScene(const Vdp2Scene &scene, RenderBothOptions options = {}, bool requireColors = true,
-                   uint32_t skipFrame = UINT32_MAX) {
+// Checks a scene: FBRAM after every frame and checkpoint, every frame's composite (skipFrame: one not compared). With
+// options.vdp1Upscaling also the N x sprite surface against the N x reference at the internal resolution options.scale
+// (compared at least once, at that scale, with sub-texel detail when `nxDetail`).
+FbramResult RunFbramScene(const Vdp2Scene &scene, RenderBothOptions options = {}, bool requireColors = true,
+                          uint32_t skipFrame = UINT32_MAX, bool nxDetail = true) {
     auto device = OpenDevice();
     options.compareFrame = [skipFrame](uint32_t f) { return f != skipFrame; };
     const FbramResult r = RenderBothFBRAM(scene, *device, options);
@@ -346,7 +350,17 @@ void RunFbramScene(const Vdp2Scene &scene, RenderBothOptions options = {}, bool 
     CHECK(r.identical);
     CHECK(r.maxNonZero > 0);
     CHECK(r.checkpoints >= scene.frames - (skipFrame < scene.frames ? 1 : 0));
+    if (options.vdp1Upscaling && options.scale > 1) {
+        CHECK(r.nxCompares > 0);
+        CHECK(((r.nxScales >> options.scale) & 1u) != 0);
+        CHECK(r.nxCount == 0);
+        CHECK(r.nxNativeCount == 0);
+        if (nxDetail) {
+            CHECK(r.nxDetailBlocks > 0);
+        }
+    }
     CloseAndCheckValidation(device);
+    return r;
 }
 
 // The 1-cycle mode (FCM = 0) with a full-screen erase and a fresh random table every frame.
@@ -366,56 +380,59 @@ FrameControl AutoSwap(uint32_t count, int maxX = 320, int maxY = 224, uint16_t f
     return c;
 }
 
-} // namespace
+// The stage 2 scene list (each a TEST_CASE below; the N x test runs them all at N = 2, 3, 4)
+struct SceneCase {
+    std::string name;
+    Vdp2Scene scene;
+    RenderBothOptions options;
+    bool requireColors = true;
+    uint32_t skipFrame = UINT32_MAX;
+};
 
-TEST_CASE("GPU VDP1 scene: every command type, colour mode and draw mode", "[gpu][vdp1][scene]") {
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(60), 4));
+SceneCase SceneEveryCommand() {
+    return {"every command type",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(60), 4)};
 }
 
-TEST_CASE("GPU VDP1 scene: transparent meshes", "[gpu][vdp1][scene]") {
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(60), 4,
-                            {.transparentMeshes = true}, 2));
+SceneCase SceneTransparentMeshes() {
+    return {"transparent meshes", Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); },
+                                            AutoSwap(60), 4, {.transparentMeshes = true}, 2)};
 }
 
-TEST_CASE("GPU VDP1 scene: double density with deinterlacing (doubleV, alternate fields)", "[gpu][vdp1][scene]") {
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); },
-                            AutoSwap(50), 4, {.deinterlace = true, .transparentMeshes = true}, 3));
+SceneCase SceneDoubleDensity() {
+    return {"double density with deinterlacing",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); },
+                      AutoSwap(50), 4, {.deinterlace = true, .transparentMeshes = true}, 3)};
 }
 
-TEST_CASE("GPU VDP1 scene: double interlace (DIE, DIL per field)", "[gpu][vdp1][scene]") {
-    for (const bool deinterlace : {false, true}) {
-        DYNAMIC_SECTION("deinterlace " << deinterlace) {
-            FrameControl c = AutoSwap(50, 320, 448);
-            const auto program = c.program;
-            c.program = [program](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
-                program(w, rng, f);
-                w.VDP1Reg(FBCR, static_cast<uint16_t>(kDIE | ((f & 1) ? kDIL : 0)));
-            };
-            RunFbramScene(
-                Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); }, c,
-                          4, {.deinterlace = deinterlace}, 4));
-        }
-    }
+SceneCase SceneDoubleInterlace(bool deinterlace) {
+    FrameControl c = AutoSwap(50, 320, 448);
+    const auto program = c.program;
+    c.program = [program](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
+        program(w, rng, f);
+        w.VDP1Reg(FBCR, static_cast<uint16_t>(kDIE | ((f & 1) ? kDIL : 0)));
+    };
+    return {std::string("double interlace, deinterlace ") + (deinterlace ? "on" : "off"),
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); }, c, 4,
+                      {.deinterlace = deinterlace}, 4)};
 }
 
-TEST_CASE("GPU VDP1 scene: 8 bpp framebuffers (1024 wide, rotation 512 tall)", "[gpu][vdp1][scene]") {
-    for (const uint16_t tvmr : {uint16_t{1}, uint16_t{3}}) {
-        DYNAMIC_SECTION("TVMR " << tvmr) {
-            FrameControl c = AutoSwap(50);
-            const auto program = c.program;
-            c.program = [program, tvmr](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
-                program(w, rng, f);
-                w.VDP1Reg(TVMR, tvmr);
-            };
-            // A rotated framebuffer (TVMR 3) is not shown without a rotation background: FBRAM only then.
-            RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp, 0x0008); }, c,
-                                    4, {}, 5 + tvmr),
-                          {}, tvmr == 1);
-        }
-    }
+SceneCase Scene8bpp(uint16_t tvmr) {
+    FrameControl c = AutoSwap(50);
+    const auto program = c.program;
+    c.program = [program, tvmr](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
+        program(w, rng, f);
+        w.VDP1Reg(TVMR, tvmr);
+    };
+    // A rotated framebuffer (TVMR 3) is not shown without a rotation background: FBRAM only then.
+    SceneCase s{"8 bpp, TVMR " + std::to_string(tvmr),
+                Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp, 0x0008); }, c, 4, {},
+                          5 + tvmr)};
+    s.requireColors = tvmr == 1;
+    return s;
 }
 
-TEST_CASE("GPU VDP1 scene: erases with the VBlank cycle limit, empty regions and the clamps", "[gpu][vdp1][scene]") {
+SceneCase SceneErases() {
     // Manual erase and swap with VBE (TVMR.VBE, FCM, FCT = 1, 1, 1): the VBlank erase at the last line (ending mid-row
     // after 4,000 cycles), then the swap; a random erase region each frame, latched at the swap.
     FrameControl c;
@@ -429,10 +446,11 @@ TEST_CASE("GPU VDP1 scene: erases with the VBlank cycle limit, empty regions and
         WriteTable(w, rng, a, 40);
         w.DrawVDP1();
     };
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 6, {}, 9));
+    return {"erases with the VBlank cycle limit",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 6, {}, 9)};
 }
 
-TEST_CASE("GPU VDP1 scene: manual swap (FCM = 1, FCT = 1) every other frame", "[gpu][vdp1][scene]") {
+SceneCase SceneManualSwap() {
     FrameControl c;
     c.program = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
         if ((f & 1) == 0) {
@@ -447,10 +465,10 @@ TEST_CASE("GPU VDP1 scene: manual swap (FCM = 1, FCT = 1) every other frame", "[
             w.DrawVDP1();
         }
     };
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 6, {}, 10));
+    return {"manual swap", Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 6, {}, 10)};
 }
 
-TEST_CASE("GPU VDP1 scene: erase without swap (FCM = 1, FCT = 0)", "[gpu][vdp1][scene]") {
+SceneCase SceneEraseWithoutSwap() {
     // Frames 0-1 swap (1-cycle mode); from frame 2 the program erases without swapping every frame: the display
     // framebuffer is erased after each frame (a trailing op), while VDP1 keeps drawing into the draw framebuffer.
     FrameControl c;
@@ -463,10 +481,11 @@ TEST_CASE("GPU VDP1 scene: erase without swap (FCM = 1, FCT = 0)", "[gpu][vdp1][
         WriteTable(w, rng, a, 30);
         w.DrawVDP1();
     };
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 6, {}, 11));
+    return {"erase without swap",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 6, {}, 11)};
 }
 
-TEST_CASE("GPU VDP1 scene: a game that stops swapping", "[gpu][vdp1][scene]") {
+SceneCase SceneStopsSwapping() {
     // 1-cycle mode for three frames, then manual mode without any further FBCR write (no swap, no erase): the game draws
     // into the draw framebuffer (PTMR) and writes it with the CPU every frame, and VDP2 keeps showing the same one.
     FrameControl c;
@@ -493,10 +512,11 @@ TEST_CASE("GPU VDP1 scene: a game that stops swapping", "[gpu][vdp1][scene]") {
             }
         }
     };
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 7, {}, 12));
+    return {"a game that stops swapping",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 7, {}, 12)};
 }
 
-TEST_CASE("GPU VDP1 scene: register, VRAM and CPU writes between commands", "[gpu][vdp1][scene]") {
+SceneCase SceneWritesBetweenCommands() {
     // The frame's table is drawn in parts across the frame's lines; between them: TVMR 8 bpp toggles, FBCR DIE/DIL/EOS
     // changes, VRAM writes to a texture, the look-up table, a Gouraud table and a later command table entry, CPU
     // framebuffer writes, and FBRAM checkpoints.
@@ -532,11 +552,11 @@ TEST_CASE("GPU VDP1 scene: register, VRAM and CPU writes between commands", "[gp
         w.DrawVDP1Partial(part * 7, part == 9 ? 64 : 7);
         w.Checkpoint();
     };
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 4, {}, 13));
+    return {"register, VRAM and CPU writes between commands",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 4, {}, 13)};
 }
 
-TEST_CASE("GPU VDP1 scene: CPU writes in double density with deinterlacing and transparent meshes",
-          "[gpu][vdp1][scene]") {
+SceneCase SceneCpuWritesDoubleDensity() {
     // Writes mirror to the alternate field and leave the meshes alone (software's VDP1WriteFB), between mesh draws.
     FrameControl c = AutoSwap(40);
     c.line = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, uint32_t y) {
@@ -547,18 +567,20 @@ TEST_CASE("GPU VDP1 scene: CPU writes in double density with deinterlacing and t
             w.Checkpoint();
         }
     };
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); }, c,
-                            4, {.deinterlace = true, .transparentMeshes = true}, 14));
+    return {"CPU writes in double density with deinterlacing and transparent meshes",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); }, c, 4,
+                      {.deinterlace = true, .transparentMeshes = true}, 14)};
 }
 
-TEST_CASE("GPU VDP1 scene: a dropped command buffer's VDP1 ops are replayed with the next one", "[gpu][vdp1][scene]") {
-    RenderBothOptions options;
-    options.dropFrame = 2;
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40), 5, {}, 15),
-                  options, true, 2);
+SceneCase SceneDroppedCommandBuffer() {
+    SceneCase s{"a dropped command buffer",
+                Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40), 5, {}, 15)};
+    s.options.dropFrame = 2;
+    s.skipFrame = 2;
+    return s;
 }
 
-TEST_CASE("GPU VDP1 scene: save and load between commands", "[gpu][vdp1][scene]") {
+SceneCase SceneSaveLoad() {
     // The save inside the frame (the GPU holds newer data) makes one sync submit; the load uploads main and mesh.
     FrameControl c = AutoSwap(40);
     c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool) {
@@ -570,8 +592,101 @@ TEST_CASE("GPU VDP1 scene: save and load between commands", "[gpu][vdp1][scene]"
         }
         w.DrawVDP1Partial(20, 64);
     };
-    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 4,
-                            {.deinterlace = true, .transparentMeshes = true}, 16));
+    return {"save and load between commands",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 4,
+                      {.deinterlace = true, .transparentMeshes = true}, 16)};
+}
+
+FbramResult RunCase(const SceneCase &s, uint32_t nx = 0) {
+    RenderBothOptions options = s.options;
+    if (nx != 0) {
+        options.vdp1Upscaling = true;
+        options.scale = nx;
+    }
+    return RunFbramScene(s.scene, options, s.requireColors, s.skipFrame);
+}
+
+std::vector<SceneCase> Stage2Scenes() {
+    std::vector<SceneCase> list;
+    list.push_back(SceneEveryCommand());
+    list.push_back(SceneTransparentMeshes());
+    list.push_back(SceneDoubleDensity());
+    list.push_back(SceneDoubleInterlace(false));
+    list.push_back(SceneDoubleInterlace(true));
+    list.push_back(Scene8bpp(1));
+    list.push_back(Scene8bpp(3));
+    list.push_back(SceneErases());
+    list.push_back(SceneManualSwap());
+    list.push_back(SceneEraseWithoutSwap());
+    list.push_back(SceneStopsSwapping());
+    list.push_back(SceneWritesBetweenCommands());
+    list.push_back(SceneCpuWritesDoubleDensity());
+    list.push_back(SceneDroppedCommandBuffer());
+    list.push_back(SceneSaveLoad());
+    return list;
+}
+
+} // namespace
+
+TEST_CASE("GPU VDP1 scene: every command type, colour mode and draw mode", "[gpu][vdp1][scene]") {
+    RunCase(SceneEveryCommand());
+}
+
+TEST_CASE("GPU VDP1 scene: transparent meshes", "[gpu][vdp1][scene]") {
+    RunCase(SceneTransparentMeshes());
+}
+
+TEST_CASE("GPU VDP1 scene: double density with deinterlacing (doubleV, alternate fields)", "[gpu][vdp1][scene]") {
+    RunCase(SceneDoubleDensity());
+}
+
+TEST_CASE("GPU VDP1 scene: double interlace (DIE, DIL per field)", "[gpu][vdp1][scene]") {
+    for (const bool deinterlace : {false, true}) {
+        DYNAMIC_SECTION("deinterlace " << deinterlace) {
+            RunCase(SceneDoubleInterlace(deinterlace));
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 scene: 8 bpp framebuffers (1024 wide, rotation 512 tall)", "[gpu][vdp1][scene]") {
+    for (const uint16_t tvmr : {uint16_t{1}, uint16_t{3}}) {
+        DYNAMIC_SECTION("TVMR " << tvmr) {
+            RunCase(Scene8bpp(tvmr));
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 scene: erases with the VBlank cycle limit, empty regions and the clamps", "[gpu][vdp1][scene]") {
+    RunCase(SceneErases());
+}
+
+TEST_CASE("GPU VDP1 scene: manual swap (FCM = 1, FCT = 1) every other frame", "[gpu][vdp1][scene]") {
+    RunCase(SceneManualSwap());
+}
+
+TEST_CASE("GPU VDP1 scene: erase without swap (FCM = 1, FCT = 0)", "[gpu][vdp1][scene]") {
+    RunCase(SceneEraseWithoutSwap());
+}
+
+TEST_CASE("GPU VDP1 scene: a game that stops swapping", "[gpu][vdp1][scene]") {
+    RunCase(SceneStopsSwapping());
+}
+
+TEST_CASE("GPU VDP1 scene: register, VRAM and CPU writes between commands", "[gpu][vdp1][scene]") {
+    RunCase(SceneWritesBetweenCommands());
+}
+
+TEST_CASE("GPU VDP1 scene: CPU writes in double density with deinterlacing and transparent meshes",
+          "[gpu][vdp1][scene]") {
+    RunCase(SceneCpuWritesDoubleDensity());
+}
+
+TEST_CASE("GPU VDP1 scene: a dropped command buffer's VDP1 ops are replayed with the next one", "[gpu][vdp1][scene]") {
+    RunCase(SceneDroppedCommandBuffer());
+}
+
+TEST_CASE("GPU VDP1 scene: save and load between commands", "[gpu][vdp1][scene]") {
+    RunCase(SceneSaveLoad());
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1617,4 +1732,475 @@ TEST_CASE("GPU VDP1: a detach that discards the state (unload) makes no sync sub
 TEST_CASE("GPU VDP1 exception: abandon loses the frame's VDP1 work (operational exception; frame 4 differs)",
           "[gpu][vdp1][scene][!shouldfail]") {
     RunAbandonScene(true, Poll::AfterWait, false);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// VDP1 upscaling (GPU stage 3, Task 5): the N x sprite surface of the VDP1 back half (RenderBothOptions::vdp1Upscaling:
+// at every checkpoint and frame end the GPU surface equals the N x reference replaying what the GPU replayed, and the
+// native FBRAM equals software's), plus the consistency paths of research section 2 checked block by block: a native
+// word changed by anything but a draw has its whole N x block equal to it, the other blocks keep their sub-texel detail.
+
+namespace {
+
+bool CpuDevice() {
+    auto device = OpenDevice();
+    return device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+}
+
+// The N x surface and the FBRAM as read back at one checkpoint
+struct NxSnapshot {
+    uint32_t scale = 0;
+    std::vector<uint8_t> surface, fbram;
+};
+
+uint16_t NxWordAt(const NxSnapshot &s, uint32_t slice, uint32_t index) {
+    const uint8_t *p = s.surface.data() + gpu::vdp1::Vdp1NxFbramByteAddress(slice, index, s.scale);
+    return static_cast<uint16_t>((p[0] << 8) | p[1]);
+}
+
+uint16_t NativeWordAt(const NxSnapshot &s, uint32_t slice, uint32_t word) {
+    const uint8_t *p = s.fbram.data() + size_t{slice} * gpu::vdp1::kFbramSliceSize + 2 * size_t{word};
+    return static_cast<uint16_t>((p[0] << 8) | p[1]);
+}
+
+// Block by block from `before` to `after` over the slices of `mask`: in `rebuilt` slices every block must be its native
+// word (a slice upload or a new surface); elsewhere a block whose native word changed must be its native word
+// (touched) and every other block must be as it was (kept; keptDetail counts those with sub-texel detail).
+struct NxConsistency {
+    uint64_t touched = 0, kept = 0, keptDetail = 0, rebuilt = 0, rebuiltDetailLost = 0, violations = 0;
+    std::string first;
+};
+
+NxConsistency CheckNxBlocks(const NxSnapshot &before, const NxSnapshot &after, uint32_t mask, uint32_t rebuilt) {
+    NxConsistency c;
+    const uint32_t n = after.scale, sub = n * n;
+    const auto violation = [&](uint32_t slice, uint32_t w, const char *what) {
+        if (c.violations++ == 0) {
+            c.first = std::string(what) + ": slice " + std::to_string(slice) + " native word " + std::to_string(w) +
+                      " (x " + std::to_string(w % 512) + ", y " + std::to_string(w / 512) + ")";
+        }
+    };
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        if (((mask >> slice) & 1u) == 0) {
+            continue;
+        }
+        for (uint32_t w = 0; w < gpu::vdp1::kFbramSliceSize / 2; ++w) {
+            const uint16_t native = NativeWordAt(after, slice, w);
+            bool uniform = true, same = true, detailBefore = false;
+            for (uint32_t s = 0; s < sub; ++s) {
+                const uint16_t v = NxWordAt(after, slice, w * sub + s);
+                uniform = uniform && v == native;
+                if (before.scale == n) {
+                    const uint16_t old = NxWordAt(before, slice, w * sub + s);
+                    same = same && v == old;
+                    detailBefore = detailBefore || old != NxWordAt(before, slice, w * sub);
+                }
+            }
+            if ((rebuilt >> slice) & 1u) {
+                ++c.rebuilt;
+                c.rebuiltDetailLost += detailBefore ? 1 : 0;
+                if (!uniform) {
+                    violation(slice, w, "a rebuilt block is not its native word");
+                }
+                continue;
+            }
+            if (before.scale != n) {
+                violation(slice, w, "compared across a scale change");
+                continue;
+            }
+            if (NativeWordAt(before, slice, w) != native) {
+                ++c.touched;
+                if (!uniform) {
+                    violation(slice, w, "a touched block is not its native word");
+                }
+            } else if (same) {
+                ++c.kept;
+                c.keptDetail += detailBefore ? 1 : 0;
+            } else if (!uniform) {
+                violation(slice, w, "an untouched block changed");
+            } else {
+                ++c.touched; // set to its unchanged native word (an erase or a write of the same value)
+            }
+        }
+    }
+    return c;
+}
+
+// Snapshots taken at the checkpoints the scene names (`next` is set right before the checkpoint)
+struct NxSnapshots {
+    std::string next;
+    std::map<std::string, NxSnapshot> taken;
+};
+
+RenderBothOptions NxOptions(uint32_t nx, const std::shared_ptr<NxSnapshots> &snaps = nullptr) {
+    RenderBothOptions options;
+    options.vdp1Upscaling = true;
+    options.scale = nx;
+    if (snaps) {
+        options.nxInspect = [snaps](const std::string &, uint32_t scale, std::span<const uint8_t> surface,
+                                    std::span<const uint8_t> fbram) {
+            if (snaps->next.empty()) {
+                return;
+            }
+            NxSnapshot &s = snaps->taken[snaps->next];
+            s.scale = scale;
+            s.surface.assign(surface.begin(), surface.end());
+            s.fbram.assign(fbram.begin(), fbram.end());
+            snaps->next.clear();
+        };
+    }
+    return options;
+}
+
+void Snap(Vdp2SceneWriter &w, const std::shared_ptr<NxSnapshots> &snaps, const std::string &name) {
+    snaps->next = name;
+    w.Checkpoint();
+}
+
+const NxSnapshot &Taken(const NxSnapshots &snaps, const std::string &name) {
+    const auto it = snaps.taken.find(name);
+    INFO("snapshot " << name);
+    REQUIRE(it != snaps.taken.end());
+    return it->second;
+}
+
+std::vector<uint32_t> NxScales(bool cpu) {
+    return cpu ? std::vector<uint32_t>{2, 4} : std::vector<uint32_t>{2, 3, 4};
+}
+
+} // namespace
+
+TEST_CASE("GPU VDP1 N x: the stage 2 scenes, the N x surface equal to the reference at N = 2, 3, 4",
+          "[gpu][vdp1][scene][nx]") {
+    const bool cpu = CpuDevice();
+    for (const uint32_t n : NxScales(cpu)) {
+        for (const SceneCase &s : Stage2Scenes()) {
+            // A CPU device (lavapipe) runs every scene at 2x and three of them at 4x
+            if (cpu && n == 4 && s.name != "every command type" && s.name != "transparent meshes" &&
+                s.name != "a dropped command buffer") {
+                continue;
+            }
+            DYNAMIC_SECTION(n << "x: " << s.name) {
+                RunCase(s, n);
+            }
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x: upscaling off or at 1x allocates and records nothing N x", "[gpu][vdp1][scene][nx]") {
+    for (const bool upscaling : {false, true}) {
+        const uint32_t scale = upscaling ? 1 : 2;
+        DYNAMIC_SECTION("upscaling " << upscaling << ", " << scale << "x") {
+            uint32_t frames = 0;
+            RenderBothOptions options;
+            options.vdp1Upscaling = upscaling;
+            options.scale = scale;
+            options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+                REQUIRE(vk.Vdp1Backend() != nullptr);
+                CHECK(vk.Vdp1UpscaleScale() == 0);
+                CHECK(vk.Vdp1Backend()->NxScale() == 0);
+                CHECK(vk.Vdp1Backend()->NxSurfaceBuffer() == VK_NULL_HANDLE);
+                CHECK(vk.Vdp1Backend()->NxMemoryBytes() == 0);
+                const auto &stats = vk.Vdp1Backend()->StatsForTest();
+                CHECK(stats.batches > 0);
+                CHECK(stats.nxSubBatches + stats.nxErases + stats.nxFbWriteRuns + stats.nxRebuilds == 0);
+                ++frames;
+            };
+            const FbramResult r = RunFbramScene(SceneEveryCommand().scene, options);
+            CHECK(r.nxCompares == 0);
+            CHECK(frames == 4);
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x consistency: CPU writes then a read; touched blocks become the native word",
+          "[gpu][vdp1][scene][nx]") {
+    // Each frame draws a table (sub-texel detail), then 300 CPU word writes (and a few byte writes) into the draw
+    // framebuffer and a read (a sync submit): the written words' blocks equal the native word, every other block of
+    // the framebuffer keeps its detail.
+    for (const uint32_t n : NxScales(CpuDevice())) {
+        DYNAMIC_SECTION(n << "x") {
+            auto snaps = std::make_shared<NxSnapshots>();
+            FrameControl c = AutoSwap(50);
+            const auto draw = c.draw;
+            c.draw = [draw, snaps](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool swapped) {
+                draw(w, rng, f, swapped);
+                Snap(w, snaps, "before " + std::to_string(f));
+                const uint32_t fb = w.DrawFramebuffer();
+                for (uint32_t i = 0; i < 300; ++i) {
+                    const uint32_t x = Rand(rng, 320), y = Rand(rng, 224);
+                    w.FBRAM16(fb, Pixel16(x, y), static_cast<uint16_t>(0x8000 | Rand(rng, 0x8000)));
+                }
+                const auto v = w.ReadFB16(Pixel16(Rand(rng, 320), Rand(rng, 224)));
+                CHECK(v[0] == v[1]);
+                Snap(w, snaps, "after " + std::to_string(f));
+            };
+            RenderBothOptions options = NxOptions(n, snaps);
+            RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 3, {}, 40),
+                          options);
+            for (uint32_t f = 0; f < 3; ++f) {
+                const NxSnapshot &before = Taken(*snaps, "before " + std::to_string(f));
+                const NxSnapshot &after = Taken(*snaps, "after " + std::to_string(f));
+                // Both main framebuffers (the display one is not written)
+                const NxConsistency k = CheckNxBlocks(before, after, 0x03, 0);
+                INFO("frame " << f << ": " << k.first);
+                CHECK(k.violations == 0);
+                CHECK(k.touched >= 250);
+                CHECK(k.touched <= 300);
+                CHECK(k.keptDetail > 100);
+            }
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x consistency: an erase cut short by its cycle budget", "[gpu][vdp1][scene][nx]") {
+    // In blanking, before the frame's own display erase, the display framebuffer still holds the previous frame's
+    // drawing: an erase of the whole screen with a 3,000-cycle budget (the VBlank erase's) stops mid-row. The erased
+    // words' blocks hold the erase value, the words after the stop and outside the region keep their detail.
+    for (const uint32_t n : NxScales(CpuDevice())) {
+        DYNAMIC_SECTION(n << "x") {
+            auto snaps = std::make_shared<NxSnapshots>();
+            FrameControl c;
+            c.program = [](Vdp2SceneWriter &w, std::mt19937 &, uint32_t) {
+                w.VDP1Reg(FBCR, 0);
+                w.VDP1Reg(EWDR, 0x8421);
+                w.VDP1Reg(EWLR, 0);
+                w.VDP1Reg(EWRR, static_cast<uint16_t>((40 << 9) | 0x1FF));
+            };
+            c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, bool) {
+                const Assets a = WriteAssets(w, rng);
+                WriteTable(w, rng, a, 60);
+                w.DrawVDP1();
+            };
+            Vdp2Scene scene = Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 3, {}, 41);
+            auto frame = std::make_shared<uint32_t>(0);
+            scene.blanking = [blanking = scene.blanking, snaps, frame](Vdp2SceneWriter &w) {
+                const uint32_t f = (*frame)++;
+                if (f >= 1) {
+                    Snap(w, snaps, "before " + std::to_string(f));
+                    w.EraseFramebuffer(3000);
+                    Snap(w, snaps, "after " + std::to_string(f));
+                }
+                blanking(w);
+            };
+            RunFbramScene(scene, NxOptions(n, snaps));
+            for (uint32_t f = 1; f < 3; ++f) {
+                const NxSnapshot &before = Taken(*snaps, "before " + std::to_string(f));
+                const NxSnapshot &after = Taken(*snaps, "after " + std::to_string(f));
+                const NxConsistency k = CheckNxBlocks(before, after, 0x03, 0); // both main framebuffers
+                INFO("frame " << f << ": " << k.first);
+                CHECK(k.violations == 0);
+                // (words the erase sets to the value they had are not counted: the background of the drawing)
+                CHECK(k.touched > 100);
+                CHECK(k.touched <= 3001); // the budget's writes
+                CHECK(k.keptDetail > 100);
+            }
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x consistency: resets, a state load, a detach and attach rebuild the uploaded slices",
+          "[gpu][vdp1][scene][nx]") {
+    // Soft reset (frame 1: alt and mesh uploaded, main kept), hard reset (frame 2: all slices uploaded), a state load
+    // (frame 3: main and mesh uploaded), a detach and attach (frame 4: everything uploaded); transparent meshes and
+    // deinterlacing on, so every slice is in use. Each upload's slices are their native words block for block; the
+    // slices not uploaded keep their detail.
+    for (const uint32_t n : NxScales(CpuDevice())) {
+        DYNAMIC_SECTION(n << "x") {
+            auto snaps = std::make_shared<NxSnapshots>();
+            // Step k (0 soft reset, 1 hard reset, 2 state load) at line 40 of a frame after the first (a reset
+            // restarts the frame at line 0: once per frame); the attach before RenderBoth's frame 4
+            struct Steps {
+                uint32_t next = 0, lastFrame = UINT32_MAX;
+                bool attached = false;
+            };
+            auto steps = std::make_shared<Steps>();
+            FrameControl c = AutoSwap(50);
+            c.line = [snaps, steps](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, uint32_t y) {
+                if (y != 40 || f == 0 || steps->next > 2 || steps->lastFrame == f) {
+                    return;
+                }
+                const uint32_t k = steps->next++;
+                steps->lastFrame = f;
+                Snap(w, snaps, "before " + std::to_string(k));
+                if (k == 2) {
+                    w.SaveLoadMidFrame();
+                    Snap(w, snaps, "after " + std::to_string(k));
+                } else {
+                    // (the reset restarts the frame: the snapshot right after it, before line 0)
+                    w.ResetVDP(k == 1);
+                    Snap(w, snaps, "after " + std::to_string(k));
+                    Display(w, rng, kDisp | kDoubleDensity);
+                }
+            };
+            c.program = [program = c.program, snaps, steps](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
+                if (steps->attached) {
+                    steps->attached = false;
+                    Snap(w, snaps, "after attach");
+                }
+                program(w, rng, f);
+            };
+            RenderBothOptions options = NxOptions(n, snaps);
+            options.beforeFrame = [steps](uint32_t f, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &device) {
+                if (f == 5) {
+                    vk.DetachDevice();
+                    CHECK(vk.Vdp1UpscaleScale() == 0);
+                    vk.AttachDevice(device, 2);
+                    REQUIRE(vk.GpuVdp1());
+                    CHECK(vk.Vdp1UpscaleScale() == vk.InternalScale());
+                    steps->attached = true;
+                }
+            };
+            RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, kDisp | kDoubleDensity); },
+                                    c, 7, {.deinterlace = true, .transparentMeshes = true}, 42),
+                          options);
+            constexpr uint32_t kMain = 0x03, kAlt = 0x0C, kMesh = 0xF0;
+            const struct {
+                uint32_t step;
+                uint32_t rebuilt;
+            } cases[] = {{0, kAlt | kMesh}, {1, 0xFF}, {2, kMain | kMesh}};
+            for (const auto &k : cases) {
+                const NxSnapshot &before = Taken(*snaps, "before " + std::to_string(k.step));
+                const NxSnapshot &after = Taken(*snaps, "after " + std::to_string(k.step));
+                const NxConsistency r = CheckNxBlocks(before, after, 0xFF, k.rebuilt);
+                INFO("step " << k.step << ": " << r.first);
+                CHECK(r.violations == 0);
+                CHECK(r.rebuiltDetailLost > 0); // the upload replaced detail (the accepted transient)
+                if (k.rebuilt != 0xFF) {
+                    CHECK(r.keptDetail > 0); // the slices not uploaded keep theirs
+                }
+            }
+            const NxSnapshot &attached = Taken(*snaps, "after attach");
+            const NxConsistency r = CheckNxBlocks(attached, attached, 0xFF, 0xFF);
+            CHECK(r.violations == 0);
+            CHECK(r.rebuilt == 8u * gpu::vdp1::kFbramSliceSize / 2);
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x consistency: internal resolution changes rebuild the surface at the new scale",
+          "[gpu][vdp1][scene][nx]") {
+    // 2x -> 4x -> 1x (no surface) -> 3x, one change before each frame: the first checkpoint of the frame (before its
+    // erase and draw) finds every block of every slice equal to its native word at the new scale; the frames after it
+    // draw detail again and equal the reference.
+    auto snaps = std::make_shared<NxSnapshots>();
+    const std::array<uint32_t, 5> scales{2, 4, 1, 3, 3};
+    FrameControl c = AutoSwap(50);
+    c.program = [program = c.program, snaps](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
+        Snap(w, snaps, "start " + std::to_string(f));
+        program(w, rng, f);
+    };
+    RenderBothOptions options = NxOptions(2, snaps);
+    std::vector<uint32_t> effective;
+    options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+        REQUIRE(vk.SetInternalScale(scales[f]));
+        effective.push_back(vk.Vdp1UpscaleScale());
+    };
+    const FbramResult r =
+        RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 5,
+                                {.transparentMeshes = true}, 43),
+                      options);
+    CHECK(effective == std::vector<uint32_t>{2, 4, 0, 3, 3});
+    CHECK(r.nxScales == ((1u << 2) | (1u << 4) | (1u << 3)));
+    for (const uint32_t f : {1u, 3u}) {
+        const NxSnapshot &s = Taken(*snaps, "start " + std::to_string(f));
+        CHECK(s.scale == scales[f]);
+        const NxConsistency k = CheckNxBlocks(s, s, 0xFF, 0xFF);
+        INFO("frame " << f << ": " << k.first);
+        CHECK(k.violations == 0);
+    }
+    CHECK(snaps->taken.count("start 2") == 0); // no surface at 1x
+}
+
+TEST_CASE("GPU VDP1 N x consistency: a dropped command buffer replays the surface's rebuild and the N x passes",
+          "[gpu][vdp1][scene][nx]") {
+    // Frame 2 changes 2x -> 4x and its command buffer (the new surface's rebuild, the frame's ops and their N x
+    // passes) is dropped: the next one carries all of it again; frame 4's (no scale change) is dropped too.
+    for (const uint32_t dropped : {2u, 4u}) {
+        DYNAMIC_SECTION("dropped frame " << dropped) {
+            RenderBothOptions options = NxOptions(2);
+            options.dropFrame = dropped;
+            options.beforeFrame = [](uint32_t f, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+                if (f == 2) {
+                    REQUIRE(vk.SetInternalScale(4));
+                }
+            };
+            RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40), 6,
+                                    {}, 44),
+                          options, true, dropped);
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x: a surface that cannot be allocated turns VDP1 upscaling off at that scale",
+          "[gpu][vdp1][scene][nx]") {
+    // N x resources above 20 MiB fail: 2x (16 MiB) works, 3x (36 MiB) is refused (logged; VDP1 stays on the GPU,
+    // native and identical to software), back at 2x the surface is allocated again.
+    std::vector<std::string> logs;
+    std::vector<uint32_t> effective;
+    RenderBothOptions options = NxOptions(2);
+    options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+        if (f == 0) {
+            vk.SetLog([&logs](const std::string &text) { logs.push_back(text); });
+            vk.SetVdp1NxAllocationLimitForTest(20u * 1024 * 1024);
+        } else if (f == 2) {
+            REQUIRE(vk.SetInternalScale(3));
+        } else if (f == 4) {
+            REQUIRE(vk.SetInternalScale(2));
+        }
+        effective.push_back(vk.Vdp1UpscaleScale());
+        CHECK(vk.GpuVdp1());
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40), 6, {}, 45),
+                  options);
+    CHECK(effective == std::vector<uint32_t>{2, 2, 0, 0, 2, 2});
+    CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+              return text.find("3x sprite surface could not be allocated") != std::string::npos;
+          }) == 1);
+    CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+              return text.find("VDP1 upscaling: sprite surface at 2x (16 MiB)") != std::string::npos;
+          }) == 1);
+}
+
+TEST_CASE("GPU VDP1 N x: a full batch at 4x splits into several sub-batches, resolved in order",
+          "[gpu][vdp1][scene][nx]") {
+    // One native batch of 14 half-transparent full-screen polygons (rect path: 1.15 M slots each at 4x) and 6 skewed
+    // ones (quad path): far beyond one sub-batch's 4 Mi slots. Every sub-batch's blending depends on the previous ones.
+    uint32_t maxSubBatches = 0, subBatches = 0;
+    FrameControl c;
+    c.program = [](Vdp2SceneWriter &w, std::mt19937 &, uint32_t) {
+        w.VDP1Reg(FBCR, 0);
+        w.VDP1Reg(EWDR, 0x8000);
+        w.VDP1Reg(EWLR, 0);
+        w.VDP1Reg(EWRR, static_cast<uint16_t>((50 << 9) | 0x1FF));
+    };
+    c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, bool) {
+        uint32_t slot = 0;
+        const auto put = [&](const Vdp1Cmd &cmd) { w.VDP1Command(0x20 * slot++, cmd); };
+        put(Vdp1Cmd::SystemClip(319, 223));
+        put(Vdp1Cmd::UserClip(0, 0, 319, 223));
+        put(Vdp1Cmd::Local(0, 0));
+        put(Vdp1Cmd::Polygon(0x0000, static_cast<uint16_t>(0x8000 | Rand(rng, 0x8000)), 0, 0, 319, 0, 319, 223, 0, 223));
+        for (uint32_t i = 0; i < 20; ++i) {
+            const uint16_t color = static_cast<uint16_t>(0x8000 | Rand(rng, 0x8000));
+            if (i % 3 == 2) {
+                const int o = RandI(rng, 0, 30);
+                put(Vdp1Cmd::Polygon(0x0003, color, o, 0, 319, o, 319 - o, 223, 0, 223 - o));
+            } else {
+                put(Vdp1Cmd::Polygon(0x0003, color, 0, 0, 319, 0, 319, 223, 0, 223));
+            }
+        }
+        put(Vdp1Cmd::End());
+        w.DrawVDP1();
+    };
+    RenderBothOptions options = NxOptions(4);
+    options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+        const auto &stats = vk.Vdp1Backend()->StatsForTest();
+        maxSubBatches = std::max(maxSubBatches, stats.nxMaxSubBatchesPerBatch);
+        subBatches += stats.nxSubBatches;
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 2, {}, 46), options,
+                  true, UINT32_MAX, false);
+    INFO(subBatches << " sub-batches, at most " << maxSubBatches << " per native batch");
+    CHECK(maxSubBatches >= 4);
 }

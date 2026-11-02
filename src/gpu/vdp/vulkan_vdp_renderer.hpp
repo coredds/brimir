@@ -208,7 +208,7 @@ public:
     bool RecordPendingVdp1Work(uint32_t context, VkCommandBuffer cmd);
     // The last RecordPendingFrame or RecordPendingVdp1Work recorded VDP1 work: a command buffer that is not submitted
     // must then be reported with RecordedFrameDropped even without a frame.
-    bool RecordedVdp1Work() const { return !m_vdp1Recorded.empty() || m_proposed.mask != 0; }
+    bool RecordedVdp1Work() const { return !m_vdp1Recorded.empty() || m_proposed.mask != 0 || m_vdp1OneTimeRecorded; }
     // A VDP2 frame was recorded and submitted by a VDP1 sync submit (ordered with the ops after it) since the last
     // call: the composite holds it (the caller presents the composite as it is).
     bool TakeFrameRecordedBySync();
@@ -218,6 +218,32 @@ public:
     bool SaveSyncFailed() const { return m_saveSyncFailed; }
     // Test hook: every PreSaveStateSync fails as above.
     void FailSaveSyncForTest(bool fail) { m_failSaveSync = fail; }
+    // VDP1 upscaling (GPU stage 3): in Gpu VDP1 mode at an internal resolution N > 1, the VDP1 back half also draws the
+    // N x sprite surface (Vdp1VulkanBackend::SetNxScale; the native FBRAM, the CPU shadow, save states and readbacks
+    // stay native). Off until set (the libretro core sets it with BRIMIR_VDP1_UPSCALING=1 until the core option
+    // exists). Applies at once while attached, with SetInternalScale's contract; the N x resources are freed before the
+    // VDP2 resources of a new scale are allocated and allocated after them. When they cannot be allocated VDP1 upscaling
+    // stays off at that scale (logged); the renderer is unaffected.
+    void SetVdp1Upscaling(bool enabled);
+    bool Vdp1UpscalingRequested() const { return m_vdp1Upscaling; }
+    // The effective N x scale of the sprite surface (0: none).
+    uint32_t Vdp1UpscaleScale() const;
+    // Test hook: what the GPU replayed, reported when its command buffer is submitted (FrameSubmitted; a dropped one is
+    // reported when it is submitted again), and every change of the N x surface (Rescale: the surface was (re)created
+    // at `scale` and is rebuilt from the GPU FBRAM before any later work; 0 when it is gone).
+    struct Vdp1WorkEvent {
+        enum class Kind { Ops, Upload, Rescale } kind = Kind::Ops;
+        const vdp1::Vdp1OpList *ops = nullptr;  // Ops
+        std::span<const uint8_t> fbram;          // Upload: all eight slices
+        uint32_t sliceMask = 0;                  // Upload
+        uint32_t scale = 0;                      // Rescale
+    };
+    void SetVdp1WorkObserverForTest(std::function<void(const Vdp1WorkEvent &)> observer) {
+        m_vdp1WorkObserver = std::move(observer);
+    }
+    // Test hook: the VDP1 back half's N x resources fail to allocate above `bytes` (0: no limit), kept across attaches.
+    void SetVdp1NxAllocationLimitForTest(VkDeviceSize bytes);
+
     // The inner software renderer (VDP1 in Software mode and while detached), for tests.
     const ymir::vdp::SoftwareVDPRenderer &InnerVdp1ForTest() const { return *m_vdp1; }
     // The VDP1 back half (nullptr unless GpuVdp1()) and front half, for tests.
@@ -356,6 +382,10 @@ private:
     bool EnterGpuVdp1(VulkanDevice &device, uint32_t contexts);
     void LeaveGpuVdp1(bool sync);
     void DestroyGpuVdp1();
+    // VDP1 upscaling: the N x scale wanted at internal resolution n (0: none), and applying it to the VDP1 back half
+    uint32_t Vdp1NxTarget(uint32_t n) const;
+    void ApplyVdp1NxScale(uint32_t scale);
+    void NotifyVdp1Rescale(uint32_t scale);
     // Replays the pending work into cmd (see FramePolicy), then the readbacks of rule 2 plus the slices of `extra` (when
     // covered). False when recording failed (what was recorded is in m_vdp1Recorded, the rest stays queued).
     bool RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, FramePolicy policy, bool &frameRecorded,
@@ -415,6 +445,11 @@ private:
     std::vector<VkFence> m_contextFences;     // per context: its last committed command buffer's (null: completed)
     std::function<bool(const SyncRecord &record)> m_syncSubmit;
     Vdp1SyncStats m_syncStats;
+    bool m_vdp1Upscaling = false;
+    bool m_vdp1OneTimeRecorded = false; // the last record call recorded the VDP1 back half's one-time work
+    uint32_t m_vdp1NxNotified = 0; // the last scale reported to m_vdp1WorkObserver
+    VkDeviceSize m_vdp1NxAllocationLimit = 0;
+    std::function<void(const Vdp1WorkEvent &)> m_vdp1WorkObserver;
 
     uint32_t m_HRes = ymir::vdp::kDefaultResH;
     uint32_t m_VRes = ymir::vdp::kDefaultResV;

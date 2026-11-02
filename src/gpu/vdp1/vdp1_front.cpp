@@ -196,6 +196,11 @@ void Vdp1FrontEnd::OpenBatch() {
 
 void Vdp1FrontEnd::CloseBatch(Vdp1BatchEnd end) {
     assert(m_batchOpen);
+    // A capacity split's continuation is the op and the batch right after the split batch, in the same list
+    assert(!m_continuesCapacity ||
+           (!m_ops.ops.empty() && m_ops.ops.back().kind == Vdp1OpKind::Draw &&
+            m_ops.ops.back().index + 1 == m_ops.batches.size() && m_ops.batches.back().end == Vdp1BatchEnd::Capacity));
+    m_continuesCapacity = false;
     m_batch.end = end;
     UploadDirtyVRAM(m_batch);
     m_ops.ops.push_back({Vdp1OpKind::Draw, static_cast<uint32_t>(m_ops.batches.size())});
@@ -332,6 +337,8 @@ void Vdp1FrontEnd::AddSpan(CoordS32 a, CoordS32 b, uint32_t quadStep, uint32_t t
                         (m_batch.fragmentCount > 0 && m_batch.fragmentCount + slots > m_limits.fragments) ||
                         (!m_cmdInBatch && m_batch.cmdCount >= m_limits.commands))) {
         CloseBatch(Vdp1BatchEnd::Capacity);
+        OpenBatch();
+        m_continuesCapacity = true;
     }
     if (!m_batchOpen) {
         OpenBatch();

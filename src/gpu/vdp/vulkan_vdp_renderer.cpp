@@ -137,6 +137,7 @@ void VulkanVDPRenderer::AbandonDevice() {
         HandToSoftware();
     }
     (void)m_vdp1Backend.release();
+    NotifyVdp1Rescale(0);
     m_device = nullptr;
     m_gpuVdp1 = false;
     m_vdp1Queue.clear();
@@ -186,6 +187,10 @@ bool VulkanVDPRenderer::HasPendingVdp1Work() const {
     if (!m_vdp1Queue.empty() || m_vdp1Front.HasPendingOps()) {
         return true;
     }
+    // A new N x surface waiting for its rebuild
+    if (m_vdp1Backend->NxScale() != 0 && m_vdp1Backend->HasPendingWork()) {
+        return true;
+    }
     // A GpuNewer slice whose readback no command buffer took yet (rule 2: none may outlive the retro_run)
     for (uint32_t slice = 0; slice < 8; ++slice) {
         if (((ShadowedSlices() >> slice) & 1u) && NeedsReadback(slice, m_vdp1Seq)) {
@@ -198,6 +203,7 @@ bool VulkanVDPRenderer::HasPendingVdp1Work() const {
 bool VulkanVDPRenderer::RecordPendingVdp1Work(uint32_t context, VkCommandBuffer cmd) {
     if (!HasPendingVdp1Work()) {
         m_vdp1Recorded.clear();
+        m_vdp1OneTimeRecorded = false;
         m_vdp2FrameRecorded = false;
         return false;
     }
@@ -223,6 +229,7 @@ void VulkanVDPRenderer::RecordedFrameDropped() {
         m_vdp1Backend->FrameDropped();
     }
     m_proposed = {}; // its readbacks never happen
+    m_vdp1OneTimeRecorded = false; // re-armed by the back half's FrameDropped
     if (!m_vdp1Recorded.empty()) {
         // The dropped ops come before everything still pending (they were recorded first).
         const size_t count = m_vdp1Recorded.size();
@@ -250,12 +257,72 @@ bool VulkanVDPRenderer::FallBackInternalScale(uint32_t n) {
         return false;
     }
     if (m_backend) {
+        // VDP1 upscaling: the N x sprite surface of the old scale is freed before the VDP2 resources of the new one are
+        // allocated, and the new one allocated after them (its contents are rebuilt from the GPU FBRAM).
+        const bool nxChanges = m_vdp1Backend && m_vdp1Backend->NxScale() != Vdp1NxTarget(n);
+        if (nxChanges) {
+            ApplyVdp1NxScale(0);
+        }
         if (!m_backend->SetScale(n)) {
+            if (nxChanges) {
+                ApplyVdp1NxScale(Vdp1NxTarget(m_internalScale));
+            }
             return false; // logged by the back half, which keeps its scale
         }
+        m_internalScale = n;
+        if (nxChanges) {
+            ApplyVdp1NxScale(Vdp1NxTarget(n));
+        }
+        return true;
     }
     m_internalScale = n;
     return true;
+}
+
+uint32_t VulkanVDPRenderer::Vdp1NxTarget(uint32_t n) const {
+    return m_vdp1Upscaling && n > 1 ? n : 0;
+}
+
+uint32_t VulkanVDPRenderer::Vdp1UpscaleScale() const {
+    return m_vdp1Backend ? m_vdp1Backend->NxScale() : 0;
+}
+
+void VulkanVDPRenderer::ApplyVdp1NxScale(uint32_t scale) {
+    if (!m_vdp1Backend || m_vdp1Backend->NxScale() == scale) {
+        return;
+    }
+    if (!m_vdp1Backend->SetNxScale(scale)) {
+        Log("VDP1 upscaling: the " + std::to_string(scale) + "x sprite surface could not be allocated (" +
+            vk_util::ResultName(m_vdp1Backend->NxFailure()) + "); VDP1 upscaling off at this internal resolution");
+    } else if (scale != 0) {
+        Log("VDP1 upscaling: sprite surface at " + std::to_string(scale) + "x (" +
+            std::to_string(m_vdp1Backend->NxMemoryBytes() / (1024 * 1024)) + " MiB)");
+    }
+    NotifyVdp1Rescale(m_vdp1Backend->NxScale());
+}
+
+void VulkanVDPRenderer::NotifyVdp1Rescale(uint32_t scale) {
+    if (m_vdp1WorkObserver && (scale != 0 || m_vdp1NxNotified != 0)) {
+        Vdp1WorkEvent event;
+        event.kind = Vdp1WorkEvent::Kind::Rescale;
+        event.scale = scale;
+        m_vdp1WorkObserver(event);
+    }
+    m_vdp1NxNotified = scale;
+}
+
+void VulkanVDPRenderer::SetVdp1Upscaling(bool enabled) {
+    m_vdp1Upscaling = enabled;
+    if (m_backend) {
+        ApplyVdp1NxScale(Vdp1NxTarget(m_internalScale));
+    }
+}
+
+void VulkanVDPRenderer::SetVdp1NxAllocationLimitForTest(VkDeviceSize bytes) {
+    m_vdp1NxAllocationLimit = bytes;
+    if (m_vdp1Backend) {
+        m_vdp1Backend->SetNxAllocationLimitForTest(bytes);
+    }
 }
 
 void VulkanVDPRenderer::SetLog(std::function<void(const std::string &)> log) {
@@ -318,6 +385,9 @@ bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
     QueueFbramUpload(0xFF, &(*m_altShadow)[0], &(*m_altShadow)[1]);
     m_gpuVdp1 = true;
     m_frameRecordedBySync = false;
+    // VDP1 upscaling: the N x surface, rebuilt from the uploaded FBRAM
+    m_vdp1Backend->SetNxAllocationLimitForTest(m_vdp1NxAllocationLimit);
+    ApplyVdp1NxScale(Vdp1NxTarget(m_internalScale));
     return true;
 }
 
@@ -352,6 +422,7 @@ void VulkanVDPRenderer::HandToSoftware() {
 
 void VulkanVDPRenderer::DestroyGpuVdp1() {
     m_vdp1Backend.reset();
+    NotifyVdp1Rescale(0); // the N x surface dies with the back half
     m_device = nullptr;
     m_gpuVdp1 = false;
     m_vdp1Queue.clear();
@@ -416,6 +487,7 @@ bool VulkanVDPRenderer::ReplayVdp1Work(const Vdp1Work &work, uint32_t context, V
 bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, FramePolicy policy,
                                        bool &frameRecorded, uint32_t extra) {
     frameRecorded = false;
+    m_vdp1OneTimeRecorded = false;
     m_vdp1Recorded.clear(); // the previous command buffer was submitted (or reported dropped)
     m_vdp2FrameRecorded = false;
     m_proposed = {};
@@ -429,6 +501,8 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     if (!m_vdp1Backend->BeginContext(context)) {
         return false;
     }
+    // A new N x surface's rebuild, even without ops (the surface is current at the end of every command buffer)
+    m_vdp1OneTimeRecorded = m_vdp1Backend->NxScale() != 0 && m_vdp1Backend->RecordPendingWork(context, cmd);
     const bool framePending = m_front.HasFrame();
     const size_t before = framePending && policy != FramePolicy::Ignore
                               ? std::min(m_vdp1BeforeFrame, m_vdp1Queue.size())
@@ -697,7 +771,18 @@ void VulkanVDPRenderer::FrameSubmitted(uint32_t context, VkFence fence) {
         m_contextFences.resize(context + 1, VK_NULL_HANDLE);
     }
     m_contextFences[context] = fence;
+    if (m_vdp1WorkObserver) {
+        for (const Vdp1Work &work : m_vdp1Recorded) {
+            Vdp1WorkEvent event;
+            event.kind = work.sliceMask != 0 ? Vdp1WorkEvent::Kind::Upload : Vdp1WorkEvent::Kind::Ops;
+            event.ops = &work.ops;
+            event.fbram = work.fbram;
+            event.sliceMask = work.sliceMask;
+            m_vdp1WorkObserver(event);
+        }
+    }
     m_vdp1Recorded.clear(); // submitted: nothing to put back
+    m_vdp1OneTimeRecorded = false;
     CommitReadback(context);
     if (fence == VK_NULL_HANDLE) {
         MergeContext(context);

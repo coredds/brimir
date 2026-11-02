@@ -22,6 +22,9 @@
 // (BRIMIR_VDP1_FUZZ_MINIMIZE=1 minimises and prints the first failures; BRIMIR_VDP1_FUZZ_VALIDATION=1 keeps the
 // validation layer on), and one seed replays with
 // BRIMIR_VDP1_FUZZ_SEED=S brimir_tests "[vdp1-fuzz-one]". Several long runs can share the device (one process each).
+// VDP1 upscaling (GPU stage 3): BRIMIR_VDP1_FUZZ_NX=N (2-4) runs both at internal resolution N with the N x sprite
+// surface compared with the N x reference (vdp1_nx_reference.hpp) at every BRIMIR_VDP1_FUZZ_NX_EVERY-th checkpoint
+// (default 1) and every frame's end; [gpu][vdp1][fuzz][nx] runs a few seeds at 2x and 4x.
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
@@ -946,13 +949,27 @@ struct FuzzResult {
     std::array<uint64_t, kKinds> ops{};
     uint64_t fragmentSlots = 0, spans = 0, batches = 0;
     uint64_t lsmdSwitches = 0;
+    uint64_t nxCompares = 0, nxDetailBlocks = 0;
 };
 
+uint64_t EnvU64(const char *name, uint64_t fallback) {
+    const char *v = std::getenv(name);
+    return v != nullptr ? std::strtoull(v, nullptr, 10) : fallback;
+}
+
 // `hazardTracking` false breaks the GPU renderer on purpose (the front half's VRAM hazard batch splits off): the
-// sensitivity check.
-FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool hazardTracking = true) {
+// sensitivity check. `nx` > 1: VDP1 upscaling at internal resolution nx, the N x surface compared with the N x
+// reference at every nxEvery-th checkpoint and every frame's end (vdp2_scene.hpp RenderBothOptions::vdp1Upscaling);
+// frames are compared at the sample points.
+FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool hazardTracking = true, uint32_t nx = 0,
+                      uint32_t nxEvery = 1) {
     auto log = std::make_shared<FuzzLog>();
     RenderBothOptions options;
+    if (nx > 1) {
+        options.vdp1Upscaling = true;
+        options.scale = nx;
+        options.nxCompareEvery = nxEvery;
+    }
     options.compareFrame = [](uint32_t) { return true; };
     const gpu::vdp1::Vdp1BatchLimits limits = p.limits;
     FuzzResult result;
@@ -973,9 +990,15 @@ FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool haza
     result.maxNonZero = r.maxNonZero;
     result.ops = log->ops;
     result.lsmdSwitches = log->lsmdSwitches;
+    result.nxCompares = r.nxCompares;
+    result.nxDetailBlocks = r.nxDetailBlocks;
     std::string what;
     if (!r.error.empty() || !r.frame.error.empty() || !r.identical || !r.frame.identical) {
         what = r.Describe();
+    }
+    if (nx > 1 && r.error.empty() && ((r.nxScales >> nx) & 1u) == 0) {
+        what += (what.empty() ? "" : "; ") + std::string("the N x surface was never compared at ") +
+                std::to_string(nx) + "x";
     }
     if (!log->diff.empty()) {
         what += (what.empty() ? "" : "; ") + log->diff;
@@ -987,6 +1010,8 @@ FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool haza
         result.kind = "harness";
     } else if (r.count > 0) {
         result.kind = "fbram";
+    } else if (r.nxCount > 0 || r.nxNativeCount > 0) {
+        result.kind = "nx";
     } else if (!log->diff.empty()) {
         result.kind = log->diff.substr(log->diff.find(':') + 1, 24);
     } else if (!r.frame.identical) {
@@ -996,12 +1021,12 @@ FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool haza
 }
 
 // Removes ops (and trailing frames) while the program still fails the same way: ddmin over the op list.
-FuzzProgram Minimize(gpu::VulkanDevice &device, FuzzProgram p, uint32_t maxRuns = 3000) {
+FuzzProgram Minimize(gpu::VulkanDevice &device, FuzzProgram p, uint32_t maxRuns = 3000, uint32_t nx = 0) {
     uint32_t runs = 0;
-    const std::string kind = RunProgram(device, p).kind;
+    const std::string kind = RunProgram(device, p, true, nx).kind;
     const auto fails = [&](const FuzzProgram &q) {
         ++runs;
-        const FuzzResult r = RunProgram(device, q);
+        const FuzzResult r = RunProgram(device, q, true, nx);
         return r.failed && r.kind == kind;
     };
     while (p.frames > 1) {
@@ -1064,11 +1089,6 @@ std::string ToCpp(const FuzzProgram &p) {
     }
     s << "}}";
     return s.str();
-}
-
-uint64_t EnvU64(const char *name, uint64_t fallback) {
-    const char *v = std::getenv(name);
-    return v != nullptr ? std::strtoull(v, nullptr, 10) : fallback;
 }
 
 } // namespace
@@ -1142,6 +1162,31 @@ TEST_CASE("GPU VDP1 fuzz reproducers: a reset in double density clears doubleV a
     brimir::test::CloseAndCheckValidation(device);
 }
 
+TEST_CASE("GPU VDP1 fuzz: VDP1 upscaling, the N x surface equal to the N x reference at 2x and 4x",
+          "[gpu][vdp1][fuzz][nx]") {
+    // The same programs with the N x sprite surface: native FBRAM, CPU reads and saves still equal software's, the
+    // frames at the sample points, and the surface equals the reference at every checkpoint (the long run:
+    // BRIMIR_VDP1_FUZZ_NX=N)
+    auto device = OpenDevice();
+    const uint64_t seeds = device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 2 : 8;
+    for (const uint32_t n : {2u, 4u}) {
+        uint64_t compares = 0, detail = 0, fragmentSlots = 0;
+        for (uint64_t seed = 1; seed <= seeds; ++seed) {
+            const FuzzResult r = RunProgram(*device, Generate(seed), true, n);
+            INFO(n << "x, seed " << seed << ": " << r.what);
+            CHECK_FALSE(r.failed);
+            compares += r.nxCompares;
+            detail = std::max(detail, r.nxDetailBlocks);
+            fragmentSlots += r.fragmentSlots;
+        }
+        INFO(n << "x");
+        CHECK(compares > seeds * 5);
+        CHECK(detail > 0);
+        CHECK(fragmentSlots > 0);
+    }
+    brimir::test::CloseAndCheckValidation(device);
+}
+
 TEST_CASE("GPU VDP1 fuzz: the fuzzer notices a broken GPU renderer (VRAM hazard tracking off)", "[gpu][vdp1][fuzz]") {
     auto device = OpenDevice();
     uint32_t failing = 0, seeds = 0;
@@ -1208,7 +1253,8 @@ void PrintFuzzHeader(const VkPhysicalDeviceProperties &device) {
                 VK_API_VERSION_PATCH(device.apiVersion), device.driverVersion);
     std::string env;
     for (const char *name : {"BRIMIR_VDP1_FUZZ_SEEDS", "BRIMIR_VDP1_FUZZ_FIRST", "BRIMIR_VDP1_FUZZ_MINIMIZE",
-                             "BRIMIR_VDP1_FUZZ_VALIDATION", "BRIMIR_VDP1_FUZZ_SEED_LIMIT", "BRIMIR_VK_DEVICE",
+                             "BRIMIR_VDP1_FUZZ_VALIDATION", "BRIMIR_VDP1_FUZZ_SEED_LIMIT", "BRIMIR_VDP1_FUZZ_NX",
+                             "BRIMIR_VDP1_FUZZ_NX_EVERY", "BRIMIR_VK_DEVICE",
                              "VK_DRIVER_FILES", "VK_ICD_FILENAMES"}) {
         const char *value = std::getenv(name);
         env += std::string(" ") + name + "=" + (value != nullptr ? value : "(unset)");
@@ -1226,6 +1272,10 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
     const uint64_t seeds = EnvU64("BRIMIR_VDP1_FUZZ_SEEDS", 1000);
     const uint64_t first = EnvU64("BRIMIR_VDP1_FUZZ_FIRST", 1);
     const bool minimize = EnvU64("BRIMIR_VDP1_FUZZ_MINIMIZE", 0) != 0;
+    // VDP1 upscaling at N (2-4) with the N x surface compared at every BRIMIR_VDP1_FUZZ_NX_EVERY-th checkpoint
+    const uint32_t nx = static_cast<uint32_t>(EnvU64("BRIMIR_VDP1_FUZZ_NX", 0));
+    const uint32_t nxEvery = static_cast<uint32_t>(EnvU64("BRIMIR_VDP1_FUZZ_NX_EVERY", 1));
+    uint64_t nxCompares = 0, nxDetail = 0;
     const auto start = std::chrono::steady_clock::now();
     uint64_t checkpoints = 0, nonZero = 0, fragmentSlots = 0, spans = 0, batches = 0, lsmdSwitches = 0;
     std::array<uint64_t, kKinds> ops{};
@@ -1268,7 +1318,9 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
         currentSeed = seed;
         seedStartMs = nowMs();
         const FuzzProgram p = Generate(seed);
-        const FuzzResult r = RunProgram(*device, p);
+        const FuzzResult r = RunProgram(*device, p, true, nx, nxEvery);
+        nxCompares += r.nxCompares;
+        nxDetail = std::max(nxDetail, r.nxDetailBlocks);
         checkpoints += r.checkpoints;
         nonZero = std::max(nonZero, r.maxNonZero);
         fragmentSlots += r.fragmentSlots;
@@ -1283,8 +1335,8 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
             std::printf("FAIL seed %llu: %s\n", static_cast<unsigned long long>(seed), r.what.c_str());
             if (minimize && failing.size() <= 3) {
                 seedStartMs = INT64_MAX / 2; // no limit while minimising
-                const FuzzProgram m = Minimize(*device, p);
-                const FuzzResult mr = RunProgram(*device, m);
+                const FuzzProgram m = Minimize(*device, p, 3000, nx);
+                const FuzzResult mr = RunProgram(*device, m, true, nx);
                 std::printf("minimised (%zu ops): %s\n%s\n", m.ops.size(), mr.what.c_str(), ToCpp(m).c_str());
             }
             std::fflush(stdout);
@@ -1312,6 +1364,12 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
     for (uint32_t k = 0; k < kKinds; ++k) {
         std::printf("  %-12s %llu\n", kKindNames[k], static_cast<unsigned long long>(ops[k]));
     }
+    if (nx > 1) {
+        std::printf("  N x surface at %ux: %llu compares with the reference (every %u checkpoints and frame ends), up to "
+                    "%llu blocks with detail\n",
+                    nx, static_cast<unsigned long long>(nxCompares), nxEvery, static_cast<unsigned long long>(nxDetail));
+        CHECK(nxCompares > seeds * 5);
+    }
     std::fflush(stdout);
     CHECK(failing.empty());
     CHECK(checkpoints > seeds * 10);
@@ -1323,7 +1381,8 @@ TEST_CASE("GPU VDP1 fuzz: the long run", "[gpu][vdp1][fuzz][vdp1-fuzz-long][.]")
 TEST_CASE("GPU VDP1 fuzz: replay one seed (BRIMIR_VDP1_FUZZ_SEED)", "[gpu][vdp1][fuzz][vdp1-fuzz-one][.]") {
     auto device = OpenDevice();
     const FuzzProgram p = Generate(EnvU64("BRIMIR_VDP1_FUZZ_SEED", 1));
-    const FuzzResult r = RunProgram(*device, p);
+    const uint32_t nx = static_cast<uint32_t>(EnvU64("BRIMIR_VDP1_FUZZ_NX", 0));
+    const FuzzResult r = RunProgram(*device, p, true, nx);
     uint64_t hash = 0xCBF29CE484222325ull; // FNV-1a of the printed program (the same with every compiler)
     for (const char ch : ToCpp(p)) {
         hash = (hash ^ static_cast<uint8_t>(ch)) * 0x100000001B3ull;
@@ -1332,8 +1391,8 @@ TEST_CASE("GPU VDP1 fuzz: replay one seed (BRIMIR_VDP1_FUZZ_SEED)", "[gpu][vdp1]
                 p.ops.size(), static_cast<unsigned long long>(hash), static_cast<unsigned long long>(r.checkpoints),
                 r.failed ? r.what.c_str() : "identical");
     if (r.failed && EnvU64("BRIMIR_VDP1_FUZZ_MINIMIZE", 0) != 0) {
-        const FuzzProgram m = Minimize(*device, p);
-        const FuzzResult mr = RunProgram(*device, m);
+        const FuzzProgram m = Minimize(*device, p, 3000, nx);
+        const FuzzResult mr = RunProgram(*device, m, true, nx);
         std::printf("minimised (%zu ops): %s\n%s\n", m.ops.size(), mr.what.c_str(), ToCpp(m).c_str());
     }
     CHECK_FALSE(r.failed);

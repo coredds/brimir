@@ -342,6 +342,16 @@ static bool vdp1_mode_requested(void) {
     return requested;
 }
 
+// VDP1 upscaling (GPU stage 3: the N x sprite surface at internal resolution N > 1) is off until its core option
+// exists; BRIMIR_VDP1_UPSCALING=1 turns it on for tests and brimir_vkhost. VDP2 still shows the native sprite layer.
+static bool vdp1_upscaling_requested(void) {
+    static const bool requested = [] {
+        const char* env = std::getenv("BRIMIR_VDP1_UPSCALING");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }();
+    return requested;
+}
+
 // The VDP renderer follows the frame output: the Vulkan VDP renderer while the compute output is live, the software
 // renderer otherwise (copy-only output, no context, or the renderer cannot run on the device). Switching carries the
 // renderer state over (CoreWrapper). Call between frames: context_reset, the start of retro_run, or after a frame
@@ -363,6 +373,7 @@ static void sync_vdp_renderer(void) {
             error = "installing it failed";
         } else {
             renderer->SetVdp1Mode(vdp1_mode_requested() ? brimir::gpu::Vdp1Mode::Gpu : brimir::gpu::Vdp1Mode::Software);
+            renderer->SetVdp1Upscaling(vdp1_upscaling_requested());
             if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
                 set_vdp2_probe(*renderer);
                 set_vdp1_op_dump(*renderer);
