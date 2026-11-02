@@ -1218,10 +1218,19 @@ TEST_CASE("GPU VDP1 fuzz: VDP1 upscaling's overwrite-class fast path equal to th
         ~Bias() { g_overwriteBias = false; }
     } bias;
     auto device = OpenDevice();
-    const uint64_t seeds = device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 3 : 12;
+    // On a CPU device (lavapipe) three seeds that cover every path: 5 (8 bpp fast, hybrid), 6 (16 bpp fast, hybrid),
+    // 8 (hybrid, ordered)
+    std::vector<uint64_t> seedList{5, 6, 8};
+    if (device->Properties().deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+        seedList.clear();
+        for (uint64_t seed = 1; seed <= 12; ++seed) {
+            seedList.push_back(seed);
+        }
+    }
+    const uint64_t seeds = seedList.size();
     for (const uint32_t n : {2u, 3u, 4u}) {
         uint64_t compares = 0, overwrite = 0, oddBytes = 0, hybrid = 0, ordered = 0;
-        for (uint64_t seed = 1; seed <= seeds; ++seed) {
+        for (const uint64_t seed : seedList) {
             const FuzzResult r = RunProgram(*device, Generate(seed), true, n);
             INFO(n << "x, seed " << seed << ": " << r.what);
             CHECK_FALSE(r.failed);
