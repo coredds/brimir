@@ -16,7 +16,10 @@
 // VDP1 upscaling (GPU stage 3, [nx]): the scene list again at N = 2, 3, 4 with the N x sprite surface compared with the
 // N x reference at every checkpoint, and the consistency paths (CPU writes, a budgeted erase, resets, a state load, a
 // detach and attach, internal resolution changes, dropped command buffers, an allocation failure, a full 4x batch)
-// checked block by block.
+// checked block by block; those show the native sprite layer (RenderBothOptions::nativeSpriteLayers). With VDP2
+// decoding the N x surface ([nxsprites], GPU stage 3 Task 6): rect-path scenes equal 1x software at the sample points,
+// 1:1 normal sprites are a nearest upscale, Software VDP1 mode shows the native layer, and a sprite-image allocation
+// failure turns VDP1 upscaling off.
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"

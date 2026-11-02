@@ -104,6 +104,22 @@ checks every module's Workgroup variables against it.
     per-dot steps (dKAx) and viewpoint X, rotation parameter selection, NBGs using the character table (character
     pattern delay, vertical cell scroll on 2x2 characters).
 
+### 1c. VDP1 upscaling (stage 3)
+
+With VDP1 on the GPU at N > 1 and `brimir_vdp1_upscaling` on, the VDP1 back half also draws the N x surface
+(`vdp1_hw_params.hpp`), and `CommonRenderParams::spriteScale` = N selects:
+- an **N x sprite pass**: the sprite shader dispatched like bgs at N, writing N x sprite layer and attribute images
+  (own descriptor sets: bindings 14/22 and 9/17 on the N x images, 23 the N x surface). Windows, the field and every
+  per-native-pixel decision stay native; the framebuffer position is taken at N x and read at sub-texel FB_N % N of the
+  N x surface: normal and deinterlaced `(N x + i, N fieldLine + j)`, doubled 8-bit input `2 (N x + i)`, doubled hi-res
+  output `N (x >> 1) + ((x & 1) N + i) / 2` (smooth; the odd column's sample point reads sub-texel N / 2, excluded like
+  the hi-res RBG), rotation `floor(N c_sub / 1024)` at the sub-pixel (S = 2N per dot of half the width in hi-res; the
+  sample point reads sub-texel floor(frac N): an exception class). The native sprite pass still runs and feeds the
+  sprite window of bgs and the fetch pass;
+- compose reads the sprite and mesh layers and the sprite attributes at the N x pixel (`SpritePos`); the colour
+  calculation window, line colours and the other native inputs stay native.
+Otherwise (option off, N = 1, Software VDP1 mode) `spriteScale` is 0 and everything is exactly section 1b.
+
 Sample points: at N = 2-4 the composite at (N x, N y) equals the 1x output at (x, y) for every native pixel, except
 where the span rules above deliberately move the sample point (correct by design, excluded from the comparisons in
 `tests/unit/vdp2_scene.*` and, conservatively from the frame size alone, in `brimir_vkhost --hash-sample`): odd native

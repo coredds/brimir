@@ -6,7 +6,8 @@
 // binding in every shader that uses it. Bindings 0-15 are read-only buffers and sampled images (HLSL t registers, shifted by
 // 0), bindings 16-31 are storage buffers and images (u registers, shifted by 16; tools/shaders/build_shaders.cmake).
 // N is the internal resolution (VDP2CommonRenderParams::renderScale, 1-4): only the background layers and the
-// composite are N x the native size; everything else is native at every N.
+// composite are N x the native size (and, with VDP1 upscaling, the N x sprite images below); everything else is native
+// at every N.
 //
 //  binding  register  resource                 descriptor type          image format / size                    used by
 //        0  t0        g_layerRenderParams      STORAGE_BUFFER_DYNAMIC   VDP2LayerRenderParams, 1,464 B         sprite, bgs

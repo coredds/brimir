@@ -22,7 +22,9 @@
 // frame at the sample points outside the excluded lattice (vdp2_scene.hpp CompareSamplePointPixels; [scale] cases pin
 // N, compare scenes without sub-pixel features as a nearest upscale, and check the sub-pixels themselves against
 // vdp2_subpixel_reference.hpp with coordinate bitmaps). BRIMIR_VDP1_MODE=gpu runs the RenderBoth scenes with VDP1 on
-// the GPU (GPU stage 2; ctest brimir_tests_gpu_vdp1): both VDP1 modes must pass them.
+// the GPU (GPU stage 2; ctest brimir_tests_gpu_vdp1): both VDP1 modes must pass them. BRIMIR_VDP1_UPSCALING=1 with
+// those two runs them with VDP2 showing the N x VDP1 surface (GPU stage 3), at the sample points too. The [nxsprites]
+// scene decodes the N x sprite pass's framebuffer mapping at every N x pixel.
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
