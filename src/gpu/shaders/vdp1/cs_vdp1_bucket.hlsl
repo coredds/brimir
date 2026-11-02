@@ -20,6 +20,7 @@ RWStructuredBuffer<uint> g_unitOffsets : register(u5);
 RWStructuredBuffer<uint> g_batchState : register(u6);
 
 groupshared uint gs_scan[64];
+
 [numthreads(64, 1, 1)]
 void CSMain(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
     const uint t = tid.x;

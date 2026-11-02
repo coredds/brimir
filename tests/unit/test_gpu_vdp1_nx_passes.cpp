@@ -688,8 +688,8 @@ std::string CompareBuckets(const std::map<uint32, std::vector<uint32>> &units, u
     if (state[gpu::kBatchStateAccLoInv] != 0 || state[gpu::kBatchStateAccHi] != 0) {
         return "the range accumulator was not reset";
     }
-    const uint32 blocks = ((hi + 63) >> 6) - (lo >> 6);
-    if (state[gpu::kBatchStateBucketArgs] != std::min(blocks, gpu::kScanBlockCount) ||
+    const uint32 blocks = ((hi + 63) >> 6) - (lo >> 6);
+    if (state[gpu::kBatchStateBucketArgs] != std::min(blocks, gpu::kScanBlockCount) ||
         state[gpu::kBatchStateBucketArgs + 1] != (blocks + gpu::kScanBlockCount - 1) / gpu::kScanBlockCount ||
         state[gpu::kBatchStateResolveArgs] != std::min(hi - lo, gpu::kResolveGroupCount)) {
         return "indirect dispatch arguments do not match the range";
