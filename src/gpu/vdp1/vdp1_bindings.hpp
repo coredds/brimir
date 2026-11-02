@@ -433,7 +433,11 @@ inline constexpr std::array<Binding, 4> kNxLayoutProbeBindings{{
 }};
 
 /// @brief The binding tables of the N x pipelines (raster_nx, bucket_sums_nx, bucket_sums_nx_add, resolve_nx, erase_nx,
-/// fb_write_nx, rebuild_nx), for the back half's N x passes (Task 5).
+/// fb_write_nx, rebuild_nx), in Vdp1VulkanBackend::NxPass order: the back half builds them at its first
+/// SetNxScale(N > 1). The N x unit counts, offsets and scan sums are the back half's own N-sized buffers (bound at
+/// kBindingUnitCounts, kBindingUnitOffsets and kBindingScanSums of raster_nx, bucket_sums_nx(_add), resolve_nx and of
+/// N x sets of the native bucket and scatter pipelines); the counts are zero at creation and between sub-batches, as
+/// the native ones between batches.
 inline constexpr std::array<std::span<const Binding>, 7> kNxPipelineBindings{
     std::span<const Binding>(kRasterNxBindings),   std::span<const Binding>(kBucketSumsNxBindings),
     std::span<const Binding>(kBucketSumsNxBindings), std::span<const Binding>(kResolveNxBindings),

@@ -477,7 +477,8 @@ struct Vdp1BatchPushConstants {
     HLSLuint cmdOffset;      // first command of the batch in the command buffer
     HLSLuint fragmentCount;  // fragment slots of the batch (the last span's fragBase + its slot count)
     HLSLuint drawFB;         // the framebuffer the batch draws to (0 or 1)
-    HLSLuint scale;          // internal resolution of the raster pass: 1 (stage 3 raises it; stage 2 is native only)
+    HLSLuint scale;          // 1 for the native passes; N for an N x sub-batch (raster_nx, bucket_sums_nx, scatter,
+                             // resolve_nx)
 };
 static_assert(sizeof(Vdp1BatchPushConstants) == 24);
 
