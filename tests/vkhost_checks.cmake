@@ -748,6 +748,43 @@ if(NOT "${gpu_vdp1_probe_err}" MATCHES "VDP1 probe: no GPU timestamps on this qu
     message(STATUS "gpu_vdp1_probe: VDP1 GPU time mean ${CMAKE_MATCH_1} us per frame (timestamps)")
 endif()
 
+# VDP1 upscaling (GPU stage 3; BRIMIR_VDP1_UPSCALING=1 until the core option exists): the VDP1 back half also draws the
+# N x sprite surface, in the same submits (at most one per retro_run); VDP2 still shows the native sprite layer, so the
+# frames stay identical to software. Live changes 1x -> 2x -> 4x -> 1x reallocate the surface (free first, logged) under
+# synchronization validation, and the state saved at 2x equals software's (native FBRAM); hidden frames draw it too.
+set(ENV{BRIMIR_VDP1_UPSCALING} 1)
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+set(nx_state "${state_dir}/vdp1_nx.state")
+run_vkhost(vdp1_nx_live --vulkan --gpu-vdp1 --hash-sample 1 --save-state-at 100 "${nx_state}"
+           --set-option-at 90 brimir_internal_resolution=2 --set-option-at 160 brimir_internal_resolution=4
+           --set-option-at 220 brimir_internal_resolution=1)
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+run_vkhost(vdp1_nx_hidden --vulkan --gpu-vdp1 --internal-resolution 2 --hash-sample 2 --hide-every 2
+           --option brimir_deinterlace_mode=bob)
+unset(ENV{BRIMIR_VDP1_UPSCALING})
+check_run(vdp1_nx_live 300)
+check_vulkan_counters(vdp1_nx_live)
+check_vdp2_renderer(vdp1_nx_live)
+check_sync_counts(vdp1_nx_live)
+require_log(vdp1_nx_live "Vulkan VDP1 renderer active")
+string(REGEX MATCHALL "VDP1 upscaling: sprite surface at [0-9]x \\([0-9]+ MiB\\)" nx_surfaces "${vdp1_nx_live_err}")
+if(NOT "${nx_surfaces}" STREQUAL "VDP1 upscaling: sprite surface at 2x (16 MiB);VDP1 upscaling: sprite surface at 4x (64 MiB)")
+    fail(vdp1_nx_live "sprite surfaces '${nx_surfaces}', expected 2x (16 MiB) then 4x (64 MiB)")
+endif()
+execute_process(COMMAND "${STATE_DIFF}" "${sw_state}" "${nx_state}"
+                OUTPUT_VARIABLE state_diff_out ERROR_VARIABLE state_diff_err RESULT_VARIABLE state_diff_code)
+if(NOT state_diff_code EQUAL 0)
+    fail(vdp1_nx_live "the software- and VDP1-upscaling-saved states differ outside the allowlist (exit "
+                      "${state_diff_code}):\n${state_diff_out}${state_diff_err}")
+endif()
+check_run(vdp1_nx_hidden 300 REFERENCE software_hidden_bob)
+check_vulkan_counters(vdp1_nx_hidden)
+check_vdp2_renderer(vdp1_nx_hidden)
+require_log(vdp1_nx_hidden "180 hidden frames")
+require_log(vdp1_nx_hidden "VDP1 upscaling: sprite surface at 2x \\(16 MiB\\)")
+message(STATUS "vdp1_nx: VDP1 upscaling on, frames identical to software (live 1x -> 2x -> 4x -> 1x, hidden frames), "
+               "one submit per retro_run, the state at 2x equal to software's")
+
 # Deterministic runs: --fixed-date pins the RTC (BRIMIR_RTC_FIXED: the virtual clock at brimir_bench's lockstep date).
 # Two software BIOS runs of 600 frames, started at different host times, are identical: every frame, and the states
 # after the last frame in every section (brimir_state_diff --strict), the SMPC RTC fields included.

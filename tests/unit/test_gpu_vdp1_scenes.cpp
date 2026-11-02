@@ -13,6 +13,10 @@
 // the renderer (vdp1_scenario.hpp) with FBRAM compared after every take.
 // [gpu][vdp1][scene]; SKIP without a Vulkan device. The random tables run 40 seeds (10 on a CPU device such as lavapipe;
 // BRIMIR_VDP1_GPU_SEEDS=N for N).
+// VDP1 upscaling (GPU stage 3, [nx]): the scene list again at N = 2, 3, 4 with the N x sprite surface compared with the
+// N x reference at every checkpoint, and the consistency paths (CPU writes, a budgeted erase, resets, a state load, a
+// detach and attach, internal resolution changes, dropped command buffers, an allocation failure, a full 4x batch)
+// checked block by block.
 #include "catch_amalgamated.hpp"
 
 #include "gpu_test_device.hpp"
