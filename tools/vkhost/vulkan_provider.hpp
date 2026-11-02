@@ -239,7 +239,25 @@ public:
         m_pinned.insert(image.view);
     }
     void SetFailOutputImagesAbove(uint32_t scale) { m_failOutputImagesAbove = scale; }
-    uint32_t FailOutputImagesAbove() const { return m_failOutputImagesAbove; }
+    // --fail-output-images-runs A B: the output images fail only in runs A .. B - 1 (armed by the host per run): those
+    // wider than the --fail-output-images-above limit, or all of them without one.
+    void SetFailOutputImagesRuns(int first, int end) {
+        m_failOutputImagesFirst = first;
+        m_failOutputImagesEnd = end;
+    }
+    void ArmOutputImagesFailure(int run) {
+        m_failOutputImagesArmed = run >= m_failOutputImagesFirst && run < m_failOutputImagesEnd;
+    }
+    // Whether the core's output image (MUTABLE_FORMAT) of this width is refused now.
+    bool RefuseOutputImage(uint32_t width) const {
+        if (m_failOutputImagesFirst >= 0) {
+            return m_failOutputImagesArmed && (m_failOutputImagesAbove == 0 || width > 352 * m_failOutputImagesAbove);
+        }
+        return m_failOutputImagesAbove != 0 && width > 352 * m_failOutputImagesAbove;
+    }
+    // The core's successful vkCreateComputePipelines pipelines, over every context of the run.
+    void CountComputePipelines(uint32_t count) { m_computePipelines += count; }
+    uint64_t ComputePipelines() const { return m_computePipelines; }
     // --fail-output-images-on-grow: the --fail-output-images-above limit takes effect once the ring grows.
     void SetFailOutputImagesOnGrow(uint32_t scale) { m_failOutputImagesOnGrow = scale; }
 
@@ -276,6 +294,10 @@ private:
     uint64_t m_memoryAllocations = 0;
     uint32_t m_failOutputImagesAbove = 0;
     uint32_t m_failOutputImagesOnGrow = 0;
+    int m_failOutputImagesFirst = -1;
+    int m_failOutputImagesEnd = -1;
+    bool m_failOutputImagesArmed = false;
+    uint64_t m_computePipelines = 0;
     int m_failSubmitFirst = -1;
     int m_failSubmitCount = 1;
     bool m_failSubmitArmed = false;

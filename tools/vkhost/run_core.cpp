@@ -306,7 +306,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     const uint64_t coreMemoryAtEnd = host.CoreMemoryLive();
     host.Unload();
     host.FillReport(report);
-    if (config.failAllocAboveMiB != 0 || config.failOutputImagesAbove != 0) {
+    if (config.failAllocAboveMiB != 0 || config.failOutputImagesAbove != 0 || config.failOutputImagesFirst >= 0) {
         std::fprintf(stderr, "vkhost: vulkan: %llu allocations refused (--fail-alloc-above %llu, "
                              "--fail-output-images-above %u)\n",
                      static_cast<unsigned long long>(host.FailedAllocations()),
@@ -319,6 +319,8 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
                      static_cast<double>(coreMemoryAtEnd) / (1024.0 * 1024.0),
                      static_cast<double>(host.CoreMemoryPeak()) / (1024.0 * 1024.0),
                      static_cast<unsigned long long>(host.CoreMemoryAllocations()));
+        std::fprintf(stderr, "vkhost: vulkan: core compute pipelines created %llu\n",
+                     static_cast<unsigned long long>(host.ComputePipelines()));
     }
     report.problems.insert(report.problems.end(), stateProblems.begin(), stateProblems.end());
     report.recordSeconds = recordSeconds;

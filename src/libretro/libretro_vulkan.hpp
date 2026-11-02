@@ -55,9 +55,14 @@ enum class VulkanOutputMode {
 // and internal resolution, in both modes): a frontend samples the whole image as that frame. The output images are
 // created for the current output size; a change (a resolution switch, a rotation or overscan change, an internal
 // resolution change) creates images of the new size at that frame and retires the old ones (freed only after
-// wait_sync_index for every sync index they were handed at, as for an internal resolution change below). When the new
-// images cannot be created the frame is not handed over (the frontend repeats the image it holds, at its size), or
-// above 1x with a frame to record a lower internal resolution is used (logged).
+// wait_sync_index for every sync index they were handed at, as for an internal resolution change below). Only images
+// change with the size: the presenter's pipeline and per-slot buffers (gpu::PresenterCore) are created with the slots.
+// Retired compute images whose wait completed are kept in a small cache (2 extents, at most 64 MiB, the current scale
+// only), so a size change back (a resolution or interlace ping-pong) reuses them. When the new images cannot be created
+// the frame is not handed over (the frontend repeats the image it holds, at its size; the identical request is retried
+// after 1, 2, 4 ... 120 frames), or above 1x with a frame to record a lower internal resolution is used (logged). Below
+// the requested internal resolution, the request is tried again (as a change) at the next native size change or 600,
+// 1200, 2400 frames after the downgrade, at most 3 times until the option changes.
 //
 // In compute mode it can carry the Vulkan VDP renderer (VDP2 on the GPU): the renderer gets one frame context per
 // sync slot (guarded by the slot fences) plus kHiddenContexts contexts for frames with video disabled, each with a
@@ -130,8 +135,8 @@ public:
     void SetGpuWorkAllowed(bool allowed);
 
     // Internal resolution n (1-4, brimir_internal_resolution) for the Vulkan VDP renderer. Kept across contexts: each
-    // attach creates output images for it first and attaches the renderer at most at their scale (the renderer tries
-    // n, its previous effective scale, then 1; logged). A change applies at the next shown frame that has a VDP2 frame
+    // attach creates output images for it first (else for the highest scale below it that works) and attaches the
+    // renderer at most at their scale (the renderer tries that, its previous effective scale, then 1; logged). A change applies at the next shown frame that has a VDP2 frame
     // to record (PresentRenderer), before it is recorded: wait for this output's slot and hidden-context fences (a
     // failed wait keeps the change pending), output images of n x the frame's size created, the renderer's
     // SetInternalScale (its composite is rescaled into the new one by that frame, so a woven field survives), then the

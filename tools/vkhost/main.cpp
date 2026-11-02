@@ -177,6 +177,8 @@ void PrintUsage(std::FILE* out) {
         "                (MUTABLE_FORMAT) wider than 352 x N (a low-res frame's maximum width at N x)\n"
         "  --fail-output-images-on-grow  with --grow-mask and --fail-output-images-above: the limit applies only\n"
         "                once the mask has grown\n"
+        "  --fail-output-images-runs A B  with --vulkan: the output images fail only in runs A .. B-1 (counting\n"
+        "                warmup frames from 0): those above the --fail-output-images-above limit, or all of them\n"
         "  --fail-submit-at F [--fail-submits N]  with --vulkan: the core's frame submit fails in runs F .. F+N-1\n"
         "                (counting warmup frames from 0; N defaults to 1): the core repeats the frontend's image\n"
         "  --defer-image-read N  with --vulkan: read each set_image image N (1-2) displayed frames later, as a\n"
@@ -299,6 +301,16 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 return ParseResult::Error;
             }
             args.config.saveStatePath = argv[i + 2];
+            i += 2;
+            continue;
+        }
+        if (opt == "--fail-output-images-runs") { // two values
+            if (i + 2 >= argc || !ParseInt(argv[i + 1], args.config.failOutputImagesFirst) ||
+                !ParseInt(argv[i + 2], args.config.failOutputImagesEnd) ||
+                args.config.failOutputImagesEnd <= args.config.failOutputImagesFirst) {
+                std::fprintf(stderr, "--fail-output-images-runs needs a first run and an end run after it\n");
+                return ParseResult::Error;
+            }
             i += 2;
             continue;
         }
@@ -508,6 +520,11 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         !vulkanRun) {
         std::fprintf(stderr, "--fail-alloc-above, --fail-output-images-above, --fail-submit-at and "
                              "--defer-image-read need --vulkan or --compare\n");
+        return ParseResult::Error;
+    }
+    if (args.config.failOutputImagesFirst >= 0 &&
+        (!args.config.vulkan || args.compare || args.config.failOutputImagesOnGrow)) {
+        std::fprintf(stderr, "--fail-output-images-runs needs --vulkan (not --compare or --fail-output-images-on-grow)\n");
         return ParseResult::Error;
     }
     if (args.config.failOutputImagesOnGrow &&

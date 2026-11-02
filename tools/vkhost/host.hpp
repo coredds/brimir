@@ -93,6 +93,10 @@ struct HostConfig {
     uint32_t failOutputImagesAbove = 0;
     // --fail-output-images-on-grow: with --grow-mask, that limit applies only once the mask has grown.
     bool failOutputImagesOnGrow = false;
+    // --fail-output-images-runs A B: with --vulkan, the output images fail only in runs A .. B - 1 (counting warmup
+    // frames from 0): those above the --fail-output-images-above limit, or all of them without one (-1: no window).
+    int failOutputImagesFirst = -1;
+    int failOutputImagesEnd = -1;
     // --defer-image-read N: with --vulkan, each set_image image is read N displayed frames later (1 or 2: before the
     // core's next wait_sync_index for its sync index, the latest a frontend may read it), as a threaded frontend does.
     int deferImageRead = 0;
@@ -215,6 +219,8 @@ public:
     uint64_t CoreMemoryAllocations() const {
         return m_vulkan ? m_vulkan->CoreMemoryAllocations() : m_coreMemoryAllocations;
     }
+    // With --vulkan: the compute pipelines the core created (complete after Unload).
+    uint64_t ComputePipelines() const { return m_vulkan ? m_vulkan->ComputePipelines() : m_computePipelines; }
     bool HadContext() const { return m_contextResets > 0; }
 
     // Adds this instance's counters and problems (Vulkan ones too; complete after Unload).
@@ -309,6 +315,7 @@ private:
     uint64_t m_maxRunSubmits = 0;
     SubmitWaitStats m_submitWaits;
     uint64_t m_failedAllocations = 0;
+    uint64_t m_computePipelines = 0;
     uint64_t m_coreMemoryPeak = 0;
     uint64_t m_coreMemoryAllocations = 0;
     bool m_validation = false;

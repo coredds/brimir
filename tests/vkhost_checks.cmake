@@ -105,11 +105,16 @@ function(check_software_renderer name)
     forbid_log(${name} "Vulkan VDP2 renderer active")
 endfunction()
 
-# check_run(name hardware [REFERENCE ref] [ALLOWED n] [FROM i]): exit code 0 and 300 frames, `hardware` of them read
-# back from set_image. Recorded frames FROM..299 (default 0) are compared with <ref>_hashes (default software); at most
-# ALLOWED (default 0) of them may differ.
+# check_run(name hardware [REFERENCE ref] [ALLOWED n] [FROM i] [FRAMES f]): exit code 0 and f (default 300) frames,
+# `hardware` of them read back from set_image. Recorded frames FROM..f-1 (default 0) are compared with <ref>_hashes
+# (default software); at most ALLOWED (default 0) of them may differ.
 function(check_run name hardware)
-    cmake_parse_arguments(PARSE_ARGV 2 arg "" "REFERENCE;ALLOWED;FROM" "")
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "REFERENCE;ALLOWED;FROM;FRAMES" "")
+    set(frames 300)
+    if(DEFINED arg_FRAMES)
+        set(frames ${arg_FRAMES})
+    endif()
+    math(EXPR last "${frames} - 1")
     set(reference software)
     if(DEFINED arg_REFERENCE)
         set(reference ${arg_REFERENCE})
@@ -126,12 +131,12 @@ function(check_run name hardware)
         fail(${name} "brimir_vkhost exited with ${${name}_code}")
     endif()
     list(LENGTH ${name}_hashes count)
-    if(NOT count EQUAL 300)
-        fail(${name} "${count} frames recorded, expected 300")
+    if(NOT count EQUAL frames)
+        fail(${name} "${count} frames recorded, expected ${frames}")
     endif()
     set(differences 0)
     set(first_difference "")
-    foreach(i RANGE ${from} 299)
+    foreach(i RANGE ${from} ${last})
         list(GET ${name}_hashes ${i} got)
         list(GET ${reference}_hashes ${i} want)
         if(NOT got STREQUAL want)
@@ -144,8 +149,8 @@ function(check_run name hardware)
     if(differences GREATER allowed)
         fail(${name} "${differences} frames differ from the ${reference} run (first: ${first_difference})")
     endif()
-    require_log(${name} "recorded 300 frames \\(${hardware} hardware\\)")
-    message(STATUS "${name}: 300 frames, ${differences} of frames ${from}..299 different from ${reference} "
+    require_log(${name} "recorded ${frames} frames \\(${hardware} hardware\\)")
+    message(STATUS "${name}: ${frames} frames, ${differences} of frames ${from}..${last} different from ${reference} "
                    "(allowed ${allowed}), ${hardware} hardware")
 endfunction()
 
@@ -291,6 +296,24 @@ endforeach()
 check_vdp2_renderer(size_changes)
 check_vdp2_renderer(size_changes_deferred)
 require_log(size_changes_copy_only "using copy-only frame output")
+# GPU stage 3 (presenter efficiency): a size change creates output images only, never a compute pipeline: the runs with
+# size changes create as many pipelines as the run without (vkhost counts the core's vkCreateComputePipelines), with one
+# presenter core (the core's count at context_destroy).
+function(compute_pipelines name out)
+    string(REGEX MATCH "core compute pipelines created ([0-9]+)" found "${${name}_err}")
+    if(found STREQUAL "")
+        fail(${name} "no 'core compute pipelines created' line")
+    endif()
+    set(${out} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+endfunction()
+compute_pipelines(vulkan pipelines_without_changes)
+foreach(name IN ITEMS size_changes size_changes_deferred)
+    compute_pipelines(${name} pipelines)
+    if(NOT pipelines EQUAL pipelines_without_changes)
+        fail(${name} "${pipelines} compute pipelines created, ${pipelines_without_changes} without size changes")
+    endif()
+    require_log(${name} "Vulkan frame output: presenter cores 1, output images created [0-9]+, reused [0-9]+, failed 0,")
+endforeach()
 # ... with a live 1x -> 2x change between them (rotated 90 from the start: --hash-sample maps the sample points through
 # the --option rotation only).
 set(scale_size_changes --option brimir_rotation=90 --set-option-at 180 brimir_overscan=2)
@@ -540,15 +563,19 @@ string(REGEX MATCHALL "frames at [0-9]x" output_scales "${output_images_fail_err
 if(NOT "${output_scales}" STREQUAL "frames at 2x;frames at 3x")
     fail(output_images_fail "presented scales '${output_scales}', expected 2x then 3x")
 endif()
-# ... and at load (4x requested, output images at most 2x wide): the renderer is attached at the output's scale.
+# ... and at load (4x requested, output images at most 2x wide): the attach tries 4x, 3x, then 2x for the output images
+# and attaches the renderer at the output's scale.
 run_vkhost(output_images_fail_load --vulkan --internal-resolution 4 --hash-sample 4 --fail-output-images-above 2)
 check_run(output_images_fail_load 300)
 check_vulkan_counters(output_images_fail_load)
 check_vdp2_renderer(output_images_fail_load)
-require_log(output_images_fail_load "VDP2 internal resolution: requested 4x, using 1x")
+require_log(output_images_fail_load
+    "Internal resolution 4x: creating the 1280x896 output images failed: VK_ERROR_OUT_OF_DEVICE_MEMORY; at most 2x")
+require_log(output_images_fail_load "vkCreateImage of a 960x672 output image refused")
+require_log(output_images_fail_load "VDP2 internal resolution: requested 4x, using 2x")
 string(REGEX MATCHALL "frames at [0-9]x" load_scales "${output_images_fail_load_err}")
-if(NOT "${load_scales}" STREQUAL "frames at 1x")
-    fail(output_images_fail_load "presented scales '${load_scales}', expected 1x")
+if(NOT "${load_scales}" STREQUAL "frames at 2x")
+    fail(output_images_fail_load "presented scales '${load_scales}', expected 2x")
 endif()
 # ... and when the sync index mask grows at 4x (the output images are re-created for the larger ring, now at most 2x
 # wide): the output steps down to 2x (3x is refused too) and the renderer falls back to it, instead of the copy-only
@@ -651,6 +678,108 @@ foreach(i RANGE 299)
 endforeach()
 message(STATUS "repeat_after_change: frames 40 and 41 repeat frame 39 (failed submits right after a live change, "
                "late reads), the other 298 identical to software")
+
+# GPU stage 3 (presenter efficiency). A size ping-pong (rotation 90 and back, every 30 frames) with a frontend reading
+# each image two displayed frames late, under synchronization validation: the output images of the extent left are
+# retired and, once the frontend is done with them (the retirement wait), cached; the way back takes them from the cache
+# instead of creating new ones (2 extents created, 4 changes reused) and no compute pipeline is created. The run fails if
+# the core destroys or rewrites an image before its late read, and every frame equals software.
+set(pingpong --set-option-at 100 brimir_rotation=90 --set-option-at 130 brimir_rotation=0
+             --set-option-at 160 brimir_rotation=90 --set-option-at 190 brimir_rotation=0
+             --set-option-at 220 brimir_rotation=90)
+run_vkhost(software_pingpong ${pingpong})
+check_software_reference(software_pingpong)
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(pingpong_deferred --vulkan --defer-image-read 2 ${pingpong})
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(pingpong_deferred 300 REFERENCE software_pingpong)
+check_vulkan_counters(pingpong_deferred)
+check_vdp2_renderer(pingpong_deferred)
+require_log(pingpong_deferred "Vulkan frame output: presenter cores 1, output images created 2, reused 4, failed 0,")
+compute_pipelines(pingpong_deferred pipelines)
+if(NOT pipelines EQUAL pipelines_without_changes)
+    fail(pingpong_deferred "${pipelines} compute pipelines created, ${pipelines_without_changes} without size changes")
+endif()
+
+# Retry backoff: every output image creation fails in runs 100 .. 159, and the rotation changes at run 100 (1x, so there
+# is no lower internal resolution to fall back to): the frontend repeats its image while the core retries the new size
+# after 1, 2, 4, 8, 16, 32 runs (tries in runs 100, 101, 103, 107, 115, 131 fail; 163 succeeds), not every run. Recorded
+# frames 40 .. 102 (runs 100 .. 162) repeat frame 39; the other frames equal software.
+set(rotate_at_100 --set-option-at 100 brimir_rotation=90)
+run_vkhost(software_rotate_at_100 ${rotate_at_100})
+check_software_reference(software_rotate_at_100)
+run_vkhost(output_images_backoff --vulkan --fail-output-images-runs 100 160 ${rotate_at_100})
+check_vulkan_counters(output_images_backoff)
+require_log(output_images_backoff "Vulkan VDP2 renderer active")
+forbid_log(output_images_backoff "Vulkan VDP2 renderer (unavailable|off)")
+require_log(output_images_backoff "recorded 300 frames \\(237 hardware\\)")
+require_log(output_images_backoff "Vulkan frame output: presenter cores 1, output images created 2, reused 0, failed 6, "
+                                  "retries backed off 57;")
+require_log(output_images_backoff "the same request is retried after a backoff")
+list(GET output_images_backoff_hashes 39 backoff_before)
+string(REGEX REPLACE "^frame [0-9]+ " "" backoff_before "${backoff_before}")
+foreach(i RANGE 299)
+    list(GET output_images_backoff_hashes ${i} got)
+    list(GET software_rotate_at_100_hashes ${i} want)
+    if(i GREATER_EQUAL 40 AND i LESS_EQUAL 102)
+        string(REGEX REPLACE "^frame [0-9]+ " "" got_pixels "${got}")
+        if(NOT got_pixels STREQUAL backoff_before)
+            fail(output_images_backoff "recorded frame ${i} is not a repeat of frame 39 ('${got}')")
+        endif()
+    elseif(NOT got STREQUAL want)
+        fail(output_images_backoff "recorded frame ${i} differs from software ('${got}' vs '${want}')")
+    endif()
+endforeach()
+
+# Restore after a downgrade: at 4x the output images above 3x fail in runs 100 .. 399, and the overscan crop changes at
+# run 100 (288 x 192 native: 1152 px wide at 4x): the output falls back to 3x for that frame (one hitch, the sample points
+# unchanged), then 600 runs later (run 701) the requested 4x is tried again and restored. 800 frames.
+set(overscan_at_100 --set-option-at 100 brimir_overscan=2 --frames 800)
+run_vkhost(software_overscan_at_100 ${overscan_at_100})
+list(LENGTH software_overscan_at_100_hashes restore_reference_count)
+if(NOT restore_reference_count EQUAL 800)
+    fail(software_overscan_at_100 "${restore_reference_count} frames recorded, expected 800")
+endif()
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(restore_after_fallback --vulkan --internal-resolution 4 --hash-sample 4 --fail-output-images-above 3
+           --fail-output-images-runs 100 400 ${overscan_at_100})
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(restore_after_fallback 800 REFERENCE software_overscan_at_100 FRAMES 800)
+check_vulkan_counters(restore_after_fallback)
+check_vdp2_renderer(restore_after_fallback)
+require_log(restore_after_fallback
+    "Internal resolution 4x: creating the 1152x768 output images failed: VK_ERROR_OUT_OF_DEVICE_MEMORY; using 3x")
+require_log(restore_after_fallback "Internal resolution: trying 4x again \\(attempt 1 of 3\\)")
+require_log(restore_after_fallback "Internal resolution: restored 4x")
+require_log(restore_after_fallback "internal resolution restores tried 1, succeeded 1")
+require_log(restore_after_fallback "SET_SYSTEM_AV_INFO calls 0,")
+string(REGEX MATCHALL "frames at [0-9]x" restore_scales "${restore_after_fallback_err}")
+if(NOT "${restore_scales}" STREQUAL "frames at 4x;frames at 3x;frames at 4x")
+    fail(restore_after_fallback "presented scales '${restore_scales}', expected 4x, 3x, 4x")
+endif()
+
+# An internal resolution change and a size change in the same frame (2x and the overscan crop at run 120, rotated 90),
+# with late reads under synchronization validation: both apply at that frame (one new set of images, 384 x 576).
+set(scale_and_size --option brimir_rotation=90 --set-option-at 120 brimir_overscan=2)
+run_vkhost(software_scale_and_size ${scale_and_size})
+check_software_reference(software_scale_and_size)
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(scale_and_size --vulkan --hash-sample 1 --defer-image-read 2 ${scale_and_size}
+           --set-option-at 120 brimir_internal_resolution=2)
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(scale_and_size 300 REFERENCE software_scale_and_size)
+check_vulkan_counters(scale_and_size)
+check_vdp2_renderer(scale_and_size)
+string(REGEX MATCHALL "SET_GEOMETRY [0-9]+x[0-9]+" geometries "${scale_and_size_err}")
+if(NOT "${geometries}" STREQUAL "SET_GEOMETRY 224x320;SET_GEOMETRY 384x576")
+    fail(scale_and_size "SET_GEOMETRY sequence '${geometries}', expected 224x320, 384x576")
+endif()
+string(REGEX MATCHALL "frames at [0-9]x" scales "${scale_and_size_err}")
+if(NOT "${scales}" STREQUAL "frames at 1x;frames at 2x")
+    fail(scale_and_size "presented scales '${scales}', expected 1x, 2x")
+endif()
+message(STATUS "presenter: size ping-pong from the image cache (no new pipeline), retry backoff (6 tries in 63 runs), "
+               "4x restored 600 runs after a fallback, scale and size change in one frame")
 
 # VDP1 on the GPU (GPU stage 2): the default with the Vulkan VDP renderer (--gpu-vdp1 sets BRIMIR_VDP1_GPU=1 explicitly;
 # --software-vdp1 sets the debug override BRIMIR_VDP1_GPU=0). The VDP1 ops go in the frame's submit, around its VDP2

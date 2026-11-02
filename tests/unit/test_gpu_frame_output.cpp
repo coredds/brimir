@@ -418,3 +418,128 @@ TEST_CASE("FramePresenter::Present rejects invalid input without recording", "[g
     CHECK_FALSE(FramePresenter(*device, 1, {320, 224}, FramePresenter::kMaxScale + 1).Ok());
     CloseAndCheckValidation(device);
 }
+
+TEST_CASE("One presenter core writes output images of any extent (a size ping-pong creates images only)",
+          "[gpu][frame-output]") {
+    auto device = OpenDevice();
+    {
+        PresenterCore core(*device, kSlots);
+        REQUIRE(core.Ok());
+        REQUIRE(core.SlotCount() == kSlots);
+        // Two output sizes (low-res and a rotated, cropped hi-res frame), alternating, every slot: each image holds
+        // the bridge's frame of its case.
+        const FramePathCase cases[2] = {{320, 224, 0, 0, 0, false}, {704, 480, 16, 16, 90, false}};
+        std::unique_ptr<OutputImages> images[2];
+        for (int i = 0; i < 2; ++i) {
+            images[i] = std::make_unique<OutputImages>(*device, kSlots, ComputeOutputSize(cases[i].w, cases[i].h,
+                                                                                          SettingsOf(cases[i])));
+            REQUIRE(images[i]->Ok());
+        }
+        auto presentAndCheck = [&](int which, uint32_t slot) {
+            const FramePathCase &c = cases[which];
+            INFO(Describe(c) << " in slot " << slot);
+            const std::vector<uint32_t> frame = MakePatternFrame(c.w, c.h);
+            bool presented = false;
+            REQUIRE(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
+                        presented = core.Present(slot, *images[which], frame.data(), c.w, c.h, SettingsOf(c), cmd);
+                    }) == VK_SUCCESS);
+            REQUIRE(presented);
+            uint32_t w = 0;
+            uint32_t h = 0;
+            const std::vector<uint32_t> expected = CpuFramePath(c, &w, &h);
+            CHECK(CountMismatches(images[which]->ReadbackXRGB(slot, {w, h}), expected, w) == 0);
+        };
+        for (uint32_t round = 0; round < 4; ++round) {
+            for (uint32_t slot = 0; slot < kSlots; ++slot) {
+                presentAndCheck(static_cast<int>((round + slot) % 2), slot);
+            }
+        }
+        // Images destroyed and created again (their handles may be the old ones' values): the slots' sets follow.
+        for (int i = 0; i < 2; ++i) {
+            const OutputSize extent = images[i]->Extent();
+            images[i].reset();
+            images[i] = std::make_unique<OutputImages>(*device, kSlots, extent);
+            REQUIRE(images[i]->Ok());
+        }
+        for (uint32_t slot = 0; slot < kSlots; ++slot) {
+            presentAndCheck(static_cast<int>(slot % 2), slot);
+            presentAndCheck(static_cast<int>((slot + 1) % 2), slot);
+        }
+        // Images of another slot count, scale or extent are refused.
+        OutputImages fewer(*device, kSlots - 1, images[0]->Extent());
+        OutputImages scaled(*device, kSlots, {640, 448}, 2);
+        REQUIRE(fewer.Ok());
+        REQUIRE(scaled.Ok());
+        const std::vector<uint32_t> frame = MakePatternFrame(320, 224);
+        CHECK(vk_util::SubmitOneShot(*device, [&](VkCommandBuffer cmd) {
+                  CHECK_FALSE(core.Present(0, fewer, frame.data(), 320, 224, {}, cmd));
+                  CHECK_FALSE(core.Present(0, scaled, frame.data(), 320, 224, {.scale = 2}, cmd));
+                  CHECK_FALSE(core.Present(0, *images[1], frame.data(), 320, 224, {}, cmd));
+              }) == VK_SUCCESS);
+        CHECK(scaled.Bytes() == uint64_t{640} * 448 * 4 * kSlots);
+    }
+    CloseAndCheckValidation(device);
+}
+
+TEST_CASE("Output image retry backoff: 1, 2, 4 ... 120 frames between tries of the same failed request",
+          "[frame-output]") {
+    OutputRetryBackoff backoff;
+    const OutputSize big{1280, 896};
+    // Failing on every allowed try from frame 100: tries at 100, 101, 103, 107, 115, 131, 163, 227, then every 120.
+    std::vector<uint64_t> tries;
+    for (uint64_t frame = 100; frame < 600; ++frame) {
+        if (backoff.MayTry(big, 4, frame)) {
+            tries.push_back(frame);
+            const bool fresh = backoff.Failed(big, 4, frame);
+            CHECK(fresh == (tries.size() == 1)); // logged once
+        }
+    }
+    CHECK(tries == std::vector<uint64_t>{100, 101, 103, 107, 115, 131, 163, 227, 347, 467, 587});
+    CHECK(backoff.Failures() == tries.size());
+    CHECK(backoff.BackedOff() == 500 - tries.size());
+    // Another request is tried at once (and is a new failure); the first one is then no longer backed off.
+    CHECK(backoff.MayTry({960, 672}, 3, 600));
+    CHECK(backoff.Failed({960, 672}, 3, 600));
+    CHECK(backoff.MayTry(big, 4, 600));
+    CHECK_FALSE(backoff.MayTry({960, 672}, 3, 600));
+    CHECK(backoff.MayTry({960, 672}, 3, 601));
+    // A success forgets the backoff.
+    CHECK(backoff.Failed({960, 672}, 3, 601) == false);
+    backoff.Succeeded();
+    CHECK(backoff.MayTry({960, 672}, 3, 602));
+    CHECK(backoff.Failed({960, 672}, 3, 602));
+}
+
+TEST_CASE("Scale restore after a downgrade: after 600, 1200, 2400 frames or at a size change, at most 3 attempts",
+          "[frame-output]") {
+    ScaleRestoreSchedule restore;
+    // Not degraded: nothing.
+    CHECK_FALSE(restore.Update(false, true, 5));
+    // The downgrade at frame 10 (a size change there is the downgrade's own): the first attempt at 610.
+    CHECK_FALSE(restore.Update(true, true, 10));
+    CHECK(restore.Degraded());
+    std::vector<uint64_t> attempts;
+    for (uint64_t frame = 11; frame < 10000; ++frame) {
+        // A native size change at 700 is an attempt too.
+        if (restore.Update(true, frame == 700, frame)) {
+            attempts.push_back(frame);
+        }
+    }
+    // 610 (+1200 -> 1810), 700 at the size change (+2400 -> 3100), 3100; no more for this request.
+    CHECK(attempts == std::vector<uint64_t>{610, 700, 3100});
+    CHECK(restore.Attempts() == 3);
+    CHECK_FALSE(restore.Update(true, true, 20000));
+    // The request changes (an option change): attempts start over, from a new downgrade.
+    restore.Reset();
+    CHECK_FALSE(restore.Degraded());
+    CHECK_FALSE(restore.Update(true, false, 20000));
+    CHECK(restore.Update(true, false, 20600));
+    CHECK(restore.AttemptsThisRequest() == 1);
+    // Restored: the schedule ends; a later downgrade starts it again with the next delay (1200 after attempt 1).
+    CHECK_FALSE(restore.Update(false, false, 20601));
+    CHECK_FALSE(restore.Degraded());
+    CHECK_FALSE(restore.Update(true, false, 21000));
+    CHECK_FALSE(restore.Update(true, false, 22199));
+    CHECK(restore.Update(true, false, 22200));
+    CHECK(restore.Attempts() == 5);
+}

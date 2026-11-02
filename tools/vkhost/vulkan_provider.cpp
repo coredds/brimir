@@ -161,7 +161,11 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateComputePipelines(VkDevice device, VkPip
         }
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
-    return g_provider->Real().createComputePipelines(device, cache, count, infos, allocator, pipelines);
+    const VkResult result = g_provider->Real().createComputePipelines(device, cache, count, infos, allocator, pipelines);
+    if (result == VK_SUCCESS) {
+        g_provider->CountComputePipelines(count);
+    }
+    return result;
 }
 
 template <typename Handle>
@@ -204,9 +208,8 @@ VKAPI_ATTR void VKAPI_CALL HookFreeMemory(VkDevice device, VkDeviceMemory memory
 // frame at N x). Every image's extent is recorded for CheckFrameExtent.
 VKAPI_ATTR VkResult VKAPI_CALL HookCreateImage(VkDevice device, const VkImageCreateInfo* info,
                                                const VkAllocationCallbacks* allocator, VkImage* image) {
-    const uint32_t scale = g_provider->FailOutputImagesAbove();
-    if (scale != 0 && info != nullptr && (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0 &&
-        info->extent.width > 352 * scale) {
+    if (info != nullptr && (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0 &&
+        g_provider->RefuseOutputImage(info->extent.width)) {
         g_provider->CountFailedAllocation();
         std::fprintf(stderr, "vkhost: vulkan: vkCreateImage of a %ux%u output image refused (--fail-output-images-above)\n",
                      info->extent.width, info->extent.height);

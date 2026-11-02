@@ -403,16 +403,17 @@ struct VulkanOutput::Impl {
         }
     };
 
-    // Replaced output images (a compute presenter, or copy-only images) and the image structs handed over for them (the
+    // Replaced output images (compute or copy-only) and the image structs handed over for them (the
     // frontend keeps those pointers, also for dupes, and reads the images on its own schedule). Kept until the
     // frontend is done with every image it got: for each sync index in `awaiting` (the ones its images were handed
     // at) wait_sync_index and this output's fence of that slot have returned since the retirement, and none of its
     // images is the frontend's current one (libretro_vulkan.h: an image must not be destroyed before wait_sync_index
     // for the sync index it was handed at). A retired image that is the frontend's current one is repeated by it,
     // possibly in frames at later sync indices (after a failed record, present or submit): when it stops being
-    // current, `awaiting` becomes every sync index.
+    // current, `awaiting` becomes every sync index. Retiring never touches the presenter core (pipeline, buffers): only
+    // images. Compute images whose wait completed go to the image cache (imageCache) instead of being destroyed.
     struct RetiredOutput {
-        std::unique_ptr<gpu::FramePresenter> presenter;
+        std::unique_ptr<gpu::OutputImages> computeImages;
         std::unique_ptr<CopyImages> copy;
         std::unique_ptr<retro_vulkan_image[]> images;
         uint32_t count = 0;
@@ -433,9 +434,25 @@ struct VulkanOutput::Impl {
     const retro_hw_render_interface_vulkan *iface = nullptr;
     std::unique_ptr<gpu::VulkanDevice> device;
     VulkanOutputMode mode = VulkanOutputMode::None;
-    std::unique_ptr<gpu::FramePresenter> presenter; // compute mode
-    std::unique_ptr<CopyImages> copyImages;         // copy-only mode
-    // The image struct handed over for each slot (one array per presenter or set of copy-only images, never changed
+    // Compute mode: the size-independent presenter (pipeline, per-slot buffers and sets; re-created only with the
+    // slots) and the output images of the current extent.
+    std::unique_ptr<gpu::PresenterCore> presenterCore;
+    std::unique_ptr<gpu::OutputImages> computeImages;
+    std::unique_ptr<CopyImages> copyImages; // copy-only mode
+    // Compute output images whose retirement wait completed (the frontend is done with them), most recent first: at
+    // most kImageCacheEntries extents and kImageCacheBytes, all at the current images' scale (other scales are freed
+    // when the scale changes). A size change back to a cached extent takes its images instead of creating new ones.
+    static constexpr size_t kImageCacheEntries = 2;
+    static constexpr uint64_t kImageCacheBytes = uint64_t{64} << 20;
+    std::vector<std::unique_ptr<gpu::OutputImages>> imageCache;
+    // Output image creation: the retry backoff of a failed request, and the counts (logged at context_destroy).
+    gpu::OutputRetryBackoff backoff;
+    uint64_t presenterCores = 0;
+    uint64_t imagesCreated = 0;
+    uint64_t imagesReused = 0;
+    // retro_run calls (BeginRun): the clock of the backoff and of the scale restore.
+    uint64_t runs = 0;
+    // The image struct handed over for each slot (one array per set of output images, never changed
     // in place), how many, and the sync indices they were handed at (bit i).
     std::unique_ptr<retro_vulkan_image[]> outputImages;
     uint32_t outputCount = 0;
@@ -488,23 +505,35 @@ struct VulkanOutput::Impl {
     }
     uint32_t presenterScale = 1;
     uint32_t presentedScale = 1;
+    // Restoring the requested internal resolution after the output ran below it (ScaleRestoreSchedule; attempts are
+    // counted per request, i.e. per session until the option changes), the native output size of the previous shown
+    // renderer frame (a change triggers an attempt) and the counts (logged at context_destroy).
+    gpu::ScaleRestoreSchedule restore;
+    gpu::OutputSize restoreNative{};
+    uint64_t restoresSucceeded = 0;
 
     VkResult CreateSlots(uint32_t count, VulkanOutputMode wanted);
-    // The image structs of the current presenter's or copy-only images.
+    // The image structs of the current compute or copy-only images.
     void FillOutputImages();
     // nativeOutput at internal resolution `scale`.
     gpu::OutputSize ScaledOutput(uint32_t scale) const;
-    // A new presenter at `scale` (images of ScaledOutput(scale)) for the current slots, or null with error set. The
-    // current one is untouched.
-    std::unique_ptr<gpu::FramePresenter> CreatePresenter(uint32_t scale, std::string &error);
+    // Compute output images at `scale` (ScaledOutput(scale)) for the current slots: from the image cache, else created
+    // (unless the retry backoff refuses the request); null with error set. The current ones are untouched.
+    std::unique_ptr<gpu::OutputImages> AcquireImages(uint32_t scale, std::string &error);
+    // Puts images whose retirement wait completed into the image cache (or frees them; see imageCache).
+    void CacheImages(std::unique_ptr<gpu::OutputImages> images);
+    // Frees the cached images not at `scale`.
+    void DropCachedImages(uint32_t scale);
     // Copy-only images of `extent` for `count` slots, or null with result set.
     std::unique_ptr<CopyImages> CreateCopyImages(uint32_t count, gpu::OutputSize extent, VkResult &result);
     // Moves the current output images (and their image structs) to the retired list, if there are any.
     void RetireOutput();
-    // Makes `created` the current presenter (or copy-only images); the previous ones are retired (RetiredOutput), not
+    // Makes `created` the current compute (or copy-only) images; the previous ones are retired (RetiredOutput), not
     // destroyed.
-    void InstallPresenter(std::unique_ptr<gpu::FramePresenter> created);
+    void InstallImages(std::unique_ptr<gpu::OutputImages> created);
     void InstallCopyImages(std::unique_ptr<CopyImages> created);
+    // Logs the presenter and restore counts (brimir_vkhost checks), at context_destroy.
+    void LogOutputCounts() const;
     // Whether the current output images are those of a frame of ScaledOutput(scale) (compute: at internal resolution
     // `scale`; copy-only: scale 1).
     bool OutputFits(uint32_t scale) const;
@@ -587,10 +616,17 @@ VkResult VulkanOutput::Impl::CreateCommandContext(VkCommandPool &pool, VkCommand
 VkResult VulkanOutput::Impl::CreateSlots(uint32_t count, VulkanOutputMode wanted) {
     VkResult result = VK_SUCCESS;
     if (wanted == VulkanOutputMode::Compute) {
-        presenter = std::make_unique<gpu::FramePresenter>(*device, count, ScaledOutput(presenterScale), presenterScale);
-        if (!presenter->Ok()) {
-            return presenter->Result();
+        presenterCore = std::make_unique<gpu::PresenterCore>(*device, count);
+        ++presenterCores;
+        if (!presenterCore->Ok()) {
+            return presenterCore->Result();
         }
+        computeImages =
+            std::make_unique<gpu::OutputImages>(*device, count, ScaledOutput(presenterScale), presenterScale);
+        if (!computeImages->Ok()) {
+            return computeImages->Result();
+        }
+        ++imagesCreated;
     } else {
         copyImages = CreateCopyImages(count, nativeOutput, result);
         if (!copyImages) {
@@ -659,7 +695,7 @@ VulkanOutput::Impl::CreateCopyImages(uint32_t count, gpu::OutputSize extent, VkR
 void VulkanOutput::Impl::FillOutputImages() {
     const bool compute = mode == VulkanOutputMode::Compute;
     const uint32_t count =
-        compute ? presenter->SlotCount() : static_cast<uint32_t>(copyImages ? copyImages->images.size() : 0);
+        compute ? computeImages->SlotCount() : static_cast<uint32_t>(copyImages ? copyImages->images.size() : 0);
     outputImages = std::make_unique<retro_vulkan_image[]>(count);
     outputCount = count;
     outputHanded = 0;
@@ -672,9 +708,9 @@ void VulkanOutput::Impl::FillOutputImages() {
                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
         view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         if (compute) {
-            view.image = presenter->OutputImage(i);
+            view.image = computeImages->Image(i);
             view.format = VK_FORMAT_R8G8B8A8_UNORM;
-            image.image_view = presenter->OutputView(i);
+            image.image_view = computeImages->View(i);
         } else {
             // B8G8R8A8 with alpha read as one (the X byte is 0), as the view was created.
             view.image = copyImages->images[i].image;
@@ -690,38 +726,96 @@ gpu::OutputSize VulkanOutput::Impl::ScaledOutput(uint32_t scale) const {
     return {nativeOutput.width * scale, nativeOutput.height * scale};
 }
 
-std::unique_ptr<gpu::FramePresenter> VulkanOutput::Impl::CreatePresenter(uint32_t scale, std::string &error) {
+std::unique_ptr<gpu::OutputImages> VulkanOutput::Impl::AcquireImages(uint32_t scale, std::string &error) {
     const gpu::OutputSize extent = ScaledOutput(scale);
-    auto created =
-        std::make_unique<gpu::FramePresenter>(*device, static_cast<uint32_t>(slots.size()), extent, scale);
-    if (!created->Ok()) {
-        error = "creating the " + std::to_string(extent.width) + "x" + std::to_string(extent.height) +
-                " output images failed: " + gpu::vk_util::ResultName(created->Result());
+    const uint32_t count = static_cast<uint32_t>(slots.size());
+    for (auto it = imageCache.begin(); it != imageCache.end(); ++it) {
+        if ((*it)->Extent() == extent && (*it)->Scale() == scale && (*it)->SlotCount() == count) {
+            std::unique_ptr<gpu::OutputImages> cached = std::move(*it);
+            imageCache.erase(it);
+            ++imagesReused;
+            backoff.Succeeded();
+            return cached;
+        }
+    }
+    const std::string what = "creating the " + std::to_string(extent.width) + "x" + std::to_string(extent.height) +
+                             " output images failed";
+    if (!backoff.MayTry(extent, scale, runs)) {
+        error = what + " (retried later)";
         return nullptr;
     }
+    // Memory first: images of another scale are not kept for later, and a failure frees the cache before a retry.
+    DropCachedImages(scale);
+    auto created = std::make_unique<gpu::OutputImages>(*device, count, extent, scale);
+    if (!created->Ok() && !imageCache.empty()) {
+        created.reset();
+        imageCache.clear();
+        created = std::make_unique<gpu::OutputImages>(*device, count, extent, scale);
+    }
+    if (!created->Ok()) {
+        error = what + ": " + gpu::vk_util::ResultName(created->Result());
+        if (backoff.Failed(extent, scale, runs)) {
+            NegotiationLog(RETRO_LOG_WARN, "Vulkan frame output: " + error + " at " + std::to_string(scale) +
+                                               "x; the same request is retried after a backoff");
+        }
+        return nullptr;
+    }
+    ++imagesCreated;
+    backoff.Succeeded();
     return created;
+}
+
+void VulkanOutput::Impl::CacheImages(std::unique_ptr<gpu::OutputImages> images) {
+    if (!computeImages || images->Scale() != computeImages->Scale() || images->SlotCount() != slots.size() ||
+        images->Bytes() > kImageCacheBytes) {
+        return; // freed
+    }
+    imageCache.insert(imageCache.begin(), std::move(images));
+    uint64_t bytes = 0;
+    for (const auto &cached : imageCache) {
+        bytes += cached->Bytes();
+    }
+    while (imageCache.size() > kImageCacheEntries || bytes > kImageCacheBytes) {
+        bytes -= imageCache.back()->Bytes();
+        imageCache.pop_back(); // the least recently used
+    }
+}
+
+void VulkanOutput::Impl::DropCachedImages(uint32_t scale) {
+    std::erase_if(imageCache, [scale](const auto &cached) { return cached->Scale() != scale; });
 }
 
 void VulkanOutput::Impl::RetireOutput() {
     RetiredOutput old;
-    old.presenter = std::move(presenter);
+    old.computeImages = std::move(computeImages);
     old.copy = std::move(copyImages);
     old.images = std::move(outputImages);
     old.count = outputCount;
     old.awaiting = outputHanded;
     outputCount = 0;
     outputHanded = 0;
-    if (old.presenter || old.copy) {
+    if (old.computeImages || old.copy) {
         retiredOutputs.push_back(std::move(old));
     }
 }
 
-void VulkanOutput::Impl::InstallPresenter(std::unique_ptr<gpu::FramePresenter> created) {
+void VulkanOutput::Impl::InstallImages(std::unique_ptr<gpu::OutputImages> created) {
     RetireOutput();
-    presenter = std::move(created);
-    presenterScale = presenter->Scale();
+    computeImages = std::move(created);
+    presenterScale = computeImages->Scale();
+    DropCachedImages(presenterScale);
     FillOutputImages();
     ReleaseRetired(UINT32_MAX); // one never handed over goes now
+}
+
+void VulkanOutput::Impl::LogOutputCounts() const {
+    const auto count = [](uint64_t n) { return std::to_string(n); };
+    NegotiationLog(RETRO_LOG_INFO, "Vulkan frame output: presenter cores " + count(presenterCores) +
+                                       ", output images created " + count(imagesCreated) + ", reused " +
+                                       count(imagesReused) + ", failed " + count(backoff.Failures()) +
+                                       ", retries backed off " + count(backoff.BackedOff()) +
+                                       "; internal resolution restores tried " + count(restore.Attempts()) +
+                                       ", succeeded " + count(restoresSucceeded));
 }
 
 void VulkanOutput::Impl::InstallCopyImages(std::unique_ptr<CopyImages> created) {
@@ -733,7 +827,7 @@ void VulkanOutput::Impl::InstallCopyImages(std::unique_ptr<CopyImages> created) 
 
 bool VulkanOutput::Impl::OutputFits(uint32_t scale) const {
     if (mode == VulkanOutputMode::Compute) {
-        return presenter && presenter->Scale() == scale && presenter->Extent() == ScaledOutput(scale);
+        return computeImages && computeImages->Scale() == scale && computeImages->Extent() == ScaledOutput(scale);
     }
     return copyImages && copyImages->extent == nativeOutput;
 }
@@ -743,20 +837,31 @@ bool VulkanOutput::Impl::FitOutput(uint32_t scale, std::string &error) {
         return true;
     }
     if (mode == VulkanOutputMode::Compute) {
-        auto created = CreatePresenter(scale, error);
+        auto created = AcquireImages(scale, error);
         if (!created) {
             return false;
         }
-        InstallPresenter(std::move(created));
+        InstallImages(std::move(created));
         return true;
+    }
+    const std::string what = "creating the " + std::to_string(nativeOutput.width) + "x" +
+                             std::to_string(nativeOutput.height) + " output images failed";
+    if (!backoff.MayTry(nativeOutput, 1, runs)) {
+        error = what + " (retried later)";
+        return false;
     }
     VkResult result = VK_SUCCESS;
     auto created = CreateCopyImages(static_cast<uint32_t>(slots.size()), nativeOutput, result);
     if (!created) {
-        error = "creating the " + std::to_string(nativeOutput.width) + "x" + std::to_string(nativeOutput.height) +
-                " output images failed: " + gpu::vk_util::ResultName(result);
+        error = what + ": " + gpu::vk_util::ResultName(result);
+        if (backoff.Failed(nativeOutput, 1, runs)) {
+            NegotiationLog(RETRO_LOG_WARN,
+                           "Vulkan frame output: " + error + "; the same request is retried after a backoff");
+        }
         return false;
     }
+    ++imagesCreated;
+    backoff.Succeeded();
     InstallCopyImages(std::move(created));
     return true;
 }
@@ -770,11 +875,11 @@ bool VulkanOutput::Impl::FallBackOutput(uint32_t scale, const std::string &reaso
     }
     for (uint32_t n = scale - 1; n >= 1; --n) {
         std::string presenterError;
-        auto created = CreatePresenter(n, presenterError);
+        auto created = AcquireImages(n, presenterError);
         if (!created || !renderer->FallBackInternalScale(n)) {
             continue; // the renderer keeps its scale when its resources cannot be allocated
         }
-        InstallPresenter(std::move(created));
+        InstallImages(std::move(created));
         compositeValid = false; // rescaled by this run's record
         NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(scale) + "x: " + reason + "; using " +
                                            std::to_string(n) + "x");
@@ -803,7 +908,12 @@ void VulkanOutput::Impl::ReleaseRetired(uint32_t syncIndex) {
             it->awaiting &= ~(1u << syncIndex);
         }
         if (it->awaiting == 0 && !current) {
-            it = retiredOutputs.erase(it); // destroys the presenter or copy-only images (images and views)
+            // The frontend is done with the images: compute ones may be reused from here on (the image cache), the
+            // rest is destroyed with the image structs.
+            if (it->computeImages) {
+                CacheImages(std::move(it->computeImages));
+            }
+            it = retiredOutputs.erase(it);
         } else {
             ++it;
         }
@@ -945,43 +1055,50 @@ bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::s
         error = std::string("creating the hidden-frame command buffers failed: ") + gpu::vk_util::ResultName(result);
         return false;
     }
-    // The output images first, at the requested internal resolution: the renderer is then attached at most at their
-    // scale, so it never renders more than can be presented. The renderer tries the request, then its previous
-    // effective scale, then 1, each allocated directly (fallbacks logged by the renderer).
+    // The output images first, at the requested internal resolution or the highest one below it whose images can be
+    // created: the renderer is then attached at most at their scale, so it never renders more than can be presented.
+    // The renderer tries that scale, then its previous effective scale, then 1, each allocated directly (fallbacks
+    // logged by the renderer).
     target.SetInternalScale(requestedScale);
     target.SetVdp1Upscaling(vdp1Upscaling);
-    if (presenter->Scale() != requestedScale) {
-        std::string presenterError;
-        if (auto created = CreatePresenter(requestedScale, presenterError)) {
-            InstallPresenter(std::move(created));
-        } else {
-            NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(requestedScale) + "x: " +
-                                               presenterError + "; at most " + std::to_string(presenter->Scale()) +
-                                               "x");
+    std::string presenterError;
+    for (uint32_t n = requestedScale; n >= 1 && n != computeImages->Scale(); --n) {
+        std::string attemptError;
+        if (auto created = AcquireImages(n, attemptError)) {
+            InstallImages(std::move(created));
+            break;
+        }
+        if (presenterError.empty()) {
+            presenterError = attemptError;
         }
     }
+    if (computeImages->Scale() < requestedScale && !presenterError.empty()) {
+        NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(requestedScale) + "x: " +
+                                           presenterError + "; at most " + std::to_string(computeImages->Scale()) +
+                                           "x");
+    }
     target.SetSyncSubmit([this](const gpu::VulkanVDPRenderer::SyncRecord &record) { return SyncSubmit(record); });
-    target.AttachDevice(*device, static_cast<uint32_t>(slots.size()) + kHiddenContexts, presenter->Scale());
+    target.AttachDevice(*device, static_cast<uint32_t>(slots.size()) + kHiddenContexts, computeImages->Scale());
     if (!target.Attached()) {
         target.SetSyncSubmit(nullptr);
         error = "creating the VDP2 GPU resources failed";
-        if (presenter->Scale() > 1) {
+        if (computeImages->Scale() > 1) {
             // The software renderer's frames are native: no N x images for them (kept if 1x cannot be created).
-            std::string presenterError;
-            if (auto created = CreatePresenter(1, presenterError)) {
-                InstallPresenter(std::move(created));
+            std::string nativeError;
+            if (auto created = AcquireImages(1, nativeError)) {
+                InstallImages(std::move(created));
             }
         }
         return false;
     }
     renderer = &target;
     scaleChangePending = false;
-    if (presenter->Scale() != renderer->InternalScale()) {
+    if (computeImages->Scale() != renderer->InternalScale()) {
         // The renderer fell back: smaller output images (if they cannot be created now, the first frame tries again:
         // FitOutput).
-        std::string presenterError;
-        if (auto created = CreatePresenter(renderer->InternalScale(), presenterError)) {
-            InstallPresenter(std::move(created));
+        std::string fallBackError;
+        if (auto created = AcquireImages(renderer->InternalScale(), fallBackError)) {
+            InstallImages(std::move(created));
         }
     }
     return true;
@@ -991,13 +1108,13 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
     const uint32_t target = requestedScale;
     const uint32_t before = renderer->InternalScale();
     const bool upscalingChanges = renderer->Vdp1UpscalingRequested() != vdp1Upscaling;
-    if (before == target && presenter->Scale() == target && !upscalingChanges) {
+    if (before == target && computeImages->Scale() == target && !upscalingChanges) {
         scaleChangePending = false;
         return true;
     }
     // SetInternalScale's contract: no submitted work of this output uses the renderer's resources (and no command
-    // buffer is recorded yet in this run). The frontend's use of the output images needs no wait: the old presenter
-    // is retired, not destroyed (InstallPresenter). A failed wait keeps the change pending for the next frame.
+    // buffer is recorded yet in this run). The frontend's use of the output images needs no wait: the old images are
+    // retired, not destroyed (InstallImages). A failed wait keeps the change pending for the next frame.
     if (const VkResult result = WaitOwnWork(); result != VK_SUCCESS) {
         error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
         return false;
@@ -1008,10 +1125,10 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
         renderer->SetVdp1Upscaling(false);
     }
     // 1. Output images of the new scale, before anything changes: without them the renderer stays where it is.
-    std::unique_ptr<gpu::FramePresenter> grown;
-    if (presenter->Scale() < target) {
+    std::unique_ptr<gpu::OutputImages> grown;
+    if (computeImages->Scale() < target) {
         std::string presenterError;
-        grown = CreatePresenter(target, presenterError);
+        grown = AcquireImages(target, presenterError);
         if (!grown) {
             NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(target) + "x: " + presenterError +
                                                "; staying at " + std::to_string(before) + "x");
@@ -1031,14 +1148,15 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
     if (upscalingChanges && vdp1Upscaling) {
         renderer->SetVdp1Upscaling(true);
     }
-    // 3. The presenter follows: the grown one when the renderer got there (otherwise it is dropped, never handed
+    // 3. The output images follow: the grown ones when the renderer got there (otherwise they are dropped, never handed
     // over), or smaller images when the scale went down (a failure is retried by the frame's FitOutput).
     if (grown && grown->Scale() == effective) {
-        InstallPresenter(std::move(grown));
-    } else if (presenter->Scale() != effective) {
+        InstallImages(std::move(grown));
+    } else if (computeImages->Scale() != effective) {
+        grown.reset();
         std::string presenterError;
-        if (auto created = CreatePresenter(effective, presenterError)) {
-            InstallPresenter(std::move(created));
+        if (auto created = AcquireImages(effective, presenterError)) {
+            InstallImages(std::move(created));
         }
     }
     if (effective != before) {
@@ -1126,7 +1244,10 @@ void VulkanOutput::Impl::DestroySlots() {
     slots.clear();
     // Every caller has withdrawn the image and waited for the device (or the frontend's queue) first.
     DestroyRetired();
-    presenter.reset();
+    imageCache.clear();
+    backoff.Succeeded(); // new slots: a new request
+    computeImages.reset();
+    presenterCore.reset();
     copyImages.reset();
     outputImages.reset();
     outputCount = 0;
@@ -1157,6 +1278,9 @@ void VulkanOutput::Impl::Teardown() {
     // Wait idle, renderer, slots, device: the renderer's pending frame (possibly ended by VDP2EndFrame but not
     // recorded yet) is dropped, and the next frame after an attach uploads everything again.
     DetachRendererIdle();
+    if (device) {
+        LogOutputCounts();
+    }
     DestroySlots();
     DestroyHidden();
     device.reset();
@@ -1175,11 +1299,16 @@ void VulkanOutput::Impl::Abandon() {
     sync = {};
     hiddenCreated = false;
     slots.clear();
-    (void)presenter.release();
+    (void)presenterCore.release();
+    (void)computeImages.release();
     (void)copyImages.release();
     (void)outputImages.release();
+    for (auto &cached : imageCache) {
+        (void)cached.release();
+    }
+    imageCache.clear();
     for (RetiredOutput &retired : retiredOutputs) {
-        (void)retired.presenter.release();
+        (void)retired.computeImages.release();
         (void)retired.copy.release();
         (void)retired.images.release();
     }
@@ -1336,7 +1465,7 @@ bool VulkanOutput::Impl::SubmitFrame(Slot &slot, uint32_t index, std::string &er
     outputHanded |= 1u << index;
     iface->set_image(iface->handle, image, 0, nullptr, VK_QUEUE_FAMILY_IGNORED);
     currentImage = image;
-    ReleaseRetired(UINT32_MAX); // a retired presenter that held the previous current image may go now
+    ReleaseRetired(UINT32_MAX); // retired images that held the previous current image may go now
     return true;
 }
 
@@ -1508,7 +1637,7 @@ bool VulkanOutput::Present(const uint32_t *xbgr, uint32_t w, uint32_t h, const V
         m.device->Table().vkEndCommandBuffer(slot->cmd);
         return false;
     }
-    if (!m.presenter->Present(index, xbgr, w, h, output, slot->cmd)) {
+    if (!m.presenterCore->Present(index, *m.computeImages, xbgr, w, h, output, slot->cmd)) {
         error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
         m.device->Table().vkEndCommandBuffer(slot->cmd);
         return false;
@@ -1627,11 +1756,28 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
     }
     // The output images are created for this frame's size from here on (ApplyInternalScale, FitOutput).
     m.nativeOutput = gpu::ComputeOutputSize(w, h, {settings.cropH, settings.cropV, settings.rotation});
+    // Below the requested internal resolution (a fallback): the request is tried again as a change (ApplyInternalScale,
+    // all or nothing) at the next native size change or after the schedule's delay, a few times per request.
+    const bool sizeChanged = m.nativeOutput != m.restoreNative;
+    m.restoreNative = m.nativeOutput;
+    if (m.restore.Update(m.renderer->InternalScale() < m.requestedScale, sizeChanged, m.runs)) {
+        NegotiationLog(RETRO_LOG_INFO, "Internal resolution: trying " + std::to_string(m.requestedScale) +
+                                           "x again (attempt " + std::to_string(m.restore.AttemptsThisRequest()) +
+                                           " of " + std::to_string(gpu::ScaleRestoreSchedule::kMaxAttempts) + ")");
+        m.scaleChangePending = true;
+    }
     // A new internal resolution applies with a frame to record: the composite is rescaled by that record (a re-present
     // without one would show a composite nothing was written to yet). Before BeginFrame: nothing of this run is
     // recorded, so SetInternalScale may rewrite the renderer's descriptor sets.
-    if (m.scaleChangePending && m.renderer->HasPendingFrame() && !m.ApplyInternalScale(error)) {
-        return false;
+    if (m.scaleChangePending && m.renderer->HasPendingFrame()) {
+        const bool degraded = m.restore.Degraded();
+        if (!m.ApplyInternalScale(error)) {
+            return false;
+        }
+        if (degraded && m.renderer->InternalScale() == m.requestedScale) {
+            ++m.restoresSucceeded;
+            NegotiationLog(RETRO_LOG_INFO, "Internal resolution: restored " + std::to_string(m.requestedScale) + "x");
+        }
     }
     uint32_t index = 0;
     Impl::Slot *slot = m.BeginFrame(index, error);
@@ -1679,7 +1825,8 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
     }
     // The composite is at the renderer's internal resolution (a change is applied only together with a record).
     const gpu::OutputSettings output{settings.cropH, settings.cropV, settings.rotation, renderer->InternalScale()};
-    if (!m.presenter->PresentDevice(index, renderer->CompositeBuffer(), w, h, output, slot->cmd)) {
+    if (!m.presenterCore->PresentDevice(index, *m.computeImages, renderer->CompositeBuffer(), w, h, output,
+                                        slot->cmd)) {
         m.device->Table().vkEndCommandBuffer(slot->cmd);
         if (work) {
             renderer->RecordedFrameDropped();
@@ -1711,6 +1858,7 @@ void VulkanOutput::SetInternalScale(uint32_t n) {
     if (n != m.requestedScale) {
         m.requestedScale = n;
         m.scaleChangePending = true;
+        m.restore.Reset(); // a new request: its own restore attempts
     }
 }
 
@@ -1732,6 +1880,7 @@ uint32_t VulkanOutput::PresentedScale() const {
 
 void VulkanOutput::BeginRun() {
     Impl &m = *m_impl;
+    ++m.runs;
     m.runSubmitted = false;
     m.runRefused = false;
     if (m.mode == VulkanOutputMode::Compute && RendererAttached()) {

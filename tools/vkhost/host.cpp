@@ -218,6 +218,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
             m_vulkan->SetFailOutputImagesAbove(config.failOutputImagesAbove);
         }
         m_vulkan->SetFailSubmits(config.failSubmitAt, config.failSubmits);
+        m_vulkan->SetFailOutputImagesRuns(config.failOutputImagesFirst, config.failOutputImagesEnd);
     }
     m_haveCaptured = false;
     m_deferImageRead = m_vulkan ? config.deferImageRead : 0;
@@ -387,6 +388,7 @@ void LibretroHost::Unload() {
         m_maxRunSubmits = m_vulkan->MaxRunSubmits();
         m_submitWaits = m_vulkan->SubmitWaits();
         m_failedAllocations = m_vulkan->FailedAllocations();
+        m_computePipelines = m_vulkan->ComputePipelines();
         m_coreMemoryPeak = m_vulkan->CoreMemoryPeak();
         m_coreMemoryAllocations = m_vulkan->CoreMemoryAllocations();
         m_validation = m_vulkan->ValidationEnabled();
@@ -420,6 +422,7 @@ bool LibretroHost::RunFrame(FrameSink* sink) {
     m_resetInPresentPending = m_frameIndex == m_resetInPresent;
     if (m_vulkan) {
         m_vulkan->ArmFailedSubmit(m_frameIndex);
+        m_vulkan->ArmOutputImagesFailure(m_frameIndex);
         m_vulkan->BeginRun();
     }
     m_api->run();
