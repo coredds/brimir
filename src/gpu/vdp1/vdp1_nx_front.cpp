@@ -838,6 +838,11 @@ std::span<const Vdp1NxSubBatch> GenerateNx(const Vdp1OpList &ops, uint32_t batch
     for (uint32_t i = begin; i < spanEnd; ++i) {
         Vdp1NxSpan &span = arena.spans[i];
         const uint32_t s = span.slotBase;
+        // A span larger than a whole sub-batch cannot be split (unreachable at the real capacity, Vdp1NxStats)
+        assert(s <= kMaxNxSlotsPerSubBatch);
+        if (s > maxSlots) {
+            ++arena.stats.oversizedSpans;
+        }
         if (i > begin && (i - begin >= maxSpans || uint64_t{slots} + s > maxSlots)) {
             arena.subBatches.push_back({begin, i - begin, slots});
             begin = i;

@@ -165,8 +165,16 @@ static_assert(kFragmentBufferSize == 32u * 1024 * 1024 && kFragmentBufferSize <=
 /// the padded clip box [-1, clip + 2] of its major axis (or leaves it whole when both ends are inside that box), and
 /// the clip is the raw 16-bit system clip of the command: CMDXC up to 0xFFFF and CMDYC up to 0xFFFF, which doubleV
 /// makes (0xFFFF << 1) | 1. So a line has at most 0x1FFFF + 4 pixels: 262,150 slots, which always fit a fresh batch.
+/// That is the clip's bound; the coordinates bound it tighter. Every vertex is a 13-bit coordinate plus the shared
+/// local coordinate, so vertex deltas are at most 8191 (doubled vertically with doubleV, plus the alternate field's
+/// row: 16,383), and every line of a command lies between its vertices: at most 16,384 pixels, 32,768 slots. An N x
+/// span has at most N^2 times that (replicate; rect spans N times, quad spans 2 * N x the length): 524,288 at 4x, an
+/// eighth of an N x sub-batch (kMaxNxSlotsPerSubBatch); the generator asserts it and counts any span above the
+/// sub-batch capacity (Vdp1NxStats::oversizedSpans).
 inline constexpr uint32_t kMaxSpanSlots = 2u * ((2u * 0xFFFFu + 1u) + 4u);
 static_assert(kMaxSpanSlots == 262150 && kMaxSpanSlots <= kMaxFragmentsPerBatch);
+inline constexpr uint32_t kMaxLinePixels = 2u * 8191u + 1u + 1u;
+static_assert(kMaxNxScale * kMaxNxScale * 2u * kMaxLinePixels <= kMaxNxSlotsPerSubBatch);
 
 /// @brief The most spans, commands and CPU framebuffer write records of one batch (one op). The front half closes a
 /// batch between spans (or a write run between records) at any of them.

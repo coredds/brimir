@@ -220,14 +220,28 @@ public:
     void FailSaveSyncForTest(bool fail) { m_failSaveSync = fail; }
     // VDP1 upscaling (GPU stage 3): in Gpu VDP1 mode at an internal resolution N > 1, the VDP1 back half also draws the
     // N x sprite surface (Vdp1VulkanBackend::SetNxScale; the native FBRAM, the CPU shadow, save states and readbacks
-    // stay native). Off until set (the libretro core sets it with BRIMIR_VDP1_UPSCALING=1 until the core option
-    // exists). Applies at once while attached, with SetInternalScale's contract; the N x resources are freed before the
-    // VDP2 resources of a new scale are allocated and allocated after them. When they cannot be allocated VDP1 upscaling
-    // stays off at that scale (logged); the renderer is unaffected.
+    // stay native), and VDP2 decodes it (Vdp2VulkanBackend::SetSpriteSurfaceNx: an N x sprite pass that compose reads;
+    // the native sprite pass still feeds the sprite windows). Off until set (the libretro core option
+    // brimir_vdp1_upscaling, through VulkanOutput::SetVdp1Upscaling). Applies at once while attached, with
+    // SetInternalScale's contract; the N x resources (the VDP2 N x sprite images, then the VDP1 surface) are freed before
+    // the VDP2 resources of a new scale are allocated and allocated after them. When they cannot be allocated VDP1
+    // upscaling stays off at that scale (logged); the renderer is unaffected. In Software VDP1 mode there is no N x
+    // surface: compose reads the native sprite layer.
     void SetVdp1Upscaling(bool enabled);
     bool Vdp1UpscalingRequested() const { return m_vdp1Upscaling; }
     // The effective N x scale of the sprite surface (0: none).
     uint32_t Vdp1UpscaleScale() const;
+    // VDP2 decodes the N x sprite surface (the frames show N x sprites).
+    bool Vdp2NxSprites() const;
+    // Test hook: VDP2 keeps the native sprite layers even with an N x surface (the surface is drawn, not shown).
+    void SetVdp2NxSpritesForTest(bool enabled);
+    // N x work of the last record call (RecordPendingFrame / RecordPendingVdp1Work): VDP2 N x sprite passes and VDP1 N x
+    // sub-batches, erases, CPU write runs and rebuilds (diagnostics: hidden frames render N x).
+    struct NxRecordStats {
+        uint32_t spritePasses = 0;
+        uint32_t vdp1Passes = 0;
+    };
+    NxRecordStats LastNxRecordStats() const { return m_lastNxStats; }
     // Test hook: what the GPU replayed, reported when its command buffer is submitted (FrameSubmitted; a dropped one is
     // reported when it is submitted again), and every change of the N x surface (Rescale: the surface was (re)created
     // at `scale` and is rebuilt from the GPU FBRAM before any later work; 0 when it is gone).
@@ -386,6 +400,9 @@ private:
     uint32_t Vdp1NxTarget(uint32_t n) const;
     void ApplyVdp1NxScale(uint32_t scale);
     void NotifyVdp1Rescale(uint32_t scale);
+    // Points VDP2's N x sprite pass at the VDP1 back half's N x surface (or none), as m_vdp2NxSprites and the scales say
+    void SyncVdp2NxSprites();
+    void TakeNxRecordStats(bool frameRecorded);
     // Replays the pending work into cmd (see FramePolicy), then the readbacks of rule 2 plus the slices of `extra` (when
     // covered). False when recording failed (what was recorded is in m_vdp1Recorded, the rest stays queued).
     bool RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, FramePolicy policy, bool &frameRecorded,
@@ -446,6 +463,8 @@ private:
     std::function<bool(const SyncRecord &record)> m_syncSubmit;
     Vdp1SyncStats m_syncStats;
     bool m_vdp1Upscaling = false;
+    bool m_vdp2NxSprites = true; // SetVdp2NxSpritesForTest
+    NxRecordStats m_lastNxStats{};
     bool m_vdp1OneTimeRecorded = false; // the last record call recorded the VDP1 back half's one-time work
     uint32_t m_vdp1NxNotified = 0; // the last scale reported to m_vdp1WorkObserver
     VkDeviceSize m_vdp1NxAllocationLimit = 0;

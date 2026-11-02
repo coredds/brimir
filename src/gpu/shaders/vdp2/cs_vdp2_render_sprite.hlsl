@@ -21,8 +21,25 @@
 //   6  t6  g_spriteFB           ByteAddressBuffer                    STORAGE_BUFFER
 //  17  u1  g_spriteAttrsOut     RWTexture2DArray<uint> r32ui         STORAGE_IMAGE
 //  22  u6  g_spriteLayerOut     RWTexture2DArray<uint4> rgba8ui      STORAGE_IMAGE
+//  23  u7  g_spriteFBNx         RWByteAddressBuffer (read only)      STORAGE_BUFFER
 // Push constants: CommonRenderParams (56 bytes). Dispatch: (HRes / 32, lines, 1 + transparent meshes), native at every
-// internal resolution (renderScale is not used).
+// internal resolution (renderScale and spriteScale 0 or 1).
+//
+// Brimir: VDP1 upscaling (GPU stage 3; stage3-research.md section 3.2): with spriteScale N > 1 the same pass decodes
+// the N x VDP1 surface (vdp1_hw_params.hpp "N x surface") into the N x sprite layer images, dispatched like bgs at N:
+// (N * HRes / 32, N * lines, 1 + transparent meshes). The N x pixel (X, Y) is native pixel (x, row) = (X / N, startY +
+// Y / N) with sub-pixel (i, j) = (X % N, Y % N), written at (X, N * GetY(row) + j). Windows, the field, the framebuffer
+// and everything decided per native pixel stay native; the framebuffer position is taken at N x (FB_N below) and read
+// at its native pixel FB_N / N, sub-texel FB_N % N, of the N x surface:
+// - normal: FB_N = (N x + i, N fieldLine + j) (deinterlaced: j within the field row of the line);
+// - 8-bit input doubled (inHalfResH): FB_N.x = 2 (N x + i);
+// - doubled output (outHalfResH): FB_N.x = N (x >> 1) + ((x & 1) N + i) / 2, smooth across the pair (the odd column's
+//   sample point reads sub-texel N / 2: excluded like the hi-res RBG's odd columns); the window stays per even pixel;
+// - rotation: the 13.10 coordinates at the sub-pixel, c + (s deltaX) / S + (j deltaXst) / N with S = N (s = i) or, in
+//   hi-res modes (per dot of half the output width), S = 2N (s = (x & 1) N + i), then FB_N = floor(N c_sub / 1024).
+//   At (i, j) = (0, 0) the native pixel is the native one, but the sub-texel is that of c's fraction (an exception
+//   class of the sample-point invariant).
+// At sub-texel (0, 0) of every other mapping the read is the native word's sub-texel (0, 0).
 
 #include "vdp2_common_params.hlsli"
 #include "vdp2_render_params_layer.hlsli"
@@ -49,6 +66,8 @@ ByteAddressBuffer g_spriteFB : register(t6);
 // native size).
 [[vk::image_format("rgba8ui")]] RWTexture2DArray<uint4> g_spriteLayerOut : register(u6);
 [[vk::image_format("r32ui")]] RWTexture2DArray<uint> g_spriteAttrsOut : register(u1);
+// Brimir: the N x VDP1 surface (read only; bound to the native framebuffer when there is none, never read then).
+RWByteAddressBuffer g_spriteFBNx : register(u7);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Parameters
@@ -83,6 +102,10 @@ static const uint kVDP1MeshFBOffset = kVDP1FBRAMSize * 2 * 2;
 // Brimir: the frame's output size (bounds of the outputs).
 static const uint2 outputSize = UnpackOutputSize(g_commonParams.outputSize);
 
+// Brimir: the N x sprite pass (spriteScale N > 1), else native (1).
+static const uint spriteScale = UnpackRenderScale(g_commonParams.spriteScale);
+static const bool nxSprites = spriteScale > 1;
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Utilities
 
@@ -102,30 +125,53 @@ uint LoadSpriteFB(uint address) {
 
 // Brimir: matches software (sw:5522, 5528, 2766): framebuffer offsets wrap within the 256 KiB framebuffer
 // (& 0x3FFFF, & 0x3FFFE) before the slice base is added, instead of reading into the next slice.
-uint ReadFB8(uint address, uint sliceBase) {
+// Brimir: the N x surface (N = spriteScale): native byte `address` (wrapped within its slice) of the slice at
+// `sliceBase` is byte address & 1 of N x word (address >> 1) * N^2 + sub of that slice, sub = j * N + i (the same
+// big-endian words as FBRAM). Reads beyond the buffer return 0.
+uint NxByteAddress(uint address, uint sliceBase, uint sub) {
+    const uint n2 = spriteScale * spriteScale;
+    return (sliceBase / kVDP1FBRAMSize) * kVDP1FBRAMSize * n2 + ((address >> 1) * n2 + sub) * 2 + (address & 1);
+}
+
+uint LoadSpriteFBNx(uint address) {
+    uint size;
+    g_spriteFBNx.GetDimensions(size);
+    return address < (size & ~3u) ? g_spriteFBNx.Load(address) : 0;
+}
+
+uint ReadFB8(uint address, uint sliceBase, uint sub) {
+    if (nxSprites) {
+        const uint at = NxByteAddress(address & 0x3FFFF, sliceBase, sub);
+        return BitExtract(LoadSpriteFBNx(at & ~3), (at & 3) * 8, 8);
+    }
     address = (address & 0x3FFFF) + sliceBase;
     return BitExtract(LoadSpriteFB(address & ~3), (address & 3) * 8, 8); // Brimir: LoadSpriteFB
 }
 
-uint ReadFB16(uint address, uint sliceBase) {
+uint ReadFB16(uint address, uint sliceBase, uint sub) {
+    if (nxSprites) {
+        const uint at = NxByteAddress(address & 0x3FFFE, sliceBase, sub);
+        return ByteSwap16(LoadSpriteFBNx(at & ~3) >> ((at & 2) * 8));
+    }
     address = (address & 0x3FFFE) + sliceBase;
     return ByteSwap16(LoadSpriteFB(address & ~3) >> ((address & 2) * 8)); // Brimir: LoadSpriteFB
 }
 
-uint ReadSprite8(uint address, uint field) {
-    return ReadFB8(address, kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
+// Brimir: `sub` is the N x sub-texel (0 natively).
+uint ReadSprite8(uint address, uint field, uint sub) {
+    return ReadFB8(address, kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset, sub);
 }
 
-uint ReadSprite16(uint address, uint field) {
-    return ReadFB16(address, kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
+uint ReadSprite16(uint address, uint field, uint sub) {
+    return ReadFB16(address, kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset, sub);
 }
 
-uint ReadMesh8(uint address, uint field) {
-    return ReadFB8(address, kVDP1MeshFBOffset + kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
+uint ReadMesh8(uint address, uint field, uint sub) {
+    return ReadFB8(address, kVDP1MeshFBOffset + kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset, sub);
 }
 
-uint ReadMesh16(uint address, uint field) {
-    return ReadFB16(address, kVDP1MeshFBOffset + kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset);
+uint ReadMesh16(uint address, uint field, uint sub) {
+    return ReadFB16(address, kVDP1MeshFBOffset + kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset, sub);
 }
 
 uint ReadVRAM16(uint address) {
@@ -264,6 +310,34 @@ uint2 CalcRotationSpriteCoordinates(uint2 pos) {
     );
 }
 
+// Brimir: VDP1 upscaling: the N x framebuffer position (N = spriteScale) at sub-pixel s / span horizontally (span N, or
+// 2N per dot of half the output width) and j / N vertically: floor(N * (c + s * delta / span + j * deltaSt / N) / 1024)
+// per axis, negative when outside. |N * span * c| stays below 2^31 (c: 23 bits plus 22-bit line and dot terms).
+int2 CalcRotationSpriteCoordinatesNx(uint2 pos, uint s, uint span, uint j) {
+    const RotParamBase base = g_rotParamBases[pos.y];
+
+    const int Xst = SignExtend(ReadVRAM32(base.tableAddress + 0x00) >> 6, 23);
+    const int Yst = SignExtend(ReadVRAM32(base.tableAddress + 0x04) >> 6, 23);
+
+    const int deltaXst = SignExtend(ReadVRAM32(base.tableAddress + 0x0C) >> 6, 13);
+    const int deltaYst = SignExtend(ReadVRAM32(base.tableAddress + 0x10) >> 6, 13);
+
+    const int deltaX = SignExtend(ReadVRAM32(base.tableAddress + 0x14) >> 6, 13);
+    const int deltaY = SignExtend(ReadVRAM32(base.tableAddress + 0x18) >> 6, 13);
+
+    const int cx = Xst + int(pos.y) * deltaXst + int(pos.x) * deltaX;
+    const int cy = Yst + int(pos.y) * deltaYst + int(pos.x) * deltaY;
+    // N * c + s * N * delta / span + j * deltaSt, scaled by span / N to stay integral: span * c + s * delta +
+    // j * deltaSt * span / N, over 1024 * span / N
+    const int n = int(spriteScale);
+    const int k = int(span) / n; // 1, or 2 in hi-res modes
+    const int shift = 10 + (k - 1);
+    return int2(
+        (int(span) * cx + int(s) * deltaX + int(j) * deltaXst * k) >> shift,
+        (int(span) * cy + int(s) * deltaY + int(j) * deltaYst * k) >> shift
+    );
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Sprite data
 
@@ -288,7 +362,8 @@ uint GetSpecialPattern(uint rawData, uint colorDataBits) {
     }
 }
 
-SpriteData FetchSpriteData(uint fbAddr, uint field, bool meshLayer) {
+// Brimir: `sub` is the N x sub-texel (0 natively).
+SpriteData FetchSpriteData(uint fbAddr, uint field, bool meshLayer, uint sub) {
     // Adjust offset based on VDP1 data size.
     // The majority of games actually set the sprite readout size to match the VDP1 sprite data size, but there's
     // *always* an exception...
@@ -296,13 +371,13 @@ SpriteData FetchSpriteData(uint fbAddr, uint field, bool meshLayer) {
     // 16-bit VDP1 data vs. 8-bit readout: I Love Donald Duck
     uint rawData;
     if (pixel8Bits) {
-        rawData = meshLayer ? ReadMesh8(fbAddr, field) : ReadSprite8(fbAddr, field);
+        rawData = meshLayer ? ReadMesh8(fbAddr, field, sub) : ReadSprite8(fbAddr, field, sub);
         if (type < 8 && (!meshLayer || rawData != 0)) {
             rawData |= 0xFF00;
         }
     } else {
         fbAddr <<= 1;
-        rawData = meshLayer ? ReadMesh16(fbAddr, field) : ReadSprite16(fbAddr, field);
+        rawData = meshLayer ? ReadMesh16(fbAddr, field, sub) : ReadSprite16(fbAddr, field, sub);
     }
 
     // Sprite types 0-7 are 16-bit, 8-15 are 8-bit
@@ -478,8 +553,10 @@ struct SpriteOutput {
 
 // index 0 = sprite
 // index 1 = transparent meshes
-SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
+// Brimir: subPixel is the N x sub-pixel (i, j) of the N x sprite pass ((0, 0) natively).
+SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index, uint2 subPixel) {
     const bool meshLayer = index == 1;
+    const uint origX = pos.x;
 
     SpriteOutput output = { kTransparentPixel, 0, false, false, false };
 
@@ -504,19 +581,41 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
     }
 
     uint2 spritePos;
+    uint sub = 0; // Brimir: the N x sub-texel of the framebuffer position (VDP1 upscaling)
     if (rotate) {
         // Brimir: matches software (sw:2223-2225, 2678-2682, 53bfa4c): in hi-res modes the coordinates are per dot of
         // half the output width, also when the output is not doubled (8-bit framebuffer).
-        spritePos = CalcRotationSpriteCoordinates(uint2(hiResH ? pos.x >> 1 : pos.x, fieldLine));
+        const uint2 rotPos = uint2(hiResH ? pos.x >> 1 : pos.x, fieldLine);
+        if (nxSprites) {
+            // Brimir: VDP1 upscaling: at the sub-pixel (s / span of a rotation step, j / N of a line)
+            const uint s = hiResH ? (origX & 1) * spriteScale + subPixel.x : subPixel.x;
+            const int2 fbN = CalcRotationSpriteCoordinatesNx(rotPos, s, hiResH ? 2 * spriteScale : spriteScale,
+                                                             subPixel.y);
+            if (any(fbN < 0)) {
+                return output;
+            }
+            spritePos = uint2(fbN) / spriteScale;
+            const uint2 texel = uint2(fbN) % spriteScale;
+            sub = texel.y * spriteScale + texel.x;
+        } else {
+            spritePos = CalcRotationSpriteCoordinates(rotPos);
+        }
         if (any(spritePos >= fbSize)) {
             return output;
         }
     } else {
         spritePos = uint2(pos.x, fieldLine);
+        uint xN = spritePos.x * spriteScale + subPixel.x; // Brimir: VDP1 upscaling: FB_N.x
         if (inHalfResH) {
             spritePos.x <<= 1;
+            xN <<= 1;
         } else if (outHalfResH) {
             spritePos.x >>= 1;
+            xN = (origX >> 1) * spriteScale + ((origX & 1) * spriteScale + subPixel.x) / 2;
+        }
+        if (nxSprites) {
+            spritePos.x = xN / spriteScale;
+            sub = subPixel.y * spriteScale + xN % spriteScale;
         }
     }
     const uint fbAddr = spritePos.x + spritePos.y * fbSize.x;
@@ -526,7 +625,8 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
     }
 
     if (mixedFormat) {
-        const uint spriteDataValue = meshLayer ? ReadMesh16(fbAddr << 1, field) : ReadSprite16(fbAddr << 1, field);
+        const uint spriteDataValue =
+            meshLayer ? ReadMesh16(fbAddr << 1, field, sub) : ReadSprite16(fbAddr << 1, field, sub);
         if (BitTest(spriteDataValue, 15)) {
             // RGB data
 
@@ -555,7 +655,7 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
     }
 
     // Palette data
-    const SpriteData spriteData = FetchSpriteData(fbAddr, field, meshLayer);
+    const SpriteData spriteData = FetchSpriteData(fbAddr, field, meshLayer, sub);
 
     // Handle sprite window
     const bool spriteWindowEnabled = BitTest(g_commonParams.spriteParams, 21);
@@ -591,15 +691,19 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
 // TODO: 32 threads might be suboptimal on AMD GPUs
 [numthreads(32, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
-    const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
+    // Brimir: in the N x sprite pass id.xy is the N x pixel: native (x, row) = (id.x / N, startY + id.y / N), the
+    // sub-pixel id.xy % N, written at (id.x, N * GetY(row) + j) of the N x layer images (N = 1: as Ymir).
+    const uint2 subPixel = id.xy % spriteScale;
+    const uint2 drawCoord = uint2(id.x / spriteScale, id.y / spriteScale + g_commonParams.startY);
     const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
     // Brimir: nothing outside the frame (HRes x VRes) or beyond the mesh layer is written (no robust access).
     if (any(outCoord >= outputSize) || id.z > 1) {
         return;
     }
-    const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z);
-    g_spriteLayerOut[uint3(outCoord.xy, id.z)] = output.layer;
-    g_spriteAttrsOut[uint3(outCoord.xy, id.z)] =
+    const uint2 store = uint2(id.x, outCoord.y * spriteScale + subPixel.y);
+    const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z, subPixel);
+    g_spriteLayerOut[uint3(store, id.z)] = output.layer;
+    g_spriteAttrsOut[uint3(store, id.z)] =
         output.colorCalcRatio |
         ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |
         ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |

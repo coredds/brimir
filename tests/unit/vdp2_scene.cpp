@@ -554,7 +554,7 @@ std::string SceneResult::Describe() const {
 }
 
 void LatticeForLine(const Vdp2SceneWriter &writer, const VDPState &state, uint32_t y, bool deinterlace,
-                    const std::function<void(uint32_t row, SampleLatticeRow flags)> &set) {
+                    const std::function<void(uint32_t row, SampleLatticeRow flags)> &set, bool nxSpriteLayers) {
     const VDP2Regs &regs2 = state.regs2;
     const bool rbg = regs2.bgEnabled[4] || regs2.bgEnabled[5];
     const bool nbg = regs2.bgEnabled[0] || regs2.bgEnabled[1] || regs2.bgEnabled[2] || regs2.bgEnabled[3];
@@ -562,7 +562,11 @@ void LatticeForLine(const Vdp2SceneWriter &writer, const VDPState &state, uint32
     // The composite doubles the rows in interlaced modes (not in exclusive monitor modes), as FieldLines.
     const bool interlaced = !writer.ExclusiveMonitor() && writer.VRes() > kMaxNormalResV;
     const bool singleDensity = regs2.TVMD.LSMDn == InterlaceMode::SingleDensity;
-    SampleLatticeRow flags{.skipOddColumns = rbg && hiRes};
+    // VDP1 upscaling: a doubled sprite output (hi-res, 16-bit framebuffer; the sprite pass's outHalfResH) is smooth
+    // across each pair, so the odd column's sample point reads sub-texel N / 2
+    const bool doubledSprites = nxSpriteLayers && !state.regs1.tvmr.hdtvEnable && !state.regs1.tvmr.pixel8Bits &&
+                                (regs2.TVMD.HRESOn & 0b110) == 0b010;
+    SampleLatticeRow flags{.skipOddColumns = (rbg && hiRes) || doubledSprites};
     if (!interlaced) {
         set(y, flags);
         return;
@@ -1070,7 +1074,13 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
     // VDP1 upscaling: the N x reference follows what the GPU replays
     // (shared with the observer: the renderer reports the surface's end when it is destroyed, after this scope's model)
     std::shared_ptr<NxModel> nxModel;
-    if (options.vdp1Upscaling) {
+    // BRIMIR_VDP1_UPSCALING=1 runs every scene with VDP1 upscaling (with BRIMIR_VDP1_MODE=gpu and BRIMIR_VDP2_SCALE)
+    const char *upscalingEnv = std::getenv("BRIMIR_VDP1_UPSCALING");
+    const bool vdp1Upscaling =
+        options.vdp1Upscaling || (upscalingEnv != nullptr && std::string(upscalingEnv) == "1");
+    vulkan->SetVdp2NxSpritesForTest(!options.nativeSpriteLayers);
+    const bool nxSpriteLayersShown = vdp1Upscaling && vdp1 == Vdp1Path::Gpu && !options.nativeSpriteLayers;
+    if (vdp1Upscaling) {
         vulkan->SetVdp1Upscaling(true);
         if (options.fbram != nullptr) {
             nxModel = std::make_shared<NxModel>();
@@ -1141,11 +1151,14 @@ SceneResult RenderBoth(const Vdp2Scene &scene, gpu::VulkanDevice &device, const 
         if (lattice.size() != w.VRes()) {
             lattice.assign(w.VRes(), SampleLatticeRow{});
         }
-        LatticeForLine(w, state, y, scene.enhancements.deinterlace, [&](uint32_t row, SampleLatticeRow flags) {
-            if (row < lattice.size()) {
-                lattice[row] = flags;
-            }
-        });
+        LatticeForLine(
+            w, state, y, scene.enhancements.deinterlace,
+            [&](uint32_t row, SampleLatticeRow flags) {
+                if (row < lattice.size()) {
+                    lattice[row] = flags;
+                }
+            },
+            nxSpriteLayersShown);
     };
     // FBRAM checkpoints (RenderBothFBRAM): the pending VDP1 ops in an ops-only submit, then the GPU FBRAM read back and
     // compared with software's.

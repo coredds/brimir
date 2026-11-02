@@ -31,6 +31,7 @@
 
 #include <gpu/frame_presenter.hpp>
 #include <gpu/vdp/vulkan_vdp_renderer.hpp>
+#include <gpu/vdp1/vdp1_hw_params.hpp>
 #include <gpu/vk_util.hpp>
 
 #include <algorithm>
@@ -40,6 +41,7 @@
 #include <functional>
 #include <memory>
 #include <random>
+#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -51,6 +53,8 @@ using brimir::test::RenderBoth;
 using brimir::test::RenderBothOptions;
 using brimir::test::RenderSoftware;
 using brimir::test::SceneResult;
+using brimir::test::Vdp1Cmd;
+using brimir::test::Vdp1Size;
 using brimir::test::Vdp2Scene;
 using brimir::test::Vdp2SceneWriter;
 
@@ -4823,7 +4827,12 @@ TEST_CASE("Scene: an internal resolution that cannot be allocated keeps the prev
     options.scale = 2;
     options.beforeFrame = [&](uint32_t frame, gpu::VulkanVDPRenderer &vulkan, gpu::VulkanDevice &) {
         if (frame == 1) {
-            vulkan.SetLog([&](const std::string &text) { logs.push_back(text); });
+            // (VDP1 upscaling, BRIMIR_VDP1_UPSCALING=1, logs its surface as it is freed and made again)
+            vulkan.SetLog([&](const std::string &text) {
+                if (text.rfind("VDP1 upscaling:", 0) != 0) {
+                    logs.push_back(text);
+                }
+            });
             vulkan.Backend()->SetScaleAllocationLimitForTest(vdp2::Vdp2VulkanBackend::ScaledResourceBytes(2));
             failed = !vulkan.SetInternalScale(4);
             CHECK(vulkan.InternalScale() == 2);
@@ -5331,6 +5340,259 @@ TEST_CASE("Bench: character pattern delay with windows", "[gpu][vdp2][bench][.]"
             WARN((cell2x2 ? "2x2 " : "1x1 ") << config.name << ": GPU " << median << " ms/frame median, "
                                               << sorted.back() << " max (" << sorted.size() << " frames"
                                               << (result.identical ? "" : ", DIFFERS from software") << ")");
+        }
+    }
+    CloseAndCheckValidation(device);
+}
+
+// =====================================================================================================================
+// VDP1 upscaling: the N x sprite pass's framebuffer mapping (GPU stage 3, Task 6; stage3-research.md section 3.2). A
+// static scene: two magnified scaled sprites whose texels encode (u, v) are drawn once (VDP1 on the GPU at N x) and
+// shown. The N x composite is decoded against the reference mapping below at every N x pixel, reading the N x surface
+// as read back (itself compared with the N x reference by RenderBothFBRAM): normal, deinterlaced double density, the
+// doubled 8-bit input, the doubled hi-res output, and rotation (lo-res and hi-res).
+
+namespace {
+
+enum class FbMapping { Normal, Deinterlace, HalfInput, DoubledOutput, Rotation, RotationHiRes };
+
+struct FbMappingCase {
+    const char *name;
+    FbMapping mapping;
+    uint16_t tvmd;
+    uint16_t tvmr;
+};
+
+constexpr FbMappingCase kFbMappingCases[] = {
+    {"normal", FbMapping::Normal, kDisp, 0},
+    {"deinterlaced double density", FbMapping::Deinterlace, kDisp | kLSMDDouble, 0},
+    {"8 bpp, doubled input", FbMapping::HalfInput, kDisp, 1},
+    {"hi-res 640, doubled output", FbMapping::DoubledOutput, kDisp | 0x0002, 0},
+    {"rotation", FbMapping::Rotation, kDisp, 2},
+    {"rotation, hi-res 640", FbMapping::RotationHiRes, kDisp | 0x0002, 2},
+};
+
+uint32_t Xbgr555(uint16_t v) {
+    return ((v & 31u) << 3) | (((v >> 5) & 31u) << 11) | (((v >> 10) & 31u) << 19);
+}
+
+uint16_t MappingCram(uint32_t k) {
+    return static_cast<uint16_t>((k * 0x2E5u + 0x1111u) & 0x7FFF);
+}
+
+RotTable SpriteRotation() {
+    RotTable t;
+    const double angle = 0.4, scale = 0.55;
+    t.xst = 3.25;
+    t.yst = 2.5;
+    t.dx = std::cos(angle) * scale;
+    t.dy = std::sin(angle) * scale;
+    t.dxst = -std::sin(angle) * scale;
+    t.dyst = std::cos(angle) * scale;
+    return t;
+}
+
+int32_t RotFixed(double value) {
+    return static_cast<int32_t>(std::lround(value * 1024));
+}
+
+Vdp2Scene FbMappingScene(const FbMappingCase &c, std::shared_ptr<uint32_t> displayFB) {
+    return Make(
+        [c, displayFB](Vdp2SceneWriter &w, Shadow &s, std::mt19937 &rng) {
+            Base(w, s, rng, c.tvmd);
+            const bool eightBit = (c.tvmr & 1) != 0;
+            for (uint32_t k = 0; k < 128; ++k) {
+                w.CRAM16(k * 2, MappingCram(k));
+            }
+            // 16 bpp: mixed format (RGB words); 8 bpp: sprite type 8 (7-bit colour, CRAM)
+            w.Reg(SPCTL, static_cast<uint16_t>(eightBit ? 0x0008 : 0x0020));
+            for (uint32_t reg = PRISA; reg <= PRISD; reg += 2) {
+                w.Reg(reg, 0x0707);
+            }
+            if (c.mapping == FbMapping::Rotation || c.mapping == FbMapping::RotationHiRes) {
+                // Rotation parameter A (an RBG0 of priority 0 enables the tables; it is never shown)
+                WriteRotTable(w, kRotTableAddress, SpriteRotation());
+                w.Reg(RPTAU, static_cast<uint16_t>(kRotTableAddress >> 17));
+                w.Reg(RPTAL, static_cast<uint16_t>((kRotTableAddress >> 1) & 0xFFFE));
+                w.Reg(RPMD, 0);
+                w.Reg(PRIR, 0);
+                s.bgon |= 0x0010;
+            }
+            // A 64 x 64 texture whose texels encode (u, v): RGB words, or 8-bit colours 1-125. Shrunk sprites give the
+            // N x surface sub-texel detail (a magnified texel boundary stays on the native pixel's block)
+            std::vector<uint8_t> texture;
+            for (uint32_t v = 0; v < 64; ++v) {
+                for (uint32_t u = 0; u < 64; ++u) {
+                    if (eightBit) {
+                        texture.push_back(static_cast<uint8_t>(1 + (u * 3 + v * 7) % 125));
+                    } else {
+                        const uint16_t word = static_cast<uint16_t>(0x8000 | u | (v << 6) | (((u ^ v) & 7) << 12));
+                        texture.push_back(static_cast<uint8_t>(word >> 8));
+                        texture.push_back(static_cast<uint8_t>(word));
+                    }
+                }
+            }
+            constexpr uint32_t kTexture = 0x10000;
+            w.VDP1VRAMBytes(kTexture, texture);
+            const uint16_t pmod = eightBit ? 0x0020 : 0x0028; // colour mode 4 (256 colours) or 5 (RGB)
+            uint32_t slot = 0;
+            const auto put = [&](const Vdp1Cmd &cmd) { w.VDP1Command(0x20 * slot++, cmd); };
+            put(Vdp1Cmd::SystemClip(eightBit ? 1023 : 511, 255));
+            put(Vdp1Cmd::Local(0, 0));
+            put(Vdp1Cmd::Scaled(pmod, 0, kTexture / 8, Vdp1Size(64, 64), 60, 120, 170, 200)); // magnified
+            put(Vdp1Cmd::Scaled(pmod, 0, kTexture / 8, Vdp1Size(64, 64), 13, 9, 52, 44));     // shrunk
+            Vdp1Cmd flipped = Vdp1Cmd::Scaled(pmod, 0, kTexture / 8, Vdp1Size(64, 64), 180, 120, 229, 149);
+            flipped.Flip(true, false);
+            put(flipped);
+            put(Vdp1Cmd::Scaled(pmod, 0, kTexture / 8, Vdp1Size(64, 64), 240, 20, 299, 99)); // shrunk across, tall
+            put(Vdp1Cmd::Scaled(pmod, 0, kTexture / 8, Vdp1Size(64, 64), 100, 10, 120, 26)); // shrunk 3x
+            put(Vdp1Cmd::End());
+            w.VDP1Reg(TVMR, c.tvmr);
+            w.VDP1Reg(FBCR, 0);
+            *displayFB = w.DrawFramebuffer();
+            w.DrawVDP1();
+            w.SwapFramebuffers();
+        },
+        {.deinterlace = c.mapping == FbMapping::Deinterlace}, 2);
+}
+
+// The colour the frame shows at N x pixel (X, Y) by the reference mapping, from the N x surface; back: the back screen
+struct MappingCheck {
+    uint64_t mismatches = 0, sprite = 0, detail = 0;
+    std::string first;
+    std::vector<uint32_t> colors;
+};
+
+MappingCheck CheckFbMapping(const FbMappingCase &c, uint32_t n, uint32_t displayFB, const SceneResult &frame,
+                            std::span<const uint8_t> surface) {
+    MappingCheck m;
+    const uint32_t width = frame.width, height = frame.height;
+    const bool eightBit = (c.tvmr & 1) != 0;
+    const bool rotate = c.mapping == FbMapping::Rotation || c.mapping == FbMapping::RotationHiRes;
+    const bool hiRes = width >= 640;
+    const uint32_t fbWidth = eightBit ? 1024 : 512, fbHeight = 256;
+    const uint32_t sliceSize = gpu::vdp1::Vdp1NxFbramSliceSize(n);
+    const uint32_t back = Xbgr555(0x1234);
+    const RotTable t = SpriteRotation();
+    const int32_t xst = RotFixed(t.xst), yst = RotFixed(t.yst), dxst = RotFixed(t.dxst), dyst = RotFixed(t.dyst),
+                  dx = RotFixed(t.dx), dy = RotFixed(t.dy);
+    const auto expected = [&](uint32_t X, uint32_t Y) -> uint32_t {
+        const uint32_t x = X / n, row = Y / n, i = X % n, j = Y % n;
+        uint32_t fieldLine = row, field = 0;
+        if (c.mapping == FbMapping::Deinterlace) {
+            fieldLine = row >> 1;
+            field = row & 1;
+        }
+        int64_t fx = 0, fy = 0; // FB_N
+        if (rotate) {
+            const uint32_t rx = hiRes ? x >> 1 : x;
+            const int64_t cx = xst + int64_t(fieldLine) * dxst + int64_t(rx) * dx;
+            const int64_t cy = yst + int64_t(fieldLine) * dyst + int64_t(rx) * dy;
+            if (hiRes) {
+                const int64_t sx = (x & 1) * n + i;
+                fx = (2 * n * cx + sx * dx + 2 * int64_t(j) * dxst) >> 11;
+                fy = (2 * n * cy + sx * dy + 2 * int64_t(j) * dyst) >> 11;
+            } else {
+                fx = (n * cx + int64_t(i) * dx + int64_t(j) * dxst) >> 10;
+                fy = (n * cy + int64_t(i) * dy + int64_t(j) * dyst) >> 10;
+            }
+            if (fx < 0 || fy < 0 || fx / n >= fbWidth || fy / n >= fbHeight) {
+                return back;
+            }
+        } else {
+            fy = int64_t(n) * fieldLine + j;
+            switch (c.mapping) {
+            case FbMapping::HalfInput: fx = 2 * (int64_t(n) * x + i); break;
+            case FbMapping::DoubledOutput: fx = int64_t(n) * (x >> 1) + ((x & 1) * n + i) / 2; break;
+            default: fx = int64_t(n) * x + i; break;
+            }
+        }
+        const uint32_t nx = static_cast<uint32_t>(fx / n), ny = static_cast<uint32_t>(fy / n);
+        const uint32_t sub = static_cast<uint32_t>(fy % n) * n + static_cast<uint32_t>(fx % n);
+        const uint32_t slice = displayFB + field * 2;
+        if (eightBit) {
+            const uint32_t a = (nx + ny * fbWidth) & 0x3FFFF;
+            const uint8_t b = surface[slice * sliceSize + ((a >> 1) * n * n + sub) * 2 + (a & 1)];
+            return b == 0 ? back : Xbgr555(MappingCram(b & 0x7F));
+        }
+        const uint32_t word = (nx + ny * fbWidth) & 0x1FFFF;
+        const uint32_t at = slice * sliceSize + (word * n * n + sub) * 2;
+        const uint16_t v = static_cast<uint16_t>((surface[at] << 8) | surface[at + 1]);
+        return (v & 0x8000) != 0 ? Xbgr555(v) : back;
+    };
+    const uint32_t pitch = width * n;
+    for (uint32_t Y = 0; Y < height * n; ++Y) {
+        for (uint32_t X = 0; X < pitch; ++X) {
+            const uint32_t want = expected(X, Y);
+            const uint32_t got = frame.gpuScaled[Y * pitch + X] & 0xFFFFFF;
+            if (want != back) {
+                ++m.sprite;
+                if (m.colors.size() < 256 && std::find(m.colors.begin(), m.colors.end(), want) == m.colors.end()) {
+                    m.colors.push_back(want);
+                }
+            }
+            if (want != expected(X - X % n, Y - Y % n)) {
+                ++m.detail;
+            }
+            if (got != want && m.mismatches++ == 0) {
+                std::ostringstream text;
+                text << std::hex << "at N x (" << std::dec << X << ", " << Y << "): expected 0x" << std::hex << want
+                     << ", got 0x" << got;
+                m.first = text.str();
+            }
+        }
+    }
+    return m;
+}
+
+} // namespace
+
+TEST_CASE("Scene: VDP1 upscaling, the N x sprite pass's framebuffer mapping", "[gpu][vdp2][scene][nx][nxsprites]") {
+    auto device = OpenDevice();
+    const bool cpu = device && device->Properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+    for (const FbMappingCase &c : kFbMappingCases) {
+        for (const uint32_t n : {2u, 3u, 4u}) {
+            if (cpu && n == 3) {
+                continue;
+            }
+            DYNAMIC_SECTION(c.name << " at " << n << "x") {
+                auto displayFB = std::make_shared<uint32_t>(0);
+                std::vector<uint8_t> surface;
+                RenderBothOptions options;
+                options.vdp1Upscaling = true;
+                options.scale = n;
+                options.nxInspect = [&](const std::string &, uint32_t scale, std::span<const uint8_t> s,
+                                        std::span<const uint8_t>) {
+                    if (scale == n) {
+                        surface.assign(s.begin(), s.end());
+                    }
+                };
+                const brimir::test::FbramResult r =
+                    brimir::test::RenderBothFBRAM(FbMappingScene(c, displayFB), *device, options);
+                INFO(r.Describe());
+                REQUIRE(r.error.empty());
+                REQUIRE(r.frame.error.empty());
+                CHECK(r.identical);
+                CHECK(r.nxCount == 0);
+                CHECK(r.nxDetailBlocks > 0);
+                REQUIRE(r.frame.scale == n);
+                REQUIRE(surface.size() == gpu::vdp1::Vdp1NxFbramBufferSize(n));
+                REQUIRE(r.frame.gpuScaled.size() == size_t{r.frame.width} * r.frame.height * n * n);
+                const MappingCheck m = CheckFbMapping(c, n, *displayFB, r.frame, surface);
+                INFO(m.first);
+                CHECK(m.mismatches == 0);
+                CHECK(m.sprite > 10000);
+                CHECK(m.colors.size() >= 100);
+                // Sub-texel detail visible in the frame (at 2x a doubled output pair reads one N x column per pixel)
+                if (c.mapping != FbMapping::DoubledOutput || n > 2) {
+                    CHECK(m.detail > 100);
+                }
+                if (c.mapping == FbMapping::Normal || c.mapping == FbMapping::Deinterlace ||
+                    c.mapping == FbMapping::HalfInput) {
+                    // The sample points read sub-texel (0, 0): 1x software there
+                    CHECK(r.frame.identical);
+                }
+            }
         }
     }
     CloseAndCheckValidation(device);

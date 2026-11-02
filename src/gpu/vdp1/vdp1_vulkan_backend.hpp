@@ -135,10 +135,12 @@ public:
         uint32_t nxErases = 0;
         uint32_t nxFbWriteRuns = 0;
         uint32_t nxRebuilds = 0; // rebuild_nx dispatches (new surface, uploads)
+        // N x spans whose slots alone exceed a sub-batch's slot capacity (Vdp1NxStats::oversizedSpans)
+        uint32_t nxOversizedSpans = 0;
     };
     const RecordStats &StatsForTest() const { return m_stats; }
-    // Ops and VRAM copies Record skipped as malformed since creation (the front half never produces one; the first is
-    // logged through SetLog).
+    // Ops, VRAM copies and (at N x) native spans Record skipped as malformed since creation (the front half never
+    // produces one; the first is logged through SetLog).
     uint64_t MalformedTotal() const { return m_malformedTotal; }
 
     // Diagnostics (brimir_vkhost --probe): from now on every Record, RecordFbramUpload and RecordReadback is bracketed

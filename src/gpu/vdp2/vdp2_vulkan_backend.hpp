@@ -8,7 +8,8 @@
 // Internal resolution N (1-4, SetScale): the background layer image (NBG0-3, RBG0-1) and the composite are N x the
 // native size and the bgs and compose passes run over N x N threads per native pixel; the sprite pass, the NBG fetch
 // pass and every other image (sprite and mesh layers, sprite attributes, colour calculation window, RBG line colours)
-// stay native. Only the resources of the current N are allocated.
+// stay native. Only the resources of the current N are allocated. With VDP1 upscaling (SetSpriteSurfaceNx) an N x
+// sprite pass also decodes the N x VDP1 surface into N x sprite layer and attribute images, which compose reads.
 //
 // Uploads go through frame contexts: each context owns a host-visible base upload block (4 MiB) plus overflow blocks
 // chained on demand; the next time the context records, its overflow blocks are freed and its base block is reused, or
@@ -101,10 +102,27 @@ public:
     // Record.
     // When the new resources cannot be allocated, the previous resources and scale are kept, the failure is logged and
     // false is returned. Also false (nothing changes) for an n out of range or a backend that failed to initialize.
+    // N x sprite layers, if any (SetSpriteSurfaceNx), are freed first (the caller sets them up again for n).
     bool SetScale(uint32_t n);
     uint32_t Scale() const { return m_scale; }
     // Device memory the resources that scale take at internal resolution n.
     static VkDeviceSize ScaledResourceBytes(uint32_t n);
+
+    // VDP1 upscaling (GPU stage 3; stage3-research.md section 3.2): `surface` is the N x VDP1 surface
+    // (Vdp1VulkanBackend::NxSurfaceBuffer at N = Scale() > 1). From the next Record on, every batch with layer lines also
+    // runs the N x sprite pass, which decodes it into N x sprite layer and attribute images, and compose reads those at
+    // the N x pixel (CommonRenderParams::spriteScale); the native sprite pass still runs and feeds the sprite window of
+    // bgs and the fetch pass. VK_NULL_HANDLE frees the N x sprite images: compose reads the native sprite layers again.
+    // The images are allocated here (free first: old ones go before new ones are created); on failure nothing N x is
+    // left, the failure is logged and false returned. Also false at Scale() 1 or for a backend that failed to
+    // initialize. The caller's guarantee is SetScale's (descriptor sets are rewritten).
+    bool SetSpriteSurfaceNx(VkBuffer surface);
+    // The N x VDP1 surface the N x sprite pass decodes (VK_NULL_HANDLE: none, native sprite layers).
+    VkBuffer SpriteSurfaceNx() const { return m_spriteSurfaceNx; }
+    // Device memory of the N x sprite layer and attribute images at internal resolution n.
+    static VkDeviceSize SpriteNxImageBytes(uint32_t n);
+    // Test hook: SetSpriteSurfaceNx's allocations fail.
+    void FailSpriteNxAllocationForTest(bool fail) { m_failSpriteNx = fail; }
 
     // Where failures (scale and large upload block allocations) are logged; stderr when unset.
     void SetLog(std::function<void(const std::string &)> log) { m_log = std::move(log); }
@@ -150,6 +168,8 @@ public:
         uint32_t fetchPasses = 0;        // NBG fetch dispatches
         uint32_t fetchOutputSize = 0;    // outputSize the last NBG fetch dispatch pushed (always native)
         uint32_t composeOutputSize = 0;  // outputSize the last compose dispatch pushed (always native)
+        uint32_t nxSpritePasses = 0;     // N x sprite pass dispatches (VDP1 upscaling)
+        uint32_t nxComposes = 0;         // compose dispatches that read the N x sprite layers
     };
     const RecordStats &LastRecordStatsForTest() const { return m_lastStats; }
 
@@ -162,6 +182,10 @@ private:
         VkDeviceSize used = 0;
         VkDescriptorPool pool = VK_NULL_HANDLE;              // created with the sets, on the first arena placement
         std::array<VkDescriptorSet, kPipelineCount> sets{}; // parameter bindings point into this block
+        // VDP1 upscaling: the N x sprite pass's and compose's sets on the N x sprite images (the native images while
+        // there are none)
+        VkDescriptorSet nxSpriteSet = VK_NULL_HANDLE;
+        VkDescriptorSet nxComposeSet = VK_NULL_HANDLE;
     };
     struct FrameContext {
         std::vector<UploadBlock> blocks;
@@ -199,10 +223,15 @@ private:
     void WriteBlockSets(UploadBlock &block);
     void Barrier(VkCommandBuffer cmd, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
                  VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) const;
-    // `scale` is the dispatch's renderScale (1 for the native sprite pass).
+    // `scale` is the dispatch's renderScale (1 for the native sprite pass), `spriteScale` its spriteScale (N in the
+    // N x sprite pass and the compose dispatches reading the N x sprite layers, with `set` their N x set; 0 otherwise,
+    // with the block's set of the pipeline).
     void Dispatch(VkCommandBuffer cmd, Pipeline pipeline, const UploadBlock &block, uint32_t paramsOffset,
                   const VDP2CommonRenderParams &common, uint32_t startY, uint32_t lines, uint32_t groupsX,
-                  uint32_t groupsZ, uint32_t outputSize, uint32_t scale) const;
+                  uint32_t groupsZ, uint32_t outputSize, uint32_t scale, uint32_t spriteScale = 0,
+                  VkDescriptorSet set = VK_NULL_HANDLE) const;
+    void DestroySpriteNx();
+    void WriteAllBlockSets();
     // The NBG fetch pass over `lines` dispatch rows from startY (one workgroup per row and NBG), native at every
     // internal resolution: outputSize is the native size.
     void DispatchNBGFetch(VkCommandBuffer cmd, const UploadBlock &block, uint32_t paramsOffset,
@@ -236,6 +265,11 @@ private:
     vk_util::Image m_spriteAttrs;   // R32_UINT 704x512, 2 layers
     vk_util::Image m_rbgLineColor;  // R8G8B8A8_UINT 352x512, 2 layers
     vk_util::Image m_colorCalcWindow; // R32_UINT 704x512
+    // VDP1 upscaling (SetSpriteSurfaceNx): the N x VDP1 surface (not owned) and the N x sprite images
+    VkBuffer m_spriteSurfaceNx = VK_NULL_HANDLE;
+    vk_util::Image m_spriteLayersNx; // R8G8B8A8_UINT 704Nx512N, 2 layers (sprite, mesh)
+    vk_util::Image m_spriteAttrsNx;  // R32_UINT 704Nx512N, 2 layers
+    bool m_failSpriteNx = false;
 
     // One-time work for the next Record (a new back half clears its composite to black and zeroes the sprite
     // framebuffer; after a scale change the previous composite is rescaled into the new one, before any clear), and

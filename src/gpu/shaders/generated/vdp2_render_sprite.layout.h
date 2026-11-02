@@ -47,6 +47,7 @@ inline constexpr uint32_t kVdp2RenderSprite_CommonRenderParams_windows = 36;
 inline constexpr uint32_t kVdp2RenderSprite_CommonRenderParams_enhancements = 40;
 inline constexpr uint32_t kVdp2RenderSprite_CommonRenderParams_outputSize = 44;
 inline constexpr uint32_t kVdp2RenderSprite_CommonRenderParams_renderScale = 48;
+inline constexpr uint32_t kVdp2RenderSprite_CommonRenderParams_spriteScale = 52;
 inline constexpr uint32_t kVdp2RenderSprite_CommonRenderParams_size = 56;
 
 // GlobalWindowParams

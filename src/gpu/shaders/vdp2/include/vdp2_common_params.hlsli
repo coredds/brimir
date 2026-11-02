@@ -23,8 +23,12 @@ struct CommonRenderParams {
     // startY.
     uint outputSize;
     // Brimir: the internal resolution N (1-4) of the bgs and compose dispatches (0 reads as 1); the sprite and NBG
-    // fetch passes are native. The block is 56 bytes with the std430 tail.
+    // fetch passes are native.
     uint renderScale;
+    // Brimir: VDP1 upscaling (GPU stage 3): N (2-4, equal to renderScale) in the N x sprite pass, which decodes the
+    // N x VDP1 surface into the N x sprite layers, and in compose when it reads them; 0 everywhere else (the native
+    // sprite layers). The block is 56 bytes.
+    uint spriteScale;
 };
 
 #endif

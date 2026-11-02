@@ -748,11 +748,12 @@ if(NOT "${gpu_vdp1_probe_err}" MATCHES "VDP1 probe: no GPU timestamps on this qu
     message(STATUS "gpu_vdp1_probe: VDP1 GPU time mean ${CMAKE_MATCH_1} us per frame (timestamps)")
 endif()
 
-# VDP1 upscaling (GPU stage 3; BRIMIR_VDP1_UPSCALING=1 until the core option exists): the VDP1 back half also draws the
-# N x sprite surface, in the same submits (at most one per retro_run); VDP2 still shows the native sprite layer, so the
-# frames stay identical to software. Live changes 1x -> 2x -> 4x -> 1x reallocate the surface (free first, logged) under
-# synchronization validation, and the state saved at 2x equals software's (native FBRAM); hidden frames draw it too.
-set(ENV{BRIMIR_VDP1_UPSCALING} 1)
+# VDP1 upscaling (GPU stage 3; brimir_vdp1_upscaling, Enabled by default): at an internal resolution above 1 the VDP1
+# back half also draws the N x sprite surface, in the same submits (at most one per retro_run), and VDP2 decodes it (the
+# N x sprite pass; compose reads its layers). The menu's VDP1 drawing is rect-path content, so its sample points stay
+# identical to software (and every 2 x 2 block constant, scale2 above). Live changes 1x -> 2x -> 4x -> 1x reallocate the
+# surface (free first, logged) under synchronization validation, and the state saved at 2x equals software's (native
+# FBRAM); hidden frames draw and decode it too (the core's counts of N x passes in hidden submits).
 set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
 set(nx_state "${state_dir}/vdp1_nx.state")
 run_vkhost(vdp1_nx_live --vulkan --gpu-vdp1 --hash-sample 1 --save-state-at 100 "${nx_state}"
@@ -761,16 +762,17 @@ run_vkhost(vdp1_nx_live --vulkan --gpu-vdp1 --hash-sample 1 --save-state-at 100 
 unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
 run_vkhost(vdp1_nx_hidden --vulkan --gpu-vdp1 --internal-resolution 2 --hash-sample 2 --hide-every 2
            --option brimir_deinterlace_mode=bob)
-unset(ENV{BRIMIR_VDP1_UPSCALING})
 check_run(vdp1_nx_live 300)
 check_vulkan_counters(vdp1_nx_live)
 check_vdp2_renderer(vdp1_nx_live)
 check_sync_counts(vdp1_nx_live)
 require_log(vdp1_nx_live "Vulkan VDP1 renderer active")
+require_log(vdp1_nx_live "SET_SYSTEM_AV_INFO calls 0,")
 string(REGEX MATCHALL "VDP1 upscaling: sprite surface at [0-9]x \\([0-9]+ MiB\\)" nx_surfaces "${vdp1_nx_live_err}")
 if(NOT "${nx_surfaces}" STREQUAL "VDP1 upscaling: sprite surface at 2x (16 MiB);VDP1 upscaling: sprite surface at 4x (64 MiB)")
     fail(vdp1_nx_live "sprite surfaces '${nx_surfaces}', expected 2x (16 MiB) then 4x (64 MiB)")
 endif()
+require_log(vdp1_nx_live "VDP1 upscaling: N x sprite frames shown [1-9][0-9]*, hidden 0; N x VDP1 passes shown [1-9]")
 execute_process(COMMAND "${STATE_DIFF}" "${sw_state}" "${nx_state}"
                 OUTPUT_VARIABLE state_diff_out ERROR_VARIABLE state_diff_err RESULT_VARIABLE state_diff_code)
 if(NOT state_diff_code EQUAL 0)
@@ -782,8 +784,56 @@ check_vulkan_counters(vdp1_nx_hidden)
 check_vdp2_renderer(vdp1_nx_hidden)
 require_log(vdp1_nx_hidden "180 hidden frames")
 require_log(vdp1_nx_hidden "VDP1 upscaling: sprite surface at 2x \\(16 MiB\\)")
-message(STATUS "vdp1_nx: VDP1 upscaling on, frames identical to software (live 1x -> 2x -> 4x -> 1x, hidden frames), "
-               "one submit per retro_run, the state at 2x equal to software's")
+# Every hidden submit carried the N x work: its VDP1 N x passes and the N x sprite pass (180 hidden frames, each with a
+# VDP2 frame)
+string(REGEX MATCH "N x sprite frames shown ([0-9]+), hidden ([0-9]+); N x VDP1 passes shown ([0-9]+), hidden ([0-9]+)"
+       nx_counts "${vdp1_nx_hidden_err}")
+if(nx_counts STREQUAL "" OR NOT CMAKE_MATCH_2 EQUAL 180 OR CMAKE_MATCH_4 LESS 180)
+    fail(vdp1_nx_hidden "'${nx_counts}': expected 180 hidden N x sprite frames and at least 180 hidden VDP1 N x passes")
+endif()
+message(STATUS "vdp1_nx: VDP1 upscaling on, sample points identical to software (live 1x -> 2x -> 4x -> 1x, hidden "
+               "frames: ${nx_counts}), one submit per retro_run, the state at 2x equal to software's")
+
+# ... the option off: nothing N x (no surface, no N x pass), frames as with upscaling on (the menu is rect-path)
+run_vkhost(vdp1_nx_off --vulkan --gpu-vdp1 --internal-resolution 2 --hash-sample 2 --option brimir_vdp1_upscaling=disabled)
+check_run(vdp1_nx_off 300)
+check_vulkan_counters(vdp1_nx_off)
+check_vdp2_renderer(vdp1_nx_off)
+forbid_log(vdp1_nx_off "sprite surface at")
+require_log(vdp1_nx_off "N x sprite frames shown 0, hidden 0; N x VDP1 passes shown 0, hidden 0")
+
+# ... live option changes (as from RetroArch's Quick Menu), under synchronization validation: VDP1 upscaling off and on
+# and the internal resolution, with weave (the composite keeps the other field) and with run-ahead (hidden frames and a
+# second instance). Every frame at its sample points identical to software (no black field), only SET_GEOMETRY for the
+# scale changes (never SET_SYSTEM_AV_INFO), one submit per retro_run; the surface follows each change (free first).
+set(nx_toggles --internal-resolution 2 --set-option-at 80 brimir_vdp1_upscaling=disabled
+               --set-option-at 120 brimir_vdp1_upscaling=enabled --set-option-at 160 brimir_internal_resolution=4
+               --set-option-at 200 brimir_vdp1_upscaling=disabled --set-option-at 240 brimir_internal_resolution=3
+               --set-option-at 260 brimir_vdp1_upscaling=enabled)
+set(ENV{BRIMIR_VK_SYNC_VALIDATION} 1)
+run_vkhost(vdp1_nx_toggle_weave --vulkan --gpu-vdp1 --hash-sample 1 --option brimir_deinterlace_mode=none ${nx_toggles})
+run_vkhost(vdp1_nx_toggle_runahead --vulkan --gpu-vdp1 --hash-sample 1 --runahead ${nx_toggles})
+unset(ENV{BRIMIR_VK_SYNC_VALIDATION})
+check_run(vdp1_nx_toggle_weave 300 REFERENCE software_weave)
+check_run(vdp1_nx_toggle_runahead 300 REFERENCE software_runahead)
+foreach(name IN ITEMS vdp1_nx_toggle_weave vdp1_nx_toggle_runahead)
+    check_vulkan_counters(${name})
+    check_vdp2_renderer(${name})
+    require_log(${name} "SET_SYSTEM_AV_INFO calls 0, SET_GEOMETRY calls 3")
+    string(REGEX MATCHALL "VDP1 upscaling: sprite surface at [0-9]x \\([0-9]+ MiB\\)" nx_surfaces "${${name}_err}")
+    if(NOT "${nx_surfaces}" STREQUAL
+       "VDP1 upscaling: sprite surface at 2x (16 MiB);VDP1 upscaling: sprite surface at 2x (16 MiB);VDP1 upscaling: sprite surface at 4x (64 MiB);VDP1 upscaling: sprite surface at 3x (36 MiB)")
+        fail(${name} "sprite surfaces '${nx_surfaces}', expected 2x, 2x (off and on), 4x, 3x (off, 3x, on)")
+    endif()
+    string(REGEX MATCHALL "frames at [0-9]x" scales "${${name}_err}")
+    if(NOT "${scales}" STREQUAL "frames at 2x;frames at 4x;frames at 3x")
+        fail(${name} "presented scales '${scales}', expected 2x, 4x, 3x")
+    endif()
+endforeach()
+require_log(vdp1_nx_toggle_runahead "second instance ran 360 frames, 0 hardware frames, context none")
+require_log(vdp1_nx_toggle_runahead "N x sprite frames shown [1-9][0-9]*, hidden [1-9][0-9]*; N x VDP1 passes shown [1-9][0-9]*, hidden [1-9]")
+message(STATUS "vdp1_nx_toggle: live VDP1 upscaling off/on and 2x -> 4x -> 3x with weave and run-ahead, identical to "
+               "software at the sample points, no SET_SYSTEM_AV_INFO")
 
 # Deterministic runs: --fixed-date pins the RTC (BRIMIR_RTC_FIXED: the virtual clock at brimir_bench's lockstep date).
 # Two software BIOS runs of 600 frames, started at different host times, are identical: every frame, and the states

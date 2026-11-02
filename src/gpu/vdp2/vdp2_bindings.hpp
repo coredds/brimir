@@ -32,6 +32,12 @@
 //       20  u4        g_compositeOut           STORAGE_BUFFER           uint[704N * 512N] packed XBGR          compose
 //       21  u5        g_nbgCharsOut            STORAGE_BUFFER           uint[4 * 512 * 704]                    nbg_fetch
 //       22  u6        g_spriteLayerOut         STORAGE_IMAGE            R8G8B8A8_UINT 704x512, 2 layers        sprite
+//       23  u7        g_spriteFBNx             STORAGE_BUFFER           the N x VDP1 surface (read only)       sprite
+//
+// VDP1 upscaling (GPU stage 3): the N x sprite pass and the compose dispatches that read its output use descriptor sets
+// of their own (the sprite and compose layouts) in which 9/17 and 14/22 are the N x sprite attribute and sprite layer
+// images (704N x 512N, 2 layers each) and 23 the N x VDP1 surface (Vdp1VulkanBackend::NxSurfaceBuffer,
+// Vdp1NxFbramBufferSize(N)); in every other set 23 is the sprite framebuffer (6), which the shader never reads there.
 //
 // The NBG fetch pass (nbg_fetch) uses bindings 0, 2, 7 and 9 as bgs does. The rescale pass (cs_vdp2_rescale.hlsl, run
 // once after an internal resolution change) copies the previous composite (15) into the new one (20); its push
@@ -77,6 +83,7 @@ inline constexpr uint32_t kBindingColorCalcWindowOut = 19;
 inline constexpr uint32_t kBindingCompositeOut = 20;
 inline constexpr uint32_t kBindingNBGCharsOut = 21;
 inline constexpr uint32_t kBindingSpriteLayerOut = 22;
+inline constexpr uint32_t kBindingSpriteFBNx = 23;
 
 /// @brief Size of the push-constant block (VDP2CommonRenderParams) the sprite, bgs and compose pipelines declare.
 inline constexpr uint32_t kPushConstantSize = sizeof(VDP2CommonRenderParams);
@@ -185,7 +192,7 @@ struct Binding {
     ImageFormat format = ImageFormat::None;
 };
 
-inline constexpr std::array<Binding, 7> kRenderSpriteBindings{{
+inline constexpr std::array<Binding, 8> kRenderSpriteBindings{{
     {kBindingLayerParams, DescriptorKind::StorageBufferDynamic},
     {kBindingVRAM, DescriptorKind::StorageBuffer},
     {kBindingCRAMColor, DescriptorKind::StorageBuffer},
@@ -193,6 +200,7 @@ inline constexpr std::array<Binding, 7> kRenderSpriteBindings{{
     {kBindingSpriteFB, DescriptorKind::StorageBuffer},
     {kBindingSpriteLayerOut, DescriptorKind::StorageImage, ImageFormat::Rgba8ui},
     {kBindingSpriteAttrsOut, DescriptorKind::StorageImage, ImageFormat::R32ui},
+    {kBindingSpriteFBNx, DescriptorKind::StorageBuffer},
 }};
 
 inline constexpr std::array<Binding, 11> kRenderBgsBindings{{

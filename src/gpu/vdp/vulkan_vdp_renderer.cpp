@@ -167,10 +167,12 @@ bool VulkanVDPRenderer::RecordPendingFrame(uint32_t context, VkCommandBuffer cmd
     }
     m_vdp1Recorded.clear();
     m_vdp2FrameRecorded = false;
+    m_lastNxStats = {};
     if (!HasPendingFrame()) {
         return false;
     }
     const bool recorded = m_backend->Record(m_front.Frame(), context, cmd);
+    TakeNxRecordStats(recorded);
     m_vdp2FrameRecorded = recorded;
     m_front.ConsumeFrame();
     if (!recorded) {
@@ -205,6 +207,7 @@ bool VulkanVDPRenderer::RecordPendingVdp1Work(uint32_t context, VkCommandBuffer 
         m_vdp1Recorded.clear();
         m_vdp1OneTimeRecorded = false;
         m_vdp2FrameRecorded = false;
+        m_lastNxStats = {};
         return false;
     }
     bool frameRecorded = false;
@@ -288,17 +291,62 @@ uint32_t VulkanVDPRenderer::Vdp1UpscaleScale() const {
 }
 
 void VulkanVDPRenderer::ApplyVdp1NxScale(uint32_t scale) {
-    if (!m_vdp1Backend || m_vdp1Backend->NxScale() == scale) {
+    if (!m_vdp1Backend) {
         return;
     }
-    if (!m_vdp1Backend->SetNxScale(scale)) {
-        Log("VDP1 upscaling: the " + std::to_string(scale) + "x sprite surface could not be allocated (" +
-            vk_util::ResultName(m_vdp1Backend->NxFailure()) + "); VDP1 upscaling off at this internal resolution");
-    } else if (scale != 0) {
-        Log("VDP1 upscaling: sprite surface at " + std::to_string(scale) + "x (" +
-            std::to_string(m_vdp1Backend->NxMemoryBytes() / (1024 * 1024)) + " MiB)");
+    if (m_vdp1Backend->NxScale() != scale) {
+        // Free first: VDP2's N x sprite images, then the old surface (SetNxScale)
+        if (m_backend) {
+            m_backend->SetSpriteSurfaceNx(VK_NULL_HANDLE);
+        }
+        if (!m_vdp1Backend->SetNxScale(scale)) {
+            Log("VDP1 upscaling: the " + std::to_string(scale) + "x sprite surface could not be allocated (" +
+                vk_util::ResultName(m_vdp1Backend->NxFailure()) + "); VDP1 upscaling off at this internal resolution");
+        } else if (scale != 0) {
+            Log("VDP1 upscaling: sprite surface at " + std::to_string(scale) + "x (" +
+                std::to_string(m_vdp1Backend->NxMemoryBytes() / (1024 * 1024)) + " MiB)");
+        }
+        NotifyVdp1Rescale(m_vdp1Backend->NxScale());
     }
-    NotifyVdp1Rescale(m_vdp1Backend->NxScale());
+    SyncVdp2NxSprites();
+}
+
+void VulkanVDPRenderer::SyncVdp2NxSprites() {
+    if (!m_backend) {
+        return;
+    }
+    const uint32_t nx = m_vdp1Backend ? m_vdp1Backend->NxScale() : 0;
+    const VkBuffer surface =
+        m_vdp2NxSprites && nx > 1 && nx == m_backend->Scale() ? m_vdp1Backend->NxSurfaceBuffer() : VK_NULL_HANDLE;
+    if (m_backend->SpriteSurfaceNx() == surface) {
+        return;
+    }
+    if (!m_backend->SetSpriteSurfaceNx(surface)) {
+        // Logged by the back half: no N x sprites at this scale, and no surface nobody shows
+        Log("VDP1 upscaling off at this internal resolution");
+        m_vdp1Backend->SetNxScale(0);
+        NotifyVdp1Rescale(0);
+    }
+}
+
+bool VulkanVDPRenderer::Vdp2NxSprites() const {
+    return m_backend && m_backend->SpriteSurfaceNx() != VK_NULL_HANDLE;
+}
+
+void VulkanVDPRenderer::SetVdp2NxSpritesForTest(bool enabled) {
+    m_vdp2NxSprites = enabled;
+    SyncVdp2NxSprites();
+}
+
+void VulkanVDPRenderer::TakeNxRecordStats(bool frameRecorded) {
+    m_lastNxStats = {};
+    if (frameRecorded && m_backend) {
+        m_lastNxStats.spritePasses = m_backend->LastRecordStatsForTest().nxSpritePasses;
+    }
+    if (m_vdp1Backend && m_vdp1Backend->NxScale() != 0) {
+        const auto &s = m_vdp1Backend->StatsForTest();
+        m_lastNxStats.vdp1Passes = s.nxSubBatches + s.nxErases + s.nxFbWriteRuns + s.nxRebuilds;
+    }
 }
 
 void VulkanVDPRenderer::NotifyVdp1Rescale(uint32_t scale) {
@@ -421,6 +469,9 @@ void VulkanVDPRenderer::HandToSoftware() {
 }
 
 void VulkanVDPRenderer::DestroyGpuVdp1() {
+    if (m_backend) {
+        m_backend->SetSpriteSurfaceNx(VK_NULL_HANDLE); // the N x surface dies with the VDP1 back half
+    }
     m_vdp1Backend.reset();
     NotifyVdp1Rescale(0); // the N x surface dies with the back half
     m_device = nullptr;
@@ -491,6 +542,7 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     m_vdp1Recorded.clear(); // the previous command buffer was submitted (or reported dropped)
     m_vdp2FrameRecorded = false;
     m_proposed = {};
+    m_lastNxStats = {};
     if (FrameProbe && !m_vdp1Backend->EnableTimestamps() && !m_timestampsLogged) {
         // Diagnostics: vdp1_gpu_us stays 0
         Log("VDP1 probe: no GPU timestamps on this queue; the VDP1 GPU time is not measured");
@@ -579,6 +631,7 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
             Log("VDP1: the framebuffer readback buffer cannot be allocated; the CPU copy falls behind");
         }
     }
+    TakeNxRecordStats(frameRecorded);
     return ok;
 }
 

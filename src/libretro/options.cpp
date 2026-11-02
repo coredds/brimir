@@ -56,10 +56,10 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_renderer",
         "Renderer (restart required)",
         nullptr,
-        "Software draws and presents every frame on the CPU. Vulkan presents the frames through the frontend's "
-        "Vulkan driver (the emulation itself is unchanged for now). Vulkan is only used when the frontend already "
-        "runs the vulkan video driver (the core never switches drivers); otherwise the core uses software. A "
-        "Vulkan 1.2 GPU gets the GPU frame output, older ones a plain copy. Applies when content is loaded.",
+        "Software draws every frame on the CPU. Vulkan draws VDP1 (polygons and sprites) and VDP2 (backgrounds) on "
+        "the GPU and enables Internal Resolution. Needs the frontend's vulkan video driver (the core never switches "
+        "drivers; otherwise it uses software) and a Vulkan 1.2 GPU (older ones get software frames through a plain "
+        "copy). Applies when content is loaded.",
         nullptr,
         "video",
         {
@@ -74,9 +74,9 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_internal_resolution",
         "Internal Resolution (Vulkan)",
         nullptr,
-        "Renders the VDP2 backgrounds at a multiple of the Saturn resolution: rotating and zoomed backgrounds get "
-        "sharper. Sprites (VDP1) stay at native resolution for now. Only used with Renderer = Vulkan on the GPU "
-        "renderer; ignored by the software renderer and the copy-only output. Applies immediately. 3x and 4x of "
+        "Renders at a multiple of the Saturn resolution: backgrounds (VDP2) always, rotating and zoomed ones getting "
+        "sharper, and polygons and sprites (VDP1) when VDP1 Upscaling is on. Only used with Renderer = Vulkan on the "
+        "GPU renderer; ignored by the software renderer and the copy-only output. Applies immediately. 3x and 4x of "
         "high-resolution modes exceed 1080p.",
         nullptr,
         "video",
@@ -88,6 +88,24 @@ static struct retro_core_option_v2_definition option_defs[] = {
             { nullptr, nullptr }
         },
         "1"
+    },
+    {
+        // Live: applies at the next frame, like brimir_internal_resolution (VulkanOutput::SetVdp1Upscaling).
+        "brimir_vdp1_upscaling",
+        "VDP1 Upscaling (Vulkan)",
+        nullptr,
+        "Draws polygons and sprites (VDP1) at the internal resolution: smoother 3D edges and textures. Disable it "
+        "for a game that shows artefacts (gaps, seams or misplaced lines) at higher internal resolutions; sprites "
+        "then stay at native resolution. Only used with Renderer = Vulkan at Internal Resolution 2x or more. Applies "
+        "immediately.",
+        nullptr,
+        "video",
+        {
+            { "enabled", "Enabled" },
+            { "disabled", "Disabled" },
+            { nullptr, nullptr }
+        },
+        "enabled"
     },
 #endif
     {

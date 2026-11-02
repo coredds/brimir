@@ -473,6 +473,19 @@ struct VulkanOutput::Impl {
     // a VDP2 frame, the scale of the presenter's images (CreateSlots), and of the last frame handed over.
     uint32_t requestedScale = 1;
     bool scaleChangePending = false;
+    // VDP1 upscaling (brimir_vdp1_upscaling): requested; a change is applied with the internal resolution's
+    bool vdp1Upscaling = false;
+    // Diagnostics (brimir_vkhost checks; logged at detach): submitted frames whose VDP2 work decoded the N x sprite
+    // surface, and the VDP1 N x passes the submits carried, in shown and hidden frames, since the attach
+    struct NxCounts {
+        uint64_t frames = 0;
+        uint64_t vdp1Passes = 0;
+    } nxShown, nxHidden;
+    void CountNx(NxCounts &counts) const {
+        const auto s = renderer->LastNxRecordStats();
+        counts.frames += s.spritePasses != 0 ? 1 : 0;
+        counts.vdp1Passes += s.vdp1Passes;
+    }
     uint32_t presenterScale = 1;
     uint32_t presentedScale = 1;
 
@@ -936,6 +949,7 @@ bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::s
     // scale, so it never renders more than can be presented. The renderer tries the request, then its previous
     // effective scale, then 1, each allocated directly (fallbacks logged by the renderer).
     target.SetInternalScale(requestedScale);
+    target.SetVdp1Upscaling(vdp1Upscaling);
     if (presenter->Scale() != requestedScale) {
         std::string presenterError;
         if (auto created = CreatePresenter(requestedScale, presenterError)) {
@@ -976,7 +990,8 @@ bool VulkanOutput::Impl::AttachRendererTo(gpu::VulkanVDPRenderer &target, std::s
 bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
     const uint32_t target = requestedScale;
     const uint32_t before = renderer->InternalScale();
-    if (before == target && presenter->Scale() == target) {
+    const bool upscalingChanges = renderer->Vdp1UpscalingRequested() != vdp1Upscaling;
+    if (before == target && presenter->Scale() == target && !upscalingChanges) {
         scaleChangePending = false;
         return true;
     }
@@ -988,6 +1003,10 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
         return false;
     }
     scaleChangePending = false;
+    // 0. VDP1 upscaling turned off: its N x resources go first (the output images keep their size)
+    if (upscalingChanges && !vdp1Upscaling) {
+        renderer->SetVdp1Upscaling(false);
+    }
     // 1. Output images of the new scale, before anything changes: without them the renderer stays where it is.
     std::unique_ptr<gpu::FramePresenter> grown;
     if (presenter->Scale() < target) {
@@ -996,6 +1015,9 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
         if (!grown) {
             NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(target) + "x: " + presenterError +
                                                "; staying at " + std::to_string(before) + "x");
+            if (upscalingChanges && vdp1Upscaling) {
+                renderer->SetVdp1Upscaling(true);
+            }
             return true;
         }
     }
@@ -1005,6 +1027,10 @@ bool VulkanOutput::Impl::ApplyInternalScale(std::string &error) {
                                            "x could not be allocated; staying at " + std::to_string(before) + "x");
     }
     const uint32_t effective = renderer->InternalScale();
+    // ... and VDP1 upscaling turned on: its N x resources at the new scale only
+    if (upscalingChanges && vdp1Upscaling) {
+        renderer->SetVdp1Upscaling(true);
+    }
     // 3. The presenter follows: the grown one when the renderer got there (otherwise it is dropped, never handed
     // over), or smaller images when the scale went down (a failure is retried by the frame's FitOutput).
     if (grown && grown->Scale() == effective) {
@@ -1053,7 +1079,12 @@ void VulkanOutput::Impl::DetachRendererIdle(bool discardState) {
                                count(s.refusedSyncs) + " (output " + count(refusedSyncSubmits) + "), readback slices " +
                                count(s.readbackSlices) + ", merged " + count(s.mergedSlices) + " (" +
                                ms(s.mergeSeconds) + " ms)");
+            NegotiationLog(RETRO_LOG_INFO, "VDP1 upscaling: N x sprite frames shown " + count(nxShown.frames) +
+                                               ", hidden " + count(nxHidden.frames) + "; N x VDP1 passes shown " +
+                                               count(nxShown.vdp1Passes) + ", hidden " + count(nxHidden.vdp1Passes));
         }
+        nxShown = {};
+        nxHidden = {};
         renderer->SetSyncSubmit(nullptr);
         renderer = nullptr;
     }
@@ -1663,6 +1694,7 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
         return false;
     }
     renderer->FrameSubmitted(index, slot->fence);
+    m.CountNx(m.nxShown);
     if (recorded) {
         m.compositeValid = true;
     }
@@ -1679,6 +1711,14 @@ void VulkanOutput::SetInternalScale(uint32_t n) {
     if (n != m.requestedScale) {
         m.requestedScale = n;
         m.scaleChangePending = true;
+    }
+}
+
+void VulkanOutput::SetVdp1Upscaling(bool enabled) {
+    Impl &m = *m_impl;
+    if (enabled != m.vdp1Upscaling) {
+        m.vdp1Upscaling = enabled;
+        m.scaleChangePending = true; // applied by ApplyInternalScale with the next recorded frame
     }
 }
 
@@ -1778,6 +1818,7 @@ bool VulkanOutput::SubmitHidden(std::string &error) {
     }
     m.runSubmitted = true;
     m.renderer->FrameSubmitted(rendererContext, context.fence);
+    m.CountNx(m.nxHidden);
     context.pending = true;
     m.nextHidden = (index + 1) % kHiddenContexts;
     if (frame && recorded) {

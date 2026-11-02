@@ -50,6 +50,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
 #ifdef BRIMIR_VULKAN
         { "brimir_renderer",             "software" },
         { "brimir_internal_resolution",  "1"        },
+        { "brimir_vdp1_upscaling",       "enabled"  },
 #endif
     };
 
@@ -254,12 +255,70 @@ TEST_CASE("Core options include the internal resolution option (Vulkan builds)",
     }
     CHECK(found->values[4].value == nullptr);
 }
+
+TEST_CASE("Core options include the VDP1 upscaling option (Vulkan builds)", "[options][libretro]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+
+    const retro_core_option_v2_definition* found = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_vdp1_upscaling") == 0) {
+            found = &options->definitions[i];
+            break;
+        }
+    }
+
+    REQUIRE(found != nullptr);
+    CHECK(std::strcmp(found->desc, "VDP1 Upscaling (Vulkan)") == 0);
+    REQUIRE(found->info != nullptr);
+    CHECK(std::strstr(found->info, "polygons and sprites (VDP1) at the internal resolution") != nullptr);
+    CHECK(std::strstr(found->info, "artefacts") != nullptr);
+    REQUIRE(found->category_key != nullptr);
+    CHECK(std::strcmp(found->category_key, "video") == 0);
+    REQUIRE(found->default_value != nullptr);
+    CHECK(std::strcmp(found->default_value, "enabled") == 0);
+    const char* const values[] = {"enabled", "disabled"};
+    const char* const labels[] = {"Enabled", "Disabled"};
+    for (int i = 0; i < 2; ++i) {
+        INFO("value " << i);
+        REQUIRE(found->values[i].value != nullptr);
+        REQUIRE(found->values[i].label != nullptr);
+        CHECK(std::strcmp(found->values[i].value, values[i]) == 0);
+        CHECK(std::strcmp(found->values[i].label, labels[i]) == 0);
+    }
+    CHECK(found->values[2].value == nullptr);
+}
+
+TEST_CASE("The renderer and internal resolution texts describe VDP1 on the GPU (Vulkan builds)",
+          "[options][libretro]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+    const char* renderer = nullptr;
+    const char* resolution = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_renderer") == 0) {
+            renderer = options->definitions[i].info;
+        }
+        if (std::strcmp(options->definitions[i].key, "brimir_internal_resolution") == 0) {
+            resolution = options->definitions[i].info;
+        }
+    }
+    REQUIRE(renderer != nullptr);
+    REQUIRE(resolution != nullptr);
+    CHECK(std::strstr(renderer, "draws VDP1 (polygons and sprites) and VDP2 (backgrounds) on the GPU") != nullptr);
+    CHECK(std::strstr(renderer, "vulkan video driver") != nullptr);
+    CHECK(std::strstr(renderer, "Applies when content is loaded") != nullptr);
+    CHECK(std::strstr(renderer, "unchanged for now") == nullptr);
+    CHECK(std::strstr(resolution, "polygons and sprites (VDP1) when VDP1 Upscaling is on") != nullptr);
+    CHECK(std::strstr(resolution, "native resolution for now") == nullptr);
+}
 #else
 TEST_CASE("Core options have no internal resolution option without Vulkan", "[options][libretro]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);
     for (int i = 0; options->definitions[i].key != nullptr; ++i) {
         CHECK(std::strcmp(options->definitions[i].key, "brimir_internal_resolution") != 0);
+        CHECK(std::strcmp(options->definitions[i].key, "brimir_vdp1_upscaling") != 0);
     }
 }
 #endif

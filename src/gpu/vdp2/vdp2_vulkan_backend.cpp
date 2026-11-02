@@ -70,6 +70,16 @@ vk_util::ImageDesc BGLayersDesc(uint32_t n) {
             .arrayLayers = kBGLayerImageLayers};
 }
 
+// VDP1 upscaling: the N x sprite layer and attribute images
+vk_util::ImageDesc SpriteLayersNxDesc(uint32_t n) {
+    return {.width = ScaledResH(n), .height = ScaledResV(n), .format = VK_FORMAT_R8G8B8A8_UINT, .usage = kImageUsage,
+            .arrayLayers = kSpriteLayerImageLayers};
+}
+vk_util::ImageDesc SpriteAttrsNxDesc(uint32_t n) {
+    return {.width = ScaledResH(n), .height = ScaledResV(n), .format = VK_FORMAT_R32_UINT, .usage = kImageUsage,
+            .arrayLayers = kSpriteAttrImageLayers};
+}
+
 } // namespace
 
 Vdp2VulkanBackend::Vdp2VulkanBackend(VulkanDevice &device, uint32_t frameContexts, uint32_t scale,
@@ -251,9 +261,11 @@ void Vdp2VulkanBackend::Destroy() {
         m_pipelineLayouts[p] = VK_NULL_HANDLE;
         m_setLayouts[p] = VK_NULL_HANDLE;
     }
-    for (vk_util::Image *image : {&m_bgLayers, &m_spriteLayers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow}) {
+    for (vk_util::Image *image : {&m_bgLayers, &m_spriteLayers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow,
+                                  &m_spriteLayersNx, &m_spriteAttrsNx}) {
         vk_util::DestroyImage(m_device, *image);
     }
+    m_spriteSurfaceNx = VK_NULL_HANDLE;
     for (vk_util::Buffer *buffer :
          {&m_vram, &m_cramColors, &m_cramCoeffs, &m_rotBases, &m_lnclBack, &m_nbgLines, &m_spriteFB, &m_composite,
           &m_nbgChars}) {
@@ -303,10 +315,16 @@ bool Vdp2VulkanBackend::SetScale(uint32_t n) {
     if (n == m_scale) {
         return true;
     }
+    // The N x sprite images belong to the old scale: freed first (the sets are rewritten below)
+    const bool hadSpriteNx = m_spriteLayersNx.image != VK_NULL_HANDLE;
+    DestroySpriteNx();
     vk_util::Image bgLayers;
     vk_util::Buffer composite;
     const VkResult result = CreateScaledResources(n, bgLayers, composite);
     if (result != VK_SUCCESS) {
+        if (hadSpriteNx) {
+            WriteAllBlockSets();
+        }
         Log("VDP2 internal resolution " + std::to_string(n) + "x: allocating " +
             std::to_string(ScaledResourceBytes(n) >> 20) + " MiB failed (VkResult " +
             std::to_string(static_cast<int>(result)) + "); staying at " + std::to_string(m_scale) + "x");
@@ -332,13 +350,7 @@ bool Vdp2VulkanBackend::SetScale(uint32_t n) {
     }
     m_composite = composite;
     m_scale = n;
-    for (FrameContext &context : m_contexts) {
-        for (UploadBlock &block : context.blocks) {
-            if (block.pool != VK_NULL_HANDLE) {
-                WriteBlockSets(block);
-            }
-        }
-    }
+    WriteAllBlockSets();
     if (m_pending.rescale) {
         const VkDescriptorBufferInfo infos[2] = {{m_rescaleSource.composite.buffer, 0, VK_WHOLE_SIZE},
                                                  {m_composite.buffer, 0, VK_WHOLE_SIZE}};
@@ -354,6 +366,58 @@ bool Vdp2VulkanBackend::SetScale(uint32_t n) {
         m_device.Table().vkUpdateDescriptorSets(m_device.Device(), 2, writes, 0, nullptr);
     }
     return true;
+}
+
+void Vdp2VulkanBackend::WriteAllBlockSets() {
+    for (FrameContext &context : m_contexts) {
+        for (UploadBlock &block : context.blocks) {
+            if (block.pool != VK_NULL_HANDLE) {
+                WriteBlockSets(block);
+            }
+        }
+    }
+}
+
+VkDeviceSize Vdp2VulkanBackend::SpriteNxImageBytes(uint32_t n) {
+    return VkDeviceSize{ScaledResH(n)} * ScaledResV(n) * (4 * kSpriteLayerImageLayers + 4 * kSpriteAttrImageLayers);
+}
+
+void Vdp2VulkanBackend::DestroySpriteNx() {
+    vk_util::DestroyImage(m_device, m_spriteLayersNx);
+    vk_util::DestroyImage(m_device, m_spriteAttrsNx);
+    m_spriteSurfaceNx = VK_NULL_HANDLE;
+}
+
+bool Vdp2VulkanBackend::SetSpriteSurfaceNx(VkBuffer surface) {
+    if (!Ok()) {
+        return false;
+    }
+    if (surface == m_spriteSurfaceNx) {
+        return surface == VK_NULL_HANDLE || m_spriteLayersNx.image != VK_NULL_HANDLE;
+    }
+    // Free first: nothing uses the old images any more (the caller's guarantee)
+    DestroySpriteNx();
+    bool ok = surface == VK_NULL_HANDLE;
+    if (surface != VK_NULL_HANDLE && m_scale > 1) {
+        VkResult result = m_failSpriteNx ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_SUCCESS;
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreateImage2D(m_device, SpriteLayersNxDesc(m_scale), m_spriteLayersNx);
+        }
+        if (result == VK_SUCCESS) {
+            result = vk_util::CreateImage2D(m_device, SpriteAttrsNxDesc(m_scale), m_spriteAttrsNx);
+        }
+        if (result == VK_SUCCESS) {
+            m_spriteSurfaceNx = surface;
+            ok = true;
+        } else {
+            DestroySpriteNx();
+            Log("VDP1 upscaling: the " + std::to_string(m_scale) + "x sprite layers (" +
+                std::to_string(SpriteNxImageBytes(m_scale) >> 20) + " MiB) could not be allocated (VkResult " +
+                std::to_string(static_cast<int>(result)) + ")");
+        }
+    }
+    WriteAllBlockSets();
+    return ok;
 }
 
 void Vdp2VulkanBackend::FrameDropped() {
@@ -509,23 +573,31 @@ VkResult Vdp2VulkanBackend::CreateBlockSets(UploadBlock &block) {
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 0},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0},
     }};
+    // One set per pipeline, and the N x sprite pass's and compose's N x sets
     for (uint32_t p = 0; p < kPipelineCount; ++p) {
         for (const Binding &b : BindingTable(p)) {
-            ++sizes[static_cast<size_t>(b.kind)].descriptorCount;
+            sizes[static_cast<size_t>(b.kind)].descriptorCount += (p == kSprite || p == kCompose) ? 2 : 1;
         }
     }
     static_assert(static_cast<size_t>(DescriptorKind::StorageBuffer) == 0 &&
                   static_cast<size_t>(DescriptorKind::StorageBufferDynamic) == 1 &&
                   static_cast<size_t>(DescriptorKind::SampledImage) == 2 &&
                   static_cast<size_t>(DescriptorKind::StorageImage) == 3);
-    VkResult result = vk_util::CreateDescriptorPool(m_device, sizes, kPipelineCount, block.pool);
+    VkResult result = vk_util::CreateDescriptorPool(m_device, sizes, kPipelineCount + 2, block.pool);
     for (uint32_t p = 0; p < kPipelineCount && result == VK_SUCCESS; ++p) {
         result = vk_util::AllocateDescriptorSet(m_device, block.pool, m_setLayouts[p], block.sets[p]);
+    }
+    if (result == VK_SUCCESS) {
+        result = vk_util::AllocateDescriptorSet(m_device, block.pool, m_setLayouts[kSprite], block.nxSpriteSet);
+    }
+    if (result == VK_SUCCESS) {
+        result = vk_util::AllocateDescriptorSet(m_device, block.pool, m_setLayouts[kCompose], block.nxComposeSet);
     }
     if (result != VK_SUCCESS) {
         vk.vkDestroyDescriptorPool(dev, block.pool, nullptr);
         block.pool = VK_NULL_HANDLE;
         block.sets = {};
+        block.nxSpriteSet = block.nxComposeSet = VK_NULL_HANDLE;
         return result;
     }
     WriteBlockSets(block);
@@ -535,7 +607,16 @@ VkResult Vdp2VulkanBackend::CreateBlockSets(UploadBlock &block) {
 void Vdp2VulkanBackend::WriteBlockSets(UploadBlock &block) {
     const auto &vk = m_device.Table();
     const VkDevice dev = m_device.Device();
-    for (uint32_t p = 0; p < kPipelineCount; ++p) {
+    // Sets 0 to kPipelineCount - 1: the pipelines'; then the N x sprite pass's and compose's N x sets, on the N x
+    // sprite images and the N x surface (the native images and framebuffer while there are none).
+    const bool haveNx = m_spriteSurfaceNx != VK_NULL_HANDLE;
+    for (uint32_t s = 0; s < kPipelineCount + 2; ++s) {
+        const bool nxSet = s >= kPipelineCount;
+        const uint32_t p = s == kPipelineCount ? kSprite : s == kPipelineCount + 1 ? kCompose : s;
+        const VkDescriptorSet set = s == kPipelineCount ? block.nxSpriteSet
+                                    : nxSet             ? block.nxComposeSet
+                                                        : block.sets[s];
+        const bool nx = nxSet && haveNx;
         for (const Binding &b : BindingTable(p)) {
             VkDescriptorBufferInfo bufferInfo{VK_NULL_HANDLE, 0, VK_WHOLE_SIZE};
             VkDescriptorImageInfo imageInfo{VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL};
@@ -552,12 +633,13 @@ void Vdp2VulkanBackend::WriteBlockSets(UploadBlock &block) {
             case kBindingCompositeOut: bufferInfo.buffer = m_composite.buffer; break;
             case kBindingNBGChars:
             case kBindingNBGCharsOut: bufferInfo.buffer = m_nbgChars.buffer; break;
+            case kBindingSpriteFBNx: bufferInfo.buffer = nx ? m_spriteSurfaceNx : m_spriteFB.buffer; break;
             case kBindingSpriteAttrsIn:
-            case kBindingSpriteAttrsOut: imageInfo.imageView = m_spriteAttrs.view; break;
+            case kBindingSpriteAttrsOut: imageInfo.imageView = nx ? m_spriteAttrsNx.view : m_spriteAttrs.view; break;
             case kBindingLayerIn:
             case kBindingLayerOut: imageInfo.imageView = m_bgLayers.view; break;
             case kBindingSpriteLayerIn:
-            case kBindingSpriteLayerOut: imageInfo.imageView = m_spriteLayers.view; break;
+            case kBindingSpriteLayerOut: imageInfo.imageView = nx ? m_spriteLayersNx.view : m_spriteLayers.view; break;
             case kBindingRBGLineColorIn:
             case kBindingRBGLineColorOut: imageInfo.imageView = m_rbgLineColor.view; break;
             case kBindingColorCalcWindowIn:
@@ -565,7 +647,7 @@ void Vdp2VulkanBackend::WriteBlockSets(UploadBlock &block) {
             default: break;
             }
             VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            write.dstSet = block.sets[p];
+            write.dstSet = set;
             write.dstBinding = b.binding;
             write.descriptorCount = 1;
             write.descriptorType = ToVk(b.kind);
@@ -587,15 +669,19 @@ void Vdp2VulkanBackend::Barrier(VkCommandBuffer cmd, VkPipelineStageFlags srcSta
 void Vdp2VulkanBackend::Dispatch(VkCommandBuffer cmd, Pipeline pipeline, const UploadBlock &block,
                                  uint32_t paramsOffset, const VDP2CommonRenderParams &common, uint32_t startY,
                                  uint32_t lines, uint32_t groupsX, uint32_t groupsZ, uint32_t outputSize,
-                                 uint32_t scale) const {
+                                 uint32_t scale, uint32_t spriteScale, VkDescriptorSet set) const {
     const auto &vk = m_device.Table();
     VDP2CommonRenderParams push = common;
     push.startY = startY;
     push.outputSize = outputSize;
     push.renderScale = scale;
+    push.spriteScale = spriteScale;
+    if (set == VK_NULL_HANDLE) {
+        set = block.sets[pipeline];
+    }
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines[pipeline]);
-    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayouts[pipeline], 0, 1,
-                               &block.sets[pipeline], 1, &paramsOffset);
+    vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayouts[pipeline], 0, 1, &set, 1,
+                               &paramsOffset);
     vk.vkCmdPushConstants(cmd, m_pipelineLayouts[pipeline], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vk.vkCmdDispatch(cmd, groupsX, lines, groupsZ);
 }
@@ -612,6 +698,7 @@ void Vdp2VulkanBackend::DispatchNBGFetch(VkCommandBuffer cmd, const UploadBlock 
     push.common.startY = startY;
     push.common.outputSize = outputSize;
     push.common.renderScale = 1;
+    push.common.spriteScale = 0;
     push.rows = lines;
     vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines[kNBGFetch]);
     vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayouts[kNBGFetch], 0, 1,
@@ -741,8 +828,13 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
 
     // The layer images only hold rows of the frame being rendered (every row composed this frame is rendered this
     // frame), so they start from UNDEFINED each frame, independent of what earlier command buffers did.
-    for (const vk_util::Image *image :
-         {&m_bgLayers, &m_spriteLayers, &m_spriteAttrs, &m_rbgLineColor, &m_colorCalcWindow}) {
+    // VDP1 upscaling: the N x sprite layers of this frame (none without an N x surface)
+    const bool nxSprites = m_spriteSurfaceNx != VK_NULL_HANDLE && m_scale > 1;
+    for (const vk_util::Image *image : {&m_bgLayers, &m_spriteLayers, &m_spriteAttrs, &m_rbgLineColor,
+                                        &m_colorCalcWindow, &m_spriteLayersNx, &m_spriteAttrsNx}) {
+        if (image->image == VK_NULL_HANDLE) {
+            continue;
+        }
         vk_util::ImageBarrier(m_device, cmd, image->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                               kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute | kTransfer,
                               kShaderRW | VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -839,6 +931,13 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
             const uint32_t spriteLayers = batch.common.enhancements.transparentMeshes ? 2 : 1;
             Dispatch(cmd, kSprite, arenaBlock, layerOffset, batch.common, batch.layerStartY, batch.layerLines,
                      groupsX, spriteLayers, outputSize, 1);
+            if (nxSprites) {
+                // VDP1 upscaling: the N x sprite pass (the native one above still feeds the sprite windows)
+                Dispatch(cmd, kSprite, arenaBlock, layerOffset, batch.common, batch.layerStartY,
+                         batch.layerLines * scale, scaledGroupsX, spriteLayers, outputSize, scale, scale,
+                         arenaBlock.nxSpriteSet);
+                ++stats.nxSpritePasses;
+            }
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
             if (batch.needsFetchPass) {
                 // After the sprite pass (the sprite window), before bgs (the character table).
@@ -856,7 +955,9 @@ bool Vdp2VulkanBackend::Record(const Vdp2FrameRecord &frame, uint32_t contextInd
         if (batch.composeLines > 0) {
             const uint32_t composeOffset = static_cast<uint32_t>(arenaBase) + batch.composeParamsOffset;
             Dispatch(cmd, kCompose, arenaBlock, composeOffset, batch.common, batch.composeStartY,
-                     batch.composeLines * scale, scaledGroupsX, 1, outputSize, scale);
+                     batch.composeLines * scale, scaledGroupsX, 1, outputSize, scale, nxSprites ? scale : 0,
+                     nxSprites ? arenaBlock.nxComposeSet : VK_NULL_HANDLE);
+            stats.nxComposes += nxSprites ? 1 : 0;
             Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute, kShaderRW);
             stats.composeOutputSize = outputSize;
         }

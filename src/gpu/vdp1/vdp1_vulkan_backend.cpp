@@ -568,6 +568,9 @@ void Vdp1VulkanBackend::Prologue(VkCommandBuffer cmd) {
         RecordNxRebuild(cmd, m_nxPendingRebuild);
         m_nxRecordedRebuild |= m_nxPendingRebuild;
         m_nxPendingRebuild = 0;
+        // The rebuild reads the GPU FBRAM and writes the surface: both before what this Record does next (an FBRAM
+        // upload's copy overwrites what it read, its rebuild_nx and the N x passes write the surface again)
+        Barrier(cmd, kCompute, VK_ACCESS_SHADER_WRITE_BIT, kCompute | kTransfer, kAll);
     }
 }
 
@@ -661,6 +664,8 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
     };
     // At N x: the N x sub-batches of every draw first (their spans are uploaded with the rest)
     const uint32_t nx = m_nxScale;
+    const uint64_t malformedSpansBefore = m_nxArena.stats.malformedSpans;
+    const uint64_t oversizedSpansBefore = m_nxArena.stats.oversizedSpans;
     if (nx != 0) {
         m_nxArena.Clear();
         m_nxDraws.assign(segment.opCount, NxDraw{});
@@ -694,6 +699,17 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
     if (bytes != 0 && !Allocate(context, bytes, upload)) {
         return false;
     }
+    // The generator's skipped native spans count as malformed data (the first logged); a lone N x span above a
+    // sub-batch's slot capacity (unreachable with 13-bit coordinates) is counted in the stats
+    if (const uint64_t skipped = m_nxArena.stats.malformedSpans - malformedSpansBefore; skipped != 0) {
+        m_stats.malformed += static_cast<uint32_t>(skipped);
+        if (m_malformedTotal == 0) {
+            Log("VDP1: skipped " + std::to_string(skipped) +
+                " malformed native span(s) at N x (data out of range); later ones are only counted");
+        }
+        m_malformedTotal += skipped;
+    }
+    m_stats.nxOversizedSpans += static_cast<uint32_t>(m_nxArena.stats.oversizedSpans - oversizedSpansBefore);
 
     const auto &vk = m_device.Table();
     VkDeviceSize cursor = 0;

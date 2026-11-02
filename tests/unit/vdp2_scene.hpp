@@ -253,8 +253,11 @@ struct SampleLatticeRow {
 /// layer is transparent or covered (the lattice does not know which layer is on top). So in single density the odd
 /// rows of the lines with every NBG and RBG off are compared (sprites, back screen; the scene "single-density
 /// interlace with NBGs off on some lines").
+/// With nxSpriteLayers (VDP1 upscaling shown by VDP2), a hi-res line with a 16-bit sprite framebuffer (doubled sprite
+/// output, smooth across each pair at N x) skips its odd columns too.
 void LatticeForLine(const Vdp2SceneWriter &writer, const ymir::vdp::VDPState &state, uint32_t y, bool deinterlace,
-                    const std::function<void(uint32_t row, SampleLatticeRow flags)> &set);
+                    const std::function<void(uint32_t row, SampleLatticeRow flags)> &set,
+                    bool nxSpriteLayers = false);
 
 /// @brief Nearest-upscale comparison: every pixel (X, Y) of `scaled` (n * width x n * height) must equal
 /// software(X / n, Y / n) in RGB. Fills result (scale, gpuScaled, the native gpu image, diffs, comparedPixels,
@@ -333,7 +336,11 @@ struct RenderBothOptions {
     // replaying what the GPU replayed (VulkanVDPRenderer::SetVdp1WorkObserverForTest: submitted op lists and FBRAM
     // uploads; a new surface is the reference's native FBRAM replicated); the reference's native FBRAM is compared with
     // the GPU's there too.
+    // BRIMIR_VDP1_UPSCALING=1 turns it on for every scene. VDP2 decodes the N x surface (the frames show N x sprites),
+    // unless nativeSpriteLayers (VulkanVDPRenderer::SetVdp2NxSpritesForTest(false): the surface is drawn and checked,
+    // the frames show the native sprite layer and stay comparable with software where quad-path content differs).
     bool vdp1Upscaling = false;
+    bool nativeSpriteLayers = false;
     uint32_t nxCompareEvery = 1;
     // Called at each N x comparison (after it) with the checkpoint's label, the scale and the GPU's N x surface and
     // FBRAM bytes as read back.

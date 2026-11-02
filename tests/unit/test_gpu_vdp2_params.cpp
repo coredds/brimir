@@ -228,6 +228,7 @@ TEST_CASE("RotDotShr10 and RotCoordShr equal the int64_t expressions on 1,000,00
         CHECK_OFFSET(VDP2CommonRenderParams, enhancements, k##shader##_CommonRenderParams_enhancements);               \
         CHECK_OFFSET(VDP2CommonRenderParams, outputSize, k##shader##_CommonRenderParams_outputSize);                   \
         CHECK_OFFSET(VDP2CommonRenderParams, renderScale, k##shader##_CommonRenderParams_renderScale);                 \
+        CHECK_OFFSET(VDP2CommonRenderParams, spriteScale, k##shader##_CommonRenderParams_spriteScale);                 \
         CHECK_SIZE(VDP2CommonRenderParams, k##shader##_CommonRenderParams_size);                                       \
     } while (false)
 
@@ -241,6 +242,7 @@ TEST_CASE("VDP2 host parameter structs match the reflected std430 layouts", "[vd
         STATIC_CHECK(offsetof(VDP2CommonRenderParams, spritePriosRatios) == 24);
         STATIC_CHECK(offsetof(VDP2CommonRenderParams, outputSize) == 44);
         STATIC_CHECK(offsetof(VDP2CommonRenderParams, renderScale) == 48);
+        STATIC_CHECK(offsetof(VDP2CommonRenderParams, spriteScale) == 52);
         STATIC_CHECK(sizeof(VDP2CommonRenderParams) == 56);
         CHECK(sizeof(VDP2CommonRenderParams) <= 128); // the push-constant minimum
     }

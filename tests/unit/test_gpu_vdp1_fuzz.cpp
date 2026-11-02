@@ -960,13 +960,15 @@ uint64_t EnvU64(const char *name, uint64_t fallback) {
 // `hazardTracking` false breaks the GPU renderer on purpose (the front half's VRAM hazard batch splits off): the
 // sensitivity check. `nx` > 1: VDP1 upscaling at internal resolution nx, the N x surface compared with the N x
 // reference at every nxEvery-th checkpoint and every frame's end (vdp2_scene.hpp RenderBothOptions::vdp1Upscaling);
-// frames are compared at the sample points.
+// frames are compared at the sample points, with VDP2 showing the native sprite layer (random quads differ from native
+// at N x by design; the N x surface itself is checked against the reference).
 FuzzResult RunProgram(gpu::VulkanDevice &device, const FuzzProgram &p, bool hazardTracking = true, uint32_t nx = 0,
                       uint32_t nxEvery = 1) {
     auto log = std::make_shared<FuzzLog>();
     RenderBothOptions options;
     if (nx > 1) {
         options.vdp1Upscaling = true;
+        options.nativeSpriteLayers = true;
         options.scale = nx;
         options.nxCompareEvery = nxEvery;
     }

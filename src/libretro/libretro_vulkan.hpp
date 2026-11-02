@@ -146,6 +146,11 @@ public:
     uint32_t InternalScale() const;
     // The internal resolution of the last frame handed over (1 for the software renderer and the copy-only output).
     uint32_t PresentedScale() const;
+    // VDP1 upscaling (brimir_vdp1_upscaling; VulkanVDPRenderer::SetVdp1Upscaling): kept across contexts and set on the
+    // renderer at each attach. A change applies like an internal resolution change, at the next shown frame with a VDP2
+    // frame to record, after the same waits (ApplyInternalScale): the output images keep their size and the composite
+    // stays valid (the woven field too); the frame shows the sprites as drawn under the new setting.
+    void SetVdp1Upscaling(bool enabled);
 
 private:
     struct Impl;

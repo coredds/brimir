@@ -196,6 +196,8 @@ struct OptionCache {
     std::string renderer = "software";
     // Live (Vulkan VDP2 renderer only): applied at the next shown frame.
     std::string internal_resolution = "1";
+    // Live (Vulkan renderer with VDP1 on the GPU, internal resolution above 1): applied at the next shown frame.
+    std::string vdp1_upscaling = "enabled";
 } g_options;
 
 #ifdef BRIMIR_VULKAN
@@ -205,6 +207,11 @@ static unsigned requested_internal_resolution(void) {
 }
 
 static void note_internal_resolution(void);
+
+// brimir_vdp1_upscaling (VDP1 upscaling: VDP1 drawn at the internal resolution, GPU stage 3)
+static bool vdp1_upscaling_requested(void) {
+    return g_options.vdp1_upscaling != "disabled";
+}
 #endif
 
 static void apply_core_options(bool force) {
@@ -262,6 +269,11 @@ static void apply_core_options(bool force) {
             g_vulkanOutput->SetInternalScale(requested_internal_resolution());
         }
         note_internal_resolution();
+    });
+    apply("brimir_vdp1_upscaling", g_options.vdp1_upscaling, [](const char*) {
+        if (g_vulkanOutput) {
+            g_vulkanOutput->SetVdp1Upscaling(vdp1_upscaling_requested());
+        }
     });
 #endif
 }
@@ -342,16 +354,6 @@ static bool vdp1_mode_requested(void) {
     return requested;
 }
 
-// VDP1 upscaling (GPU stage 3: the N x sprite surface at internal resolution N > 1) is off until its core option
-// exists; BRIMIR_VDP1_UPSCALING=1 turns it on for tests and brimir_vkhost. VDP2 still shows the native sprite layer.
-static bool vdp1_upscaling_requested(void) {
-    static const bool requested = [] {
-        const char* env = std::getenv("BRIMIR_VDP1_UPSCALING");
-        return env != nullptr && std::strcmp(env, "1") == 0;
-    }();
-    return requested;
-}
-
 // The VDP renderer follows the frame output: the Vulkan VDP renderer while the compute output is live, the software
 // renderer otherwise (copy-only output, no context, or the renderer cannot run on the device). Switching carries the
 // renderer state over (CoreWrapper). Call between frames: context_reset, the start of retro_run, or after a frame
@@ -373,7 +375,6 @@ static void sync_vdp_renderer(void) {
             error = "installing it failed";
         } else {
             renderer->SetVdp1Mode(vdp1_mode_requested() ? brimir::gpu::Vdp1Mode::Gpu : brimir::gpu::Vdp1Mode::Software);
-            renderer->SetVdp1Upscaling(vdp1_upscaling_requested());
             if (g_vulkanOutput->AttachRenderer(*renderer, error)) {
                 set_vdp2_probe(*renderer);
                 set_vdp1_op_dump(*renderer);
@@ -438,6 +439,7 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
         GpuWorkScope::Apply();
     }
     g_vulkanOutput->SetInternalScale(requested_internal_resolution());
+    g_vulkanOutput->SetVdp1Upscaling(vdp1_upscaling_requested());
     std::string reason;
     const bool live = g_vulkanOutput->ContextReset(environ_cb, reason);
     g_vulkanPresentErrorLogged = false;

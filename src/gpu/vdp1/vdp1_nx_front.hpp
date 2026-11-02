@@ -67,6 +67,11 @@ struct Vdp1NxStats {
     // Native spans skipped as malformed (the front half never makes one): a rect command's span that is not one of its
     // rows, or a span whose command index is out of the batch
     uint64_t malformedSpans = 0;
+    // N x spans whose slots alone exceed the sub-batch slot capacity (limits.slots): such a span gets a sub-batch of
+    // its own, whose slots beyond the fragment buffer the shaders drop. Unreachable at the real capacity: a native line
+    // is at most 16,384 pixels (vertex deltas of 13-bit coordinates, doubled vertically), so a span has at most
+    // 16 x 32,768 = 524,288 slots at 4x (replicate), against kMaxNxSlotsPerSubBatch (4 Mi); tests lower the limits.
+    uint64_t oversizedSpans = 0;
 };
 
 struct Vdp1NxArena {

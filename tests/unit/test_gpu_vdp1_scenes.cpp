@@ -604,7 +604,9 @@ SceneCase SceneSaveLoad() {
 FbramResult RunCase(const SceneCase &s, uint32_t nx = 0) {
     RenderBothOptions options = s.options;
     if (nx != 0) {
+        // The surface against the reference; frames with the native sprite layer (the scenes have quad-path content)
         options.vdp1Upscaling = true;
+        options.nativeSpriteLayers = true;
         options.scale = nx;
     }
     return RunFbramScene(s.scene, options, s.requireColors, s.skipFrame);
@@ -1839,6 +1841,7 @@ struct NxSnapshots {
 RenderBothOptions NxOptions(uint32_t nx, const std::shared_ptr<NxSnapshots> &snaps = nullptr) {
     RenderBothOptions options;
     options.vdp1Upscaling = true;
+    options.nativeSpriteLayers = true;
     options.scale = nx;
     if (snaps) {
         options.nxInspect = [snaps](const std::string &, uint32_t scale, std::span<const uint8_t> surface,
@@ -2207,4 +2210,232 @@ TEST_CASE("GPU VDP1 N x: a full batch at 4x splits into several sub-batches, res
                   true, UINT32_MAX, false);
     INFO(subBatches << " sub-batches, at most " << maxSubBatches << " per native batch");
     CHECK(maxSubBatches >= 4);
+}
+
+// =====================================================================================================================
+// VDP1 upscaling shown by VDP2 (GPU stage 3, Task 6): the N x sprite pass decodes the N x surface and compose reads it.
+
+namespace {
+
+// A random rect-path command (stage3-research.md section 3.3: normal sprites, scaled sprites, distorted sprites and
+// polygons with xa == xd, xb == xc, ya == yb, yc == yd), every colour and draw mode; `normalOnly`: 1:1 normal sprites.
+Vdp1Cmd RandomRectDraw(std::mt19937 &rng, const Assets &a, int maxX, int maxY, bool normalOnly) {
+    Vdp1Cmd cmd;
+    const uint32_t cm = Rand(rng, 6);
+    uint16_t pmod = static_cast<uint16_t>((cm << 3) | Rand(rng, 8));
+    if (Rand(rng, 5) == 0) pmod |= 0x0040;
+    if (Rand(rng, 5) == 0) pmod |= 0x0080;
+    if (Rand(rng, 5) == 0) pmod |= 0x0100;
+    if (Rand(rng, 7) == 0) pmod |= static_cast<uint16_t>(0x0400 | (Rand(rng, 2) << 9));
+    if (Rand(rng, 5) == 0) pmod |= 0x1000;
+    if (Rand(rng, 10) == 0) pmod |= 0x8000;
+    if (normalOnly) {
+        pmod = static_cast<uint16_t>(pmod & ~0x0004); // no Gouraud: more than one 5-bit step per pixel shows its natively skipped steps at N x
+    }
+    const uint16_t colr = cm == 1 ? a.lut : cm == 5 ? 0 : static_cast<uint16_t>(Rand(rng, 0x80) << 4);
+    const auto x = [&] { return RandI(rng, -24, maxX + 8); };
+    const auto y = [&] { return RandI(rng, -24, maxY + 8); };
+    switch (normalOnly ? 0 : Rand(rng, 5)) {
+    case 0: cmd = Vdp1Cmd::Normal(pmod, colr, a.srca[cm], Vdp1Size(16, 16), x(), y()); break;
+    case 1: {
+        const int ax = x(), ay = y();
+        cmd = Vdp1Cmd::Scaled(pmod, colr, a.srca[cm], Vdp1Size(16, 16), ax, ay, ax + RandI(rng, -40, 60),
+                              ay + RandI(rng, -40, 60));
+        break;
+    }
+    case 2: {
+        static constexpr uint16_t kZoom[] = {5, 6, 7, 9, 10, 11, 13, 14, 15};
+        cmd = Vdp1Cmd::ScaledZoom(kZoom[Rand(rng, 9)], pmod, colr, a.srca[cm], Vdp1Size(16, 16), x(), y(),
+                                  RandI(rng, -50, 50), RandI(rng, -50, 50));
+        break;
+    }
+    case 3: {
+        const int ax = x(), ay = y(), bx = ax + RandI(rng, -60, 60), cy = ay + RandI(rng, -50, 50);
+        cmd = Vdp1Cmd::Distorted(pmod, colr, a.srca[cm], Vdp1Size(16, 16), ax, ay, bx, ay, bx, cy, ax, cy);
+        break;
+    }
+    default: {
+        const int ax = x(), ay = y(), bx = ax + RandI(rng, -90, 90), cy = ay + RandI(rng, -70, 70);
+        const uint16_t rgb =
+            static_cast<uint16_t>(Rand(rng, 2) ? 0x8000 | Rand(rng, 0x8000) : Rand(rng, 0x10000) & 0x7FFF);
+        cmd = Vdp1Cmd::Polygon(static_cast<uint16_t>(pmod & ~0x0038), rgb, ax, ay, bx, ay, bx, cy, ax, cy);
+        break;
+    }
+    }
+    if ((pmod & 0x0004) != 0) {
+        cmd.Gouraud(a.gouraud[Rand(rng, static_cast<uint32_t>(a.gouraud.size()))]);
+    }
+    cmd.Flip(Rand(rng, 2) != 0, Rand(rng, 2) != 0);
+    return cmd;
+}
+
+// WriteTable with rect-path commands only (the half-transparent stack is rect polygons)
+void WriteRectTable(Vdp2SceneWriter &w, std::mt19937 &rng, const Assets &a, uint32_t count, int maxX, int maxY,
+                    bool normalOnly) {
+    uint32_t slot = 0;
+    const auto put = [&](const Vdp1Cmd &cmd) { w.VDP1Command(0x20 * slot++, cmd); };
+    put(Vdp1Cmd::SystemClip(maxX - 1, maxY - 1));
+    put(Vdp1Cmd::UserClip(RandI(rng, 0, 80), RandI(rng, 0, 60), RandI(rng, 160, 300), RandI(rng, 120, 200)));
+    put(Vdp1Cmd::Local(RandI(rng, -8, 16), RandI(rng, -8, 16)));
+    for (uint32_t i = 0; i < count; ++i) {
+        switch (Rand(rng, 24)) {
+        case 0: put(Vdp1Cmd::Local(RandI(rng, -16, 24), RandI(rng, -16, 24))); break;
+        case 1: put(RandomRectDraw(rng, a, maxX, maxY, normalOnly).Skip()); break;
+        default: put(RandomRectDraw(rng, a, maxX, maxY, normalOnly)); break;
+        }
+    }
+    const int sx = RandI(rng, 20, 200), sy = RandI(rng, 20, 120);
+    for (uint32_t i = 0; i < 6; ++i) {
+        const int o = static_cast<int>(i) * 3;
+        put(Vdp1Cmd::Polygon(0x0003, static_cast<uint16_t>(0x8000 | Rand(rng, 0x8000)), sx + o, sy + o, sx + 60 + o,
+                             sy + o, sx + 60 + o, sy + 40 + o, sx + o, sy + 40 + o));
+    }
+    put(Vdp1Cmd::End());
+}
+
+FrameControl AutoSwapRect(uint32_t count, int maxX, int maxY, bool normalOnly, uint16_t tvmr = 0) {
+    FrameControl c = AutoSwap(count, maxX, maxY);
+    const auto program = c.program;
+    c.program = [program, tvmr](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f) {
+        program(w, rng, f);
+        w.VDP1Reg(TVMR, tvmr);
+    };
+    c.draw = [=](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteRectTable(w, rng, a, count, maxX, maxY, normalOnly);
+        w.DrawVDP1();
+    };
+    return c;
+}
+
+struct NxSpriteScene {
+    std::string name;
+    Vdp2Scene scene;
+};
+
+// Rect-path scenes over the sprite readouts: lo-res 16 bpp (mixed format), transparent meshes, double density with
+// deinterlacing, 8 bpp (doubled input, sprite type 8), hi-res 640 (doubled output: odd columns excluded), palette
+// sprite type 3 with shadows.
+std::vector<NxSpriteScene> RectScenes(bool normalOnly) {
+    const auto display = [](uint16_t tvmd, uint16_t spctl) {
+        return [=](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng, tvmd, spctl); };
+    };
+    std::vector<NxSpriteScene> list;
+    list.push_back({"lo-res, mixed format",
+                    Vdp1Scene(display(kDisp, 0x0020), AutoSwapRect(50, 320, 224, normalOnly), 3, {}, 61)});
+    list.push_back({"transparent meshes", Vdp1Scene(display(kDisp, 0x0020), AutoSwapRect(50, 320, 224, normalOnly),
+                                                    3, {.transparentMeshes = true}, 62)});
+    list.push_back({"palette type 3", Vdp1Scene(display(kDisp, 0x0003), AutoSwapRect(50, 320, 224, normalOnly), 3,
+                                                {}, 63)});
+    if (!normalOnly) {
+        list.push_back({"double density, deinterlaced",
+                        Vdp1Scene(display(kDisp | kDoubleDensity, 0x0020), AutoSwapRect(50, 320, 224, false), 3,
+                                  {.deinterlace = true, .transparentMeshes = true}, 64)});
+        list.push_back({"8 bpp (doubled input)",
+                        Vdp1Scene(display(kDisp, 0x0008), AutoSwapRect(50, 320, 224, false, 1), 3, {}, 65)});
+        list.push_back({"hi-res 640 (doubled output)",
+                        Vdp1Scene(display(kDisp | 0x0002, 0x0020), AutoSwapRect(50, 320, 224, false), 3, {}, 66)});
+    }
+    return list;
+}
+
+} // namespace
+
+TEST_CASE("GPU VDP1 N x sprites: rect-path scenes shown at N x equal 1x software at the sample points",
+          "[gpu][vdp1][scene][nx][nxsprites]") {
+    // The N x surface against the reference, every frame at the sample points against software with VDP2 decoding the
+    // N x surface (sub-texel (0, 0) of a rect-path block is the native word); doubled hi-res output excludes its odd
+    // columns (vdp2_scene.cpp LatticeForLine).
+    const bool cpu = CpuDevice();
+    for (const uint32_t n : NxScales(cpu)) {
+        for (const NxSpriteScene &s : RectScenes(false)) {
+            if (cpu && n == 4 && s.name != "lo-res, mixed format") {
+                continue;
+            }
+            DYNAMIC_SECTION(n << "x: " << s.name) {
+                uint32_t shown = 0;
+                RenderBothOptions options;
+                options.vdp1Upscaling = true;
+                options.scale = n;
+                options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+                    CHECK(vk.Vdp2NxSprites());
+                    shown += vk.LastNxRecordStats().spritePasses != 0 ? 1 : 0;
+                };
+                RunFbramScene(s.scene, options);
+                CHECK(shown == s.scene.frames);
+            }
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x sprites: 1:1 normal sprites shown at N x are a nearest upscale of 1x software",
+          "[gpu][vdp1][scene][nx][nxsprites]") {
+    // Normal sprites (every colour mode and colour calculation but Gouraud, mesh, clipping, end codes, flips) and the
+    // half-transparent rect polygons:
+    // every N x block of the surface is one word, and every N x pixel of the frame equals software's native pixel.
+    for (const uint32_t n : NxScales(CpuDevice())) {
+        for (const NxSpriteScene &s : RectScenes(true)) {
+            DYNAMIC_SECTION(n << "x: " << s.name) {
+                RenderBothOptions options;
+                options.vdp1Upscaling = true;
+                options.scale = n;
+                options.scaleCompare = brimir::test::ScaleCompare::Nearest;
+                const FbramResult r = RunFbramScene(s.scene, options, true, UINT32_MAX, false);
+                CHECK(r.nxDetailBlocks == 0);
+            }
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x sprites: Software VDP1 mode and N x sprites off show the native sprite layer",
+          "[gpu][vdp1][scene][nx][nxsprites]") {
+    // Upscaling requested with VDP1 in software (no N x surface), and with the VDP2 decode turned off by the test hook:
+    // no N x sprite pass is recorded; frames compared at the sample points with quad-path content.
+    for (const bool softwareVdp1 : {true, false}) {
+        DYNAMIC_SECTION((softwareVdp1 ? "Software VDP1 mode" : "N x surface drawn, not shown")) {
+            uint32_t frames = 0;
+            RenderBothOptions options;
+            options.vdp1Upscaling = true;
+            options.nativeSpriteLayers = !softwareVdp1;
+            options.scale = 2;
+            options.vdp1 = softwareVdp1 ? brimir::test::Vdp1Path::Software : brimir::test::Vdp1Path::Gpu;
+            options.afterFrame = [&](uint32_t, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+                CHECK_FALSE(vk.Vdp2NxSprites());
+                CHECK(vk.LastNxRecordStats().spritePasses == 0);
+                CHECK(vk.Backend()->LastRecordStatsForTest().nxComposes == 0);
+                CHECK(vk.Vdp1UpscaleScale() == (softwareVdp1 ? 0u : 2u));
+                ++frames;
+            };
+            auto device = OpenDevice();
+            const brimir::test::SceneResult r = brimir::test::RenderBoth(SceneEveryCommand().scene, *device, options);
+            INFO(r.Describe());
+            CHECK(r.error.empty());
+            CHECK(r.identical);
+            CHECK(frames == 4);
+            CloseAndCheckValidation(device);
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 N x sprites: the VDP2 sprite layers cannot be allocated", "[gpu][vdp1][scene][nx][nxsprites]") {
+    // The N x sprite images fail to allocate: logged, VDP1 upscaling off at that scale (no surface), frames native.
+    std::vector<std::string> logs;
+    RenderBothOptions options;
+    options.scale = 2;
+    options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+        if (f == 1) {
+            vk.SetLog([&logs](const std::string &text) { logs.push_back(text); });
+            vk.Backend()->FailSpriteNxAllocationForTest(true);
+            vk.SetVdp1Upscaling(true);
+            CHECK(vk.Vdp1UpscaleScale() == 0);
+            CHECK_FALSE(vk.Vdp2NxSprites());
+        }
+    };
+    RunFbramScene(SceneEveryCommand().scene, options);
+    CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+              return text.find("2x sprite layers") != std::string::npos;
+          }) == 1);
+    CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+              return text.find("VDP1 upscaling off at this internal resolution") != std::string::npos;
+          }) == 1);
 }

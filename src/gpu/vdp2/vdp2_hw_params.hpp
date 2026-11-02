@@ -331,10 +331,14 @@ struct VDP2CommonRenderParams {
     // Brimir: the internal resolution N (1-4) of the background and compose dispatches: they run over N x N output
     // pixels per native pixel, write the background layer image and the composite at N x the native size (pitch
     // N * HRes), and read the native images (sprite layers and attributes, colour calculation window, RBG line colours)
-    // at the native pixel. outputSize stays native. The sprite and NBG fetch passes are native and ignore it. The back
+    // at the native pixel. outputSize stays native. The native sprite pass and the NBG fetch pass ignore it. The back
     // half sets it per dispatch like startY; the front half leaves it 0, which the shaders read as 1.
     HLSLuint renderScale;
-    HLSLuint pad; // std430 tail (the block size is a multiple of the uint2 alignment)
+    // Brimir: VDP1 upscaling (GPU stage 3): N in the N x sprite pass (renderScale N too: it decodes the N x VDP1
+    // surface into the N x sprite layers, N x N threads per native pixel) and in the compose dispatches that read those
+    // layers and attributes at the N x pixel; 0 everywhere else (the native sprite layers, read at the native pixel).
+    // Set per dispatch by the back half; the front half leaves it 0.
+    HLSLuint spriteScale;
 };
 static_assert(sizeof(VDP2CommonRenderParams) == 56);
 static_assert(sizeof(VDP2CommonRenderParams) <= 128, "must fit the minimum maxPushConstantsSize");

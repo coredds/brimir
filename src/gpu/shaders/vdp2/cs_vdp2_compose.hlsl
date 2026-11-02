@@ -13,7 +13,10 @@
 //   Y * (N * HRes) + X; the background layers are read at (X, Y) from the N x layer image, every native input (the
 //   sprite and mesh layers, which have a native image of their own, sprite attributes, colour calculation window, RBG
 //   line colours, LNCL/BACK) at the native pixel (X / N, Y / N); colour gradation taps X - N and X - 2N (the native
-//   neighbours' distance).
+//   neighbours' distance);
+// - VDP1 upscaling (GPU stage 3; CommonRenderParams::spriteScale = N): the sprite and mesh layers and the sprite
+//   attributes are N x images (the N x sprite pass's), read at the N x pixel (SpritePos); the colour calculation window,
+//   line colours and the other native inputs stay at the native pixel.
 // Where Ymir's compositor differs from Brimir's software renderer (the reference), the software semantics are ported,
 // each marked "// Brimir: matches software (sw:<lines>)" (vdp_renderer_sw.cpp; stage1b-port-inventory.md section 4.1):
 // per-layer shadow enable, the extended colour calculation layer-1 enable, the back screen ratio, LNCL/BACK per field
@@ -102,6 +105,8 @@ static const bool transparentMeshes = BitTest(g_commonParams.enhancements, 1);
 // resolution.
 static const uint2 outputSize = UnpackOutputSize(g_commonParams.outputSize);
 static const uint renderScale = UnpackRenderScale(g_commonParams.renderScale);
+// Brimir: the sprite layer images and attributes are N x (VDP1 upscaling), else native.
+static const bool nxSprites = g_commonParams.spriteScale > 1 && g_commonParams.spriteScale == renderScale;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Utilities
@@ -167,14 +172,20 @@ uint2 NativePos(uint2 outPos) {
     return outPos / renderScale;
 }
 
+// Brimir: the pixel of the sprite and mesh layer images and the sprite attributes for N x output pixel outPos: outPos
+// itself when they are N x (VDP1 upscaling), else the native pixel.
+uint2 SpritePos(uint2 outPos) {
+    return nxSprites ? outPos : NativePos(outPos);
+}
+
 // Brimir: layer bgLayer's pixel at N x output pixel outPos: the background layers from the N x layer image, the sprite
-// and mesh layers from their native image at the native pixel, blank for kBGLayerInvalid (D3D12's out-of-bounds read).
+// and mesh layers from their image at SpritePos, blank for kBGLayerInvalid (D3D12's out-of-bounds read).
 uint4 LoadLayer(uint bgLayer, uint2 outPos) {
     if (bgLayer < kBGLayerSprite) {
         return g_layerIn[uint3(outPos, bgLayer)];
     }
     if (bgLayer <= kBGLayerMesh) {
-        return g_spriteLayerIn[uint3(NativePos(outPos), bgLayer - kBGLayerSprite)];
+        return g_spriteLayerIn[uint3(SpritePos(outPos), bgLayer - kBGLayerSprite)];
     }
     return kTransparentPixel;
 }
@@ -220,7 +231,7 @@ bool IsColorCalcEnabled(uint layer, uint2 outPos) {
         if (restrictedColorCalc && BitTest(layerAttrs, kPixelAttrBitSpecColorCalc)) {
             return false;
         }
-        const uint attrs = g_spriteAttrsIn[uint3(pos, 0)];
+        const uint attrs = g_spriteAttrsIn[uint3(SpritePos(outPos), 0)];
         const uint priority = BitExtract(layerAttrs, 0, 3);
         const uint value = BitExtract(g_commonParams.spriteParams, 12, 3);
         const uint cond = BitExtract(g_commonParams.spriteParams, 15, 2);
@@ -249,7 +260,6 @@ bool IsColorCalcEnabled(uint layer, uint2 outPos) {
 // enable bit and restricted colour calculation (and the sprite condition), not the colour calculation window or the
 // per-pixel special colour calculation bit (Ymir uses IsColorCalcEnabled).
 bool IsLayer1ColorCalcEnabled(uint layer, uint2 outPos) {
-    const uint2 pos = NativePos(outPos);
     const bool enabled = BitTest(g_composeParams[0].colorCalcEnable, layer);
     if (!enabled || layer >= kLayerBack) {
         return enabled;
@@ -260,7 +270,7 @@ bool IsLayer1ColorCalcEnabled(uint layer, uint2 outPos) {
         if (restrictedColorCalc && BitTest(layerAttrs, kPixelAttrBitSpecColorCalc)) {
             return false;
         }
-        const uint attrs = g_spriteAttrsIn[uint3(pos, 0)];
+        const uint attrs = g_spriteAttrsIn[uint3(SpritePos(outPos), 0)];
         const uint priority = BitExtract(layerAttrs, 0, 3);
         const uint value = BitExtract(g_commonParams.spriteParams, 12, 3);
         const uint cond = BitExtract(g_commonParams.spriteParams, 15, 2);
@@ -282,8 +292,8 @@ bool IsLayer1ColorCalcEnabled(uint layer, uint2 outPos) {
 
 // Brimir: matches software (sw:4325-4344): the mesh layer's colour calculation uses the sprite enable and condition
 // with the mesh pixel's priority and colour MSB, without the colour calculation window or restricted colour
-// calculation (Ymir tests the kLayerMesh enable bit, which is never set).
-bool IsMeshColorCalcEnabled(uint meshPriority, uint2 pos) {
+// calculation (Ymir tests the kLayerMesh enable bit, which is never set). outPos is the N x output pixel.
+bool IsMeshColorCalcEnabled(uint meshPriority, uint2 outPos) {
     if (!BitTest(g_commonParams.spriteParams, 11)) {
         return false;
     }
@@ -297,7 +307,7 @@ bool IsMeshColorCalcEnabled(uint meshPriority, uint2 pos) {
         case kSpriteCCCondPriorityGE:
             return meshPriority >= value;
         case kSpriteCCCondColorMSB:
-            return BitTest(g_spriteAttrsIn[uint3(pos, 1)], kSpriteAttrBitColorMSB);
+            return BitTest(g_spriteAttrsIn[uint3(SpritePos(outPos), 1)], kSpriteAttrBitColorMSB);
     }
     return false;
 }
@@ -320,10 +330,11 @@ uint3 GetLineColor(uint layer, uint2 pos) {
     return UnpackRGBA8(g_lnclBackIn[GetLineIndex(pos.y)]).rgb; // Brimir: packed RGBA8
 }
 
-int GetColorCalcRatio(uint layer, uint2 pos) {
+// Brimir: outPos is the N x output pixel.
+int GetColorCalcRatio(uint layer, uint2 outPos) {
     switch (layer) {
         case kLayerSprite:
-            return BitExtract(g_spriteAttrsIn[uint3(pos, 0)], kSpriteAttrBitColorCalcRatio, 5);
+            return BitExtract(g_spriteAttrsIn[uint3(SpritePos(outPos), 0)], kSpriteAttrBitColorCalcRatio, 5);
         case kLayerRBG0:
         case kLayerNBG0_RBG1:
         case kLayerNBG1_EXBG:
@@ -422,7 +433,7 @@ uint3 Compose(uint2 outPos) {
 
         // Skip normal shadow sprite layer pixels
         if (layer == kLayerSprite) {
-            const uint spriteAttrs = g_spriteAttrsIn[uint3(pos, 0)];
+            const uint spriteAttrs = g_spriteAttrsIn[uint3(SpritePos(outPos), 0)];
             if (BitExtract(spriteAttrs, kSpriteAttrBitSpecial, 2) != kSpriteDataNormal) {
                 continue;
             }
@@ -455,7 +466,7 @@ uint3 Compose(uint2 outPos) {
         meshPixel = meshOutput.rgb;
         const Attributes meshAttrs = ToAttributes(meshOutput.a);
         meshPriority = meshAttrs.priority;
-        const uint meshSpriteAttrs = g_spriteAttrsIn[uint3(pos, 1)];
+        const uint meshSpriteAttrs = g_spriteAttrsIn[uint3(SpritePos(outPos), 1)];
         // Brimir: matches software (sw:4009): only normal mesh pixels are inserted (Ymir skips only shadow pixels).
         if (meshAttrs.priority > 0 && BitExtract(meshSpriteAttrs, kSpriteAttrBitSpecial, 2) == kSpriteDataNormal) {
             for (uint i = 0; i < 3; i++) {
@@ -547,7 +558,7 @@ uint3 Compose(uint2 outPos) {
                 ratio = g_composeParams[0].backLineColorCalcRatios[1];
             } else {
                 const uint ratioLayer = useSecondScreenRatio ? layerStack[1] : layerStack[0];
-                ratio = GetColorCalcRatio(ratioLayer, pos);
+                ratio = GetColorCalcRatio(ratioLayer, outPos);
             }
             output = int3(layer1Pixel) + (((int3(layer0Pixel) - int3(layer1Pixel)) * ratio) >> 5);
         }
@@ -559,7 +570,7 @@ uint3 Compose(uint2 outPos) {
     const uint4 spriteOutput = GetLayerOutput(kLayerSprite, outPos);
     const uint spritePriority = BitExtract(spriteOutput.a, 0, 3);
     if (spritePriority >= layerPrios[0]) {
-        const uint spriteAttrs = g_spriteAttrsIn[uint3(pos, 0)];
+        const uint spriteAttrs = g_spriteAttrsIn[uint3(SpritePos(outPos), 0)];
         const bool useSpriteWindow = BitTest(g_commonParams.spriteParams, 20);
         const bool isNormalShadow = BitExtract(spriteAttrs, kSpriteAttrBitSpecial, 2) == kSpriteDataShadow;
         const bool isMSBShadow = !useSpriteWindow && BitTest(spriteAttrs, kSpriteAttrBitShadowWindow);
@@ -585,12 +596,12 @@ uint3 Compose(uint2 outPos) {
     if (transparentMeshes && meshLayer == 0) {
         // Brimir: matches software (sw:4322-4359): the mesh pixel's colour calculation (IsMeshColorCalcEnabled) with
         // the mesh pixel's own ratio.
-        if (IsMeshColorCalcEnabled(meshPriority, pos)) {
+        if (IsMeshColorCalcEnabled(meshPriority, outPos)) {
             const bool useAdditiveBlend = BitTest(g_commonParams.layerParams, 26);
             if (useAdditiveBlend) {
                 meshPixel = min(meshPixel + output, 255);
             } else {
-                const int ratio = BitExtract(g_spriteAttrsIn[uint3(pos, 1)], kSpriteAttrBitColorCalcRatio, 5);
+                const int ratio = BitExtract(g_spriteAttrsIn[uint3(SpritePos(outPos), 1)], kSpriteAttrBitColorCalcRatio, 5);
                 meshPixel = int3(output) + (((int3(meshPixel) - int3(output)) * ratio) >> 5);
             }
         }
