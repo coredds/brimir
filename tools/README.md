@@ -320,7 +320,8 @@ failure, 3 a check failed (the `vkhost: FAILED:` lines say which), 4 `--vulkan` 
 ### Vulkan host (`--vulkan`)
 
 The host creates its own instance and device (`gpu::CreateHeadlessDevice`, validation layer on when installed;
-`BRIMIR_VK_DEVICE` picks the GPU, `BRIMIR_VK_SYNC_VALIDATION=1` adds synchronization validation) before loading the
+`BRIMIR_VK_DEVICE` picks the GPU, `BRIMIR_VK_SYNC_VALIDATION=1` adds synchronization validation,
+`BRIMIR_VK_GPU_VALIDATION=1` GPU-assisted validation; the tests' devices take the same variables) before loading the
 core, then plays RetroArch's vulkan driver: `GET_PREFERRED_HW_RENDER` answers Vulkan, `SET_HW_RENDER` (Vulkan) and the
 negotiation interface (v2) are accepted, and after `retro_load_game` it calls `get_application_info` and
 `create_device2` (with a `create_device_wrapper` that creates the device on the host's instance) and then

@@ -189,6 +189,7 @@ std::unique_ptr<VulkanDevice> HeadlessDeviceAccess::Create(const HeadlessOptions
     // by default), else through VK_EXT_validation_features (command-level accesses only).
     bool syncLayerSettings = false;
     bool syncFeatures = false;
+    bool gpuAssisted = false;
     if (options.validation) {
         if (HasLayer(kValidationLayer)) {
             layers.push_back(kValidationLayer);
@@ -209,6 +210,20 @@ std::unique_ptr<VulkanDevice> HeadlessDeviceAccess::Create(const HeadlessOptions
                                          "accesses\n", VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
                 } else {
                     std::fprintf(stderr, "[vulkan] the validation layer cannot enable synchronization validation\n");
+                }
+            }
+            // GPU-assisted validation (BRIMIR_VK_GPU_VALIDATION=1): shader accesses out of bounds, through
+            // VK_EXT_validation_features
+            const char *gpuEnv = std::getenv("BRIMIR_VK_GPU_VALIDATION");
+            if (gpuEnv && std::strcmp(gpuEnv, "1") == 0) {
+                if (HasInstanceExtension(kValidationLayer, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME)) {
+                    gpuAssisted = true;
+                    if (!syncFeatures) {
+                        instanceExtensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                    }
+                    std::fprintf(stderr, "[vulkan] GPU-assisted validation on\n");
+                } else {
+                    std::fprintf(stderr, "[vulkan] the validation layer cannot enable GPU-assisted validation\n");
                 }
             }
         } else {
@@ -246,11 +261,18 @@ std::unique_ptr<VulkanDevice> HeadlessDeviceAccess::Create(const HeadlessOptions
         instanceNext = &layerSettings;
     }
 
-    const VkValidationFeatureEnableEXT syncFeature = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
-    VkValidationFeaturesEXT validationFeatures{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
-    validationFeatures.enabledValidationFeatureCount = 1;
-    validationFeatures.pEnabledValidationFeatures = &syncFeature;
+    std::vector<VkValidationFeatureEnableEXT> featureEnables;
     if (syncFeatures) {
+        featureEnables.push_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+    }
+    if (gpuAssisted) {
+        featureEnables.push_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
+        featureEnables.push_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT);
+    }
+    VkValidationFeaturesEXT validationFeatures{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
+    validationFeatures.enabledValidationFeatureCount = static_cast<uint32_t>(featureEnables.size());
+    validationFeatures.pEnabledValidationFeatures = featureEnables.data();
+    if (!featureEnables.empty()) {
         validationFeatures.pNext = instanceNext;
         instanceNext = &validationFeatures;
     }
