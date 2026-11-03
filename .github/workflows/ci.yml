@@ -100,12 +100,25 @@ jobs:
 
   # The [gpu] tests on Mesa's lavapipe (software Vulkan) with the Khronos validation layer: headless device, compute
   # helpers, zero validation errors. BRIMIR_REQUIRE_VULKAN=1 makes a missing device or layer fail instead of SKIP.
-  # The timeout is about 1.5x a local run (16 threads, 2026-10-30: build 3 min, [gpu] 32 min, the VDP2 scenes with VDP1
-  # on the GPU 6 min).
+  # "[gpu]" also selects the hidden [gpu] cases, among them the long VDP1 fuzz run (seeds 1-1000), most of the time.
+  # Two shards on separate runners: 1 = every [gpu] case but the long fuzz run, plus its seeds 1-450; 2 = seeds
+  # 451-1000, plus every VDP2 scene again with VDP1 on the GPU. Together exactly the one-job set. CI run 41596579632
+  # (one job, 4 vCPUs): build 7 min, [gpu] without the long run 14 min, the long run 68 min, the VDP2 scenes with VDP1
+  # on the GPU 10 min; so about 52 and 54 min per shard.
   gpu-lavapipe:
+    name: gpu-lavapipe (${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    # 4-vCPU runners give lavapipe a quarter of a 16-thread machine's threads
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            fuzz-first: 1
+            fuzz-seeds: 450
+          - shard: 2
+            fuzz-first: 451
+            fuzz-seeds: 550
     steps:
       - uses: actions/checkout@v4
 
@@ -129,15 +142,27 @@ jobs:
 
       # The manifest is lvp_icd.json in noble-updates' Mesa (lvp_icd.<arch>.json in some older packages).
       - name: Test
+        if: matrix.shard == 1
         env:
           BRIMIR_REQUIRE_VULKAN: 1
         run: |
           export VK_DRIVER_FILES="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)"
           echo "VK_DRIVER_FILES=$VK_DRIVER_FILES"
-          ./build/bin/brimir_tests "[gpu]"
+          ./build/bin/brimir_tests "[gpu]~[vdp1-fuzz-long]"
+
+      - name: Test the long VDP1 fuzz run (${{ matrix.fuzz-seeds }} seeds from ${{ matrix.fuzz-first }})
+        env:
+          BRIMIR_REQUIRE_VULKAN: 1
+          BRIMIR_VDP1_FUZZ_FIRST: ${{ matrix.fuzz-first }}
+          BRIMIR_VDP1_FUZZ_SEEDS: ${{ matrix.fuzz-seeds }}
+        run: |
+          export VK_DRIVER_FILES="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)"
+          echo "VK_DRIVER_FILES=$VK_DRIVER_FILES"
+          ./build/bin/brimir_tests "[vdp1-fuzz-long]"
 
       # Every VDP2 scene again with VDP1 on the GPU (RenderBoth's BRIMIR_VDP1_MODE).
       - name: Test VDP2 scenes with VDP1 on the GPU
+        if: matrix.shard == 2
         env:
           BRIMIR_REQUIRE_VULKAN: 1
           BRIMIR_VDP1_MODE: gpu
