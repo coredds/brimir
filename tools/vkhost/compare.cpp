@@ -193,7 +193,8 @@ void PrintSummary(const char* label, const ChildResult& child) {
         if (line.rfind("vkhost: ", 0) == 0) {
             std::printf("compare: %s: %s\n", label, line.c_str() + 8);
         } else if (line.find("Vulkan VDP1 renderer active") != std::string::npos ||
-                   line.find("VDP1 on the GPU") != std::string::npos) {
+                   line.find("VDP1 on the GPU") != std::string::npos ||
+                   line.find("VDP1 upscaling") != std::string::npos) {
             std::printf("compare: %s: %s\n", label, line.c_str());
         }
     }

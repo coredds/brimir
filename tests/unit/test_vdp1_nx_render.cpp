@@ -24,6 +24,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -632,4 +634,186 @@ TEST_CASE("VDP1 N x renders of captured frames (BRIMIR_VDP1_CAPTURES, BRIMIR_NX_
             }
         }
     }
+}
+
+TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CAPTURES)", "[.][nx-confinement]") {
+    // GPU stage 3 Task 9 (stage3-research.md sections 3.3 and 7). At the sample points (sub-texel (0, 0)) the N x
+    // surface may differ from native FBRAM only on quad-path content: within one native pixel of a quad-path command's
+    // edge or of a texel / Gouraud boundary (two neighbouring native fragments of the command with different colours),
+    // or where one quad-path command draws a word twice (within-command overdraw). Per capture and N (BRIMIR_NX_SCALES,
+    // default "24"): the words drawn, the share of their sample points equal to native, the mismatches outside that
+    // allowance ("unconfined", which also counts any mismatch on rect-path content), and the share of drawn words
+    // whose N x N block is not constant (VDP1 sharpness), split by quad-path and other content. The allowance is
+    // accumulated over the capture's batches (erases do not reset it), so it is generous where a frame is drawn
+    // twice. The reference equals the GPU byte for byte (the [.captures] tests), so this measures what the GPU draws.
+    const char *capDir = std::getenv("BRIMIR_VDP1_CAPTURES");
+    if (capDir == nullptr) {
+        SKIP("BRIMIR_VDP1_CAPTURES not set");
+    }
+    std::vector<uint32> scales;
+    {
+        const char *text = std::getenv("BRIMIR_NX_SCALES");
+        for (const char c : std::string(text != nullptr ? text : "24")) {
+            if (c >= '2' && c <= '4') {
+                scales.push_back(static_cast<uint32>(c - '0'));
+            }
+        }
+    }
+    std::vector<fs::path> files;
+    for (const auto &e : fs::recursive_directory_iterator(capDir)) {
+        if (e.path().extension() == ".bin" && e.path().filename().string().rfind("vdp1ops_", 0) == 0) {
+            files.push_back(e.path());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    constexpr uint32 kUnits = 2 * ref::kWordsPerFB; // word | alternate field
+    enum : uint8 { kDrawn = 1, kQuad = 2, kSeed = 4 };
+    for (const fs::path &file : files) {
+        gpu::Vdp1OpDump d;
+        REQUIRE(gpu::ReadVdp1OpDump(file.string(), d));
+        for (const uint32 n : scales) {
+            auto native = std::make_unique<ref::Fbram>();
+            ToFbram(d.fbramStart, *native);
+            auto surface = std::make_unique<nx::NxFbram>(n);
+            surface->ReplicateFrom(*native);
+            nx::ReferenceNx r{*native, *surface, nx::Options{.scale = n}, d.vramStart};
+            std::array<std::vector<uint8>, 2> flags{std::vector<uint8>(kUnits, 0), std::vector<uint8>(kUnits, 0)};
+            std::array<uint32, 2> rowWords{512, 512};
+            r.SetBatchObserver([&](const nx::BatchObservation &b) {
+                std::vector<uint8> &f = flags[b.drawFB];
+                std::vector<uint8> quadCmd(b.commands.size(), 0);
+                for (const nx::NxSpan &s : b.nxSpans) {
+                    if (s.kind == nx::SpanKind::Quad) {
+                        quadCmd[s.cmdIndex] = 1;
+                    }
+                }
+                // Per quad-path command: (word | alt | odd byte) -> (fragments, last colour)
+                std::vector<std::unordered_map<uint32, std::pair<uint32, uint32>>> perCmd(b.commands.size());
+                constexpr uint32 kKeyMask = ref::kTargetUnitMask | ref::kTargetOddBit;
+                for (const ref::Fragment &fr : b.nativeFragments) {
+                    const uint32 unit = fr.target & ref::kTargetUnitMask;
+                    f[unit] |= kDrawn;
+                    const auto it = std::upper_bound(b.spans.begin(), b.spans.end(), fr.key,
+                                                     [](uint32 k, const ref::Span &s) { return k < s.fragBase; });
+                    const uint32 cmd = std::prev(it)->cmdIndex;
+                    if (quadCmd[cmd] == 0) {
+                        continue;
+                    }
+                    f[unit] |= kQuad;
+                    auto &e = perCmd[cmd][fr.target & kKeyMask];
+                    ++e.first;
+                    e.second = fr.color;
+                }
+                for (size_t cmd = 0; cmd < perCmd.size(); ++cmd) {
+                    if (quadCmd[cmd] == 0) {
+                        continue;
+                    }
+                    const ref::RasterState &st = b.states[cmd];
+                    const uint32 rw = st.pixel8Bits ? st.fbSizeH / 2 : st.fbSizeH;
+                    rowWords[b.drawFB] = rw;
+                    const auto &m = perCmd[cmd];
+                    for (const auto &[key, e] : m) {
+                        const uint32 unit = key & ref::kTargetUnitMask;
+                        const uint32 word = unit & ref::kTargetWordMask;
+                        const uint32 high = key & ~ref::kTargetWordMask; // alt and odd-byte bits
+                        bool seed = e.first > 1;
+                        const sint32 x = static_cast<sint32>(word % rw), y = static_cast<sint32>(word / rw);
+                        for (sint32 dy = -1; dy <= 1 && !seed; ++dy) {
+                            for (sint32 dx = -1; dx <= 1 && !seed; ++dx) {
+                                const sint32 nxp = x + dx, nyp = y + dy;
+                                if (nxp < 0 || nxp >= static_cast<sint32>(rw) || nyp < 0 ||
+                                    static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp) >= ref::kWordsPerFB) {
+                                    seed = true;
+                                    break;
+                                }
+                                const auto other =
+                                    m.find((static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp)) | high);
+                                seed = other == m.end() || other->second.second != e.second;
+                            }
+                        }
+                        if (seed) {
+                            f[unit] |= kSeed;
+                        }
+                    }
+                }
+            });
+            for (const auto &l : d.lists) {
+                r.Replay(l);
+            }
+            uint64 drawn = 0, quad = 0, mismatches = 0, quadMismatches = 0, unconfined = 0, nonConst = 0,
+                   nonConstQuad = 0, nonConstOther = 0;
+            std::string examples;
+            for (uint32 fb = 0; fb < 2; ++fb) {
+                const std::vector<uint8> &f = flags[fb];
+                const uint32 rw = rowWords[fb];
+                std::vector<uint8> allowed(kUnits, 0);
+                for (uint32 unit = 0; unit < kUnits; ++unit) {
+                    if ((f[unit] & kSeed) == 0) {
+                        continue;
+                    }
+                    const uint32 word = unit & ref::kTargetWordMask, alt = unit & ref::kTargetAltBit;
+                    const sint32 x = static_cast<sint32>(word % rw), y = static_cast<sint32>(word / rw);
+                    for (sint32 dy = -1; dy <= 1; ++dy) {
+                        for (sint32 dx = -1; dx <= 1; ++dx) {
+                            const sint32 nxp = x + dx, nyp = y + dy;
+                            if (nxp >= 0 && nxp < static_cast<sint32>(rw) && nyp >= 0 &&
+                                static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp) < ref::kWordsPerFB) {
+                                allowed[(static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp)) | alt] = 1;
+                            }
+                        }
+                    }
+                }
+                for (uint32 unit = 0; unit < kUnits; ++unit) {
+                    const uint32 word = unit & ref::kTargetWordMask;
+                    const uint32 slice = (unit & ref::kTargetAltBit) ? gpu::Vdp1AltSlice(fb) : gpu::Vdp1MainSlice(fb);
+                    const uint16 sample = surface->Word(slice, word, 0, 0);
+                    const bool mismatch = sample != nx::NativeWord(*native, slice, word);
+                    const bool isDrawn = (f[unit] & kDrawn) != 0;
+                    if (!isDrawn && !mismatch) {
+                        continue;
+                    }
+                    const bool isQuad = (f[unit] & kQuad) != 0;
+                    drawn += isDrawn;
+                    quad += isQuad;
+                    bool constant = true;
+                    for (uint32 sub = 1; sub < n * n && constant; ++sub) {
+                        constant = surface->Word(slice, word, sub % n, sub / n) == sample;
+                    }
+                    if (isDrawn && !constant) {
+                        ++nonConst;
+                        (isQuad ? nonConstQuad : nonConstOther) += 1;
+                    }
+                    if (mismatch) {
+                        ++mismatches;
+                        quadMismatches += isQuad;
+                        if (allowed[unit] == 0) {
+                            ++unconfined;
+                            if (unconfined <= 5) {
+                                char text[64];
+                                std::snprintf(text, sizeof(text), " fb%u:%u,%u%s%s(%04x/%04x)", fb, word % rw, word / rw,
+                                              (unit & ref::kTargetAltBit) ? "a" : "", isQuad ? "q" : "",
+                                              nx::NativeWord(*native, slice, word), sample);
+                                examples += text;
+                            }
+                        }
+                    }
+                }
+            }
+            const nx::Stats &s = r.GetStats();
+            const auto pct = [](uint64 a, uint64 b) { return b == 0 ? 0.0 : 100.0 * static_cast<double>(a) / b; };
+            const uint64 quadCommands = s.commands.counts[nx::CommandCounts::Quad];
+            std::printf("confine %s/%s %ux: drawn %llu (quad-path %.1f%%, %llu quad commands), sample points equal "
+                        "%.3f%%, mismatches %llu (on quad-path words %.1f%%), confined %.2f%%, unconfined %llu%s; "
+                        "non-constant blocks %.2f%% (quad-path %.2f%%, other %.2f%%)\n",
+                        file.parent_path().filename().string().c_str(), file.filename().string().c_str(), n,
+                        static_cast<unsigned long long>(drawn), pct(quad, drawn),
+                        static_cast<unsigned long long>(quadCommands), 100.0 - pct(mismatches, drawn),
+                        static_cast<unsigned long long>(mismatches), pct(quadMismatches, mismatches),
+                        mismatches == 0 ? 100.0 : 100.0 - pct(unconfined, mismatches),
+                        static_cast<unsigned long long>(unconfined), examples.c_str(), pct(nonConst, drawn),
+                        pct(nonConstQuad, quad), pct(nonConstOther, drawn - quad));
+            std::fflush(stdout);
+        }
+    }
+    CHECK(!files.empty());
 }

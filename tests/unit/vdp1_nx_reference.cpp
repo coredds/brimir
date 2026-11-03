@@ -1640,6 +1640,9 @@ void ReferenceNx::DrawBatch(const gpu::Vdp1OpList &ops, const gpu::Vdp1DrawBatch
         m_stats.nativeSpans += batch.spanCount;
         m_stats.nativeSlots += batch.fragmentCount;
         m_stats.nativeFragments += fragments.size();
+        if (m_observer) {
+            m_observedFragments = fragments;
+        }
         ref::Resolve(batch.drawFB, std::move(fragments), m_native);
     }
     m_stats.nativeSeconds += Seconds(t0);
@@ -1658,6 +1661,10 @@ void ReferenceNx::DrawBatch(const gpu::Vdp1OpList &ops, const gpu::Vdp1DrawBatch
     std::vector<NxSpan> nxSpans = GenerateBatch(m_options, in, &m_stats.commands);
     const auto subBatches = SplitSubBatches(m_options, nxSpans);
     m_stats.generateSeconds += Seconds(t0);
+    if (m_observer) {
+        m_observer(BatchObservation{batch.drawFB & 1u, commands, states, spans, m_observedFragments, nxSpans});
+        m_observedFragments.clear();
+    }
 
     std::vector<NxFragment> fragments;
     for (const auto &[begin, end] : subBatches) {

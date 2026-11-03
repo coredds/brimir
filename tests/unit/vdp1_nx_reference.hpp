@@ -60,6 +60,7 @@
 #include <gpu/vdp1/vdp1_front.hpp>
 
 #include <array>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -239,8 +240,24 @@ struct Stats {
     }
 };
 
+// What one native draw batch was (ReferenceNx::SetBatchObserver): its decoded commands and native spans, the native
+// fragments before the resolve and the N x spans the generator made of it
+struct BatchObservation {
+    uint32 drawFB = 0;
+    std::span<const ref::CommandParams> commands;
+    std::span<const ref::RasterState> states;
+    std::span<const ref::Span> spans;
+    std::span<const ref::Fragment> nativeFragments;
+    std::span<const NxSpan> nxSpans;
+};
+
 class ReferenceNx {
 public:
+    // Called for every draw batch, after the native resolve and before the N x raster (tests: the confinement metric)
+    void SetBatchObserver(std::function<void(const BatchObservation &)> observer) {
+        m_observer = std::move(observer);
+    }
+
     // `native` and `nx` hold the start state (nx usually ReplicateFrom(native)); VDP1 VRAM starts as `vram` (zero when
     // empty) and follows the batches' uploads
     ReferenceNx(ref::Fbram &native, NxFbram &nx, Options options, std::span<const uint8> vram = {});
@@ -269,6 +286,8 @@ private:
     Stats m_stats;
     uint32 m_lastDrawFB = 0;
     uint64 m_shuffle = 0;
+    std::function<void(const BatchObservation &)> m_observer;
+    std::vector<ref::Fragment> m_observedFragments;
     // The previous batch's end, its last command and last span's quad step (capacity-split continuations)
     bool m_prevCapacity = false;
     brimir::gpu::vdp1::Vdp1CommandParams m_prevCommand{};
