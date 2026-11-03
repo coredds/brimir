@@ -69,6 +69,9 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
   - SIMD software rendering: baseline SSE2 on x64, NEON on ARM64, optional AVX2 on compatible x64 CPUs
   - Threaded VDP1 and VDP2 rendering for optimal performance
   - Full resolution output (no overscan cropping by VDP)
+- **Vulkan Renderer** (optional, 64-bit desktop builds): VDP1 and VDP2 on the GPU, identical to the software
+  renderer at native resolution, with an internal resolution of 2x-4x for sharper 3D (see
+  [Vulkan renderer](#vulkan-renderer))
 - **Deinterlacing**: Multiple modes for interlaced video
   - Bob (smooth 60 FPS, no scanlines)
   - Weave (CRT-style scanlines)
@@ -94,6 +97,71 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
 - **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
 - **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter. The x64 backend's SH-2 time is between about 5% and 28% below the interpreter's across six games, and its native compiles run on an extra thread where the CPU has at least 4 threads (core option "SH-2 JIT Compile Thread (Experimental)"); the IR interpreter backend is about 3x slower than the interpreter (see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)). It can still stutter while a game loads a lot of new code: Burning Rangers over a long session has SH-2 time about 5% below the interpreter's, but 358 of 33,600 frames take over 16.7 ms (the interpreter: none; the worst 48 ms), and with threaded VDP, the default, the average frame of Sega Rally, Street Fighter Zero 3 and that session is 2-6% longer than the interpreter's. It uses up to 128 MB of native code per SH-2 CPU, allocated on demand. It is not used while SH-2 cache emulation is active. It stays an experimental, opt-in option for testing; the current state and the next steps are in [design/sh2-jit.md](design/sh2-jit.md) ("Where to pick up").
+
+## Vulkan renderer
+
+The Vulkan renderer draws the Saturn's two video chips on the GPU: VDP1 (polygons and sprites) and VDP2
+(backgrounds). At native resolution (1x) every frame and every save state is identical to the software renderer. At
+2x-4x the GPU renders more pixels: 3D edges, rotated and zoomed backgrounds, and distant or shrunk textures get
+smoother. Magnified textures stay blocky, as on the Saturn, and 2D sprite games look as they do at 1x.
+
+### Turning it on (RetroArch)
+
+1. Settings > Drivers > Video: `vulkan`. Restart RetroArch.
+2. Quick Menu > Core Options > Video > Renderer: `Vulkan`. It applies when content is loaded, so close and load the
+   content again.
+3. Quick Menu > Core Options > Video > Internal Resolution: `2x`, `3x` or `4x`. It applies at once.
+
+With any other video driver the core uses the software renderer; it never asks RetroArch to switch drivers.
+
+### Options
+
+| Option | Values | Notes |
+|---|---|---|
+| Renderer (restart required) | Software (default), Vulkan | Applies on content load |
+| Internal Resolution (Vulkan) | 1x (Native, default), 2x, 3x, 4x | Live. 3x and 4x of the high-resolution modes are above 1080p |
+| VDP1 Upscaling (Vulkan) | Enabled (default), Disabled | Live. Disabled keeps polygons and sprites at native resolution (backgrounds still upscale); use it if a game shows gaps, seams or misplaced lines at 2x-4x |
+
+### GPU memory (the core's device memory, measured)
+
+| Internal resolution | VDP1 upscaling on | VDP1 upscaling off |
+|---|---|---|
+| 1x | about 140 MiB | about 140 MiB |
+| 2x | about 210-230 MiB | about 170-185 MiB |
+| 3x | about 320-365 MiB | about 225-270 MiB |
+| 4x | about 460-530 MiB | about 295-365 MiB |
+
+A live change of the internal resolution needs about 20-40 MiB more for a moment.
+
+### Fallbacks
+
+- No Vulkan video driver, or a GPU without Vulkan 1.2: the software renderer (on an old GPU through a plain Vulkan
+  copy of the frames). The reason is logged and shown once.
+- The GPU is short of memory: VDP1 upscaling is turned off at that resolution first, then a lower internal resolution
+  is used (logged; the requested one is tried again later), then VDP1 is drawn in software. The picture never stops.
+- A lost GPU device: the software renderer continues from the last state the GPU handed back; a few frames of VDP1
+  drawing may be redrawn by the game.
+
+### macOS
+
+RetroArch's Vulkan driver runs on Metal through MoltenVK, and the renderer is built for it (compute shaders only,
+Vulkan 1.2 baseline). Release builds include it, but it has not been tried on a real Mac yet: reports are welcome.
+
+### Known exceptions and issues
+
+- At 2x-4x with VDP1 upscaling on, 3D polygons are rasterised at the higher resolution, so their edges and texture
+  steps differ from the 1x image by design. 2D sprites (normal and scaled sprites) are drawn exactly as at 1x.
+- A few VDP2 corner cases differ from the software renderer on purpose, where the software renderer is itself wrong
+  (for example sprites in exclusive monitor mode); they are listed in
+  [src/gpu/shaders/vdp2/README.md](src/gpu/shaders/vdp2/README.md#documented-exceptions).
+- Daytona USA CE: the SEGA logo and the restart of the attract mode stutter at 4x (and are slow at 1x too). Gameplay
+  is not affected.
+- Burning Rangers at 4x: its slowest 1% of frames take 10-11 ms of VDP1 GPU time on the test GPU (a Radeon RX 9060
+  XT), close to the 12 ms target, and up to 18 ms at worst; a slower GPU may drop frames there. Use 2x or 3x then.
+- Run-ahead renders every hidden frame at the internal resolution too, so it multiplies the GPU cost.
+
+Developer notes: [src/gpu/shaders/vdp2/README.md](src/gpu/shaders/vdp2/README.md) (the GPU passes) and
+[tools/README.md](tools/README.md) (`brimir_vkhost`, the compare and fault-injection tool).
 
 ## Build Requirements
 
@@ -126,10 +194,9 @@ LTO applies to optimized configurations, not Debug. To disable it completely, se
 
 On Windows, run the commands from a *Developer PowerShell for VS 2022* (or any shell with the MSVC environment loaded) when using the Ninja generator.
 
-### Vulkan renderer (`feature/vulkan-renderer` only)
+### Vulkan renderer
 
-The GPU renderer work lives on the `feature/vulkan-renderer` branch and is not part of `master` or any release yet.
-There, `-DBRIMIR_VULKAN=ON` (the default on 64-bit Windows x64, Linux x64/arm64 and macOS arm64) builds the Vulkan frame output, the `brimir_renderer` core option and the `brimir_vkhost` tool ([tools/README.md](tools/README.md)). `-DBRIMIR_VULKAN=OFF` builds the core as on `master` (no option, no GPU code). The core never links the Vulkan loader (volk loads it at runtime) and a normal build needs neither the Vulkan SDK nor a shader compiler: the SPIR-V and the reflected buffer layouts (`*.layout.h`) are committed in `src/gpu/shaders/generated/`. After editing a shader in `src/gpu/shaders/`, regenerate them with DXC, `spirv-val` and `spirv-cross` on the path (Vulkan SDK):
+`-DBRIMIR_VULKAN=ON` (the default on 64-bit Windows x64, Linux x64/arm64 and macOS arm64) builds the Vulkan renderer, its core options and the `brimir_vkhost` tool ([tools/README.md](tools/README.md)). `-DBRIMIR_VULKAN=OFF` builds the core as on `master` (no option, no GPU code). The core never links the Vulkan loader (volk loads it at runtime) and a normal build needs neither the Vulkan SDK nor a shader compiler: the SPIR-V and the reflected buffer layouts (`*.layout.h`) are committed in `src/gpu/shaders/generated/`. After editing a shader in `src/gpu/shaders/`, regenerate them with DXC, `spirv-val` and `spirv-cross` on the path (Vulkan SDK):
 
 ```bash
 cmake -P tools/shaders/build_shaders.cmake
@@ -186,6 +253,9 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | System | SH-2 JIT (Experimental) | On/Off (default Off; for testing) |
 | System | SH-2 JIT Compile Thread (Experimental) | Auto/Off (default Auto; only used while the JIT is on, on x86-64 with at least 4 CPU threads) |
 | System | Performance Profiling | On/Off |
+| Video | Renderer (restart required) | Software, Vulkan (64-bit desktop builds; see [Vulkan renderer](#vulkan-renderer)) |
+| Video | Internal Resolution (Vulkan) | 1x (Native), 2x, 3x, 4x |
+| Video | VDP1 Upscaling (Vulkan) | Enabled/Disabled |
 | Video | Deinterlacing | On/Off |
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
 | Video | Threaded VDP1 Rendering | On/Off |
