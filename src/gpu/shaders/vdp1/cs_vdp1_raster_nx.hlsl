@@ -19,13 +19,25 @@
 // Clipping, mesh, double interlace, the alternate field and the FB address come from the native coordinates
 // (floor(X / N), floor(Y / N)) of each N x pixel.
 // Bindings (src/gpu/vdp1/vdp1_bindings.hpp kRasterNxBindings): commands (0), N x spans (1), VDP1 VRAM (2), fragments
-// (16), unit counts (17, N^2 * 262,144), unit offsets (21; the 8 bpp odd bytes' winners of an overwrite-class
-// sub-batch, or a hybrid one's winners), batch state (22). Push constants: BatchParams (scale = N, 2 to 4; drawFB's kBatchOverwrite* bits).
+// (16), unit counts (17, N^2 * 262,144), batch state (22). Push constants: BatchParams (scale = N, 2 to 4).
+//
+// Variants (VDP1_NX_RASTER_MODE; the overwrite-class fast path of research section 1.6, vdp1_hw_params.hpp
+// kBatchOverwrite*, kBatchHybrid): 0 (this file) counts every fragment for the ordered resolve; 1
+// (cs_vdp1_raster_nx_overwrite.hlsl) keeps each unit's highest slot + 1 instead (8 bpp odd bytes in the second half of
+// the unit offsets, Vdp1NxWinnerIndex), which resolve_fast_nx applies; 2 (cs_vdp1_raster_nx_hybrid.hlsl) keeps each
+// byte's last overwrite-class slot + 1 in the unit offsets, for filter_nx. Variants 1 and 2 also bind the unit offsets
+// (21; kRasterNxWinnersBindings). Variant 0 is the code from before the fast path.
+
+#ifndef VDP1_NX_RASTER_MODE
+#define VDP1_NX_RASTER_MODE 0
+#endif
 
 #define VDP1_RASTER_NX 1
 
 #include "vdp1_defs.hlsli"
+#if VDP1_NX_RASTER_MODE != 0
 #include "vdp1_overwrite_nx.hlsli"
+#endif
 #include "vdp1_params.hlsli"
 
 [[vk::push_constant]] BatchParams g_batch;
@@ -35,32 +47,39 @@ StructuredBuffer<NxSpan> g_spans : register(t1);
 ByteAddressBuffer g_vram : register(t2);
 RWStructuredBuffer<Fragment> g_fragments : register(u0);
 RWStructuredBuffer<uint> g_unitCounts : register(u1);
+#if VDP1_NX_RASTER_MODE != 0
 RWStructuredBuffer<uint> g_unitOffsets : register(u5);
+#endif
 RWStructuredBuffer<uint> g_batchState : register(u6);
 
-// A fragment at absolute `slot` of N x unit `unit` (N x target `target`): counted for the ordered resolve; in an
-// overwrite-class sub-batch (drawFB kBatchOverwrite) the unit keeps its highest slot + 1 (8 bpp odd bytes in the second
-// half of g_unitOffsets, Vdp1NxWinnerIndex), which resolve_fast_nx applies; in a hybrid one (kBatchHybrid) each byte
-// keeps its last overwrite-class fragment's slot + 1 in g_unitOffsets (Vdp1NxWinnerIndex), for filter_nx
-void NxCountFragment(uint unit, uint slot, uint target) {
-    const uint native = Vdp1NxFragNativeTarget(target);
-    const bool hybrid = (g_batch.drawFB & kBatchHybrid) != 0;
-    if (!hybrid && (g_batch.drawFB & kBatchOverwrite) == 0) {
-        InterlockedAdd(g_unitCounts[unit], 1);
-        return;
-    }
-    const uint index = Vdp1NxWinnerIndex(unit, native, g_batch.scale);
-    if (!hybrid && index == unit) {
-        InterlockedMax(g_unitCounts[unit], slot + 1);
-        return;
-    }
+#if VDP1_NX_RASTER_MODE != 0
+uint UnitOffsetsSize() {
     uint offsets, stride;
     g_unitOffsets.GetDimensions(offsets, stride);
-    if (index < offsets && (!hybrid || Vdp1NxFragOverwrite(native))) {
-        InterlockedMax(g_unitOffsets[index], slot + 1);
-    }
+    return offsets;
 }
 
+// The unit offsets' size, queried once per invocation
+static const uint kUnitOffsetsSize = UnitOffsetsSize();
+
+// A fragment at absolute `slot` of N x unit `unit` (N x target `target`), in place of the ordered count
+// (vdp1_raster_line.hlsli WriteSlot)
+void NxCountFragment(uint unit, uint slot, uint target) {
+    const uint native = Vdp1NxFragNativeTarget(target);
+    const uint index = Vdp1NxWinnerIndex(unit, native, g_batch.scale);
+#if VDP1_NX_RASTER_MODE == 1
+    if (index == unit) {
+        InterlockedMax(g_unitCounts[unit], slot + 1);
+    } else if (index < kUnitOffsetsSize) {
+        InterlockedMax(g_unitOffsets[index], slot + 1);
+    }
+#else
+    if (index < kUnitOffsetsSize && Vdp1NxFragOverwrite(native)) {
+        InterlockedMax(g_unitOffsets[index], slot + 1);
+    }
+#endif
+}
+#endif
 #include "vdp1_raster_line.hlsli"
 
 [numthreads(64, 1, 1)]

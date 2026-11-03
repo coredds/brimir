@@ -316,22 +316,28 @@ bool Vdp2VulkanBackend::SetScale(uint32_t n) {
         return true;
     }
     // The N x sprite images belong to the old scale: freed first (the sets are rewritten below)
-    const bool hadSpriteNx = m_spriteLayersNx.image != VK_NULL_HANDLE;
     DestroySpriteNx();
+    // Nothing uses the old resources any more (the caller's guarantee). The old layers are freed first (the largest
+    // allocation; a GPU short of memory can then still take a lower scale); the old composite stays for the rescale.
+    vk_util::DestroyImage(m_device, m_bgLayers);
     vk_util::Image bgLayers;
     vk_util::Buffer composite;
     const VkResult result = CreateScaledResources(n, bgLayers, composite);
     if (result != VK_SUCCESS) {
-        if (hadSpriteNx) {
-            WriteAllBlockSets();
-        }
         Log("VDP2 internal resolution " + std::to_string(n) + "x: allocating " +
             std::to_string(ScaledResourceBytes(n) >> 20) + " MiB failed (VkResult " +
             std::to_string(static_cast<int>(result)) + "); staying at " + std::to_string(m_scale) + "x");
+        // The previous scale's layers again (they fitted before the attempt)
+        if (const VkResult restored = vk_util::CreateImage2D(m_device, BGLayersDesc(m_scale), m_bgLayers);
+            restored != VK_SUCCESS) {
+            Log("VDP2 internal resolution " + std::to_string(m_scale) + "x: its layers could not be allocated again "
+                "(VkResult " + std::to_string(static_cast<int>(restored)) + "); the back half is unusable");
+            m_result = restored;
+            return false;
+        }
+        WriteAllBlockSets();
         return false;
     }
-    // Nothing uses the old resources any more (the caller's guarantee).
-    vk_util::DestroyImage(m_device, m_bgLayers);
     m_bgLayers = bgLayers;
     if (m_pending.rescale) {
         // The current composite was never written: keep rescaling from the composite of the last Record.

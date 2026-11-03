@@ -226,7 +226,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
         m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
         m_vulkan->SetFailAllocAbove(config.failAllocAboveMiB << 20);
-    m_vulkan->SetFailAllocTotalAbove(config.failAllocTotalAboveMiB << 20);
+        m_vulkan->SetFailAllocTotalAbove(config.failAllocTotalAboveMiB << 20);
         if (config.failOutputImagesOnGrow) {
             m_vulkan->SetFailOutputImagesOnGrow(config.failOutputImagesAbove);
         } else {

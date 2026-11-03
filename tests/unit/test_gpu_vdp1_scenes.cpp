@@ -2172,6 +2172,41 @@ TEST_CASE("GPU VDP1 N x: a surface that cannot be allocated turns VDP1 upscaling
           }) == 1);
 }
 
+TEST_CASE("GPU VDP1: a VDP1 back half short of memory lowers the internal resolution; other failures keep it",
+          "[gpu][vdp1][scene][nx]") {
+    // At attach (2x): a VDP1 back half failing with VK_ERROR_OUT_OF_DEVICE_MEMORY makes the renderer try 1x (where it
+    // fails again: VDP1 in software); any other failure keeps 2x with VDP1 in software. Then a normal attach at 2x.
+    // Every frame stays identical to software.
+    std::vector<std::string> logs;
+    RenderBothOptions options = NxOptions(2);
+    options.beforeFrame = [&](uint32_t f, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &device) {
+        if (f == 0) {
+            vk.SetLog([&logs](const std::string &text) { logs.push_back(text); });
+        } else if (f == 2) {
+            vk.DetachDevice();
+            vk.SetVdp1BackendFailureForTest(VK_ERROR_INITIALIZATION_FAILED);
+            vk.AttachDevice(device, 2);
+            CHECK_FALSE(vk.GpuVdp1());
+            CHECK(vk.InternalScale() == 2);
+            vk.DetachDevice();
+            vk.SetVdp1BackendFailureForTest(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            vk.AttachDevice(device, 2);
+            CHECK_FALSE(vk.GpuVdp1());
+            CHECK(vk.InternalScale() == 1);
+            vk.DetachDevice();
+            vk.SetVdp1BackendFailureForTest(VK_SUCCESS);
+            vk.AttachDevice(device, 2);
+            CHECK(vk.GpuVdp1());
+            CHECK(vk.InternalScale() == 2);
+        }
+    };
+    RunFbramScene(Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, AutoSwap(40), 5, {}, 45),
+                  options);
+    CHECK(std::count_if(logs.begin(), logs.end(), [](const std::string &text) {
+              return text.find("VDP1 on the GPU unavailable at 2x; trying 1x") != std::string::npos;
+          }) == 1);
+}
+
 TEST_CASE("GPU VDP1 N x: a full batch at 4x splits into several sub-batches, resolved in order",
           "[gpu][vdp1][scene][nx]") {
     // One native batch of 14 half-transparent full-screen polygons (rect path: 1.15 M slots each at 4x) and 6 skewed

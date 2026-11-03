@@ -232,6 +232,8 @@ public:
     bool Failed(OutputSize extent, uint32_t scale, uint64_t frame);
     // A creation succeeded: the backoff is forgotten (at every scale).
     void Succeeded() { m_entries = {}; }
+    // The circumstances of a scale's last failure changed (memory was freed): its next request is tried at once.
+    void Forget(uint32_t scale) { At(scale) = {}; }
 
     uint64_t Failures() const { return m_failures; }
     uint64_t BackedOff() const { return m_backedOff; }

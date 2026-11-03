@@ -31,7 +31,11 @@
 #include <gpu/shaders/generated/vdp1_raster.layout.h>
 #include <gpu/shaders/generated/vdp1_raster.spv.h>
 #include <gpu/shaders/generated/vdp1_raster_nx.layout.h>
+#include <gpu/shaders/generated/vdp1_raster_nx_hybrid.layout.h>
+#include <gpu/shaders/generated/vdp1_raster_nx_overwrite.layout.h>
 #include <gpu/shaders/generated/vdp1_raster_nx.spv.h>
+#include <gpu/shaders/generated/vdp1_raster_nx_hybrid.spv.h>
+#include <gpu/shaders/generated/vdp1_raster_nx_overwrite.spv.h>
 #include <gpu/shaders/generated/vdp1_rebuild_nx.layout.h>
 #include <gpu/shaders/generated/vdp1_rebuild_nx.spv.h>
 #include <gpu/shaders/generated/vdp1_resolve.layout.h>
@@ -108,6 +112,10 @@ const std::vector<ShaderCase> &Shaders() {
         {"vdp1_resolve_fast_nx", sh::kVdp1ResolveFastNxSpv, kResolveFastNxBindings, sizeof(Vdp1BatchPushConstants), 64,
          1, 0},
         {"vdp1_filter_nx", sh::kVdp1FilterNxSpv, kFilterNxBindings, sizeof(Vdp1BatchPushConstants), 64, 1, 0},
+        {"vdp1_raster_nx_overwrite", sh::kVdp1RasterNxOverwriteSpv, kRasterNxWinnersBindings,
+         sizeof(Vdp1BatchPushConstants), 64, 1, kRasterSharedMemorySize},
+        {"vdp1_raster_nx_hybrid", sh::kVdp1RasterNxHybridSpv, kRasterNxWinnersBindings, sizeof(Vdp1BatchPushConstants),
+         64, 1, kRasterSharedMemorySize},
     };
     return shaders;
 }
@@ -383,7 +391,8 @@ TEST_CASE("VDP1 push-constant blocks are the host structs", "[vdp1][pipelines]")
     STATIC_CHECK(sh::kVdp1ResolveNx_BatchParams_drawFB == offsetof(Vdp1BatchPushConstants, drawFB));
     STATIC_CHECK(sh::kVdp1ResolveFastNx_BatchParams_drawFB == offsetof(Vdp1BatchPushConstants, drawFB));
     STATIC_CHECK(sh::kVdp1ResolveFastNx_BatchParams_scale == offsetof(Vdp1BatchPushConstants, scale));
-    STATIC_CHECK(sh::kVdp1RasterNx_BatchParams_drawFB == offsetof(Vdp1BatchPushConstants, drawFB));
+    STATIC_CHECK(sh::kVdp1RasterNxOverwrite_BatchParams_drawFB == offsetof(Vdp1BatchPushConstants, drawFB));
+    STATIC_CHECK(sh::kVdp1RasterNxHybrid_BatchParams_scale == offsetof(Vdp1BatchPushConstants, scale));
     STATIC_CHECK(sh::kVdp1EraseNx_EraseNxParams_size == sizeof(Vdp1EraseNxPushConstants));
     STATIC_CHECK(sh::kVdp1EraseNx_EraseNxParams_scale == offsetof(Vdp1EraseNxPushConstants, scale));
     STATIC_CHECK(sh::kVdp1FbWriteNx_FbWriteNxParams_size == sizeof(Vdp1FbWriteNxPushConstants));

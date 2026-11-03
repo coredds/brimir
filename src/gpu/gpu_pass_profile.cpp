@@ -1,14 +1,17 @@
 #include "gpu_pass_profile.hpp"
 
+#include <iterator>
+
 namespace brimir::gpu {
 
 const char *GpuPassProfile::Name(Label label) {
-    static constexpr std::array<const char *, kLabelCount> kNames{
+    static constexpr const char *kNames[] = {
         "boundary",       "vdp1_copy",       "vdp1_raster",        "vdp1_batch_range", "vdp1_bucket",
         "vdp1_bucket_sums", "vdp1_scatter",  "vdp1_resolve",       "vdp1_erase",       "vdp1_fb_write",
         "vdp1_other",     "nx_copy",         "nx_raster",          "nx_batch_range",   "nx_bucket",
         "nx_bucket_sums", "nx_scatter",      "nx_resolve",         "nx_erase",         "nx_fb_write",
         "nx_rebuild",     "nx_resolve_fast", "nx_filter",     "vdp2_sprite",     "vdp2_sprite_nx",     "vdp2_other"};
+    static_assert(std::size(kNames) == kLabelCount, "a name for every label");
     return label < kLabelCount ? kNames[label] : "?";
 }
 

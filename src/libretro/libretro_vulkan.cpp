@@ -873,7 +873,8 @@ bool VulkanOutput::Impl::FitOutput(uint32_t scale, std::string &error) {
 bool VulkanOutput::Impl::FallBackOutput(uint32_t scale, const std::string &reason, std::string &error) {
     // While every lower scale's images are backed off (their creation failed lately) there is nothing to try: no wait.
     const uint32_t count = static_cast<uint32_t>(slots.size());
-    bool anyTry = false;
+    // VDP1 upscaling active at this scale: first its memory (then this scale is tried again)
+    bool anyTry = renderer->Vdp1UpscaleScale() != 0;
     for (uint32_t n = scale - 1; n >= 1 && !anyTry; --n) {
         const gpu::OutputSize extent = ScaledOutput(n);
         anyTry = backoff.WouldTry(extent, n, runs) ||
@@ -891,6 +892,17 @@ bool VulkanOutput::Impl::FallBackOutput(uint32_t scale, const std::string &reaso
         error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
         return false;
     }
+    if (renderer->SuspendVdp1Upscaling()) {
+        backoff.Forget(scale); // memory was freed: this scale's images are tried again at once
+        std::string presenterError;
+        if (auto created = AcquireImages(scale, presenterError)) {
+            InstallImages(std::move(created));
+            NegotiationLog(RETRO_LOG_WARN, "Internal resolution " + std::to_string(scale) + "x: " + reason +
+                                               "; using " + std::to_string(scale) + "x without VDP1 upscaling");
+            return true;
+        }
+    }
+    // Then the lower scales, each with VDP1 upscaling where it fits
     for (uint32_t n = scale - 1; n >= 1; --n) {
         std::string presenterError;
         auto created = AcquireImages(n, presenterError);
@@ -1790,6 +1802,16 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
                                            "x again (attempt " + std::to_string(m.restore.AttemptsThisRequest()) +
                                            " of " + std::to_string(gpu::ScaleRestoreSchedule::kMaxAttempts) + ")");
         m.scaleChangePending = true;
+    }
+    // VDP1 ops that could not be recorded for upload space (a GPU short of memory) while VDP1 upscaling is active: its
+    // memory goes first (SuspendVdp1Upscaling's contract: this output's work is done; nothing of this run is recorded).
+    if (m.renderer->TakeVdp1RecordFailed() && m.renderer->Vdp1UpscaleScale() != 0) {
+        ++m.fallBackWaits;
+        if (const VkResult result = m.WaitOwnWork(); result != VK_SUCCESS) {
+            error = std::string("waiting for the frame fences failed: ") + gpu::vk_util::ResultName(result);
+            return false;
+        }
+        m.renderer->SuspendVdp1Upscaling();
     }
     // A new internal resolution applies with a frame to record: the composite is rescaled by that record (a re-present
     // without one would show a composite nothing was written to yet). Before BeginFrame: nothing of this run is

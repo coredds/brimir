@@ -95,10 +95,14 @@ void VulkanVDPRenderer::AttachDevice(VulkanDevice &device, uint32_t frameContext
         // cleared (Vdp2VulkanBackend clears it on first use).
         m_front.ConsumeFrame();
         m_front.MarkAllDirty();
-        if (!gpuVdp1 || EnterGpuVdp1(device, contexts)) {
+        VkResult failure = VK_SUCCESS;
+        if (!gpuVdp1 || EnterGpuVdp1(device, contexts, failure)) {
             break;
         }
-        if (m_internalScale <= 1) {
+        // Only a GPU short of memory tries a lower internal resolution; any other failure keeps this one with VDP1 in
+        // software
+        const bool outOfMemory = failure == VK_ERROR_OUT_OF_DEVICE_MEMORY || failure == VK_ERROR_OUT_OF_HOST_MEMORY;
+        if (m_internalScale <= 1 || !outOfMemory) {
             Log("VDP1 on the GPU unavailable; VDP1 stays in software");
             break;
         }
@@ -271,6 +275,7 @@ bool VulkanVDPRenderer::SetInternalScale(uint32_t n) {
         return false;
     }
     m_requestedScale = n;
+    m_vdp1NxSuspendedAt = 0; // a new request: VDP1 upscaling is tried again
     return FallBackInternalScale(n);
 }
 
@@ -302,7 +307,17 @@ bool VulkanVDPRenderer::FallBackInternalScale(uint32_t n) {
 }
 
 uint32_t VulkanVDPRenderer::Vdp1NxTarget(uint32_t n) const {
-    return m_vdp1Upscaling && n > 1 ? n : 0;
+    return m_vdp1Upscaling && n > 1 && n != m_vdp1NxSuspendedAt ? n : 0;
+}
+
+bool VulkanVDPRenderer::SuspendVdp1Upscaling() {
+    if (Vdp1UpscaleScale() == 0) {
+        return false;
+    }
+    m_vdp1NxSuspendedAt = m_internalScale;
+    ApplyVdp1NxScale(0);
+    Log("VDP1 upscaling off at " + std::to_string(m_internalScale) + "x: the GPU is short of memory");
+    return true;
 }
 
 uint32_t VulkanVDPRenderer::Vdp1UpscaleScale() const {
@@ -380,6 +395,7 @@ void VulkanVDPRenderer::NotifyVdp1Rescale(uint32_t scale) {
 
 void VulkanVDPRenderer::SetVdp1Upscaling(bool enabled) {
     m_vdp1Upscaling = enabled;
+    m_vdp1NxSuspendedAt = 0;
     if (m_backend) {
         ApplyVdp1NxScale(Vdp1NxTarget(m_internalScale));
     }
@@ -424,9 +440,14 @@ void VulkanVDPRenderer::Log(const std::string &text) const {
 // -----------------------------------------------------------------------------
 // Gpu VDP1 mode
 
-bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts) {
+bool VulkanVDPRenderer::EnterGpuVdp1(VulkanDevice &device, uint32_t contexts, VkResult &failure) {
+    if (m_vdp1FailureForTest != VK_SUCCESS) {
+        failure = m_vdp1FailureForTest;
+        return false;
+    }
     auto backend = std::make_unique<vdp1::Vdp1VulkanBackend>(device, contexts, m_backend->SpriteFBBuffer());
     if (!backend->Ok()) {
+        failure = backend->Result();
         return false;
     }
     backend->SetLog([this](const std::string &text) {
@@ -645,6 +666,7 @@ bool VulkanVDPRenderer::RecordVdp1Work(uint32_t context, VkCommandBuffer cmd, Fr
     m_vdp1BeforeFrame = m_vdp1BeforeFrame > done ? m_vdp1BeforeFrame - done : 0;
     if (!ok) {
         Log("VDP1: recording the VDP1 ops failed (upload space); they stay pending");
+        m_vdp1RecordFailed = true;
     }
 
     // Rule 2: the readbacks of the GpuNewer shadowed slices this command buffer covers, plus `extra` (whatever they

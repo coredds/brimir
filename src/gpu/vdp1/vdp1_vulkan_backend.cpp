@@ -17,6 +17,8 @@
 #include "gpu/shaders/generated/vdp1_fb_write_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_filter_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_raster_nx.spv.h"
+#include "gpu/shaders/generated/vdp1_raster_nx_hybrid.spv.h"
+#include "gpu/shaders/generated/vdp1_raster_nx_overwrite.spv.h"
 #include "gpu/shaders/generated/vdp1_rebuild_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_resolve_fast_nx.spv.h"
 #include "gpu/shaders/generated/vdp1_resolve_nx.spv.h"
@@ -197,6 +199,8 @@ VkResult Vdp1VulkanBackend::CreateNxPipelines() {
         {shaders::kVdp1RebuildNxSpv, sizeof(Vdp1RebuildNxPushConstants)},
         {shaders::kVdp1ResolveFastNxSpv, sizeof(Vdp1BatchPushConstants)},
         {shaders::kVdp1FilterNxSpv, sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1RasterNxOverwriteSpv, sizeof(Vdp1BatchPushConstants)},
+        {shaders::kVdp1RasterNxHybridSpv, sizeof(Vdp1BatchPushConstants)},
     }};
     for (uint32_t i = 0; i < kNxPassCount; ++i) {
         Pipe &pipe = m_nxPipes[i];
@@ -680,7 +684,9 @@ void Vdp1VulkanBackend::DispatchWith(VkCommandBuffer cmd, const Pipe &p, VkDescr
     }
     vk.vkCmdDispatch(cmd, x, y, 1);
     PassBarrier(cmd);
-    ProfileStamp(cmd, ProfileLabel(p));
+    if (m_profile != nullptr) {
+        m_profile->Stamp(cmd, ProfileLabel(p));
+    }
 }
 
 void Vdp1VulkanBackend::ProfileStamp(VkCommandBuffer cmd, GpuPassProfile::Label label) const {
@@ -709,7 +715,9 @@ GpuPassProfile::Label Vdp1VulkanBackend::ProfileLabel(const Pipe &p) const {
     for (uint32_t i = 0; i < kNxPassCount; ++i) {
         if (&p == &m_nxPipes[i]) {
             switch (i) {
-            case kNxRaster: return P::kVdp1NxRaster;
+            case kNxRaster:
+            case kNxRasterOverwrite:
+            case kNxRasterHybrid: return P::kVdp1NxRaster;
             case kNxBucketSums:
             case kNxBucketSumsAdd: return P::kVdp1NxBucketSums;
             case kNxResolve: return P::kVdp1NxResolve;
@@ -734,7 +742,9 @@ void Vdp1VulkanBackend::DispatchIndirectWith(VkCommandBuffer cmd, const Pipe &p,
     }
     vk.vkCmdDispatchIndirect(cmd, m_buffers[kBatchState].buffer, argsWord * sizeof(uint32_t));
     PassBarrier(cmd);
-    ProfileStamp(cmd, ProfileLabel(p));
+    if (m_profile != nullptr) {
+        m_profile->Stamp(cmd, ProfileLabel(p));
+    }
 }
 
 bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment, uint32_t contextIndex,
@@ -925,7 +935,9 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
                                             (oddBytes ? kBatchOverwriteOddBytes : 0u) | (hybrid ? kBatchHybrid : 0u);
                     const Vdp1BatchPushConstants npc{0, sb.spanCount, 0, sb.slotCount, drawFB, nx};
                     if (const uint32_t groups = Groups(sb.spanCount, kWorkgroupSize); groups != 0) {
-                        DispatchWith(cmd, m_nxPipes[kNxRaster], m_nxPipes[kNxRaster].set, &npc, groups, 1);
+                        const NxPass variant = overwrite ? kNxRasterOverwrite : hybrid ? kNxRasterHybrid : kNxRaster;
+                        const Pipe &raster = m_nxPipes[variant];
+                        DispatchWith(cmd, raster, raster.set, &npc, groups, 1);
                     }
                     Dispatch(cmd, kBatchRange, nullptr, 1);
                     ++m_stats.nxSubBatches;
@@ -947,6 +959,7 @@ bool Vdp1VulkanBackend::Record(const Vdp1OpList &ops, const Vdp1Segment &segment
                         }
                         ++m_stats.nxHybridSubBatches;
                         ++m_nxPathTotals.hybrid;
+                        m_nxPathTotals.hybridPixel8 += oddWinners ? 1 : 0;
                         // filter_nx leaves the odd bytes' winners
                         m_nxOddWinnersDirty = m_nxOddWinnersDirty || oddWinners;
                     } else {

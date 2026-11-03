@@ -581,8 +581,26 @@ endforeach()
 require_log(lowvram_c "VDP1 on the GPU unavailable at 4x; trying 3x")
 require_log(lowvram_c "VDP2 internal resolution: requested 4x, using [123]x")
 forbid_log(lowvram_c "frames at 4x")
+# ... with VDP1 upscaling active at 4x when memory runs short (the cap 2 MiB above a 4x upscaling run's memory, then the
+# overscan crop changes at run 100 and new output images are needed): upscaling goes off at 4x and the scale stays (not a
+# lower scale with upscaling). At most one frame repeats (a frame whose VDP1 ops found no upload space).
+set(overscan_at_100_300 --set-option-at 100 brimir_overscan=2)
+run_vkhost(software_overscan_at_100_300 ${overscan_at_100_300})
+check_software_reference(software_overscan_at_100_300)
+run_vkhost(lowvram_on --vulkan --internal-resolution 4)
+string(REGEX MATCH "core device memory: ([0-9]+)\\.[0-9] MiB after the last frame" ignored "${lowvram_on_err}")
+math(EXPR lowvram_cap_on "${CMAKE_MATCH_1} + 2")
+run_vkhost(lowvram_on_short --vulkan --internal-resolution 4 --hash-sample 4 --fail-alloc-total-above ${lowvram_cap_on}
+           ${overscan_at_100_300})
+check_run(lowvram_on_short 300 REFERENCE software_overscan_at_100_300 ALLOWED 1)
+check_vulkan_counters(lowvram_on_short)
+check_vdp2_renderer(lowvram_on_short)
+require_log(lowvram_on_short "Vulkan VDP1 renderer active")
+require_log(lowvram_on_short "VDP1 upscaling: sprite surface at 4x")
+require_log(lowvram_on_short "VDP1 upscaling off at 4x: the GPU is short of memory")
+forbid_log(lowvram_on_short "frames at [123]x")
 message(STATUS "lowvram: M ${lowvram_m} MiB at 4x; caps M + 24 and M + 100: upscaling off at 4x; M - 40: a lower scale, "
-               "VDP1 still on the GPU")
+               "VDP1 still on the GPU; short of memory with upscaling active: upscaling off, 4x kept")
 
 # The output images (the ones handed to set_image) cannot be created above 3x: a live 2x -> 4x keeps the renderer and the
 # output at 2x (the images are created before the renderer changes, so the two never differ); a live 3x then works.
@@ -825,11 +843,10 @@ endif()
 # image creation fails in runs 100 .. 159 and the overscan crop changes at run 100, so the new size fails at 4x and then in
 # the fallback at 3x, 2x and 1x. Each scale is tried only in runs 100, 101, 103, 107, 115 and 131 (24 failures; the
 # fallback waits for the output's work only in those runs), not every run; run 163 creates the 4x images. Recorded
-# frames 40 .. 102 repeat frame 39, the others equal software at the sample points.
-set(overscan_at_100_300 --set-option-at 100 brimir_overscan=2)
-run_vkhost(software_overscan_at_100_300 ${overscan_at_100_300})
-check_software_reference(software_overscan_at_100_300)
+# frames 40 .. 102 repeat frame 39, the others equal software at the sample points. VDP1 upscaling off (with it, its
+# memory would first be freed at 4x and tried once more: lowvram_on_short).
 run_vkhost(output_images_backoff_4x --vulkan --internal-resolution 4 --hash-sample 4 --fail-output-images-runs 100 160
+           --option brimir_vdp1_upscaling=disabled
            ${overscan_at_100_300})
 check_vulkan_counters(output_images_backoff_4x)
 forbid_log(output_images_backoff_4x "Vulkan VDP2 renderer (unavailable|off)")

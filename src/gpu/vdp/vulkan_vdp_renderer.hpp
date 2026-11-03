@@ -264,6 +264,8 @@ public:
     // The VDP1 back half's overwrite-class fast path at N x (Vdp1VulkanBackend::SetNxOverwritePath; on by default),
     // kept across back halves. Diagnostics and tests (BRIMIR_VDP1_NX_OVERWRITE=0).
     void SetVdp1OverwritePath(bool enabled);
+    // Test hook: the VDP1 back half "fails" with this result at the next attaches (VK_SUCCESS: no failure).
+    void SetVdp1BackendFailureForTest(VkResult result) { m_vdp1FailureForTest = result; }
 
     // The inner software renderer (VDP1 in Software mode and while detached), for tests.
     const ymir::vdp::SoftwareVDPRenderer &InnerVdp1ForTest() const { return *m_vdp1; }
@@ -295,6 +297,17 @@ public:
     // Changes the effective internal resolution only (as SetInternalScale, same contract), keeping the request: for a
     // caller that cannot present the requested one (its output images could not be allocated).
     bool FallBackInternalScale(uint32_t n);
+    // A caller short of memory at the current internal resolution (same contract as FallBackInternalScale): frees the
+    // VDP1 upscaling resources and keeps upscaling off at this scale (until SetInternalScale or SetVdp1Upscaling; the
+    // lower scales of later fallbacks still try it). False when upscaling is not active (nothing freed).
+    bool SuspendVdp1Upscaling();
+    // Whether recording VDP1 ops failed for upload space since the last call (a GPU short of memory: the caller may
+    // free VDP1 upscaling's memory, SuspendVdp1Upscaling).
+    bool TakeVdp1RecordFailed() {
+        const bool failed = m_vdp1RecordFailed;
+        m_vdp1RecordFailed = false;
+        return failed;
+    }
     // Where the back half logs its allocation failures and the renderer the effective scale after a fallback (stderr
     // when unset); kept across AttachDevice.
     void SetLog(std::function<void(const std::string &)> log);
@@ -400,7 +413,8 @@ private:
     void CaptureAltSpriteSlices();
 
     // Gpu VDP1 mode
-    bool EnterGpuVdp1(VulkanDevice &device, uint32_t contexts);
+    // False (failure: the VDP1 back half's VkResult) when the back half cannot be created.
+    bool EnterGpuVdp1(VulkanDevice &device, uint32_t contexts, VkResult &failure);
     void LeaveGpuVdp1(bool sync);
     void DestroyGpuVdp1();
     // VDP1 upscaling: the N x scale wanted at internal resolution n (0: none), and applying it to the VDP1 back half
@@ -471,12 +485,15 @@ private:
     std::function<bool(const SyncRecord &record)> m_syncSubmit;
     Vdp1SyncStats m_syncStats;
     bool m_vdp1Upscaling = false;
+    bool m_vdp1RecordFailed = false;   // TakeVdp1RecordFailed
+    uint32_t m_vdp1NxSuspendedAt = 0; // SuspendVdp1Upscaling: the internal resolution upscaling stays off at
     bool m_vdp2NxSprites = true; // SetVdp2NxSpritesForTest
     NxRecordStats m_lastNxStats{};
     bool m_vdp1OneTimeRecorded = false; // the last record call recorded the VDP1 back half's one-time work
     uint32_t m_vdp1NxNotified = 0; // the last scale reported to m_vdp1WorkObserver
     VkDeviceSize m_vdp1NxAllocationLimit = 0;
     bool m_vdp1OverwritePath = true;
+    VkResult m_vdp1FailureForTest = VK_SUCCESS;
     std::function<void(const Vdp1WorkEvent &)> m_vdp1WorkObserver;
 
     uint32_t m_HRes = ymir::vdp::kDefaultResH;

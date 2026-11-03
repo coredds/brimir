@@ -132,7 +132,7 @@ public:
     static NxPath ClassifyNx(std::span<const Vdp1CommandParams> commands);
     // N x sub-batches recorded since creation: on the fast path (of them 8 bpp) and ordered (tests).
     struct NxPathTotals {
-        uint64_t overwrite = 0, overwriteOddBytes = 0, hybrid = 0, ordered = 0;
+        uint64_t overwrite = 0, overwriteOddBytes = 0, hybrid = 0, hybridPixel8 = 0, ordered = 0;
     };
     const NxPathTotals &NxPathTotalsForTest() const { return m_nxPathTotals; }
 
@@ -214,7 +214,7 @@ private:
     // pipelines, bucket and scatter with N x descriptor sets.
     enum NxPass : uint32_t {
         kNxRaster, kNxBucketSums, kNxBucketSumsAdd, kNxResolve, kNxErase, kNxFbWrite, kNxRebuild, kNxResolveFast,
-        kNxFilter, kNxPassCount
+        kNxFilter, kNxRasterOverwrite, kNxRasterHybrid, kNxPassCount
     };
     enum NxBuf : uint32_t { kNxUnitCounts, kNxUnitOffsets, kNxScanSums, kNxSurface, kNxBufCount };
 

@@ -408,9 +408,11 @@ inline constexpr std::array<std::span<const Binding>, 10> kPipelineBindings{
     std::span<const Binding>(kEraseBindings),      std::span<const Binding>(kFbWriteMarkBindings),
     std::span<const Binding>(kFbWriteBindings),    std::span<const Binding>(kFbWriteClearBindings)};
 
-// N x pipelines (GPU stage 3). raster_nx has the native raster's bindings and the unit offsets (the 8 bpp odd bytes'
-// winners of an overwrite-class sub-batch); batch_range, bucket and scatter are the native pipelines.
-inline constexpr std::array<Binding, 7> kRasterNxBindings{{
+// N x pipelines (GPU stage 3). raster_nx has the native raster's bindings; its overwrite-class and hybrid variants
+// (raster_nx_overwrite, raster_nx_hybrid) also the unit offsets (their winners); batch_range, bucket and scatter are
+// the native pipelines.
+inline constexpr std::array<Binding, 6> kRasterNxBindings = kRasterBindings;
+inline constexpr std::array<Binding, 7> kRasterNxWinnersBindings{{
     {kBindingCommands, DescriptorKind::StorageBuffer},
     {kBindingSpans, DescriptorKind::StorageBuffer},
     {kBindingVRAM, DescriptorKind::StorageBuffer},
@@ -478,17 +480,19 @@ inline constexpr std::array<Binding, 4> kNxLayoutProbeBindings{{
 }};
 
 /// @brief The binding tables of the N x pipelines (raster_nx, bucket_sums_nx, bucket_sums_nx_add, resolve_nx, erase_nx,
-/// fb_write_nx, rebuild_nx, resolve_fast_nx, filter_nx), in Vdp1VulkanBackend::NxPass order: the back half builds them
-/// at its first SetNxScale(N > 1). The N x unit counts, offsets and scan sums are the back half's own N-sized buffers
-/// (bound at kBindingUnitCounts, kBindingUnitOffsets and kBindingScanSums of raster_nx, bucket_sums_nx(_add),
-/// resolve_nx, resolve_fast_nx, filter_nx and of N x sets of the native bucket and scatter pipelines); the counts are
-/// zero at creation and between sub-batches, as the native ones between batches.
-inline constexpr std::array<std::span<const Binding>, 9> kNxPipelineBindings{
+/// fb_write_nx, rebuild_nx, resolve_fast_nx, filter_nx, raster_nx_overwrite, raster_nx_hybrid), in
+/// Vdp1VulkanBackend::NxPass order: the back half builds them at its first SetNxScale(N > 1). The N x unit counts,
+/// offsets and scan sums are the back half's own N-sized buffers (bound at kBindingUnitCounts, kBindingUnitOffsets and
+/// kBindingScanSums of the raster_nx variants, bucket_sums_nx(_add), resolve_nx, resolve_fast_nx, filter_nx and of
+/// N x sets of the native bucket and scatter pipelines); the counts are zero at creation and between sub-batches, as
+/// the native ones between batches.
+inline constexpr std::array<std::span<const Binding>, 11> kNxPipelineBindings{
     std::span<const Binding>(kRasterNxBindings),   std::span<const Binding>(kBucketSumsNxBindings),
     std::span<const Binding>(kBucketSumsNxBindings), std::span<const Binding>(kResolveNxBindings),
     std::span<const Binding>(kEraseNxBindings),    std::span<const Binding>(kFbWriteNxBindings),
     std::span<const Binding>(kRebuildNxBindings),  std::span<const Binding>(kResolveFastNxBindings),
-    std::span<const Binding>(kFilterNxBindings)};
+    std::span<const Binding>(kFilterNxBindings),     std::span<const Binding>(kRasterNxWinnersBindings),
+    std::span<const Binding>(kRasterNxWinnersBindings)};
 
 /// @brief The largest per-stage use over the VDP1 pipelines, native and N x (gpu_version.hpp takes the maximum with
 /// VDP2's).
