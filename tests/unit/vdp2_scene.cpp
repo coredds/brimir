@@ -189,11 +189,24 @@ std::vector<std::unique_ptr<savestate::VDPSaveState>> Vdp2SceneWriter::SaveState
 void Vdp2SceneWriter::CrossLoad() {
     auto saved = SaveStates();
     for (size_t i = 0; i < m_targets.size(); ++i) {
-        // VDP::LoadState (vdp.cpp:530-546)
+        // VDP::LoadState (vdp.cpp:536-547)
         const savestate::VDPSaveState &state = *saved[(i + 1) % saved.size()];
         Target &t = m_targets[i];
+        t.renderer->PreLoadState();
         t.state->LoadState(state);
         t.renderer->LoadState(state.renderer);
+        t.renderer->PostLoadStateSync();
+    }
+}
+
+void Vdp2SceneWriter::RoundTrip() {
+    auto saved = SaveStates();
+    for (size_t i = 0; i < m_targets.size(); ++i) {
+        // VDP::LoadState (vdp.cpp:536-547)
+        Target &t = m_targets[i];
+        t.renderer->PreLoadState();
+        t.state->LoadState(*saved[i]);
+        t.renderer->LoadState(saved[i]->renderer);
         t.renderer->PostLoadStateSync();
     }
 }

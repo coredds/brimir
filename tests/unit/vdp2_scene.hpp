@@ -141,9 +141,13 @@ public:
     /// @brief Every attached pair's state as VDP::SaveState saves it (PreSaveStateSync, VDPState::SaveState, the
     /// renderer's SaveState), in Attach order.
     std::vector<std::unique_ptr<ymir::savestate::VDPSaveState>> SaveStates();
-    /// @brief Saves every pair (SaveStates) and loads pair i with pair (i + 1) % n's state (VDP::LoadState: VDPState,
-    /// renderer LoadState, PostLoadStateSync): with two pairs, software loads the other renderer's state and vice versa.
+    /// @brief Saves every pair (SaveStates) and loads pair i with pair (i + 1) % n's state (VDP::LoadState: PreLoadState,
+    /// VDPState, renderer LoadState, PostLoadStateSync): with two pairs, software loads the other renderer's state and
+    /// vice versa.
     void CrossLoad();
+    /// @brief Saves every pair (SaveStates) and loads each pair's own state back (VDP::LoadState: PreLoadState,
+    /// VDPState, renderer LoadState, PostLoadStateSync), as run-ahead and netplay do.
+    void RoundTrip();
     /// @brief Every attached renderer's state saved, a blank renderer section loaded, then the saved state loaded again
     /// (PreSaveStateSync, SaveState, LoadState, PostLoadStateSync as VDP::SaveState / LoadState call them).
     void SaveLoadMidFrame();

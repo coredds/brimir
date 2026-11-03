@@ -1089,6 +1089,17 @@ check_vdp2_renderer(vdp1_nx_off)
 forbid_log(vdp1_nx_off "sprite surface at")
 require_log(vdp1_nx_off "N x sprite frames shown 0, hidden 0; N x VDP1 passes shown 0, hidden 0")
 
+# ... state loads (run-ahead and netplay load one every frame; here a round trip after every frame): a main or mesh
+# slice whose loaded bytes equal what the GPU holds is not uploaded, so its N x blocks keep their detail instead of
+# being rebuilt from native FBRAM. In the menu nothing changes between the save and the load: every load keeps all six.
+run_vkhost(vdp1_nx_roundtrip --vulkan --gpu-vdp1 --internal-resolution 2 --hash-sample 2 --state-roundtrip 1)
+check_run(vdp1_nx_roundtrip 300)
+check_vulkan_counters(vdp1_nx_roundtrip)
+check_vdp2_renderer(vdp1_nx_roundtrip)
+check_sync_counts(vdp1_nx_roundtrip)
+require_log(vdp1_nx_roundtrip "360 state round trips")
+require_log(vdp1_nx_roundtrip "VDP1 state loads 360: main and mesh slices uploaded 0, kept 2160")
+
 # ... live option changes (as from RetroArch's Quick Menu), under synchronization validation: VDP1 upscaling off and on
 # and the internal resolution, with weave (the composite keeps the other field) and with run-ahead (hidden frames and a
 # second instance). Every frame at its sample points identical to software (no black field), only SET_GEOMETRY for the

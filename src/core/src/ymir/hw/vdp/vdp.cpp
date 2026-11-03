@@ -534,6 +534,7 @@ bool VDP::ValidateState(const savestate::VDPSaveState &state) const {
 }
 
 void VDP::LoadState(const savestate::VDPSaveState &state) {
+    m_renderer->PreLoadState(); // Brimir: before VDPState changes
     m_state.LoadState(state);
     m_renderer->LoadState(state.renderer);
 

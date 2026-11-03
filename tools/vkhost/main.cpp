@@ -110,6 +110,9 @@ void PrintUsage(std::FILE* out) {
         "  --runahead    run-ahead simulation: before each frame one hidden frame (video disabled; not rolled\n"
         "                back, so compare with a software --runahead run), and a second instance of the core\n"
         "                (refused a hardware context) running one frame per frame with audio and video disabled\n"
+        "  --rollback    RetroArch's single-instance run-ahead of one frame: per frame one hidden frame, retro_serialize,\n"
+        "                the recorded frame, retro_unserialize (the recorded frames run one frame ahead; compare with\n"
+        "                a software --rollback run)\n"
         "  --preferred-hw gl  with --vulkan: GET_PREFERRED_HW_RENDER reports GL (RetroArch on the gl driver with\n"
         "                driver switching allowed); SET_HW_RENDER would still be accepted\n"
         "  --fake-api X.Y  with --vulkan: vkGetPhysicalDeviceProperties tells the core the GPU supports only\n"
@@ -273,6 +276,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         }
         if (opt == "--runahead") {
             args.config.runahead = true;
+            continue;
+        }
+        if (opt == "--rollback") {
+            args.config.rollback = true;
             continue;
         }
         if (opt == "--compare") {

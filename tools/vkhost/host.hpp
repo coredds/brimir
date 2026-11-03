@@ -66,6 +66,7 @@ struct HostConfig {
     std::string saveStateDir;
     std::string loadStatePath; // --load-state <file>: retro_unserialize before the first frame
     bool runahead = false; // --runahead: run-ahead simulation (hidden frames, a second instance without context)
+    bool rollback = false; // --rollback: RetroArch's single-instance run-ahead (hidden frame, save, frame, load)
     bool preferGl = false; // --preferred-hw gl: GET_PREFERRED_HW_RENDER reports GL (SET_HW_RENDER still accepted)
     uint32_t fakeApi = 0;  // --fake-api X.Y: the core is told the GPU supports only this Vulkan version
     int growMaskAt = -1;   // --grow-mask F: sync mask 0b1 until frame F, then 0b111

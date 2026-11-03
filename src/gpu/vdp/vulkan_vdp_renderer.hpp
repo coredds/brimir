@@ -48,7 +48,10 @@
 //    readbacks), waits and merges. So a burst of reads costs one sync submit, the first.
 // 5. PreSaveStateSync: rule 4 for main and mesh. Between retro_run calls every slice is Valid or Pending (rule 2 and
 //    the ops-only submit), so retro_serialize only waits for fences.
-// 6. PostLoadStateSync: main and mesh uploaded from the loaded state, Valid; alt left as it is (as software).
+// 6. PostLoadStateSync: main and mesh uploaded from the loaded state, Valid; alt left as it is (as software). A slice
+//    that was Valid before the load (PreLoadState) and whose loaded bytes equal its shadow is not uploaded: the GPU
+//    already holds those bytes (after the queued ops), and the N x surface keeps its detail instead of being rebuilt
+//    from native (run-ahead and netplay load a state every frame).
 // 7. Reset: main (hard reset), alt and mesh uploaded as the reset left them, after the ops so far.
 // 8. DetachDevice syncs (every slice, alt included) and hands the framebuffers to the inner renderer
 //    (SetAltFBRAM, SetMeshFBRAM). AbandonDevice (the device lost) makes no Vulkan call: the inner renderer continues
@@ -198,6 +201,9 @@ public:
         double syncSeconds = 0, maxSyncSeconds = 0; // sync submits: record, submit, wait and merge
         double waitSeconds = 0, maxWaitSeconds = 0; // fence waits and their merges
         double mergeSeconds = 0;                    // every merge (also those in the two above)
+        uint64_t stateLoads = 0;          // state loads in Gpu VDP1 mode
+        uint64_t loadUploadedSlices = 0;  // main and mesh slices they uploaded (N x rebuilt from native)
+        uint64_t loadKeptSlices = 0;      // ... and kept: loaded bytes equal to what the GPU holds (N x detail kept)
     };
     const Vdp1SyncStats &Vdp1Sync() const { return m_syncStats; }
     uint64_t Vdp1SyncSubmits() const;
@@ -328,6 +334,7 @@ public:
     void Reset(bool hard) override;
 
     void PreSaveStateSync() override;
+    void PreLoadState() override;
     void PostLoadStateSync() override;
     void SaveState(ymir::savestate::VDPSaveState::VDPRendererSaveState &state) override;
     bool ValidateState(const ymir::savestate::VDPSaveState::VDPRendererSaveState &state) const override;
@@ -475,6 +482,10 @@ private:
     std::vector<Vdp1Work> m_vdp1Recorded;     // what the last record call recorded (for RecordedFrameDropped)
     std::unique_ptr<MeshFBRAM> m_meshShadow;  // Gpu mode: the CPU shadow of the mesh framebuffers
     bool m_stateLoaded = false;               // LoadState since the last PostLoadStateSync
+    // PreLoadState: the main and mesh slices that were Valid (the GPU holds the shadow's bytes once the queued ops
+    // run) and a copy of the Valid main slices (VDPState's, which the load overwrites before LoadState).
+    uint32_t m_preLoadValid = 0;
+    std::unique_ptr<std::array<ymir::vdp::SpriteFB, 2>> m_preLoadMain;
     bool m_frameRecordedBySync = false;
     bool m_vdp2FrameRecorded = false;         // the last record call recorded a VDP2 frame (for RecordedFrameDropped)
     VulkanDevice *m_device = nullptr;

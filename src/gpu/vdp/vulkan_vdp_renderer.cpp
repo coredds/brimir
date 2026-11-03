@@ -3,6 +3,7 @@
 #include "gpu/vdp2/vdp2_bindings.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -1105,11 +1106,49 @@ void VulkanVDPRenderer::PostLoadStateSync() {
         QueueVdp1Ops();
         m_vdp1Front.PostLoadStateSync();
         if (m_stateLoaded) {
-            QueueFbramUpload(kMainSlices | kMeshSlices, nullptr, nullptr);
+            // Rule 6: a slice whose loaded bytes equal what the GPU holds keeps its N x detail (no upload, no rebuild)
+            uint32_t keep = m_preLoadValid;
+            for (uint32_t fb = 0; fb < 2; ++fb) {
+                const uint32_t slice = vdp1::Vdp1MainSlice(fb);
+                if (((keep >> slice) & 1u) && m_state.mem1.FBRAM[fb] != (*m_preLoadMain)[fb]) {
+                    keep &= ~(1u << slice);
+                }
+            }
+            const uint32_t upload = (kMainSlices | kMeshSlices) & ~keep;
+            if (upload != 0) {
+                QueueFbramUpload(upload, nullptr, nullptr);
+            }
             MarkShadowValid(kMainSlices | kMeshSlices);
+            ++m_syncStats.stateLoads;
+            m_syncStats.loadUploadedSlices += static_cast<uint32_t>(std::popcount(upload));
+            m_syncStats.loadKeptSlices += static_cast<uint32_t>(std::popcount((kMainSlices | kMeshSlices) & keep));
         }
     }
     m_stateLoaded = false;
+    m_preLoadValid = 0;
+}
+
+void VulkanVDPRenderer::PreLoadState() {
+    m_preLoadValid = 0;
+    if (!m_gpuVdp1 || m_stateLoaded) {
+        return; // (a LoadState without its PostLoadStateSync changed the mesh shadow)
+    }
+    // Valid: the shadow holds every op emitted so far and every CPU write, which is what the GPU holds once the
+    // queued and submitted work has run (no wait here: GpuNewer and Pending slices are uploaded as before).
+    for (uint32_t slice = 0; slice < 8; ++slice) {
+        const SliceSync &s = m_slices[slice];
+        if ((((kMainSlices | kMeshSlices) >> slice) & 1u) && s.valid >= s.lastTouch) {
+            m_preLoadValid |= 1u << slice;
+        }
+    }
+    for (uint32_t fb = 0; fb < 2; ++fb) {
+        if ((m_preLoadValid >> vdp1::Vdp1MainSlice(fb)) & 1u) {
+            if (!m_preLoadMain) {
+                m_preLoadMain = std::make_unique<std::array<SpriteFB, 2>>();
+            }
+            (*m_preLoadMain)[fb] = m_state.mem1.FBRAM[fb];
+        }
+    }
 }
 
 void VulkanVDPRenderer::SaveState(savestate::VDPSaveState::VDPRendererSaveState &state) {
@@ -1131,6 +1170,17 @@ void VulkanVDPRenderer::LoadState(const savestate::VDPSaveState::VDPRendererSave
     m_front.LoadFetchers(state);
     if (m_gpuVdp1) {
         m_vdp1Front.SetDoubleV(state.vdp1State.doubleV != 0);
+        if (m_stateLoaded) {
+            m_preLoadValid = 0; // a second LoadState: the mesh shadow is the first one's
+        }
+        for (uint32_t alt = 0; alt < 2; ++alt) {
+            for (uint32_t fb = 0; fb < 2; ++fb) {
+                const uint32_t bit = 1u << vdp1::Vdp1MeshSlice(alt, fb);
+                if ((m_preLoadValid & bit) && (*m_meshShadow)[alt][fb] != state.vdp1State.meshFBRAM[alt][fb]) {
+                    m_preLoadValid &= ~bit;
+                }
+            }
+        }
         *m_meshShadow = state.vdp1State.meshFBRAM;
         m_stateLoaded = true;
     }

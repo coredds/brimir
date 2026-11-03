@@ -210,6 +210,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     uint64_t secondaryFrames = 0;
     uint64_t hiddenFrames = 0;
     uint64_t roundtrips = 0;
+    uint64_t rollbacks = 0;
     uint64_t periodicSaves = 0;
     if (config.saveStateEvery > 0) {
         std::error_code ec;
@@ -239,7 +240,22 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
             runHidden();
             ++hiddenFrames;
         }
+        if (config.rollback) {
+            runHidden();
+            ++hiddenFrames;
+            if (!host.Serialize(state)) {
+                stateProblems.push_back("--rollback: retro_serialize failed before frame " + std::to_string(i));
+                break;
+            }
+        }
         host.RunFrame(i >= config.warmup ? &timedSink : nullptr);
+        if (config.rollback) {
+            if (!host.Unserialize(state)) {
+                stateProblems.push_back("--rollback: retro_unserialize failed after frame " + std::to_string(i));
+                break;
+            }
+            ++rollbacks;
+        }
         if (config.runahead) {
             secondary.SetAvEnable(0);
             secondary.RunFrame(nullptr);
@@ -280,9 +296,12 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         std::fprintf(stderr, "vkhost: %llu periodic states saved to %s\n", static_cast<unsigned long long>(periodicSaves),
                      config.saveStateDir.c_str());
     }
-    if (config.hideEvery > 0 || config.runahead) {
+    if (config.hideEvery > 0 || config.runahead || config.rollback) {
         std::fprintf(stderr, "vkhost: %llu hidden frames (video disabled)\n",
                      static_cast<unsigned long long>(hiddenFrames));
+    }
+    if (config.rollback) {
+        std::fprintf(stderr, "vkhost: %llu rollbacks\n", static_cast<unsigned long long>(rollbacks));
     }
     if (config.stateRoundtrip > 0) {
         std::fprintf(stderr, "vkhost: %llu state round trips\n", static_cast<unsigned long long>(roundtrips));

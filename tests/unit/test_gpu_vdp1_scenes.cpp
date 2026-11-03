@@ -604,6 +604,28 @@ SceneCase SceneSaveLoad() {
                       {.deinterlace = true, .transparentMeshes = true}, 16)};
 }
 
+SceneCase SceneRoundTrips() {
+    // Run-ahead and netplay: a save and a load of the same state (VDP::SaveState, VDP::LoadState) before the frame's
+    // first command and between commands. The loaded framebuffers equal what the GPU holds, so the load uploads nothing (rule 6) and the N x
+    // surface keeps what was drawn.
+    FrameControl c = AutoSwap(40);
+    c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 40);
+        if (f > 0) {
+            w.RoundTrip();
+        }
+        w.DrawVDP1Partial(0, 20);
+        if (f > 0) {
+            w.RoundTrip();
+        }
+        w.DrawVDP1Partial(20, 64);
+    };
+    return {"state round trips",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 4,
+                      {.deinterlace = true, .transparentMeshes = true}, 17)};
+}
+
 FbramResult RunCase(const SceneCase &s, uint32_t nx = 0) {
     RenderBothOptions options = s.options;
     if (nx != 0) {
@@ -632,6 +654,7 @@ std::vector<SceneCase> Stage2Scenes() {
     list.push_back(SceneCpuWritesDoubleDensity());
     list.push_back(SceneDroppedCommandBuffer());
     list.push_back(SceneSaveLoad());
+    list.push_back(SceneRoundTrips());
     return list;
 }
 
@@ -696,6 +719,23 @@ TEST_CASE("GPU VDP1 scene: a dropped command buffer's VDP1 ops are replayed with
 
 TEST_CASE("GPU VDP1 scene: save and load between commands", "[gpu][vdp1][scene]") {
     RunCase(SceneSaveLoad());
+}
+
+TEST_CASE("GPU VDP1 scene: state round trips upload nothing and keep the N x surface", "[gpu][vdp1][scene]") {
+    for (const uint32_t nx : {0u, 2u}) {
+        DYNAMIC_SECTION("N " << nx) {
+            SceneCase s = SceneRoundTrips();
+            auto stats = std::make_shared<gpu::VulkanVDPRenderer::Vdp1SyncStats>();
+            s.options.afterFrame = [stats](uint32_t, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+                *stats = vk.Vdp1Sync();
+            };
+            RunCase(s, nx);
+            // Frames 1-3, two round trips each; each keeps the two main and the four mesh slices
+            CHECK(stats->stateLoads == 6);
+            CHECK(stats->loadUploadedSlices == 0);
+            CHECK(stats->loadKeptSlices == 36);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

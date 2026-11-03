@@ -85,6 +85,11 @@ public:
     /// @brief Performs any necessary synchronization after loading a state.
     virtual void PostLoadStateSync() = 0;
 
+    // Brimir: called by VDP::LoadState before VDPState is overwritten (the Vulkan renderer compares the loaded
+    // framebuffers with the ones it holds).
+    /// @brief Runs before a state is loaded into VDPState and the renderer.
+    virtual void PreLoadState() {}
+
     /// @brief Saves the renderer state.
     /// @param[in] state the state object
     virtual void SaveState(savestate::VDPSaveState::VDPRendererSaveState &state) = 0;

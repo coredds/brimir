@@ -1234,6 +1234,8 @@ void VulkanOutput::Impl::DetachRendererIdle(bool discardState) {
                                count(s.refusedSyncs) + " (output " + count(refusedSyncSubmits) + "), readback slices " +
                                count(s.readbackSlices) + ", merged " + count(s.mergedSlices) + " (" +
                                ms(s.mergeSeconds) + " ms)");
+            NegotiationLog(RETRO_LOG_INFO, "VDP1 state loads " + count(s.stateLoads) + ": main and mesh slices uploaded " +
+                                               count(s.loadUploadedSlices) + ", kept " + count(s.loadKeptSlices));
             NegotiationLog(RETRO_LOG_INFO, "VDP1 upscaling: N x sprite frames shown " + count(nxShown.frames) +
                                                ", hidden " + count(nxHidden.frames) + "; N x VDP1 passes shown " +
                                                count(nxShown.vdp1Passes) + ", hidden " + count(nxHidden.vdp1Passes));
