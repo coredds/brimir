@@ -812,9 +812,11 @@ TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CA
     //   - texel boundary: the same command draws both with different texels, or a transparent texel / end code at one
     //     of them (minified textures: the native stepping skips texels the N x stepping reads, and the other way);
     //   - Gouraud boundary: the same command and texel, another colour;
-    //   - later command: another command's N x step wins (an edge of that command);
+    //   - later command: another command's N x step wins (an edge of that command), drawn after the native winner when
+    //     the native winner has no N x step there;
     //   - edge reach: N x draws where native drew nothing and the command has no native step there;
-    //   - coverage gap: native covers the word and no N x step of that command reaches sub-texel (0, 0) (a crack);
+    //   - coverage gap: native covers the word and no N x step of that command reaches sub-texel (0, 0), and no later
+    //     command covers it at N x (a crack);
     //   - rect-path violation: the winner is rect or replicate kind.
     // The last two are findings. BRIMIR_NX_MAX_UNCONFINED=K fails the test when a capture has more than K unconfined
     // points outside the texel and Gouraud classes, or any finding.
@@ -1006,7 +1008,10 @@ TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CA
                     // The native winner's command at N x on this word
                     const auto steps = stepsOf(evN, w1);
                     if (steps.empty()) {
-                        cls = wN != nullptr ? LaterCommand : CoverageGap;
+                        // Not a gap only when a later command covers it at N x (draw order: batch, then command)
+                        const bool later = wN != nullptr && (wN->batch != w1->batch ? wN->batch > w1->batch
+                                                                                      : wN->cmdIndex > w1->cmdIndex);
+                        cls = later ? LaterCommand : CoverageGap;
                     } else if (hasStatus(steps, nx::ProbeEvent::Transparent) ||
                                hasStatus(steps, nx::ProbeEvent::EndCode)) {
                         cls = Texel;
@@ -1024,7 +1029,7 @@ TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CA
                 }
                 ++classes[cls];
                 const uint32 word = unit & ref::kTargetWordMask;
-                const uint32 rw = std::max<uint32>(r.rowWords[fb][unit], 512u);
+                const uint32 rw = r.rowWords[fb][unit] != 0 ? r.rowWords[fb][unit] : 512u;
                 const uint32 slice = (unit & ref::kTargetAltBit) ? gpu::Vdp1AltSlice(fb) : gpu::Vdp1MainSlice(fb);
                 std::string block;
                 for (uint32 sub = 0; sub < n * n; ++sub) {

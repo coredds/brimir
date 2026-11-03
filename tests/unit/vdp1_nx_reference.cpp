@@ -826,7 +826,8 @@ public:
         const uint32 rows = dmaj + 1;
         const uint32 subRows = rows * static_cast<uint32>(m_n);
 
-        // Per sub-row (stepping order): the texel row and the edge Gouraud colours, "native DDA + sub-step"
+        // Per sub-row (stepping order): the texel row and the edge Gouraud colours, from the step count K of the header's
+        // sub-step rule (the native count at sub-row 0, the phase clamped between the native counts at the others)
         m_texV.assign(subRows, 0);
         m_gouraudL.assign(subRows, Color555{.u16 = 0});
         m_gouraudR.assign(subRows, Color555{.u16 = 0});

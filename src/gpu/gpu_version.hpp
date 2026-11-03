@@ -42,7 +42,8 @@ struct RequiredLimit {
 
 // Per-stage descriptor counts of the VDP2 pipelines (src/gpu/vdp2/vdp2_bindings.hpp). The background shader's seven
 // storage buffers exceed the guaranteed maxPerStageDescriptorStorageBuffers (4). The VDP1 pipelines
-// (src/gpu/vdp1/vdp1_bindings.hpp) use at most six storage buffers and nothing else, so VDP2 sets every maximum.
+// (src/gpu/vdp1/vdp1_bindings.hpp, kMaxStageUsage) use at most seven storage buffers and nothing else, so VDP2 sets
+// every maximum.
 inline constexpr uint32_t kRequiredStageStorageBuffers = 7;
 inline constexpr uint32_t kRequiredStageStorageImages = 3;
 inline constexpr uint32_t kRequiredStageSampledImages = 5;

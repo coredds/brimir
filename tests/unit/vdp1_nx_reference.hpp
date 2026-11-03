@@ -47,7 +47,8 @@
 //     quad without the quad path.
 //   Lines and polylines with LineRule::Parallel (L2) become N parallel N x lines (offset 0..N-1 on the minor axis, the
 //     major axis area-mapped to cover both end pixels' blocks), quad-kind spans without antialiasing.
-//// Sub-batches: a native batch's N x spans are cut into sub-batches at a slot (and span) capacity, between spans; each
+//
+// Sub-batches: a native batch's N x spans are cut into sub-batches at a slot (and span) capacity, between spans; each
 // sub-batch has its own slot range from 0 and resolves on its own, in order. The order inside a sub-batch is the
 // command order, then quad step / row, sub-row, pixel, sub-step, main before antialias: VDP1's drawing order at N x.
 //
