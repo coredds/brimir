@@ -18,6 +18,41 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// RasterProbe (ReferenceNx::SetRasterProbe): the probe and the span being rastered, the texel of the current step
+struct ProbeContext {
+    RasterProbe *probe = nullptr;
+    uint64 batch = 0;
+    uint32 drawFB = 0;
+    uint32 cmdIndex = 0;
+    SpanKind kind = SpanKind::Replicate;
+    bool texelKnown = false;
+    sint32 u = 0, v = 0;
+    uint16 texel = 0;
+};
+thread_local ProbeContext t_probe;
+
+void ProbeRecord(uint32 target, uint32 sub, ProbeEvent::Status status, uint32 color) {
+    const uint32 unit = target & ref::kTargetUnitMask;
+    if (t_probe.probe == nullptr || !t_probe.probe->want(t_probe.drawFB, unit, sub)) {
+        return;
+    }
+    ProbeEvent e;
+    e.batch = t_probe.batch;
+    e.drawFB = t_probe.drawFB;
+    e.cmdIndex = t_probe.cmdIndex;
+    e.kind = t_probe.kind;
+    e.unit = unit;
+    e.sub = sub;
+    e.status = status;
+    e.color = color;
+    e.mode = target & ~(ref::kTargetUnitMask | ref::kTargetOddBit);
+    e.texelKnown = t_probe.texelKnown;
+    e.u = t_probe.u;
+    e.v = t_probe.v;
+    e.texel = t_probe.texel;
+    t_probe.probe->events.push_back(e);
+}
+
 double Seconds(Clock::time_point since) {
     return std::chrono::duration<double>(Clock::now() - since).count();
 }
@@ -527,21 +562,58 @@ public:
     // VDP1PlotPixel up to the write at native coordinates (floor(X / N), floor(Y / N)); false only when clipped
     bool Plot(sint32 X, sint32 Y, uint32 key, uint32 color) {
         const sint32 x = FloorDiv(X, m_n);
-        sint32 y = FloorDiv(Y, m_n);
+        const sint32 y = FloorDiv(Y, m_n);
         const uint32 i = static_cast<uint32>(X - x * m_n);
         const uint32 j = static_cast<uint32>(Y - y * m_n);
+        const uint32 sub = j * static_cast<uint32>(m_n) + i;
         if (PixelClipped(m_clip, x, y, m_mode.userClippingEnable, m_mode.clippingMode)) {
+            if (t_probe.probe != nullptr) {
+                ProbeRecord(Target(x, y), sub, ProbeEvent::Clipped, 0);
+            }
             return false;
         }
         const ref::RasterState &s = m_state;
         if (!s.transparentMeshes && m_mode.meshEnable && ((x ^ y) & 1)) {
+            if (t_probe.probe != nullptr) {
+                ProbeRecord(Target(x, y), sub, ProbeEvent::Mesh, 0);
+            }
             return true;
         }
-        const bool altFB = s.deinterlace && s.doubleDensity && (y & 1);
         if (s.doubleDensity && !s.deinterlace && s.dblInterlaceEnable &&
             (y & 1) != static_cast<sint32>(s.dblInterlaceDrawLine)) {
+            if (t_probe.probe != nullptr) {
+                ProbeRecord(Target(x, y), sub, ProbeEvent::OtherLine, 0);
+            }
             return true;
         }
+        NxFragment f;
+        f.key = key;
+        f.target = Target(x, y) | m_targetMode;
+        f.sub = sub;
+        f.color = color;
+        m_out.push_back(f);
+        if (t_probe.probe != nullptr) {
+            ProbeRecord(f.target, sub, ProbeEvent::Drawn, color);
+        }
+        return true;
+    }
+
+    // A step that draws nothing at (X, Y) (a transparent texel or an end code), for the probe
+    void Skipped(sint32 X, sint32 Y, ProbeEvent::Status status) {
+        if (t_probe.probe == nullptr) {
+            return;
+        }
+        const sint32 x = FloorDiv(X, m_n);
+        const sint32 y = FloorDiv(Y, m_n);
+        const uint32 sub =
+            static_cast<uint32>(Y - y * m_n) * static_cast<uint32>(m_n) + static_cast<uint32>(X - x * m_n);
+        ProbeRecord(Target(x, y), sub, status, 0);
+    }
+
+    // The FB address bits of native pixel (x, y): word, alternate field, odd byte
+    uint32 Target(sint32 x, sint32 y) const {
+        const ref::RasterState &s = m_state;
+        const bool altFB = s.deinterlace && s.doubleDensity && (y & 1);
         if ((s.deinterlace && s.doubleDensity) || s.dblInterlaceEnable) {
             y >>= 1;
         }
@@ -550,14 +622,7 @@ public:
             fbOffset *= 2u;
         }
         fbOffset &= 0x3FFFF;
-        NxFragment f;
-        f.key = key;
-        f.target = (fbOffset >> 1) | (altFB ? ref::kTargetAltBit : 0u) | ((fbOffset & 1) ? ref::kTargetOddBit : 0u) |
-                   m_targetMode;
-        f.sub = j * static_cast<uint32>(m_n) + i;
-        f.color = color;
-        m_out.push_back(f);
-        return true;
+        return (fbOffset >> 1) | (altFB ? ref::kTargetAltBit : 0u) | ((fbOffset & 1) ? ref::kTargetOddBit : 0u);
     }
 
     // The fragment colour of VDP1PlotPixel
@@ -1151,9 +1216,21 @@ void RasterQuad(uint32 n, const ref::RasterState &state, const ref::CommandParam
         if (texel.endCodeCount == 2) {
             return;
         }
+        if (t_probe.probe != nullptr) {
+            t_probe.texelKnown = true;
+            t_probe.u = static_cast<sint32>(u.Value());
+            t_probe.v = span.texV;
+            t_probe.texel = static_cast<uint16>(texel.color);
+        }
         u.StepPixel();
         if (!(texel.hasEndCode || (texel.transparent && !mode.transparentPixelDisable))) {
             plotStep(line.step - 1, aa, texel.color);
+        } else if (t_probe.probe != nullptr) {
+            const auto status = texel.hasEndCode ? ProbeEvent::EndCode : ProbeEvent::Transparent;
+            writer.Skipped(line.x, line.y, status);
+            if (aa) {
+                writer.Skipped(line.x + line.aaXInc, line.y + line.aaYInc, status);
+            }
         }
         if (mode.gouraudEnable) {
             gouraud.Step();
@@ -1185,6 +1262,20 @@ const char *Name(ThinRule rule) {
 
 const char *Name(LineRule rule) {
     return rule == LineRule::NativeThick ? "lines native-thick" : "lines N-parallel";
+}
+
+const char *Name(ProbeEvent::Status status) {
+    static constexpr const char *kNames[] = {"drawn", "transparent", "end code", "clipped", "mesh", "other line"};
+    return kNames[status];
+}
+
+const char *Name(SpanKind kind) {
+    switch (kind) {
+    case SpanKind::Rect: return "rect";
+    case SpanKind::Quad: return "quad";
+    case SpanKind::Replicate: return "replicate";
+    }
+    return "?";
 }
 
 const char *CommandCounts::Name(uint32 c) {
@@ -1674,7 +1765,18 @@ void ReferenceNx::DrawBatch(const gpu::Vdp1OpList &ops, const gpu::Vdp1DrawBatch
         for (uint32 i = begin; i < end; ++i) {
             const NxSpan &span = nxSpans[i];
             const size_t before = fragments.size();
+            if (m_probe != nullptr) {
+                t_probe = ProbeContext{m_probe, m_stats.batches, batch.drawFB & 1u, span.cmdIndex, span.kind};
+            }
             RasterSpan(m_options.scale, states[span.cmdIndex], commands[span.cmdIndex], span, m_vram.data(), fragments);
+            if (m_probe != nullptr) {
+                if (span.kind == SpanKind::Replicate) { // drawn without the pixel writer
+                    for (size_t f = before; f < fragments.size(); ++f) {
+                        ProbeRecord(fragments[f].target, fragments[f].sub, ProbeEvent::Drawn, fragments[f].color);
+                    }
+                }
+                t_probe = ProbeContext{};
+            }
             for (size_t f = before; f < fragments.size(); ++f) {
                 if (fragments[f].key < span.slotBase || fragments[f].key >= span.slotBase + span.slots) {
                     throw std::logic_error("vdp1nx::DrawBatch: fragment key outside its span's slots");

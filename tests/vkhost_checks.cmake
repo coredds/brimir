@@ -615,6 +615,19 @@ require_log(scale_restore_lost "VDP2 back half lost at the internal resolution c
 require_log(scale_restore_lost "VDP2 internal resolution: requested 4x, using 1x")
 require_log(scale_restore_lost "Internal resolution: frames at 1x")
 forbid_log(scale_restore_lost "Vulkan VDP2 renderer unavailable")
+# ... and after the pressure: the requested 4x comes back with the scale restore (600 frames after the fallback), while
+# VDP1 stays in software until the next attach (a context reset or a content load), as the README says.
+run_vkhost(scale_restore_lost_later --vulkan --internal-resolution 2 --frames 800
+           --set-option-at 150 brimir_internal_resolution=4 --fail-alloc-above 30 --fail-alloc-runs 150 151)
+if(NOT "${scale_restore_lost_later_code}" STREQUAL "0")
+    fail(scale_restore_lost_later "brimir_vkhost exited with ${scale_restore_lost_later_code}")
+endif()
+check_vulkan_counters(scale_restore_lost_later)
+require_log(scale_restore_lost_later "VDP2 back half lost at the internal resolution change")
+require_log(scale_restore_lost_later "Internal resolution: restored 4x")
+require_log(scale_restore_lost_later "Internal resolution: frames at 4x")
+require_log(scale_restore_lost_later "VDP1 on the GPU unavailable; VDP1 in software")
+message(STATUS "scale_restore_lost: the lost back half is attached again (1x, VDP1 in software), 4x restored later")
 
 # The output images (the ones handed to set_image) cannot be created above 3x: a live 2x -> 4x keeps the renderer and the
 # output at 2x (the images are created before the renderer changes, so the two never differ); a live 3x then works.

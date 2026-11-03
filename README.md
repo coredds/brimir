@@ -103,7 +103,8 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 The Vulkan renderer draws the Saturn's two video chips on the GPU: VDP1 (polygons and sprites) and VDP2
 (backgrounds). At native resolution (1x) every frame and every save state is identical to the software renderer. At
 2x-4x the GPU renders more pixels: 3D edges, rotated and zoomed backgrounds, and distant or shrunk textures get
-smoother. Magnified textures stay blocky, as on the Saturn, and 2D sprite games look as they do at 1x.
+smoother. Magnified textures stay blocky, as on the Saturn. Normal and scaled sprites match the 1x image at its
+sample points; rotated or distorted sprites (for example in Astal) may differ at their edges.
 
 ### Turning it on (RetroArch)
 
@@ -139,6 +140,8 @@ A live change of the internal resolution needs about 20-40 MiB more for a moment
   copy of the frames). The reason is logged and shown once.
 - The GPU is short of memory: VDP1 upscaling is turned off at that resolution first, then a lower internal resolution
   is used (logged; the requested one is tried again later), then VDP1 is drawn in software. The picture never stops.
+  Once VDP1 has moved to software it stays there until the content is loaded again or the video driver is
+  reinitialised; the internal resolution itself comes back automatically.
 - A lost GPU device: the software renderer continues from the last state the GPU handed back; a few frames of VDP1
   drawing may be redrawn by the game.
 
@@ -150,7 +153,8 @@ Vulkan 1.2 baseline). Release builds include it, but it has not been tried on a 
 ### Known exceptions and issues
 
 - At 2x-4x with VDP1 upscaling on, 3D polygons are rasterised at the higher resolution, so their edges and texture
-  steps differ from the 1x image by design. 2D sprites (normal and scaled sprites) are drawn exactly as at 1x.
+  steps differ from the 1x image by design; so do rotated and distorted sprites at their edges. Normal and scaled
+  sprites match the 1x image at its sample points.
 - A few VDP2 corner cases differ from the software renderer on purpose, where the software renderer is itself wrong
   (for example sprites in exclusive monitor mode); they are listed in
   [src/gpu/shaders/vdp2/README.md](src/gpu/shaders/vdp2/README.md#documented-exceptions).

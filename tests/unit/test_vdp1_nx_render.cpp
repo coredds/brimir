@@ -636,16 +636,189 @@ TEST_CASE("VDP1 N x renders of captured frames (BRIMIR_VDP1_CAPTURES, BRIMIR_NX_
     }
 }
 
+namespace {
+
+// The confinement metric's view of one capture at one N (see the test below)
+struct ConfineResult {
+    uint64 drawn = 0, quad = 0, mismatches = 0, quadMismatches = 0, nonConst = 0, nonConstQuad = 0, nonConstOther = 0;
+    // Mismatches whose N x winner at sub-texel (0, 0), or else the native winner, is not quad-kind (rect-path and
+    // replicated content must be native at the sample points)
+    uint64 rectMismatches = 0;
+    std::vector<uint32> unconfined; // fb << 18 | unit
+    std::array<std::vector<uint8>, 2> allowed;
+    std::array<std::vector<uint16>, 2> rowWords; // per drawn unit: the row width (words) of the command that drew it
+};
+
+constexpr uint32 kConfineUnits = 2 * ref::kWordsPerFB; // word | alternate field
+
+void ToFbramStart(const gpu::Vdp1OpDump &d, ref::Fbram &fb) {
+    ToFbram(d.fbramStart, fb);
+}
+
+// Replays the capture at N with the allowance observer (and the raster probe, when given); fills `r` (first pass) or
+// only the probe events
+void ReplayConfine(const gpu::Vdp1OpDump &d, uint32 n, ConfineResult *r, nx::RasterProbe *probe,
+                   std::unique_ptr<ref::Fbram> &native, std::unique_ptr<nx::NxFbram> &surface) {
+    native = std::make_unique<ref::Fbram>();
+    ToFbramStart(d, *native);
+    surface = std::make_unique<nx::NxFbram>(n);
+    surface->ReplicateFrom(*native);
+    nx::ReferenceNx ref{*native, *surface, nx::Options{.scale = n}, d.vramStart};
+    ref.SetRasterProbe(probe);
+    if (r != nullptr) {
+        for (uint32 fb = 0; fb < 2; ++fb) {
+            r->allowed[fb].assign(kConfineUnits, 0);
+            r->rowWords[fb].assign(kConfineUnits, 0);
+        }
+        ref.SetBatchObserver([r](const nx::BatchObservation &b) {
+            std::vector<uint8> &allowed = r->allowed[b.drawFB];
+            std::vector<uint16> &rows = r->rowWords[b.drawFB];
+            std::vector<uint8> quadCmd(b.commands.size(), 0);
+            for (const nx::NxSpan &s : b.nxSpans) {
+                if (s.kind == nx::SpanKind::Quad) {
+                    quadCmd[s.cmdIndex] = 1;
+                }
+            }
+            // Per quad-path command: (word | alt | odd byte) -> (fragments, last colour)
+            std::vector<std::unordered_map<uint32, std::pair<uint32, uint32>>> perCmd(b.commands.size());
+            constexpr uint32 kKeyMask = ref::kTargetUnitMask | ref::kTargetOddBit;
+            for (const ref::Fragment &fr : b.nativeFragments) {
+                const auto it = std::upper_bound(b.spans.begin(), b.spans.end(), fr.key,
+                                                 [](uint32 k, const ref::Span &s) { return k < s.fragBase; });
+                const uint32 cmd = std::prev(it)->cmdIndex;
+                const ref::RasterState &st = b.states[cmd];
+                rows[fr.target & ref::kTargetUnitMask] =
+                    static_cast<uint16>(st.pixel8Bits ? st.fbSizeH / 2 : st.fbSizeH);
+                if (quadCmd[cmd] != 0) {
+                    auto &e = perCmd[cmd][fr.target & kKeyMask];
+                    ++e.first;
+                    e.second = fr.color;
+                }
+            }
+            for (size_t cmd = 0; cmd < perCmd.size(); ++cmd) {
+                if (quadCmd[cmd] == 0) {
+                    continue;
+                }
+                const ref::RasterState &st = b.states[cmd];
+                const uint32 rw = st.pixel8Bits ? st.fbSizeH / 2 : st.fbSizeH; // this command's row width
+                const auto &m = perCmd[cmd];
+                auto inside = [rw](sint32 x, sint32 y) {
+                    return x >= 0 && x < static_cast<sint32>(rw) && y >= 0 &&
+                           static_cast<uint32>(y) * rw + static_cast<uint32>(x) < ref::kWordsPerFB;
+                };
+                for (const auto &[key, e] : m) {
+                    const uint32 unit = key & ref::kTargetUnitMask;
+                    const uint32 word = unit & ref::kTargetWordMask;
+                    const uint32 alt = unit & ref::kTargetAltBit;
+                    const uint32 high = key & ~ref::kTargetWordMask; // alt and odd-byte bits
+                    bool seed = e.first > 1;
+                    const sint32 x = static_cast<sint32>(word % rw), y = static_cast<sint32>(word / rw);
+                    for (sint32 dy = -1; dy <= 1 && !seed; ++dy) {
+                        for (sint32 dx = -1; dx <= 1 && !seed; ++dx) {
+                            if (!inside(x + dx, y + dy)) {
+                                seed = true;
+                                break;
+                            }
+                            const auto other = m.find((static_cast<uint32>(y + dy) * rw + static_cast<uint32>(x + dx)) |
+                                                      high);
+                            seed = other == m.end() || other->second.second != e.second;
+                        }
+                    }
+                    if (!seed) {
+                        continue;
+                    }
+                    // The allowance: the seed and its 8 neighbours, in this command's row width
+                    for (sint32 dy = -1; dy <= 1; ++dy) {
+                        for (sint32 dx = -1; dx <= 1; ++dx) {
+                            if (inside(x + dx, y + dy)) {
+                                allowed[(static_cast<uint32>(y + dy) * rw + static_cast<uint32>(x + dx)) | alt] = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    for (const auto &l : d.lists) {
+        ref.Replay(l);
+    }
+}
+
+const nx::ProbeEvent *LastDrawn(const std::vector<const nx::ProbeEvent *> &events) {
+    const nx::ProbeEvent *last = nullptr;
+    for (const nx::ProbeEvent *e : events) {
+        // (fragments for the transparent-mesh framebuffer leave the main word alone)
+        if (e->status == nx::ProbeEvent::Drawn && (e->mode & ref::kTargetMeshBit) == 0) {
+            last = e;
+        }
+    }
+    return last;
+}
+
+// A drawn fragment whose result depends on the word below it (shadow, half-transparency, MSB-on)
+bool ReadsDestination(const nx::ProbeEvent *e) {
+    if (e == nullptr) {
+        return false;
+    }
+    const uint32 calc = (e->mode >> ref::kTargetCalcShift) & 3u;
+    const bool pixel8 = (e->mode & ref::kTargetPixel8Bit) != 0;
+    return (!pixel8 && (calc == 1 || calc == 3)) || (e->mode & ref::kTargetMsbOnBit) != 0;
+}
+
+// Whether a quad-kind command drew this word before `last` (in the same event list)
+bool QuadDrawnBefore(const std::vector<const nx::ProbeEvent *> &events, const nx::ProbeEvent *last) {
+    for (const nx::ProbeEvent *e : events) {
+        if (e == last) {
+            return false;
+        }
+        if (e->status == nx::ProbeEvent::Drawn && e->kind == nx::SpanKind::Quad) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string Describe(const nx::ProbeEvent *e) {
+    if (e == nullptr) {
+        return "none";
+    }
+    char text[128];
+    if (e->texelKnown) {
+        std::snprintf(text, sizeof(text), "b%llu c%u %s %s u%d v%d texel %04x colour %04x",
+                      static_cast<unsigned long long>(e->batch), e->cmdIndex, nx::Name(e->kind), nx::Name(e->status),
+                      e->u, e->v, e->texel, e->color);
+    } else {
+        std::snprintf(text, sizeof(text), "b%llu c%u %s %s colour %04x", static_cast<unsigned long long>(e->batch),
+                      e->cmdIndex, nx::Name(e->kind), nx::Name(e->status), e->color);
+    }
+    return text;
+}
+
+} // namespace
+
 TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CAPTURES)", "[.][nx-confinement]") {
     // GPU stage 3 Task 9 (stage3-research.md sections 3.3 and 7). At the sample points (sub-texel (0, 0)) the N x
     // surface may differ from native FBRAM only on quad-path content: within one native pixel of a quad-path command's
     // edge or of a texel / Gouraud boundary (two neighbouring native fragments of the command with different colours),
     // or where one quad-path command draws a word twice (within-command overdraw). Per capture and N (BRIMIR_NX_SCALES,
-    // default "24"): the words drawn, the share of their sample points equal to native, the mismatches outside that
-    // allowance ("unconfined", which also counts any mismatch on rect-path content), and the share of drawn words
-    // whose N x N block is not constant (VDP1 sharpness), split by quad-path and other content. The allowance is
-    // accumulated over the capture's batches (erases do not reset it), so it is generous where a frame is drawn
-    // twice. The reference equals the GPU byte for byte (the [.captures] tests), so this measures what the GPU draws.
+    // default "24"): the words drawn, the share of their sample points equal to native, the mismatches whose winner is
+    // not quad-kind (rect-path or replicated content: must be 0), the mismatches outside that allowance
+    // ("unconfined"), and the share of drawn words whose N x N block is not constant (VDP1 sharpness), split by
+    // quad-path and other content. The allowance is accumulated over the capture's batches (erases do not reset it).
+    //
+    // Every unconfined sample point is then attributed with the raster probe, at N and at N = 1 (equal to native,
+    // Task 1): the N x step that resolves at sub-texel (0, 0) against the native winner (command, span kind, texel
+    // u / v, colour), and classified:
+    //   - texel boundary: the same command draws both with different texels, or a transparent texel / end code at one
+    //     of them (minified textures: the native stepping skips texels the N x stepping reads, and the other way);
+    //   - Gouraud boundary: the same command and texel, another colour;
+    //   - later command: another command's N x step wins (an edge of that command);
+    //   - edge reach: N x draws where native drew nothing and the command has no native step there;
+    //   - coverage gap: native covers the word and no N x step of that command reaches sub-texel (0, 0) (a crack);
+    //   - rect-path violation: the winner is rect or replicate kind.
+    // The last two are findings. BRIMIR_NX_MAX_UNCONFINED=K fails the test when a capture has more than K unconfined
+    // points outside the texel and Gouraud classes, or any finding.
+    // The reference equals the GPU byte for byte (the [.captures] tests), so this measures what the GPU draws.
     const char *capDir = std::getenv("BRIMIR_VDP1_CAPTURES");
     if (capDir == nullptr) {
         SKIP("BRIMIR_VDP1_CAPTURES not set");
@@ -659,6 +832,8 @@ TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CA
             }
         }
     }
+    const char *maxText = std::getenv("BRIMIR_NX_MAX_UNCONFINED");
+    const sint64 maxUnexplained = maxText != nullptr ? std::atoll(maxText) : -1;
     std::vector<fs::path> files;
     for (const auto &e : fs::recursive_directory_iterator(capDir)) {
         if (e.path().extension() == ".bin" && e.path().filename().string().rfind("vdp1ops_", 0) == 0) {
@@ -666,154 +841,257 @@ TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CA
         }
     }
     std::sort(files.begin(), files.end());
-    constexpr uint32 kUnits = 2 * ref::kWordsPerFB; // word | alternate field
-    enum : uint8 { kDrawn = 1, kQuad = 2, kSeed = 4 };
+    enum Class : uint32 { Texel, Gouraud, LaterCommand, EdgeReach, CoverageGap, RectPath, Other, ClassCount };
+    static constexpr const char *kClassNames[ClassCount] = {"texel boundary", "Gouraud boundary", "later command",
+                                                            "edge reach",     "coverage gap",     "rect-path",
+                                                            "other"};
+    std::array<uint64, ClassCount> totals{};
     for (const fs::path &file : files) {
         gpu::Vdp1OpDump d;
         REQUIRE(gpu::ReadVdp1OpDump(file.string(), d));
+        const std::string name = file.parent_path().filename().string() + "/" + file.filename().string();
         for (const uint32 n : scales) {
-            auto native = std::make_unique<ref::Fbram>();
-            ToFbram(d.fbramStart, *native);
-            auto surface = std::make_unique<nx::NxFbram>(n);
-            surface->ReplicateFrom(*native);
-            nx::ReferenceNx r{*native, *surface, nx::Options{.scale = n}, d.vramStart};
-            std::array<std::vector<uint8>, 2> flags{std::vector<uint8>(kUnits, 0), std::vector<uint8>(kUnits, 0)};
-            std::array<uint32, 2> rowWords{512, 512};
-            r.SetBatchObserver([&](const nx::BatchObservation &b) {
-                std::vector<uint8> &f = flags[b.drawFB];
-                std::vector<uint8> quadCmd(b.commands.size(), 0);
-                for (const nx::NxSpan &s : b.nxSpans) {
-                    if (s.kind == nx::SpanKind::Quad) {
-                        quadCmd[s.cmdIndex] = 1;
-                    }
-                }
-                // Per quad-path command: (word | alt | odd byte) -> (fragments, last colour)
-                std::vector<std::unordered_map<uint32, std::pair<uint32, uint32>>> perCmd(b.commands.size());
-                constexpr uint32 kKeyMask = ref::kTargetUnitMask | ref::kTargetOddBit;
-                for (const ref::Fragment &fr : b.nativeFragments) {
-                    const uint32 unit = fr.target & ref::kTargetUnitMask;
-                    f[unit] |= kDrawn;
-                    const auto it = std::upper_bound(b.spans.begin(), b.spans.end(), fr.key,
-                                                     [](uint32 k, const ref::Span &s) { return k < s.fragBase; });
-                    const uint32 cmd = std::prev(it)->cmdIndex;
-                    if (quadCmd[cmd] == 0) {
-                        continue;
-                    }
-                    f[unit] |= kQuad;
-                    auto &e = perCmd[cmd][fr.target & kKeyMask];
-                    ++e.first;
-                    e.second = fr.color;
-                }
-                for (size_t cmd = 0; cmd < perCmd.size(); ++cmd) {
-                    if (quadCmd[cmd] == 0) {
-                        continue;
-                    }
-                    const ref::RasterState &st = b.states[cmd];
-                    const uint32 rw = st.pixel8Bits ? st.fbSizeH / 2 : st.fbSizeH;
-                    rowWords[b.drawFB] = rw;
-                    const auto &m = perCmd[cmd];
-                    for (const auto &[key, e] : m) {
-                        const uint32 unit = key & ref::kTargetUnitMask;
-                        const uint32 word = unit & ref::kTargetWordMask;
-                        const uint32 high = key & ~ref::kTargetWordMask; // alt and odd-byte bits
-                        bool seed = e.first > 1;
-                        const sint32 x = static_cast<sint32>(word % rw), y = static_cast<sint32>(word / rw);
-                        for (sint32 dy = -1; dy <= 1 && !seed; ++dy) {
-                            for (sint32 dx = -1; dx <= 1 && !seed; ++dx) {
-                                const sint32 nxp = x + dx, nyp = y + dy;
-                                if (nxp < 0 || nxp >= static_cast<sint32>(rw) || nyp < 0 ||
-                                    static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp) >= ref::kWordsPerFB) {
-                                    seed = true;
-                                    break;
-                                }
-                                const auto other =
-                                    m.find((static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp)) | high);
-                                seed = other == m.end() || other->second.second != e.second;
-                            }
-                        }
-                        if (seed) {
-                            f[unit] |= kSeed;
-                        }
-                    }
-                }
-            });
-            for (const auto &l : d.lists) {
-                r.Replay(l);
-            }
-            uint64 drawn = 0, quad = 0, mismatches = 0, quadMismatches = 0, unconfined = 0, nonConst = 0,
-                   nonConstQuad = 0, nonConstOther = 0;
-            std::string examples;
+            ConfineResult r;
+            std::unique_ptr<ref::Fbram> native;
+            std::unique_ptr<nx::NxFbram> surface;
+            ReplayConfine(d, n, &r, nullptr, native, surface);
+            // Drawn words: any native fragment (row width known) or a differing sample point
+            std::unordered_map<uint32, uint8> mismatchUnits; // fb << 18 | unit -> quad-drawn (from the first pass)
+            std::vector<uint32> mismatchList;
             for (uint32 fb = 0; fb < 2; ++fb) {
-                const std::vector<uint8> &f = flags[fb];
-                const uint32 rw = rowWords[fb];
-                std::vector<uint8> allowed(kUnits, 0);
-                for (uint32 unit = 0; unit < kUnits; ++unit) {
-                    if ((f[unit] & kSeed) == 0) {
-                        continue;
-                    }
-                    const uint32 word = unit & ref::kTargetWordMask, alt = unit & ref::kTargetAltBit;
-                    const sint32 x = static_cast<sint32>(word % rw), y = static_cast<sint32>(word / rw);
-                    for (sint32 dy = -1; dy <= 1; ++dy) {
-                        for (sint32 dx = -1; dx <= 1; ++dx) {
-                            const sint32 nxp = x + dx, nyp = y + dy;
-                            if (nxp >= 0 && nxp < static_cast<sint32>(rw) && nyp >= 0 &&
-                                static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp) < ref::kWordsPerFB) {
-                                allowed[(static_cast<uint32>(nyp) * rw + static_cast<uint32>(nxp)) | alt] = 1;
-                            }
-                        }
-                    }
-                }
-                for (uint32 unit = 0; unit < kUnits; ++unit) {
+                for (uint32 unit = 0; unit < kConfineUnits; ++unit) {
                     const uint32 word = unit & ref::kTargetWordMask;
                     const uint32 slice = (unit & ref::kTargetAltBit) ? gpu::Vdp1AltSlice(fb) : gpu::Vdp1MainSlice(fb);
                     const uint16 sample = surface->Word(slice, word, 0, 0);
                     const bool mismatch = sample != nx::NativeWord(*native, slice, word);
-                    const bool isDrawn = (f[unit] & kDrawn) != 0;
+                    const bool isDrawn = r.rowWords[fb][unit] != 0;
                     if (!isDrawn && !mismatch) {
                         continue;
                     }
-                    const bool isQuad = (f[unit] & kQuad) != 0;
-                    drawn += isDrawn;
-                    quad += isQuad;
+                    r.drawn += isDrawn;
                     bool constant = true;
                     for (uint32 sub = 1; sub < n * n && constant; ++sub) {
                         constant = surface->Word(slice, word, sub % n, sub / n) == sample;
                     }
                     if (isDrawn && !constant) {
-                        ++nonConst;
-                        (isQuad ? nonConstQuad : nonConstOther) += 1;
+                        ++r.nonConst;
                     }
                     if (mismatch) {
-                        ++mismatches;
-                        quadMismatches += isQuad;
-                        if (allowed[unit] == 0) {
-                            ++unconfined;
-                            if (unconfined <= 5) {
-                                char text[64];
-                                std::snprintf(text, sizeof(text), " fb%u:%u,%u%s%s(%04x/%04x)", fb, word % rw, word / rw,
-                                              (unit & ref::kTargetAltBit) ? "a" : "", isQuad ? "q" : "",
-                                              nx::NativeWord(*native, slice, word), sample);
-                                examples += text;
-                            }
+                        ++r.mismatches;
+                        mismatchList.push_back(fb << 18 | unit);
+                        mismatchUnits[fb << 18 | unit] = 0;
+                        if (r.allowed[fb][unit] == 0) {
+                            r.unconfined.push_back(fb << 18 | unit);
                         }
                     }
                 }
             }
-            const nx::Stats &s = r.GetStats();
+            // The probe on every differing word (and every drawn word, for the quad / other split), at N and at N = 1
+            std::unordered_map<uint32, std::vector<const nx::ProbeEvent *>> atN, atNative;
+            nx::RasterProbe probeN, probe1;
+            probeN.want = [&](uint32 fb, uint32 unit, uint32 sub) {
+                return sub == 0 && (r.rowWords[fb][unit] != 0 || mismatchUnits.count(fb << 18 | unit) != 0);
+            };
+            probe1.want = probeN.want;
+            {
+                std::unique_ptr<ref::Fbram> n2;
+                std::unique_ptr<nx::NxFbram> s2;
+                ReplayConfine(d, n, nullptr, &probeN, n2, s2);
+                ReplayConfine(d, 1, nullptr, &probe1, n2, s2);
+            }
+            for (const nx::ProbeEvent &e : probeN.events) {
+                atN[e.drawFB << 18 | e.unit].push_back(&e);
+            }
+            for (const nx::ProbeEvent &e : probe1.events) {
+                atNative[e.drawFB << 18 | e.unit].push_back(&e);
+            }
+            // Quad / other split of drawn words and mismatches by the winner's kind (N x winner, else native winner)
+            auto winnerKind = [&](uint32 key, bool &known) {
+                const nx::ProbeEvent *w = LastDrawn(atN[key]);
+                if (w == nullptr) {
+                    w = LastDrawn(atNative[key]);
+                }
+                known = w != nullptr;
+                return w != nullptr ? w->kind : nx::SpanKind::Replicate;
+            };
+            for (uint32 fb = 0; fb < 2; ++fb) {
+                for (uint32 unit = 0; unit < kConfineUnits; ++unit) {
+                    if (r.rowWords[fb][unit] == 0) {
+                        continue;
+                    }
+                    bool known = false;
+                    const bool isQuad = winnerKind(fb << 18 | unit, known) == nx::SpanKind::Quad && known;
+                    r.quad += isQuad;
+                    if (isQuad) {
+                        const uint32 word = unit & ref::kTargetWordMask;
+                        const uint32 slice =
+                            (unit & ref::kTargetAltBit) ? gpu::Vdp1AltSlice(fb) : gpu::Vdp1MainSlice(fb);
+                        const uint16 sample = surface->Word(slice, word, 0, 0);
+                        bool constant = true;
+                        for (uint32 sub = 1; sub < n * n && constant; ++sub) {
+                            constant = surface->Word(slice, word, sub % n, sub / n) == sample;
+                        }
+                        r.nonConstQuad += !constant;
+                    }
+                }
+            }
+            r.nonConstOther = r.nonConst - r.nonConstQuad;
+            // A mismatch is quad-path when either winner (N x or native) is quad-kind: a rect-kind winner at N x over a
+            // native quad winner is that quad's edge or texel step. Neither quad-kind: rect-path content differs.
+            // A rect-kind winner that reads the destination (shadow, half-transparency, MSB-on) over
+            // a word a quad-kind command drew before it, in either run, inherits that quad's difference.
+            uint64 blendOverQuad = 0;
+            std::string rectExamples;
+            for (const uint32 key : mismatchList) {
+                const nx::ProbeEvent *wN = LastDrawn(atN[key]);
+                const nx::ProbeEvent *w1 = LastDrawn(atNative[key]);
+                const bool quadWinner = (wN != nullptr && wN->kind == nx::SpanKind::Quad) ||
+                                        (w1 != nullptr && w1->kind == nx::SpanKind::Quad);
+                if (quadWinner) {
+                    ++r.quadMismatches;
+                    continue;
+                }
+                if (ReadsDestination(wN) && ReadsDestination(w1) && wN->batch == w1->batch &&
+                    wN->cmdIndex == w1->cmdIndex && wN->color == w1->color &&
+                    (QuadDrawnBefore(atN[key], wN) || QuadDrawnBefore(atNative[key], w1))) {
+                    ++r.quadMismatches;
+                    ++blendOverQuad;
+                    continue;
+                }
+                if (++r.rectMismatches <= 5) {
+                    char mode[48];
+                    std::snprintf(mode, sizeof(mode), " (modes %06x / %06x)", wN != nullptr ? wN->mode : 0,
+                                  w1 != nullptr ? w1->mode : 0);
+                    rectExamples += "    rect-path mismatch fb" + std::to_string(key >> 18) + " unit " +
+                                    std::to_string(key & (kConfineUnits - 1)) + ": N x winner " + Describe(wN) +
+                                    "; native winner " + Describe(w1) + mode + "\n";
+                }
+            }
+            // Attribute the unconfined points
+            std::array<uint64, ClassCount> classes{};
+            std::string details;
+            for (const uint32 key : r.unconfined) {
+                const uint32 fb = key >> 18, unit = key & (kConfineUnits - 1);
+                const auto &evN = atN[key];
+                const auto &ev1 = atNative[key];
+                const nx::ProbeEvent *wN = LastDrawn(evN);
+                const nx::ProbeEvent *w1 = LastDrawn(ev1);
+                auto sameCmd = [](const nx::ProbeEvent *a, const nx::ProbeEvent *b) {
+                    return a != nullptr && b != nullptr && a->batch == b->batch && a->cmdIndex == b->cmdIndex;
+                };
+                auto stepsOf = [](const std::vector<const nx::ProbeEvent *> &events, const nx::ProbeEvent *c) {
+                    std::vector<const nx::ProbeEvent *> out;
+                    for (const nx::ProbeEvent *e : events) {
+                        if (e->batch == c->batch && e->cmdIndex == c->cmdIndex) {
+                            out.push_back(e);
+                        }
+                    }
+                    return out;
+                };
+                auto hasStatus = [](const std::vector<const nx::ProbeEvent *> &events, nx::ProbeEvent::Status s) {
+                    return std::any_of(events.begin(), events.end(),
+                                       [s](const nx::ProbeEvent *e) { return e->status == s; });
+                };
+                Class cls = Other;
+                if (!(wN != nullptr && wN->kind == nx::SpanKind::Quad) &&
+                    !(w1 != nullptr && w1->kind == nx::SpanKind::Quad)) {
+                    cls = RectPath;
+                } else if (sameCmd(wN, w1)) {
+                    if (wN->texelKnown && w1->texelKnown && (wN->u != w1->u || wN->v != w1->v)) {
+                        cls = Texel;
+                    } else if (wN->color != w1->color) {
+                        cls = Gouraud;
+                    }
+                } else if (w1 != nullptr) {
+                    // The native winner's command at N x on this word
+                    const auto steps = stepsOf(evN, w1);
+                    if (steps.empty()) {
+                        cls = wN != nullptr ? LaterCommand : CoverageGap;
+                    } else if (hasStatus(steps, nx::ProbeEvent::Transparent) ||
+                               hasStatus(steps, nx::ProbeEvent::EndCode)) {
+                        cls = Texel;
+                    } else if (wN != nullptr) {
+                        cls = LaterCommand;
+                    }
+                } else if (wN != nullptr) {
+                    // Native drew nothing here: the N x winner's command at N = 1
+                    const auto steps = stepsOf(ev1, wN);
+                    if (hasStatus(steps, nx::ProbeEvent::Transparent) || hasStatus(steps, nx::ProbeEvent::EndCode)) {
+                        cls = Texel;
+                    } else if (steps.empty()) {
+                        cls = EdgeReach;
+                    }
+                }
+                ++classes[cls];
+                const uint32 word = unit & ref::kTargetWordMask;
+                const uint32 rw = std::max<uint32>(r.rowWords[fb][unit], 512u);
+                const uint32 slice = (unit & ref::kTargetAltBit) ? gpu::Vdp1AltSlice(fb) : gpu::Vdp1MainSlice(fb);
+                std::string block;
+                for (uint32 sub = 0; sub < n * n; ++sub) {
+                    char hex[8];
+                    std::snprintf(hex, sizeof(hex), "%s%04x", sub == 0 ? "" : (sub % n == 0 ? "|" : " "),
+                                  surface->Word(slice, word, sub % n, sub / n));
+                    block += hex;
+                }
+                char head[96];
+                std::snprintf(head, sizeof(head), "    unconfined fb%u %u,%u%s [%s] native %04x: ", fb, word % rw,
+                              word / rw,
+                              (unit & ref::kTargetAltBit) ? " alt" : "", kClassNames[cls],
+                              nx::NativeWord(*native, slice, word));
+                details += head + std::string("N x winner ") + Describe(wN) + "; native winner " + Describe(w1) +
+                           "; block " + block;
+                if (w1 != nullptr && !sameCmd(wN, w1)) {
+                    for (const nx::ProbeEvent *e : stepsOf(evN, w1)) {
+                        details += "; N x step of the native winner " + Describe(e);
+                    }
+                }
+                if (wN != nullptr && w1 == nullptr) {
+                    for (const nx::ProbeEvent *e : stepsOf(ev1, wN)) {
+                        details += "; native step of the N x winner " + Describe(e);
+                    }
+                }
+                details += "\n";
+            }
+            for (uint32 c = 0; c < ClassCount; ++c) {
+                totals[c] += classes[c];
+            }
             const auto pct = [](uint64 a, uint64 b) { return b == 0 ? 0.0 : 100.0 * static_cast<double>(a) / b; };
-            const uint64 quadCommands = s.commands.counts[nx::CommandCounts::Quad];
-            std::printf("confine %s/%s %ux: drawn %llu (quad-path %.1f%%, %llu quad commands), sample points equal "
-                        "%.3f%%, mismatches %llu (on quad-path words %.1f%%), confined %.2f%%, unconfined %llu%s; "
-                        "non-constant blocks %.2f%% (quad-path %.2f%%, other %.2f%%)\n",
-                        file.parent_path().filename().string().c_str(), file.filename().string().c_str(), n,
-                        static_cast<unsigned long long>(drawn), pct(quad, drawn),
-                        static_cast<unsigned long long>(quadCommands), 100.0 - pct(mismatches, drawn),
-                        static_cast<unsigned long long>(mismatches), pct(quadMismatches, mismatches),
-                        mismatches == 0 ? 100.0 : 100.0 - pct(unconfined, mismatches),
-                        static_cast<unsigned long long>(unconfined), examples.c_str(), pct(nonConst, drawn),
-                        pct(nonConstQuad, quad), pct(nonConstOther, drawn - quad));
+            std::string classText;
+            for (uint32 c = 0; c < ClassCount; ++c) {
+                if (classes[c] != 0) {
+                    classText += std::string(classText.empty() ? "" : ", ") + kClassNames[c] + " " +
+                                 std::to_string(classes[c]);
+                }
+            }
+            const uint64 unconfined = r.unconfined.size();
+            std::printf("confine %s %ux: drawn %llu (quad-path %.1f%%), sample points equal %.3f%%, mismatches %llu "
+                        "(quad-path %llu, of them rect blends over quad-path %llu; rect-path %llu), confined %.2f%%, "
+                        "unconfined %llu%s%s%s; "
+                        "non-constant blocks %.2f%% (quad-path %.2f%%, other %.2f%%)\n%s",
+                        name.c_str(), n, static_cast<unsigned long long>(r.drawn), pct(r.quad, r.drawn),
+                        100.0 - pct(r.mismatches, r.drawn), static_cast<unsigned long long>(r.mismatches),
+                        static_cast<unsigned long long>(r.quadMismatches),
+                        static_cast<unsigned long long>(blendOverQuad),
+                        static_cast<unsigned long long>(r.rectMismatches),
+                        r.mismatches == 0 ? 100.0 : 100.0 - pct(unconfined, r.mismatches),
+                        static_cast<unsigned long long>(unconfined), classText.empty() ? "" : " (",
+                        classText.c_str(), classText.empty() ? "" : ")", pct(r.nonConst, r.drawn),
+                        pct(r.nonConstQuad, r.quad), pct(r.nonConstOther, r.drawn - r.quad),
+                        (details + rectExamples).c_str());
             std::fflush(stdout);
+            CAPTURE(name, n);
+            CHECK(r.rectMismatches == 0);
+            CHECK(classes[CoverageGap] == 0);
+            CHECK(classes[RectPath] == 0);
+            if (maxUnexplained >= 0) {
+                CHECK(static_cast<sint64>(unconfined - classes[Texel] - classes[Gouraud]) <= maxUnexplained);
+            }
         }
     }
+    std::string totalText;
+    for (uint32 c = 0; c < ClassCount; ++c) {
+        totalText += std::string(totalText.empty() ? "" : ", ") + kClassNames[c] + " " + std::to_string(totals[c]);
+    }
+    std::printf("confine totals: unconfined by class: %s\n", totalText.c_str());
     CHECK(!files.empty());
 }

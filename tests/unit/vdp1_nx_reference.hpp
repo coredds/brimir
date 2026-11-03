@@ -240,6 +240,30 @@ struct Stats {
     }
 };
 
+// Diagnostics (the confinement metric): every N x step the raster takes on a watched N x word, drawn or not
+struct ProbeEvent {
+    enum Status : uint8 { Drawn, Transparent, EndCode, Clipped, Mesh, OtherLine };
+    uint64 batch = 0;   // ReferenceNx's batch count when it was drawn (1-based)
+    uint32 drawFB = 0;
+    uint32 cmdIndex = 0;
+    SpanKind kind = SpanKind::Replicate;
+    uint32 unit = 0;    // word | alt
+    uint32 sub = 0;     // j * N + i
+    Status status = Drawn;
+    uint32 color = 0;   // the fragment colour (after Gouraud); Drawn only
+    uint32 mode = 0;    // Drawn: the fragment's ref::kTarget* mode bits (colour calculation, mesh, MSB-on, 8 bpp)
+    bool texelKnown = false; // textured quad-kind steps: the texel read for the step
+    sint32 u = 0;
+    sint32 v = 0;
+    uint16 texel = 0; // the raw texel value
+};
+struct RasterProbe {
+    std::function<bool(uint32 drawFB, uint32 unit, uint32 sub)> want;
+    std::vector<ProbeEvent> events;
+};
+const char *Name(ProbeEvent::Status status);
+const char *Name(SpanKind kind);
+
 // What one native draw batch was (ReferenceNx::SetBatchObserver): its decoded commands and native spans, the native
 // fragments before the resolve and the N x spans the generator made of it
 struct BatchObservation {
@@ -256,6 +280,10 @@ public:
     // Called for every draw batch, after the native resolve and before the N x raster (tests: the confinement metric)
     void SetBatchObserver(std::function<void(const BatchObservation &)> observer) {
         m_observer = std::move(observer);
+    }
+    // Records the N x raster's steps on the words `probe->want` selects (null: none)
+    void SetRasterProbe(RasterProbe *probe) {
+        m_probe = probe;
     }
 
     // `native` and `nx` hold the start state (nx usually ReplicateFrom(native)); VDP1 VRAM starts as `vram` (zero when
@@ -288,6 +316,7 @@ private:
     uint64 m_shuffle = 0;
     std::function<void(const BatchObservation &)> m_observer;
     std::vector<ref::Fragment> m_observedFragments;
+    RasterProbe *m_probe = nullptr;
     // The previous batch's end, its last command and last span's quad step (capacity-split continuations)
     bool m_prevCapacity = false;
     brimir::gpu::vdp1::Vdp1CommandParams m_prevCommand{};
