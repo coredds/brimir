@@ -94,10 +94,11 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_vdp1_upscaling",
         "VDP1 Upscaling (Vulkan)",
         nullptr,
-        "Draws polygons and sprites (VDP1) at the internal resolution: smoother 3D edges and textures. Disable it "
-        "for a game that shows artefacts (gaps, seams or misplaced lines) at higher internal resolutions; sprites "
-        "then stay at native resolution. Only used with Renderer = Vulkan at Internal Resolution 2x or more. Applies "
-        "immediately.",
+        "Draws polygons and sprites (VDP1) at the internal resolution: smoother 3D edges and distant/shrunk "
+        "textures (magnified textures stay blocky and unscaled 2D sprites look as at native resolution). "
+        "Disable it for a game that shows artefacts (gaps, seams or misplaced lines) at higher internal resolutions; "
+        "sprites then stay at native resolution. Only used with Renderer = Vulkan at Internal Resolution 2x or more. "
+        "Applies immediately.",
         nullptr,
         "video",
         {
