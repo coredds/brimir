@@ -328,7 +328,9 @@ bool Vdp2VulkanBackend::SetScale(uint32_t n) {
             std::to_string(ScaledResourceBytes(n) >> 20) + " MiB failed (VkResult " +
             std::to_string(static_cast<int>(result)) + "); staying at " + std::to_string(m_scale) + "x");
         // The previous scale's layers again (they fitted before the attempt)
-        if (const VkResult restored = vk_util::CreateImage2D(m_device, BGLayersDesc(m_scale), m_bgLayers);
+        if (const VkResult restored =
+                m_failScaleRestore ? VK_ERROR_OUT_OF_DEVICE_MEMORY
+                                   : vk_util::CreateImage2D(m_device, BGLayersDesc(m_scale), m_bgLayers);
             restored != VK_SUCCESS) {
             Log("VDP2 internal resolution " + std::to_string(m_scale) + "x: its layers could not be allocated again "
                 "(VkResult " + std::to_string(static_cast<int>(restored)) + "); the back half is unusable");

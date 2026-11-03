@@ -103,6 +103,8 @@ public:
     // Record.
     // When the new resources cannot be allocated, the previous resources and scale are kept, the failure is logged and
     // false is returned. Also false (nothing changes) for an n out of range or a backend that failed to initialize.
+    // When even the previous scale's layers (freed first) cannot be allocated again, the backend is no longer Ok():
+    // it records nothing, and the owner must replace it (VulkanVDPRenderer::BackHalfLost).
     // N x sprite layers, if any (SetSpriteSurfaceNx), are freed first (the caller sets them up again for n).
     bool SetScale(uint32_t n);
     uint32_t Scale() const { return m_scale; }
@@ -142,6 +144,8 @@ public:
     // SetScale fails (as an allocation failure) when the resources of the new scale take more than `bytes` (0: no
     // limit).
     void SetScaleAllocationLimitForTest(VkDeviceSize bytes) { m_scaleAllocationLimit = bytes; }
+    // After a failed SetScale, allocating the previous scale's layers again fails too (the back half is lost).
+    void FailScaleRestoreForTest(bool fail) { m_failScaleRestore = fail; }
     // Base upload blocks above the default size (high-water blocks) fail to allocate.
     void FailHighWaterBlocksForTest(bool fail) { m_failHighWaterBlocks = fail; }
     // kHighWaterDecayRecords for this backend.
@@ -251,6 +255,7 @@ private:
     bool m_highWaterFailed = false;
     uint32_t m_highWaterDecayRecords = kHighWaterDecayRecords;
     VkDeviceSize m_scaleAllocationLimit = 0;
+    bool m_failScaleRestore = false;
     bool m_failHighWaterBlocks = false;
 
     // Device-local resources (bindings in vdp2_bindings.hpp)

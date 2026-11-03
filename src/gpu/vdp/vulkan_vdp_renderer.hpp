@@ -112,6 +112,10 @@ public:
     // mode VDP1 continues in software from the CPU shadow (rule 8 at the top of this file).
     void AbandonDevice();
     bool Attached() const { return m_backend != nullptr; }
+    // Attached, but the VDP2 back half can no longer record (a failed internal resolution change could not allocate
+    // the previous scale's resources again): the owner must detach the renderer (DetachDevice; VDP1 is synced as usual)
+    // and attach it again or use the software renderer.
+    bool BackHalfLost() const { return m_backend != nullptr && !m_backend->Ok(); }
 
     // The back half, for tests (nullptr while detached).
     vdp2::Vdp2VulkanBackend *Backend() { return m_backend.get(); }
@@ -287,7 +291,8 @@ public:
     // still waiting to be submitted (report a dropped one with RecordedFrameDropped first): the descriptor sets are
     // rewritten and the old resources destroyed here. While detached it is kept for the next AttachDevice. The request
     // is remembered either way; false, with the previous effective scale kept and the failure logged, when the
-    // resources cannot be allocated; false (nothing changes) for an n out of range.
+    // resources cannot be allocated; false (nothing changes) for an n out of range. When not even the previous scale's
+    // resources can be allocated again, BackHalfLost() is true from then on (logged).
     bool SetInternalScale(uint32_t n);
     // The effective internal resolution (the back half's while attached; while detached the last effective one, or
     // the request made while detached).

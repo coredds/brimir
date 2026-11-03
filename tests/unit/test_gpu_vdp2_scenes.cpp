@@ -4857,6 +4857,62 @@ TEST_CASE("Scene: an internal resolution that cannot be allocated keeps the prev
     CloseAndCheckValidation(device);
 }
 
+TEST_CASE("A scale change that cannot restore the previous scale loses the back half; a re-attach recovers",
+          "[gpu][vdp2][scale]") {
+    // The new scale does not fit and the previous scale's layers (freed first) cannot be allocated again: the back half
+    // is no longer Ok, the renderer reports BackHalfLost (the libretro output then detaches and attaches it again; vkhost
+    // check scale_restore_lost) and logs it. A new back half at the request works.
+    namespace vdp2 = gpu::vdp2;
+    namespace vdp = ymir::vdp;
+    auto device = OpenDevice();
+    {
+        auto state = std::make_unique<vdp::VDPState>();
+        vdp::config::VDP2DebugRender debug{};
+        vdp::config::VDP2AccessPatternsConfig access{};
+        auto vulkan = std::make_unique<gpu::VulkanVDPRenderer>(*state, debug, access);
+        std::vector<std::string> logs;
+        vulkan->SetLog([&](const std::string &text) { logs.push_back(text); });
+        CHECK(vulkan->SetInternalScale(2));
+        vulkan->AttachDevice(*device, 1);
+        REQUIRE(vulkan->Attached());
+        REQUIRE(vulkan->Backend()->Scale() == 2);
+        CHECK_FALSE(vulkan->BackHalfLost());
+
+        // Only the new scale fails: the previous one is kept (not lost)
+        vulkan->Backend()->SetScaleAllocationLimitForTest(vdp2::Vdp2VulkanBackend::ScaledResourceBytes(2));
+        CHECK_FALSE(vulkan->SetInternalScale(4));
+        CHECK_FALSE(vulkan->BackHalfLost());
+        CHECK(vulkan->Backend()->Scale() == 2);
+
+        // ... and then the previous one too: lost
+        logs.clear();
+        vulkan->Backend()->FailScaleRestoreForTest(true);
+        CHECK_FALSE(vulkan->SetInternalScale(3));
+        CHECK(vulkan->Attached());
+        CHECK(vulkan->BackHalfLost());
+        CHECK_FALSE(vulkan->Backend()->Ok());
+        CHECK(vulkan->InternalScale() == 2);
+        CHECK(vulkan->RequestedInternalScale() == 3);
+        CHECK_FALSE(vulkan->SetInternalScale(2)); // a lost back half changes nothing any more
+        REQUIRE(logs.size() == 3);
+        CHECK(logs[0].find("3x") != std::string::npos);
+        CHECK(logs[1].find("could not be allocated again") != std::string::npos);
+        CHECK(logs[2].find("VDP2 back half lost") != std::string::npos);
+
+        // The re-attach: a new back half at the request
+        vulkan->DetachDevice();
+        CHECK_FALSE(vulkan->BackHalfLost());
+        vulkan->AttachDevice(*device, 1);
+        REQUIRE(vulkan->Attached());
+        CHECK_FALSE(vulkan->BackHalfLost());
+        CHECK(vulkan->Backend()->Scale() == 2);
+        CHECK(vulkan->SetInternalScale(3));
+        CHECK(vulkan->Backend()->Scale() == 3);
+        vulkan->DetachDevice();
+    }
+    CloseAndCheckValidation(device);
+}
+
 TEST_CASE("Vdp2VulkanBackend: scale resources per N, and the renderer's requested N at attach", "[gpu][vdp2][scale]") {
     namespace vdp2 = gpu::vdp2;
     // Background layers (6 x 4 bytes) and the composite (4 bytes) per N x pixel of 704 x 512.

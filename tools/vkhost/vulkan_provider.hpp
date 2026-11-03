@@ -190,7 +190,13 @@ public:
     // --fail-alloc-above: the core's vkAllocateMemory fails with VK_ERROR_OUT_OF_DEVICE_MEMORY for allocations larger
     // than `bytes` (0: never); FailedAllocations() counts them.
     void SetFailAllocAbove(uint64_t bytes) { m_failAllocAbove = bytes; }
-    uint64_t FailAllocAbove() const { return m_failAllocAbove; }
+    uint64_t FailAllocAbove() const { return m_failAllocFirst < 0 || m_failAllocArmed ? m_failAllocAbove : 0; }
+    // --fail-alloc-runs A B: --fail-alloc-above applies only in runs A .. B - 1 (armed by the host per run).
+    void SetFailAllocRuns(int first, int end) {
+        m_failAllocFirst = first;
+        m_failAllocEnd = end;
+    }
+    void ArmAllocFailure(int run) { m_failAllocArmed = run >= m_failAllocFirst && run < m_failAllocEnd; }
     // --fail-alloc-total-above: ... for allocations that would take the live bytes (CoreMemoryLive) above `bytes`.
     void SetFailAllocTotalAbove(uint64_t bytes) { m_failAllocTotalAbove = bytes; }
     uint64_t FailAllocTotalAbove() const { return m_failAllocTotalAbove; }
@@ -289,6 +295,9 @@ private:
     uint32_t m_contextsCreated = 0;
     bool m_failPipelines = false;
     uint64_t m_failAllocAbove = 0;
+    int m_failAllocFirst = -1;
+    int m_failAllocEnd = -1;
+    bool m_failAllocArmed = false;
     uint64_t m_failAllocTotalAbove = 0;
     uint64_t m_failedAllocations = 0;
     std::mutex m_memoryMutex;

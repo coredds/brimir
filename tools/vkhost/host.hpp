@@ -91,6 +91,10 @@ struct HostConfig {
     // --fail-alloc-above MiB: with --vulkan, the core's vkAllocateMemory fails (VK_ERROR_OUT_OF_DEVICE_MEMORY) for
     // allocations above this size (0: never).
     uint64_t failAllocAboveMiB = 0;
+    // --fail-alloc-runs A B: --fail-alloc-above applies only in runs A .. B - 1 (counting warmup frames from 0; -1: in
+    // every run).
+    int failAllocFirst = -1;
+    int failAllocEnd = -1;
     // --fail-alloc-total-above MiB: ... for allocations that would take the core's live device memory above this.
     uint64_t failAllocTotalAboveMiB = 0;
     // --fail-output-images-above N: with --vulkan, the core's output images (set_image) wider than 704 * N fail.

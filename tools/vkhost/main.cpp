@@ -178,6 +178,8 @@ void PrintUsage(std::FILE* out) {
         "                injection: a GPU short of memory)\n"
         "  --fail-alloc-total-above MiB  with --vulkan: ... fails when the core's live device memory would exceed this\n"
         "                (a GPU with that much memory for the core)\n"
+        "  --fail-alloc-runs A B  with --vulkan and --fail-alloc-above: that limit applies only in runs A .. B-1\n"
+        "                (counting warmup frames from 0): memory pressure for a moment\n"
         "  --fail-output-images-above N  with --vulkan: the core's vkCreateImage fails for its output images\n"
         "                (MUTABLE_FORMAT) wider than 352 x N (a low-res frame's maximum width at N x)\n"
         "  --fail-output-images-on-grow  with --grow-mask and --fail-output-images-above: the limit applies only\n"
@@ -310,6 +312,16 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 return ParseResult::Error;
             }
             args.config.saveStatePath = argv[i + 2];
+            i += 2;
+            continue;
+        }
+        if (opt == "--fail-alloc-runs") { // two values
+            if (i + 2 >= argc || !ParseInt(argv[i + 1], args.config.failAllocFirst) ||
+                !ParseInt(argv[i + 2], args.config.failAllocEnd) || args.config.failAllocFirst < 0 ||
+                args.config.failAllocEnd <= args.config.failAllocFirst) {
+                std::fprintf(stderr, "--fail-alloc-runs needs a first run and an end run after it\n");
+                return ParseResult::Error;
+            }
             i += 2;
             continue;
         }
@@ -536,6 +548,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         !vulkanRun) {
         std::fprintf(stderr, "--fail-alloc-above, --fail-alloc-total-above, --fail-output-images-above, "
                              "--fail-submit-at and --defer-image-read need --vulkan or --compare\n");
+        return ParseResult::Error;
+    }
+    if (args.config.failAllocFirst >= 0 && (!args.config.vulkan || args.compare || args.config.failAllocAboveMiB == 0)) {
+        std::fprintf(stderr, "--fail-alloc-runs needs --vulkan and --fail-alloc-above (not --compare)\n");
         return ParseResult::Error;
     }
     if (args.config.failOutputImagesFirst >= 0 &&

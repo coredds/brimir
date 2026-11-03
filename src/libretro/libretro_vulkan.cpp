@@ -1746,7 +1746,7 @@ bool VulkanOutput::AttachRenderer(gpu::VulkanVDPRenderer &renderer, std::string 
         error = "the compute frame output is not active";
         return false;
     }
-    if (m.renderer == &renderer && renderer.Attached()) {
+    if (m.renderer == &renderer && renderer.Attached() && !renderer.BackHalfLost()) {
         return true;
     }
     // Another renderer (or a back half of this one) may still be in use by submitted frames.
@@ -1776,7 +1776,9 @@ bool VulkanOutput::DetachRenderer(std::string &error, bool discardState) {
 }
 
 bool VulkanOutput::RendererAttached() const {
-    return m_impl->renderer != nullptr && m_impl->renderer->Attached();
+    // A renderer whose back half was lost (BackHalfLost) counts as detached: the next sync of the VDP renderer
+    // (libretro.cpp) attaches it again, or uses the software renderer.
+    return m_impl->renderer != nullptr && m_impl->renderer->Attached() && !m_impl->renderer->BackHalfLost();
 }
 
 bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSettings &settings, unsigned &outW,
@@ -1821,6 +1823,11 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
         if (!m.ApplyInternalScale(error)) {
             return false;
         }
+        if (m.renderer->BackHalfLost()) {
+            // Nothing of this run is recorded: the caller sees the renderer detached and attaches it again
+            error = "the Vulkan VDP2 renderer lost its resources at an internal resolution change";
+            return false;
+        }
         if (degraded && m.renderer->InternalScale() == m.requestedScale) {
             ++m.restoresSucceeded;
             NegotiationLog(RETRO_LOG_INFO, "Internal resolution: restored " + std::to_string(m.requestedScale) + "x");
@@ -1852,6 +1859,12 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
                 return false;
             }
         }
+    }
+    if (renderer->BackHalfLost()) {
+        // A lower internal resolution in BeginFrame or FallBackOutput lost the back half (nothing is recorded yet)
+        m.device->Table().vkEndCommandBuffer(slot->cmd);
+        error = "the Vulkan VDP2 renderer lost its resources at an internal resolution change";
+        return false;
     }
     // This retro_run's VDP2 frame, if one ended; else the composite as it is (the last frame, at the last size). With
     // VDP1 on the GPU the pending VDP1 ops go in the same command buffer, around the frame (with or without one). A

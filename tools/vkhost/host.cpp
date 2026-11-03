@@ -226,6 +226,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         m_vulkan->SetFailComputeOnGrow(config.failComputeOnGrow);
         m_vulkan->SetFailComputeOnReset(config.failComputeOnReset);
         m_vulkan->SetFailAllocAbove(config.failAllocAboveMiB << 20);
+        m_vulkan->SetFailAllocRuns(config.failAllocFirst, config.failAllocEnd);
         m_vulkan->SetFailAllocTotalAbove(config.failAllocTotalAboveMiB << 20);
         if (config.failOutputImagesOnGrow) {
             m_vulkan->SetFailOutputImagesOnGrow(config.failOutputImagesAbove);
@@ -438,6 +439,7 @@ bool LibretroHost::RunFrame(FrameSink* sink) {
     if (m_vulkan) {
         m_vulkan->ArmFailedSubmit(m_frameIndex);
         m_vulkan->ArmOutputImagesFailure(m_frameIndex);
+        m_vulkan->ArmAllocFailure(m_frameIndex);
         m_vulkan->BeginRun();
     }
     m_api->run();

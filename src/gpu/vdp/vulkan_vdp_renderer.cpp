@@ -283,6 +283,9 @@ bool VulkanVDPRenderer::FallBackInternalScale(uint32_t n) {
     if (n < 1 || n > vdp2::kMaxRenderScale) {
         return false;
     }
+    if (BackHalfLost()) {
+        return false; // logged when it was lost
+    }
     if (m_backend) {
         // VDP1 upscaling: the N x sprite surface of the old scale is freed before the VDP2 resources of the new one are
         // allocated, and the new one allocated after them (its contents are rebuilt from the GPU FBRAM).
@@ -291,8 +294,14 @@ bool VulkanVDPRenderer::FallBackInternalScale(uint32_t n) {
             ApplyVdp1NxScale(0);
         }
         if (!m_backend->SetScale(n)) {
-            if (nxChanges) {
-                ApplyVdp1NxScale(Vdp1NxTarget(m_internalScale));
+            if (m_backend->Ok()) {
+                if (nxChanges) {
+                    ApplyVdp1NxScale(Vdp1NxTarget(m_internalScale));
+                }
+            } else {
+                // Not even the previous scale's layers again: nothing can be recorded with this back half any more
+                // (the N x sprite surface stays freed). The owner detaches the renderer (BackHalfLost).
+                Log("VDP2 back half lost at the internal resolution change; the renderer has to be attached again");
             }
             return false; // logged by the back half, which keeps its scale
         }

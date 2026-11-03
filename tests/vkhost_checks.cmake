@@ -602,6 +602,20 @@ forbid_log(lowvram_on_short "frames at [123]x")
 message(STATUS "lowvram: M ${lowvram_m} MiB at 4x; caps M + 24 and M + 100: upscaling off at 4x; M - 40: a lower scale, "
                "VDP1 still on the GPU; short of memory with upscaling active: upscaling off, 4x kept")
 
+# Memory pressure for one retro_run (allocations above 30 MiB fail in run 150) at a live 2x -> 4x: 4x does not fit, and
+# the 2x layers (freed first) cannot be allocated again, so the VDP2 back half is lost. The output detaches the renderer
+# and attaches it again in the same run (still under pressure: 1x, VDP1 in software) instead of freezing the picture:
+# that one frame repeats, every other one equals software at the sample points.
+run_vkhost(scale_restore_lost --vulkan --internal-resolution 2 --hash-sample 2
+           --set-option-at 150 brimir_internal_resolution=4 --fail-alloc-above 30 --fail-alloc-runs 150 151)
+check_one_repeat(scale_restore_lost 90)
+check_vulkan_counters(scale_restore_lost)
+require_log(scale_restore_lost "its layers could not be allocated again")
+require_log(scale_restore_lost "VDP2 back half lost at the internal resolution change")
+require_log(scale_restore_lost "VDP2 internal resolution: requested 4x, using 1x")
+require_log(scale_restore_lost "Internal resolution: frames at 1x")
+forbid_log(scale_restore_lost "Vulkan VDP2 renderer unavailable")
+
 # The output images (the ones handed to set_image) cannot be created above 3x: a live 2x -> 4x keeps the renderer and the
 # output at 2x (the images are created before the renderer changes, so the two never differ); a live 3x then works.
 run_vkhost(output_images_fail --vulkan --internal-resolution 2 --hash-sample 2 --fail-output-images-above 3
