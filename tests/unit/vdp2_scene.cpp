@@ -200,7 +200,10 @@ void Vdp2SceneWriter::CrossLoad() {
 }
 
 void Vdp2SceneWriter::RoundTrip() {
-    auto saved = SaveStates();
+    LoadStates(SaveStates());
+}
+
+void Vdp2SceneWriter::LoadStates(const std::vector<std::unique_ptr<savestate::VDPSaveState>> &saved) {
     for (size_t i = 0; i < m_targets.size(); ++i) {
         // VDP::LoadState (vdp.cpp:536-547)
         Target &t = m_targets[i];

@@ -626,6 +626,47 @@ SceneCase SceneRoundTrips() {
                       {.deinterlace = true, .transparentMeshes = true}, 17)};
 }
 
+SceneCase SceneChangedLoads() {
+    // A slice that stays a candidate for keeping (Valid before the load) but whose loaded bytes differ is uploaded.
+    // Frame 1: a CPU write into the draw framebuffer after the save (main stays Valid: CPU writes are no GPU op), then
+    // the load: main of the draw framebuffer uploads. Frame 2: the save before the draw, the draw (normal and mesh
+    // pixels), a second save (its sync makes main and mesh Valid with the drawn bytes), then the first state loaded:
+    // main and mesh of the draw framebuffer upload.
+    FrameControl c = AutoSwap(40);
+    c.draw = [](Vdp2SceneWriter &w, std::mt19937 &rng, uint32_t f, bool) {
+        const Assets a = WriteAssets(w, rng);
+        WriteTable(w, rng, a, 40);
+        if (f == 1) {
+            const auto saved = w.SaveStates();
+            const uint32_t fb = w.DrawFramebuffer();
+            constexpr uint32_t kAddress = 0x2468;
+            uint16_t old = 0;
+            bool first = true;
+            w.ForEachState([&](ymir::vdp::VDPState &s) {
+                if (first) {
+                    old = static_cast<uint16_t>(s.mem1.FBRAM[fb][kAddress] << 8 | s.mem1.FBRAM[fb][kAddress + 1]);
+                    first = false;
+                }
+            });
+            w.FBRAM16(fb, kAddress, static_cast<uint16_t>(~old));
+            w.LoadStates(saved);
+            w.Checkpoint();
+        }
+        if (f == 2) {
+            const auto saved = w.SaveStates();
+            w.DrawVDP1();
+            (void)w.SaveStates();
+            w.LoadStates(saved);
+            w.Checkpoint();
+            return;
+        }
+        w.DrawVDP1();
+    };
+    return {"state loads with changed bytes",
+            Vdp1Scene([](Vdp2SceneWriter &w, std::mt19937 &rng) { Display(w, rng); }, c, 3,
+                      {.transparentMeshes = true}, 18)};
+}
+
 FbramResult RunCase(const SceneCase &s, uint32_t nx = 0) {
     RenderBothOptions options = s.options;
     if (nx != 0) {
@@ -734,6 +775,29 @@ TEST_CASE("GPU VDP1 scene: state round trips upload nothing and keep the N x sur
             CHECK(stats->stateLoads == 6);
             CHECK(stats->loadUploadedSlices == 0);
             CHECK(stats->loadKeptSlices == 36);
+        }
+    }
+}
+
+TEST_CASE("GPU VDP1 scene: a state load with changed bytes uploads the slice", "[gpu][vdp1][scene]") {
+    for (const uint32_t nx : {0u, 2u}) {
+        DYNAMIC_SECTION("N " << nx) {
+            SceneCase s = SceneChangedLoads();
+            auto perFrame = std::make_shared<std::vector<gpu::VulkanVDPRenderer::Vdp1SyncStats>>();
+            s.options.afterFrame = [perFrame](uint32_t, gpu::VulkanVDPRenderer &vk, gpu::VulkanDevice &) {
+                perFrame->push_back(vk.Vdp1Sync());
+            };
+            RunCase(s, nx);
+            REQUIRE(perFrame->size() == 3);
+            const auto &f1 = (*perFrame)[1], &f2 = (*perFrame)[2];
+            // Frame 1: main of the draw framebuffer (the CPU write); the other five slices kept
+            CHECK(f1.stateLoads == 1);
+            CHECK(f1.loadUploadedSlices == 1);
+            CHECK(f1.loadKeptSlices == 5);
+            // Frame 2: main and mesh of the draw framebuffer (the draw); the other four kept
+            CHECK(f2.stateLoads == 2);
+            CHECK(f2.loadUploadedSlices - f1.loadUploadedSlices == 2);
+            CHECK(f2.loadKeptSlices - f1.loadKeptSlices == 4);
         }
     }
 }

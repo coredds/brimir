@@ -148,6 +148,8 @@ public:
     /// @brief Saves every pair (SaveStates) and loads each pair's own state back (VDP::LoadState: PreLoadState,
     /// VDPState, renderer LoadState, PostLoadStateSync), as run-ahead and netplay do.
     void RoundTrip();
+    /// @brief Loads each pair's own state from `saved` (SaveStates, in Attach order) as VDP::LoadState does.
+    void LoadStates(const std::vector<std::unique_ptr<ymir::savestate::VDPSaveState>> &saved);
     /// @brief Every attached renderer's state saved, a blank renderer section loaded, then the saved state loaded again
     /// (PreSaveStateSync, SaveState, LoadState, PostLoadStateSync as VDP::SaveState / LoadState call them).
     void SaveLoadMidFrame();

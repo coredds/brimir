@@ -1007,15 +1007,16 @@ TEST_CASE("VDP1 N x confinement and sharpness of captured frames (BRIMIR_VDP1_CA
                 } else if (w1 != nullptr) {
                     // The native winner's command at N x on this word
                     const auto steps = stepsOf(evN, w1);
+                    // The N x winner drawn after the native winner (draw order: batch, then command)
+                    const bool later = wN != nullptr && (wN->batch != w1->batch ? wN->batch > w1->batch
+                                                                                  : wN->cmdIndex > w1->cmdIndex);
                     if (steps.empty()) {
-                        // Not a gap only when a later command covers it at N x (draw order: batch, then command)
-                        const bool later = wN != nullptr && (wN->batch != w1->batch ? wN->batch > w1->batch
-                                                                                      : wN->cmdIndex > w1->cmdIndex);
+                        // Not a gap only when a later command covers it at N x
                         cls = later ? LaterCommand : CoverageGap;
                     } else if (hasStatus(steps, nx::ProbeEvent::Transparent) ||
                                hasStatus(steps, nx::ProbeEvent::EndCode)) {
                         cls = Texel;
-                    } else if (wN != nullptr) {
+                    } else if (later) {
                         cls = LaterCommand;
                     }
                 } else if (wN != nullptr) {
