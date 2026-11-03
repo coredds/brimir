@@ -140,6 +140,8 @@ A live change of the internal resolution needs about 20-40 MiB more for a moment
   copy of the frames). The reason is logged and shown once.
 - The GPU is short of memory: VDP1 upscaling is turned off at that resolution first, then a lower internal resolution
   is used (logged; the requested one is tried again later), then VDP1 is drawn in software. The picture never stops.
+  VDP1 upscaling turned off for memory at the requested resolution stays off until the Internal Resolution or VDP1
+  Upscaling option changes, the content is loaded again or the video driver is reinitialised.
   Once VDP1 has moved to software it stays there until the content is loaded again or the video driver is
   reinitialised; the internal resolution itself comes back automatically.
 - A lost GPU device: the software renderer continues from the last state the GPU handed back; a few frames of VDP1
@@ -163,6 +165,9 @@ Vulkan 1.2 baseline). Release builds include it, but it has not been tried on a 
 - Burning Rangers at 4x: its slowest 1% of frames take 10-11 ms of VDP1 GPU time on the test GPU (a Radeon RX 9060
   XT), close to the 12 ms target, and up to 18 ms at worst; a slower GPU may drop frames there. Use 2x or 3x then.
 - Run-ahead renders every hidden frame at the internal resolution too, so it multiplies the GPU cost.
+- Run-ahead, netplay and save states: a state load keeps the upscaled VDP1 drawing of every framebuffer whose
+  contents the loaded state does not change (run-ahead and netplay load one every frame, so this is the usual case);
+  a framebuffer the load changes starts again from its native pixels until the game draws it again.
 
 Developer notes: [src/gpu/shaders/vdp2/README.md](src/gpu/shaders/vdp2/README.md) (the GPU passes) and
 [tools/README.md](tools/README.md) (`brimir_vkhost`, the compare and fault-injection tool).
