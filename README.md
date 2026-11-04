@@ -8,6 +8,10 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-10-16 and Brimir-specific optimizations.
 
+## What's New in v0.6.1
+
+- **Crash fix** - RetroArch no longer crashes on Quick Menu > Close Content when the core uses the Vulkan renderer. Hotfix on top of v0.6.0 with no other changes; save states and saves are unaffected.
+
 ## What's New in v0.6.0
 
 - **Vulkan renderer (optional)** - set Renderer to Vulkan (applies on content load; needs RetroArch's Vulkan video driver and a Vulkan 1.2 GPU) to draw VDP1 and VDP2 with compute shaders on the GPU. At native resolution every frame and save state is identical to the software renderer, and states load in either renderer. See [Vulkan renderer](#vulkan-renderer).

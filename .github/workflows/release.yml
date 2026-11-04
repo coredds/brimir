@@ -195,6 +195,10 @@ jobs:
 
             ### ${{ github.ref_name }}
 
+            Hotfix release on top of v0.6.0: RetroArch no longer crashes on Quick Menu > Close Content when the core uses the Vulkan renderer (the core gave RetroArch a device-teardown callback that RetroArch calls after unloading the core). No other changes; save states and saves are unaffected. The v0.6.0 notes follow.
+
+            ### v0.6.0
+
             **Added**
             - **Vulkan renderer (optional)** - core option Renderer = Vulkan (applies on content load; needs RetroArch's Vulkan video driver and a Vulkan 1.2 GPU) draws VDP1 and VDP2 with compute shaders on the GPU. At native resolution every frame and save state is identical to the software renderer, and states load in either renderer. Falls back to software without the Vulkan driver.
             - **Internal resolution up to 4x** - Internal Resolution (1x-4x, live) and VDP1 Upscaling (Vulkan) (on by default, live): sharper 3D edges, rotated floors and distant textures. Save states, run-ahead, rewind and netplay behave as at 1x. GPU memory: about 140 MiB at 1x, 460-530 MiB at 4x; when memory runs short, VDP1 upscaling and then the resolution are lowered.

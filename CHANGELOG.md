@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-03
+
 ### Fixed
 - **Close Content crash with the Vulkan renderer** - RetroArch crashed (access violation) on Quick Menu > Close Content when the core used the Vulkan renderer. The core offered RetroArch a `destroy_device` callback, and RetroArch calls it after it has already unloaded the core, when the menu restarts the video driver. The core no longer offers it (it had nothing to free). `brimir_vkhost` now fails any core that offers it.
 
