@@ -542,6 +542,12 @@ bool VulkanProvider::CreateContext(const retro_hw_render_context_negotiation_int
                     physical = context.gpu != VK_NULL_HANDLE ? context.gpu : physical;
                     m_ownedDevice = device;
                     m_destroyDevice = neg->destroy_device;
+                    if (m_destroyDevice != nullptr) {
+                        // RetroArch's Close Content unloads the core first and calls destroy_device later, when
+                        // the menu restarts the video driver: a core pointer there jumps into an unloaded DLL.
+                        AddProblem("the negotiation interface sets destroy_device; RetroArch calls it after "
+                                   "unloading the core (Close Content), so it must be null");
+                    }
                     std::fprintf(stderr, "vkhost: vulkan: device created through create_device2 (negotiation v%u)\n",
                                  neg->interface_version);
                 } else {

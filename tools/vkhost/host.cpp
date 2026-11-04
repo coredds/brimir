@@ -372,7 +372,8 @@ bool LibretroHost::ResetContext() {
 void LibretroHost::Unload() {
     if (m_api) {
         // RetroArch's order: context_destroy, retro_unload_game, then the video driver frees the device
-        // (destroy_device, vkDestroyDevice).
+        // (destroy_device, vkDestroyDevice). On Close Content RetroArch frees the device only after it has unloaded
+        // the core, so the provider refuses a core that sets destroy_device.
         if (m_contextLive) {
             ProcessDeferred(0);
             if (m_hwRender.context_destroy != nullptr) {

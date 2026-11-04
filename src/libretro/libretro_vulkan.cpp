@@ -306,17 +306,15 @@ bool CreateDevice2(retro_vulkan_context *context, VkInstance instance, VkPhysica
     return true;
 }
 
-// Frees nothing: the device is the frontend's and every resource on it is gone after context_destroy.
-void DestroyDevice() {
-    g_negotiation.device = VK_NULL_HANDLE;
-}
-
+// No destroy_device: the core has nothing to free there (the device is the frontend's and every resource on it is
+// gone after context_destroy), and RetroArch's Close Content calls it after unloading the core, which would jump
+// into the unloaded library. g_negotiation is reset by the next RequestVulkanContext.
 retro_hw_render_context_negotiation_interface_vulkan g_negotiationInterface{
     .interface_type = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN,
     .interface_version = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION,
     .get_application_info = GetApplicationInfo,
     .create_device = CreateDevice,
-    .destroy_device = DestroyDevice,
+    .destroy_device = nullptr,
     .create_instance = nullptr,
     .create_device2 = CreateDevice2,
 };
@@ -1527,6 +1525,9 @@ bool VulkanOutput::Live() const {
 
 void VulkanOutput::ContextDestroy() {
     m_impl->Teardown();
+    // The frontend destroys the negotiated device after this; a new one comes through create_device2 again.
+    g_negotiation.device = VK_NULL_HANDLE;
+    g_negotiation.baseline = false;
 }
 
 void VulkanOutput::Abandon() {
