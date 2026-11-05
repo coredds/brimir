@@ -1476,6 +1476,44 @@ TEST_CASE("rtc: host mode follows host clock", "[core][rtc]") {
     CHECK(std::llabs(util::datetime::to_timestamp(later) - HostEpochSeconds()) <= 2 + 3600);
 }
 
+TEST_CASE("rtc: a first boot in virtual mode is configured (no BIOS setup screen)", "[core][rtc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    SECTION("virtual, no RTC file: clock set (STE), default settings (SMEM zero: English)") {
+        RtcContent content("brimir_rtc_firstboot_virtual");
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetRTCMode(RTCMode::Virtual);
+        REQUIRE(content.Load(core));
+        const auto data = PersistentData(core);
+        CHECK(data.STE);
+        CHECK(data.SMEM == std::array<uint8_t, 4>{0, 0, 0, 0});
+        core.UnloadGame(); // persisted for the next session
+        REQUIRE(std::filesystem::exists(content.RtcFile()));
+    }
+    SECTION("virtual, existing RTC file: read unchanged") {
+        RtcContent content("brimir_rtc_firstboot_existing");
+        WriteRtcFile(content.RtcFile(), 0, 0, 1000000000);
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetRTCMode(RTCMode::Virtual);
+        REQUIRE(content.Load(core));
+        CHECK_FALSE(PersistentData(core).STE);
+    }
+    SECTION("host, no RTC file: as before (the BIOS asks)") {
+        RtcContent content("brimir_rtc_firstboot_host");
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetRTCMode(RTCMode::Host);
+        REQUIRE(content.Load(core));
+        CHECK_FALSE(PersistentData(core).STE);
+    }
+}
+
 TEST_CASE("rtc: the RTC mode defaults to virtual", "[core][rtc]") {
     CoreWrapper core;
     CHECK(core.GetRTCMode() == RTCMode::Virtual);

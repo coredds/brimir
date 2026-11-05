@@ -381,6 +381,12 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                     std::error_code migrateError;
                     std::filesystem::create_directories(smpcPath.parent_path(), migrateError);
                     SavePersistentSMPCDataToFile(smpcData, smpcPath);
+                } else if (m_rtcMode == RTCMode::Virtual) {
+                    // No settings saved for this region yet: the virtual clock starts at the host's time
+                    // (ApplyRTCMode), so mark the clock as set (STE) with the default settings (SMEM zero:
+                    // English) and the BIOS boots without its language and clock setup screen. Host mode
+                    // keeps showing it, as before.
+                    smpcData.STE = true;
                 }
             }
             m_saturn->SMPC.LoadPersistentData(smpcData);
