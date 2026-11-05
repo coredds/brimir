@@ -1286,4 +1286,55 @@ foreach(rejected IN ITEMS "--refuse-hw" "--fake-api;1.1" "--option;brimir_render
 endforeach()
 message(STATUS "--compare: vacuous Vulkan runs and conflicting options are rejected")
 
+# rollback_deterministic: RetroArch's single-instance run-ahead (--rollback: a hidden frame, retro_serialize, the
+# shown frame, retro_unserialize, every frame) must emulate exactly what a plain run does (run-ahead, rewind and
+# netplay rely on it). The BIOS menu from boot with a fixed RTC date, software renderer, 600 frames:
+# the rollback run's frame i is the plain run's frame i + 1 (it runs one frame ahead), and the states saved after the
+# same frames (every 60) are identical in every section (brimir_state_diff --strict).
+foreach(mode IN ITEMS plain rollback)
+    set(extra "")
+    if(mode STREQUAL "rollback")
+        set(extra --rollback)
+    endif()
+    execute_process(
+        COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 600 --hash
+                --save-state-every 60 "${state_dir}/rollback_${mode}" ${extra}
+        OUTPUT_VARIABLE rb_out ERROR_VARIABLE rb_err RESULT_VARIABLE rb_code)
+    if(NOT rb_code EQUAL 0)
+        message(FATAL_ERROR "rollback_deterministic (${mode}): exit ${rb_code}\n${rb_err}")
+    endif()
+    string(REGEX MATCHALL "frame [0-9]+ [0-9]+x[0-9]+ [0-9a-f]+" rb_lines "${rb_out}")
+    set(rb_hashes "")
+    foreach(line IN LISTS rb_lines)
+        string(REGEX REPLACE "^frame [0-9]+ " "" line "${line}")
+        list(APPEND rb_hashes "${line}")
+    endforeach()
+    set(rb_${mode} "${rb_hashes}")
+endforeach()
+list(LENGTH rb_plain plain_count)
+list(LENGTH rb_rollback rollback_count)
+if(NOT plain_count EQUAL 600 OR NOT rollback_count EQUAL 600)
+    message(FATAL_ERROR "rollback_deterministic: expected 600 frames from each run, got ${plain_count} and ${rollback_count}")
+endif()
+foreach(i RANGE 0 598)
+    math(EXPR next "${i} + 1")
+    list(GET rb_rollback ${i} shown)
+    list(GET rb_plain ${next} expected)
+    if(NOT shown STREQUAL expected)
+        message(FATAL_ERROR "rollback_deterministic: rollback frame ${i} (${shown}) differs from plain frame ${next} (${expected})")
+    endif()
+endforeach()
+foreach(k RANGE 59 599 60)
+    string(LENGTH "0000${k}" padded_length)
+    math(EXPR start "${padded_length} - 5")
+    string(SUBSTRING "0000${k}" ${start} 5 padded)
+    execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/rollback_plain/state_${padded}.bin"
+                            "${state_dir}/rollback_rollback/state_${padded}.bin"
+        OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+    if(NOT sd_code EQUAL 0)
+        message(FATAL_ERROR "rollback_deterministic: the states after frame ${k} differ (exit ${sd_code}):\n${sd_out}${sd_err}")
+    endif()
+endforeach()
+message(STATUS "rollback_deterministic: 600 frames, --rollback emulates exactly the plain run (frames and 10 states)")
+
 message(STATUS "brimir_vkhost Vulkan checks passed")

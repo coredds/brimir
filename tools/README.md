@@ -383,7 +383,9 @@ load keeps all six main and mesh slices (`uploaded 0`); every
 Vulkan run at N compared with software through `--hash-sample`), and requires identical
 frame hashes, the Vulkan VDP2 renderer active where the context allows it (and not where it does not), the
 validation layer on and zero validation errors, queue-lock violations and hidden-frame presentation calls, and at
-most one submit per `retro_run`. It is skipped without the BIOS or a Vulkan device
+most one submit per `retro_run`. It also checks `rollback_deterministic`: 600 BIOS frames from boot (`--fixed-date`,
+software) with `--rollback` against a plain run, the frames one apart and every 60th state identical in every section
+(`brimir_state_diff --strict`). It is skipped without the BIOS or a Vulkan device
 (`BRIMIR_REQUIRE_VULKAN=1` fails instead; `BRIMIR_VKHOST_ALLOW_NO_VALIDATION=1` only warns without the layer).
 A `video_refresh(NULL)` (dupe) is recorded as a repeat of the last frame.
 
