@@ -194,6 +194,7 @@ struct OptionCache {
     std::string sh2_jit_compile_thread = "auto";
     // Load-time only (read in retro_load_game); kept to report live changes.
     std::string renderer = "software";
+    std::string rtc_mode = "virtual";
     // Live (Vulkan VDP2 renderer only): applied at the next shown frame.
     std::string internal_resolution = "1";
     // Live (Vulkan renderer with VDP1 on the GPU, internal resolution above 1): applied at the next shown frame.
@@ -253,6 +254,15 @@ static void apply_core_options(bool force) {
 
     if (const std::string warning = g_core->TakeSH2JitWorkerWarning(); !warning.empty()) {
         brimir_log(RETRO_LOG_WARN, "%s", warning.c_str());
+    }
+
+    // The RTC mode is chosen at content load (retro_load_game); a live change only takes effect with the next content.
+    if (!force) {
+        const char* rtc_mode = get_option_value("brimir_rtc_mode", g_options.rtc_mode.c_str());
+        if (g_options.rtc_mode != rtc_mode) {
+            g_options.rtc_mode = rtc_mode;
+            brimir_log(RETRO_LOG_INFO, "RTC mode '%s' applies when content is next loaded", rtc_mode);
+        }
     }
 
 #ifdef BRIMIR_VULKAN
@@ -1221,6 +1231,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
     }
     
+    // Before LoadGame, which applies the mode again once the RTC file is read (no content: applies now).
+    g_options.rtc_mode = get_option_value("brimir_rtc_mode", "virtual");
+    g_core->SetRTCMode(g_options.rtc_mode == "host" ? brimir::RTCMode::Host : brimir::RTCMode::Virtual);
+
     if (!no_content) {
         brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
 

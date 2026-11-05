@@ -428,9 +428,9 @@ std::string DiffSH2State(const ymir::savestate::SH2SaveState &a, const ymir::sav
 void PrepareLockstepCore(CoreWrapper &core) {
     core.SetThreadedVDP1(false);
     core.SetThreadedVDP2(false);
-    // The default RTC mode reads the host clock, so two cores run one after the other can see
+    // The Host RTC mode reads the host clock, so two cores run one after the other can see
     // different seconds (the BIOS diverges within a few seconds of emulated time). The virtual RTC
-    // advances with emulated time only.
+    // (CoreWrapper's default) advances with emulated time only; pinned here whatever the core's mode.
     if (ymir::Saturn *saturn = core.GetSaturn(); saturn != nullptr) {
         saturn->configuration.rtc.mode = ymir::core::config::rtc::Mode::Virtual;
         // Keep the SCSP on the emulation thread so audio timing cannot depend on host thread

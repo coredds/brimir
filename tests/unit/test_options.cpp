@@ -23,6 +23,33 @@ TEST_CASE("Core options include profiling option", "[options][libretro]") {
     REQUIRE(std::strcmp(found->default_value, "disabled") == 0);
 }
 
+TEST_CASE("Core options include the RTC mode option", "[options][libretro][rtc]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+
+    const retro_core_option_v2_definition* found = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_rtc_mode") == 0) {
+            found = &options->definitions[i];
+            break;
+        }
+    }
+
+    REQUIRE(found != nullptr);
+    CHECK(std::strcmp(found->desc, "RTC Mode") == 0);
+    REQUIRE(found->category_key != nullptr);
+    CHECK(std::strcmp(found->category_key, "system") == 0);
+    REQUIRE(found->default_value != nullptr);
+    CHECK(std::strcmp(found->default_value, "virtual") == 0);
+    REQUIRE(found->values[0].value != nullptr);
+    REQUIRE(found->values[1].value != nullptr);
+    CHECK(std::strcmp(found->values[0].value, "virtual") == 0);
+    CHECK(std::strcmp(found->values[1].value, "host") == 0);
+    CHECK(found->values[2].value == nullptr);
+    REQUIRE(found->info != nullptr);
+    CHECK(std::strstr(found->info, "Applies when content is loaded") != nullptr);
+}
+
 TEST_CASE("Core options default values match OptionCache defaults", "[options][libretro]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);
@@ -47,6 +74,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_sh2_jit",              "disabled" },
         { "brimir_sh2_jit_compile_thread", "auto"   },
         { "brimir_profiling",            "disabled" },
+        { "brimir_rtc_mode",             "virtual"  },
 #ifdef BRIMIR_VULKAN
         { "brimir_renderer",             "software" },
         { "brimir_internal_resolution",  "1"        },

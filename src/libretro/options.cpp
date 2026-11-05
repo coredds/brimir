@@ -191,6 +191,24 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "enabled"
     },
     {
+        // Read once at content load (retro_load_game), like brimir_bios.
+        "brimir_rtc_mode",
+        "RTC Mode",
+        nullptr,
+        "How the Saturn's clock keeps time. Virtual: the clock runs with the emulated time only, so save states, "
+        "run-ahead, rewind and netplay stay exact; it starts at your computer's local time and continues from the "
+        "saved clock (one per BIOS region, in the system folder) on later sessions. Host: the clock follows your "
+        "computer's clock. Applies when content is loaded.",
+        nullptr,
+        "system",
+        {
+            { "virtual", "Virtual" },
+            { "host", "Host" },
+            { nullptr, nullptr }
+        },
+        "virtual"
+    },
+    {
         "brimir_audio_interpolation",
         "Audio Interpolation",
         nullptr,

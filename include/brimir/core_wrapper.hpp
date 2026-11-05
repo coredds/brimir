@@ -60,6 +60,12 @@ enum class ConsoleRegion {
     Unknown,
 };
 
+/// @brief How the emulated RTC keeps time (option brimir_rtc_mode)
+enum class RTCMode {
+    Virtual, ///< advances with emulated time only (deterministic; held in save states)
+    Host,    ///< reads the host clock plus the user's offset
+};
+
 /// @brief The output transforms the GPU frame output applies to a raw frame (see SetOverscanCrop/SetRotation)
 struct FrameOutputSettings {
     uint32_t cropH = 0;    ///< total horizontal overscan crop
@@ -290,6 +296,13 @@ public:
     /// @brief Set autodetect region from disc
     /// @param enable True to enable autodetect
     void SetAutodetectRegion(bool enable);
+
+    /// @brief Set the RTC mode. Applies now to the running system and again at each LoadGame, after the RTC file is
+    /// read. Virtual: the clock advances with emulated time, survives hard resets, and starts at the host's local
+    /// time (plus the file's offset to the host clock) when no virtual time is stored yet. Host: reads the host
+    /// clock plus the stored offset.
+    void SetRTCMode(RTCMode mode);
+    RTCMode GetRTCMode() const { return m_rtcMode; }
     
     /// @brief Set renderer type (Ymir hw layer only supports software)
     /// @param renderer Renderer string: "software"
@@ -528,6 +541,11 @@ private:
 
     /// @brief Callback invoked by the core when persistent SMPC data should be saved.
     static void OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, void *ctx);
+
+    /// @brief Applies m_rtcMode to the Saturn's RTC configuration (see SetRTCMode).
+    void ApplyRTCMode();
+
+    RTCMode m_rtcMode = RTCMode::Virtual;
 
     // Disc loading options
     bool m_discPreload = true; // Preload disc images to RAM by default to avoid streaming hitches

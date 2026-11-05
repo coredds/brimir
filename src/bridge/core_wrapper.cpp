@@ -29,6 +29,7 @@
 #endif
 
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -195,6 +196,8 @@ bool CoreWrapper::Initialize() {
         m_saturn->configuration.video.threadedVDP1 = true;
         m_saturn->configuration.video.threadedVDP2 = true;
         m_saturn->configuration.video.threadedDeinterlacer = true;
+
+        ApplyRTCMode();
         
         // Configure enhancements for optimal libretro performance
         m_saturn->VDP.ModifyEnhancements([](ymir::vdp::config::Enhancements& enh) {
@@ -382,6 +385,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             }
             m_saturn->SMPC.LoadPersistentData(smpcData);
         }
+        ApplyRTCMode();
 
         // Set up the canonical .srm path the frontend normally manages. If the
         // frontend did not preload the .srm into m_sramData (e.g. because the
@@ -705,6 +709,13 @@ void CoreWrapper::UnloadGame() {
     // This preserves the date/time the user set (system-wide, not per-game)
     if (m_saturn) {
         try {
+            // The virtual clock only catches up with emulated time when the guest reads it: bring it up to date so
+            // the file holds the time emulation reached.
+            if (*m_saturn->configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual) {
+                auto state = std::make_unique<ymir::savestate::SaveState>();
+                m_saturn->SaveState(*state);
+                m_saturn->SMPC.GetRTC().UpdateSysClock(state->scheduler.currCount);
+            }
             m_saturn->SMPC.PersistData();
         } catch (...) {
             // Non-critical, continue
@@ -751,6 +762,37 @@ void CoreWrapper::UnloadGame() {
     m_sramInitialized = false;
     m_framesSinceLastSRAMSync = 0;
     m_sramFirstLoad = true;  // Reset for next game load
+}
+
+void CoreWrapper::SetRTCMode(RTCMode mode) {
+    m_rtcMode = mode;
+    ApplyRTCMode();
+}
+
+void CoreWrapper::ApplyRTCMode() {
+    if (!m_saturn) {
+        return;
+    }
+    using namespace ymir::core::config;
+    auto &config = m_saturn->configuration.rtc;
+    if (m_rtcMode == RTCMode::Host) {
+        config.mode = rtc::Mode::Host;
+        return;
+    }
+    config.mode = rtc::Mode::Virtual;
+    config.virtHardResetStrategy = rtc::HardResetStrategy::Preserve;
+    // No virtual time was ever stored when the timestamp is still a default: Ymir's (1994-01-01 00:00 local, also
+    // what LoadGame loads without an RTC file) or 0 (files written by older versions in Host mode, which only keep
+    // the offset to the host clock). Start at the date the guest would read in Host mode.
+    ymir::smpc::PersistentSMPCData data{};
+    m_saturn->SMPC.SavePersistentData(data);
+    if (data.rtc.timestamp == 0 || data.rtc.timestamp == util::datetime::to_timestamp(util::datetime::kDefaultDateTime)) {
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        data.rtc.timestamp = static_cast<sint64>(now) + data.rtc.offset;
+        m_saturn->SMPC.LoadPersistentData(data);
+    }
 }
 
 std::string CoreWrapper::GetSMPCRegionSuffix() const {

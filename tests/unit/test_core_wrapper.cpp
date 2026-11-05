@@ -7,9 +7,13 @@
 #include <brimir/core_wrapper.hpp>
 #include <brimir/savestate_codec.hpp>
 #include <lz4.h>
+#include <ymir/hw/smpc/smpc_defs.hpp>
+#include <ymir/util/date_time.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1259,4 +1263,192 @@ TEST_CASE("Frame path: GPU output keeps the raw frame and skips the CPU transfor
     core.TestInjectFrame(second.data(), 352, 240);
     CHECK(core.GetFramebufferWidth() == 352 - 32);
     CHECK(core.GetFramebufferHeight() == 240 - 16);
+}
+
+// ============================================================
+// RTC mode
+// ============================================================
+
+namespace {
+
+int64_t HostEpochSeconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+// A temporary content folder: saves/, system/ and an audio CD image (one silent WAV track behind a CUE sheet), which
+// LoadGame accepts as a disc. Removed on destruction.
+struct RtcContent {
+    std::filesystem::path root;
+    std::filesystem::path saves;
+    std::filesystem::path system;
+    std::filesystem::path cue;
+
+    explicit RtcContent(const char* name) {
+        root = std::filesystem::temp_directory_path() / name;
+        std::filesystem::remove_all(root);
+        saves = root / "saves";
+        system = root / "system";
+        std::filesystem::create_directories(saves);
+        std::filesystem::create_directories(system);
+        const uint32_t dataSize = 2352 * 75; // one second of CD audio
+        {
+            std::ofstream wav(root / "track.wav", std::ios::binary);
+            const auto u32 = [&](uint32_t v) { wav.write(reinterpret_cast<const char*>(&v), 4); };
+            const auto u16 = [&](uint16_t v) { wav.write(reinterpret_cast<const char*>(&v), 2); };
+            wav.write("RIFF", 4);
+            u32(36 + dataSize);
+            wav.write("WAVEfmt ", 8);
+            u32(16);
+            u16(1);
+            u16(2);
+            u32(44100);
+            u32(44100 * 4);
+            u16(4);
+            u16(16);
+            wav.write("data", 4);
+            u32(dataSize);
+            const std::vector<char> silence(dataSize, 0);
+            wav.write(silence.data(), silence.size());
+        }
+        cue = root / "audio.cue";
+        std::ofstream(cue, std::ios::binary) << "FILE \"track.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n";
+    }
+    ~RtcContent() {
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+    }
+
+    bool Load(CoreWrapper& core) const {
+        return core.LoadGame(cue.string().c_str(), saves.string().c_str(), system.string().c_str());
+    }
+
+    std::filesystem::path RtcFile() const { return system / "brimir_saturn_rtc_us_eu.smpc"; }
+};
+
+std::filesystem::path UsBiosFixture() {
+    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / "mpr-17933.bin";
+}
+
+ymir::smpc::PersistentSMPCData PersistentData(CoreWrapper& core) {
+    ymir::smpc::PersistentSMPCData data{};
+    core.GetSaturn()->SMPC.SavePersistentData(data);
+    return data;
+}
+
+// The RTC file layout: version, 3 reserved bytes, SMEM[4], STE, offset (int64 LE), timestamp (int64 LE).
+void WriteRtcFile(const std::filesystem::path& path, uint8_t ste, int64_t offset, int64_t timestamp) {
+    std::ofstream out(path, std::ios::binary);
+    const char header[9] = {1, 0, 0, 0, 0, 0, 0, 0, static_cast<char>(ste)};
+    out.write(header, sizeof(header));
+    out.write(reinterpret_cast<const char*>(&offset), 8);
+    out.write(reinterpret_cast<const char*>(&timestamp), 8);
+}
+
+int64_t RtcFileTimestamp(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    std::vector<char> bytes(25);
+    in.read(bytes.data(), bytes.size());
+    REQUIRE(in);
+    int64_t timestamp = 0;
+    std::memcpy(&timestamp, bytes.data() + 17, 8);
+    return timestamp;
+}
+
+} // namespace
+
+TEST_CASE("rtc: virtual mode seeds from host time once and persists", "[core][rtc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    RtcContent content("brimir_rtc_virtual_test");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    core.SetRTCMode(RTCMode::Virtual);
+    REQUIRE(content.Load(core));
+
+    ymir::Saturn& saturn = *core.GetSaturn();
+    CHECK(*saturn.configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual);
+    CHECK(saturn.configuration.rtc.virtHardResetStrategy == ymir::core::config::rtc::HardResetStrategy::Preserve);
+
+    // No RTC file: the virtual clock starts at the host's local time.
+    const auto seeded = PersistentData(core);
+    CHECK(std::llabs(seeded.rtc.timestamp - HostEpochSeconds()) <= 120);
+
+    // A date far from the host's (2001-09-09), then 600 frames (10 s of emulated time) and unload: the file keeps the
+    // virtual clock where emulation left it.
+    constexpr int64_t kStart = 1000000000;
+    auto data = seeded;
+    data.rtc.timestamp = kStart;
+    saturn.SMPC.LoadPersistentData(data);
+    for (int i = 0; i < 600; ++i) {
+        core.RunFrame();
+    }
+    core.UnloadGame();
+    REQUIRE(std::filesystem::exists(content.RtcFile()));
+    const int64_t saved = RtcFileTimestamp(content.RtcFile());
+    CHECK(saved >= kStart + 9);
+    CHECK(saved <= kStart + 11);
+
+    // Reloading continues from the file, not from the host's time.
+    REQUIRE(content.Load(core));
+    CHECK(PersistentData(core).rtc.timestamp == saved);
+    const util::datetime::DateTime guest = saturn.SMPC.GetRTC().GetDateTime();
+    CHECK(guest.year == 2001);
+}
+
+TEST_CASE("rtc: virtual mode starts an existing host-mode RTC file at the date it showed", "[core][rtc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // A file written in Host mode holds the user's offset to the host clock and no virtual timestamp: 0 (older
+    // versions) or Ymir's default date.
+    const int64_t stored = GENERATE(int64_t{0}, util::datetime::to_timestamp(util::datetime::kDefaultDateTime));
+    INFO("stored timestamp " << stored);
+    RtcContent content("brimir_rtc_hostfile_test");
+    constexpr int64_t kOffset = -3600 * 24 * 365;
+    WriteRtcFile(content.RtcFile(), 1, kOffset, stored);
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    core.SetRTCMode(RTCMode::Virtual);
+    REQUIRE(content.Load(core));
+    const auto data = PersistentData(core);
+    CHECK(data.STE);
+    CHECK(data.rtc.offset == kOffset);
+    CHECK(std::llabs(data.rtc.timestamp - (HostEpochSeconds() + kOffset)) <= 120);
+}
+
+TEST_CASE("rtc: host mode follows host clock", "[core][rtc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    RtcContent content("brimir_rtc_host_test");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    core.SetRTCMode(RTCMode::Host);
+    REQUIRE(content.Load(core));
+
+    ymir::Saturn& saturn = *core.GetSaturn();
+    CHECK(*saturn.configuration.rtc.mode == ymir::core::config::rtc::Mode::Host);
+    // Today's behaviour: the virtual timestamp keeps Ymir's default (not seeded), the guest reads the host clock
+    // (offset 0 without a file).
+    CHECK(PersistentData(core).rtc.timestamp == util::datetime::to_timestamp(util::datetime::kDefaultDateTime));
+    const util::datetime::DateTime guest = saturn.SMPC.GetRTC().GetDateTime();
+    CHECK(std::llabs(util::datetime::to_timestamp(guest) - HostEpochSeconds()) <= 2 + 3600);
+    for (int i = 0; i < 60; ++i) {
+        core.RunFrame();
+    }
+    const util::datetime::DateTime later = saturn.SMPC.GetRTC().GetDateTime();
+    CHECK(std::llabs(util::datetime::to_timestamp(later) - HostEpochSeconds()) <= 2 + 3600);
+}
+
+TEST_CASE("rtc: the RTC mode defaults to virtual", "[core][rtc]") {
+    CoreWrapper core;
+    CHECK(core.GetRTCMode() == RTCMode::Virtual);
+    REQUIRE(core.Initialize());
+    CHECK(*core.GetSaturn()->configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual);
+    CHECK(std::llabs(PersistentData(core).rtc.timestamp - HostEpochSeconds()) <= 120);
 }
