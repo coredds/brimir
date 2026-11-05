@@ -1,5 +1,6 @@
 #pragma once
 
+#include "savestate_brimir.hpp"
 #include "savestate_cd_drive.hpp"
 #include "savestate_cdblock.hpp"
 #include "savestate_scheduler.hpp"
@@ -54,6 +55,9 @@ struct SaveState {
     uint64 ssh2SpilloverCycles;
     uint64 sh1SpilloverCycles;
     uint64 sh1FracCycles;
+
+    // Brimir: state upstream omits or restores inexactly (savestate_brimir.hpp)
+    BrimirSaveState brimir;
 };
 
 } // namespace ymir::savestate

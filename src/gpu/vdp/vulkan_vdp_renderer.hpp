@@ -25,8 +25,8 @@
 //
 // GPU-authoritative FBRAM with a lazily synchronised CPU shadow (stage2-vdp1-research.md section 3.5). The shadow is
 // VDPState's main fb0/fb1 (which the CPU reads and the save state stores), m_meshShadow (the save state's meshFBRAM)
-// and, while the deinterlace enhancement is on, m_altShadow (alt is never saved, as software; it is shadowed only so a
-// lost device keeps it, rule 8). Each shadowed slice is, against the emulated FBRAM:
+// and, while the deinterlace enhancement is on, m_altShadow (the save state extension's altFBRAM, as software's; it is
+// also kept so a lost device keeps it, rule 8). Each shadowed slice is, against the emulated FBRAM:
 // - Valid: the CPU copy holds every GPU op emitted so far (and every CPU write);
 // - Pending: a readback committed with a submitted command buffer holds every GPU op emitted so far;
 // - GpuNewer: a GPU op was emitted after the latest readback.
@@ -339,6 +339,8 @@ public:
     void SaveState(ymir::savestate::VDPSaveState::VDPRendererSaveState &state) override;
     bool ValidateState(const ymir::savestate::VDPSaveState::VDPRendererSaveState &state) const override;
     void LoadState(const ymir::savestate::VDPSaveState::VDPRendererSaveState &state) override;
+    void SaveBrimirState(ymir::savestate::BrimirSaveState::VDPRenderer &state) override;
+    void LoadBrimirState(const ymir::savestate::BrimirSaveState::VDPRenderer &state) override;
 
     void VDP1WriteVRAM(uint32_t address, uint8_t value) override;
     void VDP1WriteVRAM(uint32_t address, uint16_t value) override;
@@ -482,6 +484,7 @@ private:
     std::vector<Vdp1Work> m_vdp1Recorded;     // what the last record call recorded (for RecordedFrameDropped)
     std::unique_ptr<MeshFBRAM> m_meshShadow;  // Gpu mode: the CPU shadow of the mesh framebuffers
     bool m_stateLoaded = false;               // LoadState since the last PostLoadStateSync
+    bool m_altLoaded = false;                 // LoadBrimirState since the last PostLoadStateSync (Gpu mode)
     // PreLoadState: the main and mesh slices that were Valid (the GPU holds the shadow's bytes once the queued ops
     // run) and a copy of the Valid main slices (VDPState's, which the load overwrites before LoadState).
     uint32_t m_preLoadValid = 0;

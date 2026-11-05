@@ -241,6 +241,15 @@ public:
     [[nodiscard]] bool ValidateState(const savestate::SCSPDSPSaveState &state) const;
     void LoadState(const savestate::SCSPDSPSaveState &state);
 
+    // Brimir: the number of program steps run per sample, maintained by UpdateProgramLength from the order of MPRO
+    // writes. LoadState can only estimate it from the program, so save states carry it (BrimirSaveState).
+    [[nodiscard]] uint8 GetProgramLength() const noexcept {
+        return m_programLength;
+    }
+    void SetProgramLength(uint8 length) noexcept {
+        m_programLength = length <= program.size() ? length : static_cast<uint8>(program.size());
+    }
+
 private:
     // -------------------------------------------------------------------------
     // State

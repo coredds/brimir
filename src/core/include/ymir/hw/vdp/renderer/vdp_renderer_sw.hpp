@@ -97,6 +97,10 @@ public:
     bool ValidateState(const savestate::VDPSaveState::VDPRendererSaveState &state) const override;
     void LoadState(const savestate::VDPSaveState::VDPRendererSaveState &state) override;
 
+    // Brimir: the other field's VDP1 framebuffers (m_altFBRAM)
+    void SaveBrimirState(savestate::BrimirSaveState::VDPRenderer &state) override;
+    void LoadBrimirState(const savestate::BrimirSaveState::VDPRenderer &state) override;
+
     // -------------------------------------------------------------------------
     // VDP1 memory and register writes
 

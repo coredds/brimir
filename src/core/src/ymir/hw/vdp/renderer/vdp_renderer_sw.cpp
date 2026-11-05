@@ -327,6 +327,20 @@ bool SoftwareVDPRenderer::ValidateState(const savestate::VDPSaveState::VDPRender
     return true;
 }
 
+// Brimir: the other field's VDP1 framebuffers are part of the image after a load (double-density interlace)
+void SoftwareVDPRenderer::SaveBrimirState(savestate::BrimirSaveState::VDPRenderer &state) {
+    static_assert(sizeof(state.altFBRAM[0]) == sizeof(m_altFBRAM[0]));
+    for (size_t fb = 0; fb < 2; ++fb) {
+        std::copy(m_altFBRAM[fb].begin(), m_altFBRAM[fb].end(), state.altFBRAM[fb].begin());
+    }
+}
+
+void SoftwareVDPRenderer::LoadBrimirState(const savestate::BrimirSaveState::VDPRenderer &state) {
+    for (size_t fb = 0; fb < 2; ++fb) {
+        std::copy(state.altFBRAM[fb].begin(), state.altFBRAM[fb].end(), m_altFBRAM[fb].begin());
+    }
+}
+
 void SoftwareVDPRenderer::LoadState(const savestate::VDPSaveState::VDPRendererSaveState &state) {
     m_VDP1doubleV = state.vdp1State.doubleV;
     m_meshFBRAM = state.vdp1State.meshFBRAM;

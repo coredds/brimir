@@ -18,6 +18,7 @@
 #include <ymir/sys/bus.hpp>
 #include <ymir/sys/system.hpp>
 
+#include <ymir/savestate/savestate_brimir.hpp>
 #include <ymir/savestate/savestate_vdp.hpp>
 
 #include <ymir/hw/smpc/smpc_internal_callbacks.hpp>
@@ -255,7 +256,16 @@ public:
 
     void SaveState(savestate::VDPSaveState &state) const;
     [[nodiscard]] bool ValidateState(const savestate::VDPSaveState &state) const;
-    void LoadState(const savestate::VDPSaveState &state);
+    // Brimir: `ext` (state upstream omits, savestate_brimir.hpp) is applied when given; null keeps the upstream
+    // behaviour (states from older Brimir versions).
+    void LoadState(const savestate::VDPSaveState &state, const savestate::BrimirSaveState *ext = nullptr);
+    // Brimir: fills the VDP and VDP renderer parts of the save state extension (after SaveState)
+    void SaveBrimirState(savestate::BrimirSaveState &ext) const;
+
+private:
+    void SaveBrimirVDPState(savestate::BrimirSaveState::VDP &ext) const;
+
+public:
 
 private:
     VDPState m_state;
@@ -385,6 +395,7 @@ private:
     std::array<std::array<uint32, 6>, 2> m_VTimings; // [even/odd][phase]
     uint32 m_VTimingField;
     uint16 m_VCounterSkip;
+    uint16 m_appliedTVMD = 0; // Brimir: TVMD the timings above were derived from (saved in BrimirSaveState)
     uint64 m_VBlankEraseCyclesPerLine;        // cycles per line for VBlank erase
     std::array<uint64, 2> m_VBlankEraseLines; // [even/odd] lines in VBlank erase
 
@@ -495,6 +506,8 @@ public:
         [[nodiscard]] const VDP1Regs &GetVDP1Regs() const;
         [[nodiscard]] const VDP2Regs &GetVDP2Regs() const;
         [[nodiscard]] const VDP1State &GetVDP1State() const;
+        // Brimir: the state BrimirSaveState::VDP holds, for tests
+        [[nodiscard]] savestate::BrimirSaveState::VDP GetBrimirState() const;
         [[nodiscard]] const VDP2State &GetVDP2State() const;
 
         [[nodiscard]] uint16 GetLatchedEraseWriteValue() const;

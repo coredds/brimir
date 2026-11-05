@@ -1287,8 +1287,9 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
 
         // [magic:4][version:4][payloadSize:4][compressedSize:4] followed by the LZ4-compressed payload
         // (see savestate_codec.hpp). Versions before 4 held the raw SaveState struct, whose std::vector
-        // members were stored as heap pointers: they cannot be loaded safely. Version 4 has the current
-        // layout and is converted after decoding (UpgradeVersion4SaveState).
+        // members were stored as heap pointers: they cannot be loaded safely. Version 4 has the version 5
+        // layout and is converted after decoding (UpgradeVersion4SaveState); versions 4 and 5 lack the Brimir
+        // extension that version 6 appends (savestate_brimir.hpp) and load as they did.
         if (magic == kNewStateMagic && size >= 16) {
             uint32_t version = 0;
             uint32_t payloadSize = 0;
@@ -1319,7 +1320,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             }
             // DecodeSaveState writes every member, so the scratch state needs no reset.
             auto& state = Scratch(m_stateScratch);
-            if (!DecodeSaveState(m_statePayload, state)) {
+            if (!DecodeSaveState(m_statePayload, state, version >= 6)) {
                 return false;
             }
             if (version == 4) {

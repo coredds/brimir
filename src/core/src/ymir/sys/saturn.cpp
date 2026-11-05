@@ -393,6 +393,10 @@ void Saturn::SaveState(savestate::SaveState &state) const {
         CDBlock.SaveState(state.cdblock);
     }
     state.discHash = GetDiscHash();
+    // Brimir: state upstream omits or restores inexactly (savestate_brimir.hpp)
+    VDP.SaveBrimirState(state.brimir);
+    SCSP.SaveBrimirState(state.brimir.scsp);
+    state.brimir.valid = true;
 }
 
 bool Saturn::LoadState(const savestate::SaveState &state, bool skipROMChecks) {
@@ -456,8 +460,9 @@ bool Saturn::LoadState(const savestate::SaveState &state, bool skipROMChecks) {
     slaveSH2.LoadState(state.ssh2);
     SCU.LoadState(state.scu);
     SMPC.LoadState(state.smpc);
-    VDP.LoadState(state.vdp);
-    SCSP.LoadState(state.scsp);
+    // Brimir: with the extension of states saved by this version (savestate_brimir.hpp)
+    VDP.LoadState(state.vdp, state.brimir.valid ? &state.brimir : nullptr);
+    SCSP.LoadState(state.scsp, state.brimir.valid ? &state.brimir.scsp : nullptr);
     if (m_cdblockLLE) {
         SH1.LoadState(state.sh1);
         YGR.LoadState(state.ygr);

@@ -24,6 +24,8 @@ using ymir::savestate::SMPCSaveState;
 // CoreWrapper::kSaveStateVersion.
 static_assert(sizeof(void*) != 8 || sizeof(SCUSaveState) == 2496, "SCUSaveState changed: update the serializer");
 static_assert(sizeof(void*) != 8 || sizeof(SMPCSaveState) == 144, "SMPCSaveState changed: update the serializer");
+static_assert(sizeof(ymir::savestate::BrimirSaveState) == 524336,
+              "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
 
 // Counts bytes (out == nullptr) or writes them.
 class Writer {
@@ -190,10 +192,11 @@ void VisitSMPC(Archive& ar, State& smpc) {
     ar.Raw(rtcSysClockCount);
 }
 
+// withBrimir: payloads from version 6 on end with the Brimir extension (savestate_brimir.hpp); earlier ones lack it.
 template <typename Archive, typename State>
-void Visit(Archive& ar, State& s) {
+void Visit(Archive& ar, State& s, bool withBrimir = true) {
     auto& [scheduler, system, msh2, ssh2, scu, smpc, vdp, scsp, cdblockLLE, cdblock, sh1, ygr, cddrive, cdblockDRAM,
-           discHash, msh2SpilloverCycles, ssh2SpilloverCycles, sh1SpilloverCycles, sh1FracCycles] = s;
+           discHash, msh2SpilloverCycles, ssh2SpilloverCycles, sh1SpilloverCycles, sh1FracCycles, brimir] = s;
     ar.Raw(scheduler);
     ar.Raw(system);
     ar.Raw(msh2);
@@ -213,6 +216,9 @@ void Visit(Archive& ar, State& s) {
     ar.Raw(ssh2SpilloverCycles);
     ar.Raw(sh1SpilloverCycles);
     ar.Raw(sh1FracCycles);
+    if (withBrimir) {
+        ar.Raw(brimir);
+    }
 }
 
 // The cartridge image size SCU::SaveState writes for each cartridge type, or SIZE_MAX for a value that
@@ -260,9 +266,12 @@ void ResetSaveState(SaveState& state) {
     Visit(clearer, state);
 }
 
-bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state) {
+bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, bool withBrimirExtension) {
     Reader reader(payload);
-    Visit(reader, state);
+    Visit(reader, state, withBrimirExtension);
+    if (!withBrimirExtension) {
+        std::memset(&state.brimir, 0, sizeof(state.brimir)); // valid = false: the state loads as before
+    }
     if (!reader.Done()) {
         return false;
     }

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Save states continue exactly like the uninterrupted run** - loading a state could change what happened next (seen in Virtua Fighter 2, Sega Rally and Burning Rangers; this breaks rewind and run-ahead, and netplay needs it): interlaced games flipped the video field on load, the latched H counter was converted twice, a screen mode change waiting for the next frame was applied at once, the VDP1 command list return address and loop detection, the SCSP DSP program length and, in double-density interlace, the other field's VDP1 framebuffer were not saved. The save-state format is now version 6; states from earlier versions still load (as before). Logged in `src/core/BRIMIR_FORK.md` (upstream Ymir has the same code).
+
 ## [0.6.1] - 2026-11-04
 
 ### Fixed

@@ -14,6 +14,7 @@
 #include <ymir/sys/bus.hpp>
 #include <ymir/sys/clocks.hpp>
 
+#include <ymir/savestate/savestate_brimir.hpp>
 #include <ymir/savestate/savestate_scsp.hpp>
 
 #include <ymir/hw/hw_defs.hpp>
@@ -189,7 +190,14 @@ public:
 
     void SaveState(savestate::SCSPSaveState &state) const;
     [[nodiscard]] bool ValidateState(const savestate::SCSPSaveState &state) const;
-    void LoadState(const savestate::SCSPSaveState &state);
+    // Brimir: `ext` (state upstream omits, savestate_brimir.hpp) is applied when given
+    void LoadState(const savestate::SCSPSaveState &state, const savestate::BrimirSaveState::SCSP *ext = nullptr);
+    // Brimir: fills the SCSP part of the save state extension
+    void SaveBrimirState(savestate::BrimirSaveState::SCSP &ext) const;
+    // Brimir: for tests
+    [[nodiscard]] const DSP &GetDSP() const {
+        return m_dsp;
+    }
 
 private:
     struct QueuedMidiMessage {

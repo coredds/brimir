@@ -1088,7 +1088,9 @@ void VulkanVDPRenderer::UpdateEnhancements() {
 void VulkanVDPRenderer::PreSaveStateSync() {
     m_vdp1->PreSaveStateSync();
     // Rule 5: fence waits in retro_serialize; a sync submit only for a save inside retro_run with newer GPU data.
-    const bool current = !m_gpuVdp1 || SyncShadow(kMainSlices | kMeshSlices, Vdp1SyncKind::Save, FramePolicy::Sync);
+    // The alt slices too while they are shadowed: the save state extension holds them (SaveBrimirState).
+    const bool current = !m_gpuVdp1 || SyncShadow(kMainSlices | kMeshSlices | (ShadowedSlices() & kAltSlices),
+                                                  Vdp1SyncKind::Save, FramePolicy::Sync);
     m_saveSyncFailed = !current || m_failSaveSync;
     if (m_saveSyncFailed && !m_saveSyncFailLogged) {
         Log("VDP1: the GPU framebuffers could not be read back before a save; a save state fails rather than hold "
@@ -1114,17 +1116,21 @@ void VulkanVDPRenderer::PostLoadStateSync() {
                     keep &= ~(1u << slice);
                 }
             }
-            const uint32_t upload = (kMainSlices | kMeshSlices) & ~keep;
-            if (upload != 0) {
-                QueueFbramUpload(upload, nullptr, nullptr);
+            uint32_t upload = (kMainSlices | kMeshSlices) & ~keep;
+            if (m_altLoaded) {
+                upload |= kAltSlices; // the state's alt framebuffers (LoadBrimirState)
             }
-            MarkShadowValid(kMainSlices | kMeshSlices);
+            if (upload != 0) {
+                QueueFbramUpload(upload, &(*m_altShadow)[0], &(*m_altShadow)[1]);
+            }
+            MarkShadowValid(kMainSlices | kMeshSlices | (m_altLoaded ? ShadowedSlices() & kAltSlices : 0u));
             ++m_syncStats.stateLoads;
             m_syncStats.loadUploadedSlices += static_cast<uint32_t>(std::popcount(upload));
             m_syncStats.loadKeptSlices += static_cast<uint32_t>(std::popcount((kMainSlices | kMeshSlices) & keep));
         }
     }
     m_stateLoaded = false;
+    m_altLoaded = false;
     m_preLoadValid = 0;
 }
 
@@ -1183,6 +1189,27 @@ void VulkanVDPRenderer::LoadState(const savestate::VDPSaveState::VDPRendererSave
         }
         *m_meshShadow = state.vdp1State.meshFBRAM;
         m_stateLoaded = true;
+    }
+}
+
+void VulkanVDPRenderer::SaveBrimirState(savestate::BrimirSaveState::VDPRenderer &state) {
+    if (m_gpuVdp1) {
+        // PreSaveStateSync read the shadowed alt slices back; unshadowed (deinterlacing off) they are not drawn.
+        for (size_t fb = 0; fb < 2; ++fb) {
+            std::memcpy(state.altFBRAM[fb].data(), (*m_altShadow)[fb].data(), kSliceSize);
+        }
+    } else {
+        m_vdp1->SaveBrimirState(state);
+    }
+}
+
+void VulkanVDPRenderer::LoadBrimirState(const savestate::BrimirSaveState::VDPRenderer &state) {
+    m_vdp1->LoadBrimirState(state);
+    if (m_gpuVdp1) {
+        for (size_t fb = 0; fb < 2; ++fb) {
+            std::memcpy((*m_altShadow)[fb].data(), state.altFBRAM[fb].data(), kSliceSize);
+        }
+        m_altLoaded = true; // uploaded by PostLoadStateSync
     }
 }
 

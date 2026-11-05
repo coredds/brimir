@@ -9,6 +9,7 @@
 //   - scu:  each field in declaration order; cartData as uint32 length + bytes
 //   - smpc: each field in declaration order; intback.report as uint32 length + bytes and
 //           intback.reportOffset as uint64
+//   - brimir (the last member, from version 6 on): raw bytes; absent from version 4 and 5 payloads
 
 #include <ymir/savestate/savestate.hpp>
 
@@ -42,9 +43,12 @@ bool EncodeSaveState(const ymir::savestate::SaveState& state, std::vector<uint8_
 void ResetSaveState(ymir::savestate::SaveState& state);
 
 /// @brief Fills every member of state from a payload written by EncodeSaveState
+/// @param withBrimirExtension false for version 4 and 5 payloads, which end before `brimir` (the extension is then
+/// cleared: `brimir.valid` false, so the state loads as it did in those versions)
 /// @return false if the payload is truncated, has trailing bytes, or holds an invalid length,
 /// cartridge type, bool or INTBACK report offset; state is then partially overwritten
-bool DecodeSaveState(std::span<const uint8_t> payload, ymir::savestate::SaveState& state);
+bool DecodeSaveState(std::span<const uint8_t> payload, ymir::savestate::SaveState& state,
+                     bool withBrimirExtension = true);
 
 /// @brief Converts a state decoded from a version 4 payload to the current meaning of its fields.
 /// Version 4 stored the VDP2 VRAM fetchers' character palette numbers shifted right by 4, which lost

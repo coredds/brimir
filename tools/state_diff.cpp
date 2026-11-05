@@ -68,7 +68,7 @@ bool Load(const char *path, SaveState &state) {
     if (LZ4_decompress_safe(reinterpret_cast<const char *>(data.data() + 16), reinterpret_cast<char *>(payload.data()),
                             static_cast<int>(compressedSize), static_cast<int>(payloadSize)) !=
             static_cast<int>(payloadSize) ||
-        !brimir::DecodeSaveState(payload, state)) {
+        !brimir::DecodeSaveState(payload, state, version >= 6)) {
         std::fprintf(stderr, "%s: cannot decode the state\n", path);
         return false;
     }
@@ -201,6 +201,11 @@ int main(int argc, char **argv) {
         r.Field("vdp.FBRAM[" + std::to_string(fb) + "]", a->vdp.FBRAM[fb], b->vdp.FBRAM[fb], false);
     }
     r.Field("vdp.displayFB", a->vdp.displayFB, b->vdp.displayFB, false);
+    // The other field's framebuffers (save state extension, version 6 on)
+    for (size_t fb = 0; fb < a->brimir.vdpRenderer.altFBRAM.size(); ++fb) {
+        r.Field("brimir.vdpRenderer.altFBRAM[" + std::to_string(fb) + "]", a->brimir.vdpRenderer.altFBRAM[fb],
+                b->brimir.vdpRenderer.altFBRAM[fb], false);
+    }
     std::printf("renderer section:\n");
     const Renderer &ra = a->vdp.renderer;
     const Renderer &rb = b->vdp.renderer;

@@ -11,6 +11,7 @@
 #include <ymir/hw/vdp/vdp_configs.hpp>
 #include <ymir/hw/vdp/vdp_state.hpp>
 
+#include <ymir/savestate/savestate_brimir.hpp>
 #include <ymir/savestate/savestate_vdp.hpp>
 
 #include <ymir/core/types.hpp>
@@ -102,6 +103,12 @@ public:
     /// @brief Loads the renderer state.
     /// @param[in] state the state object
     virtual void LoadState(const savestate::VDPSaveState::VDPRendererSaveState &state) = 0;
+
+    // Brimir: renderer state the upstream save state omits (savestate_brimir.hpp). SaveBrimirState runs after
+    // PreSaveStateSync; LoadBrimirState runs after LoadState and before PostLoadStateSync, only for states that carry
+    // the extension.
+    virtual void SaveBrimirState(savestate::BrimirSaveState::VDPRenderer &state) {}
+    virtual void LoadBrimirState(const savestate::BrimirSaveState::VDPRenderer &state) {}
 
     // -------------------------------------------------------------------------
     // VDP1 memory and register writes

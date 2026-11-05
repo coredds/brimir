@@ -31,6 +31,7 @@ add_executable(brimir_tests
     unit/test_vdp_external_renderer.cpp
     # Core wrapper tests (audio volume, rotation, overscan crop)
     unit/test_core_wrapper.cpp
+    unit/test_savestate_fidelity.cpp
     unit/test_profiler.cpp
     # Audio ring buffer tests
     unit/test_audio_ring_buffer.cpp

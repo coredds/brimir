@@ -533,10 +533,30 @@ bool VDP::ValidateState(const savestate::VDPSaveState &state) const {
     return true;
 }
 
-void VDP::LoadState(const savestate::VDPSaveState &state) {
+void VDP::SaveBrimirState(savestate::BrimirSaveState &ext) const {
+    SaveBrimirVDPState(ext.vdp);
+    m_renderer->SaveBrimirState(ext.vdpRenderer); // SaveState ran PreSaveStateSync
+}
+
+void VDP::SaveBrimirVDPState(savestate::BrimirSaveState::VDP &ext) const {
+    ext.appliedTVMD = m_appliedTVMD;
+    ext.TVMDDirty = m_state.regs2.TVMDDirty;
+    ext.VTimingField = m_VTimingField;
+    ext.VCounterSkip = m_VCounterSkip;
+    ext.vdp1LastJumpAddress = m_VDP1CtlState.lastJumpAddress;
+    ext.vdp1LoopCount = m_VDP1CtlState.loopCount;
+    ext.vdp1InInfiniteLoop = m_VDP1CtlState.inInfiniteLoop;
+    ext.vdp1ReturnAddress = m_state.regs1.returnAddress;
+}
+
+void VDP::LoadState(const savestate::VDPSaveState &state, const savestate::BrimirSaveState *brimir) {
     m_renderer->PreLoadState(); // Brimir: before VDPState changes
     m_state.LoadState(state);
     m_renderer->LoadState(state.renderer);
+    if (brimir != nullptr) {
+        m_renderer->LoadBrimirState(brimir->vdpRenderer); // Brimir: before PostLoadStateSync
+    }
+    const savestate::BrimirSaveState::VDP *ext = brimir != nullptr ? &brimir->vdp : nullptr;
 
     m_renderer->PostLoadStateSync();
 
@@ -546,7 +566,28 @@ void VDP::LoadState(const savestate::VDPSaveState &state) {
     m_VDP1CtlState.spilloverCycles = state.vdp1State.spilloverCycles;
     m_VDP1TimingPenaltyCycles = state.vdp1State.timingPenalty;
 
-    UpdateResolution<true>();
+    if (ext != nullptr) {
+        // Brimir: derive the timings from the TVMD they were derived from when the state was saved (a TVMD write
+        // waits for the top border), then put back the register and its pending flag and the values that
+        // UpdateResolution took from the field at the time.
+        // Only when they differ from the current timings: the renderers clear their output on a resolution change.
+        const uint16 tvmd = m_state.regs2.TVMD.u16;
+        if (((ext->appliedTVMD ^ m_appliedTVMD) & 0x1F7) != 0) {
+            m_state.regs2.TVMD.u16 = ext->appliedTVMD & 0x81F7;
+            m_state.regs2.TVMDDirty = true;
+            UpdateResolution<true>();
+        }
+        m_state.regs2.TVMD.u16 = tvmd;
+        m_state.regs2.TVMDDirty = ext->TVMDDirty;
+        m_VTimingField = ext->VTimingField & 1;
+        m_VCounterSkip = ext->VCounterSkip;
+        m_VDP1CtlState.lastJumpAddress = ext->vdp1LastJumpAddress;
+        m_VDP1CtlState.loopCount = ext->vdp1LoopCount;
+        m_VDP1CtlState.inInfiniteLoop = ext->vdp1InInfiniteLoop;
+        m_state.regs1.returnAddress = ext->vdp1ReturnAddress;
+    } else {
+        UpdateResolution<true>();
+    }
 
     switch (m_state.VPhase) {
     case VerticalPhase::Active: [[fallthrough]];
@@ -599,6 +640,7 @@ void VDP::UpdateResolution() {
     }
 
     m_state.regs2.TVMDDirty = false;
+    m_appliedTVMD = m_state.regs2.TVMD.u16; // Brimir: saved in BrimirSaveState
 
     // Horizontal/vertical resolution tables
     // NTSC uses the first two vRes entries, PAL uses the full table, and exclusive monitors use 480 lines
@@ -1310,6 +1352,12 @@ VDP::Probe::Probe(VDP &vdp)
 
 Dimensions VDP::Probe::GetResolution() const {
     return {m_vdp.m_HRes, m_vdp.m_VRes};
+}
+
+savestate::BrimirSaveState::VDP VDP::Probe::GetBrimirState() const {
+    savestate::BrimirSaveState::VDP ext{};
+    m_vdp.SaveBrimirVDPState(ext);
+    return ext;
 }
 
 InterlaceMode VDP::Probe::GetInterlaceMode() const {

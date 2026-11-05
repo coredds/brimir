@@ -529,7 +529,12 @@ bool SCSP::ValidateState(const savestate::SCSPSaveState &state) const {
     return true;
 }
 
-void SCSP::LoadState(const savestate::SCSPSaveState &state) {
+void SCSP::SaveBrimirState(savestate::BrimirSaveState::SCSP &ext) const {
+    const_cast<SCSP *>(this)->SyncSCSPThread();
+    ext.dspProgramLength = m_dsp.GetProgramLength();
+}
+
+void SCSP::LoadState(const savestate::SCSPSaveState &state, const savestate::BrimirSaveState::SCSP *ext) {
     if (m_threadedSCSP) {
         SyncSCSPThread();
     }
@@ -580,6 +585,9 @@ void SCSP::LoadState(const savestate::SCSPSaveState &state) {
     m_soundStackIndex = state.soundStackIndex % m_soundStack.size();
 
     m_dsp.LoadState(state.dsp);
+    if (ext != nullptr) {
+        m_dsp.SetProgramLength(ext->dspProgramLength); // Brimir: LoadState only estimates it
+    }
 
     m_m68kCycles = state.m68kCycles;
     m_sampleCounter = state.sampleCounter;

@@ -228,6 +228,9 @@ std::string DiffSubsystemStates(const ymir::savestate::SaveState &a, const ymir:
     if (a.sh1FracCycles != b.sh1FracCycles) {
         return Describe("", "sh1FracCycles", a.sh1FracCycles, b.sh1FracCycles);
     }
+    if (std::string d = DiffBytes("brimir", a.brimir, b.brimir); !d.empty()) {
+        return d;
+    }
     return {};
 }
 

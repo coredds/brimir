@@ -1176,9 +1176,12 @@ struct VDPState {
 
         regs2.WriteTVMD(state.regs2.TVMD);
         regs2.WriteEXTEN(state.regs2.EXTEN);
-        regs2.WriteTVSTAT(state.regs2.TVSTAT);
+        // Brimir: SaveState stores TVSTAT as the CPU reads it, with ODD inverted in interlaced modes; undo that
+        // (TVMD is loaded above)
+        regs2.WriteTVSTAT(state.regs2.TVSTAT ^ (regs2.TVMD.IsInterlaced() ? 0x2 : 0x0));
         regs2.WriteVRSIZE(state.regs2.VRSIZE);
-        regs2.WriteHCNT(state.regs2.HCNT);
+        // Brimir: SaveState stores the latched counter itself; WriteHCNT would shift and mask it a second time
+        regs2.HCNT = state.regs2.HCNT;
         regs2.VCNT = state.regs2.VCNT;
         regs2.WriteRAMCTL(state.regs2.RAMCTL);
         regs2.WriteCYCA0L(state.regs2.CYCA0L);
