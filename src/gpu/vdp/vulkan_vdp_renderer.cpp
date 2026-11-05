@@ -1116,12 +1116,11 @@ void VulkanVDPRenderer::PostLoadStateSync() {
                     keep &= ~(1u << slice);
                 }
             }
-            uint32_t upload = (kMainSlices | kMeshSlices) & ~keep;
-            if (m_altLoaded) {
-                upload |= kAltSlices; // the state's alt framebuffers (LoadBrimirState)
-            }
-            if (upload != 0) {
-                QueueFbramUpload(upload, &(*m_altShadow)[0], &(*m_altShadow)[1]);
+            const uint32_t upload = (kMainSlices | kMeshSlices) & ~keep;
+            // The state's alt framebuffers (LoadBrimirState), unless the GPU holds the same bytes
+            const uint32_t altUpload = m_altLoaded ? kAltSlices & ~keep : 0u;
+            if ((upload | altUpload) != 0) {
+                QueueFbramUpload(upload | altUpload, &(*m_altShadow)[0], &(*m_altShadow)[1]);
             }
             MarkShadowValid(kMainSlices | kMeshSlices | (m_altLoaded ? ShadowedSlices() & kAltSlices : 0u));
             ++m_syncStats.stateLoads;
@@ -1141,9 +1140,10 @@ void VulkanVDPRenderer::PreLoadState() {
     }
     // Valid: the shadow holds every op emitted so far and every CPU write, which is what the GPU holds once the
     // queued and submitted work has run (no wait here: GpuNewer and Pending slices are uploaded as before).
+    const uint32_t candidates = kMainSlices | kMeshSlices | (ShadowedSlices() & kAltSlices);
     for (uint32_t slice = 0; slice < 8; ++slice) {
         const SliceSync &s = m_slices[slice];
-        if ((((kMainSlices | kMeshSlices) >> slice) & 1u) && s.valid >= s.lastTouch) {
+        if (((candidates >> slice) & 1u) && s.valid >= s.lastTouch) {
             m_preLoadValid |= 1u << slice;
         }
     }
@@ -1208,10 +1208,15 @@ void VulkanVDPRenderer::SaveBrimirState(savestate::BrimirSaveState::VDPRenderer 
 void VulkanVDPRenderer::LoadBrimirState(const savestate::BrimirSaveState::VDPRenderer &state) {
     m_vdp1->LoadBrimirState(state);
     if (m_gpuVdp1) {
+        // Rule 6, as for main and mesh: an alt slice whose loaded bytes equal what the GPU holds keeps its N x detail.
         for (size_t fb = 0; fb < 2; ++fb) {
-            std::memcpy((*m_altShadow)[fb].data(), state.altFBRAM[fb].data(), kSliceSize);
+            const uint32_t bit = 1u << vdp1::Vdp1AltSlice(static_cast<uint32_t>(fb));
+            if (std::memcmp((*m_altShadow)[fb].data(), state.altFBRAM[fb].data(), kSliceSize) != 0) {
+                m_preLoadValid &= ~bit;
+                std::memcpy((*m_altShadow)[fb].data(), state.altFBRAM[fb].data(), kSliceSize);
+            }
         }
-        m_altLoaded = true; // uploaded by PostLoadStateSync
+        m_altLoaded = true; // uploaded by PostLoadStateSync unless kept
         // The GPU continues from the draw framebuffer as drawn so far (a state saved by a threaded software VDP1 in the
         // middle of a draw holds an older one in FBRAM); PostLoadStateSync uploads it with the main slices.
         std::memcpy(m_state.mem1.FBRAM[m_state.fbIndex.draw].data(), state.vdp1DrawFB.data(), kSliceSize);
