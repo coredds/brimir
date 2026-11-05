@@ -24,7 +24,7 @@ using ymir::savestate::SMPCSaveState;
 // CoreWrapper::kSaveStateVersion.
 static_assert(sizeof(void*) != 8 || sizeof(SCUSaveState) == 2496, "SCUSaveState changed: update the serializer");
 static_assert(sizeof(void*) != 8 || sizeof(SMPCSaveState) == 144, "SMPCSaveState changed: update the serializer");
-static_assert(sizeof(ymir::savestate::BrimirSaveState) == 524336,
+static_assert(sizeof(ymir::savestate::BrimirSaveState) == 786480,
               "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
 
 // Counts bytes (out == nullptr) or writes them.

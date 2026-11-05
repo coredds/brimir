@@ -267,6 +267,14 @@ void SoftwareVDPRenderer::PreSaveStateSync() {
     }
 }
 
+// Brimir: a load right after a frame (run-ahead, rewind, netplay) found the render threads still working through that
+// frame's queued events: the VDP1 thread's draws then landed in the loaded framebuffers (main FBRAM, which the CPU
+// reads, and the mesh framebuffers) after VDPState::LoadState and LoadState wrote them. Wait for both threads first,
+// as a save does.
+void SoftwareVDPRenderer::PreLoadState() {
+    PreSaveStateSync();
+}
+
 void SoftwareVDPRenderer::PostLoadStateSync() {
     for (uint32 address = 0; address < kVDP2CRAMSize; address += 2) {
         VDP2UpdateCRAMCache<uint16>(address);
@@ -291,6 +299,18 @@ void SoftwareVDPRenderer::PostLoadStateSync() {
     if (m_threadedVDP2Rendering) {
         m_vdp2RenderingContext.postLoadSyncSignal.Wait();
         m_vdp2RenderingContext.postLoadSyncSignal.Reset();
+    }
+
+    // Brimir: the loaded draw framebuffer as drawn so far (LoadBrimirState). The VDP1 thread waits for its next
+    // event after the copy above, so its framebuffer can be written here.
+    if (m_loadedDrawFB) {
+        const auto drawFB = m_state.fbIndex.draw;
+        if (m_threadedVDP1Rendering) {
+            m_vdp1RenderingContext.vdp1.mem.FBRAM[drawFB] = *m_loadedDrawFB;
+        } else {
+            m_state.mem1.FBRAM[drawFB] = *m_loadedDrawFB;
+        }
+        m_loadedDrawFB.reset();
     }
 }
 
@@ -330,15 +350,24 @@ bool SoftwareVDPRenderer::ValidateState(const savestate::VDPSaveState::VDPRender
 // Brimir: the other field's VDP1 framebuffers are part of the image after a load (double-density interlace)
 void SoftwareVDPRenderer::SaveBrimirState(savestate::BrimirSaveState::VDPRenderer &state) {
     static_assert(sizeof(state.altFBRAM[0]) == sizeof(m_altFBRAM[0]));
+    static_assert(sizeof(state.vdp1DrawFB) == sizeof(m_state.mem1.FBRAM[0]));
     for (size_t fb = 0; fb < 2; ++fb) {
         std::copy(m_altFBRAM[fb].begin(), m_altFBRAM[fb].end(), state.altFBRAM[fb].begin());
     }
+    // Brimir: the draw framebuffer as drawn so far; the threaded VDP1 is idle (PreSaveStateSync ran)
+    const auto &drawFB = m_threadedVDP1Rendering ? m_vdp1RenderingContext.vdp1.mem.FBRAM[m_state.fbIndex.draw]
+                                                 : m_state.mem1.FBRAM[m_state.fbIndex.draw];
+    std::copy(drawFB.begin(), drawFB.end(), state.vdp1DrawFB.begin());
 }
 
 void SoftwareVDPRenderer::LoadBrimirState(const savestate::BrimirSaveState::VDPRenderer &state) {
     for (size_t fb = 0; fb < 2; ++fb) {
         std::copy(state.altFBRAM[fb].begin(), state.altFBRAM[fb].end(), m_altFBRAM[fb].begin());
     }
+    // Applied by PostLoadStateSync: a threaded VDP1 continues drawing on it (its copy), while VDPState keeps the
+    // state's FBRAM until the draw ends, as when it was saved; unthreaded VDP1 draws into VDPState directly.
+    m_loadedDrawFB = std::make_unique<SpriteFB>();
+    std::copy(state.vdp1DrawFB.begin(), state.vdp1DrawFB.end(), m_loadedDrawFB->begin());
 }
 
 void SoftwareVDPRenderer::LoadState(const savestate::VDPSaveState::VDPRendererSaveState &state) {
@@ -674,7 +703,7 @@ void SoftwareVDPRenderer::UpdateEnabledLayers() {
 
 void SoftwareVDPRenderer::DumpExtraVDP1Framebuffers(std::ostream &out) const {
     const uint8 dispFB = m_state.fbIndex.display;
-    const uint8 drawFB = m_state.fbIndex.draw;
+    const auto drawFB = m_state.fbIndex.draw;
     if (m_enhancements.deinterlace) {
         out.write((const char *)m_altFBRAM[drawFB].data(), m_altFBRAM[drawFB].size());
         out.write((const char *)m_altFBRAM[dispFB].data(), m_altFBRAM[dispFB].size());

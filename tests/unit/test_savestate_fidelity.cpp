@@ -5,6 +5,7 @@
 
 #include "catch_amalgamated.hpp"
 
+#include <brimir/lockstep.hpp>
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
@@ -72,6 +73,44 @@ std::unique_ptr<Saturn> FreshWith(const savestate::SaveState &state, bool withEx
         REQUIRE(fresh->LoadState(*older, true));
     }
     return fresh;
+}
+
+// A VDP1 command table that takes several frames to draw: system clipping to the screen, then full-screen polygons.
+void WriteHeavyVDP1Table(Saturn &saturn, int polygons) {
+    uint32 addr = 0;
+    const auto cmd = [&](uint16 ctrl) {
+        for (uint32 i = 0; i < 0x20; i += 2) {
+            saturn.mainBus.Write<uint16>(kVDP1VRAM + addr + i, 0);
+        }
+        saturn.mainBus.Write<uint16>(kVDP1VRAM + addr, ctrl);
+    };
+    const auto field = [&](uint32 offset, uint16 value) { saturn.mainBus.Write<uint16>(kVDP1VRAM + addr + offset, value); };
+    cmd(0x0009); // system clipping
+    field(0x14, 319);
+    field(0x16, 223);
+    addr += 0x20;
+    cmd(0x000A); // local coordinates (0, 0)
+    addr += 0x20;
+    for (int i = 0; i < polygons; ++i) {
+        cmd(0x0004); // polygon
+        field(0x06, static_cast<uint16>(0x8000 | (i * 0x0421)));
+        field(0x0C, 0);
+        field(0x0E, 0);
+        field(0x10, 319);
+        field(0x12, 0);
+        field(0x14, 319);
+        field(0x16, 223);
+        field(0x18, 0);
+        field(0x1A, 223);
+        addr += 0x20;
+    }
+    cmd(0x8000); // end
+}
+
+std::unique_ptr<Saturn> ThreadedVDP1Saturn() {
+    auto saturn = std::make_unique<Saturn>();
+    saturn->configuration.video.threadedVDP1 = true;
+    return saturn;
 }
 
 bool SameVDPExtension(const savestate::BrimirSaveState::VDP &a, const savestate::BrimirSaveState::VDP &b) {
@@ -194,6 +233,64 @@ TEST_CASE("Save state keeps the SCSP DSP program length", "[savestate][fidelity]
     CHECK(saturn->SCSP.GetDSP().GetProgramLength() == length);
     CHECK(FreshWith(*state)->SCSP.GetDSP().GetProgramLength() == length);
     CHECK(FreshWith(*state, false)->SCSP.GetDSP().GetProgramLength() != length);
+}
+
+TEST_CASE("A threaded VDP1 state saved in the middle of a draw continues identically",
+          "[savestate][fidelity][vdp][vdp1][threaded][brimir]") {
+    // A threaded software VDP1 draws into its own framebuffer copy and copies it into VDPState only when the draw
+    // ends, so the state's FBRAM lacks what was drawn so far; a load continued from that older framebuffer.
+    auto a = ThreadedVDP1Saturn();
+    a->mainBus.Write<uint16>(kVDP2TVMD, kTVMDDisplayOn);
+    WriteHeavyVDP1Table(*a, 40);
+    a->mainBus.Write<uint16>(kVDP1PTMR, 0x0001);
+    REQUIRE(RunToLine(*a, 100));
+    const auto state = Save(*a);
+    REQUIRE(state->vdp.vdp1State.drawing);
+    const uint8 draw = state->vdp.displayFB ^ 1;
+    REQUIRE(state->brimir.vdpRenderer.vdp1DrawFB != state->vdp.FBRAM[draw]); // drawn so far, not yet in the state
+
+    auto b = ThreadedVDP1Saturn();
+    REQUIRE(b->LoadState(*state, true));
+    auto older = ThreadedVDP1Saturn();
+    {
+        auto copy = std::make_unique<savestate::SaveState>(*state);
+        copy->brimir.valid = false;
+        REQUIRE(older->LoadState(*copy, true));
+    }
+    bool olderDiffered = false;
+    for (int frame = 0; frame < 6; ++frame) {
+        CAPTURE(frame);
+        for (Saturn *s : {a.get(), b.get(), older.get()}) {
+            REQUIRE(RunToLine(*s, 100));
+        }
+        const auto sa = Save(*a);
+        CHECK(brimir::DiffSaveStates(*sa, *Save(*b)).empty());
+        olderDiffered |= !brimir::DiffSaveStates(*sa, *Save(*older)).empty();
+    }
+    CHECK(olderDiffered); // the loss this fixes
+}
+
+TEST_CASE("Loading a state waits for the threaded VDP1's queued draws", "[savestate][fidelity][vdp][vdp1][threaded][brimir]") {
+    // Run-ahead loads the state of the previous frame right after a frame: the VDP1 render thread can still be drawing
+    // that frame's commands, and those draws must not land in the loaded framebuffers.
+    auto x = ThreadedVDP1Saturn();
+    WriteHeavyVDP1Table(*x, 40);
+    const auto state = Save(*x); // drains the render thread (the table is in its VRAM copy)
+    auto *sw = x->VDP.GetRendererAs<vdp::VDPRendererType::Software>();
+    REQUIRE(sw != nullptr);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        CAPTURE(attempt);
+        // A burst of draws for the render thread (system clipping, local coordinates, 40 full-screen polygons, twice),
+        // then at once the load, as run-ahead does after a frame.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (uint32 cmd = 0; cmd < 42; ++cmd) {
+                const vdp::VDP1Command::Control control{.u16 = x->mainBus.Peek<uint16>(kVDP1VRAM + cmd * 0x20)};
+                sw->VDP1ExecuteCommand(cmd * 0x20, control);
+            }
+        }
+        REQUIRE(x->LoadState(*state, true));
+        CHECK(brimir::DiffSaveStates(*state, *Save(*x)).empty());
+    }
 }
 
 TEST_CASE("A fresh system keeps the other field's VDP1 framebuffer", "[savestate][fidelity][vdp][vdp1][brimir]") {

@@ -1198,6 +1198,8 @@ void VulkanVDPRenderer::SaveBrimirState(savestate::BrimirSaveState::VDPRenderer 
         for (size_t fb = 0; fb < 2; ++fb) {
             std::memcpy(state.altFBRAM[fb].data(), (*m_altShadow)[fb].data(), kSliceSize);
         }
+        // The main shadow holds every op so far (PreSaveStateSync): the draw framebuffer as drawn so far.
+        std::memcpy(state.vdp1DrawFB.data(), m_state.mem1.FBRAM[m_state.fbIndex.draw].data(), kSliceSize);
     } else {
         m_vdp1->SaveBrimirState(state);
     }
@@ -1210,6 +1212,9 @@ void VulkanVDPRenderer::LoadBrimirState(const savestate::BrimirSaveState::VDPRen
             std::memcpy((*m_altShadow)[fb].data(), state.altFBRAM[fb].data(), kSliceSize);
         }
         m_altLoaded = true; // uploaded by PostLoadStateSync
+        // The GPU continues from the draw framebuffer as drawn so far (a state saved by a threaded software VDP1 in the
+        // middle of a draw holds an older one in FBRAM); PostLoadStateSync uploads it with the main slices.
+        std::memcpy(m_state.mem1.FBRAM[m_state.fbIndex.draw].data(), state.vdp1DrawFB.data(), kSliceSize);
     }
 }
 

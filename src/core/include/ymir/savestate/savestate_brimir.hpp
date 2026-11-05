@@ -35,6 +35,10 @@ struct BrimirSaveState {
         // VDP1 framebuffers of the other field in double-density interlace (the software renderer's altFBRAM; the
         // Vulkan renderer's alt slices). The frame shown after a load combines them with the loaded fields.
         alignas(16) std::array<std::array<uint8, 256 * 1024>, 2> altFBRAM;
+        // The VDP1 draw framebuffer as drawn so far. A threaded software VDP1 draws into its own copy and copies it
+        // into VDPState (the state's FBRAM) only at the end of the draw, swap or erase, so in the middle of a draw the
+        // state's FBRAM lacks what was drawn; unthreaded (and the Vulkan renderer) it equals the state's FBRAM.
+        alignas(16) std::array<uint8, 256 * 1024> vdp1DrawFB;
     } vdpRenderer;
 
     struct SCSP {

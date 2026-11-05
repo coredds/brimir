@@ -92,6 +92,8 @@ public:
 
     void PreSaveStateSync() override;
     void PostLoadStateSync() override;
+    // Brimir: drains the render threads before a load overwrites the state they draw into
+    void PreLoadState() override;
 
     void SaveState(savestate::VDPSaveState::VDPRendererSaveState &state) override;
     bool ValidateState(const savestate::VDPSaveState::VDPRendererSaveState &state) const override;
@@ -210,6 +212,10 @@ private:
     // contains even lines).
     // VDP2 rendering will combine both buffers to draw a full-resolution progressive image in one go.
     alignas(16) std::array<SpriteFB, 2> m_altFBRAM;
+
+    // Brimir: the draw framebuffer of a loaded state (BrimirSaveState::VDPRenderer::vdp1DrawFB), applied by
+    // PostLoadStateSync
+    std::unique_ptr<SpriteFB> m_loadedDrawFB;
 
     // Transparent mesh sprite framebuffer.
     // Used when transparent meshes are enabled.
