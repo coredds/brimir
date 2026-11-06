@@ -7,6 +7,7 @@
 #include <libretro_vulkan.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -152,6 +153,8 @@ struct LibretroHost::Api {
     bool (*unserialize)(const void*, size_t) = nullptr;
     void* (*get_memory_data)(unsigned) = nullptr;
     size_t (*get_memory_size)(unsigned) = nullptr;
+    void (*cheat_reset)() = nullptr;
+    void (*cheat_set)(unsigned, bool, const char*) = nullptr;
 };
 
 LibretroHost::LibretroHost() = default;
@@ -279,6 +282,8 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     resolve(api->unserialize, "retro_unserialize");
     resolve(api->get_memory_data, "retro_get_memory_data");
     resolve(api->get_memory_size, "retro_get_memory_size");
+    resolve(api->cheat_reset, "retro_cheat_reset");
+    resolve(api->cheat_set, "retro_cheat_set");
     if (missing) {
         return false;
     }
@@ -337,6 +342,14 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     // RetroArch builds the video driver after retro_load_game: the device, then context_reset.
     if (m_hwAccepted && !StartContext()) {
         return false;
+    }
+    // RetroArch applies the cheats after the content (and the video driver) is up: a reset, then every cheat.
+    if (!config.cheats.empty()) {
+        m_api->cheat_reset();
+        for (size_t i = 0; i < config.cheats.size(); ++i) {
+            m_api->cheat_set(static_cast<unsigned>(i), true, config.cheats[i].c_str());
+            std::fprintf(stderr, "vkhost: cheat %zu set: %s\n", i, config.cheats[i].c_str());
+        }
     }
     return true;
 }
@@ -553,6 +566,39 @@ bool LibretroHost::DumpView(int frame, size_t offset, size_t length) {
         text += byte;
     }
     std::printf("view frame %d offset 0x%06zx: %s\n", frame, offset, text.c_str());
+    std::fflush(stdout);
+    return true;
+}
+
+bool LibretroHost::DumpRam(int frame, uint32_t address, size_t length) {
+    // The view's layout (Beetle Saturn's): Work RAM Low at 0, Work RAM High at 0x100000, host-endian 16-bit words.
+    constexpr size_t kHalf = 0x100000;
+    size_t offset = 0;
+    if (address >= 0x00200000 && address < 0x00200000 + kHalf && length <= 0x00200000 + kHalf - address) {
+        offset = address - 0x00200000;
+    } else if (address >= 0x06000000 && address < 0x06000000 + kHalf && length <= 0x06000000 + kHalf - address) {
+        offset = kHalf + (address - 0x06000000);
+    } else {
+        char text[128];
+        std::snprintf(text, sizeof(text), "--dump-ram-at: 0x%08x + %zu bytes is not inside Work RAM Low or High",
+                      address, length);
+        Problem(text);
+        return false;
+    }
+    size_t size = 0;
+    const uint8_t* ram = MemoryData(RETRO_MEMORY_SYSTEM_RAM, size);
+    if (ram == nullptr || size < 2 * kHalf) {
+        Problem(RangeProblem("--dump-ram-at", offset, length, size));
+        return false;
+    }
+    const size_t swap = std::endian::native == std::endian::little ? 1 : 0;
+    std::string text;
+    char byte[4];
+    for (size_t i = 0; i < length; ++i) {
+        std::snprintf(byte, sizeof(byte), i == 0 ? "%02x" : " %02x", ram[(offset + i) ^ swap]);
+        text += byte;
+    }
+    std::printf("ram frame %d 0x%08x: %s\n", frame, address, text.c_str());
     std::fflush(stdout);
     return true;
 }

@@ -35,6 +35,8 @@ add_executable(brimir_tests
     unit/test_profiler.cpp
     # Beetle-compatible work RAM view (RETRO_MEMORY_SYSTEM_RAM, memory map)
     unit/test_ram_view.cpp
+    # Action Replay cheats (retro_cheat_set); [.cheat-db] sweeps RetroArch's Saturn .cht files in $BRIMIR_CHT_DIR
+    unit/test_cheat_engine.cpp
     # Audio ring buffer tests
     unit/test_audio_ring_buffer.cpp
     # Media loader tests (CUE/CCD compressed audio, sparse tracks, sector alignment)

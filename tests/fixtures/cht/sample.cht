@@ -1,0 +1,56 @@
+cheats = 12
+
+cheat0_desc = "Master Code"
+cheat0_code = "b60028000000"
+cheat0_enable = false
+
+cheat1_desc = "Begin At High Level"
+cheat1_code = "16033c7400c0"
+cheat1_enable = false
+
+cheat2_desc = "Infinite Lives P1"
+cheat2_code = "1601dba40900"
+cheat2_enable = false
+
+cheat3_desc = "Alternate Master Code"
+cheat3_code = "F6000924+C305+B6002800+0000"
+cheat3_enable = false
+
+cheat4_desc = "Must Be On Code"
+cheat4_code = "D6033C60+270F"
+cheat4_enable = false
+
+cheat5_desc = "P1 Infinite HP"
+cheat5_code = "16033C5E+270F+16033C60+270F"
+cheat5_enable = false
+
+cheat6_desc = "Infinite Continues"
+cheat6_code = "3601DBA4+0063"
+cheat6_enable = false
+
+cheat7_desc = "Template value (edit the ??)"
+cheat7_code = "D60B374E+0000+160B374E+00??"
+cheat7_enable = false
+
+cheat8_desc = "Low Work RAM"
+cheat8_code = "102FB0C4+0063"
+cheat8_enable = false
+
+cheat9_desc = "Seven-digit address (database typo)"
+cheat9_code = "160CE42+0001"
+cheat9_enable = false
+
+cheat10_desc = "Spaces"
+cheat10_code = "1601dba4 0900"
+cheat10_enable = "false"
+
+cheat11_address = "1570724"
+cheat11_address_bit_position = "255"
+cheat11_big_endian = "false"
+cheat11_cheat_type = "1"
+cheat11_code = ""
+cheat11_desc = "RetroArch-handled entry (address/value through the memory map)"
+cheat11_enable = "false"
+cheat11_handler = "1"
+cheat11_memory_search_size = "4"
+cheat11_value = "207"

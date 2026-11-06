@@ -227,6 +227,98 @@ foreach(line IN ITEMS "view frame 99 offset 0x1fff00: 00 00 00 00" "view frame 3
 endforeach()
 message(STATUS "ram_view: 2 MiB view, memory map into it, achievements declared, frontend writes reach work RAM")
 
+# cheat_pins_ram: Action Replay codes through retro_cheat_set (vkhost --cheat) write work RAM before every frame, read
+# back at Saturn addresses (--dump-ram-at, Saturn byte order). On bytes the BIOS menu does not use: a 16-bit High RAM
+# write, a conditional that sees the earlier cheat's write (true) and one that does not match (false), a Low RAM
+# write, a master code (nothing). 0x0604DA90 is a BIOS animation countdown: pinned, it differs from the run without
+# cheats. The same run without cheats shows none of the writes. No Vulkan needed.
+set(cheat_codes --cheat 160FFF001234 --cheat "D60FFF00+1234+360FFF05+0077" --cheat "D60FFF00+FFFF+360FFF07+0066"
+                --cheat "102FFF10 ABCD" --cheat "F6000924+C305+B6002800+0000" --cheat 1604DA900030)
+foreach(mode IN ITEMS on off)
+    set(extra "")
+    if(mode STREQUAL "on")
+        set(extra ${cheat_codes})
+    endif()
+    execute_process(
+        COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 301 ${extra}
+                --dump-ram-at 300 0x060FFF00 8 --dump-ram-at 300 0x002FFF10 2 --dump-ram-at 300 0x0604DA90 2
+        OUTPUT_VARIABLE cheat_out ERROR_VARIABLE cheat_err RESULT_VARIABLE cheat_code)
+    if(NOT cheat_code EQUAL 0)
+        message(FATAL_ERROR "cheat_pins_ram (${mode}): exit ${cheat_code}\n${cheat_err}")
+    endif()
+    if(mode STREQUAL "on")
+        set(cheat_expected "ram frame 300 0x060fff00: 12 34 00 00 00 77 00 00" "ram frame 300 0x002fff10: ab cd")
+    else()
+        set(cheat_expected "ram frame 300 0x060fff00: 00 00 00 00 00 00 00 00" "ram frame 300 0x002fff10: 00 00")
+    endif()
+    foreach(line IN LISTS cheat_expected)
+        string(FIND "${cheat_out}" "${line}" found)
+        if(found EQUAL -1)
+            message(FATAL_ERROR "cheat_pins_ram (${mode}): expected '${line}' on stdout\n${cheat_out}\n${cheat_err}")
+        endif()
+    endforeach()
+    string(REGEX MATCH "ram frame 300 0x0604da90: [0-9a-f][0-9a-f] [0-9a-f][0-9a-f]" cheat_counter_${mode} "${cheat_out}")
+endforeach()
+if(cheat_counter_on STREQUAL "" OR cheat_counter_on STREQUAL cheat_counter_off)
+    message(FATAL_ERROR "cheat_pins_ram: the pinned BIOS countdown ('${cheat_counter_on}') must differ from the run "
+                        "without cheats ('${cheat_counter_off}')")
+endif()
+message(STATUS "cheat_pins_ram: 16/8-bit writes, conditionals, Low RAM, master code; countdown "
+               "'${cheat_counter_on}' vs '${cheat_counter_off}' without cheats")
+
+# cheats_rollback_deterministic: with the same cheats, RetroArch's single-instance run-ahead (--rollback) emulates
+# exactly the plain run (cheats apply before every retro_run, hidden frames included): frame i of the rollback run is
+# frame i + 1 of the plain run, and the states after the same frames (every 60) match in every section.
+foreach(mode IN ITEMS plain rollback)
+    set(extra "")
+    if(mode STREQUAL "rollback")
+        set(extra --rollback)
+    endif()
+    execute_process(
+        COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 300 --hash ${cheat_codes}
+                --save-state-every 60 "${state_dir}/cheats_${mode}" ${extra}
+        OUTPUT_VARIABLE crb_out ERROR_VARIABLE crb_err RESULT_VARIABLE crb_code)
+    if(NOT crb_code EQUAL 0)
+        message(FATAL_ERROR "cheats_rollback_deterministic (${mode}): exit ${crb_code}\n${crb_err}")
+    endif()
+    string(REGEX MATCHALL "frame [0-9]+ [0-9]+x[0-9]+ [0-9a-f]+" crb_lines "${crb_out}")
+    set(crb_hashes "")
+    foreach(line IN LISTS crb_lines)
+        string(REGEX REPLACE "^frame [0-9]+ " "" line "${line}")
+        list(APPEND crb_hashes "${line}")
+    endforeach()
+    set(crb_${mode} "${crb_hashes}")
+endforeach()
+list(LENGTH crb_plain crb_plain_count)
+list(LENGTH crb_rollback crb_rollback_count)
+if(NOT crb_plain_count EQUAL 300 OR NOT crb_rollback_count EQUAL 300)
+    message(FATAL_ERROR "cheats_rollback_deterministic: expected 300 frames from each run, got ${crb_plain_count} and "
+                        "${crb_rollback_count}")
+endif()
+foreach(i RANGE 0 298)
+    math(EXPR next "${i} + 1")
+    list(GET crb_rollback ${i} shown)
+    list(GET crb_plain ${next} expected)
+    if(NOT shown STREQUAL expected)
+        message(FATAL_ERROR "cheats_rollback_deterministic: rollback frame ${i} (${shown}) differs from plain frame "
+                            "${next} (${expected})")
+    endif()
+endforeach()
+foreach(k RANGE 59 299 60)
+    string(LENGTH "0000${k}" padded_length)
+    math(EXPR start "${padded_length} - 5")
+    string(SUBSTRING "0000${k}" ${start} 5 padded)
+    execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/cheats_plain/state_${padded}.bin"
+                            "${state_dir}/cheats_rollback/state_${padded}.bin"
+        OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+    if(NOT sd_code EQUAL 0)
+        message(FATAL_ERROR "cheats_rollback_deterministic: the states after frame ${k} differ (exit ${sd_code}):\n"
+                            "${sd_out}${sd_err}")
+    endif()
+endforeach()
+message(STATUS "cheats_rollback_deterministic: 300 frames with 6 cheats, --rollback emulates exactly the plain run "
+               "(frames and 5 states)")
+
 run_vkhost(vulkan --vulkan --save-state-at 100 "${vk_state}")
 if(vulkan_code EQUAL 4)
     file(REMOVE_RECURSE "${state_dir}")

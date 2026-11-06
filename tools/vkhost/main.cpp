@@ -174,6 +174,12 @@ void PrintUsage(std::FILE* out) {
         "                first one also logs the memory map's descriptors relative to it (repeatable)\n"
         "  --write-view-at F OFFSET HEX  before frame F write the bytes HEX (ab01...) into RETRO_MEMORY_SYSTEM_RAM at\n"
         "                OFFSET, as a frontend's cheat or memory editor does (repeatable)\n"
+        "  --dump-ram-at F ADDR LEN  after frame F (counting warmup frames from 0) print LEN bytes of work RAM from the\n"
+        "                Saturn address ADDR (0x00200000-0x002FFFFF or 0x06000000-0x060FFFFF) in Saturn byte order, read\n"
+        "                through RETRO_MEMORY_SYSTEM_RAM: 'ram frame F 0xADDR: xx xx ...' (repeatable)\n"
+        "  --cheat CODE  after loading the content, retro_cheat_set(i, true, CODE) for the i-th --cheat (after one\n"
+        "                retro_cheat_reset), as RetroArch applies a cheat file: an Action Replay code such as\n"
+        "                1601dba40900 or D6033C60+270F+16033C60+0001 (repeatable)\n"
         "  --hash-sample N  with --hash: hash the native image of the sample points instead of the frame. Frames are at\n"
         "                internal resolution N until the core logs another (\"Internal resolution: frames at Mx\"); the\n"
         "                sample point of native output pixel (x, y) is mapped through the rotation (brimir_rotation\n"
@@ -404,9 +410,10 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             i += 2;
             continue;
         }
-        if (opt == "--dump-view-at" || opt == "--write-view-at") { // three values
+        if (opt == "--dump-view-at" || opt == "--write-view-at" || opt == "--dump-ram-at") { // three values
             vkhost::HostConfig::ViewAccess access;
-            const bool dump = opt == "--dump-view-at";
+            const bool ramDump = opt == "--dump-ram-at";
+            const bool dump = opt == "--dump-view-at" || ramDump;
             bool ok = i + 3 < argc && ParseInt(argv[i + 1], access.frame) && ParseSize(argv[i + 2], access.offset);
             if (ok && dump) {
                 ok = ParseSize(argv[i + 3], access.length) && access.length > 0;
@@ -414,11 +421,12 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 ok = ParseHexBytes(argv[i + 3], access.bytes);
             }
             if (!ok) {
-                std::fprintf(stderr, dump ? "--dump-view-at needs a frame number, an offset and a length (1 or more)\n"
-                                          : "--write-view-at needs a frame number, an offset and hex bytes (ab01...)\n");
+                std::fprintf(stderr, ramDump ? "--dump-ram-at needs a frame number, a Saturn address and a length (1 or more)\n"
+                                     : dump  ? "--dump-view-at needs a frame number, an offset and a length (1 or more)\n"
+                                             : "--write-view-at needs a frame number, an offset and hex bytes (ab01...)\n");
                 return ParseResult::Error;
             }
-            (dump ? args.config.viewDumps : args.config.viewWrites).push_back(access);
+            (ramDump ? args.config.ramDumps : dump ? args.config.viewDumps : args.config.viewWrites).push_back(access);
             i += 3;
             continue;
         }
@@ -443,6 +451,8 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
         const char* value = argv[++i];
         if (opt == "--core") {
             args.config.corePath = value;
+        } else if (opt == "--cheat") {
+            args.config.cheats.push_back(value);
         } else if (opt == "--bios") {
             args.config.biosPath = value;
         } else if (opt == "--game") {

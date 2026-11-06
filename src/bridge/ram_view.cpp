@@ -68,18 +68,39 @@ void PublishHalf(const uint8_t *src, uint8_t *view, uint8_t *snapshot) {
         }
     }
 #elif BRIMIR_RAM_VIEW_NEON
-    for (size_t i = 0; i < RamView::kHalfSize; i += 16) {
-        const uint8x16_t swapped = vrev16q_u8(vld1q_u8(src + i));
-        vst1q_u8(view + i, swapped);
-        vst1q_u8(snapshot + i, swapped);
+    for (size_t block = 0; block < RamView::kHalfSize; block += kBlock) {
+        uint8x16_t swapped[kBlock / 16];
+        uint8x16_t diff = vdupq_n_u8(0);
+        for (size_t k = 0; k < kBlock / 16; ++k) {
+            swapped[k] = vrev16q_u8(vld1q_u8(src + block + k * 16));
+            diff = vorrq_u8(diff, veorq_u8(swapped[k], vld1q_u8(view + block + k * 16)));
+        }
+        if (vmaxvq_u8(diff) == 0) {
+            continue;
+        }
+        for (size_t k = 0; k < kBlock / 16; ++k) {
+            vst1q_u8(view + block + k * 16, swapped[k]);
+            vst1q_u8(snapshot + block + k * 16, swapped[k]);
+        }
     }
 #else
-    for (size_t i = 0; i < RamView::kHalfSize; i += sizeof(uint64_t)) {
-        uint64_t x;
-        std::memcpy(&x, src + i, sizeof(x));
-        x = ((x & 0x00FF00FF00FF00FFull) << 8) | ((x >> 8) & 0x00FF00FF00FF00FFull);
-        std::memcpy(view + i, &x, sizeof(x));
-        std::memcpy(snapshot + i, &x, sizeof(x));
+    constexpr size_t kWords = kBlock / sizeof(uint64_t);
+    for (size_t block = 0; block < RamView::kHalfSize; block += kBlock) {
+        uint64_t swapped[kWords];
+        uint64_t diff = 0;
+        for (size_t k = 0; k < kWords; ++k) {
+            uint64_t x;
+            uint64_t v;
+            std::memcpy(&x, src + block + k * sizeof(x), sizeof(x));
+            std::memcpy(&v, view + block + k * sizeof(v), sizeof(v));
+            swapped[k] = ((x & 0x00FF00FF00FF00FFull) << 8) | ((x >> 8) & 0x00FF00FF00FF00FFull);
+            diff |= swapped[k] ^ v;
+        }
+        if (diff == 0) {
+            continue;
+        }
+        std::memcpy(view + block, swapped, kBlock);
+        std::memcpy(snapshot + block, swapped, kBlock);
     }
 #endif
 }

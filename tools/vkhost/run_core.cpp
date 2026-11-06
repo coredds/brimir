@@ -279,6 +279,11 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
                 host.DumpView(i, dump.offset, dump.length);
             }
         }
+        for (const HostConfig::ViewAccess& dump : config.ramDumps) {
+            if (dump.frame == i) {
+                host.DumpRam(i, static_cast<uint32_t>(dump.offset), dump.length);
+            }
+        }
         if (i == config.saveStateAt) {
             std::ofstream out(config.saveStatePath, std::ios::binary | std::ios::trunc);
             if (!host.Serialize(state) ||

@@ -97,6 +97,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - Compatible with RetroArch and other libretro frontends
 - XRGB8888 pixel format output
 - Work RAM exposed in Beetle Saturn's layout (`RETRO_MEMORY_SYSTEM_RAM` and memory map) for RetroAchievements, RetroArch cheat search and memory viewer
+- Action Replay cheats (`retro_cheat_set`) for the Saturn cheat files in RetroArch's database
 - Real NTSC/PAL region reporting with dynamic AV timing updates
 - Save state versioning for forward compatibility
 - Performance profiling option (gated via core option)

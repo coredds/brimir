@@ -4,6 +4,7 @@
 
 #include "libretro.h"
 #include "options.hpp"
+#include "brimir/cheat_engine.hpp"
 #include "brimir/core_wrapper.hpp"
 #include "brimir/lockstep.hpp"
 #include "brimir/ram_view.hpp"
@@ -23,8 +24,11 @@
 #include <cstdarg>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 // Libretro callbacks
 static retro_log_printf_t log_cb = nullptr;
@@ -46,8 +50,13 @@ static std::recursive_mutex g_coreMutex;
 
 // Beetle-compatible work RAM view (brimir/ram_view.hpp): RETRO_MEMORY_SYSTEM_RAM and the memory map point into it, so
 // achievement sets and RetroArch cheats authored on Beetle Saturn read and write the same bytes. Its address never
-// changes (the frontend keeps the pointers). Order in retro_run: apply_ram_view_writes, RunFrame, publish_ram_view.
+// changes (the frontend keeps the pointers). Order in retro_run: apply_ram_view_writes, apply_cheats, RunFrame,
+// publish_ram_view.
 static brimir::RamView g_ramView;
+
+// Action Replay codes from retro_cheat_set (brimir/cheat_engine.hpp). Frontend state: not in save states, cleared by
+// retro_cheat_reset and when the content is unloaded.
+static brimir::CheatEngine g_cheats;
 
 // Memory descriptors for achievements (rcheevos maps Saturn $000000/$100000 to 0x00200000/0x06000000) and RetroArch's
 // cheats and memory viewer (which concatenate the RETRO_MEMDESC_SYSTEM_RAM descriptors in order: Low then High, the
@@ -156,6 +165,17 @@ static void apply_ram_view_writes(void) {
     }
     g_ramView.ApplyFrontendWrites(std::span<uint8_t, brimir::RamView::kHalfSize>(low, brimir::RamView::kHalfSize),
                                   std::span<uint8_t, brimir::RamView::kHalfSize>(high, brimir::RamView::kHalfSize));
+}
+
+// Before a frame, after the frontend's writes: the enabled Action Replay cheats write work RAM.
+static void apply_cheats(void) {
+    uint8_t* low = nullptr;
+    uint8_t* high = nullptr;
+    if (g_cheats.ActiveCount() == 0 || !work_ram(low, high)) {
+        return;
+    }
+    g_cheats.Apply(std::span<uint8_t, brimir::RamView::kHalfSize>(low, brimir::RamView::kHalfSize),
+                   std::span<uint8_t, brimir::RamView::kHalfSize>(high, brimir::RamView::kHalfSize));
 }
 
 static void reset_frame_state(void) {
@@ -1027,11 +1047,15 @@ RETRO_API void retro_run(void) {
     prepare_vulkan_frame();
 #endif
 
-    // Frontend writes to the work RAM view, then one frame of emulation, then the view shows the new work RAM. The
-    // same point every frame, hidden run-ahead frames included.
+    // Frontend writes to the work RAM view, then the cheats, then one frame of emulation, then the view shows the new
+    // work RAM. The same point every frame, hidden run-ahead frames included.
     {
         brimir::ScopedTimer timer(g_core->GetProfiler(), "RamView_ApplyFrontendWrites");
         apply_ram_view_writes();
+    }
+    {
+        brimir::ScopedTimer timer(g_core->GetProfiler(), "Cheats_Apply");
+        apply_cheats();
     }
     g_core->RunFrame();
     {
@@ -1114,14 +1138,48 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
 }
 
 RETRO_API void retro_cheat_reset(void) {
-    // TODO: Implement cheat support
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    g_cheats.Reset();
 }
 
+// Saturn Pro Action Replay codes as in RetroArch's Saturn database (brimir/cheat_engine.hpp). RetroArch-handled
+// entries (address/value fields) do not come here: RetroArch writes them through the memory map (the RAM view).
 RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code) {
-    // TODO: Implement cheat support
-    (void)index;
-    (void)enabled;
-    (void)code;
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    const char* text = code != nullptr ? code : "";
+    std::optional<std::vector<brimir::CheatOp>> ops = brimir::ParseCheat(text);
+    if (!ops) {
+        g_cheats.Set(index, enabled, std::string_view(text)); // empties the slot
+        brimir_log(RETRO_LOG_WARN, "Cheat %u: '%s' is not an Action Replay code (1AAAAAAA VVVV, 3AAAAAAA 00VV, "
+                                   "DAAAAAAA VVVV, sub-codes joined with '+'); ignored", index, text);
+        return;
+    }
+    unsigned master = 0;
+    unsigned unknown = 0;
+    unsigned malformed = 0;
+    unsigned outside = 0;
+    for (const brimir::CheatOp& op : *ops) {
+        if (op.kind != brimir::CheatOp::Kind::Ignored) {
+            outside += brimir::CheatAddressInWorkRam(op.address) ? 0 : 1;
+        } else if (op.reason == brimir::CheatOp::IgnoreReason::MasterCode) {
+            ++master;
+        } else if (op.reason == brimir::CheatOp::IgnoreReason::UnknownType) {
+            ++unknown;
+        } else {
+            ++malformed;
+        }
+    }
+    const size_t count = ops->size();
+    g_cheats.Set(index, enabled, std::move(*ops));
+    if (unknown + malformed + outside > 0) {
+        brimir_log(RETRO_LOG_WARN,
+                   "Cheat %u: '%s': %zu sub-codes, ignored: %u master, %u unknown type, %u malformed (template "
+                   "values such as 00?? must be edited), %u outside work RAM",
+                   index, text, count, master, unknown, malformed, outside);
+    } else {
+        brimir_log(RETRO_LOG_INFO, "Cheat %u %s: '%s' (%zu sub-codes, %u master codes ignored)", index,
+                   enabled ? "on" : "off", text, count, master);
+    }
 }
 
 // Deterministic runs (brimir_vkhost --fixed-date): BRIMIR_RTC_FIXED pins the RTC to the virtual clock at a fixed date
@@ -1397,6 +1455,7 @@ RETRO_API void retro_unload_game(void) {
     }
     reset_frame_state();
     g_ramView.Clear();
+    g_cheats.Reset();
 #ifdef BRIMIR_VULKAN
     // The frontend destroys the context (context_destroy) before unloading; nothing GPU-side happens here.
     g_vulkanRequested = false;

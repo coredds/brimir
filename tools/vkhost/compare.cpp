@@ -59,6 +59,8 @@ const std::set<std::string> kVulkanOnly = {"--reset-at",   "--reset-in-run", "--
 const std::string kSaveStateAt = "--save-state-at";
 // Takes a frame number and key=value; both children get it.
 const std::string kSetOptionAt = "--set-option-at";
+// Take three values; both children get them.
+const std::set<std::string> kThreeValues = {"--dump-view-at", "--write-view-at", "--dump-ram-at"};
 // The software child samples its 1x frames (the same excluded lattice); the Vulkan child the given N.
 const std::string kHashSample = "--hash-sample";
 // Takes an optional date (IsFixedDateValue); both children get it.
@@ -238,6 +240,11 @@ std::vector<std::string> BuildArgs(const std::vector<std::string>& in, bool vulk
         if (arg == kSetOptionAt && i + 2 < in.size()) {
             out.insert(out.end(), {arg, in[i + 1], in[i + 2]});
             i += 2;
+            continue;
+        }
+        if (kThreeValues.count(arg) != 0 && i + 3 < in.size()) {
+            out.insert(out.end(), {arg, in[i + 1], in[i + 2], in[i + 3]});
+            i += 3;
             continue;
         }
         if (arg == kFixedDate) { // an optional value; both children get it

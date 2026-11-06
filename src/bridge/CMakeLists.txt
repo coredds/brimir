@@ -1,6 +1,7 @@
 # Bridge layer - adapts Ymir emulator to libretro API
 
 add_library(brimir_bridge OBJECT
+    cheat_engine.cpp
     core_wrapper.cpp
     lockstep.cpp
     ram_view.cpp

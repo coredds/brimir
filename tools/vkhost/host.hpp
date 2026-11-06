@@ -124,6 +124,12 @@ struct HostConfig {
     };
     std::vector<ViewAccess> viewDumps;
     std::vector<ViewAccess> viewWrites;
+    // --dump-ram-at F ADDR LEN: after frame F, print LEN bytes of work RAM from the Saturn address ADDR in Saturn byte
+    // order, read through the same view (offset = the address's view offset; the view's 16-bit byte swap undone).
+    std::vector<ViewAccess> ramDumps;
+    // --cheat CODE (repeatable): retro_cheat_reset, then retro_cheat_set(i, true, CODE) for each after the content
+    // is loaded, as RetroArch applies a .cht file.
+    std::vector<std::string> cheats;
 };
 
 // One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).
@@ -239,6 +245,8 @@ public:
     // --dump-view-at / --write-view-at: false (a problem is recorded) if the range is outside the memory.
     bool DumpView(int frame, size_t offset, size_t length);
     bool WriteView(int frame, size_t offset, const std::vector<uint8_t>& bytes);
+    // --dump-ram-at: false (a problem is recorded) if the range is not inside Work RAM Low or High.
+    bool DumpRam(int frame, uint32_t address, size_t length);
 
     // Number of video_refresh calls that delivered pixels / no new frame (NULL data) / a frame we cannot read.
     uint64_t DisplayedFrames() const { return m_displayed; }

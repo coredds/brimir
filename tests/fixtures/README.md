@@ -106,7 +106,9 @@ tests/fixtures/*.chd
 tests/fixtures/games/
 ```
 
-Only this README file is tracked in git.
+Only this README file is tracked in git, with the redistributable test data: `audio/` and `cht/sample.cht` (a few
+Action Replay codes copied from RetroArch's Saturn cheat database for `tests/unit/test_cheat_engine.cpp`; the full
+database is not committed, the hidden `[.cheat-db]` case reads it from `$BRIMIR_CHT_DIR`).
 
 
 
