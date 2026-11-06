@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **RTC Mode option and deterministic save states** - new core option `brimir_rtc_mode` (`virtual` by default, or `host`; applies on content load). Virtual runs the Saturn's clock with emulated time only, seeded from the computer's local time on the first run and kept in the per-region RTC file afterwards; a first boot with no RTC file no longer shows the BIOS language and clock setup screen. With the clock and the save-state fixes below, a save state followed by a load continues exactly like the uninterrupted run (checked over 3,600 frames on the BIOS menu and four games, software and Vulkan renderers, with a one-frame run-ahead rollback and two-instance runs), so the core now declares `savestate_features = "deterministic"` and RetroArch allows run-ahead and netplay. At 2x internal resolution with VDP1 upscaling, the upscaled sprite detail of a few frames after a load can differ (GPU output only; the states are identical).
+
 ### Fixed
 - **Save states continue exactly like the uninterrupted run** - loading a state could change what happened next (seen in Virtua Fighter 2, Sega Rally and Burning Rangers; this breaks rewind and run-ahead, and netplay needs it): interlaced games flipped the video field on load, the latched H counter was converted twice, a screen mode change waiting for the next frame was applied at once, the VDP1 command list return address and loop detection, the SCSP DSP program length and, in double-density interlace, the other field's VDP1 framebuffer were not saved, and with threaded VDP1 rendering (the default) a load could catch the render thread still drawing the previous frame or lose what it had drawn so far. The save-state format is now version 6; states from earlier versions still load (as before). Logged in `src/core/BRIMIR_FORK.md` (upstream Ymir has the same code).
 
