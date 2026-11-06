@@ -33,6 +33,8 @@ add_executable(brimir_tests
     unit/test_core_wrapper.cpp
     unit/test_savestate_fidelity.cpp
     unit/test_profiler.cpp
+    # Beetle-compatible work RAM view (RETRO_MEMORY_SYSTEM_RAM, memory map)
+    unit/test_ram_view.cpp
     # Audio ring buffer tests
     unit/test_audio_ring_buffer.cpp
     # Media loader tests (CUE/CCD compressed audio, sparse tracks, sector alignment)

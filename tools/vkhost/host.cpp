@@ -150,6 +150,8 @@ struct LibretroHost::Api {
     size_t (*serialize_size)() = nullptr;
     bool (*serialize)(void*, size_t) = nullptr;
     bool (*unserialize)(const void*, size_t) = nullptr;
+    void* (*get_memory_data)(unsigned) = nullptr;
+    size_t (*get_memory_size)(unsigned) = nullptr;
 };
 
 LibretroHost::LibretroHost() = default;
@@ -275,6 +277,8 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     resolve(api->serialize_size, "retro_serialize_size");
     resolve(api->serialize, "retro_serialize");
     resolve(api->unserialize, "retro_unserialize");
+    resolve(api->get_memory_data, "retro_get_memory_data");
+    resolve(api->get_memory_size, "retro_get_memory_size");
     if (missing) {
         return false;
     }
@@ -493,6 +497,77 @@ bool LibretroHost::Unserialize(const std::vector<uint8_t>& state) {
         m_vulkan->SetPhase(previous);
     }
     return ok;
+}
+
+uint8_t* LibretroHost::MemoryData(unsigned id, size_t& size) const {
+    size = 0;
+    if (!m_api || !m_contentLoaded) {
+        return nullptr;
+    }
+    auto* data = static_cast<uint8_t*>(m_api->get_memory_data(id));
+    size = data != nullptr ? m_api->get_memory_size(id) : 0;
+    return data;
+}
+
+static std::string RangeProblem(const char* option, size_t offset, size_t length, size_t size) {
+    char text[160];
+    std::snprintf(text, sizeof(text), "%s: 0x%zx + %zu bytes is outside RETRO_MEMORY_SYSTEM_RAM (%zu bytes)", option,
+                  offset, length, size);
+    return text;
+}
+
+// Where each memory map descriptor points, relative to RETRO_MEMORY_SYSTEM_RAM (once per SET_MEMORY_MAPS).
+static void LogMemoryMap(const std::vector<retro_memory_descriptor>& map, const uint8_t* ram, size_t ramSize,
+                         bool achievements) {
+    std::fprintf(stderr,
+                 "vkhost: memory: RETRO_MEMORY_SYSTEM_RAM %zu bytes, achievements %s, memory map %zu descriptors\n",
+                 ramSize, achievements ? "supported" : "not declared", map.size());
+    for (size_t i = 0; i < map.size(); ++i) {
+        const retro_memory_descriptor& d = map[i];
+        const auto* ptr = static_cast<const uint8_t*>(d.ptr) + d.offset;
+        char where[64] = "outside RETRO_MEMORY_SYSTEM_RAM";
+        if (d.ptr != nullptr && ram != nullptr && ptr >= ram && ptr + d.len <= ram + ramSize) {
+            std::snprintf(where, sizeof(where), "RETRO_MEMORY_SYSTEM_RAM + 0x%zx", static_cast<size_t>(ptr - ram));
+        }
+        std::fprintf(stderr, "vkhost: memory map %zu: flags 0x%llx start 0x%08zx len 0x%zx (%s) -> %s\n", i,
+                     static_cast<unsigned long long>(d.flags), static_cast<size_t>(d.start), static_cast<size_t>(d.len),
+                     d.addrspace != nullptr ? d.addrspace : "", where);
+    }
+}
+
+bool LibretroHost::DumpView(int frame, size_t offset, size_t length) {
+    size_t size = 0;
+    const uint8_t* ram = MemoryData(RETRO_MEMORY_SYSTEM_RAM, size);
+    if (!m_memoryMapLogged) {
+        LogMemoryMap(m_memoryMap, ram, size, m_achievements);
+        m_memoryMapLogged = true;
+    }
+    if (ram == nullptr || offset > size || length > size - offset) {
+        Problem(RangeProblem("--dump-view-at", offset, length, size));
+        return false;
+    }
+    std::string text;
+    char byte[4];
+    for (size_t i = 0; i < length; ++i) {
+        std::snprintf(byte, sizeof(byte), i == 0 ? "%02x" : " %02x", ram[offset + i]);
+        text += byte;
+    }
+    std::printf("view frame %d offset 0x%06zx: %s\n", frame, offset, text.c_str());
+    std::fflush(stdout);
+    return true;
+}
+
+bool LibretroHost::WriteView(int frame, size_t offset, const std::vector<uint8_t>& bytes) {
+    size_t size = 0;
+    uint8_t* ram = MemoryData(RETRO_MEMORY_SYSTEM_RAM, size);
+    if (ram == nullptr || offset > size || bytes.size() > size - offset) {
+        Problem(RangeProblem("--write-view-at", offset, bytes.size(), size));
+        return false;
+    }
+    std::memcpy(ram + offset, bytes.data(), bytes.size());
+    std::fprintf(stderr, "vkhost: wrote %zu bytes into RETRO_MEMORY_SYSTEM_RAM at 0x%06zx before frame %d\n",
+                 bytes.size(), offset, frame);
+    return true;
 }
 
 void LibretroHost::CoreLogLine(const char* text) {
@@ -730,8 +805,16 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
         return true;
     case kEnv(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME):
     case kEnv(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS):
-    case kEnv(RETRO_ENVIRONMENT_SET_MEMORY_MAPS):
     case kEnv(RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE):
+        return true;
+    case kEnv(RETRO_ENVIRONMENT_SET_MEMORY_MAPS): {
+        const auto* map = static_cast<const retro_memory_map*>(data);
+        m_memoryMap.assign(map->descriptors, map->descriptors + map->num_descriptors);
+        m_memoryMapLogged = false;
+        return true;
+    }
+    case kEnv(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS):
+        m_achievements = *static_cast<const bool*>(data);
         return true;
     case kEnv(RETRO_ENVIRONMENT_GET_LOG_INTERFACE):
         static_cast<retro_log_callback*>(data)->log = m_slot == 0 ? &LogCallback<0> : &LogCallback<1>;

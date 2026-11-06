@@ -303,6 +303,8 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--dump-vdp1-ops F <dir>` | with `--vulkan` and VDP1 on the GPU: sets `BRIMIR_VDP1_DUMP_OPS` so the core captures the VDP1 work of its VDP2 frame F (1 or more, counted from the renderer's attach: about frame F counting warmup frames from 0) into `<dir>/vdp1ops_<F>.bin` (`src/gpu/vdp1/vdp1_op_dump.hpp`): the op lists taken during the frame, all eight FBRAM slices before and after them (two Dump syncs), VDP1 VRAM, the VDP2 registers and the CRAM colours. Exit 2 when the file was not written (the core logs why, for example an FBRAM upload during the frame). Games drawing at 30 fps have frames without VDP1 work: capture the next one. Read by the N x VDP1 reference tests (`tests/unit/test_vdp1_nx_*.cpp`) |
 | `--internal-resolution N` | the same as `--option brimir_internal_resolution=N` (1-4). With `brimir_vdp1_upscaling` enabled (the default; GPU stage 3) VDP1 is drawn at N x too and VDP2 shows it (logs `VDP1 upscaling: sprite surface at Nx (M MiB)`, and at the end `VDP1 upscaling: N x sprite frames shown S, hidden H; N x VDP1 passes shown s, hidden h`); `--option brimir_vdp1_upscaling=disabled` keeps the sprites native |
 | `--set-option-at F key=value` | a live option change before frame F (counting warmup frames from 0, as `--reset-at`), reported to the core by the next `GET_VARIABLE_UPDATE` (repeatable); with `--compare` both runs get it |
+| `--dump-view-at F OFFSET LEN` | after frame F (counting warmup frames from 0) print LEN bytes of the core's `RETRO_MEMORY_SYSTEM_RAM` (`retro_get_memory_data`: what RetroArch's cheats, memory viewer and achievements read) from OFFSET (decimal or `0x` hex) on stdout as `view frame F offset 0xOFFSET: xx xx ...` (repeatable). The first one also logs the size, whether the core declared achievements and where each memory map descriptor points (`vkhost: memory map N: flags ... start ... len ... -> RETRO_MEMORY_SYSTEM_RAM + 0x...`). Brimir's view is Beetle Saturn's layout: Work RAM Low at 0, High at 0x100000, the bytes of each 16-bit word swapped on little-endian hosts (Saturn address A in High RAM is view byte `0x100000 + ((A - 0x06000000) ^ 1)`; a 16-bit little-endian read at an even offset is the Saturn word) |
+| `--write-view-at F OFFSET HEX` | before frame F write the bytes HEX (`ab01...`) into `RETRO_MEMORY_SYSTEM_RAM` at OFFSET, as a frontend's cheat or memory editor does (repeatable). The core applies them to work RAM before the frame; `--dump-view-at` after a later frame shows whether they stuck (vkhost check `ram_view`) |
 | `--hash-sample N` | with `--hash`: hash the sample points instead of the frame (below). With `--compare` the software run gets `--hash-sample 1` |
 | `--sharpness N` | print, per recorded frame and as a summary, how much the N x frame differs from a nearest upscale (below) |
 | `--region x,y,w,h` | with `--sharpness`: only these native output pixels (after crop and rotation; clamped to the frame) |
@@ -385,7 +387,10 @@ frame hashes, the Vulkan VDP2 renderer active where the context allows it (and n
 validation layer on and zero validation errors, queue-lock violations and hidden-frame presentation calls, and at
 most one submit per `retro_run`. It also checks `rollback_deterministic`: 600 BIOS frames from boot (`--fixed-date`,
 software) with `--rollback` against a plain run, the frames one apart and every 60th state identical in every section
-(`brimir_state_diff --strict`). It is skipped without the BIOS or a Vulkan device
+(`brimir_state_diff --strict`), and `ram_view` (before the Vulkan runs, so it also runs without a device): the 2 MiB
+work RAM view, the memory map's two descriptors into it, the achievements declaration, and that a `--write-view-at`
+write is still in the view 200 frames later (the view is republished from work RAM every frame, so it reached work
+RAM). It is skipped without the BIOS or a Vulkan device
 (`BRIMIR_REQUIRE_VULKAN=1` fails instead; `BRIMIR_VKHOST_ALLOW_NO_VALIDATION=1` only warns without the layer).
 A `video_refresh(NULL)` (dupe) is recorded as a repeat of the last frame.
 
@@ -512,8 +517,8 @@ Environment calls answered: `GET_CORE_OPTIONS_VERSION` (2), `SET_CORE_OPTIONS_V2
 `GET_VARIABLE_UPDATE` (true once after a `--set-option-at` change), `SET_PIXEL_FORMAT` (XRGB8888 only), `GET_SYSTEM_DIRECTORY`,
 `GET_SAVE_DIRECTORY`, `SET_SYSTEM_AV_INFO`, `SET_GEOMETRY`, `GET_LOG_INTERFACE`, `GET_INPUT_BITMASKS`,
 `GET_AUDIO_VIDEO_ENABLE`, `GET/SET_DISK_CONTROL_(EXT_)INTERFACE`, the hardware rendering calls above (with
-`--vulkan`; refused otherwise), and `SET_SUPPORT_NO_GAME`,
-`SET_INPUT_DESCRIPTORS` and `SET_MEMORY_MAPS` (accepted, ignored). Any other call returns false and is logged once
+`--vulkan`; refused otherwise), `SET_MEMORY_MAPS` and `SET_SUPPORT_ACHIEVEMENTS` (kept for `--dump-view-at`'s log),
+and `SET_SUPPORT_NO_GAME` and `SET_INPUT_DESCRIPTORS` (accepted, ignored). Any other call returns false and is logged once
 as `environment call N not supported`. Audio and input are no-ops.
 
 ## bench/ - benchmark hosts (Linux devices)

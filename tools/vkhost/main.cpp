@@ -168,6 +168,12 @@ void PrintUsage(std::FILE* out) {
         "  --internal-resolution N  the same as --option brimir_internal_resolution=N (1-4)\n"
         "  --set-option-at F key=value  a live option change before frame F (counting warmup frames from 0), reported\n"
         "                to the core by GET_VARIABLE_UPDATE (repeatable)\n"
+        "  --dump-view-at F OFFSET LEN  after frame F (counting warmup frames from 0) print LEN bytes of the core's\n"
+        "                RETRO_MEMORY_SYSTEM_RAM (retro_get_memory_data, what RetroArch's cheats and achievements read)\n"
+        "                from OFFSET (decimal or 0x hex) on stdout: 'view frame F offset 0xOFFSET: xx xx ...'; the\n"
+        "                first one also logs the memory map's descriptors relative to it (repeatable)\n"
+        "  --write-view-at F OFFSET HEX  before frame F write the bytes HEX (ab01...) into RETRO_MEMORY_SYSTEM_RAM at\n"
+        "                OFFSET, as a frontend's cheat or memory editor does (repeatable)\n"
         "  --hash-sample N  with --hash: hash the native image of the sample points instead of the frame. Frames are at\n"
         "                internal resolution N until the core logs another (\"Internal resolution: frames at Mx\"); the\n"
         "                sample point of native output pixel (x, y) is mapped through the rotation (brimir_rotation\n"
@@ -211,6 +217,42 @@ bool ParseInt(const char* text, int& out) {
         return false;
     }
     out = static_cast<int>(value);
+    return true;
+}
+
+// Decimal or 0x-prefixed hexadecimal.
+bool ParseSize(const char* text, size_t& out) {
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 0);
+    if (end == text || *end != '\0' || text[0] == '-' || value > 0xFFFFFFFFull) {
+        return false;
+    }
+    out = static_cast<size_t>(value);
+    return true;
+}
+
+// Hex digit pairs ("ab01"), at least one byte.
+bool ParseHexBytes(const char* text, std::vector<uint8_t>& out) {
+    out.clear();
+    const std::string hex = text;
+    if (hex.empty() || hex.size() % 2 != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        unsigned value = 0;
+        for (size_t k = i; k < i + 2; ++k) {
+            const char c = hex[k];
+            const int digit = c >= '0' && c <= '9'   ? c - '0'
+                              : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                              : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                                     : -1;
+            if (digit < 0) {
+                return false;
+            }
+            value = value * 16 + static_cast<unsigned>(digit);
+        }
+        out.push_back(static_cast<uint8_t>(value));
+    }
     return true;
 }
 
@@ -360,6 +402,24 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             }
             args.config.saveStateDir = argv[i + 2];
             i += 2;
+            continue;
+        }
+        if (opt == "--dump-view-at" || opt == "--write-view-at") { // three values
+            vkhost::HostConfig::ViewAccess access;
+            const bool dump = opt == "--dump-view-at";
+            bool ok = i + 3 < argc && ParseInt(argv[i + 1], access.frame) && ParseSize(argv[i + 2], access.offset);
+            if (ok && dump) {
+                ok = ParseSize(argv[i + 3], access.length) && access.length > 0;
+            } else if (ok) {
+                ok = ParseHexBytes(argv[i + 3], access.bytes);
+            }
+            if (!ok) {
+                std::fprintf(stderr, dump ? "--dump-view-at needs a frame number, an offset and a length (1 or more)\n"
+                                          : "--write-view-at needs a frame number, an offset and hex bytes (ab01...)\n");
+                return ParseResult::Error;
+            }
+            (dump ? args.config.viewDumps : args.config.viewWrites).push_back(access);
+            i += 3;
             continue;
         }
         if (opt == "--set-option-at") { // two values

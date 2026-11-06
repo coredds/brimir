@@ -3,6 +3,7 @@
 add_library(brimir_bridge OBJECT
     core_wrapper.cpp
     lockstep.cpp
+    ram_view.cpp
     savestate_codec.cpp
 )
 

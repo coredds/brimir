@@ -128,7 +128,8 @@ public:
     /// @return true if the data was accepted (size matches and data non-null)
     bool SetSRAMData(const uint8_t* data, size_t size);
 
-    /// @brief Get pointer to system RAM (Work RAM Low) for RetroAchievements / cheat search
+    /// @brief Get pointer to Work RAM Low, in Saturn (big-endian) byte order. The libretro layer gives the frontend
+    /// the Beetle-compatible view of Low and High instead (brimir/ram_view.hpp).
     /// @return Pointer to WRAM Low data (1MiB), or nullptr if not available
     void* GetSystemRAMData();
 
@@ -408,6 +409,8 @@ public:
 
     /// @brief Read-only access to the profiler (for tools and tests)
     const Profiler& GetProfiler() const { return m_profiler; }
+    /// @brief The profiler, for samples timed outside the core (libretro layer: the work RAM view)
+    Profiler& GetProfiler() { return m_profiler; }
 
 #ifdef BRIMIR_BUILD_TESTS
     /// @brief Test seam: feed a synthetic native frame (Ymir XBGR8888, tightly packed) through the same path

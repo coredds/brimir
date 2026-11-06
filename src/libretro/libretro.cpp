@@ -6,6 +6,7 @@
 #include "options.hpp"
 #include "brimir/core_wrapper.hpp"
 #include "brimir/lockstep.hpp"
+#include "brimir/ram_view.hpp"
 
 #ifdef BRIMIR_VULKAN
 #include "libretro_vulkan.hpp"
@@ -22,6 +23,7 @@
 #include <cstdarg>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 
 // Libretro callbacks
@@ -42,13 +44,19 @@ static std::unique_ptr<brimir::CoreWrapper> g_core;
 // but the lock makes the core safe either way).
 static std::recursive_mutex g_coreMutex;
 
-// Memory descriptors for RetroArch's memory viewer / cheat search
-// ptr fields are updated on each game load; struct layout must match
-// declaration order in libretro.h (flags, ptr, offset, start, select, disconnect, len, addrspace)
+// Beetle-compatible work RAM view (brimir/ram_view.hpp): RETRO_MEMORY_SYSTEM_RAM and the memory map point into it, so
+// achievement sets and RetroArch cheats authored on Beetle Saturn read and write the same bytes. Its address never
+// changes (the frontend keeps the pointers). Order in retro_run: apply_ram_view_writes, RunFrame, publish_ram_view.
+static brimir::RamView g_ramView;
+
+// Memory descriptors for achievements (rcheevos maps Saturn $000000/$100000 to 0x00200000/0x06000000) and RetroArch's
+// cheats and memory viewer (which concatenate the RETRO_MEMDESC_SYSTEM_RAM descriptors in order: Low then High, the
+// same offsets as RETRO_MEMORY_SYSTEM_RAM). Field order as in libretro.h (flags, ptr, offset, start, select,
+// disconnect, len, addrspace). No save RAM descriptor: RetroArch reads and writes the .srm through
+// retro_get_memory_data(RETRO_MEMORY_SAVE_RAM), and the backup RAM is not at a work RAM address.
 static struct retro_memory_descriptor g_memdesc[] = {
-    { RETRO_MEMDESC_SYSTEM_RAM, nullptr, 0, 0x00200000, 0, 0, 1024 * 1024, "SYSARAM" },
-    { RETRO_MEMDESC_SAVE_RAM,   nullptr, 0, 0x00100000, 0, 0, 32 * 1024,   "SYSARAM" },
-    { RETRO_MEMDESC_SYSTEM_RAM, nullptr, 0, 0x06000000, 0, 0, 1024 * 1024, "SYSARAM" },
+    { RETRO_MEMDESC_SYSTEM_RAM, nullptr, 0, 0x00200000, 0, 0, brimir::RamView::kHalfSize, "WRAML" },
+    { RETRO_MEMDESC_SYSTEM_RAM, nullptr, 0, 0x06000000, 0, 0, brimir::RamView::kHalfSize, "WRAMH" },
 };
 static const unsigned g_memdesc_count = sizeof(g_memdesc) / sizeof(g_memdesc[0]);
 
@@ -113,6 +121,42 @@ private:
     bool m_previous;
 };
 #endif
+
+// Work RAM Low and High (Saturn byte order, 1 MiB each), or false if the core has no Saturn.
+static bool work_ram(uint8_t*& low, uint8_t*& high) {
+    if (!g_core) {
+        return false;
+    }
+    low = static_cast<uint8_t*>(g_core->GetSystemRAMRawPointer());
+    high = static_cast<uint8_t*>(g_core->GetSystemRAMHighRawPointer());
+    return low != nullptr && high != nullptr && g_core->GetSystemRAMSize() == brimir::RamView::kHalfSize &&
+           g_core->GetSystemRAMHighSize() == brimir::RamView::kHalfSize;
+}
+
+// After a frame, a state load, a reset and a content load: the view shows the current work RAM, and bytes the
+// frontend changed in it before are dropped.
+static void publish_ram_view(void) {
+    uint8_t* low = nullptr;
+    uint8_t* high = nullptr;
+    if (!work_ram(low, high)) {
+        g_ramView.Clear();
+        return;
+    }
+    g_ramView.Publish(std::span<const uint8_t, brimir::RamView::kHalfSize>(low, brimir::RamView::kHalfSize),
+                      std::span<const uint8_t, brimir::RamView::kHalfSize>(high, brimir::RamView::kHalfSize));
+}
+
+// Before a frame: the bytes the frontend wrote into the view since the last publish (RetroArch cheats, memory editor,
+// achievement tools) go into work RAM.
+static void apply_ram_view_writes(void) {
+    uint8_t* low = nullptr;
+    uint8_t* high = nullptr;
+    if (!work_ram(low, high)) {
+        return;
+    }
+    g_ramView.ApplyFrontendWrites(std::span<uint8_t, brimir::RamView::kHalfSize>(low, brimir::RamView::kHalfSize),
+                                  std::span<uint8_t, brimir::RamView::kHalfSize>(high, brimir::RamView::kHalfSize));
+}
 
 static void reset_frame_state(void) {
     g_lastWidth = 0;
@@ -855,6 +899,7 @@ RETRO_API void retro_reset(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (g_core) {
         g_core->Reset();
+        publish_ram_view();
     }
 }
 
@@ -982,8 +1027,17 @@ RETRO_API void retro_run(void) {
     prepare_vulkan_frame();
 #endif
 
-    // Run one frame of emulation
+    // Frontend writes to the work RAM view, then one frame of emulation, then the view shows the new work RAM. The
+    // same point every frame, hidden run-ahead frames included.
+    {
+        brimir::ScopedTimer timer(g_core->GetProfiler(), "RamView_ApplyFrontendWrites");
+        apply_ram_view_writes();
+    }
     g_core->RunFrame();
+    {
+        brimir::ScopedTimer timer(g_core->GetProfiler(), "RamView_Publish");
+        publish_ram_view();
+    }
     log_vdp1_probe();
     
     // Output video
@@ -1047,7 +1101,10 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
     if (!g_core) {
         return false;
     }
-    if (g_core->LoadState(data, size)) {
+    const bool loaded = g_core->LoadState(data, size);
+    // Also after a rejected state: the view must match work RAM whatever the load left in it.
+    publish_ram_view();
+    if (loaded) {
         return true;
     }
     if (!g_core->GetLastStateError().empty()) {
@@ -1289,17 +1346,19 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
     g_core->SetRenderer("software");
 
-    // Register memory descriptors for RetroArch's memory viewer / cheat search
-    // Use raw pointer getters to avoid triggering .srm sync side effects
-    g_memdesc[0].ptr = g_core->GetSystemRAMRawPointer();
-    g_memdesc[1].ptr = g_core->GetSRAMRawPointer();
-    g_memdesc[2].ptr = g_core->GetSystemRAMHighRawPointer();
+    // Work RAM view for achievements and RetroArch cheats / memory viewer.
+    publish_ram_view();
+    g_memdesc[0].ptr = g_ramView.Data();
+    g_memdesc[1].ptr = g_ramView.Data() + brimir::RamView::kHighOffset;
 
     static struct retro_memory_map mmap = {
         .descriptors     = g_memdesc,
         .num_descriptors = g_memdesc_count,
     };
     environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmap);
+
+    bool achievements = true;
+    environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &achievements);
 
     return true;
 }
@@ -1337,6 +1396,7 @@ RETRO_API void retro_unload_game(void) {
         brimir_log(RETRO_LOG_ERROR, "Unknown exception while unloading game");
     }
     reset_frame_state();
+    g_ramView.Clear();
 #ifdef BRIMIR_VULKAN
     // The frontend destroys the context (context_destroy) before unloading; nothing GPU-side happens here.
     g_vulkanRequested = false;
@@ -1429,7 +1489,7 @@ RETRO_API void* retro_get_memory_data(unsigned id) {
         case RETRO_MEMORY_SAVE_RAM:
             return g_core->GetSRAMData();
         case RETRO_MEMORY_SYSTEM_RAM:
-            return g_core->GetSystemRAMData();
+            return g_ramView.Data();
         default:
             return nullptr;
     }
@@ -1445,7 +1505,7 @@ RETRO_API size_t retro_get_memory_size(unsigned id) {
         case RETRO_MEMORY_SAVE_RAM:
             return g_core->GetSRAMSize();
         case RETRO_MEMORY_SYSTEM_RAM:
-            return g_core->GetSystemRAMSize();
+            return brimir::RamView::kSize;
         default:
             return 0;
     }

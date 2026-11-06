@@ -197,6 +197,36 @@ if(NOT EXISTS "${sw_state}")
     fail(software "no state saved")
 endif()
 
+# ram_view: RETRO_MEMORY_SYSTEM_RAM is the 2 MiB Beetle-compatible work RAM view (Low at 0, High at 0x100000; the
+# memory map's two descriptors point into it) and the core declares achievements. A frontend write into the view (as
+# RetroArch's cheats and memory editor do) reaches work RAM: the view is republished from work RAM after every frame,
+# so the bytes would be gone 200 frames later otherwise. The BIOS menu does not use these bytes. No Vulkan needed.
+execute_process(
+    COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 301
+            --dump-view-at 99 0x1FFF00 4 --write-view-at 100 0x1FFF00 a1b2c3d4 --write-view-at 100 0x0FFF00 0102
+            --dump-view-at 300 0x1FFF00 4 --dump-view-at 300 0x0FFF00 2
+    OUTPUT_VARIABLE ram_view_out ERROR_VARIABLE ram_view_err RESULT_VARIABLE ram_view_code)
+set(ram_view_expected
+    "RETRO_MEMORY_SYSTEM_RAM 2097152 bytes, achievements supported, memory map 2 descriptors"
+    "memory map 0: flags 0x4 start 0x00200000 len 0x100000 \\(WRAML\\) -> RETRO_MEMORY_SYSTEM_RAM \\+ 0x0[\r\n]"
+    "memory map 1: flags 0x4 start 0x06000000 len 0x100000 \\(WRAMH\\) -> RETRO_MEMORY_SYSTEM_RAM \\+ 0x100000[\r\n]")
+if(NOT ram_view_code EQUAL 0)
+    message(FATAL_ERROR "ram_view: exit ${ram_view_code}\n${ram_view_err}")
+endif()
+foreach(regex IN LISTS ram_view_expected)
+    if(NOT "${ram_view_err}" MATCHES "${regex}")
+        message(FATAL_ERROR "ram_view: expected '${regex}' in the log\n${ram_view_err}")
+    endif()
+endforeach()
+foreach(line IN ITEMS "view frame 99 offset 0x1fff00: 00 00 00 00" "view frame 300 offset 0x1fff00: a1 b2 c3 d4"
+                      "view frame 300 offset 0x0fff00: 01 02")
+    string(FIND "${ram_view_out}" "${line}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "ram_view: expected '${line}' on stdout\n${ram_view_out}")
+    endif()
+endforeach()
+message(STATUS "ram_view: 2 MiB view, memory map into it, achievements declared, frontend writes reach work RAM")
+
 run_vkhost(vulkan --vulkan --save-state-at 100 "${vk_state}")
 if(vulkan_code EQUAL 4)
     file(REMOVE_RECURSE "${state_dir}")

@@ -113,6 +113,17 @@ struct HostConfig {
     // (counting warmup frames from 0; N defaults to 1): the core repeats the frontend's image.
     int failSubmitAt = -1;
     int failSubmits = 1;
+    // The core's RETRO_MEMORY_SYSTEM_RAM (retro_get_memory_data), as RetroArch's cheats and achievements see it.
+    // --dump-view-at F OFFSET LEN: after frame F (counting warmup frames from 0), print LEN bytes from OFFSET.
+    // --write-view-at F OFFSET HEX: before frame F, write the bytes HEX at OFFSET (a frontend cheat or memory editor).
+    struct ViewAccess {
+        int frame = 0;
+        size_t offset = 0;
+        size_t length = 0;          // dump
+        std::vector<uint8_t> bytes; // write
+    };
+    std::vector<ViewAccess> viewDumps;
+    std::vector<ViewAccess> viewWrites;
 };
 
 // One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).
@@ -219,6 +230,15 @@ public:
     // retro_serialize / retro_unserialize.
     bool Serialize(std::vector<uint8_t>& state);
     bool Unserialize(const std::vector<uint8_t>& state);
+
+    // retro_get_memory_data / retro_get_memory_size (RETRO_MEMORY_*).
+    uint8_t* MemoryData(unsigned id, size_t& size) const;
+    // The descriptors of the last SET_MEMORY_MAPS, and the last SET_SUPPORT_ACHIEVEMENTS value.
+    const std::vector<retro_memory_descriptor>& MemoryMap() const { return m_memoryMap; }
+    bool AchievementsSupported() const { return m_achievements; }
+    // --dump-view-at / --write-view-at: false (a problem is recorded) if the range is outside the memory.
+    bool DumpView(int frame, size_t offset, size_t length);
+    bool WriteView(int frame, size_t offset, const std::vector<uint8_t>& bytes);
 
     // Number of video_refresh calls that delivered pixels / no new frame (NULL data) / a frame we cannot read.
     uint64_t DisplayedFrames() const { return m_displayed; }
@@ -351,6 +371,9 @@ private:
     uint64_t m_geometryCalls = 0;
     std::set<unsigned> m_unsupportedLogged;
     bool m_verbose = false;
+    std::vector<retro_memory_descriptor> m_memoryMap;
+    bool m_achievements = false;
+    bool m_memoryMapLogged = false;
 
     retro_pixel_format m_pixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
     retro_system_av_info m_avInfo{};

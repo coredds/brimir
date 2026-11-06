@@ -232,6 +232,11 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
                 host.SetOption(change.key, change.value);
             }
         }
+        for (const HostConfig::ViewAccess& write : config.viewWrites) {
+            if (write.frame == i) {
+                host.WriteView(i, write.offset, write.bytes);
+            }
+        }
         if (config.runahead) {
             runHidden();
             ++hiddenFrames;
@@ -268,6 +273,11 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
                 break;
             }
             ++roundtrips;
+        }
+        for (const HostConfig::ViewAccess& dump : config.viewDumps) {
+            if (dump.frame == i) {
+                host.DumpView(i, dump.offset, dump.length);
+            }
         }
         if (i == config.saveStateAt) {
             std::ofstream out(config.saveStatePath, std::ios::binary | std::ios::trunc);

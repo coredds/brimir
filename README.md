@@ -96,7 +96,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - Libretro API v2 with live-updatable core options
 - Compatible with RetroArch and other libretro frontends
 - XRGB8888 pixel format output
-- Memory descriptors for RetroArch cheat search / memory viewer
+- Work RAM exposed in Beetle Saturn's layout (`RETRO_MEMORY_SYSTEM_RAM` and memory map) for RetroAchievements, RetroArch cheat search and memory viewer
 - Real NTSC/PAL region reporting with dynamic AV timing updates
 - Save state versioning for forward compatibility
 - Performance profiling option (gated via core option)
