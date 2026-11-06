@@ -529,6 +529,7 @@ bool SCSP::ValidateState(const savestate::SCSPSaveState &state) const {
     return true;
 }
 
+// Brimir: save state extension (savestate_brimir.hpp)
 void SCSP::SaveBrimirState(savestate::BrimirSaveState::SCSP &ext) const {
     const_cast<SCSP *>(this)->SyncSCSPThread();
     ext.dspProgramLength = m_dsp.GetProgramLength();

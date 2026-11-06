@@ -703,7 +703,7 @@ void SoftwareVDPRenderer::UpdateEnabledLayers() {
 
 void SoftwareVDPRenderer::DumpExtraVDP1Framebuffers(std::ostream &out) const {
     const uint8 dispFB = m_state.fbIndex.display;
-    const auto drawFB = m_state.fbIndex.draw;
+    const uint8 drawFB = m_state.fbIndex.draw;
     if (m_enhancements.deinterlace) {
         out.write((const char *)m_altFBRAM[drawFB].data(), m_altFBRAM[drawFB].size());
         out.write((const char *)m_altFBRAM[dispFB].data(), m_altFBRAM[dispFB].size());

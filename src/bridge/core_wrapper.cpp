@@ -717,11 +717,7 @@ void CoreWrapper::UnloadGame() {
         try {
             // The virtual clock only catches up with emulated time when the guest reads it: bring it up to date so
             // the file holds the time emulation reached.
-            if (*m_saturn->configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual) {
-                auto state = std::make_unique<ymir::savestate::SaveState>();
-                m_saturn->SaveState(*state);
-                m_saturn->SMPC.GetRTC().UpdateSysClock(state->scheduler.currCount);
-            }
+            m_saturn->SMPC.SyncVirtualRTC();
             m_saturn->SMPC.PersistData();
         } catch (...) {
             // Non-critical, continue

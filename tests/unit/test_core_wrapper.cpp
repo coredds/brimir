@@ -946,6 +946,35 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
         REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
     }
 
+    SECTION("invalid Brimir extension") {
+        // The extension is the payload's last member, written raw.
+        const size_t ext = payload.size() - sizeof(ymir::savestate::BrimirSaveState);
+        using B = ymir::savestate::BrimirSaveState;
+        const auto patched = [&](size_t offset, const void* bytes, size_t size) {
+            std::vector<uint8_t> p = payload;
+            std::memcpy(p.data() + ext + offset, bytes, size);
+            return p;
+        };
+        const uint8_t two = 2;
+        const uint8_t zero = 0;
+        const uint32_t pastVram = 0x80000 + 0x20;
+        const uint32_t field = 2;
+        const uint8_t longProgram = 129;
+        REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, valid), &zero, 1), *decoded));
+        REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, valid), &two, 1), *decoded));
+        REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, vdp) + offsetof(B::VDP, TVMDDirty), &two, 1), *decoded));
+        REQUIRE_FALSE(
+            DecodeSaveState(patched(offsetof(B, vdp) + offsetof(B::VDP, vdp1InInfiniteLoop), &two, 1), *decoded));
+        REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, vdp) + offsetof(B::VDP, VTimingField), &field, 4), *decoded));
+        REQUIRE_FALSE(
+            DecodeSaveState(patched(offsetof(B, vdp) + offsetof(B::VDP, vdp1ReturnAddress), &pastVram, 4), *decoded));
+        REQUIRE_FALSE(
+            DecodeSaveState(patched(offsetof(B, scsp) + offsetof(B::SCSP, dspProgramLength), &longProgram, 1), *decoded));
+        // Without the extension (versions 4 and 5) the same bytes are not read.
+        REQUIRE(DecodeSaveState(std::span<const uint8_t>(payload.data(), ext), *decoded, false));
+        REQUIRE_FALSE(decoded->brimir.valid);
+    }
+
     SECTION("cartridge length word out of range") {
         // The cartridge length word follows the scheduler, system, both SH-2s, and the SCU's DMA, DSP
         // and cartridge type fields.

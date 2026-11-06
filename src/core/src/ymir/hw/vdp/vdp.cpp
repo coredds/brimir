@@ -533,11 +533,13 @@ bool VDP::ValidateState(const savestate::VDPSaveState &state) const {
     return true;
 }
 
+// Brimir: save state extension (savestate_brimir.hpp)
 void VDP::SaveBrimirState(savestate::BrimirSaveState &ext) const {
     SaveBrimirVDPState(ext.vdp);
     m_renderer->SaveBrimirState(ext.vdpRenderer); // SaveState ran PreSaveStateSync
 }
 
+// Brimir
 void VDP::SaveBrimirVDPState(savestate::BrimirSaveState::VDP &ext) const {
     ext.appliedTVMD = m_appliedTVMD;
     ext.TVMDDirty = m_state.regs2.TVMDDirty;
@@ -570,13 +572,16 @@ void VDP::LoadState(const savestate::VDPSaveState &state, const savestate::Brimi
         // Brimir: derive the timings from the TVMD they were derived from when the state was saved (a TVMD write
         // waits for the top border), then put back the register and its pending flag and the values that
         // UpdateResolution took from the field at the time.
-        // Only when they differ from the current timings: the renderers clear their output on a resolution change.
+        // Only when they differ from the current timings (the TVMD bits UpdateResolution reads, or the loaded video
+        // standard; the overclock factor is this system's setting, already applied): the renderers clear their output
+        // on a resolution change.
         const uint16 tvmd = m_state.regs2.TVMD.u16;
-        if (((ext->appliedTVMD ^ m_appliedTVMD) & 0x1F7) != 0) {
+        if (((ext->appliedTVMD ^ m_appliedTVMD) & 0x1F7) != 0 || m_appliedPAL != m_state.regs2.TVSTAT.PAL) {
             m_state.regs2.TVMD.u16 = ext->appliedTVMD & 0x81F7;
             m_state.regs2.TVMDDirty = true;
             UpdateResolution<true>();
         }
+        m_appliedTVMD = ext->appliedTVMD & 0x81F7; // the saved value, also where only DISP/BDCLMD differ
         m_state.regs2.TVMD.u16 = tvmd;
         m_state.regs2.TVMDDirty = ext->TVMDDirty;
         m_VTimingField = ext->VTimingField & 1;
@@ -640,7 +645,8 @@ void VDP::UpdateResolution() {
     }
 
     m_state.regs2.TVMDDirty = false;
-    m_appliedTVMD = m_state.regs2.TVMD.u16; // Brimir: saved in BrimirSaveState
+    m_appliedTVMD = m_state.regs2.TVMD.u16;   // Brimir: saved in BrimirSaveState
+    m_appliedPAL = m_state.regs2.TVSTAT.PAL;  // Brimir: see VDP::LoadState
 
     // Horizontal/vertical resolution tables
     // NTSC uses the first two vRes entries, PAL uses the full table, and exclusive monitors use 480 lines
@@ -1354,6 +1360,7 @@ Dimensions VDP::Probe::GetResolution() const {
     return {m_vdp.m_HRes, m_vdp.m_VRes};
 }
 
+// Brimir
 savestate::BrimirSaveState::VDP VDP::Probe::GetBrimirState() const {
     savestate::BrimirSaveState::VDP ext{};
     m_vdp.SaveBrimirVDPState(ext);

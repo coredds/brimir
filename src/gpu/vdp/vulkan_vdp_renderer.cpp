@@ -1134,6 +1134,9 @@ void VulkanVDPRenderer::PostLoadStateSync() {
 }
 
 void VulkanVDPRenderer::PreLoadState() {
+    // The inner software renderer's render threads first (VDP1 in software: they may still be drawing the frame just
+    // run), as saves forward PreSaveStateSync.
+    m_vdp1->PreLoadState();
     m_preLoadValid = 0;
     if (!m_gpuVdp1 || m_stateLoaded) {
         return; // (a LoadState without its PostLoadStateSync changed the mesh shadow)

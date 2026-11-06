@@ -81,6 +81,14 @@ public:
         return m_rtc;
     }
 
+    // Brimir: brings the virtual RTC up to the current emulated time (it otherwise advances only when the guest reads
+    // it), so the frontend persists the time emulation reached. Nothing changes in Host mode.
+    void SyncVirtualRTC() {
+        if (m_rtc.IsVirtualMode()) {
+            m_rtc.UpdateSysClock(m_scheduler.CurrentCount());
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Save states
 

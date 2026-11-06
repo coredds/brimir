@@ -263,11 +263,9 @@ public:
     void SaveBrimirState(savestate::BrimirSaveState &ext) const;
 
 private:
+    // Brimir: the VDP part of SaveBrimirState (also read by Probe::GetBrimirState)
     void SaveBrimirVDPState(savestate::BrimirSaveState::VDP &ext) const;
 
-public:
-
-private:
     VDPState m_state;
 
     core::Configuration &m_config;
@@ -395,7 +393,8 @@ private:
     std::array<std::array<uint32, 6>, 2> m_VTimings; // [even/odd][phase]
     uint32 m_VTimingField;
     uint16 m_VCounterSkip;
-    uint16 m_appliedTVMD = 0; // Brimir: TVMD the timings above were derived from (saved in BrimirSaveState)
+    uint16 m_appliedTVMD = 0;  // Brimir: TVMD the timings above were derived from (saved in BrimirSaveState)
+    bool m_appliedPAL = false; // Brimir: TVSTAT.PAL they were derived with
     uint64 m_VBlankEraseCyclesPerLine;        // cycles per line for VBlank erase
     std::array<uint64, 2> m_VBlankEraseLines; // [even/odd] lines in VBlank erase
 
@@ -441,6 +440,11 @@ private:
             spilloverCycles = 0;
 
             lastJumpAddress = 0xFFFFFFFF;
+            // Brimir: upstream left these uninitialized. VDP1BeginFrame sets them, but a state saved during a draw
+            // (drawing set; upstream states do not hold them) loaded into a fresh system read the garbage: a nonzero
+            // inInfiniteLoop stopped the VDP1 (seen on Linux). They are also saved in the Brimir extension.
+            loopCount = 0;
+            inInfiniteLoop = false;
         }
 
         // Is the VDP1 currently drawing?

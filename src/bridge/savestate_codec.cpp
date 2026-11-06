@@ -4,6 +4,8 @@
 #include <brimir/savestate_codec.hpp>
 
 #include <ymir/hw/cart/rom_cart_defs.hpp>
+#include <ymir/hw/vdp/vdp1_defs.hpp>
+#include <ymir/hw/vdp/vdp1_regs.hpp>
 
 #include <cstring>
 #include <limits>
@@ -237,6 +239,27 @@ size_t ExpectedCartDataSize(SCUSaveState::CartType type) {
     return SIZE_MAX;
 }
 
+// The extension is read as raw bytes, so its bools are checked here (any byte other than 0 or 1 is an invalid bool),
+// with the ranges the loaders rely on: a VDP1 return address is "none" or within VDP1 VRAM (a Call at the last slot returns to its end), the timing field is 0 or
+// 1, the DSP program has at most 128 steps.
+bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext) {
+    const auto byte = [](const bool &value) {
+        uint8_t raw = 0;
+        std::memcpy(&raw, &value, 1);
+        return raw;
+    };
+    if (byte(ext.valid) != 1 || byte(ext.vdp.TVMDDirty) > 1 || byte(ext.vdp.vdp1InInfiniteLoop) > 1) {
+        return false;
+    }
+    if (ext.vdp.VTimingField > 1) {
+        return false;
+    }
+    if (ext.vdp.vdp1ReturnAddress != ymir::vdp::kVDP1NoReturn && ext.vdp.vdp1ReturnAddress > ymir::vdp::kVDP1VRAMSize) {
+        return false;
+    }
+    return ext.scsp.dspProgramLength <= 128;
+}
+
 } // namespace
 
 size_t EncodedSaveStateSize(const SaveState& state) {
@@ -280,6 +303,9 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, bool wi
     }
     // SMPC reads the report from this offset on (SMPC::INTBACKPeripheral).
     if (state.smpc.intback.reportOffset > state.smpc.intback.report.size()) {
+        return false;
+    }
+    if (withBrimirExtension && !ValidBrimirExtension(state.brimir)) {
         return false;
     }
     return true;

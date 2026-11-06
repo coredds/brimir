@@ -6,11 +6,16 @@
 #include "catch_amalgamated.hpp"
 
 #include <brimir/lockstep.hpp>
+#ifdef BRIMIR_VULKAN
+#include <gpu/vdp/vulkan_vdp_renderer.hpp>
+#endif
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
 
+#include <cstring>
 #include <functional>
+#include <new>
 #include <memory>
 
 namespace {
@@ -131,9 +136,10 @@ TEST_CASE("Save state round trip keeps the interlaced field (TVSTAT.ODD)", "[sav
         REQUIRE(RunToLine(*saturn, 100));
         REQUIRE(Regs2(*saturn).TVMD.IsInterlaced());
         const uint16 odd = Regs2(*saturn).TVSTAT.ODD;
-        RoundTrip(*saturn);
+        const auto state = Save(*saturn); // before the in-place round trip, so the two checks are independent
+        CHECK(FreshWith(*state)->VDP.GetProbe().GetVDP2Regs().TVSTAT.ODD == odd);
+        REQUIRE(saturn->LoadState(*state, true));
         CHECK(Regs2(*saturn).TVSTAT.ODD == odd);
-        CHECK(FreshWith(*Save(*saturn))->VDP.GetProbe().GetVDP2Regs().TVSTAT.ODD == odd);
     }
 }
 
@@ -219,6 +225,19 @@ TEST_CASE("A fresh system keeps the VDP1 return address and infinite loop state"
     CHECK(older.vdp1ReturnAddress != 0x20);
 }
 
+TEST_CASE("The VDP1 loop detection state starts defined", "[savestate][fidelity][vdp][uninit][brimir]") {
+    // Upstream left loopCount and inInfiniteLoop uninitialized; a state saved during a draw (which upstream states hold
+    // without them) loaded into a fresh system then ran the VDP1 with whatever the memory held.
+    alignas(Saturn) static unsigned char storage[sizeof(Saturn)];
+    std::memset(storage, 0xCD, sizeof(storage));
+    auto *saturn = new (storage) Saturn();
+    const auto ext = saturn->VDP.GetProbe().GetBrimirState();
+    CHECK(ext.vdp1LoopCount == 0);
+    CHECK_FALSE(ext.vdp1InInfiniteLoop);
+    CHECK(ext.vdp1LastJumpAddress == 0xFFFFFFFF);
+    saturn->~Saturn();
+}
+
 TEST_CASE("Save state keeps the SCSP DSP program length", "[savestate][fidelity][scsp][brimir]") {
     // The DSP runs m_programLength steps per sample; MPRO writes maintain it incrementally (a NOP written below the
     // end does not shrink it), so it cannot be derived from the program. Upstream re-derived it on load.
@@ -292,6 +311,36 @@ TEST_CASE("Loading a state waits for the threaded VDP1's queued draws", "[savest
         CHECK(brimir::DiffSaveStates(*state, *Save(*x)).empty());
     }
 }
+
+#ifdef BRIMIR_VULKAN
+TEST_CASE("Loading a state waits for the threaded VDP1 under the Vulkan renderer with VDP1 in software",
+          "[savestate][fidelity][vdp][vdp1][threaded][brimir]") {
+    // The Vulkan renderer without VDP1 on the GPU (no device here, as in its software fallback) draws VDP1 with its
+    // inner software renderer, threaded; its PreLoadState must drain that renderer's threads too.
+    auto x = std::make_unique<Saturn>();
+    brimir::gpu::VulkanVDPRenderer *vk = nullptr;
+    REQUIRE(x->VDP.UseExternalRenderer([&](vdp::VDPState &state, vdp::config::VDP2DebugRender &debug,
+                                           const vdp::config::VDP2AccessPatternsConfig &access) {
+        auto renderer = std::make_unique<brimir::gpu::VulkanVDPRenderer>(state, debug, access);
+        vk = renderer.get();
+        return renderer;
+    }) != nullptr);
+    vk->EnableThreadedVDP1(true);
+    WriteHeavyVDP1Table(*x, 40);
+    const auto state = Save(*x);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        CAPTURE(attempt);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (uint32 cmd = 0; cmd < 42; ++cmd) {
+                const vdp::VDP1Command::Control control{.u16 = x->mainBus.Peek<uint16>(kVDP1VRAM + cmd * 0x20)};
+                vk->VDP1ExecuteCommand(cmd * 0x20, control);
+            }
+        }
+        REQUIRE(x->LoadState(*state, true));
+        CHECK(brimir::DiffSaveStates(*state, *Save(*x)).empty());
+    }
+}
+#endif
 
 TEST_CASE("A fresh system keeps the other field's VDP1 framebuffer", "[savestate][fidelity][vdp][vdp1][brimir]") {
     // With deinterlacing, the software renderer keeps the other field of double-density interlace in altFBRAM; the
