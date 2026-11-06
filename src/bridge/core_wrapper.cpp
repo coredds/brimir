@@ -327,24 +327,22 @@ bool CoreWrapper::Initialize() {
         auto audioCallback = util::MakeClassMemberOptionalCallback<&CoreWrapper::OnAudioSample>(this);
         m_saturn->SCSP.SetSampleCallback(audioCallback);
         
-        // Connect controllers to peripheral ports with input callbacks
-        m_controller1 = m_saturn->SMPC.GetPeripheralPort1().ConnectControlPad();
-        m_controller2 = m_saturn->SMPC.GetPeripheralPort2().ConnectControlPad();
-        
-        // Set up peripheral report callbacks for input injection
+        // Peripheral report callbacks for input injection (the ports keep them for every peripheral connected later),
+        // then the chosen peripherals (the Control Pad unless SetPeripheral chose another)
         auto callback1 = util::MakeClassMemberOptionalCallback<&CoreWrapper::OnPeripheralReport1>(this);
         m_saturn->SMPC.GetPeripheralPort1().SetPeripheralReportCallback(callback1);
         
         auto callback2 = util::MakeClassMemberOptionalCallback<&CoreWrapper::OnPeripheralReport2>(this);
         m_saturn->SMPC.GetPeripheralPort2().SetPeripheralReportCallback(callback2);
+
+        ConnectPeripheral(0);
+        ConnectPeripheral(1);
         
         m_initialized = true;
         return true;
     } catch (const std::exception&) {
         // Failed to create Saturn instance
         m_saturn.reset();
-        m_controller1 = nullptr;
-        m_controller2 = nullptr;
         return false;
     }
 }
@@ -1421,6 +1419,14 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         auto& state = Scratch(m_stateScratch);
         ResetSaveState(state);
         m_saturn->SaveState(state);
+        // The ports' input state across frames (version 9; the peripherals' own state is saved by the core)
+        for (size_t i = 0; i < m_portInput.size(); ++i) {
+            auto& port = state.brimir.peripherals.ports[i];
+            port.prevButtons = m_portInput[i].prevButtons;
+            port.analogMode = m_portInput[i].analogMode;
+            port.throttleLatched = m_portInput[i].throttleLatched;
+            port.throttle = m_portInput[i].throttle;
+        }
         // The cartridge image of the state format (savestate_codec.hpp, version 8): SCU::SaveState holds no backup
         // memory, which games write while running (run-ahead and netplay need it), and the ROM is the inserted dump.
         if (auto* bup = m_saturn->GetCartridge().As<ymir::cart::CartType::BackupMemory>()) {
@@ -1568,6 +1574,17 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             }
             if (!m_saturn->LoadState(state, true)) {
                 return false;
+            }
+            if (state.brimir.valid && state.brimir.peripherals.valid) {
+                // A port whose peripheral changed since the state was saved keeps its own input state, as the
+                // peripheral keeps its own (SMPC::LoadBrimirState).
+                for (unsigned i = 0; i < 2; ++i) {
+                    const auto& port = state.brimir.peripherals.ports[i];
+                    const auto& smpcPort = i == 0 ? m_saturn->SMPC.GetPeripheralPort1() : m_saturn->SMPC.GetPeripheralPort2();
+                    if (port.type == static_cast<uint8_t>(smpcPort.GetPeripheral().GetType())) {
+                        m_portInput[i] = {port.prevButtons, port.analogMode, port.throttleLatched, port.throttle};
+                    }
+                }
             }
             if (bupCart != nullptr && !state.scu.cartData.empty()) {
                 // SCU::LoadState keeps the inserted backup cartridge; its data as saved, like the internal backup RAM
@@ -1805,110 +1822,107 @@ void CoreWrapper::OnAudioSample(int16_t left, int16_t right) {
 }
 
 void CoreWrapper::SetControllerState(unsigned int port, uint16_t buttons) {
-    if (!m_initialized || !m_saturn) {
+    InputSnapshot input;
+    input.joypad = buttons;
+    SetPeripheralInput(port, input);
+}
+
+void CoreWrapper::SetPeripheral(unsigned port, PeripheralKind kind) {
+    if (port > 1 || m_portKind[port] == kind) {
         return;
     }
-
-    // Store button state for the specified port
-    // The peripheral callback will read these when the emulator needs input
-    if (port == 0) {
-        m_port1Buttons = buttons;
-    } else if (port == 1) {
-        m_port2Buttons = buttons;
+    m_portKind[port] = kind;
+    if (m_saturn) {
+        ConnectPeripheral(port);
     }
 }
 
+PeripheralKind CoreWrapper::GetPeripheral(unsigned port) const {
+    return m_portKind[port & 1];
+}
 
+void CoreWrapper::ConnectPeripheral(unsigned port) {
+    auto& smpcPort = port == 0 ? m_saturn->SMPC.GetPeripheralPort1() : m_saturn->SMPC.GetPeripheralPort2();
+    switch (m_portKind[port]) {
+    case PeripheralKind::None: smpcPort.DisconnectPeripherals(); break;
+    case PeripheralKind::ControlPad: smpcPort.ConnectControlPad(); break;
+    case PeripheralKind::AnalogPad: smpcPort.ConnectAnalogPad(); break;
+    case PeripheralKind::ArcadeRacer: smpcPort.ConnectArcadeRacer(); break;
+    case PeripheralKind::MissionStick: smpcPort.ConnectMissionStick(); break;
+    case PeripheralKind::ShuttleMouse: smpcPort.ConnectShuttleMouse(); break;
+    case PeripheralKind::VirtuaGun: smpcPort.ConnectVirtuaGun(); break;
+    }
+    m_portInput[port] = PortInputState{};
+    m_portReport[port] = MapPortReport(port, InputSnapshot{});
+}
+
+GunScreen CoreWrapper::GetGunScreen() const {
+    GunScreen screen;
+    if (m_saturn) {
+        const auto resolution = m_saturn->VDP.GetProbe().GetResolution();
+        screen.width = resolution.width;
+        screen.height = resolution.height;
+    }
+    screen.cropH = static_cast<uint32_t>(m_overscanCropH);
+    screen.cropV = static_cast<uint32_t>(m_overscanCropV);
+    screen.rotation = static_cast<uint32_t>(m_rotation);
+    return screen;
+}
+
+ymir::peripheral::PeripheralReport CoreWrapper::MapPortReport(unsigned port, const InputSnapshot& input) const {
+    using ymir::peripheral::PeripheralType;
+    ymir::peripheral::PeripheralReport report{};
+    const PortInputState& state = m_portInput[port];
+    switch (m_portKind[port]) {
+    case PeripheralKind::None: report.type = PeripheralType::None; break;
+    case PeripheralKind::ControlPad:
+        report.type = PeripheralType::ControlPad;
+        report.report.controlPad = MapControlPad(input);
+        break;
+    case PeripheralKind::AnalogPad:
+        report.type = PeripheralType::AnalogPad;
+        report.report.analogPad = MapAnalogPad(input, state);
+        break;
+    case PeripheralKind::ArcadeRacer:
+        report.type = PeripheralType::ArcadeRacer;
+        report.report.arcadeRacer = MapArcadeRacer(input);
+        break;
+    case PeripheralKind::MissionStick:
+        report.type = PeripheralType::MissionStick;
+        report.report.missionStick = MapMissionStick(input, state);
+        break;
+    case PeripheralKind::ShuttleMouse:
+        report.type = PeripheralType::ShuttleMouse;
+        report.report.shuttleMouse = MapShuttleMouse(input);
+        break;
+    case PeripheralKind::VirtuaGun:
+        report.type = PeripheralType::VirtuaGun;
+        report.report.virtuaGun = MapVirtuaGun(input, GetGunScreen());
+        break;
+    }
+    return report;
+}
+
+void CoreWrapper::SetPeripheralInput(unsigned port, const InputSnapshot& input) {
+    if (!m_initialized || !m_saturn || port > 1) {
+        return;
+    }
+    AdvancePortInput(m_portKind[port], input, m_portInput[port]);
+    m_portReport[port] = MapPortReport(port, input);
+}
+
+// The peripheral asks for its report whenever the game reads it (INTBACK or a port register access); it gets this
+// frame's mapped report when it is the peripheral the report was mapped for.
 void CoreWrapper::OnPeripheralReport1(ymir::peripheral::PeripheralReport& report) {
-    if (report.type == ymir::peripheral::PeripheralType::ControlPad) {
-        // Convert libretro button mask to Saturn button states
-        report.report.controlPad.buttons = ConvertLibretroButtons(m_port1Buttons);
+    if (report.type == m_portReport[0].type) {
+        report.report = m_portReport[0].report;
     }
 }
 
 void CoreWrapper::OnPeripheralReport2(ymir::peripheral::PeripheralReport& report) {
-    if (report.type == ymir::peripheral::PeripheralType::ControlPad) {
-        // Convert libretro button mask to Saturn button states
-        report.report.controlPad.buttons = ConvertLibretroButtons(m_port2Buttons);
+    if (report.type == m_portReport[1].type) {
+        report.report = m_portReport[1].report;
     }
-}
-
-ymir::peripheral::Button CoreWrapper::ConvertLibretroButtons(uint16_t retroButtons) {
-    // libretro button indices (standard mapping)
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_B = 0;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_Y = 1;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_SELECT = 2;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_START = 3;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_UP = 4;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_DOWN = 5;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_LEFT = 6;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_RIGHT = 7;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_A = 8;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_X = 9;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_L = 10;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_R = 11;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_L2 = 12;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_R2 = 13;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_L3 = 14;
-    constexpr uint16_t RETRO_DEVICE_ID_JOYPAD_R3 = 15;
-    
-    // Start with all buttons released (1 = released in Saturn)
-    ymir::peripheral::Button saturnButtons = ymir::peripheral::Button::Default;
-    
-    // Map libretro buttons to Saturn buttons (0 = pressed in Saturn)
-    // Note: libretro uses bit mask (1 = pressed), Saturn uses inverted (0 = pressed)
-    
-    // D-pad
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_UP)) {
-        saturnButtons &= ~ymir::peripheral::Button::Up;
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_DOWN)) {
-        saturnButtons &= ~ymir::peripheral::Button::Down;
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_LEFT)) {
-        saturnButtons &= ~ymir::peripheral::Button::Left;
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT)) {
-        saturnButtons &= ~ymir::peripheral::Button::Right;
-    }
-    
-    // Face buttons (map to Saturn's 6-button layout)
-    // Saturn: A B C X Y Z
-    // Libretro: B A Y X (SNES layout)
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_B)) {
-        saturnButtons &= ~ymir::peripheral::Button::A;  // B -> A
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_A)) {
-        saturnButtons &= ~ymir::peripheral::Button::B;  // A -> B
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_Y)) {
-        saturnButtons &= ~ymir::peripheral::Button::C;  // Y -> C
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_X)) {
-        saturnButtons &= ~ymir::peripheral::Button::X;  // X -> X
-    }
-    // L2/R2 for Y/Z
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_L2)) {
-        saturnButtons &= ~ymir::peripheral::Button::Y;  // L2 -> Y
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_R2)) {
-        saturnButtons &= ~ymir::peripheral::Button::Z;  // R2 -> Z
-    }
-    
-    // Shoulder buttons
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_L)) {
-        saturnButtons &= ~ymir::peripheral::Button::L;
-    }
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_R)) {
-        saturnButtons &= ~ymir::peripheral::Button::R;
-    }
-    
-    // Start button
-    if (retroButtons & (1 << RETRO_DEVICE_ID_JOYPAD_START)) {
-        saturnButtons &= ~ymir::peripheral::Button::Start;
-    }
-    
-    return saturnButtons;
 }
 
 void CoreWrapper::SetAudioInterpolation(const char* mode) {

@@ -28,6 +28,11 @@ static struct retro_core_option_v2_category option_cats[] = {
         "Media Settings",
         "Configure CD-ROM and disc loading"
     },
+    {
+        "input",
+        "Input Settings",
+        "Configure controllers and the light gun"
+    },
     { nullptr, nullptr, nullptr }
 };
 
@@ -401,6 +406,24 @@ static struct retro_core_option_v2_definition option_defs[] = {
             { nullptr, nullptr }
         },
         "auto"
+    },
+    {
+        // Live: the next shown frame (libretro.cpp, update_crosshairs).
+        "brimir_gun_crosshair",
+        "Gun Crosshair",
+        nullptr,
+        "The crosshair shown where a Virtua Gun aims (red for port 1, blue for port 2). Drawn on the shown frame "
+        "only: the game does not see it. Off hides it (with a real light gun, or for games that draw their own). "
+        "Applies immediately.",
+        nullptr,
+        "input",
+        {
+            { "cross", "Cross" },
+            { "dot", "Dot" },
+            { "off", "Off" },
+            { nullptr, nullptr }
+        },
+        "cross"
     },
     {
         "brimir_profiling",

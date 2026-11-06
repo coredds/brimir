@@ -319,6 +319,42 @@ endforeach()
 message(STATUS "cheats_rollback_deterministic: 300 frames with 6 cheats, --rollback emulates exactly the plain run "
                "(frames and 5 states)")
 
+# peripherals_rollback_deterministic: every peripheral type on the two ports with scripted input (--input-pattern:
+# buttons, sticks, triggers, mouse movement, light gun), --rollback emulates exactly the plain run: the states after
+# every 5th frame match in every section (the input changes between frames, so shown frames may be mispredicted, as
+# in RetroArch; the states are what run-ahead and netplay rely on).
+foreach(devices IN ITEMS "3dpad;mouse" "wheel;gun" "missionstick;pad")
+    list(GET devices 0 dev0)
+    list(GET devices 1 dev1)
+    foreach(mode IN ITEMS plain rollback)
+        set(extra "")
+        if(mode STREQUAL "rollback")
+            set(extra --rollback)
+        endif()
+        execute_process(
+            COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 200 --device 0 ${dev0} --device 1 ${dev1}
+                    --input-pattern 7 --save-state-every 5 "${state_dir}/peripherals_${dev0}_${mode}" ${extra}
+            OUTPUT_VARIABLE prb_out ERROR_VARIABLE prb_err RESULT_VARIABLE prb_code)
+        if(NOT prb_code EQUAL 0)
+            message(FATAL_ERROR "peripherals_rollback_deterministic (${dev0}+${dev1}, ${mode}): exit ${prb_code}\n${prb_err}")
+        endif()
+    endforeach()
+    foreach(k RANGE 4 199 5)
+        string(LENGTH "0000${k}" padded_length)
+        math(EXPR start "${padded_length} - 5")
+        string(SUBSTRING "0000${k}" ${start} 5 padded)
+        execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/peripherals_${dev0}_plain/state_${padded}.bin"
+                                "${state_dir}/peripherals_${dev0}_rollback/state_${padded}.bin"
+            OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+        if(NOT sd_code EQUAL 0)
+            message(FATAL_ERROR "peripherals_rollback_deterministic (${dev0}+${dev1}): the states after frame ${k} "
+                                "differ (exit ${sd_code}):\n${sd_out}${sd_err}")
+        endif()
+    endforeach()
+endforeach()
+message(STATUS "peripherals_rollback_deterministic: 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse, Virtua "
+               "Gun and Control Pad with scripted input, --rollback emulates exactly the plain run (40 states each)")
+
 run_vkhost(vulkan --vulkan --save-state-at 100 "${vk_state}")
 if(vulkan_code EQUAL 4)
     file(REMOVE_RECURSE "${state_dir}")

@@ -30,6 +30,10 @@ public:
 
     void SetAnalogMode(bool mode);
 
+    // Brimir: save states
+    void SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const override;
+    void LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) override;
+
 private:
     bool m_analogMode = false;
 

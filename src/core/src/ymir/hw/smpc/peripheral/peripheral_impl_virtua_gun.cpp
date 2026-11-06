@@ -55,4 +55,13 @@ bool VirtuaGun::GetExternalLatchCoordinates(uint16 &x, uint16 &y) {
     return true;
 }
 
+// Brimir: save states
+void VirtuaGun::SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const {
+    state.gunReload = m_reload;
+}
+
+void VirtuaGun::LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) {
+    m_reload = state.gunReload;
+}
+
 } // namespace ymir::peripheral

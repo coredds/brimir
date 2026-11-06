@@ -11,9 +11,12 @@
 
 #include "libretro.h"
 
+#include <brimir/peripheral_input.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 
 namespace brimir::gpu {
@@ -156,6 +159,11 @@ public:
     // frame to record, after the same waits (ApplyInternalScale): the output images keep their size and the composite
     // stays valid (the woven field too); the frame shows the sprites as drawn under the new setting.
     void SetVdp1Upscaling(bool enabled);
+
+    // Light gun crosshairs (brimir/peripheral_input.hpp) drawn on the frames handed over from now on, in every mode:
+    // after the frame output pass, a few buffer-to-image copies of solid colour into the output image (never into the
+    // emulated frame or the composite). At most two; an empty span draws none.
+    void SetCrosshairs(std::span<const brimir::Crosshair> crosshairs);
 
 private:
     struct Impl;

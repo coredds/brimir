@@ -237,7 +237,7 @@ std::vector<std::string> BuildArgs(const std::vector<std::string>& in, bool vulk
             i += 2;
             continue;
         }
-        if (arg == kSetOptionAt && i + 2 < in.size()) {
+        if ((arg == kSetOptionAt || arg == "--device") && i + 2 < in.size()) {
             out.insert(out.end(), {arg, in[i + 1], in[i + 2]});
             i += 2;
             continue;

@@ -5,6 +5,8 @@
 
 #include <ymir/core/types.hpp>
 
+#include <ymir/savestate/savestate_brimir.hpp> // Brimir
+
 #include <ymir/util/inline.hpp>
 
 #include <span>
@@ -83,6 +85,11 @@ public:
     virtual bool GetExternalLatchCoordinates(uint16 &x, uint16 &y) {
         return false;
     }
+
+    // Brimir: the state kept between reads, for save states (savestate_brimir.hpp). The report itself is not part of
+    // it: UpdateInputs runs before every read. LoadBrimirState gets a state saved from a peripheral of this type.
+    virtual void SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const {}
+    virtual void LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) {}
 
 private:
     const PeripheralType m_type;

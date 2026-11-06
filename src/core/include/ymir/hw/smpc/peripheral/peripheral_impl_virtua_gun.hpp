@@ -21,6 +21,10 @@ public:
 
     bool GetExternalLatchCoordinates(uint16 &x, uint16 &y) override;
 
+    // Brimir: save states
+    void SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const override;
+    void LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) override;
+
 private:
     VirtuaGunReport m_report;
     bool m_reload = false;

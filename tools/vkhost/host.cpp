@@ -42,6 +42,57 @@ constexpr unsigned kEnv(unsigned cmd) {
 // Libretro callbacks carry no user data: one set of thunks per instance slot.
 constexpr int kMaxHosts = 2;
 LibretroHost* g_hosts[kMaxHosts] = {};
+
+// --input-pattern: the seed (0: no input) and the frame whose input the instances read.
+uint32_t g_inputSeed = 0;
+int g_inputFrame = 0;
+
+uint64_t SplitMix(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+// Scripted input: held for 6 frames at a time (mouse movement changes every frame), so games see presses, holds and
+// releases. A function of its arguments only.
+int16_t ScriptedInput(unsigned port, unsigned device, unsigned index, unsigned id) {
+    const uint64_t period = static_cast<uint64_t>(g_inputFrame / 6);
+    const auto draw = [&](uint64_t salt, uint64_t time, unsigned which) {
+        return SplitMix(SplitMix(SplitMix(g_inputSeed ^ (time << 20)) ^ (uint64_t{port} << 8) ^ (uint64_t{device} << 16) ^
+                                 (uint64_t{index} << 24) ^ (uint64_t{which} << 32)) ^
+                        salt);
+    };
+    switch (device & RETRO_DEVICE_MASK) {
+    case RETRO_DEVICE_JOYPAD: {
+        // About one button in four pressed (two draws ANDed); one mask for the bitmask and the per-button queries
+        const uint64_t mask = draw(1, period, 0) & draw(2, period, 0) & 0xFFFF;
+        if (id == RETRO_DEVICE_ID_JOYPAD_MASK) {
+            return static_cast<int16_t>(mask);
+        }
+        return static_cast<int16_t>((mask >> id) & 1);
+    }
+    case RETRO_DEVICE_ANALOG:
+        if (index == RETRO_DEVICE_INDEX_ANALOG_BUTTON) {
+            return static_cast<int16_t>(draw(3, period, id) & 0x7FFF);
+        }
+        return static_cast<int16_t>(draw(3, period, id) & 0xFFFF);
+    case RETRO_DEVICE_MOUSE:
+        if (id == RETRO_DEVICE_ID_MOUSE_X || id == RETRO_DEVICE_ID_MOUSE_Y) {
+            return static_cast<int16_t>(static_cast<int>(draw(4, static_cast<uint64_t>(g_inputFrame), id) % 41) - 20);
+        }
+        return static_cast<int16_t>(draw(5, period, id) % 3 == 0);
+    case RETRO_DEVICE_LIGHTGUN:
+        if (id == RETRO_DEVICE_ID_LIGHTGUN_SCREEN_X || id == RETRO_DEVICE_ID_LIGHTGUN_SCREEN_Y) {
+            return static_cast<int16_t>(static_cast<int32_t>(draw(6, period, id) % 0xFFFF) - 0x7FFF);
+        }
+        if (id == RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN) {
+            return static_cast<int16_t>(draw(7, period, id) % 8 == 0);
+        }
+        return static_cast<int16_t>(draw(8, period, id) % 3 == 0);
+    default: return 0;
+    }
+}
 bool g_verbose = false;
 
 // Shared library handle, loaded the way a frontend does.
@@ -155,6 +206,7 @@ struct LibretroHost::Api {
     size_t (*get_memory_size)(unsigned) = nullptr;
     void (*cheat_reset)() = nullptr;
     void (*cheat_set)(unsigned, bool, const char*) = nullptr;
+    void (*set_controller_port_device)(unsigned, unsigned) = nullptr;
 };
 
 LibretroHost::LibretroHost() = default;
@@ -284,6 +336,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     resolve(api->get_memory_size, "retro_get_memory_size");
     resolve(api->cheat_reset, "retro_cheat_reset");
     resolve(api->cheat_set, "retro_cheat_set");
+    resolve(api->set_controller_port_device, "retro_set_controller_port_device");
     if (missing) {
         return false;
     }
@@ -343,6 +396,12 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     if (m_hwAccepted && !StartContext()) {
         return false;
     }
+    // RetroArch sets the ports' device types once the content is loaded.
+    for (const auto& [port, device] : config.devices) {
+        m_api->set_controller_port_device(port, device);
+        std::fprintf(stderr, "vkhost: port %u device %u\n", port, device);
+    }
+    g_inputSeed = config.inputPattern;
     // RetroArch applies the cheats after the content (and the video driver) is up: a reset, then every cheat.
     if (!config.cheats.empty()) {
         m_api->cheat_reset();
@@ -789,8 +848,12 @@ size_t RETRO_CALLCONV LibretroHost::AudioBatchThunk(const int16_t*, size_t frame
 
 void RETRO_CALLCONV LibretroHost::InputPollThunk() {}
 
-int16_t RETRO_CALLCONV LibretroHost::InputStateThunk(unsigned, unsigned, unsigned, unsigned) {
-    return 0;
+int16_t RETRO_CALLCONV LibretroHost::InputStateThunk(unsigned port, unsigned device, unsigned index, unsigned id) {
+    return g_inputSeed != 0 ? ScriptedInput(port, device, index, id) : 0;
+}
+
+void LibretroHost::SetInputFrame(int frame) {
+    g_inputFrame = frame;
 }
 
 void LibretroHost::LogUnsupportedOnce(unsigned cmd) {

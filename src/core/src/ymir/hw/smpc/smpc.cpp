@@ -197,6 +197,32 @@ void SMPC::SaveState(savestate::SMPCSaveState &state) const {
     m_rtc.SaveState(state);
 }
 
+// Brimir: see savestate_brimir.hpp
+void SMPC::SaveBrimirState(savestate::BrimirSaveState &ext) const {
+    const auto save = [](const peripheral::PeripheralPort &port, savestate::BrimirSaveState::Peripherals::Port &out) {
+        const peripheral::BasePeripheral &peripheral = port.GetPeripheral();
+        out.type = static_cast<uint8>(peripheral.GetType());
+        peripheral.SaveBrimirState(out);
+    };
+    save(m_port1, ext.peripherals.ports[0]);
+    save(m_port2, ext.peripherals.ports[1]);
+    ext.peripherals.valid = true;
+}
+
+void SMPC::LoadBrimirState(const savestate::BrimirSaveState &ext) {
+    if (!ext.peripherals.valid) {
+        return;
+    }
+    const auto load = [](peripheral::PeripheralPort &port, const savestate::BrimirSaveState::Peripherals::Port &in) {
+        peripheral::BasePeripheral &peripheral = port.GetPeripheral();
+        if (in.type == static_cast<uint8>(peripheral.GetType())) {
+            peripheral.LoadBrimirState(in);
+        }
+    };
+    load(m_port1, ext.peripherals.ports[0]);
+    load(m_port2, ext.peripherals.ports[1]);
+}
+
 bool SMPC::ValidateState(const savestate::SMPCSaveState &state) const {
     if (!m_rtc.ValidateState(state)) {
         return false;

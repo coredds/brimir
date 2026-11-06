@@ -4,6 +4,7 @@ add_library(brimir_bridge OBJECT
     cheat_engine.cpp
     core_wrapper.cpp
     lockstep.cpp
+    peripheral_input.cpp
     ram_view.cpp
     savestate_codec.cpp
 )

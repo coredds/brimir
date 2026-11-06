@@ -163,4 +163,17 @@ void MissionStick::SetSixAxisMode(bool mode) {
     m_sixAxisMode = mode;
 }
 
+// Brimir: save states
+void MissionStick::SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const {
+    state.mode = m_sixAxisMode;
+    state.reportPos = m_reportPos;
+    state.tl = m_tl;
+}
+
+void MissionStick::LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) {
+    SetSixAxisMode(state.mode);
+    m_reportPos = state.reportPos % (m_sixAxisMode ? 22 : 14);
+    m_tl = state.tl;
+}
+
 } // namespace ymir::peripheral

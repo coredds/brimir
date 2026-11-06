@@ -307,6 +307,8 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--write-view-at F OFFSET HEX` | before frame F write the bytes HEX (`ab01...`) into `RETRO_MEMORY_SYSTEM_RAM` at OFFSET, as a frontend's cheat or memory editor does (repeatable). The core applies them to work RAM before the frame; `--dump-view-at` after a later frame shows whether they stuck (vkhost check `ram_view`) |
 | `--dump-ram-at F ADDR LEN` | after frame F print LEN bytes of work RAM from the Saturn address ADDR (`0x00200000`-`0x002FFFFF` or `0x06000000`-`0x060FFFFF`) in the Saturn's byte order, as `ram frame F 0xADDR: xx xx ...` (repeatable). Read through `RETRO_MEMORY_SYSTEM_RAM` with the view's 16-bit byte swap undone, so `--dump-ram-at 900 0x0601DBA4 2` shows the word a cheat `1601dba40900` writes as `09 00` |
 | `--cheat CODE` | after loading the content, `retro_cheat_reset` and then `retro_cheat_set(i, true, CODE)` for the i-th `--cheat`, as RetroArch applies a `.cht` file (repeatable): Action Replay codes such as `1601dba40900` or `D6033C60+270F+16033C60+0001` (vkhost checks `cheat_pins_ram`, `cheats_rollback_deterministic`) |
+| `--device PORT KIND` | test only: after loading the content, `retro_set_controller_port_device(PORT, ...)` with KIND's device type, as RetroArch sets the ports' device types (repeatable): PORT 0 or 1, KIND `pad`, `3dpad`, `wheel`, `missionstick`, `mouse`, `gun` or `none` |
+| `--input-pattern SEED` | test only: scripted input on every port for every device type (RetroPad buttons, sticks, analog triggers, mouse movement and buttons, light gun position, off-screen, trigger, reload, start), a function of SEED and the frame index only: held 6 frames at a time, mouse movement every frame. The hidden and shown frames of an iteration (`--rollback`, `--runahead`) read the input of the plain run's frame with that index, as in RetroArch. Without it every input reads 0 (vkhost check `peripherals_rollback_deterministic`) |
 | `--hash-sample N` | with `--hash`: hash the sample points instead of the frame (below). With `--compare` the software run gets `--hash-sample 1` |
 | `--sharpness N` | print, per recorded frame and as a summary, how much the N x frame differs from a nearest upscale (below) |
 | `--region x,y,w,h` | with `--sharpness`: only these native output pixels (after crop and rotation; clamped to the frame) |
@@ -395,7 +397,7 @@ write is still in the view 200 frames later (the view is republished from work R
 RAM), `cheat_pins_ram` (`--cheat` codes on bytes the BIOS menu does not use: a 16-bit and an 8-bit write, a true and
 a false conditional, Low RAM, a master code, read back with `--dump-ram-at`; a pinned BIOS countdown differs from the
 run without cheats) and `cheats_rollback_deterministic` (the same cheats, `--rollback` against a plain run over 300
-frames, frames one apart and every 60th state identical). It is skipped without the BIOS or a Vulkan device
+frames, frames one apart and every 60th state identical) and `peripherals_rollback_deterministic` (every peripheral type on the two ports with `--input-pattern`, `--rollback` against a plain run over 200 frames, every 5th state identical). It is skipped without the BIOS or a Vulkan device
 (`BRIMIR_REQUIRE_VULKAN=1` fails instead; `BRIMIR_VKHOST_ALLOW_NO_VALIDATION=1` only warns without the layer).
 A `video_refresh(NULL)` (dupe) is recorded as a repeat of the last frame.
 

@@ -37,6 +37,8 @@ add_executable(brimir_tests
     unit/test_ram_view.cpp
     # Action Replay cheats (retro_cheat_set); [.cheat-db] sweeps RetroArch's Saturn .cht files in $BRIMIR_CHT_DIR
     unit/test_cheat_engine.cpp
+    # Controller peripherals: libretro input mappings, device changes, peripheral state in save states
+    unit/test_peripheral_input.cpp
     # Audio ring buffer tests
     unit/test_audio_ring_buffer.cpp
     # Media loader tests (CUE/CCD compressed audio, sparse tracks, sector alignment)

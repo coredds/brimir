@@ -396,6 +396,7 @@ void Saturn::SaveState(savestate::SaveState &state) const {
     // Brimir: state upstream omits or restores inexactly (savestate_brimir.hpp)
     VDP.SaveBrimirState(state.brimir);
     SCSP.SaveBrimirState(state.brimir);
+    SMPC.SaveBrimirState(state.brimir);
     {
         // The internal backup RAM's data bytes (ReadAll is const; the accessor is not)
         auto &bup = const_cast<sys::SystemMemory &>(mem).GetInternalBackupRAM();
@@ -472,6 +473,9 @@ bool Saturn::LoadState(const savestate::SaveState &state, bool skipROMChecks) {
     slaveSH2.LoadState(state.ssh2);
     SCU.LoadState(state.scu);
     SMPC.LoadState(state.smpc);
+    if (state.brimir.valid) {
+        SMPC.LoadBrimirState(state.brimir); // Brimir
+    }
     // Brimir: with the extension of states saved by this version (savestate_brimir.hpp)
     VDP.LoadState(state.vdp, state.brimir.valid ? &state.brimir : nullptr);
     SCSP.LoadState(state.scsp, state.brimir.valid ? &state.brimir : nullptr);

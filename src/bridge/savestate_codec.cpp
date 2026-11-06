@@ -4,6 +4,7 @@
 #include <brimir/savestate_codec.hpp>
 
 #include <ymir/hw/cart/rom_cart_defs.hpp>
+#include <ymir/hw/smpc/peripheral/peripheral_defs.hpp>
 #include <ymir/hw/vdp/vdp1_defs.hpp>
 #include <ymir/hw/vdp/vdp1_regs.hpp>
 
@@ -27,7 +28,7 @@ using ymir::savestate::SMPCSaveState;
 // CoreWrapper::kSaveStateVersion.
 static_assert(sizeof(void*) != 8 || sizeof(SCUSaveState) == 2496, "SCUSaveState changed: update the serializer");
 static_assert(sizeof(void*) != 8 || sizeof(SMPCSaveState) == 144, "SMPCSaveState changed: update the serializer");
-static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819376,
+static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819392,
               "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
 
 // Counts bytes (out == nullptr) or writes them.
@@ -206,8 +207,9 @@ void VisitSMPC(Archive& ar, State& smpc) {
     ar.Raw(rtcSysClockCount);
 }
 
-// version: payloads from version 6 on end with the Brimir extension (savestate_brimir.hpp); earlier ones lack it, and
-// version 6 has only its first kBrimirSaveStateV6Size bytes (no scspSlots; read with Reader::RawPrefix).
+// version: payloads from version 6 on end with the Brimir extension (savestate_brimir.hpp); earlier ones lack it,
+// version 6 has only its first kBrimirSaveStateV6Size bytes (no scspSlots; read with Reader::RawPrefix), and versions
+// 7 and 8 only the first kBrimirSaveStateV8Size bytes (no peripherals).
 template <typename Archive, typename State>
 void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     auto& [scheduler, system, msh2, ssh2, scu, smpc, vdp, scsp, cdblockLLE, cdblock, sh1, ygr, cddrive, cdblockDRAM,
@@ -231,8 +233,12 @@ void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     ar.Raw(ssh2SpilloverCycles);
     ar.Raw(sh1SpilloverCycles);
     ar.Raw(sh1FracCycles);
-    if (version >= 7) {
+    if (version >= 9) {
         ar.Raw(brimir);
+    } else if (version >= 7) {
+        if constexpr (std::is_same_v<Archive, Reader>) {
+            ar.RawPrefix(brimir, ymir::savestate::kBrimirSaveStateV8Size);
+        }
     } else if (version == 6) {
         if constexpr (std::is_same_v<Archive, Reader>) {
             ar.RawPrefix(brimir, ymir::savestate::kBrimirSaveStateV6Size);
@@ -285,6 +291,20 @@ bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext, uint32_t 
     if (version >= 7 && byte(ext.scspSlots.valid) != 1) {
         return false;
     }
+    if (version >= 9) {
+        // The peripheral type is a PeripheralType (None .. ShuttleMouse); the longest TH/TR handshake (six-axis
+        // Mission Stick) has 22 positions.
+        if (byte(ext.peripherals.valid) != 1) {
+            return false;
+        }
+        for (const auto& port : ext.peripherals.ports) {
+            if (port.type > static_cast<uint8_t>(ymir::peripheral::PeripheralType::ShuttleMouse) ||
+                port.reportPos >= 22 || byte(port.mode) > 1 || byte(port.tl) > 1 || byte(port.mouseReset) > 1 ||
+                byte(port.gunReload) > 1 || byte(port.analogMode) > 1 || byte(port.throttleLatched) > 1) {
+                return false;
+            }
+        }
+    }
     return ext.scsp.dspProgramLength <= 128;
 }
 
@@ -328,6 +348,13 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_
         using ymir::savestate::BrimirSaveState;
         constexpr size_t from = offsetof(BrimirSaveState, scspSlots);
         static_assert(from <= ymir::savestate::kBrimirSaveStateV6Size);
+        std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
+    } else if (version < 9) {
+        // Everything from peripherals on (its first bytes may hold the version 7/8 padding): valid false, so the
+        // peripherals and the bridge keep their state, as these versions loaded
+        using ymir::savestate::BrimirSaveState;
+        constexpr size_t from = offsetof(BrimirSaveState, peripherals);
+        static_assert(from <= ymir::savestate::kBrimirSaveStateV8Size);
         std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
     }
     if (!reader.Done()) {

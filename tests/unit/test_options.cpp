@@ -101,6 +101,34 @@ TEST_CASE("cartridge: core option values and labels", "[options][libretro][cartr
     CHECK(brimir_cartridge_choice("bogus") == CartridgeChoice::Auto);
 }
 
+TEST_CASE("peripherals: gun crosshair option values", "[options][libretro][peripherals]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+    const retro_core_option_v2_definition* found = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_gun_crosshair") == 0) {
+            found = &options->definitions[i];
+            break;
+        }
+    }
+    REQUIRE(found != nullptr);
+    CHECK(std::strcmp(found->desc, "Gun Crosshair") == 0);
+    REQUIRE(found->category_key != nullptr);
+    CHECK(std::strcmp(found->category_key, "input") == 0);
+    bool categoryExists = false;
+    for (int i = 0; options->categories[i].key != nullptr; ++i) {
+        categoryExists = categoryExists || std::strcmp(options->categories[i].key, "input") == 0;
+    }
+    CHECK(categoryExists);
+    CHECK(std::strcmp(found->default_value, "cross") == 0);
+    const char* const values[] = {"cross", "dot", "off"};
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(found->values[i].value != nullptr);
+        CHECK(std::strcmp(found->values[i].value, values[i]) == 0);
+    }
+    CHECK(found->values[3].value == nullptr);
+}
+
 TEST_CASE("Core options default values match OptionCache defaults", "[options][libretro]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);
@@ -127,6 +155,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_profiling",            "disabled" },
         { "brimir_rtc_mode",             "virtual"  },
         { "brimir_cartridge",            "auto"     },
+        { "brimir_gun_crosshair",        "cross"    },
 #ifdef BRIMIR_VULKAN
         { "brimir_renderer",             "software" },
         { "brimir_internal_resolution",  "1"        },

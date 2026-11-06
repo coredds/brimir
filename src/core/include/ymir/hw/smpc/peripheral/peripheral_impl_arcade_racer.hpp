@@ -25,6 +25,10 @@ public:
 
     [[nodiscard]] uint8 WritePDR(uint8 ddr, uint8 value, bool exle) override;
 
+    // Brimir: save states
+    void SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const override;
+    void LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) override;
+
 private:
     ArcadeRacerReport m_report;
 

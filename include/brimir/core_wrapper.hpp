@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "audio_ring_buffer.hpp"
+#include "peripheral_input.hpp"
 #include "profiler.hpp"
 
 // Include Saturn headers for test access
@@ -98,8 +99,10 @@ public:
     /// upstream save states omit (ymir::savestate::BrimirSaveState); version 4 and 5 states load without it. Version 7
     /// adds the SCSP slot modulation inputs to it; version 6 states load without them. Version 8 keeps the layout:
     /// the SCU cartridge image holds a backup memory cartridge's data bytes and is empty for a ROM cartridge (the
-    /// ROM is the dump inserted at content load); version 7 states have no image for either.
-    static constexpr uint32_t kSaveStateVersion = 8;
+    /// ROM is the dump inserted at content load); version 7 states have no image for either. Version 9 adds the
+    /// controller port peripherals' state and the bridge's input state per port (BrimirSaveState::Peripherals);
+    /// version 7 and 8 states load without them.
+    static constexpr uint32_t kSaveStateVersion = 9;
 
     /// @brief Oldest BRI2 version LoadState accepts
     static constexpr uint32_t kOldestLoadableSaveStateVersion = 4;
@@ -199,10 +202,26 @@ public:
     /// @brief Get the currently configured console region for libretro reporting
     ConsoleRegion GetConsoleRegion() const;
 
-    /// @brief Set controller input state for a port
+    /// @brief Set controller input state for a port: SetPeripheralInput with only the RetroPad buttons
     /// @param port Port number (0 or 1)
     /// @param buttons Button states (libretro button mask)
     void SetControllerState(unsigned int port, uint16_t buttons);
+
+    /// @brief Connects a peripheral to a controller port (0 or 1); nothing changes if it is connected already. The new
+    /// peripheral starts in its power-on state with released controls. Call between frames; before Initialize the
+    /// choice is kept and applied there. Both ports start with the Control Pad.
+    void SetPeripheral(unsigned port, PeripheralKind kind);
+    PeripheralKind GetPeripheral(unsigned port) const;
+
+    /// @brief This frame's libretro input for a port (call before RunFrame): the port's edges advance
+    /// (AdvancePortInput) and the report its peripheral reads during the frame is mapped (peripheral_input.hpp).
+    void SetPeripheralInput(unsigned port, const InputSnapshot& input);
+
+    /// @brief The port's input state across frames (3D Control Pad mode, Mission Stick throttle latch); in states
+    const PortInputState& GetPortInputState(unsigned port) const { return m_portInput[port & 1]; }
+
+    /// @brief The screen the Virtua Gun aims at: the current Saturn resolution and the overscan crop and rotation
+    GunScreen GetGunScreen() const;
 
     /// @brief Get the current video frame buffer
     /// @return Pointer to framebuffer data, or nullptr if not available
@@ -524,20 +543,20 @@ private:
     static constexpr size_t kAudioRingBufferStereoCapacity = 2048;
     AudioRingBuffer<kAudioRingBufferStereoCapacity> m_audioRingBuffer;
     
-    // Input devices (raw pointers owned by Saturn's SMPC)
-    ymir::peripheral::ControlPad* m_controller1 = nullptr;
-    ymir::peripheral::ControlPad* m_controller2 = nullptr;
-    
-    // Button states for each port (stored for peripheral callback)
-    uint16_t m_port1Buttons = 0;
-    uint16_t m_port2Buttons = 0;
-    
+    // Controller ports: the connected peripheral, the input state kept across frames, and the report mapped from this
+    // frame's input (the peripheral report callbacks hand it to the peripheral whenever it is read)
+    std::array<PeripheralKind, 2> m_portKind{PeripheralKind::ControlPad, PeripheralKind::ControlPad};
+    std::array<PortInputState, 2> m_portInput{};
+    std::array<ymir::peripheral::PeripheralReport, 2> m_portReport{};
+
+    /// @brief Connects m_portKind[port] to the Saturn's port and resets its input to released controls
+    void ConnectPeripheral(unsigned port);
+    /// @brief The report for the port's peripheral from this input
+    ymir::peripheral::PeripheralReport MapPortReport(unsigned port, const InputSnapshot& input) const;
+
     // Peripheral report callbacks
     void OnPeripheralReport1(ymir::peripheral::PeripheralReport& report);
     void OnPeripheralReport2(ymir::peripheral::PeripheralReport& report);
-    
-    // Convert libretro button mask to Saturn Button enum
-    static ymir::peripheral::Button ConvertLibretroButtons(uint16_t retroButtons);
     
     // Last error message from operations (for debugging)
     std::string m_lastError;

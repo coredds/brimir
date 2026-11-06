@@ -94,12 +94,14 @@ VkResult OutputImages::Init(uint32_t slotCount) {
     if (slotCount == 0) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    // libretro output images: MUTABLE_FORMAT, SAMPLED | TRANSFER_SRC | STORAGE (stage1-libretro-vulkan.md).
+    // libretro output images: MUTABLE_FORMAT, SAMPLED | TRANSFER_SRC | STORAGE (stage1-libretro-vulkan.md), plus
+    // TRANSFER_DST for the light gun crosshair copied over the converted frame (libretro_vulkan.cpp).
     const vk_util::ImageDesc imageDesc{
         .width = m_extent.width,
         .height = m_extent.height,
         .format = kOutputFormat,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
     };
     const auto &vk = m_device.Table();

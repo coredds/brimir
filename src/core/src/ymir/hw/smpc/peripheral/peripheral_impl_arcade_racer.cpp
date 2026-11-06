@@ -84,4 +84,15 @@ uint8 ArcadeRacerPeripheral::WritePDR(uint8 ddr, uint8 value, bool exle) {
     return 0xFF;
 }
 
+// Brimir: save states
+void ArcadeRacerPeripheral::SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const {
+    state.reportPos = m_reportPos;
+    state.tl = m_tl;
+}
+
+void ArcadeRacerPeripheral::LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) {
+    m_reportPos = state.reportPos % 10;
+    m_tl = state.tl;
+}
+
 } // namespace ymir::peripheral

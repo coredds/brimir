@@ -96,6 +96,10 @@ public:
     [[nodiscard]] bool ValidateState(const savestate::SMPCSaveState &state) const;
     void LoadState(const savestate::SMPCSaveState &state);
 
+    // Brimir: the peripherals' state kept between reads (BrimirSaveState::Peripherals, core fields only)
+    void SaveBrimirState(savestate::BrimirSaveState &ext) const;
+    void LoadBrimirState(const savestate::BrimirSaveState &ext);
+
 private:
     std::array<uint8, 7> IREG;
     std::array<uint8, 32> OREG;

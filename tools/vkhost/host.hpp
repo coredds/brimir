@@ -130,6 +130,14 @@ struct HostConfig {
     // --cheat CODE (repeatable): retro_cheat_reset, then retro_cheat_set(i, true, CODE) for each after the content
     // is loaded, as RetroArch applies a .cht file.
     std::vector<std::string> cheats;
+    // Test-only controller input (determinism checks of the peripherals):
+    // --device PORT KIND (repeatable): retro_set_controller_port_device(PORT, device type of KIND) after the content
+    // is loaded, as RetroArch does: {port, libretro device type}
+    std::vector<std::pair<unsigned, unsigned>> devices;
+    // --input-pattern SEED: scripted input for every device type, a function of (SEED, frame index, port, device,
+    // index, id) only, so the hidden and the shown frame of an iteration (--rollback, --runahead) get the same input as
+    // the plain run's frame of that index; 0: no input (every input_state call returns 0)
+    uint32_t inputPattern = 0;
 };
 
 // One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).
@@ -289,6 +297,10 @@ public:
 
     // --set-option-at: a live option change, reported by the next GET_VARIABLE_UPDATE.
     void SetOption(const std::string& key, const std::string& value);
+
+    // --input-pattern: the frame index (counting warmup frames from 0) whose scripted input every instance reads from
+    // now on (shared by all instances, as the frontend's input is).
+    static void SetInputFrame(int frame);
 
 private:
     struct Api;

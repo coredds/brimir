@@ -72,6 +72,10 @@ static const unsigned g_memdesc_count = sizeof(g_memdesc) / sizeof(g_memdesc[0])
 // Whether the frontend supports RETRO_DEVICE_ID_JOYPAD_MASK (single-call input read)
 static bool g_input_bitmask_supported = false;
 
+// Controller ports (brimir/peripheral_input.hpp): the device type of each port (retro_set_controller_port_device), kept
+// across content and applied to the core when it exists.
+static brimir::PeripheralKind g_portKinds[2] = {brimir::PeripheralKind::ControlPad, brimir::PeripheralKind::ControlPad};
+
 // Per-content frame state. Reset on load/unload so a new game always triggers
 // RETRO_ENVIRONMENT_SET_GEOMETRY on its first frame, even at the same resolution.
 static unsigned int g_lastWidth = 0;
@@ -264,7 +268,51 @@ struct OptionCache {
     std::string internal_resolution = "1";
     // Live (Vulkan renderer with VDP1 on the GPU, internal resolution above 1): applied at the next shown frame.
     std::string vdp1_upscaling = "enabled";
+    // Live: the next shown frame.
+    std::string gun_crosshair = "cross";
 } g_options;
+
+// Light gun crosshairs of this frame (option brimir_gun_crosshair), drawn on the shown frame only.
+static brimir::Crosshair g_crosshairs[2];
+static unsigned g_crosshairCount = 0;
+
+static brimir::CrosshairStyle crosshair_style(void) {
+    if (g_options.gun_crosshair == "off") {
+        return brimir::CrosshairStyle::Off;
+    }
+    return g_options.gun_crosshair == "dot" ? brimir::CrosshairStyle::Dot : brimir::CrosshairStyle::Cross;
+}
+
+static void update_crosshairs(const brimir::InputSnapshot (&inputs)[2]) {
+    g_crosshairCount = 0;
+    const brimir::CrosshairStyle style = crosshair_style();
+    for (unsigned port = 0; port < 2; ++port) {
+        if (style != brimir::CrosshairStyle::Off && g_portKinds[port] == brimir::PeripheralKind::VirtuaGun &&
+            !inputs[port].gunOffscreen) {
+            g_crosshairs[g_crosshairCount++] = { style, inputs[port].gunX, inputs[port].gunY,
+                                                 brimir::kCrosshairColors[port] };
+        }
+    }
+}
+
+// The software frame with the crosshairs drawn on a copy (the core's frame stays as emulated), or the frame itself.
+static std::vector<uint32_t> g_crosshairFrame;
+
+static const void* frame_with_crosshairs(const void* fb, unsigned width, unsigned height, size_t& pitch) {
+    if (g_crosshairCount == 0 || fb == nullptr || width == 0 || height == 0) {
+        return fb;
+    }
+    g_crosshairFrame.resize(static_cast<size_t>(width) * height);
+    for (unsigned y = 0; y < height; ++y) {
+        std::memcpy(g_crosshairFrame.data() + static_cast<size_t>(y) * width,
+                    static_cast<const uint8_t*>(fb) + y * pitch, static_cast<size_t>(width) * 4);
+    }
+    for (unsigned i = 0; i < g_crosshairCount; ++i) {
+        brimir::DrawCrosshair(g_crosshairs[i], g_crosshairFrame.data(), width, height, width);
+    }
+    pitch = static_cast<size_t>(width) * 4;
+    return g_crosshairFrame.data();
+}
 
 #ifdef BRIMIR_VULKAN
 static unsigned requested_internal_resolution(void) {
@@ -316,6 +364,7 @@ static void apply_core_options(bool force) {
     apply("brimir_threaded_vdp2",           g_options.threaded_vdp2,    [](const char* v){ g_core->SetThreadedVDP2(strcmp(v, "enabled") == 0); });
     apply("brimir_sh2_jit_compile_thread",  g_options.sh2_jit_compile_thread, [](const char* v){ g_core->SetSH2JitCompileThread(strcmp(v, "disabled") != 0); });
     apply("brimir_sh2_jit",                 g_options.sh2_jit,          [](const char* v){ g_core->SetSH2JitEnabled(strcmp(v, "enabled") == 0); });
+    apply("brimir_gun_crosshair",           g_options.gun_crosshair,    [](const char*){}); // read per shown frame
 
     if (const std::string warning = g_core->TakeSH2JitWorkerWarning(); !warning.empty()) {
         brimir_log(RETRO_LOG_WARN, "%s", warning.c_str());
@@ -634,6 +683,7 @@ static void present_vulkan_frame(void) {
     unsigned height = 0;
     std::string error;
     bool presented = false;
+    g_vulkanOutput->SetCrosshairs(std::span<const brimir::Crosshair>(g_crosshairs, g_crosshairCount));
     if (renderer) {
         // The renderer's frame of this run, or (no VDP2 frame ended) the composite again at the last size.
         const brimir::CoreWrapper::DeviceFrame& frame = g_core->LastDeviceFrame();
@@ -702,6 +752,190 @@ static void present_vulkan_frame(void) {
 }
 #endif
 
+static const struct retro_controller_description kPortTypes[] = {
+    { "Control Pad", brimir::RETRO_DEVICE_SATURN_PAD },
+    { "3D Control Pad", brimir::RETRO_DEVICE_SATURN_3D_PAD },
+    { "Arcade Racer", brimir::RETRO_DEVICE_SATURN_WHEEL },
+    { "Mission Stick", brimir::RETRO_DEVICE_SATURN_MISSION_STICK },
+    { "Shuttle Mouse", brimir::RETRO_DEVICE_SATURN_MOUSE },
+    { "Virtua Gun", brimir::RETRO_DEVICE_SATURN_VIRTUA_GUN },
+    { "None", RETRO_DEVICE_NONE },
+};
+static const struct retro_controller_info kControllerInfo[] = {
+    { kPortTypes, sizeof(kPortTypes) / sizeof(kPortTypes[0]) },
+    { kPortTypes, sizeof(kPortTypes) / sizeof(kPortTypes[0]) },
+    { nullptr, 0 },
+};
+
+// Input descriptors of both ports' device types (the layouts of brimir/peripheral_input.hpp). The Control Pad's are
+// Brimir's original ones:
+// RetroPad B  -> Saturn A
+// RetroPad A  -> Saturn B
+// RetroPad Y  -> Saturn C
+// RetroPad X  -> Saturn X
+// RetroPad L2 -> Saturn Y
+// RetroPad R2 -> Saturn Z
+// RetroPad L  -> Saturn L (shoulder)
+// RetroPad R  -> Saturn R (shoulder)
+static void set_input_descriptors(retro_environment_t cb) {
+    static std::vector<retro_input_descriptor> descriptors;
+    descriptors.clear();
+    for (unsigned port = 0; port < 2; ++port) {
+        const auto pad = [&](unsigned id, const char* text) {
+            descriptors.push_back({ port, RETRO_DEVICE_JOYPAD, 0, id, text });
+        };
+        const auto stick = [&](unsigned index, unsigned id, const char* text) {
+            descriptors.push_back({ port, RETRO_DEVICE_ANALOG, index, id, text });
+        };
+        const auto faceButtons = [&] { // 3D Control Pad, Arcade Racer, Mission Stick (Beetle Saturn's layout)
+            pad(RETRO_DEVICE_ID_JOYPAD_B, "A");
+            pad(RETRO_DEVICE_ID_JOYPAD_A, "B");
+            pad(RETRO_DEVICE_ID_JOYPAD_R, "C");
+            pad(RETRO_DEVICE_ID_JOYPAD_Y, "X");
+            pad(RETRO_DEVICE_ID_JOYPAD_X, "Y");
+            pad(RETRO_DEVICE_ID_JOYPAD_L, "Z");
+        };
+        switch (g_portKinds[port]) {
+        case brimir::PeripheralKind::None: break;
+        case brimir::PeripheralKind::ControlPad:
+            pad(RETRO_DEVICE_ID_JOYPAD_LEFT, "D-Pad Left");
+            pad(RETRO_DEVICE_ID_JOYPAD_UP, "D-Pad Up");
+            pad(RETRO_DEVICE_ID_JOYPAD_DOWN, "D-Pad Down");
+            pad(RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right");
+            pad(RETRO_DEVICE_ID_JOYPAD_B, "A");
+            pad(RETRO_DEVICE_ID_JOYPAD_A, "B");
+            pad(RETRO_DEVICE_ID_JOYPAD_Y, "C");
+            pad(RETRO_DEVICE_ID_JOYPAD_X, "X");
+            pad(RETRO_DEVICE_ID_JOYPAD_L2, "Y");
+            pad(RETRO_DEVICE_ID_JOYPAD_R2, "Z");
+            pad(RETRO_DEVICE_ID_JOYPAD_L, "L");
+            pad(RETRO_DEVICE_ID_JOYPAD_R, "R");
+            pad(RETRO_DEVICE_ID_JOYPAD_START, "Start");
+            break;
+        case brimir::PeripheralKind::AnalogPad:
+            pad(RETRO_DEVICE_ID_JOYPAD_LEFT, "D-Pad Left");
+            pad(RETRO_DEVICE_ID_JOYPAD_UP, "D-Pad Up");
+            pad(RETRO_DEVICE_ID_JOYPAD_DOWN, "D-Pad Down");
+            pad(RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right");
+            faceButtons();
+            pad(RETRO_DEVICE_ID_JOYPAD_L2, "L (analog)");
+            pad(RETRO_DEVICE_ID_JOYPAD_R2, "R (analog)");
+            pad(RETRO_DEVICE_ID_JOYPAD_START, "Start");
+            pad(RETRO_DEVICE_ID_JOYPAD_SELECT, "Mode Switch");
+            stick(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "Analog X");
+            stick(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y, "Analog Y");
+            break;
+        case brimir::PeripheralKind::ArcadeRacer:
+            faceButtons();
+            pad(RETRO_DEVICE_ID_JOYPAD_L2, "Shift Paddle Up");
+            pad(RETRO_DEVICE_ID_JOYPAD_R2, "Shift Paddle Down");
+            pad(RETRO_DEVICE_ID_JOYPAD_UP, "Shift Up");
+            pad(RETRO_DEVICE_ID_JOYPAD_DOWN, "Shift Down");
+            pad(RETRO_DEVICE_ID_JOYPAD_START, "Start");
+            stick(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "Wheel");
+            break;
+        case brimir::PeripheralKind::MissionStick:
+            faceButtons();
+            pad(RETRO_DEVICE_ID_JOYPAD_L2, "L");
+            pad(RETRO_DEVICE_ID_JOYPAD_R2, "R");
+            pad(RETRO_DEVICE_ID_JOYPAD_START, "Start");
+            pad(RETRO_DEVICE_ID_JOYPAD_R3, "Throttle Latch");
+            stick(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "Stick X");
+            stick(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y, "Stick Y");
+            stick(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y, "Throttle");
+            break;
+        case brimir::PeripheralKind::ShuttleMouse: break; // mouse buttons and movement have no descriptors
+        case brimir::PeripheralKind::VirtuaGun:
+            descriptors.push_back({ port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER, "Trigger" });
+            descriptors.push_back({ port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_RELOAD, "Reload" });
+            descriptors.push_back({ port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_START, "Start" });
+            break;
+        }
+    }
+    descriptors.push_back({ 0, 0, 0, 0, nullptr });
+    if (cb) {
+        cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, descriptors.data());
+    }
+}
+
+// The RetroPad buttons of a port: one call with RETRO_DEVICE_ID_JOYPAD_MASK when the frontend supports it, otherwise
+// one per button the port's device uses (the sticks' buttons only for the analog devices).
+static uint16_t poll_joypad(unsigned port, bool sticks) {
+    if (g_input_bitmask_supported) {
+        return static_cast<uint16_t>(input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK));
+    }
+    static const unsigned kButtons[] = {
+        RETRO_DEVICE_ID_JOYPAD_B,     RETRO_DEVICE_ID_JOYPAD_Y,    RETRO_DEVICE_ID_JOYPAD_SELECT,
+        RETRO_DEVICE_ID_JOYPAD_START, RETRO_DEVICE_ID_JOYPAD_UP,   RETRO_DEVICE_ID_JOYPAD_DOWN,
+        RETRO_DEVICE_ID_JOYPAD_LEFT,  RETRO_DEVICE_ID_JOYPAD_RIGHT, RETRO_DEVICE_ID_JOYPAD_A,
+        RETRO_DEVICE_ID_JOYPAD_X,     RETRO_DEVICE_ID_JOYPAD_L,    RETRO_DEVICE_ID_JOYPAD_R,
+        RETRO_DEVICE_ID_JOYPAD_L2,    RETRO_DEVICE_ID_JOYPAD_R2,
+    };
+    uint16_t buttons = 0;
+    for (const unsigned id : kButtons) {
+        if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, id)) {
+            buttons |= static_cast<uint16_t>(1u << id);
+        }
+    }
+    if (sticks) {
+        for (const unsigned id : { RETRO_DEVICE_ID_JOYPAD_L3, RETRO_DEVICE_ID_JOYPAD_R3 }) {
+            if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, id)) {
+                buttons |= static_cast<uint16_t>(1u << id);
+            }
+        }
+    }
+    return buttons;
+}
+
+// This frame's input of a port, as its device type needs it.
+static brimir::InputSnapshot poll_port(unsigned port, brimir::PeripheralKind kind) {
+    using brimir::PeripheralKind;
+    brimir::InputSnapshot in;
+    switch (kind) {
+    case PeripheralKind::None: break;
+    case PeripheralKind::ControlPad: in.joypad = poll_joypad(port, false); break;
+    case PeripheralKind::AnalogPad:
+    case PeripheralKind::ArcadeRacer:
+    case PeripheralKind::MissionStick:
+        in.joypad = poll_joypad(port, true);
+        in.leftX = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
+        in.leftY = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
+        in.rightX = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
+        in.rightY = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
+        in.l2 = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_L2);
+        in.r2 = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_R2);
+        break;
+    case PeripheralKind::ShuttleMouse: {
+        using S = brimir::InputSnapshot;
+        in.mouseX = input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
+        in.mouseY = input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_Y);
+        const struct {
+            unsigned id;
+            uint8_t bit;
+        } kMouseButtons[] = {
+            { RETRO_DEVICE_ID_MOUSE_LEFT, S::kMouseLeft },         { RETRO_DEVICE_ID_MOUSE_RIGHT, S::kMouseRight },
+            { RETRO_DEVICE_ID_MOUSE_MIDDLE, S::kMouseMiddle },     { RETRO_DEVICE_ID_MOUSE_BUTTON_4, S::kMouseButton4 },
+            { RETRO_DEVICE_ID_MOUSE_BUTTON_5, S::kMouseButton5 },
+        };
+        for (const auto& b : kMouseButtons) {
+            if (input_state_cb(port, RETRO_DEVICE_MOUSE, 0, b.id)) {
+                in.mouseButtons |= b.bit;
+            }
+        }
+        break;
+    }
+    case PeripheralKind::VirtuaGun:
+        in.gunX = input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_SCREEN_X);
+        in.gunY = input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_SCREEN_Y);
+        in.gunOffscreen = input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN) != 0;
+        in.gunTrigger = input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER) != 0;
+        in.gunReload = input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_RELOAD) != 0;
+        in.gunStart = input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_START) != 0;
+        break;
+    }
+    return in;
+}
+
 // Libretro API implementation
 
 RETRO_API void retro_set_environment(retro_environment_t cb) {
@@ -718,58 +952,10 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     bool no_content = true;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_content);
     
-    // Set input descriptors for controller remapping
-    // Sega Saturn Digital Pad layout:
-    // - D-Pad (Up, Down, Left, Right)
-    // - 6 face buttons: A, B, C (bottom row) and X, Y, Z (top row)
-    // - L and R shoulder buttons
-    // - Start button
-    //
-    // Button mapping (from bridge/core_wrapper.cpp):
-    // RetroPad B  -> Saturn A
-    // RetroPad A  -> Saturn B
-    // RetroPad Y  -> Saturn C
-    // RetroPad X  -> Saturn X
-    // RetroPad L2 -> Saturn Y
-    // RetroPad R2 -> Saturn Z
-    // RetroPad L  -> Saturn L (shoulder)
-    // RetroPad R  -> Saturn R (shoulder)
-    static const struct retro_input_descriptor input_desc[] = {
-        // Player 1
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "A" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "B" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "C" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "X" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,     "Y" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,     "Z" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "L" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "R" },
-        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
-        
-        // Player 2
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "A" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "B" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "C" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "X" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,     "Y" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,     "Z" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "L" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "R" },
-        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
-        
-        // Terminator
-        { 0 },
-    };
-    
-    cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, (void*)input_desc);
+    // Input descriptors of the ports' device types (the Control Pad's until the frontend chooses others), and the
+    // device types each port offers.
+    set_input_descriptors(cb);
+    cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)kControllerInfo);
     
     // Request log interface
     struct retro_log_callback logging;
@@ -815,6 +1001,9 @@ RETRO_API void retro_init(void) {
             brimir_log(RETRO_LOG_ERROR, "Failed to initialize core");
             g_core.reset();
             return;
+        }
+        for (unsigned port = 0; port < 2; ++port) {
+            g_core->SetPeripheral(port, g_portKinds[port]);
         }
     }
 
@@ -915,8 +1104,24 @@ static void update_system_av_info_for_region(void) {
     environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avi);
 }
 
+// Between frames (the frontend never calls it during retro_run); a state saved with another device loads with this one
+// (each port keeps the state of the peripheral it has).
 RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) {
-    brimir_log(RETRO_LOG_INFO, "Controller port %u set to device %u", port, device);
+    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    if (port > 1) {
+        brimir_log(RETRO_LOG_WARN, "Controller port %u does not exist (the Saturn has two)", port + 1);
+        return;
+    }
+    const brimir::PeripheralKind kind = brimir::PeripheralKindForDevice(device);
+    brimir_log(RETRO_LOG_INFO, "Controller port %u: %s (device %u)", port + 1, brimir::PeripheralKindName(kind), device);
+    if (kind == g_portKinds[port]) {
+        return;
+    }
+    g_portKinds[port] = kind;
+    if (g_core) {
+        g_core->SetPeripheral(port, kind);
+    }
+    set_input_descriptors(environ_cb);
 }
 
 RETRO_API void retro_reset(void) {
@@ -1033,50 +1238,14 @@ RETRO_API void retro_run(void) {
         input_poll_cb();
     }
     
-    // Read and update controller input for both players
+    // This frame's input of both ports, as each port's device type needs it (brimir/peripheral_input.hpp)
     if (input_state_cb) {
-        uint16_t buttons_p1 = 0;
-        uint16_t buttons_p2 = 0;
-
-        if (g_input_bitmask_supported) {
-            // Single call returns all buttons as a bitmask - bits match RETRO_DEVICE_ID_JOYPAD_* values
-            buttons_p1 = static_cast<uint16_t>(input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK));
-            buttons_p2 = static_cast<uint16_t>(input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK));
-        } else {
-            // Fallback: query each button individually
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_B);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_Y);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_SELECT);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))  buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_START);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_UP);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))   buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_DOWN);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))   buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_LEFT);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))  buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_A);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_X);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_L);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))      buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_R);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_L2);
-            if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))     buttons_p1 |= (1 << RETRO_DEVICE_ID_JOYPAD_R2);
-
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_B);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_Y);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT)) buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_SELECT);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START))  buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_START);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_UP);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN))   buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_DOWN);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT))   buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_LEFT);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT))  buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_A);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_X);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_L);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R))      buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_R);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_L2);
-            if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))     buttons_p2 |= (1 << RETRO_DEVICE_ID_JOYPAD_R2);
+        brimir::InputSnapshot inputs[2];
+        for (unsigned port = 0; port < 2; ++port) {
+            inputs[port] = poll_port(port, g_portKinds[port]);
+            g_core->SetPeripheralInput(port, inputs[port]);
         }
-
-        g_core->SetControllerState(0, buttons_p1);
-        g_core->SetControllerState(1, buttons_p2);
+        update_crosshairs(inputs);
     }
     
 #ifdef BRIMIR_VULKAN
@@ -1127,7 +1296,9 @@ RETRO_API void retro_run(void) {
             g_lastHeight = height;
         }
         
-        video_cb(fb, width, height, pitch);
+        size_t shownPitch = pitch;
+        const void* shown = frame_with_crosshairs(fb, width, height, shownPitch);
+        video_cb(shown, width, height, shownPitch);
     }
     
     // Output audio

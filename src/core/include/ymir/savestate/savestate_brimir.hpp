@@ -63,9 +63,35 @@ struct BrimirSaveState {
         bool valid; // false when the system has no internal backup RAM image (or in older states)
         std::array<uint8, 32 * 1024> internal;
     } backupRAM;
+
+    // From version 9 on (versions 7 and 8 end before this member): what the peripherals on the two controller ports
+    // keep between reads, so a read in progress continues the same after a load. A peripheral of another type than
+    // the saved one (the device was changed since) keeps its own state.
+    struct Peripherals {
+        bool valid;
+        struct Port {
+            uint8 type;      // peripheral::PeripheralType of the connected peripheral
+            bool mode;       // 3D Control Pad analog mode, Mission Stick six-axis mode
+            uint8 reportPos; // position in the TH/TR handshake (Saturn ID protocol)
+            bool tl;         // TL line of the TH/TR handshake
+            bool mouseReset; // Shuttle Mouse reset line
+            bool gunReload;  // Virtua Gun reload latched at the external latch
+            // Written and read by the bridge (CoreWrapper), not by the core: its input state for the port (RetroPad
+            // buttons of the previous frame for the mode switch and throttle latch edges, the 3D Control Pad mode it
+            // reports, the Mission Stick throttle latch).
+            uint16 prevButtons;
+            bool analogMode;
+            bool throttleLatched;
+            uint8 throttle;
+        };
+        std::array<Port, 2> ports;
+    } peripherals;
 };
 
 // Bytes of the extension in a version 6 payload (before scspSlots), on every supported ABI.
 inline constexpr size_t kBrimirSaveStateV6Size = 786480;
+
+// Bytes of the extension in a version 7 or 8 payload (before peripherals), on every supported ABI.
+inline constexpr size_t kBrimirSaveStateV8Size = 819376;
 
 } // namespace ymir::savestate

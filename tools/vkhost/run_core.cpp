@@ -224,6 +224,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         if (i == config.warmup) {
             recordStart = std::chrono::steady_clock::now();
         }
+        LibretroHost::SetInputFrame(i); // every retro_run of this iteration (hidden ones included) reads frame i's input
         if (i == config.resetAt) {
             host.ResetContext();
         }

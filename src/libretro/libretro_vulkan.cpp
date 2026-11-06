@@ -513,6 +513,16 @@ struct VulkanOutput::Impl {
     uint64_t optionChangeWaits = 0;
     uint64_t fallBackWaits = 0;
 
+    // Light gun crosshairs (SetCrosshairs) and the solid colours their rectangles are copied from: for each image byte
+    // order (compute: R8G8B8A8, copy-only: B8G8R8A8) the outline and the two port colours, kMaxCrosshairRectPixels
+    // each. Created at the first crosshair; constant contents, so frames in flight share it.
+    std::array<brimir::Crosshair, 2> crosshairs{};
+    uint32_t crosshairCount = 0;
+    gpu::vk_util::Buffer overlayColors;
+    bool overlayFailed = false;
+    // Records the crosshairs into an output image of w x h (layout GENERAL) after the frame output pass.
+    void RecordCrosshairs(VkCommandBuffer cmd, VkImage image, uint32_t w, uint32_t h, bool copyLayout);
+
     VkResult CreateSlots(uint32_t count, VulkanOutputMode wanted);
     // The image structs of the current compute or copy-only images.
     void FillOutputImages();
@@ -1277,7 +1287,9 @@ void VulkanOutput::Impl::DestroySlots() {
             vk.vkDestroyCommandPool(dev, slot.pool, nullptr); // frees the command buffer
             gpu::vk_util::DestroyBuffer(*device, slot.staging);
         }
+        gpu::vk_util::DestroyBuffer(*device, overlayColors);
     }
+    overlayFailed = false;
     slots.clear();
     // Every caller has withdrawn the image and waited for the device (or the frontend's queue) first.
     DestroyRetired();
@@ -1336,6 +1348,7 @@ void VulkanOutput::Impl::Abandon() {
     sync = {};
     hiddenCreated = false;
     slots.clear();
+    overlayColors = {};
     (void)presenterCore.release();
     (void)computeImages.release();
     (void)copyImages.release();
@@ -1653,6 +1666,78 @@ bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &re
     return true;
 }
 
+void VulkanOutput::Impl::RecordCrosshairs(VkCommandBuffer cmd, VkImage image, uint32_t w, uint32_t h,
+                                          bool copyLayout) {
+    if (crosshairCount == 0 || overlayFailed || image == VK_NULL_HANDLE) {
+        return;
+    }
+    constexpr size_t kRegion = brimir::kMaxCrosshairRectPixels;
+    const uint32_t colors[3] = {brimir::kCrosshairOutline, brimir::kCrosshairColors[0], brimir::kCrosshairColors[1]};
+    if (overlayColors.buffer == VK_NULL_HANDLE) {
+        const VkResult result = gpu::vk_util::CreateBuffer(
+            *device, VkDeviceSize{2 * 3 * kRegion * 4}, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, overlayColors);
+        if (result != VK_SUCCESS || overlayColors.mapped == nullptr) {
+            gpu::vk_util::DestroyBuffer(*device, overlayColors);
+            overlayFailed = true;
+            NegotiationLog(RETRO_LOG_WARN, std::string("Light gun crosshair: no buffer for it (") +
+                                               gpu::vk_util::ResultName(result) + "); none drawn on Vulkan frames");
+            return;
+        }
+        auto *words = static_cast<uint32_t *>(overlayColors.mapped);
+        for (size_t layout = 0; layout < 2; ++layout) {
+            for (size_t c = 0; c < 3; ++c) {
+                const uint32_t rgb = colors[c];
+                // R8G8B8A8 stores 0xAABBGGRR, B8G8R8A8 0xAARRGGBB (opaque, as the frame output writes)
+                const uint32_t word = layout == 0 ? (0xFF000000u | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | (rgb >> 16))
+                                                  : (0xFF000000u | rgb);
+                std::fill_n(words + (layout * 3 + c) * kRegion, kRegion, word);
+            }
+        }
+    }
+    std::vector<VkBufferImageCopy> regions;
+    for (uint32_t i = 0; i < crosshairCount; ++i) {
+        std::array<brimir::OverlayRect, brimir::kMaxCrosshairRects> rects;
+        const size_t count = brimir::CrosshairRects(crosshairs[i], w, h, rects);
+        for (size_t r = 0; r < count; ++r) {
+            const brimir::OverlayRect &rect = rects[r];
+            const size_t c = static_cast<size_t>(std::find(colors, colors + 3, rect.color) - colors);
+            if (c >= 3 || size_t{rect.w} * rect.h > kRegion) {
+                continue;
+            }
+            VkBufferImageCopy region{};
+            region.bufferOffset = VkDeviceSize{((copyLayout ? 3 : 0) + c) * kRegion * 4};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageOffset = {static_cast<int32_t>(rect.x), static_cast<int32_t>(rect.y), 0};
+            region.imageExtent = {rect.w, rect.h, 1};
+            regions.push_back(region);
+        }
+    }
+    if (regions.empty()) {
+        return;
+    }
+    // After the frame output pass (compute) or copy; the rectangles go in order (outline first), and the image is read
+    // by the frontend afterwards.
+    gpu::vk_util::ImageBarrier(*device, cmd, image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    for (const VkBufferImageCopy &region : regions) {
+        device->Table().vkCmdCopyBufferToImage(cmd, overlayColors.buffer, image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+        // Overlapping rectangles (the colour over the outline): each copy after the previous one
+        gpu::vk_util::ImageBarrier(*device, cmd, image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                   VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT);
+    }
+}
+
+void VulkanOutput::SetCrosshairs(std::span<const brimir::Crosshair> crosshairs) {
+    Impl &m = *m_impl;
+    m.crosshairCount = static_cast<uint32_t>(std::min(crosshairs.size(), m.crosshairs.size()));
+    std::copy_n(crosshairs.begin(), m.crosshairCount, m.crosshairs.begin());
+}
+
 bool VulkanOutput::Present(const uint32_t *xbgr, uint32_t w, uint32_t h, const VulkanFrameSettings &settings,
                            unsigned &outW, unsigned &outH, std::string &error) {
     Impl &m = *m_impl;
@@ -1682,6 +1767,7 @@ bool VulkanOutput::Present(const uint32_t *xbgr, uint32_t w, uint32_t h, const V
         m.device->Table().vkEndCommandBuffer(slot->cmd);
         return false;
     }
+    m.RecordCrosshairs(slot->cmd, m.computeImages->Image(index), m.nativeOutput.width, m.nativeOutput.height, false);
     if (!m.SubmitFrame(*slot, index, error)) {
         return false;
     }
@@ -1736,6 +1822,7 @@ bool VulkanOutput::PresentCopy(const void *xrgb, uint32_t w, uint32_t h, size_t 
     gpu::vk_util::ImageBarrier(*m.device, slot->cmd, image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
                                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT);
+    m.RecordCrosshairs(slot->cmd, image, w, h, true);
     if (!m.SubmitFrame(*slot, index, error)) {
         return false;
     }
@@ -1896,6 +1983,10 @@ bool VulkanOutput::PresentRenderer(uint32_t w, uint32_t h, const VulkanFrameSett
         }
         error = "frame " + std::to_string(w) + "x" + std::to_string(h) + " cannot be presented";
         return false;
+    }
+    {
+        const gpu::OutputSize shown = gpu::ComputeOutputSize(w, h, output);
+        m.RecordCrosshairs(slot->cmd, m.computeImages->Image(index), shown.width, shown.height, false);
     }
     if (!m.SubmitFrame(*slot, index, error)) {
         if (work) {

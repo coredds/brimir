@@ -180,6 +180,12 @@ void PrintUsage(std::FILE* out) {
         "  --cheat CODE  after loading the content, retro_cheat_set(i, true, CODE) for the i-th --cheat (after one\n"
         "                retro_cheat_reset), as RetroArch applies a cheat file: an Action Replay code such as\n"
         "                1601dba40900 or D6033C60+270F+16033C60+0001 (repeatable)\n"
+        "  --device PORT KIND  test only: after loading the content, retro_set_controller_port_device(PORT, KIND's\n"
+        "                device type); PORT 0 or 1, KIND pad, 3dpad, wheel, missionstick, mouse, gun or none (repeatable)\n"
+        "  --input-pattern SEED  test only: scripted input for every device type (buttons, sticks, triggers, mouse,\n"
+        "                light gun), a function of SEED and the frame index only (held 6 frames; mouse movement per\n"
+        "                frame): the hidden and shown frames of --rollback / --runahead read the input of the plain\n"
+        "                run's frame with that index. Without it every input reads 0\n"
         "  --hash-sample N  with --hash: hash the native image of the sample points instead of the frame. Frames are at\n"
         "                internal resolution N until the core logs another (\"Internal resolution: frames at Mx\"); the\n"
         "                sample point of native output pixel (x, y) is mapped through the rotation (brimir_rotation\n"
@@ -430,6 +436,37 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             i += 3;
             continue;
         }
+        if (opt == "--device") { // two values
+            static const struct {
+                const char* name;
+                unsigned device;
+            } kDevices[] = {
+                {"pad", RETRO_DEVICE_JOYPAD},
+                {"3dpad", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG, 0)},
+                {"wheel", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG, 1)},
+                {"missionstick", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG, 2)},
+                {"mouse", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_MOUSE, 0)},
+                {"gun", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_LIGHTGUN, 0)},
+                {"none", RETRO_DEVICE_NONE},
+            };
+            int port = -1;
+            const unsigned* device = nullptr;
+            if (i + 2 < argc && ParseInt(argv[i + 1], port)) {
+                for (const auto& d : kDevices) {
+                    if (std::strcmp(argv[i + 2], d.name) == 0) {
+                        device = &d.device;
+                    }
+                }
+            }
+            if (port < 0 || port > 1 || device == nullptr) {
+                std::fprintf(stderr, "--device needs a port (0 or 1) and pad, 3dpad, wheel, missionstick, mouse, gun "
+                                     "or none\n");
+                return ParseResult::Error;
+            }
+            args.config.devices.emplace_back(static_cast<unsigned>(port), *device);
+            i += 2;
+            continue;
+        }
         if (opt == "--set-option-at") { // two values
             vkhost::HostConfig::OptionChange change;
             const std::string text = i + 2 < argc ? argv[i + 2] : "";
@@ -453,6 +490,13 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.config.corePath = value;
         } else if (opt == "--cheat") {
             args.config.cheats.push_back(value);
+        } else if (opt == "--input-pattern") {
+            int seed = 0;
+            if (!ParseInt(value, seed) || seed <= 0) {
+                std::fprintf(stderr, "--input-pattern needs a seed (1 or more): %s\n", value);
+                return ParseResult::Error;
+            }
+            args.config.inputPattern = static_cast<uint32_t>(seed);
         } else if (opt == "--bios") {
             args.config.biosPath = value;
         } else if (opt == "--game") {

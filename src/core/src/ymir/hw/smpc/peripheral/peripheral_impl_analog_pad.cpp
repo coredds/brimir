@@ -144,4 +144,17 @@ void AnalogPad::SetAnalogMode(bool mode) {
     SetTypeCode(mode ? 0x1 : 0x0);
 }
 
+// Brimir: save states
+void AnalogPad::SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const {
+    state.mode = m_analogMode;
+    state.reportPos = m_reportPos;
+    state.tl = m_tl;
+}
+
+void AnalogPad::LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) {
+    SetAnalogMode(state.mode);
+    m_reportPos = state.reportPos & 15;
+    m_tl = state.tl;
+}
+
 } // namespace ymir::peripheral
