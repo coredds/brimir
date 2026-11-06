@@ -426,6 +426,31 @@ TEST_CASE("Loading a state restores the internal backup RAM", "[savestate][fidel
     CHECK_FALSE(Save(*bare)->brimir.backupRAM.valid);
 }
 
+TEST_CASE("Save state round trip keeps the SMPC port registers", "[savestate][fidelity][smpc][brimir]") {
+    // Upstream LoadState applied EXLE through WriteEXLE, which re-writes PDR1/PDR2 through the peripheral ports, and
+    // SaveState stored DDR2 through ReadDDR2, which returns DDR1. Every BIOS boot diverged after a round trip.
+    constexpr uint32 kPDR1 = 0x010'0075;
+    constexpr uint32 kPDR2 = 0x010'0077;
+    auto saturn = std::make_unique<Saturn>();
+    saturn->SMPC.GetPeripheralPort1().ConnectControlPad();
+    saturn->SMPC.GetPeripheralPort2().ConnectControlPad();
+    auto state = Save(*saturn);
+    state->smpc.DDR1 = 0x60; // TH and TR are outputs
+    state->smpc.DDR2 = 0x20;
+    state->smpc.PDR1 = 0x40;
+    state->smpc.PDR2 = 0x1F;
+    state->smpc.EXLE = 0;
+    REQUIRE(saturn->LoadState(*state, true));
+    CHECK(saturn->mainBus.Peek<uint8>(kPDR1) == 0x40);
+    CHECK(saturn->mainBus.Peek<uint8>(kPDR2) == 0x1F);
+    const auto resaved = Save(*saturn);
+    CHECK(resaved->smpc.PDR1 == 0x40);
+    CHECK(resaved->smpc.PDR2 == 0x1F);
+    CHECK(resaved->smpc.DDR1 == 0x60);
+    CHECK(resaved->smpc.DDR2 == 0x20);
+    CHECK(resaved->smpc.EXLE == 0);
+}
+
 TEST_CASE("A fresh system keeps the other field's VDP1 framebuffer", "[savestate][fidelity][vdp][vdp1][brimir]") {
     // With deinterlacing, the software renderer keeps the other field of double-density interlace in altFBRAM; the
     // first frame after a load combines it with the loaded fields. Upstream did not save it.

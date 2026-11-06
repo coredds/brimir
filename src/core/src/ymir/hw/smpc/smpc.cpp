@@ -178,7 +178,7 @@ void SMPC::SaveState(savestate::SMPCSaveState &state) const {
     state.PDR1 = ReadPDR1<true>();
     state.PDR2 = ReadPDR2<true>();
     state.DDR1 = ReadDDR1();
-    state.DDR2 = ReadDDR2();
+    state.DDR2 = DDR2; // Brimir: ReadDDR2() returns DDR1
     state.IOSEL = ReadIOSEL();
     state.EXLE = ReadEXLE();
 
@@ -219,7 +219,10 @@ void SMPC::LoadState(const savestate::SMPCSaveState &state) {
     WriteDDR1(state.DDR1);
     WriteDDR2(state.DDR2);
     WriteIOSEL(state.IOSEL);
-    WriteEXLE(state.EXLE);
+    // Brimir: not WriteEXLE, which also re-writes PDR1/PDR2 through the peripheral ports (UpdateInputs, the port's
+    // WritePDR, possibly an external latch): the loaded PDRs changed, and so did what the next frame read
+    m_extLatchEnable1 = bit::test<0>(state.EXLE);
+    m_extLatchEnable2 = bit::test<1>(state.EXLE);
 
     m_getPeripheralData = state.intback.getPeripheralData;
     m_optimize = state.intback.optimize;
