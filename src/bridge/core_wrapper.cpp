@@ -16,7 +16,9 @@
 #include <ymir/db/game_db.hpp>
 #include <ymir/db/rom_cart_db.hpp>
 #include <ymir/db/ipl_db.hpp>
+#include <ymir/hw/cart/cart_impl_bup.hpp>
 #include <ymir/hw/cart/cart_impl_dram.hpp>
+#include <ymir/hw/cart/cart_impl_rom.hpp>
 #include <ymir/hw/cart/rom_cart_defs.hpp>
 #include <ymir/core/hash.hpp>
 #include <ymir/hw/smpc/smpc_defs.hpp>
@@ -160,6 +162,103 @@ void ResetInternalBackupRAM(ymir::Saturn &saturn) {
     assert(ok && "a 256 Kbit image always matches the internal backup RAM size");
 }
 
+// The cartridge a choice inserts for a game whose database entry asks for gameCart (None for games not in it).
+ymir::db::Cartridge ResolveCartridge(brimir::CartridgeChoice choice, ymir::db::Cartridge gameCart) {
+    using brimir::CartridgeChoice;
+    using ymir::db::Cartridge;
+    switch (choice) {
+    case CartridgeChoice::Auto: return gameCart;
+    case CartridgeChoice::None: return Cartridge::None;
+    case CartridgeChoice::DRAM8Mbit: return Cartridge::DRAM8Mbit;
+    case CartridgeChoice::DRAM32Mbit: return Cartridge::DRAM32Mbit;
+    case CartridgeChoice::Backup: return Cartridge::BackupRAM;
+    case CartridgeChoice::ROM_KOF95: return Cartridge::ROM_KOF95;
+    case CartridgeChoice::ROM_Ultraman: return Cartridge::ROM_Ultraman;
+    }
+    return gameCart;
+}
+
+// Reads a whole file of at most maxSize bytes; returns false if it cannot be read, with size set to the file's size
+// (0 if unknown) and out left empty when it is larger.
+bool ReadFileUpTo(const std::filesystem::path& path, size_t maxSize, std::vector<uint8_t>& out, uintmax_t& size) {
+    out.clear();
+    std::error_code ec;
+    size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        size = 0;
+        return false;
+    }
+    if (size > maxSize) {
+        return true;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    out.resize(static_cast<size_t>(size));
+    in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(in);
+}
+
+// Writes to a sibling temp file and renames it into place, so a failed write never truncates the existing file.
+bool WriteFileReplacing(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
+    auto tmpPath = path;
+    tmpPath += ".tmp";
+    std::error_code ec;
+    {
+        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return false;
+        }
+        out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        out.close();
+        if (!out) {
+            std::filesystem::remove(tmpPath, ec);
+            return false;
+        }
+    }
+    std::filesystem::rename(tmpPath, path, ec);
+    if (ec) {
+        std::filesystem::remove(tmpPath, ec);
+        return false;
+    }
+    return true;
+}
+
+// Loads a ROM cartridge dump from the system directory into rom (kROMCartSize bytes). Returns an empty string, or why
+// the game starts without the cartridge. recognised: the dump's hash is the expected one (an unknown dump of the right
+// size is used: the database lists one dump per cartridge).
+std::string LoadROMCartDump(const std::string& systemDirectory, const char* fileName,
+                            const ymir::db::ROMCartInfo& expected, std::vector<uint8_t>& rom, bool& recognised) {
+    const std::string suffix = " Starting without the cartridge.";
+    recognised = false;
+    const std::filesystem::path path = std::filesystem::path(systemDirectory) / fileName;
+    std::error_code ec;
+    if (systemDirectory.empty() || !std::filesystem::is_regular_file(path, ec)) {
+        return std::string(expected.gameName) + " needs its ROM cartridge: " + fileName +
+               " was not found in the system directory." + suffix;
+    }
+    uintmax_t size = 0;
+    if (!ReadFileUpTo(path, ymir::cart::kROMCartSize, rom, size)) {
+        return std::string(fileName) + " could not be read." + suffix;
+    }
+    if (size != ymir::cart::kROMCartSize) {
+        rom.clear();
+        return std::string(fileName) + " is " + std::to_string(size) + " bytes, not " +
+               std::to_string(ymir::cart::kROMCartSize) + " (2 MiB): not a " + expected.gameName +
+               " ROM cartridge dump." + suffix;
+    }
+    const auto* info =
+        ymir::db::GetROMCartInfo(ymir::CalcHash128(rom.data(), rom.size(), ymir::cart::kROMCartHashSeed));
+    if (info != nullptr && info != &expected) {
+        rom.clear();
+        return std::string(fileName) + " holds the " + info->gameName + " ROM cartridge, not the " +
+               expected.gameName + " one." + suffix;
+    }
+    recognised = info == &expected;
+    return {};
+}
+
 } // namespace
 
 namespace brimir {
@@ -254,6 +353,8 @@ void CoreWrapper::Shutdown() {
 
 bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const char* system_directory) {
     m_lastError.clear();
+    m_cartridgeMessage.clear();
+    m_cartridgeDescription = "none";
 
     if (!m_initialized || !m_saturn) {
         m_lastError = "Core not initialized";
@@ -489,58 +590,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         
         // Detect and insert required cartridge AFTER loading disc but BEFORE closing tray
         // The cartridge must be inserted before the BIOS initializes
-        const auto& discForCartridge = m_saturn->GetDisc();
-        if (!discForCartridge.sessions.empty()) {
-            // Get game info from Ymir's database
-            const ymir::db::GameInfo* gameInfo = ymir::db::GetGameInfo(
-                discForCartridge.header.productNumber,
-                m_saturn->GetDiscHash()
-            );
-            
-                if (gameInfo && gameInfo->GetCartridge() != ymir::db::Cartridge::None) {
-                // Set up cartridge RAM save path
-                if (save_directory && save_directory[0] != '\0') {
-                    m_cartridgePath = std::filesystem::path(save_directory) / (gamePath.stem().string() + ".cart");
-                } else {
-                    m_cartridgePath = std::filesystem::temp_directory_path() / (gamePath.stem().string() + ".cart");
-                }
-                
-                // Insert the appropriate cartridge
-                try {
-                    switch (gameInfo->GetCartridge()) {
-                    case ymir::db::Cartridge::DRAM8Mbit:
-                        m_saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
-                        m_hasCartridge = true;
-                        break;
-                    case ymir::db::Cartridge::DRAM32Mbit:
-                        m_saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>();
-                        m_hasCartridge = true;
-                        break;
-                    case ymir::db::Cartridge::DRAM48Mbit:
-                        m_saturn->InsertCartridge<ymir::cart::DRAM48MbitCartridge>();
-                        m_hasCartridge = true;
-                        break;
-                    default:
-                        // Other cartridge types (ROM, BackupRAM) not yet supported
-                        break;
-                    }
-                    
-                    // Do a HARD reset after inserting cartridge to force BIOS reboot
-                    // This is necessary because the BIOS has already initialized
-                    m_saturn->Reset(true);
-
-                    // Load saved cartridge RAM AFTER reset (Reset zeros the RAM)
-                    LoadCartridgeRAM();
-                    
-                } catch (const std::exception& e) {
-                    m_lastError = std::string("Exception inserting cartridge: ") + e.what();
-                    // Don't fail - game might still work without cartridge
-                } catch (...) {
-                    m_lastError = "Unknown exception inserting cartridge";
-                    // Don't fail - game might still work without cartridge
-                }
-            }
-        }
+        InsertGameCartridge(gamePath, save_directory);
         
         // Close the tray to start execution
         // Note: Some BIOS versions (especially Japanese) require this to properly initialize
@@ -588,6 +638,119 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
     }
 }
 
+void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, const char* save_directory) {
+    m_cartridgeMessage.clear();
+    m_cartridgeDescription = "none";
+    m_hasCartridge = false;
+    m_cartridgePath.clear();
+
+    const auto& disc = m_saturn->GetDisc();
+    if (disc.sessions.empty()) {
+        return;
+    }
+    const std::string productNumber = m_testProductNumber.empty() ? disc.header.productNumber : m_testProductNumber;
+    const ymir::db::GameInfo* gameInfo = ymir::db::GetGameInfo(productNumber, m_saturn->GetDiscHash());
+    const ymir::db::Cartridge cartridge =
+        ResolveCartridge(m_cartridgeChoice, gameInfo ? gameInfo->GetCartridge() : ymir::db::Cartridge::None);
+    if (cartridge == ymir::db::Cartridge::None) {
+        return;
+    }
+
+    const auto savePath = [&](const char* extension) {
+        const std::filesystem::path dir = (save_directory && save_directory[0] != '\0')
+                                              ? std::filesystem::path(save_directory)
+                                              : std::filesystem::temp_directory_path();
+        return dir / (gamePath.stem().string() + extension);
+    };
+
+    try {
+        switch (cartridge) {
+        case ymir::db::Cartridge::DRAM8Mbit:
+            m_saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
+            m_cartridgeDescription = "1 MB RAM";
+            m_cartridgePath = savePath(".cart");
+            break;
+        case ymir::db::Cartridge::DRAM32Mbit:
+            m_saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>();
+            m_cartridgeDescription = "4 MB RAM";
+            m_cartridgePath = savePath(".cart");
+            break;
+        case ymir::db::Cartridge::DRAM48Mbit:
+            m_saturn->InsertCartridge<ymir::cart::DRAM48MbitCartridge>();
+            m_cartridgeDescription = "6 MB RAM";
+            m_cartridgePath = savePath(".cart");
+            break;
+        case ymir::db::Cartridge::BackupRAM: {
+            // <game>.bcr holds the cartridge's 512 KiB of data bytes in bus order (data byte i at the cartridge's bus
+            // address 2i + 1), as Beetle Saturn's .bcr does, so Beetle files load unchanged.
+            const std::filesystem::path path = savePath(".bcr");
+            ymir::bup::BackupMemory bup;
+            bup.CreateInMemory(ymir::bup::BackupMemorySize::_4Mbit); // formatted
+            std::error_code ec;
+            bool persist = true;
+            if (std::filesystem::exists(path, ec)) {
+                std::vector<uint8_t> data;
+                uintmax_t size = 0;
+                if (!ReadFileUpTo(path, kBackupCartSize, data, size) || size != kBackupCartSize) {
+                    persist = false;
+                    m_cartridgeMessage = path.filename().string() +
+                                         (size != 0 && size != kBackupCartSize
+                                              ? " is " + std::to_string(size) + " bytes, not " +
+                                                    std::to_string(kBackupCartSize) + " (4 Mbit backup cartridge)"
+                                              : std::string(" could not be read")) +
+                                         ": the file is left unchanged and the backup cartridge starts empty and is "
+                                         "not saved this session.";
+                } else {
+                    for (uint32_t i = 0; i < data.size(); ++i) {
+                        bup.WriteByte(i << 1, data[i]);
+                    }
+                }
+            }
+            m_saturn->InsertCartridge<ymir::cart::BackupMemoryCartridge>(std::move(bup));
+            m_cartridgeDescription = "4 Mbit backup memory (" + path.filename().string() +
+                                     (persist ? ")" : ", not saved)");
+            if (persist) {
+                m_cartridgePath = path;
+            }
+            break;
+        }
+        case ymir::db::Cartridge::ROM_KOF95:
+        case ymir::db::Cartridge::ROM_Ultraman: {
+            const bool kof95 = cartridge == ymir::db::Cartridge::ROM_KOF95;
+            const char* fileName = kof95 ? kKOF95ROMFileName : kUltramanROMFileName;
+            const auto& expected = kof95 ? ymir::db::kKOF95ROMInfo : ymir::db::kUltramanROMInfo;
+            std::vector<uint8_t> rom;
+            bool recognised = false;
+            m_cartridgeMessage = LoadROMCartDump(m_systemDirectory, fileName, expected, rom, recognised);
+            if (!m_cartridgeMessage.empty()) {
+                return;
+            }
+            auto* cart = m_saturn->InsertCartridge<ymir::cart::ROMCartridge>();
+            cart->LoadROM(rom);
+            m_cartridgeDescription = std::string(expected.gameName) + " ROM (" + fileName +
+                                     (recognised ? ")" : ", unrecognised dump)");
+            break;
+        }
+        default:
+            return;
+        }
+        m_hasCartridge = true;
+
+        // Do a HARD reset after inserting cartridge to force BIOS reboot
+        // This is necessary because the BIOS has already initialized
+        m_saturn->Reset(true);
+
+        // Load saved cartridge RAM AFTER reset (Reset zeros the RAM)
+        LoadCartridgeRAM();
+    } catch (const std::exception& e) {
+        m_lastError = std::string("Exception inserting cartridge: ") + e.what();
+        // Don't fail - game might still work without cartridge
+    } catch (...) {
+        m_lastError = "Unknown exception inserting cartridge";
+        // Don't fail - game might still work without cartridge
+    }
+}
+
 void CoreWrapper::SaveCartridgeRAM() {
     if (!m_saturn || !m_hasCartridge || m_cartridgePath.empty()) {
         return;
@@ -620,14 +783,21 @@ void CoreWrapper::SaveCartridgeRAM() {
         dram->DumpRAM(std::span<uint8, 6_MiB>(ram.data(), ram.size()));
         break;
     }
+    case ymir::cart::CartType::BackupMemory: {
+        auto* bup = cart.As<ymir::cart::CartType::BackupMemory>();
+        if (!bup) return;
+        ram = bup->GetBackupMemory().ReadAll(); // the .bcr layout (InsertGameCartridge)
+        break;
+    }
     default:
         return;
     }
 
     try {
-        std::ofstream file(m_cartridgePath, std::ios::binary | std::ios::trunc);
-        if (file.is_open()) {
-            file.write(reinterpret_cast<const char*>(ram.data()), ram.size());
+        std::error_code dirEc;
+        std::filesystem::create_directories(m_cartridgePath.parent_path(), dirEc);
+        if (!WriteFileReplacing(m_cartridgePath, ram)) {
+            m_lastError = "Failed to save cartridge RAM";
         }
     } catch (...) {
         m_lastError = "Failed to save cartridge RAM";
@@ -758,7 +928,10 @@ void CoreWrapper::UnloadGame() {
     m_saturn->EjectDisc();
     m_gameLoaded = false;
     
-    // Reset cartridge state
+    // Reset cartridge state: the next content gets its own cartridge (or none)
+    if (m_hasCartridge) {
+        m_saturn->RemoveCartridge();
+    }
     m_hasCartridge = false;
     m_cartridgePath.clear();
     
@@ -1157,13 +1330,16 @@ size_t CoreWrapper::GetAudioSamples(int16_t* buffer, size_t max_samples) {
     return m_audioRingBuffer.Pop(buffer, max_samples);
 }
 
-// Size of the cartridge image SCU::SaveState puts in a state for the inserted cartridge.
+// Size of the cartridge image a state holds for the inserted cartridge (SaveState): SCU::SaveState's DRAM image, the
+// backup memory's data bytes, and nothing for a ROM (savestate_codec.hpp, version 8).
 static size_t CartDataSize(ymir::Saturn& saturn) {
-    switch (saturn.GetCartridge().GetType()) {
+    auto& cart = saturn.GetCartridge();
+    switch (cart.GetType()) {
     case ymir::cart::CartType::DRAM8Mbit: return 1_MiB;
     case ymir::cart::CartType::DRAM32Mbit: return 4_MiB;
     case ymir::cart::CartType::DRAM48Mbit: return 6_MiB;
-    case ymir::cart::CartType::ROM: return ymir::cart::kROMCartSize;
+    case ymir::cart::CartType::BackupMemory:
+        return cart.As<ymir::cart::CartType::BackupMemory>()->GetBackupMemory().Size();
     default: return 0;
     }
 }
@@ -1219,6 +1395,13 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         auto& state = Scratch(m_stateScratch);
         ResetSaveState(state);
         m_saturn->SaveState(state);
+        // The cartridge image of the state format (savestate_codec.hpp, version 8): SCU::SaveState holds no backup
+        // memory, which games write while running (run-ahead and netplay need it), and the ROM is the inserted dump.
+        if (auto* bup = m_saturn->GetCartridge().As<ymir::cart::CartType::BackupMemory>()) {
+            state.scu.cartData = bup->GetBackupMemory().ReadAll();
+        } else if (state.scu.cartType == ymir::savestate::SCUSaveState::CartType::ROM) {
+            state.scu.cartData.clear();
+        }
 #ifdef BRIMIR_VULKAN
         // VDP1 on the GPU: no state with framebuffers older than the emulation (the renderer logged why)
         if (m_vulkanRenderer && m_vulkanRenderer->SaveSyncFailed()) {
@@ -1323,7 +1506,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             if (result != static_cast<int>(payloadSize)) {
                 return false;
             }
-            // DecodeSaveState writes every member, so the scratch state needs no reset.
+            // DecodeSaveState writes or clears every member for any version, so the scratch state needs no reset.
             auto& state = Scratch(m_stateScratch);
             if (!DecodeSaveState(m_statePayload, state, version)) {
                 return false;
@@ -1337,19 +1520,37 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             // SCU::LoadState inserts the state's cartridge and nothing compares disc hashes, so a state
             // from another game could swap the cartridge mid-session: GetStateSize() would change under
             // the frontend's rewind and run-ahead buffers, and the cartridge RAM file would no longer
-            // match. Brimir never inserts ROM cartridges, and SCU::LoadState reads their 2 MiB image
-            // through a 4 MiB span.
+            // match.
             using CartType = ymir::savestate::SCUSaveState::CartType;
-            if (state.scu.cartType == CartType::ROM) {
-                m_lastStateError = "the state has a ROM cartridge, which Brimir does not support";
-                return false;
-            }
             if (state.scu.cartType != InsertedCartType(*m_saturn)) {
                 m_lastStateError = "the state's cartridge differs from the inserted one (state from another game?)";
                 return false;
             }
+            auto* bupCart = m_saturn->GetCartridge().As<ymir::cart::CartType::BackupMemory>();
+            if (bupCart != nullptr && !state.scu.cartData.empty() &&
+                state.scu.cartData.size() != bupCart->GetBackupMemory().Size()) {
+                m_lastStateError = "the state's backup cartridge differs in size from the inserted one";
+                return false;
+            }
+            if (state.scu.cartType == CartType::ROM) {
+                // The inserted ROM stays (it is the content's dump; version 8 states hold none, and SCU::LoadState
+                // would read a version 7 state's 2 MiB image through a 4 MiB span): SCU::LoadState leaves the slot
+                // alone for no cartridge.
+                state.scu.cartType = CartType::None;
+            }
             if (!m_saturn->LoadState(state, true)) {
                 return false;
+            }
+            if (bupCart != nullptr && !state.scu.cartData.empty()) {
+                // SCU::LoadState keeps the inserted backup cartridge; its data as saved (data byte i at bus address
+                // i << 1, only the bytes that differ written), like the internal backup RAM in Saturn::LoadState
+                auto& bup = bupCart->GetBackupMemory();
+                const auto& data = state.scu.cartData;
+                for (uint32_t i = 0; i < data.size(); ++i) {
+                    if (bup.ReadByte(i << 1) != data[i]) {
+                        bup.WriteByte(i << 1, data[i]);
+                    }
+                }
             }
             if (state.brimir.valid && state.brimir.backupRAM.valid) {
                 // The state's backup RAM is now Ymir's: it replaces a .srm not yet copied down at the first frame,

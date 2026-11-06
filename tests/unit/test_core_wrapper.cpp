@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <span>
 #include <string>
@@ -531,7 +532,7 @@ TEST_CASE("BRI2 state with a version before 4 is rejected", "[core][savestate][u
     const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
 
     STATIC_REQUIRE(CoreWrapper::kOldestLoadableSaveStateVersion == 4);
-    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 7);
+    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 8);
 
     for (const uint32_t version : {0u, 1u, 2u, 3u, CoreWrapper::kSaveStateVersion + 1}) {
         CAPTURE(version);
@@ -570,8 +571,33 @@ TEST_CASE("Version 4, 5 and 6 states (without all of the Brimir extension) still
         std::memcpy(patched.data() + 4, &version, sizeof(version));
         REQUIRE_FALSE(core.LoadState(patched.data(), patched.size()));
     }
+    // Version 7 has the version 8 layout (only backup memory and ROM cartridge images differ).
+    const auto v7 = RepackStateAs(saved, 7);
+    REQUIRE(core.LoadState(v7.data(), v7.size()));
     core.RunFrame();
     REQUIRE(core.GetFramebuffer() != nullptr);
+}
+
+TEST_CASE("A version 6 state leaves the internal backup RAM alone", "[core][savestate][unit][brimir][regression]") {
+    // Version 6 states hold no backup RAM; the decoder reuses the core's scratch state, which held the last saved
+    // state's backup RAM.
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    auto& bup = core.GetSaturn()->mem.GetInternalBackupRAM();
+    constexpr uint32_t kAddress = 0x1234 << 1;
+    bup.WriteByte(kAddress, 0x11);
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> saved(stateSize);
+    REQUIRE(core.SaveState(saved.data(), stateSize));
+    bup.WriteByte(kAddress, 0x22);
+
+    const auto v6 = RepackStateAs(saved, 6);
+    REQUIRE(core.LoadState(v6.data(), v6.size()));
+    CHECK(core.GetSaturn()->mem.GetInternalBackupRAM().ReadByte(kAddress) == 0x22);
+
+    // Control: the current version restores it.
+    REQUIRE(core.LoadState(saved.data(), saved.size()));
+    CHECK(core.GetSaturn()->mem.GetInternalBackupRAM().ReadByte(kAddress) == 0x11);
 }
 
 namespace {
@@ -1001,6 +1027,27 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
         REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
     }
 
+    SECTION("backup memory and ROM cartridge image sizes per version") {
+        using CartType = ymir::savestate::SCUSaveState::CartType;
+        const auto decodes = [&](CartType type, size_t size, uint32_t version) {
+            state->scu.cartType = type;
+            state->scu.cartData.assign(size, 0);
+            REQUIRE(EncodeSaveState(*state, payload));
+            return DecodeSaveState(payload, *decoded, version);
+        };
+        for (const size_t size : {512u * 1024u, 1024u * 1024u, 2u * 1024u * 1024u, 4u * 1024u * 1024u}) {
+            CHECK(decodes(CartType::BackupMemory, size, 8));
+            CHECK_FALSE(decodes(CartType::BackupMemory, size, 7));
+        }
+        CHECK_FALSE(decodes(CartType::BackupMemory, 0, 8));
+        CHECK_FALSE(decodes(CartType::BackupMemory, 1000, 8));
+        CHECK(decodes(CartType::BackupMemory, 0, 7));
+        CHECK(decodes(CartType::ROM, 0, 8));
+        CHECK_FALSE(decodes(CartType::ROM, 2 * 1024 * 1024, 8));
+        CHECK(decodes(CartType::ROM, 2 * 1024 * 1024, 7));
+        CHECK_FALSE(decodes(CartType::ROM, 0, 7));
+    }
+
     SECTION("unknown cartridge type") {
         state->scu.cartType = static_cast<ymir::savestate::SCUSaveState::CartType>(7);
         REQUIRE(EncodeSaveState(*state, payload));
@@ -1117,16 +1164,35 @@ TEST_CASE("Save state with a different cartridge than the inserted one is reject
     REQUIRE(core.GetFramebuffer() != nullptr);
 }
 
-TEST_CASE("Save state of a ROM cartridge session is rejected", "[core][savestate][unit]") {
-    // Brimir never inserts ROM cartridges, and SCU::LoadState reads the 2 MiB ROM image through a
-    // 4 MiB span.
+TEST_CASE("cartridge: ROM cartridge session states hold no ROM and keep the inserted one",
+          "[core][savestate][unit][cartridge]") {
+    // The ROM is the content's dump: a state does not carry it (and SCU::LoadState would read a 2 MiB image through
+    // a 4 MiB span).
     CoreWrapper core;
     REQUIRE(core.Initialize());
-    core.GetSaturn()->InsertCartridge<ymir::cart::ROMCartridge>();
+    const size_t withoutCart = core.GetStateSize();
+    auto* rom = core.GetSaturn()->InsertCartridge<ymir::cart::ROMCartridge>();
+    std::vector<uint8_t> image(2 * 1024 * 1024);
+    for (size_t i = 0; i < image.size(); ++i) {
+        image[i] = static_cast<uint8_t>(i * 7 + 3);
+    }
+    rom->LoadROM(image);
+    REQUIRE(core.GetStateSize() == withoutCart);
 
     std::vector<uint8_t> buf(core.GetStateSize());
     REQUIRE(core.SaveState(buf.data(), buf.size()));
-    REQUIRE_FALSE(core.LoadState(buf.data(), buf.size()));
+    REQUIRE(core.LoadState(buf.data(), buf.size()));
+    auto& cart = core.GetSaturn()->GetCartridge();
+    REQUIRE(cart.GetType() == ymir::cart::CartType::ROM);
+    CHECK(cart.ReadByte(0x0200'0000 + 0x12345) == image[0x12345]);
+    CHECK(cart.ReadByte(0x0200'0000 + 0x1FFFFF) == image[0x1FFFFF]);
+
+    // A version 7 state of a ROM session holds the 2 MiB image; it loads and the inserted ROM stays.
+    const auto v7 = RepackState(buf, 7, [](ymir::savestate::SaveState& s) {
+        s.scu.cartData.assign(2 * 1024 * 1024, 0xEE);
+    });
+    REQUIRE(core.LoadState(v7.data(), v7.size()));
+    CHECK(core.GetSaturn()->GetCartridge().ReadByte(0x0200'0000 + 0x12345) == image[0x12345]);
 
     core.RunFrame();
     REQUIRE(core.GetFramebuffer() != nullptr);
@@ -1555,4 +1621,311 @@ TEST_CASE("rtc: the RTC mode defaults to virtual", "[core][rtc]") {
     REQUIRE(core.Initialize());
     CHECK(*core.GetSaturn()->configuration.rtc.mode == ymir::core::config::rtc::Mode::Virtual);
     CHECK(std::llabs(PersistentData(core).rtc.timestamp - HostEpochSeconds()) <= 120);
+}
+
+// ============================================================
+// Cartridges
+// ============================================================
+
+namespace {
+
+std::filesystem::path Fixture(const char* name) {
+    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / name;
+}
+
+std::vector<uint8_t> ReadAllBytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// A core with the US BIOS and the given cartridge choice; the content is the audio CD of RtcContent.
+struct CartSession {
+    RtcContent content;
+    CoreWrapper core;
+
+    CartSession(const char* name, CartridgeChoice choice, const char* productNumber = "")
+        : content(name) {
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetCartridgeOverride(choice);
+        core.TestSetProductNumber(productNumber);
+    }
+
+    bool Load() { return content.Load(core); }
+    ymir::cart::CartType Type() { return core.GetSaturn()->GetCartridge().GetType(); }
+};
+
+} // namespace
+
+TEST_CASE("cartridge: auto inserts KoF95 rom when dump present", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture()) || !std::filesystem::exists(Fixture("mpr-18811-mx.ic1"))) {
+        SKIP("BIOS or KoF95 ROM fixture missing");
+    }
+    // T-3101G: The King of Fighters '95 (Japan) in the game database
+    CartSession s("brimir_cart_kof95", CartridgeChoice::Auto, "T-3101G");
+    std::filesystem::copy_file(Fixture("mpr-18811-mx.ic1"), s.content.system / "mpr-18811-mx.ic1");
+    REQUIRE(s.Load());
+    REQUIRE(s.Type() == ymir::cart::CartType::ROM);
+    CHECK(s.core.GetLastCartridgeMessage().empty());
+    CHECK(s.core.GetCartridgeDescription().find("unrecognised") == std::string::npos);
+
+    const auto rom = ReadAllBytes(Fixture("mpr-18811-mx.ic1"));
+    REQUIRE(rom.size() == 2 * 1024 * 1024);
+    auto& cart = s.core.GetSaturn()->GetCartridge();
+    for (const uint32_t offset : {0u, 1u, 0x1000u, 0x1FFFFEu, 0x1FFFFFu}) {
+        CAPTURE(offset);
+        CHECK(cart.ReadByte(0x0200'0000 + offset) == rom[offset]);
+    }
+    CHECK(cart.ReadWord(0x0200'0000) == ((rom[0] << 8) | rom[1])); // the dump is in bus (big-endian) order
+
+    s.core.RunFrame();
+    REQUIRE(s.core.GetFramebuffer() != nullptr);
+}
+
+TEST_CASE("cartridge: the Ultraman rom loads from its dump", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture()) || !std::filesystem::exists(Fixture("mpr-19367-mx.ic1"))) {
+        SKIP("BIOS or Ultraman ROM fixture missing");
+    }
+    SECTION("auto, from the game database") {
+        CartSession s("brimir_cart_ultraman_auto", CartridgeChoice::Auto, "T-13308G");
+        std::filesystem::copy_file(Fixture("mpr-19367-mx.ic1"), s.content.system / "mpr-19367-mx.ic1");
+        REQUIRE(s.Load());
+        REQUIRE(s.Type() == ymir::cart::CartType::ROM);
+        CHECK(s.core.GetLastCartridgeMessage().empty());
+        CHECK(s.core.GetCartridgeDescription().find("unrecognised") == std::string::npos);
+    }
+    SECTION("override, for a game without a cartridge") {
+        CartSession s("brimir_cart_ultraman_override", CartridgeChoice::ROM_Ultraman);
+        std::filesystem::copy_file(Fixture("mpr-19367-mx.ic1"), s.content.system / "mpr-19367-mx.ic1");
+        REQUIRE(s.Load());
+        REQUIRE(s.Type() == ymir::cart::CartType::ROM);
+        const auto rom = ReadAllBytes(Fixture("mpr-19367-mx.ic1"));
+        CHECK(s.core.GetSaturn()->GetCartridge().ReadByte(0x0200'0000 + 0x4321) == rom[0x4321]);
+    }
+}
+
+TEST_CASE("cartridge: missing rom dump starts without cart", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CartSession s("brimir_cart_missing", CartridgeChoice::Auto, "T-3101G");
+    REQUIRE(s.Load());
+    CHECK(s.Type() == ymir::cart::CartType::None);
+    const std::string& message = s.core.GetLastCartridgeMessage();
+    CHECK(message.find("mpr-18811-mx.ic1") != std::string::npos);
+    CHECK(message.find("without the cartridge") != std::string::npos);
+    CHECK(s.core.GetCartridgeDescription() == "none");
+
+    s.core.RunFrame();
+    REQUIRE(s.core.GetFramebuffer() != nullptr);
+
+    // The next load with the dump in place clears the message.
+    s.core.UnloadGame();
+    if (std::filesystem::exists(Fixture("mpr-18811-mx.ic1"))) {
+        std::filesystem::copy_file(Fixture("mpr-18811-mx.ic1"), s.content.system / "mpr-18811-mx.ic1");
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::ROM);
+        CHECK(s.core.GetLastCartridgeMessage().empty());
+    }
+}
+
+TEST_CASE("cartridge: wrong-size rom dump rejected", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    SECTION("wrong size") {
+        CartSession s("brimir_cart_wrong_size", CartridgeChoice::ROM_KOF95);
+        {
+            std::ofstream out(s.content.system / "mpr-18811-mx.ic1", std::ios::binary);
+            const std::vector<char> half(1024 * 1024, 0x55);
+            out.write(half.data(), half.size());
+        }
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::None);
+        CHECK(s.core.GetLastCartridgeMessage().find("1048576 bytes") != std::string::npos);
+    }
+    SECTION("the other game's dump") {
+        if (!std::filesystem::exists(Fixture("mpr-19367-mx.ic1"))) {
+            SKIP("Ultraman ROM fixture missing");
+        }
+        CartSession s("brimir_cart_other_dump", CartridgeChoice::ROM_KOF95);
+        std::filesystem::copy_file(Fixture("mpr-19367-mx.ic1"), s.content.system / "mpr-18811-mx.ic1");
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::None);
+        CHECK(s.core.GetLastCartridgeMessage().find("Ultraman") != std::string::npos);
+    }
+    SECTION("an unknown dump of the right size is used") {
+        CartSession s("brimir_cart_unknown_dump", CartridgeChoice::ROM_KOF95);
+        {
+            std::ofstream out(s.content.system / "mpr-18811-mx.ic1", std::ios::binary);
+            const std::vector<char> rom(2 * 1024 * 1024, 0x55);
+            out.write(rom.data(), rom.size());
+        }
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::ROM);
+        CHECK(s.core.GetLastCartridgeMessage().empty());
+        CHECK(s.core.GetCartridgeDescription().find("unrecognised") != std::string::npos);
+    }
+}
+
+TEST_CASE("cartridge: backup cart persists to <game>.bcr", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CartSession s("brimir_cart_backup", CartridgeChoice::Backup);
+    const auto bcr = s.content.saves / "audio.bcr";
+    REQUIRE(s.Load());
+    REQUIRE(s.Type() == ymir::cart::CartType::BackupMemory);
+    CHECK(s.core.GetSaturn()->GetCartridge().GetID() == 0x21); // 4 Mbit backup memory
+    s.core.RunFrame();
+
+    // Data byte k at bus address 2k + 1 (A-bus CS0, 0x04000000)
+    auto& cart = s.core.GetSaturn()->GetCartridge();
+    cart.WriteByte(0x0400'0000 + (0x1000 << 1) + 1, 0x5A);
+    cart.WriteByte(0x0400'0000 + (0x7FFFF << 1) + 1, 0xA5);
+    s.core.UnloadGame();
+
+    REQUIRE(std::filesystem::exists(bcr));
+    CHECK(std::filesystem::file_size(bcr) == CoreWrapper::kBackupCartSize);
+    const auto file = ReadAllBytes(bcr);
+    REQUIRE(file.size() == 512 * 1024);
+    CHECK(std::string(file.begin(), file.begin() + 16) == "BackUpRam Format"); // formatted, raw data bytes
+    CHECK(file[0x1000] == 0x5A);
+    CHECK(file[0x7FFFF] == 0xA5);
+
+    REQUIRE(s.Load());
+    REQUIRE(s.Type() == ymir::cart::CartType::BackupMemory);
+    auto& reloaded = s.core.GetSaturn()->GetCartridge();
+    CHECK(reloaded.ReadByte(0x0400'0000 + (0x1000 << 1) + 1) == 0x5A);
+    CHECK(reloaded.ReadByte(0x0400'0000 + (0x7FFFF << 1) + 1) == 0xA5);
+    s.core.UnloadGame();
+}
+
+TEST_CASE("cartridge: a .bcr file in Beetle's layout loads unchanged", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // Beetle Saturn's backup.c: 512 KiB of data bytes (byte i at bus address 2i + 1), "BackUpRam Format" repeated over
+    // the first 512 bytes, written as is (no byte swap).
+    CartSession s("brimir_cart_beetle_bcr", CartridgeChoice::Backup);
+    std::vector<uint8_t> image(512 * 1024, 0);
+    const char header[] = "BackUpRam Format";
+    for (size_t i = 0; i < 0x200; i += 0x10) {
+        std::memcpy(image.data() + i, header, 16);
+    }
+    image[0x400] = 0x80; // a save's first block
+    image[0x404] = 'B';
+    image[0x405] = 'R';
+    {
+        std::ofstream out(s.content.saves / "audio.bcr", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(image.data()), image.size());
+    }
+    REQUIRE(s.Load());
+    REQUIRE(s.Type() == ymir::cart::CartType::BackupMemory);
+    auto& cart = s.core.GetSaturn()->GetCartridge();
+    for (const uint32_t i : {0u, 15u, 0x1FFu, 0x400u, 0x404u, 0x405u, 0x7FFFFu}) {
+        CAPTURE(i);
+        CHECK(cart.ReadByte(0x0400'0000 + (i << 1) + 1) == image[i]);
+    }
+    s.core.UnloadGame();
+    const bool unchanged = ReadAllBytes(s.content.saves / "audio.bcr") == image;
+    CHECK(unchanged); // saved back unchanged
+}
+
+TEST_CASE("cartridge: a .bcr file of the wrong size is left alone", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CartSession s("brimir_cart_bad_bcr", CartridgeChoice::Backup);
+    const std::vector<uint8_t> odd(1000, 0x42);
+    {
+        std::ofstream out(s.content.saves / "audio.bcr", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(odd.data()), odd.size());
+    }
+    REQUIRE(s.Load());
+    REQUIRE(s.Type() == ymir::cart::CartType::BackupMemory);
+    CHECK(s.core.GetLastCartridgeMessage().find("1000 bytes") != std::string::npos);
+    s.core.UnloadGame();
+    const bool leftAlone = ReadAllBytes(s.content.saves / "audio.bcr") == odd;
+    CHECK(leftAlone);
+}
+
+TEST_CASE("cartridge: override none disables auto dram", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // T-1245G: Dungeons and Dragons Collection (Japan), a 4 MB RAM cartridge game
+    SECTION("auto") {
+        CartSession s("brimir_cart_auto_dram", CartridgeChoice::Auto, "T-1245G");
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::DRAM32Mbit);
+        CHECK(s.core.GetCartridgeDescription() == "4 MB RAM");
+    }
+    SECTION("none") {
+        CartSession s("brimir_cart_none_dram", CartridgeChoice::None, "T-1245G");
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::None);
+        CHECK(s.core.GetLastCartridgeMessage().empty());
+    }
+    SECTION("1 MB RAM for a game without a cartridge") {
+        CartSession s("brimir_cart_dram1", CartridgeChoice::DRAM8Mbit);
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::DRAM8Mbit);
+    }
+    SECTION("the option applies at the next content load; unloading removes the cartridge") {
+        CartSession s("brimir_cart_next_load", CartridgeChoice::DRAM32Mbit);
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::DRAM32Mbit);
+        s.core.SetCartridgeOverride(CartridgeChoice::None);
+        CHECK(s.Type() == ymir::cart::CartType::DRAM32Mbit);
+        s.core.UnloadGame();
+        CHECK(s.Type() == ymir::cart::CartType::None);
+        REQUIRE(s.Load());
+        CHECK(s.Type() == ymir::cart::CartType::None);
+    }
+}
+
+TEST_CASE("cartridge: save states hold the backup cartridge's contents", "[core][cartridge][savestate]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // A game's write to the cartridge between a save and a load (a run-ahead frame) must not survive the load.
+    CartSession s("brimir_cart_backup_state", CartridgeChoice::Backup);
+    REQUIRE(s.Load());
+    for (int i = 0; i < 3; ++i) {
+        s.core.RunFrame();
+    }
+    auto& cart = s.core.GetSaturn()->GetCartridge();
+    constexpr uint32_t kAddress = 0x0400'0000 + (0x2345 << 1) + 1;
+    cart.WriteByte(kAddress, 0x11);
+    const size_t stateSize = s.core.GetStateSize();
+    std::vector<uint8_t> saved(stateSize);
+    REQUIRE(s.core.SaveState(saved.data(), stateSize));
+
+    s.core.RunFrame();
+    cart.WriteByte(kAddress, 0x22);
+    REQUIRE(s.core.LoadState(saved.data(), saved.size()));
+    CHECK(s.core.GetSaturn()->GetCartridge().ReadByte(kAddress) == 0x11);
+    CHECK(s.core.GetStateSize() == stateSize);
+
+    // Saving right after the load gives the same state.
+    std::vector<uint8_t> again(stateSize);
+    REQUIRE(s.core.SaveState(again.data(), stateSize));
+    const bool same = again == saved;
+    CHECK(same);
+
+    // A version 7 state of the session (no cartridge image) loads and leaves the cartridge as it is.
+    cart.WriteByte(kAddress, 0x33);
+    const auto v7 = RepackState(saved, 7, [](ymir::savestate::SaveState& st) { st.scu.cartData.clear(); });
+    REQUIRE(s.core.LoadState(v7.data(), v7.size()));
+    CHECK(s.core.GetSaturn()->GetCartridge().ReadByte(kAddress) == 0x33);
+
+    // A state without the cartridge does not load into the session.
+    CoreWrapper bare;
+    REQUIRE(bare.Initialize());
+    std::vector<uint8_t> noCart(bare.GetStateSize());
+    REQUIRE(bare.SaveState(noCart.data(), noCart.size()));
+    CHECK_FALSE(s.core.LoadState(noCart.data(), noCart.size()));
+    CHECK(s.core.GetSaturn()->GetCartridge().GetType() == ymir::cart::CartType::BackupMemory);
+    s.core.UnloadGame();
 }

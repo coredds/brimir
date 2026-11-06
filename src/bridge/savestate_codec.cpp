@@ -7,6 +7,7 @@
 #include <ymir/hw/vdp/vdp1_defs.hpp>
 #include <ymir/hw/vdp/vdp1_regs.hpp>
 
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -239,20 +240,25 @@ void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     }
 }
 
-// The cartridge image size SCU::SaveState writes for each cartridge type, or SIZE_MAX for a value that
-// is not a cartridge type. SCU::ValidateState checks only the 8 and 32 Mbit sizes, and SCU::LoadState
-// copies a fixed size per type out of cartData, so every size is checked here.
-size_t ExpectedCartDataSize(SCUSaveState::CartType type) {
+// Whether the cartridge image has a size the state's version holds for its cartridge type (false for a value that is
+// not a cartridge type). SCU::ValidateState checks only the 8 and 32 Mbit sizes, and SCU::LoadState copies a fixed
+// size per type out of cartData, so every size is checked here. From version 8 on the image of a backup memory
+// cartridge is its data (one of the four backup cartridge sizes) and a ROM cartridge has none (codec header).
+bool ValidCartDataSize(SCUSaveState::CartType type, size_t size, uint32_t version) {
     using CartType = SCUSaveState::CartType;
     switch (type) {
-    case CartType::None: return 0;
-    case CartType::BackupMemory: return 0;
-    case CartType::DRAM8Mbit: return 1024 * 1024;
-    case CartType::DRAM32Mbit: return 4 * 1024 * 1024;
-    case CartType::DRAM48Mbit: return 6 * 1024 * 1024;
-    case CartType::ROM: return ymir::cart::kROMCartSize;
+    case CartType::None: return size == 0;
+    case CartType::BackupMemory:
+        if (version < 8) {
+            return size == 0;
+        }
+        return size == 512 * 1024 || size == 1024 * 1024 || size == 2 * 1024 * 1024 || size == 4 * 1024 * 1024;
+    case CartType::DRAM8Mbit: return size == 1024 * 1024;
+    case CartType::DRAM32Mbit: return size == 4 * 1024 * 1024;
+    case CartType::DRAM48Mbit: return size == 6 * 1024 * 1024;
+    case CartType::ROM: return size == (version < 8 ? ymir::cart::kROMCartSize : 0);
     }
-    return SIZE_MAX;
+    return false;
 }
 
 // The extension is read as raw bytes, so its bools are checked here (any byte other than 0 or 1 is an invalid bool),
@@ -317,13 +323,17 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_
     if (version < 6) {
         std::memset(&state.brimir, 0, sizeof(state.brimir)); // valid = false: the state loads as before
     } else if (version == 6) {
-        // Before scspSlots (its first bytes may hold the version 6 padding): valid = false
-        std::memset(&state.brimir.scspSlots, 0, sizeof(state.brimir.scspSlots));
+        // Everything from scspSlots on (its first bytes may hold the version 6 padding): every `valid` false, and no
+        // earlier state's internal backup RAM is left in the extension
+        using ymir::savestate::BrimirSaveState;
+        constexpr size_t from = offsetof(BrimirSaveState, scspSlots);
+        static_assert(from <= ymir::savestate::kBrimirSaveStateV6Size);
+        std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
     }
     if (!reader.Done()) {
         return false;
     }
-    if (state.scu.cartData.size() != ExpectedCartDataSize(state.scu.cartType)) {
+    if (!ValidCartDataSize(state.scu.cartType, state.scu.cartData.size(), version)) {
         return false;
     }
     // SMPC reads the report from this offset on (SMPC::INTBACKPeripheral).

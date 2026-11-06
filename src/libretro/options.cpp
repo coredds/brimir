@@ -3,6 +3,7 @@
 // Licensed under GPL-3.0
 
 #include "options.hpp"
+#include <brimir/core_wrapper.hpp>
 #include <cstring>
 
 // Core option definitions using libretro API v2
@@ -209,6 +210,31 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "virtual"
     },
     {
+        // Read once at content load (retro_load_game), like brimir_rtc_mode.
+        "brimir_cartridge",
+        "Cartridge",
+        nullptr,
+        "The cartridge in the Saturn's cartridge slot. Auto: the one the game needs (1 MB or 4 MB RAM for the games "
+        "that use it, the ROM cartridge for The King of Fighters '95 and Ultraman, backup memory for the games that "
+        "save to it), none for other games. Backup memory is a 4 Mbit cartridge saved to <game>.bcr in the save "
+        "folder (the same file as Beetle Saturn's). The ROM cartridges need their dumps in the system folder: "
+        "mpr-18811-mx.ic1 (The King of Fighters '95) and mpr-19367-mx.ic1 (Ultraman); without one, the game starts "
+        "without the cartridge. Applies when content is loaded.",
+        nullptr,
+        "system",
+        {
+            { "auto", "Auto" },
+            { "none", "None" },
+            { "dram_1mb", "1 MB RAM" },
+            { "dram_4mb", "4 MB RAM" },
+            { "backup", "Backup Memory" },
+            { "rom_kof95", "The King of Fighters '95 ROM" },
+            { "rom_ultraman", "Ultraman ROM" },
+            { nullptr, nullptr }
+        },
+        "auto"
+    },
+    {
         "brimir_audio_interpolation",
         "Audio Interpolation",
         nullptr,
@@ -408,6 +434,27 @@ bool brimir_update_deinterlace(BrimirDeinterlaceOptions& cache, const char* dein
     cache.mode = newMode;
     effective = brimir_deinterlace_effective(cache.deinterlacing.c_str(), cache.mode.c_str());
     return force || changed;
+}
+
+brimir::CartridgeChoice brimir_cartridge_choice(const char* value) {
+    using brimir::CartridgeChoice;
+    static const struct {
+        const char* value;
+        CartridgeChoice choice;
+    } kChoices[] = {
+        { "none", CartridgeChoice::None },
+        { "dram_1mb", CartridgeChoice::DRAM8Mbit },
+        { "dram_4mb", CartridgeChoice::DRAM32Mbit },
+        { "backup", CartridgeChoice::Backup },
+        { "rom_kof95", CartridgeChoice::ROM_KOF95 },
+        { "rom_ultraman", CartridgeChoice::ROM_Ultraman },
+    };
+    for (const auto& c : kChoices) {
+        if (value && std::strcmp(value, c.value) == 0) {
+            return c.choice;
+        }
+    }
+    return CartridgeChoice::Auto;
 }
 
 const struct retro_core_options_v2* brimir_get_core_options_v2(void) {

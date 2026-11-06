@@ -66,6 +66,17 @@ enum class RTCMode {
     Host,    ///< reads the host clock plus the user's offset
 };
 
+/// @brief The cartridge LoadGame inserts (option brimir_cartridge)
+enum class CartridgeChoice {
+    Auto,        ///< the game database's cartridge (DRAM, ROM or backup memory), none for other games
+    None,        ///< no cartridge
+    DRAM8Mbit,   ///< 1 MB RAM cartridge
+    DRAM32Mbit,  ///< 4 MB RAM cartridge
+    Backup,      ///< 4 Mbit (512 KiB) backup memory cartridge, saved to <game>.bcr
+    ROM_KOF95,   ///< The King of Fighters '95 ROM cartridge (mpr-18811-mx.ic1 in the system directory)
+    ROM_Ultraman ///< Ultraman: Hikari no Kyojin Densetsu ROM cartridge (mpr-19367-mx.ic1 in the system directory)
+};
+
 /// @brief The output transforms the GPU frame output applies to a raw frame (see SetOverscanCrop/SetRotation)
 struct FrameOutputSettings {
     uint32_t cropH = 0;    ///< total horizontal overscan crop
@@ -81,8 +92,10 @@ public:
     /// rejected, as are the older unversioned "BRIM" states. Version 5 keeps the same layout but stores the
     /// VDP2 fetchers' palette numbers whole; version 4 states are converted on load. Version 6 appends the state
     /// upstream save states omit (ymir::savestate::BrimirSaveState); version 4 and 5 states load without it. Version 7
-    /// adds the SCSP slot modulation inputs to it; version 6 states load without them.
-    static constexpr uint32_t kSaveStateVersion = 7;
+    /// adds the SCSP slot modulation inputs to it; version 6 states load without them. Version 8 keeps the layout:
+    /// the SCU cartridge image holds a backup memory cartridge's data bytes and is empty for a ROM cartridge (the
+    /// ROM is the dump inserted at content load); version 7 states have no image for either.
+    static constexpr uint32_t kSaveStateVersion = 8;
 
     /// @brief Oldest BRI2 version LoadState accepts
     static constexpr uint32_t kOldestLoadableSaveStateVersion = 4;
@@ -306,6 +319,23 @@ public:
     /// clock plus the stored offset.
     void SetRTCMode(RTCMode mode);
     RTCMode GetRTCMode() const { return m_rtcMode; }
+
+    /// @brief ROM cartridge dump file names (in the system directory), as Beetle and Kronos name them
+    static constexpr const char* kKOF95ROMFileName = "mpr-18811-mx.ic1";
+    static constexpr const char* kUltramanROMFileName = "mpr-19367-mx.ic1";
+    /// @brief Size of the backup memory cartridge and of its <game>.bcr file (4 Mbit of data bytes)
+    static constexpr size_t kBackupCartSize = 512 * 1024;
+
+    /// @brief Choose the cartridge. Applies at the next LoadGame (the cartridge is inserted before the BIOS boots).
+    void SetCartridgeOverride(CartridgeChoice choice) { m_cartridgeChoice = choice; }
+    CartridgeChoice GetCartridgeOverride() const { return m_cartridgeChoice; }
+
+    /// @brief Why the last LoadGame started without the chosen cartridge or with an unsaved one (missing or wrong ROM
+    /// dump, unreadable .bcr file), or an empty string. For the frontend's on-screen message and log.
+    const std::string& GetLastCartridgeMessage() const { return m_cartridgeMessage; }
+
+    /// @brief The cartridge the last LoadGame inserted, for the log (e.g. "4 MB RAM"), or "none"
+    const std::string& GetCartridgeDescription() const { return m_cartridgeDescription; }
     
     /// @brief Set renderer type (Ymir hw layer only supports software)
     /// @param renderer Renderer string: "software"
@@ -419,6 +449,9 @@ public:
     void TestInjectFrame(const uint32_t* xbgr, uint32_t w, uint32_t h) {
         OnFrameComplete(const_cast<uint32_t*>(xbgr), w, h);
     }
+
+    /// @brief Test seam: the product number LoadGame looks the cartridge up with (empty: the disc's own)
+    void TestSetProductNumber(std::string productNumber) { m_testProductNumber = std::move(productNumber); }
 #endif
 
 private:
@@ -529,8 +562,15 @@ private:
     void DropSH2JitExecutors();
     
     // Cartridge support
-    std::filesystem::path m_cartridgePath;  // Path to cartridge RAM save file
-    bool m_hasCartridge = false;  // True if a cartridge is inserted
+    std::filesystem::path m_cartridgePath;  // The cartridge's save file (<game>.cart for DRAM, <game>.bcr for backup)
+    bool m_hasCartridge = false;  // True if LoadGame inserted a cartridge
+    CartridgeChoice m_cartridgeChoice = CartridgeChoice::Auto;
+    std::string m_cartridgeMessage;
+    std::string m_cartridgeDescription = "none";
+    std::string m_testProductNumber; // TestSetProductNumber
+
+    /// @brief Inserts the chosen cartridge for the loaded disc (see SetCartridgeOverride), then hard-resets
+    void InsertGameCartridge(const std::filesystem::path& gamePath, const char* save_directory);
 
     void SaveCartridgeRAM();
     void LoadCartridgeRAM();

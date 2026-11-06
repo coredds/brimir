@@ -7,8 +7,15 @@
 #include "libretro.h"
 #include <string>
 
+namespace brimir {
+enum class CartridgeChoice; // core_wrapper.hpp
+}
+
 // Get core options v2 structure
 const struct retro_core_options_v2* brimir_get_core_options_v2(void);
+
+// The cartridge a brimir_cartridge value chooses (Auto for nullptr or an unknown value).
+brimir::CartridgeChoice brimir_cartridge_choice(const char* value);
 
 // Last seen values of the two deinterlacing options. Defaults must match options.cpp.
 struct BrimirDeinterlaceOptions {

@@ -259,6 +259,7 @@ struct OptionCache {
     // Load-time only (read in retro_load_game); kept to report live changes.
     std::string renderer = "software";
     std::string rtc_mode = "virtual";
+    std::string cartridge = "auto";
     // Live (Vulkan VDP2 renderer only): applied at the next shown frame.
     std::string internal_resolution = "1";
     // Live (Vulkan renderer with VDP1 on the GPU, internal resolution above 1): applied at the next shown frame.
@@ -326,6 +327,11 @@ static void apply_core_options(bool force) {
         if (g_options.rtc_mode != rtc_mode) {
             g_options.rtc_mode = rtc_mode;
             brimir_log(RETRO_LOG_INFO, "RTC mode '%s' applies when content is next loaded", rtc_mode);
+        }
+        const char* cartridge = get_option_value("brimir_cartridge", g_options.cartridge.c_str());
+        if (g_options.cartridge != cartridge) {
+            g_options.cartridge = cartridge;
+            brimir_log(RETRO_LOG_INFO, "Cartridge '%s' applies when content is next loaded", cartridge);
         }
     }
 
@@ -1349,6 +1355,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // Before LoadGame, which applies the mode again once the RTC file is read (no content: applies now).
     g_options.rtc_mode = get_option_value("brimir_rtc_mode", "virtual");
     g_core->SetRTCMode(g_options.rtc_mode == "host" ? brimir::RTCMode::Host : brimir::RTCMode::Virtual);
+    g_options.cartridge = get_option_value("brimir_cartridge", "auto");
+    g_core->SetCartridgeOverride(brimir_cartridge_choice(g_options.cartridge.c_str()));
 
     if (!no_content) {
         brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
@@ -1361,6 +1369,16 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
 
         brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
+        brimir_log(RETRO_LOG_INFO, "Cartridge: %s", g_core->GetCartridgeDescription().c_str());
+        if (const std::string& cartMessage = g_core->GetLastCartridgeMessage(); !cartMessage.empty()) {
+            brimir_log(RETRO_LOG_WARN, "Cartridge: %s", cartMessage.c_str());
+            if (environ_cb) {
+                static std::string text;
+                text = "Brimir: " + cartMessage;
+                retro_message message{text.c_str(), 600};
+                environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+            }
+        }
     }
 
     apply_fixed_rtc();

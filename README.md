@@ -73,7 +73,10 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - Auto-detection of console region from disc; real NTSC/PAL timing reported to the frontend
 - Configurable CD read speed (2x-32x/Max)
 - SH-2 CPU overclocking (100%-300%)
-- RAM expansion cartridge support (1MB, 4MB, 6MB), inserted automatically from the game database
+- Cartridges inserted automatically from the game database, or chosen with the "Cartridge" core option: RAM
+  expansion (1MB, 4MB, 6MB), the ROM cartridges of The King of Fighters '95 and Ultraman (dumps `mpr-18811-mx.ic1`
+  and `mpr-19367-mx.ic1` in the system folder), and a 4 Mbit backup memory cartridge saved to `<game>.bcr` (Beetle
+  Saturn's file layout)
 
 ### Rendering
 - **Software Renderer**: Ymir's proven software renderer with pixel-perfect accuracy
@@ -107,7 +110,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **Cheats** — `retro_cheat_set` / `retro_cheat_reset` are stubs; cheat codes are not applied yet.
-- **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2). ROM cartridges other than DRAM expansion carts are not inserted automatically.
+- **Controllers** — Only the standard Saturn Control Pad is exposed (ports 1 and 2).
 - **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter. The x64 backend's SH-2 time is between about 5% and 28% below the interpreter's across six games, and its native compiles run on an extra thread where the CPU has at least 4 threads (core option "SH-2 JIT Compile Thread (Experimental)"); the IR interpreter backend is about 3x slower than the interpreter (see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)). It can still stutter while a game loads a lot of new code: Burning Rangers over a long session has SH-2 time about 5% below the interpreter's, but 358 of 33,600 frames take over 16.7 ms (the interpreter: none; the worst 48 ms), and with threaded VDP, the default, the average frame of Sega Rally, Street Fighter Zero 3 and that session is 2-6% longer than the interpreter's. It uses up to 128 MB of native code per SH-2 CPU, allocated on demand. It is not used while SH-2 cache emulation is active. It stays an experimental, opt-in option for testing; the current state and the next steps are in [design/sh2-jit.md](design/sh2-jit.md) ("Where to pick up").
 
 ## Vulkan renderer

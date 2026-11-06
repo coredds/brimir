@@ -3,6 +3,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "options.hpp"
+#include <brimir/core_wrapper.hpp>
 #include <cstring>
 
 TEST_CASE("Core options include profiling option", "[options][libretro]") {
@@ -50,6 +51,56 @@ TEST_CASE("Core options include the RTC mode option", "[options][libretro][rtc]"
     CHECK(std::strstr(found->info, "Applies when content is loaded") != nullptr);
 }
 
+TEST_CASE("cartridge: core option values and labels", "[options][libretro][cartridge]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+
+    const retro_core_option_v2_definition* found = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_cartridge") == 0) {
+            found = &options->definitions[i];
+            break;
+        }
+    }
+
+    REQUIRE(found != nullptr);
+    CHECK(std::strcmp(found->desc, "Cartridge") == 0);
+    REQUIRE(found->category_key != nullptr);
+    CHECK(std::strcmp(found->category_key, "system") == 0);
+    REQUIRE(found->default_value != nullptr);
+    CHECK(std::strcmp(found->default_value, "auto") == 0);
+    REQUIRE(found->info != nullptr);
+    CHECK(std::strstr(found->info, "Applies when content is loaded") != nullptr);
+    CHECK(std::strstr(found->info, "mpr-18811-mx.ic1") != nullptr);
+    CHECK(std::strstr(found->info, "mpr-19367-mx.ic1") != nullptr);
+
+    using brimir::CartridgeChoice;
+    const struct {
+        const char* value;
+        CartridgeChoice choice;
+    } expected[] = {
+        { "auto", CartridgeChoice::Auto },
+        { "none", CartridgeChoice::None },
+        { "dram_1mb", CartridgeChoice::DRAM8Mbit },
+        { "dram_4mb", CartridgeChoice::DRAM32Mbit },
+        { "backup", CartridgeChoice::Backup },
+        { "rom_kof95", CartridgeChoice::ROM_KOF95 },
+        { "rom_ultraman", CartridgeChoice::ROM_Ultraman },
+    };
+    size_t i = 0;
+    for (const auto& e : expected) {
+        CAPTURE(e.value);
+        REQUIRE(found->values[i].value != nullptr);
+        CHECK(std::strcmp(found->values[i].value, e.value) == 0);
+        CHECK(found->values[i].label != nullptr);
+        CHECK(brimir_cartridge_choice(e.value) == e.choice);
+        ++i;
+    }
+    CHECK(found->values[i].value == nullptr);
+    CHECK(brimir_cartridge_choice(nullptr) == CartridgeChoice::Auto);
+    CHECK(brimir_cartridge_choice("bogus") == CartridgeChoice::Auto);
+}
+
 TEST_CASE("Core options default values match OptionCache defaults", "[options][libretro]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);
@@ -75,6 +126,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_sh2_jit_compile_thread", "auto"   },
         { "brimir_profiling",            "disabled" },
         { "brimir_rtc_mode",             "virtual"  },
+        { "brimir_cartridge",            "auto"     },
 #ifdef BRIMIR_VULKAN
         { "brimir_renderer",             "software" },
         { "brimir_internal_resolution",  "1"        },
