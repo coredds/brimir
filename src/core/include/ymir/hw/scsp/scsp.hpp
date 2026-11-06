@@ -191,12 +191,15 @@ public:
     void SaveState(savestate::SCSPSaveState &state) const;
     [[nodiscard]] bool ValidateState(const savestate::SCSPSaveState &state) const;
     // Brimir: `ext` (state upstream omits, savestate_brimir.hpp) is applied when given
-    void LoadState(const savestate::SCSPSaveState &state, const savestate::BrimirSaveState::SCSP *ext = nullptr);
-    // Brimir: fills the SCSP part of the save state extension
-    void SaveBrimirState(savestate::BrimirSaveState::SCSP &ext) const;
+    void LoadState(const savestate::SCSPSaveState &state, const savestate::BrimirSaveState *ext = nullptr);
+    // Brimir: fills the SCSP parts of the save state extension
+    void SaveBrimirState(savestate::BrimirSaveState &ext) const;
     // Brimir: for tests
     [[nodiscard]] const DSP &GetDSP() const {
         return m_dsp;
+    }
+    [[nodiscard]] const Slot &GetSlot(size_t index) const {
+        return m_slots[index & 31];
     }
 
 private:

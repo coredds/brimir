@@ -80,8 +80,9 @@ public:
     /// (savestate_codec.hpp); earlier versions held the raw struct, including stale heap pointers, and are
     /// rejected, as are the older unversioned "BRIM" states. Version 5 keeps the same layout but stores the
     /// VDP2 fetchers' palette numbers whole; version 4 states are converted on load. Version 6 appends the state
-    /// upstream save states omit (ymir::savestate::BrimirSaveState); version 4 and 5 states load without it.
-    static constexpr uint32_t kSaveStateVersion = 6;
+    /// upstream save states omit (ymir::savestate::BrimirSaveState); version 4 and 5 states load without it. Version 7
+    /// adds the SCSP slot modulation inputs to it; version 6 states load without them.
+    static constexpr uint32_t kSaveStateVersion = 7;
 
     /// @brief Oldest BRI2 version LoadState accepts
     static constexpr uint32_t kOldestLoadableSaveStateVersion = 4;

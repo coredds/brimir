@@ -7,6 +7,7 @@
 #include <ymir/core/types.hpp>
 
 #include <array>
+#include <cstddef>
 
 namespace ymir::savestate {
 
@@ -46,6 +47,25 @@ struct BrimirSaveState {
         // the program alone.
         uint8 dspProgramLength;
     } scsp;
+
+    // From Brimir save-state version 7 on (version 6 states end before this member; `valid` is then false).
+    struct SCSPSlots {
+        bool valid;
+        // Modulation inputs each slot reads from the sound stack in pipeline steps 2-2 and 2-3 and uses in step 3-2
+        // (SCSP::SlotProcessStep*), possibly in a later sample; kept from the last read while MDL < 5.
+        std::array<sint16, 32> modXSample;
+        std::array<sint16, 32> modYSample;
+    } scspSlots;
+
+    // From version 7 on: the internal backup RAM (32 KiB of data bytes). Games write it while running (records,
+    // saves); without it, a run-ahead frame's write survived the load and the game read it a frame early.
+    struct BackupRAM {
+        bool valid; // false when the system has no internal backup RAM image (or in older states)
+        std::array<uint8, 32 * 1024> internal;
+    } backupRAM;
 };
+
+// Bytes of the extension in a version 6 payload (before scspSlots), on every supported ABI.
+inline constexpr size_t kBrimirSaveStateV6Size = 786480;
 
 } // namespace ymir::savestate

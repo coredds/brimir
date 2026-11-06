@@ -9,7 +9,8 @@
 //   - scu:  each field in declaration order; cartData as uint32 length + bytes
 //   - smpc: each field in declaration order; intback.report as uint32 length + bytes and
 //           intback.reportOffset as uint64
-//   - brimir (the last member, from version 6 on): raw bytes; absent from version 4 and 5 payloads
+//   - brimir (the last member): raw bytes from version 7 on; version 6 payloads hold only its first
+//     kBrimirSaveStateV6Size bytes (no scspSlots); absent from version 4 and 5 payloads
 
 #include <ymir/savestate/savestate.hpp>
 
@@ -27,6 +28,9 @@ inline constexpr size_t kMaxSaveStateINTBACKReportSize = 2 * (2 + 255);
 /// @brief Largest cartridge image in a state (48 Mbit DRAM cartridge)
 inline constexpr size_t kMaxSaveStateCartDataSize = 6 * 1024 * 1024;
 
+/// @brief Payload layout version EncodeSaveState writes (CoreWrapper::kSaveStateVersion, the BRI2 header version)
+inline constexpr uint32_t kSaveStatePayloadVersion = 7;
+
 /// @brief Size of the payload EncodeSaveState writes for this state
 size_t EncodedSaveStateSize(const ymir::savestate::SaveState& state);
 
@@ -43,12 +47,13 @@ bool EncodeSaveState(const ymir::savestate::SaveState& state, std::vector<uint8_
 void ResetSaveState(ymir::savestate::SaveState& state);
 
 /// @brief Fills every member of state from a payload written by EncodeSaveState
-/// @param withBrimirExtension false for version 4 and 5 payloads, which end before `brimir` (the extension is then
-/// cleared: `brimir.valid` false, so the state loads as it did in those versions)
+/// @param version the payload version: 4 and 5 end before `brimir` (the extension is then cleared: `brimir.valid`
+/// false, so the state loads as it did in those versions); 6 ends before `brimir.scspSlots` (cleared: its `valid`
+/// false)
 /// @return false if the payload is truncated, has trailing bytes, or holds an invalid length,
 /// cartridge type, bool or INTBACK report offset; state is then partially overwritten
 bool DecodeSaveState(std::span<const uint8_t> payload, ymir::savestate::SaveState& state,
-                     bool withBrimirExtension = true);
+                     uint32_t version = kSaveStatePayloadVersion);
 
 /// @brief Converts a state decoded from a version 4 payload to the current meaning of its fields.
 /// Version 4 stored the VDP2 VRAM fetchers' character palette numbers shifted right by 4, which lost

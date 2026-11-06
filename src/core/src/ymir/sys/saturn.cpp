@@ -395,7 +395,19 @@ void Saturn::SaveState(savestate::SaveState &state) const {
     state.discHash = GetDiscHash();
     // Brimir: state upstream omits or restores inexactly (savestate_brimir.hpp)
     VDP.SaveBrimirState(state.brimir);
-    SCSP.SaveBrimirState(state.brimir.scsp);
+    SCSP.SaveBrimirState(state.brimir);
+    {
+        // The internal backup RAM's data bytes (ReadAll is const; the accessor is not)
+        auto &bup = const_cast<sys::SystemMemory &>(mem).GetInternalBackupRAM();
+        auto &ext = state.brimir.backupRAM;
+        ext.valid = bup.GetBlockSize() != 0 && bup.Size() == ext.internal.size(); // no image: no container to read
+        if (ext.valid) {
+            const std::vector<uint8> data = bup.ReadAll();
+            std::copy(data.begin(), data.end(), ext.internal.begin());
+        } else {
+            ext.internal.fill(0);
+        }
+    }
     state.brimir.valid = true;
 }
 
@@ -462,7 +474,20 @@ bool Saturn::LoadState(const savestate::SaveState &state, bool skipROMChecks) {
     SMPC.LoadState(state.smpc);
     // Brimir: with the extension of states saved by this version (savestate_brimir.hpp)
     VDP.LoadState(state.vdp, state.brimir.valid ? &state.brimir : nullptr);
-    SCSP.LoadState(state.scsp, state.brimir.valid ? &state.brimir.scsp : nullptr);
+    SCSP.LoadState(state.scsp, state.brimir.valid ? &state.brimir : nullptr);
+    if (state.brimir.valid && state.brimir.backupRAM.valid) {
+        // Brimir: the internal backup RAM as saved (only the bytes that differ are written; data byte i is at bus
+        // address i << 1)
+        auto &bup = mem.GetInternalBackupRAM();
+        const auto &data = state.brimir.backupRAM.internal;
+        if (bup.GetBlockSize() != 0 && bup.Size() == data.size()) {
+            for (uint32 i = 0; i < data.size(); ++i) {
+                if (bup.ReadByte(i << 1) != data[i]) {
+                    bup.WriteByte(i << 1, data[i]);
+                }
+            }
+        }
+    }
     if (m_cdblockLLE) {
         SH1.LoadState(state.sh1);
         YGR.LoadState(state.ygr);

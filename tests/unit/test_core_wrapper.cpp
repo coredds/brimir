@@ -531,7 +531,7 @@ TEST_CASE("BRI2 state with a version before 4 is rejected", "[core][savestate][u
     const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
 
     STATIC_REQUIRE(CoreWrapper::kOldestLoadableSaveStateVersion == 4);
-    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 6);
+    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 7);
 
     for (const uint32_t version : {0u, 1u, 2u, 3u, CoreWrapper::kSaveStateVersion + 1}) {
         CAPTURE(version);
@@ -555,13 +555,13 @@ std::vector<uint8_t> RepackStateAs(const std::vector<uint8_t>& saved, uint32_t v
 
 } // namespace
 
-TEST_CASE("Version 4 and 5 states (without the Brimir extension) still load", "[core][savestate][unit][brimir]") {
+TEST_CASE("Version 4, 5 and 6 states (without all of the Brimir extension) still load", "[core][savestate][unit][brimir]") {
     CoreWrapper core;
     REQUIRE(core.Initialize());
     const size_t stateSize = core.GetStateSize();
     std::vector<uint8_t> saved(stateSize);
     REQUIRE(core.SaveState(saved.data(), stateSize));
-    for (const uint32_t version : {4u, 5u}) {
+    for (const uint32_t version : {4u, 5u, 6u}) {
         CAPTURE(version);
         const auto buf = RepackStateAs(saved, version);
         REQUIRE(core.LoadState(buf.data(), buf.size()));
@@ -596,6 +596,10 @@ std::vector<uint8_t> RepackState(const std::vector<uint8_t>& saved, uint32_t ver
     if (version < 6) {
         // Versions 4 and 5 end before the Brimir extension, the payload's last member.
         payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState));
+    } else if (version == 6) {
+        // Version 6 ends before its scspSlots.
+        payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
+                       ymir::savestate::kBrimirSaveStateV6Size);
     }
 
     std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(payload.size())));
@@ -970,8 +974,10 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
             DecodeSaveState(patched(offsetof(B, vdp) + offsetof(B::VDP, vdp1ReturnAddress), &pastVram, 4), *decoded));
         REQUIRE_FALSE(
             DecodeSaveState(patched(offsetof(B, scsp) + offsetof(B::SCSP, dspProgramLength), &longProgram, 1), *decoded));
+        REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, scspSlots) + offsetof(B::SCSPSlots, valid), &zero, 1), *decoded));
+        REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, scspSlots) + offsetof(B::SCSPSlots, valid), &two, 1), *decoded));
         // Without the extension (versions 4 and 5) the same bytes are not read.
-        REQUIRE(DecodeSaveState(std::span<const uint8_t>(payload.data(), ext), *decoded, false));
+        REQUIRE(DecodeSaveState(std::span<const uint8_t>(payload.data(), ext), *decoded, 5));
         REQUIRE_FALSE(decoded->brimir.valid);
     }
 

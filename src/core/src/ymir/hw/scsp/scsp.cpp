@@ -530,12 +530,17 @@ bool SCSP::ValidateState(const savestate::SCSPSaveState &state) const {
 }
 
 // Brimir: save state extension (savestate_brimir.hpp)
-void SCSP::SaveBrimirState(savestate::BrimirSaveState::SCSP &ext) const {
+void SCSP::SaveBrimirState(savestate::BrimirSaveState &ext) const {
     const_cast<SCSP *>(this)->SyncSCSPThread();
-    ext.dspProgramLength = m_dsp.GetProgramLength();
+    ext.scsp.dspProgramLength = m_dsp.GetProgramLength();
+    ext.scspSlots.valid = true;
+    for (size_t i = 0; i < 32; i++) {
+        ext.scspSlots.modXSample[i] = m_slots[i].modXSample;
+        ext.scspSlots.modYSample[i] = m_slots[i].modYSample;
+    }
 }
 
-void SCSP::LoadState(const savestate::SCSPSaveState &state, const savestate::BrimirSaveState::SCSP *ext) {
+void SCSP::LoadState(const savestate::SCSPSaveState &state, const savestate::BrimirSaveState *ext) {
     if (m_threadedSCSP) {
         SyncSCSPThread();
     }
@@ -587,7 +592,14 @@ void SCSP::LoadState(const savestate::SCSPSaveState &state, const savestate::Bri
 
     m_dsp.LoadState(state.dsp);
     if (ext != nullptr) {
-        m_dsp.SetProgramLength(ext->dspProgramLength); // Brimir: LoadState only estimates it
+        m_dsp.SetProgramLength(ext->scsp.dspProgramLength); // Brimir: LoadState only estimates it
+        if (ext->scspSlots.valid) {
+            // Brimir: the modulation inputs read in pipeline step 2 and used in step 3 (not in the upstream state)
+            for (size_t i = 0; i < 32; i++) {
+                m_slots[i].modXSample = ext->scspSlots.modXSample[i];
+                m_slots[i].modYSample = ext->scspSlots.modYSample[i];
+            }
+        }
     }
 
     m_m68kCycles = state.m68kCycles;

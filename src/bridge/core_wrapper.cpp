@@ -70,6 +70,9 @@ constexpr uint8_t kPersistentSMPCDataVersion = 0x01;
 constexpr uint32_t kNewStateMagic    = 0x32524942; // "BRI2" in LE
 constexpr uint32_t kLegacyStateMagic = 0x4D495242; // "BRIM" in LE
 
+static_assert(brimir::CoreWrapper::kSaveStateVersion == brimir::kSaveStatePayloadVersion,
+              "the BRI2 header version is the codec's payload version");
+
 bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
                                     const std::filesystem::path &path) {
     std::ifstream in{path, std::ios::binary};
@@ -1322,7 +1325,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             }
             // DecodeSaveState writes every member, so the scratch state needs no reset.
             auto& state = Scratch(m_stateScratch);
-            if (!DecodeSaveState(m_statePayload, state, version >= 6)) {
+            if (!DecodeSaveState(m_statePayload, state, version)) {
                 return false;
             }
             if (version == 4) {
@@ -1345,7 +1348,16 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 m_lastStateError = "the state's cartridge differs from the inserted one (state from another game?)";
                 return false;
             }
-            return m_saturn->LoadState(state, true);
+            if (!m_saturn->LoadState(state, true)) {
+                return false;
+            }
+            if (state.brimir.valid && state.brimir.backupRAM.valid) {
+                // The state's backup RAM is now Ymir's: it replaces a .srm not yet copied down at the first frame,
+                // and the frontend's SRAM buffer is refreshed from it.
+                m_sramFirstLoad = false;
+                m_sramCacheDirty = true;
+            }
+            return true;
         }
 
         // Old Brimir format ("BRIM": [magic:4][uncompSize:4] + LZ4 data, no version word) predates the

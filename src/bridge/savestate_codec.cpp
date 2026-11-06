@@ -26,7 +26,7 @@ using ymir::savestate::SMPCSaveState;
 // CoreWrapper::kSaveStateVersion.
 static_assert(sizeof(void*) != 8 || sizeof(SCUSaveState) == 2496, "SCUSaveState changed: update the serializer");
 static_assert(sizeof(void*) != 8 || sizeof(SMPCSaveState) == 144, "SMPCSaveState changed: update the serializer");
-static_assert(sizeof(ymir::savestate::BrimirSaveState) == 786480,
+static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819376,
               "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
 
 // Counts bytes (out == nullptr) or writes them.
@@ -108,6 +108,17 @@ public:
         }
         value.assign(m_in.begin() + static_cast<std::ptrdiff_t>(m_pos - size),
                      m_in.begin() + static_cast<std::ptrdiff_t>(m_pos));
+    }
+
+    // The first `size` bytes of a trivially copyable member (an older, shorter layout of it); the rest is untouched.
+    template <typename T>
+    void RawPrefix(T& value, size_t size) {
+        static_assert(std::is_trivially_copyable_v<T>, "only trivially copyable members are read as raw bytes");
+        if (size > sizeof(T) || !Take(size)) {
+            m_ok = false;
+            return;
+        }
+        std::memcpy(&value, m_in.data() + m_pos - size, size);
     }
 
     bool Done() const { return m_ok && m_pos == m_in.size(); }
@@ -194,9 +205,10 @@ void VisitSMPC(Archive& ar, State& smpc) {
     ar.Raw(rtcSysClockCount);
 }
 
-// withBrimir: payloads from version 6 on end with the Brimir extension (savestate_brimir.hpp); earlier ones lack it.
+// version: payloads from version 6 on end with the Brimir extension (savestate_brimir.hpp); earlier ones lack it, and
+// version 6 has only its first kBrimirSaveStateV6Size bytes (no scspSlots; read with Reader::RawPrefix).
 template <typename Archive, typename State>
-void Visit(Archive& ar, State& s, bool withBrimir = true) {
+void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     auto& [scheduler, system, msh2, ssh2, scu, smpc, vdp, scsp, cdblockLLE, cdblock, sh1, ygr, cddrive, cdblockDRAM,
            discHash, msh2SpilloverCycles, ssh2SpilloverCycles, sh1SpilloverCycles, sh1FracCycles, brimir] = s;
     ar.Raw(scheduler);
@@ -218,8 +230,12 @@ void Visit(Archive& ar, State& s, bool withBrimir = true) {
     ar.Raw(ssh2SpilloverCycles);
     ar.Raw(sh1SpilloverCycles);
     ar.Raw(sh1FracCycles);
-    if (withBrimir) {
+    if (version >= 7) {
         ar.Raw(brimir);
+    } else if (version == 6) {
+        if constexpr (std::is_same_v<Archive, Reader>) {
+            ar.RawPrefix(brimir, ymir::savestate::kBrimirSaveStateV6Size);
+        }
     }
 }
 
@@ -240,9 +256,9 @@ size_t ExpectedCartDataSize(SCUSaveState::CartType type) {
 }
 
 // The extension is read as raw bytes, so its bools are checked here (any byte other than 0 or 1 is an invalid bool),
-// with the ranges the loaders rely on: a VDP1 return address is "none" or within VDP1 VRAM (a Call at the last slot returns to its end), the timing field is 0 or
-// 1, the DSP program has at most 128 steps.
-bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext) {
+// with the ranges the loaders rely on: a VDP1 return address is "none" or within VDP1 VRAM (a Call at the last slot
+// returns to its end), the timing field is 0 or 1, the DSP program has at most 128 steps.
+bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext, uint32_t version) {
     const auto byte = [](const bool &value) {
         uint8_t raw = 0;
         std::memcpy(&raw, &value, 1);
@@ -255,6 +271,12 @@ bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext) {
         return false;
     }
     if (ext.vdp.vdp1ReturnAddress != ymir::vdp::kVDP1NoReturn && ext.vdp.vdp1ReturnAddress > ymir::vdp::kVDP1VRAMSize) {
+        return false;
+    }
+    if (version >= 7 && byte(ext.backupRAM.valid) > 1) {
+        return false;
+    }
+    if (version >= 7 && byte(ext.scspSlots.valid) != 1) {
         return false;
     }
     return ext.scsp.dspProgramLength <= 128;
@@ -289,11 +311,14 @@ void ResetSaveState(SaveState& state) {
     Visit(clearer, state);
 }
 
-bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, bool withBrimirExtension) {
+bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_t version) {
     Reader reader(payload);
-    Visit(reader, state, withBrimirExtension);
-    if (!withBrimirExtension) {
+    Visit(reader, state, version);
+    if (version < 6) {
         std::memset(&state.brimir, 0, sizeof(state.brimir)); // valid = false: the state loads as before
+    } else if (version == 6) {
+        // Before scspSlots (its first bytes may hold the version 6 padding): valid = false
+        std::memset(&state.brimir.scspSlots, 0, sizeof(state.brimir.scspSlots));
     }
     if (!reader.Done()) {
         return false;
@@ -305,7 +330,7 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, bool wi
     if (state.smpc.intback.reportOffset > state.smpc.intback.report.size()) {
         return false;
     }
-    if (withBrimirExtension && !ValidBrimirExtension(state.brimir)) {
+    if (version >= 6 && !ValidBrimirExtension(state.brimir, version)) {
         return false;
     }
     return true;

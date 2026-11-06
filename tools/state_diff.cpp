@@ -68,7 +68,7 @@ bool Load(const char *path, SaveState &state) {
     if (LZ4_decompress_safe(reinterpret_cast<const char *>(data.data() + 16), reinterpret_cast<char *>(payload.data()),
                             static_cast<int>(compressedSize), static_cast<int>(payloadSize)) !=
             static_cast<int>(payloadSize) ||
-        !brimir::DecodeSaveState(payload, state, version >= 6)) {
+        !brimir::DecodeSaveState(payload, state, version)) {
         std::fprintf(stderr, "%s: cannot decode the state\n", path);
         return false;
     }

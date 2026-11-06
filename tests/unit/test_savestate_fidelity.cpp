@@ -11,6 +11,7 @@
 #endif
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/savestate/savestate.hpp>
+#include <ymir/sys/backup_ram.hpp>
 #include <ymir/sys/saturn.hpp>
 
 #include <cstring>
@@ -341,6 +342,89 @@ TEST_CASE("Loading a state waits for the threaded VDP1 under the Vulkan renderer
     }
 }
 #endif
+
+TEST_CASE("Loading a state restores the SCSP slot modulation inputs", "[savestate][fidelity][scsp][brimir]") {
+    // Each slot reads its modulation inputs from the sound stack in pipeline steps 2-2/2-3 and uses them in step 3-2,
+    // possibly in a later sample; upstream did not save them, so a run-ahead load kept the values the frame run ahead
+    // had read (Guardian Heroes' sound RAM diverged in a --rollback run).
+    auto saturn = std::make_unique<Saturn>();
+    const auto state = Save(*saturn);
+    REQUIRE(state->brimir.scspSlots.valid);
+    const sint16 savedX = saturn->SCSP.GetSlot(3).modXSample;
+    const sint16 savedY = saturn->SCSP.GetSlot(17).modYSample;
+    // As a frame run ahead leaves them (the test reaches the slot through its const accessor)
+    const_cast<scsp::Slot &>(saturn->SCSP.GetSlot(3)).modXSample = static_cast<sint16>(savedX ^ 0x1234);
+    const_cast<scsp::Slot &>(saturn->SCSP.GetSlot(17)).modYSample = static_cast<sint16>(savedY ^ 0x0F0F);
+    REQUIRE(saturn->LoadState(*state, true));
+    CHECK(saturn->SCSP.GetSlot(3).modXSample == savedX);
+    CHECK(saturn->SCSP.GetSlot(17).modYSample == savedY);
+
+    // Into a fresh system, with values the fresh one does not have
+    auto modified = std::make_unique<savestate::SaveState>(*state);
+    modified->brimir.scspSlots.modXSample[5] = 0x1357;
+    modified->brimir.scspSlots.modYSample[30] = -0x2468;
+    auto fresh = FreshWith(*modified);
+    CHECK(fresh->SCSP.GetSlot(5).modXSample == 0x1357);
+    CHECK(fresh->SCSP.GetSlot(30).modYSample == -0x2468);
+    const auto resaved = Save(*fresh);
+    CHECK(resaved->brimir.scspSlots.modXSample[5] == 0x1357);
+    CHECK(resaved->brimir.scspSlots.modYSample[30] == -0x2468);
+    // Without the extension (older states) the slots keep what they hold, as upstream
+    CHECK(FreshWith(*modified, false)->SCSP.GetSlot(5).modXSample == 0);
+}
+
+namespace {
+
+void GiveInternalBackupRAM(Saturn &saturn) {
+    bup::BackupMemory memory;
+    memory.CreateInMemory(bup::BackupMemorySize::_256Kbit);
+    REQUIRE(saturn.mem.SetInternalBackupRAM(std::move(memory)));
+}
+
+} // namespace
+
+TEST_CASE("Loading a state restores the internal backup RAM", "[savestate][fidelity][backup][brimir]") {
+    // Games write the internal backup RAM while running (Daytona USA CE's records in attract mode); upstream states do
+    // not hold it, so a run-ahead frame's write survived the load and the game read it a frame early.
+    auto saturn = std::make_unique<Saturn>();
+    GiveInternalBackupRAM(*saturn);
+    auto &bup = saturn->mem.GetInternalBackupRAM();
+    bup.WriteByte(0x80 << 1, 0x11);
+    const auto state = Save(*saturn);
+    REQUIRE(state->brimir.backupRAM.valid);
+    CHECK(state->brimir.backupRAM.internal[0x80] == 0x11);
+
+    bup.WriteByte(0x80 << 1, 0x80); // as the frame run ahead writes it
+    bup.WriteByte(0x1234 << 1, 0x5A);
+    REQUIRE(saturn->LoadState(*state, true));
+    CHECK(bup.ReadByte(0x80 << 1) == 0x11);
+    CHECK(bup.ReadByte(0x1234 << 1) == state->brimir.backupRAM.internal[0x1234]);
+
+    // A fresh system with its own (formatted) image takes the state's bytes
+    auto fresh = std::make_unique<Saturn>();
+    GiveInternalBackupRAM(*fresh);
+    {
+        auto copy = std::make_unique<savestate::SaveState>(*state);
+        REQUIRE(fresh->LoadState(*copy, true));
+    }
+    CHECK(fresh->mem.GetInternalBackupRAM().ReadAll() ==
+          std::vector<uint8>(state->brimir.backupRAM.internal.begin(), state->brimir.backupRAM.internal.end()));
+
+    // Older states (no extension) leave the backup RAM alone, as upstream
+    auto older = std::make_unique<Saturn>();
+    GiveInternalBackupRAM(*older);
+    older->mem.GetInternalBackupRAM().WriteByte(0x80 << 1, 0x77);
+    {
+        auto copy = std::make_unique<savestate::SaveState>(*state);
+        copy->brimir.valid = false;
+        REQUIRE(older->LoadState(*copy, true));
+    }
+    CHECK(older->mem.GetInternalBackupRAM().ReadByte(0x80 << 1) == 0x77);
+
+    // Without an image (a bare system) nothing is saved or written
+    auto bare = std::make_unique<Saturn>();
+    CHECK_FALSE(Save(*bare)->brimir.backupRAM.valid);
+}
 
 TEST_CASE("A fresh system keeps the other field's VDP1 framebuffer", "[savestate][fidelity][vdp][vdp1][brimir]") {
     // With deinterlacing, the software renderer keeps the other field of double-density interlace in altFBRAM; the
