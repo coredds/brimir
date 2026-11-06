@@ -1929,3 +1929,149 @@ TEST_CASE("cartridge: save states hold the backup cartridge's contents", "[core]
     CHECK(s.core.GetSaturn()->GetCartridge().GetType() == ymir::cart::CartType::BackupMemory);
     s.core.UnloadGame();
 }
+
+// Cost of the backup cartridge in a state (run-ahead saves and loads one every frame). Hidden: timing only.
+TEST_CASE("cartridge: backup cart save/load cost", "[.][cartridge-bench]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    const auto measure = [](CartridgeChoice choice, const char* name) {
+        CartSession s(name, choice);
+        REQUIRE(s.Load());
+        for (int i = 0; i < 10; ++i) {
+            s.core.RunFrame();
+        }
+        std::vector<uint8_t> buf(s.core.GetStateSize());
+        constexpr int kRounds = 200;
+        double save = 0, load = 0;
+        for (int i = 0; i < kRounds; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            REQUIRE(s.core.SaveState(buf.data(), buf.size()));
+            const auto t1 = std::chrono::steady_clock::now();
+            REQUIRE(s.core.LoadState(buf.data(), buf.size()));
+            const auto t2 = std::chrono::steady_clock::now();
+            save += std::chrono::duration<double, std::milli>(t1 - t0).count();
+            load += std::chrono::duration<double, std::milli>(t2 - t1).count();
+        }
+        std::printf("cartridge bench %-8s save %.3f ms load %.3f ms\n", name, save / kRounds, load / kRounds);
+        return std::make_pair(save / kRounds, load / kRounds);
+    };
+    const auto none = measure(CartridgeChoice::None, "none");
+    const auto backup = measure(CartridgeChoice::Backup, "backup");
+    std::printf("cartridge bench backup extra: save %.3f ms load %.3f ms\n", backup.first - none.first,
+                backup.second - none.second);
+
+    // The backup cartridge's own work in SaveState (the image) and LoadState (compare and restore)
+    CartSession s("bupwork", CartridgeChoice::Backup);
+    REQUIRE(s.Load());
+    auto* bupCart = s.core.GetSaturn()->GetCartridge().As<ymir::cart::CartType::BackupMemory>();
+    REQUIRE(bupCart != nullptr);
+    auto& memory = static_cast<ymir::bup::BackupMemory&>(bupCart->GetBackupMemory());
+    std::vector<uint8_t> image(memory.Size());
+    constexpr int kRounds = 200;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < kRounds; ++i) {
+        memory.BrimirReadData(image); // as SaveState
+    }
+    const bool read = image == memory.ReadAll();
+    REQUIRE(read);
+
+    const auto t1 = std::chrono::steady_clock::now();
+    for (int i = 0; i < kRounds; ++i) {
+        image[0x1234] ^= 0xFF; // one byte differs each time, as after a frame that wrote the cartridge
+        CoreWrapper::RestoreBackupCartData(*bupCart, image);
+    }
+    const bool restored = memory.ReadAll() == image;
+    CHECK(restored);
+    const auto t2 = std::chrono::steady_clock::now();
+    std::printf("cartridge bench backup image %.3f ms, restore %.3f ms\n",
+                std::chrono::duration<double, std::milli>(t1 - t0).count() / kRounds,
+                std::chrono::duration<double, std::milli>(t2 - t1).count() / kRounds);
+}
+
+TEST_CASE("cartridge: a second session's backup cart save replaces the first one's file", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CartSession s("brimir_cart_backup_twice", CartridgeChoice::Backup);
+    const auto bcr = s.content.saves / "audio.bcr";
+    constexpr uint32_t kAddress = 0x0400'0000 + (0x3000 << 1) + 1;
+    REQUIRE(s.Load());
+    s.core.GetSaturn()->GetCartridge().WriteByte(kAddress, 0x11);
+    s.core.UnloadGame();
+    CHECK(s.core.TakeCartridgeSaveError().empty());
+    REQUIRE(ReadAllBytes(bcr).at(0x3000) == 0x11);
+
+    REQUIRE(s.Load());
+    CHECK(s.core.GetSaturn()->GetCartridge().ReadByte(kAddress) == 0x11);
+    s.core.GetSaturn()->GetCartridge().WriteByte(kAddress, 0x22);
+    s.core.UnloadGame(); // renames over the existing file
+    CHECK(s.core.TakeCartridgeSaveError().empty());
+    const auto file = ReadAllBytes(bcr);
+    REQUIRE(file.size() == 512 * 1024);
+    CHECK(file[0x3000] == 0x22);
+    CHECK_FALSE(std::filesystem::exists(s.content.saves / "audio.bcr.tmp"));
+}
+
+TEST_CASE("cartridge: flushing writes the cartridge save only when it changed", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    SECTION("backup memory") {
+        CartSession s("brimir_cart_flush_backup", CartridgeChoice::Backup);
+        const auto bcr = s.content.saves / "audio.bcr";
+        REQUIRE(s.Load());
+        REQUIRE(s.core.FlushCartridgeSave());
+        CHECK_FALSE(std::filesystem::exists(bcr)); // a fresh cartridge the game has not written
+        constexpr uint32_t kAddress = 0x0400'0000 + (0x100 << 1) + 1;
+        s.core.GetSaturn()->GetCartridge().WriteByte(kAddress, 0x5A);
+        REQUIRE(s.core.FlushCartridgeSave());
+        REQUIRE(std::filesystem::exists(bcr));
+        CHECK(ReadAllBytes(bcr).at(0x100) == 0x5A);
+        // Unchanged since: not rewritten
+        std::filesystem::remove(bcr);
+        REQUIRE(s.core.FlushCartridgeSave());
+        CHECK_FALSE(std::filesystem::exists(bcr));
+        s.core.GetSaturn()->GetCartridge().WriteByte(kAddress, 0x5B);
+        REQUIRE(s.core.FlushCartridgeSave());
+        CHECK(ReadAllBytes(bcr).at(0x100) == 0x5B);
+    }
+    SECTION("1 MB RAM") {
+        CartSession s("brimir_cart_flush_dram", CartridgeChoice::DRAM8Mbit);
+        const auto cart = s.content.saves / "audio.cart";
+        REQUIRE(s.Load());
+        s.core.GetSaturn()->GetCartridge().WriteByte(0x0240'0010, 0x77);
+        REQUIRE(s.core.FlushCartridgeSave());
+        REQUIRE(std::filesystem::exists(cart));
+        CHECK(std::filesystem::file_size(cart) == 1024 * 1024);
+    }
+    SECTION("no cartridge: nothing to do") {
+        CartSession s("brimir_cart_flush_none", CartridgeChoice::None);
+        REQUIRE(s.Load());
+        CHECK(s.core.FlushCartridgeSave());
+        CHECK(s.core.TakeCartridgeSaveError().empty());
+    }
+}
+
+TEST_CASE("cartridge: a failed cartridge save is reported and the data kept", "[core][cartridge]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CartSession s("brimir_cart_save_fails", CartridgeChoice::Backup);
+    const auto bcr = s.content.saves / "audio.bcr";
+    const auto tmp = s.content.saves / "audio.bcr.tmp";
+    REQUIRE(s.Load());
+    // A directory where the file goes: the rename into place fails (also on the retry)
+    std::filesystem::create_directories(bcr);
+    s.core.GetSaturn()->GetCartridge().WriteByte(0x0400'0000 + (0x200 << 1) + 1, 0x42);
+    CHECK_FALSE(s.core.FlushCartridgeSave());
+    const std::string error = s.core.TakeCartridgeSaveError();
+    CHECK(error.find("audio.bcr.tmp") != std::string::npos);
+    CHECK(s.core.TakeCartridgeSaveError().empty()); // taken
+    REQUIRE(std::filesystem::exists(tmp));
+    CHECK(ReadAllBytes(tmp).at(0x200) == 0x42);
+
+    s.core.UnloadGame(); // fails the same way
+    CHECK(s.core.TakeCartridgeSaveError().find("audio.bcr.tmp") != std::string::npos);
+    std::filesystem::remove(bcr);
+}

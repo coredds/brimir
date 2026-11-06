@@ -35,6 +35,10 @@ namespace savestate {
 struct SaveState;
 }
 
+namespace cart {
+class BackupMemoryCartridge;
+}
+
 namespace peripheral {
 class ControlPad;
 struct PeripheralReport;
@@ -336,6 +340,19 @@ public:
 
     /// @brief The cartridge the last LoadGame inserted, for the log (e.g. "4 MB RAM"), or "none"
     const std::string& GetCartridgeDescription() const { return m_cartridgeDescription; }
+
+    /// @brief Writes the RAM or backup cartridge's save file (<game>.cart or .bcr) if its contents changed since the
+    /// last write or the load. Reads the cartridge only (emulation state is untouched), so it may run between any
+    /// two frames. UnloadGame writes it too. A failure is kept for TakeCartridgeSaveError.
+    /// @return false if the file could not be written
+    bool FlushCartridgeSave();
+
+    /// @brief Takes why the last cartridge save failed (the file and where the data is), or an empty string
+    std::string TakeCartridgeSaveError() { return std::exchange(m_cartridgeSaveError, std::string{}); }
+
+    /// @brief Writes data into a backup memory cartridge (data byte i at bus address 2i + 1), only the bytes that
+    /// differ; data must be the cartridge's size. Used by LoadState (public for the cost measurement test).
+    static void RestoreBackupCartData(ymir::cart::BackupMemoryCartridge& cart, std::span<const uint8_t> data);
     
     /// @brief Set renderer type (Ymir hw layer only supports software)
     /// @param renderer Renderer string: "software"
@@ -568,11 +585,16 @@ private:
     std::string m_cartridgeMessage;
     std::string m_cartridgeDescription = "none";
     std::string m_testProductNumber; // TestSetProductNumber
+    std::vector<uint8_t> m_cartridgeSaved; // the cartridge's contents as last written to or read from its file
+    std::string m_cartridgeSaveError;
 
     /// @brief Inserts the chosen cartridge for the loaded disc (see SetCartridgeOverride), then hard-resets
     void InsertGameCartridge(const std::filesystem::path& gamePath, const char* save_directory);
 
-    void SaveCartridgeRAM();
+    /// @brief The RAM or backup cartridge's contents in its save file's layout (empty for other cartridges)
+    std::vector<uint8_t> DumpCartridgeSave() const;
+    /// @brief Writes the cartridge's save file; force: even if unchanged since the last write (see FlushCartridgeSave)
+    bool SaveCartridgeRAM(bool force);
     void LoadCartridgeRAM();
 
     /// @brief Copy the cached m_sramData buffer into Ymir's internal backup RAM.

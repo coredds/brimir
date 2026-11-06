@@ -4,6 +4,8 @@
 #include <ymir/util/inline.hpp>
 #include <ymir/util/size_ops.hpp>
 
+#include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <string_view>
 
@@ -218,6 +220,33 @@ std::vector<uint8> BackupMemory::ReadAll() const {
     data.resize(Size());
     DataReadString(0, data.data(), Size());
     return data;
+}
+
+// Brimir: bulk data copies for save states (backup_ram.hpp)
+void BackupMemory::BrimirReadData(std::span<uint8> out) const {
+    const uint32 size = std::min<uint32>(Size(), static_cast<uint32>(out.size()));
+    if (m_addressMask != 0 && m_addressShift == 0) {
+        std::memcpy(out.data(), m_backupRAM->Data(), size);
+    } else {
+        DataReadString(0, out.data(), size);
+    }
+}
+
+void BackupMemory::BrimirWriteData(std::span<const uint8> in) {
+    const uint32 size = std::min<uint32>(Size(), static_cast<uint32>(in.size()));
+    if (m_addressMask != 0 && m_addressShift == 0) {
+        uint8 *data = m_backupRAM->Data();
+        if (std::memcmp(data, in.data(), size) != 0) {
+            std::memcpy(data, in.data(), size);
+            m_dirty = true;
+        }
+    } else {
+        for (uint32 i = 0; i < size; ++i) {
+            if (DataReadByte(i) != in[i]) {
+                DataWriteByte(i, in[i]);
+            }
+        }
+    }
 }
 
 bool BackupMemory::IsHeaderValid() const {

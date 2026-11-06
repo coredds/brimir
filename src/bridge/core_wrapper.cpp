@@ -39,6 +39,7 @@
 #include <functional>
 #include <string>
 #include <system_error>
+#include <thread>
 
 #include <lz4.h>
 #include <algorithm>
@@ -201,28 +202,37 @@ bool ReadFileUpTo(const std::filesystem::path& path, size_t maxSize, std::vector
 }
 
 // Writes to a sibling temp file and renames it into place, so a failed write never truncates the existing file.
-bool WriteFileReplacing(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
+// Returns an empty string, or what failed and where the data is. A refused rename (the file open elsewhere, an
+// antivirus scan) is retried once after a short delay; if it still fails, the complete temp file is kept.
+std::string WriteFileReplacing(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
     auto tmpPath = path;
     tmpPath += ".tmp";
     std::error_code ec;
+    std::error_code dirEc;
+    std::filesystem::create_directories(path.parent_path(), dirEc);
     {
         std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
         if (!out) {
-            return false;
+            return "could not create " + tmpPath.string() + "; " + path.filename().string() + " was not updated";
         }
         out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
         out.close();
         if (!out) {
             std::filesystem::remove(tmpPath, ec);
-            return false;
+            return "could not write " + tmpPath.string() + " (disk full?); " + path.filename().string() +
+                   " was not updated";
         }
     }
     std::filesystem::rename(tmpPath, path, ec);
     if (ec) {
-        std::filesystem::remove(tmpPath, ec);
-        return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        ec.clear();
+        std::filesystem::rename(tmpPath, path, ec);
     }
-    return true;
+    if (ec) {
+        return "could not replace " + path.string() + " (" + ec.message() + "); the data is in " + tmpPath.string();
+    }
+    return {};
 }
 
 // Loads a ROM cartridge dump from the system directory into rom (kROMCartSize bytes). Returns an empty string, or why
@@ -643,6 +653,7 @@ void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, con
     m_cartridgeDescription = "none";
     m_hasCartridge = false;
     m_cartridgePath.clear();
+    m_cartridgeSaved.clear();
 
     const auto& disc = m_saturn->GetDisc();
     if (disc.sessions.empty()) {
@@ -742,6 +753,8 @@ void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, con
 
         // Load saved cartridge RAM AFTER reset (Reset zeros the RAM)
         LoadCartridgeRAM();
+        // What the file holds (or a fresh cartridge): FlushCartridgeSave writes only once a game changes it
+        m_cartridgeSaved = DumpCartridgeSave();
     } catch (const std::exception& e) {
         m_lastError = std::string("Exception inserting cartridge: ") + e.what();
         // Don't fail - game might still work without cartridge
@@ -751,57 +764,69 @@ void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, con
     }
 }
 
-void CoreWrapper::SaveCartridgeRAM() {
-    if (!m_saturn || !m_hasCartridge || m_cartridgePath.empty()) {
-        return;
+std::vector<uint8_t> CoreWrapper::DumpCartridgeSave() const {
+    std::vector<uint8_t> ram;
+    if (!m_saturn) {
+        return ram;
     }
-
     auto& cart = m_saturn->GetCartridge();
-    const auto type = cart.GetType();
-
-    std::vector<uint8> ram;
-
-    switch (type) {
-    case ymir::cart::CartType::DRAM8Mbit: {
-        auto* dram = cart.As<ymir::cart::CartType::DRAM8Mbit>();
-        if (!dram) return;
+    switch (cart.GetType()) {
+    case ymir::cart::CartType::DRAM8Mbit:
         ram.resize(1_MiB);
-        dram->DumpRAM(std::span<uint8, 1_MiB>(ram.data(), ram.size()));
+        cart.As<ymir::cart::CartType::DRAM8Mbit>()->DumpRAM(std::span<uint8, 1_MiB>(ram.data(), ram.size()));
         break;
-    }
-    case ymir::cart::CartType::DRAM32Mbit: {
-        auto* dram = cart.As<ymir::cart::CartType::DRAM32Mbit>();
-        if (!dram) return;
+    case ymir::cart::CartType::DRAM32Mbit:
         ram.resize(4_MiB);
-        dram->DumpRAM(std::span<uint8, 4_MiB>(ram.data(), ram.size()));
+        cart.As<ymir::cart::CartType::DRAM32Mbit>()->DumpRAM(std::span<uint8, 4_MiB>(ram.data(), ram.size()));
         break;
-    }
-    case ymir::cart::CartType::DRAM48Mbit: {
-        auto* dram = cart.As<ymir::cart::CartType::DRAM48Mbit>();
-        if (!dram) return;
+    case ymir::cart::CartType::DRAM48Mbit:
         ram.resize(6_MiB);
-        dram->DumpRAM(std::span<uint8, 6_MiB>(ram.data(), ram.size()));
+        cart.As<ymir::cart::CartType::DRAM48Mbit>()->DumpRAM(std::span<uint8, 6_MiB>(ram.data(), ram.size()));
         break;
-    }
-    case ymir::cart::CartType::BackupMemory: {
-        auto* bup = cart.As<ymir::cart::CartType::BackupMemory>();
-        if (!bup) return;
-        ram = bup->GetBackupMemory().ReadAll(); // the .bcr layout (InsertGameCartridge)
+    case ymir::cart::CartType::BackupMemory:
+        // the .bcr layout (InsertGameCartridge)
+        ram = cart.As<ymir::cart::CartType::BackupMemory>()->GetBackupMemory().ReadAll();
         break;
-    }
     default:
-        return;
+        break;
     }
+    return ram;
+}
 
-    try {
-        std::error_code dirEc;
-        std::filesystem::create_directories(m_cartridgePath.parent_path(), dirEc);
-        if (!WriteFileReplacing(m_cartridgePath, ram)) {
-            m_lastError = "Failed to save cartridge RAM";
-        }
-    } catch (...) {
-        m_lastError = "Failed to save cartridge RAM";
+bool CoreWrapper::SaveCartridgeRAM(bool force) {
+    if (!m_saturn || !m_hasCartridge || m_cartridgePath.empty()) {
+        return true;
     }
+    try {
+        std::vector<uint8_t> ram = DumpCartridgeSave();
+        if (ram.empty() || (!force && ram == m_cartridgeSaved)) {
+            return true;
+        }
+        const std::string error = WriteFileReplacing(m_cartridgePath, ram);
+        if (!error.empty()) {
+            m_cartridgeSaveError = "cartridge save failed: " + error;
+            return false;
+        }
+        m_cartridgeSaved = std::move(ram);
+        return true;
+    } catch (const std::exception& e) {
+        m_cartridgeSaveError = std::string("cartridge save failed: ") + e.what();
+        return false;
+    }
+}
+
+bool CoreWrapper::FlushCartridgeSave() {
+    return SaveCartridgeRAM(false);
+}
+
+// The cartridge's backup memory is a bup::BackupMemory (BackupMemoryCartridge's member), whose bulk copies avoid the
+// per-byte bus path (about 1 ms per 512 KiB).
+static ymir::bup::BackupMemory& CartBackupMemory(ymir::cart::BackupMemoryCartridge& cart) {
+    return static_cast<ymir::bup::BackupMemory&>(cart.GetBackupMemory());
+}
+
+void CoreWrapper::RestoreBackupCartData(ymir::cart::BackupMemoryCartridge& cart, std::span<const uint8_t> data) {
+    CartBackupMemory(cart).BrimirWriteData(data);
 }
 
 void CoreWrapper::LoadCartridgeRAM() {
@@ -879,9 +904,9 @@ void CoreWrapper::UnloadGame() {
     m_saturn->configuration.video.threadedVDP2 = false;
     ApplyVulkanRendererThreading();
     
-    // Save cartridge RAM if present
+    // Save cartridge RAM if present (a failure is kept for TakeCartridgeSaveError)
     if (m_hasCartridge) {
-        SaveCartridgeRAM();
+        SaveCartridgeRAM(true);
     }
     
     // Save SMPC persistent data (RTC clock!) before unloading
@@ -934,6 +959,7 @@ void CoreWrapper::UnloadGame() {
     }
     m_hasCartridge = false;
     m_cartridgePath.clear();
+    m_cartridgeSaved.clear();
     
     // Don't clear SRAM buffer - RetroArch needs to save it!
     // m_sramData will persist until next game load
@@ -1398,7 +1424,9 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         // The cartridge image of the state format (savestate_codec.hpp, version 8): SCU::SaveState holds no backup
         // memory, which games write while running (run-ahead and netplay need it), and the ROM is the inserted dump.
         if (auto* bup = m_saturn->GetCartridge().As<ymir::cart::CartType::BackupMemory>()) {
-            state.scu.cartData = bup->GetBackupMemory().ReadAll();
+            auto& memory = CartBackupMemory(*bup);
+            state.scu.cartData.resize(memory.Size());
+            memory.BrimirReadData(state.scu.cartData);
         } else if (state.scu.cartType == ymir::savestate::SCUSaveState::CartType::ROM) {
             state.scu.cartData.clear();
         }
@@ -1542,15 +1570,9 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 return false;
             }
             if (bupCart != nullptr && !state.scu.cartData.empty()) {
-                // SCU::LoadState keeps the inserted backup cartridge; its data as saved (data byte i at bus address
-                // i << 1, only the bytes that differ written), like the internal backup RAM in Saturn::LoadState
-                auto& bup = bupCart->GetBackupMemory();
-                const auto& data = state.scu.cartData;
-                for (uint32_t i = 0; i < data.size(); ++i) {
-                    if (bup.ReadByte(i << 1) != data[i]) {
-                        bup.WriteByte(i << 1, data[i]);
-                    }
-                }
+                // SCU::LoadState keeps the inserted backup cartridge; its data as saved, like the internal backup RAM
+                // in Saturn::LoadState
+                RestoreBackupCartData(*bupCart, state.scu.cartData);
             }
             if (state.brimir.valid && state.brimir.backupRAM.valid) {
                 // The state's backup RAM is now Ymir's: it replaces a .srm not yet copied down at the first frame,

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span> // Brimir: BrimirReadData/BrimirWriteData
 #include <vector>
 
 namespace ymir::bup {
@@ -76,6 +77,12 @@ public:
     // Backup file management
 
     std::vector<uint8> ReadAll() const final;
+
+    // Brimir: bulk copies of all Size() data bytes (in ReadAll's order) for save states, which copy a backup
+    // cartridge every frame under run-ahead; the per-byte bus path took about 1 ms per 512 KiB. See
+    // src/core/BRIMIR_FORK.md. `out` and `in` must hold Size() bytes. BrimirWriteData writes only when a byte differs.
+    void BrimirReadData(std::span<uint8> out) const;
+    void BrimirWriteData(std::span<const uint8> in);
 
     bool IsHeaderValid() const final;
 

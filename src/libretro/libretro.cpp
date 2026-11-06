@@ -959,6 +959,36 @@ static void log_vdp1_probe(void) {
 #endif
 }
 
+// Periodic save of the RAM or backup cartridge (<game>.cart / .bcr; also written at unload): every
+// kCartridgeFlushFrames shown frames (about 5 s), when the cartridge changed. Never on run-ahead's hidden frames nor on
+// the frame right after a state load; it only reads the cartridge, so emulation is unaffected.
+static constexpr unsigned kCartridgeFlushFrames = 300;
+static unsigned g_cartridgeFlushFrames = 0;
+static bool g_stateLoadedBeforeRun = false;
+
+static void log_cartridge_save_error(void) {
+    if (const std::string error = g_core->TakeCartridgeSaveError(); !error.empty()) {
+        brimir_log(RETRO_LOG_WARN, "%s", error.c_str());
+    }
+}
+
+static void flush_cartridge_save(void) {
+    const bool afterLoad = std::exchange(g_stateLoadedBeforeRun, false);
+    int av = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
+    const bool hidden =
+        environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av) && !(av & RETRO_AV_ENABLE_VIDEO);
+    if (hidden) {
+        return;
+    }
+    if (++g_cartridgeFlushFrames < kCartridgeFlushFrames || afterLoad) {
+        return;
+    }
+    g_cartridgeFlushFrames = 0;
+    if (!g_core->FlushCartridgeSave()) {
+        log_cartridge_save_error();
+    }
+}
+
 RETRO_API void retro_run(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
@@ -1108,6 +1138,8 @@ RETRO_API void retro_run(void) {
             audio_batch_cb(audio_buffer, samples);
         }
     }
+
+    flush_cartridge_save();
 }
 
 RETRO_API size_t retro_serialize_size(void) {
@@ -1134,6 +1166,7 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
     const bool loaded = g_core->LoadState(data, size);
     // Also after a rejected state: the view must match work RAM whatever the load left in it.
     publish_ram_view();
+    g_stateLoadedBeforeRun = true;
     if (loaded) {
         return true;
     }
@@ -1456,6 +1489,9 @@ RETRO_API void retro_unload_game(void) {
     try {
         if (g_core) {
             g_core->UnloadGame();
+            log_cartridge_save_error();
+            g_cartridgeFlushFrames = 0;
+            g_stateLoadedBeforeRun = false;
 #ifdef BRIMIR_VULKAN
             // The next content chooses its renderer again. The frontend has normally destroyed the context already
             // (the renderer is detached then). The state is discarded: no VDP1 readback.
