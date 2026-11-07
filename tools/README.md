@@ -34,7 +34,7 @@ its first-boot setup screen, waits for input, and never boots the disc (the
 slave SH-2 then reports 0.000 ms).
 
 The core writes RTC files back into the system directory, as it does under
-RetroArch, and may also create or rewrite `brimir_saturn_rtc_none.smpc`. Use a
+RetroArch (before 0.7.0 it could also write a stray `brimir_saturn_rtc_none.smpc`). Use a
 scratch copy of the system directory rather than the real RetroArch folder.
 `--system-dir` has no effect without `--game` (the no-disc path does not load
 SMPC settings). If it is omitted, the per-run temp directory is used, which is

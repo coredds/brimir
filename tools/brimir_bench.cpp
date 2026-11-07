@@ -75,7 +75,7 @@ void PrintUsage(std::FILE* out) {
         "                settings). The suffix follows the BIOS region, so a configured file is\n"
         "                needed for each BIOS region used. Without one the BIOS stops at its\n"
         "                first-boot setup screen and never boots the disc. The core may write\n"
-        "                RTC files back into this directory (including brimir_saturn_rtc_none.smpc),\n"
+        "                RTC files back into this directory,\n"
         "                so prefer a scratch copy over the real RetroArch system folder.\n"
         "                Only used with --game. Default: a fresh per-run temp directory\n"
         "                (unconfigured).\n"
