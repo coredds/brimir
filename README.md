@@ -15,7 +15,7 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 - **Every Saturn controller** - 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse and Virtua Gun (with an on-screen crosshair) on both ports. See [Controllers](#controllers).
 - **Cartridges** - The King of Fighters '95 and Ultraman with their ROM cartridge dumps, a backup memory cartridge saved in Beetle Saturn's `.bcr` layout, and a Cartridge option. See [Cartridges](#cartridges).
 - **Accuracy options** - SH-2 cache emulation, low-level CD Block emulation (needs the CD Block ROM) and SCSP step granularity. See [Accuracy options](#accuracy-options).
-- **Save-state fixes** - the state format is now version 11; states from v0.6.x and earlier versions down to version 4 still load. Full list in [CHANGELOG.md](CHANGELOG.md).
+- **Save-state fixes** - the state format is now version 11; states from v0.6.x and earlier versions down to version 4 still load (except Dezaemon 2 and Galaxy Force II states, see [Save states](#save-states-run-ahead-rewind-and-netplay)). Full list in [CHANGELOG.md](CHANGELOG.md).
 
 ## What's New in v0.6.1
 
@@ -140,15 +140,21 @@ with the controllers).
   so states replay the same date. It starts at your computer's local time and continues from the clock saved in the
   per-region RTC file in the system folder. A first boot with no RTC file no longer shows the BIOS language and clock
   setup screen (English, default settings). `Host` is the previous behaviour: the clock follows the computer's.
+  In Virtual mode the clock is part of the state: loading a state or rewinding moves it back to the state's time, and
+  the clock continues (and is saved to the RTC file) from there. States from v0.6.x, which ran on the computer's clock,
+  keep the current clock instead.
 - **Backup RAM is in save states** (the internal one and a backup memory cartridge), as in Beetle Saturn: loading a
   state also rolls back in-game saves made after it was saved.
-- **Save-state format**: version 11. States from older versions (version 4 on, which includes every v0.6.x state)
-  still load. States are larger than before (about 800 KiB more before compression).
+- **Save-state format**: version 11. States from older versions (version 4 on, which includes the v0.6.x states) still
+  load. States are larger than before (about 800 KiB more before compression). One exception: Dezaemon 2 and Sega
+  Ages: Galaxy Force II now get a backup memory cartridge under Cartridge = Auto, so their v0.6.x states (saved without
+  one) are refused; set Cartridge to None and reload the content to load them.
 - **Netplay**: both machines need the same BIOS and content, and should also use:
   - the same BIOS language and settings, since save states do not carry them (each machine keeps its own, from its
     RTC file) and games that read them may run differently;
   - the same core options, in particular SH-2 Cache Emulation and SCSP Step Granularity, which are not emulation state:
     a state saved with other values loads, keeps the local settings and logs a warning;
+  - the same cheats, enabled alike: cheats are not in save states and write memory every frame;
   - the same time zone (the state holds the clock; the date shown goes through each computer's local time);
   - the same kind of computer: states hold host-order data, so netplay between different CPU architectures is not
     supported.
@@ -231,8 +237,8 @@ inserts what the game needs, from Ymir's game database:
   `.4mb.bcr` variant is not read).
 
 The other values force a cartridge: None, 1 MB RAM, 4 MB RAM, Backup Memory, The King of Fighters '95 ROM, Ultraman
-ROM. The RAM and backup cartridge files are written about every 5 seconds while the game changes them, and when the
-content is closed; a failed write is logged with the file it left the data in (`<file>.tmp`). With run-ahead's "Use
+ROM. The backup cartridge file is written about every 5 seconds while the game changes it, and when the content is
+closed; a RAM cartridge's file (volatile memory on the real hardware) only when the content is closed. A failed write is logged with the file it left the data in (`<file>.tmp`). With run-ahead's "Use
 Second Instance", the second instance writes the same files when it closes too, so the last one closed wins (both hold
 the game's saves; the second instance runs a few frames ahead).
 

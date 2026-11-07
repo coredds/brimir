@@ -368,8 +368,8 @@ public:
     /// @brief The cartridge the last LoadGame inserted, for the log (e.g. "4 MB RAM"), or "none"
     const std::string& GetCartridgeDescription() const { return m_cartridgeDescription; }
 
-    /// @brief Writes the RAM or backup cartridge's save file (<game>.cart or .bcr) if its contents changed since the
-    /// last write or the load. Reads the cartridge only (emulation state is untouched), so it may run between any
+    /// @brief Writes the backup cartridge's save file (<game>.bcr) if its contents changed since the last write or
+    /// the load; a RAM cartridge's <game>.cart is written at unload only (volatile on hardware, 4-6 MiB). Reads the cartridge only (emulation state is untouched), so it may run between any
     /// two frames. UnloadGame writes it too. A failure is kept for TakeCartridgeSaveError; a flush does not wait to
     /// retry a refused rename, and after a failure it does nothing until the contents change again (UnloadGame still
     /// tries, with one retry).

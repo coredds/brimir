@@ -837,6 +837,10 @@ bool CoreWrapper::SaveCartridgeRAM(bool force) {
 }
 
 bool CoreWrapper::FlushCartridgeSave() {
+    // RAM cartridges are volatile on hardware and 4-6 MiB to compare and write: saved at unload only
+    if (!m_saturn || m_saturn->GetCartridge().GetType() != ymir::cart::CartType::BackupMemory) {
+        return true;
+    }
     return SaveCartridgeRAM(false);
 }
 
@@ -1586,7 +1590,14 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             // match.
             using CartType = ymir::savestate::SCUSaveState::CartType;
             if (state.scu.cartType != InsertedCartType(*m_saturn)) {
-                m_lastStateError = "the state's cartridge differs from the inserted one (state from another game?)";
+                if (state.scu.cartType == CartType::None) {
+                    // e.g. a Brimir 0.6.x state of a game that now gets a cartridge under Auto
+                    m_lastStateError = "the state was saved without a cartridge and this session has one (set the "
+                                       "Cartridge core option to None and reload the content to load it)";
+                } else {
+                    m_lastStateError =
+                        "the state's cartridge differs from the inserted one (state from another game?)";
+                }
                 return false;
             }
             auto* bupCart = m_saturn->GetCartridge().As<ymir::cart::CartType::BackupMemory>();
@@ -1615,6 +1626,18 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                                    CDBlockROMName(state.sh1.romHash) + ") than the loaded one (" +
                                    CDBlockROMName(m_cdblockROMHash) + ")";
                 return false;
+            }
+            if (m_rtcMode == RTCMode::Virtual &&
+                (version <= 5 || state.smpc.rtcTimestamp == 0 ||
+                 state.smpc.rtcTimestamp == util::datetime::to_timestamp(util::datetime::kDefaultDateTime))) {
+                // A state saved in Host mode (every version 5 state: Brimir 0.6.x had no virtual clock) never advanced
+                // the virtual timestamp, which still holds 0 or Ymir's default date: loading it would move the virtual
+                // clock to 1970 or 1994 and persist that at unload. The session's clock stays. Virtual-mode states
+                // (run-ahead, rewind, netplay) always hold a seeded timestamp, so they restore as saved.
+                ymir::savestate::SMPCSaveState current{};
+                m_saturn->SMPC.GetRTC().SaveState(current);
+                state.smpc.rtcTimestamp = current.rtcTimestamp;
+                state.smpc.rtcSysClockCount = current.rtcSysClockCount;
             }
             if (!m_saturn->LoadState(state, true)) {
                 return false;

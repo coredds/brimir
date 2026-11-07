@@ -1704,6 +1704,65 @@ TEST_CASE("rtc: the RTC mode defaults to virtual", "[core][rtc]") {
     CHECK(std::llabs(PersistentData(core).rtc.timestamp - HostEpochSeconds()) <= 120);
 }
 
+TEST_CASE("rtc: a v0.6.x (host-mode) state keeps the virtual clock", "[core][rtc][savestate]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // Brimir 0.6.x ran the RTC in Host mode, whose virtual timestamp never advances: its states (version 5) hold 0
+    // (from an older RTC file) or Ymir's default date.
+    const int64_t stored = GENERATE(int64_t{0}, util::datetime::to_timestamp(util::datetime::kDefaultDateTime));
+    INFO("stored timestamp " << stored);
+    RtcContent content("brimir_rtc_oldstate_test");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    core.SetRTCMode(RTCMode::Virtual);
+    REQUIRE(content.Load(core));
+    for (int i = 0; i < 30; ++i) {
+        core.RunFrame();
+    }
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> saved(stateSize);
+    REQUIRE(core.SaveState(saved.data(), stateSize));
+    const auto patch = [&](ymir::savestate::SaveState& s) { s.smpc.rtcTimestamp = stored; };
+
+    SECTION("version 5 state") {
+        const auto v5 = RepackState(saved, 5, patch);
+        REQUIRE(core.LoadState(v5.data(), v5.size()));
+    }
+    SECTION("current version with a host-mode timestamp") {
+        const auto current = RepackState(saved, CoreWrapper::kSaveStateVersion, patch);
+        REQUIRE(core.LoadState(current.data(), current.size()));
+    }
+    CHECK(std::llabs(PersistentData(core).rtc.timestamp - HostEpochSeconds()) <= 120);
+    core.UnloadGame();
+    REQUIRE(std::filesystem::exists(content.RtcFile()));
+    CHECK(std::llabs(RtcFileTimestamp(content.RtcFile()) - HostEpochSeconds()) <= 120);
+}
+
+TEST_CASE("rtc: a virtual-mode state restores its own clock", "[core][rtc][savestate]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    RtcContent content("brimir_rtc_virtualstate_test");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    core.SetRTCMode(RTCMode::Virtual);
+    REQUIRE(content.Load(core));
+    constexpr int64_t kStart = 1000000000;
+    auto data = PersistentData(core);
+    data.rtc.timestamp = kStart;
+    core.GetSaturn()->SMPC.LoadPersistentData(data);
+    const size_t stateSize = core.GetStateSize();
+    std::vector<uint8_t> saved(stateSize);
+    REQUIRE(core.SaveState(saved.data(), stateSize));
+    data.rtc.timestamp = kStart + 86400;
+    core.GetSaturn()->SMPC.LoadPersistentData(data);
+    REQUIRE(core.LoadState(saved.data(), saved.size()));
+    CHECK(PersistentData(core).rtc.timestamp == kStart);
+}
+
 // ============================================================
 // Cartridges
 // ============================================================
@@ -2008,6 +2067,9 @@ TEST_CASE("cartridge: save states hold the backup cartridge's contents", "[core]
     REQUIRE(bare.SaveState(noCart.data(), noCart.size()));
     CHECK_FALSE(s.core.LoadState(noCart.data(), noCart.size()));
     CHECK(s.core.GetSaturn()->GetCartridge().GetType() == ymir::cart::CartType::BackupMemory);
+    // The error names the way out (a 0.6.x state of a game that now gets a cartridge under Auto)
+    CHECK(s.core.GetLastStateError().find("without a cartridge") != std::string::npos);
+    CHECK(s.core.GetLastStateError().find("Cartridge core option") != std::string::npos);
     s.core.UnloadGame();
 }
 
@@ -2117,12 +2179,14 @@ TEST_CASE("cartridge: flushing writes the cartridge save only when it changed", 
         REQUIRE(s.core.FlushCartridgeSave());
         CHECK(ReadAllBytes(bcr).at(0x100) == 0x5B);
     }
-    SECTION("1 MB RAM") {
+    SECTION("1 MB RAM: written at unload only") {
         CartSession s("brimir_cart_flush_dram", CartridgeChoice::DRAM8Mbit);
         const auto cart = s.content.saves / "audio.cart";
         REQUIRE(s.Load());
         s.core.GetSaturn()->GetCartridge().WriteByte(0x0240'0010, 0x77);
         REQUIRE(s.core.FlushCartridgeSave());
+        CHECK_FALSE(std::filesystem::exists(cart));
+        s.core.UnloadGame();
         REQUIRE(std::filesystem::exists(cart));
         CHECK(std::filesystem::file_size(cart) == 1024 * 1024);
     }

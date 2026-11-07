@@ -26,7 +26,7 @@ These are the biggest wins with the lowest implementation cost. All leverage Ymi
 Ymir exposes `saturn.mainBus.Poke<T>(addr, val)` for side-effect-free memory writes, plus public memory arrays (`WRAMLow`, `WRAMHigh`). Action Replay / GameShark / RAM watch / cheat search engine all possible.
 
 - New file: `src/bridge/cheat_manager.cpp`
-- Wires `retro_cheat_set` / `retro_cheat_reset` (currently stubs)
+- Wires `retro_cheat_set` / `retro_cheat_reset` (done in v0.7.0)
 - Supports: RAM watch, hex search, cheat file import (.cht/.json)
 - Flip `.info`: `cheats = "true"` once codes are actually applied
 
@@ -149,7 +149,7 @@ Propose `configuration.system.forceVideoStandard` upstream. Core option: "Force 
 ### 18. Cartridge RAM Persistence  ✅
 **Layer**: Bridge | **Effort**: ~100 LOC | **Target**: v0.5.0 | **Status**: Done — RAM cartridges in `<game>.cart`; v0.7.0 adds the 4 Mbit backup memory cartridge (`<game>.bcr`, Beetle's layout), the KoF95/Ultraman ROM cartridges from dumps, periodic saves and the `brimir_cartridge` option
 
-Ymir's `BackupMemoryCartridge` exists and is fully wired. Brimir's `core_wrapper.cpp` has `m_cartridgePath` and TODO comments. Wire up cartridge save/load in `LoadGame()`/`UnloadGame()`.
+Cartridge save/load is wired in `CoreWrapper::LoadGame()`/`UnloadGame()` (RAM cartridges written at unload; the backup cartridge also periodically while it changes).
 
 ---
 
@@ -204,7 +204,7 @@ Hook into `IVDPRenderer::VDP1WriteVRAM()` and `VDP1WriteFB()` to dump/intercept 
 Saturn VDP1 draws affine-textured quads without perspective correction. Needs interception of VDP1 draw commands inside the renderer.
 
 ### 24. Netplay / Rollback  ✅
-**Layer**: Bridge + Ymir determinism | **Target**: Post-JIT | **Status**: Done in v0.7.0 — RetroArch netplay works on deterministic save states (#6). Peers need the same BIOS, BIOS language/settings and core options (SH-2 cache, SCSP granularity; a mismatch is logged on load) and the same CPU architecture. Open: BIOS settings (SMEM) in states, a host-independent RTC time zone
+**Layer**: Bridge + Ymir determinism | **Target**: Post-JIT | **Status**: Done in v0.7.0 — RetroArch netplay works on deterministic save states (#6). Peers need the same BIOS, BIOS language/settings and core options (SH-2 cache, SCSP granularity; a mismatch is logged on load), the same cheats and the same CPU architecture. Open: BIOS settings (SMEM) in states, a host-independent RTC time zone
 
 Requires perfect determinism across dual SH-2s, SCSP timers, CD block timing. Needs Ymir deterministic mode + RetroArch netplay integration.
 
@@ -235,15 +235,15 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requi
 |---|---|
 | **v0.4.1** ✅ | System RAM exposure, memory descriptors, save state compression, contentless mode, M3U-less disc swap, CD speed 24x+ |
 | **v0.4.2** ✅ | SH2 decode optimization + DIV1 microoptimization (4 files synced verbatim from Ymir HEAD), rewind/runahead viability |
-| **v0.5.0** ✅ | Cheat system, all controller types, ~~screen rotation~~, layer toggling, ~~overscan crop~~, ~~audio volume~~, cartridge RAM persistence, frameskip, region patching, RetroAchievements |
+| **v0.5.0** ✅ | Cheat system, all controller types, ~~screen rotation~~, layer toggling, ~~overscan crop~~, ~~audio volume~~, cartridge RAM persistence, frameskip, region patching, RetroAchievements (cheats, controllers and RetroAchievements shipped in v0.7.0) |
 | **v0.5.1** ✅ | Multi-file CUE / compressed audio support, media loader tests |
 | **v0.5.2** ✅ | Ymir hardware-layer backports: VDP2 color gradation, BIN/CUE loader sanity checks, VDP renderer switch crash fix |
 | **v0.5.3** ✅ | Hardware fixes (Dragon Force II, HLE CD seek/sub-Q, ARM64/SSE2 blending), SSE2 on Windows x64, profiler and LTO fixes |
 | **v0.5.4** ✅ | Ymir hardware-layer backports: SMPC SSHON, VDP1 COPR, threaded VDP1 FBRAM write-back, VDP2 mid-frame changes, VCNT save-state restore |
 | **v0.5.5** ✅ | Hotfix: no crash on Quick Menu > Close Content on Windows (#7) |
-| **v0.5.6** | Internal cheat database, extended compatibility testing |
+| ~~**v0.5.6**~~ | Not released (v0.6.0 followed v0.5.5). Cheats came in v0.7.0 from RetroArch's database instead of an internal one |
 | **v0.6.0** ✅ | Vulkan renderer (VDP1/VDP2 on the GPU, internal resolution up to 4x), software renderer fixes, SH-2 JIT (experimental) |
-| **v0.7.0** ✅ | Libretro features: Action Replay cheats, RetroAchievements, deterministic save states (run-ahead, netplay), RTC mode, all controller types, ROM/backup cartridges, accuracy options |
+| **v0.7.0** | Libretro features: Action Replay cheats, RetroAchievements, deterministic save states (run-ahead, netplay), RTC mode, all controller types, ROM/backup cartridges, accuracy options |
 | **v0.8.0+** | JIT compiler (Phase 2), VDP2 debug overlay exposure |
 | **v1.0.0** | JIT stable, 85%+ compatibility, RetroArch core inclusion |
 

@@ -1193,7 +1193,7 @@ static void log_vdp1_probe(void) {
 #endif
 }
 
-// Periodic save of the RAM or backup cartridge (<game>.cart / .bcr; also written at unload): every
+// Periodic save of the backup cartridge (<game>.bcr; also written at unload, as is a RAM cartridge's .cart): every
 // kCartridgeFlushFrames shown frames (about 5 s), when the cartridge changed. Never on run-ahead's hidden frames nor on
 // the frame right after a state load; it only reads the cartridge, so emulation is unaffected.
 static constexpr unsigned kCartridgeFlushFrames = 300;
