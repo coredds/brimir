@@ -3,7 +3,8 @@
 // Saturn Pro Action Replay codes, as RetroArch's Saturn cheat database stores them (retro_cheat_set). A code is one or
 // more sub-codes "TAAAAAAA VVVV" (T: code type, AAAAAAA: address, VVVV: value), written as 12 hex digits
 // ("16033c7400c0"), with spaces ("1601dba4 0900") or with the address and the value as separate '+'-joined parts
-// ("D6033C60+270F"); several sub-codes are joined with '+'. Code types:
+// ("D6033C60+270F"); several sub-codes are joined with '+' or, as users type them, only with spaces
+// ("1601dba4 0900 16033c5e 270f": a part of 24, 36, ... digits is split into 12-digit sub-codes). Code types:
 //
 //   1AAAAAAA VVVV   16-bit write of VVVV at AAAAAAA
 //   3AAAAAAA 00VV   8-bit write of VV at AAAAAAA (the value's high byte is not used)
@@ -15,6 +16,8 @@
 // Any other type, and sub-codes the database mangled (template values like "00??" meant to be edited, addresses with
 // 7 or 9 digits, numbers a spreadsheet rewrote as decimals), parse as Ignored with the reason, so one bad sub-code
 // never stops a whole file. A code with characters that cannot appear in any of these forms is not a code (nullopt).
+// The engine keeps a cheat with a Malformed sub-code inert: its other sub-codes do not apply either, since what the
+// broken part meant (a write, or the condition gating the next one) is unknown.
 //
 // Addresses go through the SH-2 bus's 27-bit mask; Work RAM Low is 0x00200000-0x002FFFFF, Work RAM High
 // 0x06000000-0x07FFFFFF (1 MiB mirrored). Anything else is skipped (a conditional there is false). 16-bit accesses use
@@ -42,6 +45,7 @@ struct CheatOp {
     uint32_t address; // Write8/Write16/IfEqual16: the Saturn address; Ignored: the type digit and address if readable
     uint16_t value;   // as written (Write8 uses the low byte)
     IgnoreReason reason = IgnoreReason::None;
+    bool noTypeDigit = false; // a Write16 read from a type-0 sub-code (a plain address)
 };
 
 std::optional<std::vector<CheatOp>> ParseCheat(std::string_view code);
@@ -53,9 +57,11 @@ class CheatEngine {
 public:
     static constexpr size_t kHalfSize = 0x100000;
 
-    // Replaces cheat `index`. A code that does not parse leaves the slot empty.
+    // Replaces cheat `index`. A code that does not parse leaves the slot empty; one with a Malformed sub-code is kept
+    // but writes nothing.
     void Set(unsigned index, bool enabled, std::string_view code);
     void Set(unsigned index, bool enabled, std::vector<CheatOp> ops);
+    void Erase(unsigned index);
     void Reset();
 
     // Applies the enabled cheats to work RAM (Saturn byte order).

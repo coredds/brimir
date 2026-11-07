@@ -4,6 +4,7 @@
 
 #include "brimir/cheat_engine.hpp"
 
+#include <algorithm>
 #include <string>
 
 namespace brimir {
@@ -60,6 +61,7 @@ CheatOp DecodeSubCode(std::string_view address, std::string_view value) {
     const auto v16 = static_cast<uint16_t>(*v);
     switch (*a >> 28) {
     case 0x0: // a plain Saturn address without a type digit (Daytona USA, Panzer Dragoon demo): written as type 1
+        return CheatOp{CheatOp::Kind::Write16, target, v16, CheatOp::IgnoreReason::None, true};
     case 0x1: return CheatOp{CheatOp::Kind::Write16, target, v16};
     case 0x3: return CheatOp{CheatOp::Kind::Write8, target, v16};
     case 0xD: return CheatOp{CheatOp::Kind::IfEqual16, target, v16};
@@ -125,8 +127,11 @@ std::optional<std::vector<CheatOp>> ParseCheat(std::string_view code) {
     std::vector<CheatOp> ops;
     for (size_t i = 0; i < parts.size(); ++i) {
         const std::string_view part = parts[i];
-        if (part.size() == 12) {
-            ops.push_back(DecodeSubCode(part.substr(0, 8), part.substr(8)));
+        if (part.size() % 12 == 0) {
+            // One 12-digit sub-code, or several typed with spaces only between them.
+            for (size_t at = 0; at < part.size(); at += 12) {
+                ops.push_back(DecodeSubCode(part.substr(at, 8), part.substr(at + 8, 4)));
+            }
         } else if (i + 1 < parts.size() && parts[i + 1].size() <= 4) {
             // An address part followed by its value part.
             ops.push_back(DecodeSubCode(part, parts[i + 1]));
@@ -148,7 +153,7 @@ bool CheatAddressInWorkRam(uint32_t address) {
 void CheatEngine::Set(unsigned index, bool enabled, std::string_view code) {
     std::optional<std::vector<CheatOp>> ops = ParseCheat(code);
     if (!ops) {
-        m_cheats.erase(index);
+        Erase(index);
         return;
     }
     Set(index, enabled, std::move(*ops));
@@ -157,6 +162,13 @@ void CheatEngine::Set(unsigned index, bool enabled, std::string_view code) {
 void CheatEngine::Set(unsigned index, bool enabled, std::vector<CheatOp> ops) {
     Cheat cheat;
     cheat.enabled = enabled;
+    const bool malformed = std::any_of(ops.begin(), ops.end(), [](const CheatOp &op) {
+        return op.kind == CheatOp::Kind::Ignored && op.reason == CheatOp::IgnoreReason::Malformed;
+    });
+    if (malformed) {
+        m_cheats[index] = std::move(cheat); // inert
+        return;
+    }
     cheat.ops.reserve(ops.size());
     for (const CheatOp &op : ops) {
         Op compiled{op.kind, 2, 0, op.value};
@@ -169,6 +181,10 @@ void CheatEngine::Set(unsigned index, bool enabled, std::vector<CheatOp> ops) {
         cheat.ops.push_back(compiled);
     }
     m_cheats[index] = std::move(cheat);
+}
+
+void CheatEngine::Erase(unsigned index) {
+    m_cheats.erase(index);
 }
 
 void CheatEngine::Reset() {

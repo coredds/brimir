@@ -172,6 +172,7 @@ struct SweepResult {
     size_t write16 = 0, write8 = 0, ifEqual = 0;
     size_t master = 0, unknownType = 0, malformed = 0;
     size_t codesWithIgnored = 0;
+    size_t inertWithWrites = 0;   // codes with a malformed sub-code and a write beside it (kept inert)
     size_t beetleDifferent = 0;   // sub-codes Beetle's type-byte reading applies differently
     size_t beetleLexAccepts = 0;  // codes Beetle's lexer accepts as stored
     std::map<std::string, size_t> beetleDiffByType; // by "TT" (type byte)
@@ -211,6 +212,16 @@ SweepResult Sweep(const fs::path &dir) {
                 ++r.beetleLexAccepts;
             }
             bool ignored = false;
+            const bool hasMalformed = std::any_of(ops->begin(), ops->end(), [](const CheatOp &op) {
+                return op.kind == Kind::Ignored && op.reason == Reason::Malformed;
+            });
+            const bool hasWrite = std::any_of(ops->begin(), ops->end(), [](const CheatOp &op) {
+                return op.kind == Kind::Write8 || op.kind == Kind::Write16;
+            });
+            if (hasMalformed && hasWrite) {
+                ++r.inertWithWrites;
+                r.notes.push_back(where + ": inert (a malformed sub-code beside writes) '" + entry.code + "'");
+            }
             for (const CheatOp &op : *ops) {
                 ++r.subCodes;
                 switch (op.kind) {
@@ -260,9 +271,11 @@ SweepResult Sweep(const fs::path &dir) {
 void PrintSweep(const char *name, const SweepResult &r) {
     std::printf("%s: %zu files, %zu entries: %zu codes parsed (%zu sub-codes: %zu 16-bit writes, %zu 8-bit writes, "
                 "%zu conditionals, %zu master codes ignored, %zu unknown types ignored, %zu malformed ignored; %zu "
-                "codes with an ignored sub-code), %zu RetroArch-handled, %zu empty codes, %zu parse failures\n",
+                "codes with an ignored sub-code; %zu inert with writes beside a malformed sub-code), %zu "
+                "RetroArch-handled, %zu empty codes, %zu parse failures\n",
                 name, r.files, r.entries, r.codes, r.subCodes, r.write16, r.write8, r.ifEqual, r.master,
-                r.unknownType, r.malformed, r.codesWithIgnored, r.retroArchHandled, r.emptyCodes, r.failures.size());
+                r.unknownType, r.malformed, r.codesWithIgnored, r.inertWithWrites, r.retroArchHandled, r.emptyCodes,
+                r.failures.size());
     std::printf("%s: Beetle's lexer accepts %zu of the %zu codes as stored; its type-byte reading applies %zu "
                 "sub-codes differently:",
                 name, r.beetleLexAccepts, r.codes, r.beetleDifferent);
@@ -330,6 +343,98 @@ TEST_CASE("cheats: parse database forms", "[cheats]") {
     CHECK_FALSE(ParseCheat("zz").has_value());
     CHECK_FALSE(ParseCheat("").has_value());
     CHECK_FALSE(ParseCheat(" + ").has_value());
+}
+
+TEST_CASE("cheats: sub-codes typed with spaces only", "[cheats]") {
+    auto ops = Parse("1601dba4 0900 16033C5E 270F");
+    REQUIRE(ops.size() == 2);
+    RequireOp(ops[0], Kind::Write16, 0x0601DBA4, 0x0900);
+    RequireOp(ops[1], Kind::Write16, 0x06033C5E, 0x270F);
+
+    ops = Parse("D6033C60 270F 16033C5E 270F 36012345 00FF+16000000+0001");
+    REQUIRE(ops.size() == 4);
+    RequireOp(ops[0], Kind::IfEqual16, 0x06033C60, 0x270F);
+    RequireOp(ops[1], Kind::Write16, 0x06033C5E, 0x270F);
+    RequireOp(ops[2], Kind::Write8, 0x06012345, 0x00FF);
+    RequireOp(ops[3], Kind::Write16, 0x06000000, 0x0001);
+
+    // Not a multiple of 12 digits: still one malformed sub-code
+    ops = Parse("1601dba4 0900 16033C5E");
+    REQUIRE(ops.size() == 1);
+    CHECK(ops[0].reason == Reason::Malformed);
+
+    CheatEngine engine;
+    WorkRam ram;
+    engine.Set(0, true, "16000010 1234 36000021 0077");
+    REQUIRE(engine.ActiveCount() == 1);
+    ram.Apply(engine);
+    CHECK(ram.high[0x10] == 0x12);
+    CHECK(ram.high[0x11] == 0x34);
+    CHECK(ram.high[0x21] == 0x77);
+}
+
+TEST_CASE("cheats: a malformed sub-code keeps the whole cheat inert", "[cheats]") {
+    CheatEngine engine;
+    WorkRam ram;
+    engine.Set(0, true, "16000010+1234+160B374E+00??");
+    engine.Set(1, true, "16000020 5678+160CE42+0001");
+    engine.Set(2, true, "16000030 9ABC");
+    CHECK(engine.ActiveCount() == 1);
+    ram.Apply(engine);
+    CHECK(ram.high[0x10] == 0x00);
+    CHECK(ram.high[0x11] == 0x00);
+    CHECK(ram.high[0x20] == 0x00);
+    CHECK(ram.high[0x21] == 0x00);
+    CHECK(ram.high[0x30] == 0x9A);
+    CHECK(ram.high[0x31] == 0xBC);
+
+    // Replacing it with a good code makes it apply.
+    engine.Set(0, true, "16000010+1234");
+    ram.Apply(engine);
+    CHECK(ram.high[0x10] == 0x12);
+}
+
+TEST_CASE("cheats: a type-0 sub-code is flagged as having no type digit", "[cheats]") {
+    auto ops = Parse("06048072+0005+16048074+0006");
+    REQUIRE(ops.size() == 2);
+    CHECK(ops[0].noTypeDigit);
+    CHECK_FALSE(ops[1].noTypeDigit);
+}
+
+TEST_CASE("cheats: a conditional gating an ignored sub-code skips only that one", "[cheats]") {
+    // if [0x06000100] == 0x270F: (a master code, nothing to do); then always 0x0002 at 0x06000300
+    CheatEngine engine;
+    WorkRam ram;
+    engine.Set(0, true, "D6000100+270F+F6000924+C305+16000300+0002");
+    ram.Apply(engine);
+    CHECK(ram.high[0x301] == 0x02);
+
+    ram.high[0x301] = 0x00;
+    ram.high[0x100] = 0x27;
+    ram.high[0x101] = 0x0F;
+    ram.Apply(engine);
+    CHECK(ram.high[0x301] == 0x02);
+
+    // An unknown type in the gated place behaves the same way.
+    CheatEngine unknown;
+    WorkRam ram2;
+    unknown.Set(0, true, "D6000100 270F C6000000 0001 16000300 0003");
+    ram2.Apply(unknown);
+    CHECK(ram2.high[0x301] == 0x03);
+}
+
+TEST_CASE("cheats: erasing a slot", "[cheats]") {
+    CheatEngine engine;
+    WorkRam ram;
+    engine.Set(3, true, "16000000 1234");
+    engine.Set(4, true, "16000002 5678");
+    REQUIRE(engine.ActiveCount() == 2);
+    engine.Erase(3);
+    engine.Erase(9); // not set: nothing happens
+    CHECK(engine.ActiveCount() == 1);
+    ram.Apply(engine);
+    CHECK(ram.high[0] == 0x00);
+    CHECK(ram.high[2] == 0x56);
 }
 
 TEST_CASE("cheats: database oddities are ignored sub-codes, not errors", "[cheats]") {
@@ -500,7 +605,8 @@ TEST_CASE("cheats: sample .cht fixture parses", "[cheats]") {
     CHECK(r.malformed >= 1);
 }
 
-TEST_CASE("cheats: per-frame cost of 20 cheats", "[cheats]") {
+// Timing only (wall clock): hidden, run with "[cheats-bench]".
+TEST_CASE("cheats: per-frame cost of 20 cheats", "[.][cheats-bench]") {
     CheatEngine engine;
     WorkRam ram;
     for (unsigned i = 0; i < 20; ++i) {
