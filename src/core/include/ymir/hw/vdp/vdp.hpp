@@ -273,6 +273,10 @@ private:
     bool m_virtuaGunJitter = false;
     uint32 m_virtuaGunLastJitterX = 0u;
     uint32 m_virtuaGunLastJitterY = 0u;
+    // Brimir: the jitter's random numbers (xorshift32, never zero) instead of the global rand(), so that they are
+    // emulation state: saved in BrimirSaveState::VirtuaGun with the last jitter values, reset by a hard reset.
+    static constexpr uint32 kVirtuaGunJitterSeed = 0x2545F491u;
+    uint32 m_virtuaGunJitterState = kVirtuaGunJitterSeed;
 
     std::unique_ptr<IVDPRenderer> m_renderer;
 

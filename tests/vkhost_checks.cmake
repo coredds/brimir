@@ -320,41 +320,94 @@ message(STATUS "cheats_rollback_deterministic: 300 frames with 6 cheats, --rollb
                "(frames and 5 states)")
 
 # peripherals_rollback_deterministic: every peripheral type on the two ports with scripted input (--input-pattern:
-# buttons, sticks, triggers, mouse movement, light gun), --rollback emulates exactly the plain run: the states after
-# every 5th frame match in every section (the input changes between frames, so shown frames may be mispredicted, as
-# in RetroArch; the states are what run-ahead and netplay rely on).
-foreach(devices IN ITEMS "3dpad;mouse" "wheel;gun" "missionstick;pad")
+# buttons, sticks, triggers, mouse movement, light gun; the 3D pad's Select presses switch its mode, the Mission
+# Stick's R3 presses latch its throttle).
+# 1. The input reaches the emulation: the BIOS frames with the 3D pad and Mission Stick differ from a run without input.
+# 2. --rollback (single-instance run-ahead) emulates exactly the plain run: the states after every 5th frame match in
+#    every section (shown frames may be mispredicted when the input changes, as in RetroArch).
+# 3. Second instance (netplay, a state loaded into a fresh core): plain states after frames 19, 59, 99 and 139 loaded
+#    into a new vkhost run that continues with the input of the following frames (--input-offset) match the plain run
+#    20 frames on. A load that dropped the bridge's edge state (previous buttons, 3D pad mode, throttle latch) fails
+#    here: the fresh instance starts from its defaults.
+# The BIOS reads the controllers through INTBACK only: the peripherals' TH/TR handshake fields in the state are not
+# exercised here (unit test "peripherals: a TH/TR read in progress continues the same after a state load").
+function(peripheral_states_equal label a b)
+    execute_process(COMMAND "${STATE_DIFF}" --strict "${a}" "${b}"
+        OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+    if(NOT sd_code EQUAL 0)
+        message(FATAL_ERROR "peripherals_rollback_deterministic: ${label} (exit ${sd_code}):\n${sd_out}${sd_err}")
+    endif()
+endfunction()
+function(padded_frame k out)
+    string(LENGTH "0000${k}" padded_length)
+    math(EXPR start "${padded_length} - 5")
+    string(SUBSTRING "0000${k}" ${start} 5 padded)
+    set(${out} "${padded}" PARENT_SCOPE)
+endfunction()
+foreach(devices IN ITEMS "3dpad;missionstick" "wheel;gun" "mouse;pad")
     list(GET devices 0 dev0)
     list(GET devices 1 dev1)
-    foreach(mode IN ITEMS plain rollback)
-        set(extra "")
+    foreach(mode IN ITEMS plain rollback noinput)
+        set(extra --input-pattern 7 --save-state-every 5 "${state_dir}/peripherals_${dev0}_${mode}")
         if(mode STREQUAL "rollback")
-            set(extra --rollback)
+            list(APPEND extra --rollback)
+        elseif(mode STREQUAL "noinput")
+            if(NOT dev0 STREQUAL "3dpad")
+                continue()
+            endif()
+            set(extra "")
         endif()
         execute_process(
-            COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 200 --device 0 ${dev0} --device 1 ${dev1}
-                    --input-pattern 7 --save-state-every 5 "${state_dir}/peripherals_${dev0}_${mode}" ${extra}
+            COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 200 --hash --device 0 ${dev0}
+                    --device 1 ${dev1} ${extra}
             OUTPUT_VARIABLE prb_out ERROR_VARIABLE prb_err RESULT_VARIABLE prb_code)
         if(NOT prb_code EQUAL 0)
             message(FATAL_ERROR "peripherals_rollback_deterministic (${dev0}+${dev1}, ${mode}): exit ${prb_code}\n${prb_err}")
         endif()
+        string(REGEX MATCHALL "frame [0-9]+ [0-9]+x[0-9]+ [0-9a-f]+" prb_hashes_${mode} "${prb_out}")
     endforeach()
-    foreach(k RANGE 4 199 5)
-        string(LENGTH "0000${k}" padded_length)
-        math(EXPR start "${padded_length} - 5")
-        string(SUBSTRING "0000${k}" ${start} 5 padded)
-        execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/peripherals_${dev0}_plain/state_${padded}.bin"
-                                "${state_dir}/peripherals_${dev0}_rollback/state_${padded}.bin"
-            OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
-        if(NOT sd_code EQUAL 0)
-            message(FATAL_ERROR "peripherals_rollback_deterministic (${dev0}+${dev1}): the states after frame ${k} "
-                                "differ (exit ${sd_code}):\n${sd_out}${sd_err}")
+    if(dev0 STREQUAL "3dpad")
+        list(LENGTH prb_hashes_plain plain_count)
+        if(NOT plain_count EQUAL 200 OR "${prb_hashes_plain}" STREQUAL "${prb_hashes_noinput}")
+            message(FATAL_ERROR "peripherals_rollback_deterministic: the scripted input does not reach the emulation "
+                                "(${plain_count} frames, the same frames as without input)")
         endif()
+    endif()
+    foreach(k RANGE 4 199 5)
+        padded_frame(${k} padded)
+        peripheral_states_equal("${dev0}+${dev1}: the --rollback state after frame ${k} differs"
+            "${state_dir}/peripherals_${dev0}_plain/state_${padded}.bin"
+            "${state_dir}/peripherals_${dev0}_rollback/state_${padded}.bin")
     endforeach()
+    if(dev0 STREQUAL "3dpad")
+        foreach(k IN ITEMS 19 59 99 139)
+            padded_frame(${k} from)
+            math(EXPR offset "${k} + 1")
+            execute_process(
+                COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 20 --device 0 ${dev0}
+                        --device 1 ${dev1} --input-pattern 7 --input-offset ${offset}
+                        --load-state "${state_dir}/peripherals_${dev0}_plain/state_${from}.bin"
+                        --save-state-every 5 "${state_dir}/peripherals_${dev0}_from${k}"
+                OUTPUT_VARIABLE prb_out ERROR_VARIABLE prb_err RESULT_VARIABLE prb_code)
+            if(NOT prb_code EQUAL 0)
+                message(FATAL_ERROR "peripherals_rollback_deterministic (second instance from ${k}): exit ${prb_code}\n"
+                                    "${prb_err}")
+            endif()
+            foreach(j IN ITEMS 4 9 14 19)
+                math(EXPR plain_frame "${k} + 1 + ${j}")
+                padded_frame(${j} at)
+                padded_frame(${plain_frame} expected)
+                peripheral_states_equal("second instance from the state after frame ${k}: its state after frame ${plain_frame} differs from the plain run's"
+                    "${state_dir}/peripherals_${dev0}_from${k}/state_${at}.bin"
+                    "${state_dir}/peripherals_${dev0}_plain/state_${expected}.bin")
+            endforeach()
+        endforeach()
+    endif()
 endforeach()
-message(STATUS "peripherals_rollback_deterministic: 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse, Virtua "
-               "Gun and Control Pad with scripted input, --rollback emulates exactly the plain run (40 states each)")
-
+message(STATUS "peripherals_rollback_deterministic: the input reaches the BIOS; with all six peripherals and scripted "
+               "input --rollback emulates exactly the plain run (40 states per device pair), and states loaded into a "
+               "fresh instance continue identically (3D pad mode and Mission Stick throttle latch included, 16 states). "
+               "The TH/TR handshake fields rest on the unit tests (the BIOS reads through INTBACK).")
 run_vkhost(vulkan --vulkan --save-state-at 100 "${vk_state}")
 if(vulkan_code EQUAL 4)
     file(REMOVE_RECURSE "${state_dir}")

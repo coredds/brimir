@@ -52,7 +52,8 @@ inline constexpr unsigned RETRO_DEVICE_SATURN_MOUSE = RETRO_DEVICE_SUBCLASS(RETR
 inline constexpr unsigned RETRO_DEVICE_SATURN_VIRTUA_GUN = RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_LIGHTGUN, 0);
 
 /// @brief The peripheral for a libretro device type: the types above, RETRO_DEVICE_NONE; any other type by its base
-/// class (joypad: Control Pad, analog: 3D Control Pad, mouse, light gun), else the Control Pad
+/// class (mouse: Shuttle Mouse, light gun: Virtua Gun), else the Control Pad (plain RETRO_DEVICE_ANALOG, "RetroPad w/
+/// Analog" in configurations saved with earlier versions, included)
 PeripheralKind PeripheralKindForDevice(unsigned device);
 
 /// @brief Display name of a peripheral (logs)

@@ -532,7 +532,7 @@ TEST_CASE("BRI2 state with a version before 4 is rejected", "[core][savestate][u
     const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
 
     STATIC_REQUIRE(CoreWrapper::kOldestLoadableSaveStateVersion == 4);
-    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 9);
+    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 10);
 
     for (const uint32_t version : {0u, 1u, 2u, 3u, CoreWrapper::kSaveStateVersion + 1}) {
         CAPTURE(version);
@@ -572,8 +572,8 @@ TEST_CASE("Version 4, 5 and 6 states (without all of the Brimir extension) still
         REQUIRE_FALSE(core.LoadState(patched.data(), patched.size()));
     }
     // Version 7 has the version 8 layout (only backup memory and ROM cartridge images differ); both end before the
-    // peripherals' state of version 9.
-    for (const uint32_t version : {7u, 8u}) {
+    // peripherals' state of version 9, which ends before the Virtua Gun jitter of version 10.
+    for (const uint32_t version : {7u, 8u, 9u}) {
         CAPTURE(version);
         const auto buf = RepackStateAs(saved, version);
         REQUIRE(core.LoadState(buf.data(), buf.size()));
@@ -637,6 +637,10 @@ std::vector<uint8_t> RepackState(const std::vector<uint8_t>& saved, uint32_t ver
         // Versions 7 and 8 end before the peripherals.
         payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
                        ymir::savestate::kBrimirSaveStateV8Size);
+    } else if (version == 9) {
+        // Version 9 ends before the Virtua Gun jitter.
+        payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
+                       ymir::savestate::kBrimirSaveStateV9Size);
     }
 
     std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(payload.size())));
@@ -1027,6 +1031,16 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
             const uint8_t lastPos = 21;
             REQUIRE(DecodeSaveState(patched(port1 + offsetof(P::Port, reportPos), &lastPos, 1), *decoded));
         }
+        {
+            using G = B::VirtuaGun;
+            const uint32_t zeroState = 0;
+            const uint32_t badJitter = 4;
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, virtuaGun) + offsetof(G, valid), &zero, 1), *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, virtuaGun) + offsetof(G, jitterState), &zeroState, 4),
+                                          *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, virtuaGun) + offsetof(G, lastJitterY), &badJitter, 4),
+                                          *decoded));
+        }
         // Without the extension (versions 4 and 5) the same bytes are not read.
         REQUIRE(DecodeSaveState(std::span<const uint8_t>(payload.data(), ext), *decoded, 5));
         REQUIRE_FALSE(decoded->brimir.valid);
@@ -1058,11 +1072,12 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
             state->scu.cartType = type;
             state->scu.cartData.assign(size, 0);
             REQUIRE(EncodeSaveState(*state, payload));
-            // Versions 7 and 8 end before the extension's peripherals (version 9).
-            const size_t size7 = payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
-                                 ymir::savestate::kBrimirSaveStateV8Size;
-            return DecodeSaveState(std::span<const uint8_t>(payload.data(), version < 9 ? size7 : payload.size()),
-                                   *decoded, version);
+            // Versions 7 and 8 end before the extension's peripherals (version 9), 9 before the Virtua Gun (10).
+            const size_t ext = payload.size() - sizeof(ymir::savestate::BrimirSaveState);
+            const size_t length = version < 9    ? ext + ymir::savestate::kBrimirSaveStateV8Size
+                                  : version == 9 ? ext + ymir::savestate::kBrimirSaveStateV9Size
+                                                 : payload.size();
+            return DecodeSaveState(std::span<const uint8_t>(payload.data(), length), *decoded, version);
         };
         for (const size_t size : {512u * 1024u, 1024u * 1024u, 2u * 1024u * 1024u, 4u * 1024u * 1024u}) {
             CHECK(decodes(CartType::BackupMemory, size, 8));

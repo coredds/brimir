@@ -86,6 +86,16 @@ struct BrimirSaveState {
         };
         std::array<Port, 2> ports;
     } peripherals;
+
+    // From version 10 on (version 9 ends before this member): the Virtua Gun jitter of VDP::ExternalLatch (enabled
+    // for Death Crimson), whose random numbers come from this xorshift32 state (never zero) and avoid repeating the
+    // last value on each axis.
+    struct VirtuaGun {
+        bool valid;
+        uint32 jitterState;
+        uint32 lastJitterX;
+        uint32 lastJitterY;
+    } virtuaGun;
 };
 
 // Bytes of the extension in a version 6 payload (before scspSlots), on every supported ABI.
@@ -93,5 +103,8 @@ inline constexpr size_t kBrimirSaveStateV6Size = 786480;
 
 // Bytes of the extension in a version 7 or 8 payload (before peripherals), on every supported ABI.
 inline constexpr size_t kBrimirSaveStateV8Size = 819376;
+
+// Bytes of the extension in a version 9 payload (before virtuaGun), on every supported ABI.
+inline constexpr size_t kBrimirSaveStateV9Size = 819392;
 
 } // namespace ymir::savestate

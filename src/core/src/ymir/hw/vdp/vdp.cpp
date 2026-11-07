@@ -91,6 +91,13 @@ void VDP::Reset(bool hard) {
     m_VDP1TimingPenaltyCycles = 0;
     m_VDP1CtlState.Reset();
 
+    if (hard) {
+        // Brimir: the Virtua Gun jitter starts over (its random numbers are emulation state)
+        m_virtuaGunJitterState = kVirtuaGunJitterSeed;
+        m_virtuaGunLastJitterX = 0;
+        m_virtuaGunLastJitterY = 0;
+    }
+
     UpdateResolution<false>();
 
     BeginHPhaseActiveDisplay();
@@ -537,6 +544,10 @@ bool VDP::ValidateState(const savestate::VDPSaveState &state) const {
 void VDP::SaveBrimirState(savestate::BrimirSaveState &ext) const {
     SaveBrimirVDPState(ext.vdp);
     m_renderer->SaveBrimirState(ext.vdpRenderer); // SaveState ran PreSaveStateSync
+    ext.virtuaGun.valid = true;
+    ext.virtuaGun.jitterState = m_virtuaGunJitterState;
+    ext.virtuaGun.lastJitterX = m_virtuaGunLastJitterX;
+    ext.virtuaGun.lastJitterY = m_virtuaGunLastJitterY;
 }
 
 // Brimir
@@ -592,6 +603,12 @@ void VDP::LoadState(const savestate::VDPSaveState &state, const savestate::Brimi
         m_state.regs1.returnAddress = ext->vdp1ReturnAddress;
     } else {
         UpdateResolution<true>();
+    }
+    if (brimir != nullptr && brimir->virtuaGun.valid && brimir->virtuaGun.jitterState != 0) {
+        // Brimir: the Virtua Gun jitter (states from version 10 on; older ones keep the running values)
+        m_virtuaGunJitterState = brimir->virtuaGun.jitterState;
+        m_virtuaGunLastJitterX = brimir->virtuaGun.lastJitterX & 3;
+        m_virtuaGunLastJitterY = brimir->virtuaGun.lastJitterY & 3;
     }
 
     switch (m_state.VPhase) {
@@ -1316,9 +1333,14 @@ void VDP::ExternalLatch(uint16 x, uint16 y) {
         m_state.regs2.TVSTAT.EXLTFG = x < m_HRes && y < m_VRes;
         if (m_state.regs2.TVSTAT.EXLTFG) {
             if (m_virtuaGunJitter) {
-                auto jitter = [](uint32 &lastValue) {
+                auto jitter = [this](uint32 &lastValue) {
                     for (;;) {
-                        const uint32 value = rand() & 3;
+                        // Brimir: xorshift32 in emulation state instead of rand() (deterministic, saved)
+                        uint32 &s = m_virtuaGunJitterState;
+                        s ^= s << 13u;
+                        s ^= s >> 17u;
+                        s ^= s << 5u;
+                        const uint32 value = (s >> 16u) & 3;
                         if (value != lastValue) {
                             lastValue = value;
                             return value;

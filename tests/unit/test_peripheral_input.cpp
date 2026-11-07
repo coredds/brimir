@@ -80,7 +80,9 @@ TEST_CASE("peripherals: device types and kinds", "[peripherals]") {
     CHECK(PeripheralKindForDevice(RETRO_DEVICE_SATURN_MOUSE) == PeripheralKind::ShuttleMouse);
     CHECK(PeripheralKindForDevice(RETRO_DEVICE_SATURN_VIRTUA_GUN) == PeripheralKind::VirtuaGun);
     // Other types by their base class
-    CHECK(PeripheralKindForDevice(RETRO_DEVICE_ANALOG) == PeripheralKind::AnalogPad);
+    // Plain RETRO_DEVICE_ANALOG ("RetroPad w/ Analog", saved by configurations of v0.6.x) stays the Control Pad
+    CHECK(PeripheralKindForDevice(RETRO_DEVICE_ANALOG) == PeripheralKind::ControlPad);
+    CHECK(PeripheralKindForDevice(RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG, 7)) == PeripheralKind::ControlPad);
     CHECK(PeripheralKindForDevice(RETRO_DEVICE_MOUSE) == PeripheralKind::ShuttleMouse);
     CHECK(PeripheralKindForDevice(RETRO_DEVICE_LIGHTGUN) == PeripheralKind::VirtuaGun);
     CHECK(PeripheralKindForDevice(RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 5)) == PeripheralKind::ControlPad);

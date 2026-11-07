@@ -186,6 +186,8 @@ void PrintUsage(std::FILE* out) {
         "                light gun), a function of SEED and the frame index only (held 6 frames; mouse movement per\n"
         "                frame): the hidden and shown frames of --rollback / --runahead read the input of the plain\n"
         "                run's frame with that index. Without it every input reads 0\n"
+        "  --input-offset N  test only: with --input-pattern, frame i reads the input of frame N + i (a second\n"
+        "                instance continuing from --load-state of a state saved after frame N - 1)\n"
         "  --hash-sample N  with --hash: hash the native image of the sample points instead of the frame. Frames are at\n"
         "                internal resolution N until the core logs another (\"Internal resolution: frames at Mx\"); the\n"
         "                sample point of native output pixel (x, y) is mapped through the rotation (brimir_rotation\n"
@@ -497,6 +499,11 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
                 return ParseResult::Error;
             }
             args.config.inputPattern = static_cast<uint32_t>(seed);
+        } else if (opt == "--input-offset") {
+            if (!ParseInt(value, args.config.inputOffset) || args.config.inputOffset < 0) {
+                std::fprintf(stderr, "--input-offset needs a frame count (0 or more): %s\n", value);
+                return ParseResult::Error;
+            }
         } else if (opt == "--bios") {
             args.config.biosPath = value;
         } else if (opt == "--game") {

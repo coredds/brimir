@@ -45,6 +45,7 @@ LibretroHost* g_hosts[kMaxHosts] = {};
 
 // --input-pattern: the seed (0: no input) and the frame whose input the instances read.
 uint32_t g_inputSeed = 0;
+int g_inputOffset = 0;
 int g_inputFrame = 0;
 
 uint64_t SplitMix(uint64_t x) {
@@ -402,6 +403,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
         std::fprintf(stderr, "vkhost: port %u device %u\n", port, device);
     }
     g_inputSeed = config.inputPattern;
+    g_inputOffset = config.inputOffset;
     // RetroArch applies the cheats after the content (and the video driver) is up: a reset, then every cheat.
     if (!config.cheats.empty()) {
         m_api->cheat_reset();
@@ -853,7 +855,7 @@ int16_t RETRO_CALLCONV LibretroHost::InputStateThunk(unsigned port, unsigned dev
 }
 
 void LibretroHost::SetInputFrame(int frame) {
-    g_inputFrame = frame;
+    g_inputFrame = frame + g_inputOffset;
 }
 
 void LibretroHost::LogUnsupportedOnce(unsigned cmd) {

@@ -28,7 +28,7 @@ using ymir::savestate::SMPCSaveState;
 // CoreWrapper::kSaveStateVersion.
 static_assert(sizeof(void*) != 8 || sizeof(SCUSaveState) == 2496, "SCUSaveState changed: update the serializer");
 static_assert(sizeof(void*) != 8 || sizeof(SMPCSaveState) == 144, "SMPCSaveState changed: update the serializer");
-static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819392,
+static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819408,
               "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
 
 // Counts bytes (out == nullptr) or writes them.
@@ -209,7 +209,8 @@ void VisitSMPC(Archive& ar, State& smpc) {
 
 // version: payloads from version 6 on end with the Brimir extension (savestate_brimir.hpp); earlier ones lack it,
 // version 6 has only its first kBrimirSaveStateV6Size bytes (no scspSlots; read with Reader::RawPrefix), and versions
-// 7 and 8 only the first kBrimirSaveStateV8Size bytes (no peripherals).
+// 7 and 8 only the first kBrimirSaveStateV8Size bytes (no peripherals), version 9 the first kBrimirSaveStateV9Size
+// bytes (no virtuaGun).
 template <typename Archive, typename State>
 void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     auto& [scheduler, system, msh2, ssh2, scu, smpc, vdp, scsp, cdblockLLE, cdblock, sh1, ygr, cddrive, cdblockDRAM,
@@ -233,8 +234,12 @@ void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     ar.Raw(ssh2SpilloverCycles);
     ar.Raw(sh1SpilloverCycles);
     ar.Raw(sh1FracCycles);
-    if (version >= 9) {
+    if (version >= 10) {
         ar.Raw(brimir);
+    } else if (version == 9) {
+        if constexpr (std::is_same_v<Archive, Reader>) {
+            ar.RawPrefix(brimir, ymir::savestate::kBrimirSaveStateV9Size);
+        }
     } else if (version >= 7) {
         if constexpr (std::is_same_v<Archive, Reader>) {
             ar.RawPrefix(brimir, ymir::savestate::kBrimirSaveStateV8Size);
@@ -305,6 +310,13 @@ bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext, uint32_t 
             }
         }
     }
+    if (version >= 10) {
+        // xorshift32 never reaches zero; the jitter values are 0 .. 3
+        if (byte(ext.virtuaGun.valid) != 1 || ext.virtuaGun.jitterState == 0 || ext.virtuaGun.lastJitterX > 3 ||
+            ext.virtuaGun.lastJitterY > 3) {
+            return false;
+        }
+    }
     return ext.scsp.dspProgramLength <= 128;
 }
 
@@ -355,6 +367,12 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_
         using ymir::savestate::BrimirSaveState;
         constexpr size_t from = offsetof(BrimirSaveState, peripherals);
         static_assert(from <= ymir::savestate::kBrimirSaveStateV8Size);
+        std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
+    } else if (version == 9) {
+        // virtuaGun: valid false, the running jitter is kept, as version 9 loaded
+        using ymir::savestate::BrimirSaveState;
+        constexpr size_t from = offsetof(BrimirSaveState, virtuaGun);
+        static_assert(from <= ymir::savestate::kBrimirSaveStateV9Size);
         std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
     }
     if (!reader.Done()) {

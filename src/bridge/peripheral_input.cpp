@@ -127,8 +127,9 @@ PeripheralKind PeripheralKindForDevice(unsigned device) {
     case RETRO_DEVICE_SATURN_VIRTUA_GUN: return PeripheralKind::VirtuaGun;
     default: break;
     }
+    // Plain RETRO_DEVICE_ANALOG is RetroArch's "RetroPad w/ Analog", which configurations saved with earlier versions
+    // (no controller info) may hold: the Control Pad they played with.
     switch (device & RETRO_DEVICE_MASK) {
-    case RETRO_DEVICE_ANALOG: return PeripheralKind::AnalogPad;
     case RETRO_DEVICE_MOUSE: return PeripheralKind::ShuttleMouse;
     case RETRO_DEVICE_LIGHTGUN: return PeripheralKind::VirtuaGun;
     default: return PeripheralKind::ControlPad;

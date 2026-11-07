@@ -1109,7 +1109,7 @@ static void update_system_av_info_for_region(void) {
 RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (port > 1) {
-        brimir_log(RETRO_LOG_WARN, "Controller port %u does not exist (the Saturn has two)", port + 1);
+        brimir_log(RETRO_LOG_DEBUG, "Controller port %u ignored (the Saturn has two)", port + 1);
         return;
     }
     const brimir::PeripheralKind kind = brimir::PeripheralKindForDevice(device);

@@ -1695,7 +1695,8 @@ void VulkanOutput::Impl::RecordCrosshairs(VkCommandBuffer cmd, VkImage image, ui
             }
         }
     }
-    std::vector<VkBufferImageCopy> regions;
+    std::array<VkBufferImageCopy, 2 * brimir::kMaxCrosshairRects> regions{};
+    size_t regionCount = 0;
     for (uint32_t i = 0; i < crosshairCount; ++i) {
         std::array<brimir::OverlayRect, brimir::kMaxCrosshairRects> rects;
         const size_t count = brimir::CrosshairRects(crosshairs[i], w, h, rects);
@@ -1710,10 +1711,10 @@ void VulkanOutput::Impl::RecordCrosshairs(VkCommandBuffer cmd, VkImage image, ui
             region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.imageOffset = {static_cast<int32_t>(rect.x), static_cast<int32_t>(rect.y), 0};
             region.imageExtent = {rect.w, rect.h, 1};
-            regions.push_back(region);
+            regions[regionCount++] = region;
         }
     }
-    if (regions.empty()) {
+    if (regionCount == 0) {
         return;
     }
     // After the frame output pass (compute) or copy; the rectangles go in order (outline first), and the image is read
@@ -1722,7 +1723,8 @@ void VulkanOutput::Impl::RecordCrosshairs(VkCommandBuffer cmd, VkImage image, ui
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                                VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
                                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-    for (const VkBufferImageCopy &region : regions) {
+    for (size_t i = 0; i < regionCount; ++i) {
+        const VkBufferImageCopy &region = regions[i];
         device->Table().vkCmdCopyBufferToImage(cmd, overlayColors.buffer, image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
         // Overlapping rectangles (the colour over the outline): each copy after the previous one
         gpu::vk_util::ImageBarrier(*device, cmd, image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,

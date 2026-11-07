@@ -138,6 +138,9 @@ struct HostConfig {
     // index, id) only, so the hidden and the shown frame of an iteration (--rollback, --runahead) get the same input as
     // the plain run's frame of that index; 0: no input (every input_state call returns 0)
     uint32_t inputPattern = 0;
+    // --input-offset N: frame i reads the scripted input of frame N + i (a run continuing from another run's state
+    // saved after frame N - 1, as a second instance in netplay)
+    int inputOffset = 0;
 };
 
 // One VDP2 frame's "VDP2 probe:" line from the Vulkan VDP renderer (the front half's Vdp2FeatureCounters).

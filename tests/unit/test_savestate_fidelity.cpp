@@ -14,10 +14,12 @@
 #include <ymir/sys/backup_ram.hpp>
 #include <ymir/sys/saturn.hpp>
 
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <new>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -475,4 +477,45 @@ TEST_CASE("A fresh system keeps the other field's VDP1 framebuffer", "[savestate
     auto older = FreshWith(*state, false);
     auto *olderSw = older->VDP.GetRendererAs<vdp::VDPRendererType::Software>();
     CHECK_FALSE((olderSw->GetAltFBRAM(0) == alt0 && olderSw->GetAltFBRAM(1) == alt1));
+}
+
+TEST_CASE("Virtua Gun jitter latches the same coordinates after a state load", "[savestate][fidelity][vdp][brimir]") {
+    // Death Crimson's jitter (VDP::ExternalLatch) used the global rand(): a run-ahead frame advanced it and the replay
+    // latched other coordinates. Its random state is now emulation state, in the Brimir extension.
+    const auto setUp = [](Saturn &saturn) {
+        saturn.VDP.SetVirtuaGunJitter(true);
+        saturn.mainBus.Write<uint16>(kVDP2EXTEN, 0x0200); // EXLTEN: latch on the external signal
+    };
+    const auto latches = [](Saturn &saturn) {
+        std::vector<uint32> out;
+        for (int i = 0; i < 16; ++i) {
+            saturn.VDP.CbExternalLatch(100, 50);
+            const auto &regs = Regs2(saturn);
+            out.push_back((uint32{regs.HCNT} << 16) | regs.VCNTLatch);
+        }
+        return out;
+    };
+    auto saturn = std::make_unique<Saturn>();
+    setUp(*saturn);
+    latches(*saturn); // some jitter drawn before the save
+    const auto state = Save(*saturn);
+    const auto expected = latches(*saturn);
+    // The jitter moves the shot (by 0 to 3 pixels, never the same offset twice in a row on an axis)
+    bool varies = false;
+    for (size_t i = 1; i < expected.size(); ++i) {
+        CHECK(expected[i] != expected[i - 1]);
+        varies = varies || expected[i] != expected[0];
+        CHECK((expected[i] & 0xFFFF) >= 50);
+        CHECK((expected[i] & 0xFFFF) <= 53);
+    }
+    CHECK(varies);
+
+    // A hidden frame's draws are undone by the load (run-ahead), in place and in another instance (netplay)
+    rand(); // what other code may do with the global generator in between
+    REQUIRE(saturn->LoadState(*state, true));
+    CHECK(latches(*saturn) == expected);
+    auto fresh = std::make_unique<Saturn>();
+    setUp(*fresh);
+    REQUIRE(fresh->LoadState(*state, true));
+    CHECK(latches(*fresh) == expected);
 }

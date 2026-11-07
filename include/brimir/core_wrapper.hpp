@@ -101,8 +101,9 @@ public:
     /// the SCU cartridge image holds a backup memory cartridge's data bytes and is empty for a ROM cartridge (the
     /// ROM is the dump inserted at content load); version 7 states have no image for either. Version 9 adds the
     /// controller port peripherals' state and the bridge's input state per port (BrimirSaveState::Peripherals);
-    /// version 7 and 8 states load without them.
-    static constexpr uint32_t kSaveStateVersion = 9;
+    /// version 7 and 8 states load without them. Version 10 adds the Virtua Gun jitter's random state
+    /// (BrimirSaveState::VirtuaGun); version 9 states load without it.
+    static constexpr uint32_t kSaveStateVersion = 10;
 
     /// @brief Oldest BRI2 version LoadState accepts
     static constexpr uint32_t kOldestLoadableSaveStateVersion = 4;
