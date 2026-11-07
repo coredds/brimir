@@ -1634,10 +1634,13 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 // the virtual timestamp, which still holds 0 or Ymir's default date: loading it would move the virtual
                 // clock to 1970 or 1994 and persist that at unload. The session's clock stays. Virtual-mode states
                 // (run-ahead, rewind, netplay) always hold a seeded timestamp, so they restore as saved.
+                // The clock is brought up to now first; it then counts from the state's own uptime (the scheduler count
+                // the load restores), since the RTC advances by the difference between the two.
+                m_saturn->SMPC.SyncVirtualRTC();
                 ymir::savestate::SMPCSaveState current{};
                 m_saturn->SMPC.GetRTC().SaveState(current);
                 state.smpc.rtcTimestamp = current.rtcTimestamp;
-                state.smpc.rtcSysClockCount = current.rtcSysClockCount;
+                state.smpc.rtcSysClockCount = state.scheduler.currCount;
             }
             if (!m_saturn->LoadState(state, true)) {
                 return false;

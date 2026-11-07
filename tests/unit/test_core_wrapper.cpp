@@ -1740,6 +1740,66 @@ TEST_CASE("rtc: a v0.6.x (host-mode) state keeps the virtual clock", "[core][rtc
     CHECK(std::llabs(RtcFileTimestamp(content.RtcFile()) - HostEpochSeconds()) <= 120);
 }
 
+TEST_CASE("rtc: a v0.6.x state keeps the clock running from its own uptime", "[core][rtc][savestate]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // The RTC advances by the emulated time between its last sync and the scheduler's count, which the load restores:
+    // the kept clock must count from the state's uptime, whether it is below the session's last sync (an unsigned
+    // wrap: thousands of years) or above it (a jump by the difference).
+    const int64_t hostMode = util::datetime::to_timestamp(util::datetime::kDefaultDateTime);
+    RtcContent content("brimir_rtc_olduptime_test");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    core.SetRTCMode(RTCMode::Virtual);
+    REQUIRE(content.Load(core));
+    const auto runFrames = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            core.RunFrame();
+        }
+    };
+    const auto saveV5 = [&] {
+        std::vector<uint8_t> saved(core.GetStateSize());
+        REQUIRE(core.SaveState(saved.data(), saved.size()));
+        return RepackState(saved, 5, [&](ymir::savestate::SaveState& s) { s.smpc.rtcTimestamp = hostMode; });
+    };
+    runFrames(30);
+    const auto early = saveV5(); // 0.5 s of uptime
+    runFrames(900);
+    const auto late = saveV5(); // 15.5 s of uptime
+
+    // The session's clock now, and after the load plus kFrames frames (10 s)
+    constexpr int kFrames = 600;
+    const auto check = [&](int64_t start) {
+        runFrames(kFrames);
+        core.GetSaturn()->SMPC.SyncVirtualRTC();
+        CHECK(std::llabs(PersistentData(core).rtc.timestamp - (start + 10)) <= 2);
+        const auto guest = util::datetime::to_timestamp(core.GetSaturn()->SMPC.GetRTC().GetDateTime());
+        CHECK(std::llabs(guest - (start + 10)) <= 2);
+        core.UnloadGame();
+        CHECK(std::llabs(RtcFileTimestamp(content.RtcFile()) - (start + 10)) <= 2);
+    };
+    const auto sessionNow = [&] {
+        core.GetSaturn()->SMPC.SyncVirtualRTC();
+        return PersistentData(core).rtc.timestamp;
+    };
+
+    SECTION("uptime below the session's last RTC sync") {
+        const int64_t start = sessionNow();
+        REQUIRE(core.LoadState(early.data(), early.size()));
+        check(start);
+    }
+    SECTION("uptime above the session's") {
+        core.UnloadGame();
+        REQUIRE(content.Load(core)); // uptime starts again
+        runFrames(30);
+        const int64_t start = sessionNow();
+        REQUIRE(core.LoadState(late.data(), late.size()));
+        check(start);
+    }
+}
+
 TEST_CASE("rtc: a virtual-mode state restores its own clock", "[core][rtc][savestate]") {
     if (!std::filesystem::exists(UsBiosFixture())) {
         SKIP("US BIOS fixture missing");
