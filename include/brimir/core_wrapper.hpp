@@ -619,6 +619,7 @@ private:
     bool m_sramDataFromFrontend = false;   // True when SetSRAMData or our own .srm load supplied data
     std::filesystem::path m_srmPath;       // Canonical .srm path (also managed by the frontend)
     std::filesystem::path m_smpcBaseDir;   // Directory for system-wide RTC persistent data files
+    std::filesystem::path m_smpcPath;      // RTC file of the BIOS region at LoadGame (empty: no persistence)
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh
     mutable uint32_t m_framesSinceLastSRAMSync = 0;  // Frames since last SRAM sync
     bool m_sramFirstLoad = true;  // True until first frame runs (for .srm loading)

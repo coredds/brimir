@@ -365,6 +365,10 @@ void CoreWrapper::Shutdown() {
     UnloadGame();
     m_vulkanRenderer = nullptr;
     m_deviceFrame = {};
+    // UnloadGame persisted the RTC; the SMPC persists again from its destructor, when m_saturn is already null.
+    if (m_saturn) {
+        m_saturn->SMPC.ClearPersistDataCallback();
+    }
     m_saturn.reset();
     m_initialized = false;
 }
@@ -492,12 +496,15 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             std::filesystem::create_directories(m_smpcBaseDir, dirError);
         }
 
+        // The file of the BIOS loaded now: every later persist writes there.
+        m_smpcPath = GetPersistentSMPCDataPath();
+
         // Register SMPC data persistence callback so core settings are saved whenever they change.
         m_saturn->SMPC.SetPersistDataCallback({this, &CoreWrapper::OnPersistSMPCData});
 
         // Load existing SMPC data for the current BIOS region.
         ymir::smpc::PersistentSMPCData smpcData{};
-        const auto smpcPath = GetPersistentSMPCDataPath();
+        const auto& smpcPath = m_smpcPath;
         if (!smpcPath.empty()) {
             if (!LoadPersistentSMPCDataFromFile(smpcData, smpcPath)) {
                 // Migrate from the old non-region-qualified filename, if present.
@@ -946,6 +953,8 @@ void CoreWrapper::UnloadGame() {
             // Non-critical, continue
         }
     }
+    // No content, no BIOS region to file the clock under until the next LoadGame.
+    m_smpcPath.clear();
     
     // Read final SRAM state from Ymir BEFORE unloading
     // This ensures RetroArch can save the latest state (including clock settings)
@@ -1055,7 +1064,7 @@ void CoreWrapper::OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, 
     if (!self) {
         return;
     }
-    const auto path = self->GetPersistentSMPCDataPath();
+    const auto& path = self->m_smpcPath;
     if (path.empty()) {
         return;
     }

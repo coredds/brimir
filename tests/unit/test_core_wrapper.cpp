@@ -1611,6 +1611,35 @@ TEST_CASE("rtc: virtual mode seeds from host time once and persists", "[core][rt
     CHECK(guest.year == 2001);
 }
 
+TEST_CASE("rtc: the clock is persisted only under the loaded BIOS region", "[core][rtc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // The frontend's Restart Content then exit: load, reset, unload, deinit (Shutdown, then the destructor).
+    RtcContent content("brimir_rtc_region_test");
+    {
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetRTCMode(RTCMode::Virtual);
+        REQUIRE(content.Load(core));
+        for (int i = 0; i < 60; ++i) {
+            core.RunFrame();
+        }
+        core.Reset();
+        for (int i = 0; i < 60; ++i) {
+            core.RunFrame();
+        }
+        core.UnloadGame();
+        core.Shutdown();
+    }
+    std::vector<std::string> files;
+    for (const auto& entry : std::filesystem::directory_iterator(content.system)) {
+        files.push_back(entry.path().filename().string());
+    }
+    CHECK(files == std::vector<std::string>{"brimir_saturn_rtc_us_eu.smpc"});
+}
+
 TEST_CASE("rtc: virtual mode starts an existing host-mode RTC file at the date it showed", "[core][rtc]") {
     if (!std::filesystem::exists(UsBiosFixture())) {
         SKIP("US BIOS fixture missing");
