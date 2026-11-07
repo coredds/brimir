@@ -373,6 +373,38 @@ public:
     /// @brief Writes data into a backup memory cartridge (data byte i at bus address 2i + 1), only the bytes that
     /// differ; data must be the cartridge's size. Used by LoadState (public for the cost measurement test).
     static void RestoreBackupCartData(ymir::cart::BackupMemoryCartridge& cart, std::span<const uint8_t> data);
+
+    /// @brief CD Block ROM file names searched in the system directory, in this order (MAME names the v1.05 dump
+    /// cdb105.bin). The first one of 64 KiB is used.
+    static constexpr const char* kCDBlockROMFileNames[] = {"cdb106.bin", "cdb105.bin", "cdb104.bin"};
+
+    /// @brief SH-2 cache emulation (option brimir_sh2_cache). Applies at the next LoadGame or ApplyLoadTimeOptions;
+    /// games the Ymir database marks keep their forced cache emulation either way.
+    void SetSH2CacheEmulation(bool enable) { m_sh2CacheRequested = enable; }
+    /// @brief Whether SH-2 cache emulation is active (the option or the game database); the SH-2 JIT is not used then
+    bool IsSH2CacheEmulationActive() const;
+
+    /// @brief Low-level CD Block emulation (option brimir_cdblock_lle). Applies at the next LoadGame or
+    /// ApplyLoadTimeOptions, with the CD Block ROM from the system directory (kCDBlockROMFileNames); without one the
+    /// CD Block stays high-level and GetLastCDBlockMessage says why.
+    void SetCDBlockLLE(bool enable) { m_cdblockLLERequested = enable; }
+    /// @brief Whether the CD Block is emulated low-level now (a save state of the other mode switches it)
+    bool IsCDBlockLLEActive() const { return m_cdblockLLEActive; }
+    /// @brief Why the last ApplyLoadTimeOptions kept the CD Block high-level although low-level was chosen (no or a
+    /// wrong-size ROM), or an empty string. For the frontend's on-screen message and log.
+    const std::string& GetLastCDBlockMessage() const { return m_cdblockMessage; }
+    /// @brief The CD Block emulation the last ApplyLoadTimeOptions chose, for the log (e.g. "high-level")
+    const std::string& GetCDBlockDescription() const { return m_cdblockDescription; }
+
+    /// @brief SCSP step granularity, 0 (a sample, 32 slots, at a time: Ymir's default) to 5 (one slot at a time).
+    /// Applies now (Ymir switches between steps live). Not part of save states.
+    void SetSCSPStepGranularity(uint32_t granularity);
+    uint32_t GetSCSPStepGranularity() const { return m_scspStepGranularity; }
+
+    /// @brief Applies the load-time accuracy options (SH-2 cache, CD Block LLE with its ROM from systemDirectory).
+    /// LoadGame calls it; a BIOS-only boot (no content) calls it before the first frame. Switching the CD Block mode
+    /// hard-resets the system.
+    void ApplyLoadTimeOptions(const char* systemDirectory);
     
     /// @brief Set renderer type (Ymir hw layer only supports software)
     /// @param renderer Renderer string: "software"
@@ -607,6 +639,16 @@ private:
     std::string m_testProductNumber; // TestSetProductNumber
     std::vector<uint8_t> m_cartridgeSaved; // the cartridge's contents as last written to or read from its file
     std::string m_cartridgeSaveError;
+
+    // Accuracy options (SetSH2CacheEmulation, SetCDBlockLLE, SetSCSPStepGranularity)
+    bool m_sh2CacheRequested = false;
+    bool m_cdblockLLERequested = false;
+    bool m_cdblockLLEActive = false;
+    bool m_cdblockROMLoaded = false;         // the SH-1 holds a CD Block ROM from the system directory
+    std::array<uint8_t, 16> m_cdblockROMHash{}; // its XXH128 hash (sh1::kROMHashSeed), as save states record it
+    std::string m_cdblockMessage;
+    std::string m_cdblockDescription = "high-level";
+    uint32_t m_scspStepGranularity = 0;
 
     /// @brief Inserts the chosen cartridge for the loaded disc (see SetCartridgeOverride), then hard-resets
     void InsertGameCartridge(const std::filesystem::path& gamePath, const char* save_directory);

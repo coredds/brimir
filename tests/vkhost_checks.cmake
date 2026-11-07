@@ -408,6 +408,66 @@ message(STATUS "peripherals_rollback_deterministic: the input reaches the BIOS; 
                "input --rollback emulates exactly the plain run (40 states per device pair), and states loaded into a "
                "fresh instance continue identically (3D pad mode and Mission Stick throttle latch included, 16 states). "
                "The TH/TR handshake fields rest on the unit tests (the BIOS reads through INTBACK).")
+
+# accuracy_rollback_deterministic: with SH-2 cache emulation, SCSP step granularity 3 and CD Block LLE chosen without
+# its ROM (high-level fallback, logged), --rollback emulates exactly the plain run: frame i of the rollback run is frame
+# i + 1 of the plain run, and the states after every 60th frame match in every section. (LLE with a ROM: unit test
+# "accuracy: options deterministic under rollback", with a stand-in ROM.)
+set(accuracy_options --option brimir_sh2_cache=enabled --option brimir_scsp_granularity=3
+                     --option brimir_cdblock_lle=enabled)
+foreach(mode IN ITEMS plain rollback)
+    set(extra "")
+    if(mode STREQUAL "rollback")
+        set(extra --rollback)
+    endif()
+    execute_process(
+        COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 300 --hash ${accuracy_options}
+                --save-state-every 60 "${state_dir}/accuracy_${mode}" ${extra}
+        OUTPUT_VARIABLE arb_out ERROR_VARIABLE arb_err RESULT_VARIABLE arb_code)
+    if(NOT arb_code EQUAL 0)
+        message(FATAL_ERROR "accuracy_rollback_deterministic (${mode}): exit ${arb_code}\n${arb_err}")
+    endif()
+    foreach(regex IN ITEMS "SH-2 cache emulation: on \\(option\\)" "CD Block: high-level"
+                           "CD Block LLE needs the CD Block ROM \\(cdb106.bin, cdb105.bin or cdb104.bin")
+        if(NOT "${arb_err}" MATCHES "${regex}")
+            message(FATAL_ERROR "accuracy_rollback_deterministic (${mode}): expected '${regex}' in the log\n${arb_err}")
+        endif()
+    endforeach()
+    string(REGEX MATCHALL "frame [0-9]+ [0-9]+x[0-9]+ [0-9a-f]+" arb_lines "${arb_out}")
+    set(arb_hashes "")
+    foreach(line IN LISTS arb_lines)
+        string(REGEX REPLACE "^frame [0-9]+ " "" line "${line}")
+        list(APPEND arb_hashes "${line}")
+    endforeach()
+    set(arb_${mode} "${arb_hashes}")
+endforeach()
+list(LENGTH arb_plain arb_plain_count)
+list(LENGTH arb_rollback arb_rollback_count)
+if(NOT arb_plain_count EQUAL 300 OR NOT arb_rollback_count EQUAL 300)
+    message(FATAL_ERROR "accuracy_rollback_deterministic: expected 300 frames from each run, got ${arb_plain_count} "
+                        "and ${arb_rollback_count}")
+endif()
+foreach(i RANGE 0 298)
+    math(EXPR next "${i} + 1")
+    list(GET arb_rollback ${i} shown)
+    list(GET arb_plain ${next} expected)
+    if(NOT shown STREQUAL expected)
+        message(FATAL_ERROR "accuracy_rollback_deterministic: rollback frame ${i} (${shown}) differs from plain frame "
+                            "${next} (${expected})")
+    endif()
+endforeach()
+foreach(k RANGE 59 299 60)
+    padded_frame(${k} padded)
+    execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/accuracy_plain/state_${padded}.bin"
+                            "${state_dir}/accuracy_rollback/state_${padded}.bin"
+        OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+    if(NOT sd_code EQUAL 0)
+        message(FATAL_ERROR "accuracy_rollback_deterministic: the states after frame ${k} differ (exit ${sd_code}):\n"
+                            "${sd_out}${sd_err}")
+    endif()
+endforeach()
+message(STATUS "accuracy_rollback_deterministic: SH-2 cache, SCSP granularity 3, CD Block LLE without ROM (high-level, "
+               "logged): --rollback emulates exactly the plain run (frames and 5 states)")
 run_vkhost(vulkan --vulkan --save-state-at 100 "${vk_state}")
 if(vulkan_code EQUAL 4)
     file(REMOVE_RECURSE "${state_dir}")

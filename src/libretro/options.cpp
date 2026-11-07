@@ -240,6 +240,63 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "auto"
     },
     {
+        // Read once at content load (retro_load_game), like brimir_cartridge.
+        "brimir_sh2_cache",
+        "SH-2 Cache Emulation",
+        nullptr,
+        "Emulates the SH-2 CPUs' caches. Most games do not need it; it costs some speed. Games known to need it "
+        "(Astal, Dark Savior, Waku Waku 7 and others in Ymir's game database) always get it. The SH-2 JIT is not "
+        "used while it is active. Applies when content is loaded.",
+        nullptr,
+        "system",
+        {
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
+            { nullptr, nullptr }
+        },
+        "disabled"
+    },
+    {
+        // Read once at content load (retro_load_game), like brimir_cartridge.
+        "brimir_cdblock_lle",
+        "CD Block Low-Level Emulation",
+        nullptr,
+        "Emulates the CD Block's own SH-1 processor running its firmware instead of emulating its commands. Slower, "
+        "and a work in progress in Ymir. Needs the CD Block ROM (64 KiB) in the system folder as cdb106.bin, "
+        "cdb105.bin or cdb104.bin; without it the CD Block stays high-level. Save states record the mode: a "
+        "high-level state switches the session to high-level, a low-level state needs this option and the same ROM. "
+        "Applies when content is loaded.",
+        nullptr,
+        "media",
+        {
+            { "disabled", "OFF" },
+            { "enabled", "ON" },
+            { nullptr, nullptr }
+        },
+        "disabled"
+    },
+    {
+        // Live: SCSP::SetStepGranularity switches between steps while running.
+        "brimir_scsp_granularity",
+        "SCSP Step Granularity",
+        nullptr,
+        "How finely the sound processor (SCSP) is stepped against the CPUs: 0 steps one sample (32 slots) at a time, "
+        "5 one slot at a time. Higher values are more accurate for games that time the sound hardware closely, and "
+        "slower. Applies immediately.",
+        nullptr,
+        "audio",
+        {
+            { "0", "0 (32 slots, default)" },
+            { "1", "1 (16 slots)" },
+            { "2", "2 (8 slots)" },
+            { "3", "3 (4 slots)" },
+            { "4", "4 (2 slots)" },
+            { "5", "5 (1 slot)" },
+            { nullptr, nullptr }
+        },
+        "0"
+    },
+    {
         "brimir_audio_interpolation",
         "Audio Interpolation",
         nullptr,

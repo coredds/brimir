@@ -378,6 +378,12 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_
     if (!reader.Done()) {
         return false;
     }
+    // Read as a raw byte: any value other than 0 or 1 is an invalid bool (Saturn::LoadState branches on it)
+    uint8_t cdblockLLE = 0;
+    std::memcpy(&cdblockLLE, &state.cdblockLLE, 1);
+    if (cdblockLLE > 1) {
+        return false;
+    }
     if (!ValidCartDataSize(state.scu.cartType, state.scu.cartData.size(), version)) {
         return false;
     }

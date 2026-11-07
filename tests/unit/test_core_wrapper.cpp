@@ -6,7 +6,10 @@
 #include "unit/frame_path_cases.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <brimir/savestate_codec.hpp>
+#include <brimir/jit/executor.hpp>
+#include <brimir/lockstep.hpp>
 #include <lz4.h>
+#include <ymir/savestate/savestate.hpp>
 #include <ymir/hw/smpc/smpc_defs.hpp>
 #include <ymir/util/date_time.hpp>
 #include <algorithm>
@@ -2118,4 +2121,289 @@ TEST_CASE("cartridge: a failed cartridge save is reported and the data kept", "[
     s.core.UnloadGame(); // fails the same way
     CHECK(s.core.TakeCartridgeSaveError().find("audio.bcr.tmp") != std::string::npos);
     std::filesystem::remove(bcr);
+}
+// ============================================================
+// Accuracy options
+// ============================================================
+
+namespace {
+
+// A 64 KiB stand-in for the CD Block ROM (the real dumps are not redistributable): the SH-1 starts at 0x400 and loops
+// there (BRA to itself, NOP in the delay slot) with interrupts masked. Low-level emulation runs it like any ROM.
+std::vector<uint8_t> StubCDBlockROM(uint8_t tag = 0) {
+    std::vector<uint8_t> rom(64 * 1024, 0);
+    const uint8_t vectors[] = {0x00, 0x00, 0x04, 0x00, 0x0F, 0x00, 0x10, 0x00}; // PC 0x400, SP 0x0F001000
+    std::copy(std::begin(vectors), std::end(vectors), rom.begin());
+    rom[0x400] = 0xAF;
+    rom[0x401] = 0xFE;
+    rom[0x402] = 0x00;
+    rom[0x403] = 0x09;
+    rom[0xFFFF] = tag; // another ROM (hash) for the same code
+    return rom;
+}
+
+void WriteBytes(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+}
+
+// The CD Block mode the Saturn itself is in (Saturn::SaveState records it)
+bool SaturnUsesCDBlockLLE(CoreWrapper& core) {
+    auto state = std::make_unique<ymir::savestate::SaveState>();
+    core.GetSaturn()->SaveState(*state);
+    return state->cdblockLLE;
+}
+
+std::vector<uint8_t> SaveStateBytes(CoreWrapper& core) {
+    std::vector<uint8_t> buffer(core.GetStateSize());
+    REQUIRE(core.SaveState(buffer.data(), buffer.size()));
+    return buffer;
+}
+
+// A core with the US BIOS and the content of RtcContent; lle: CD Block LLE chosen, with rom in the system directory
+// as cdb105.bin when given.
+struct AccuracySession {
+    RtcContent content;
+    CoreWrapper core;
+
+    AccuracySession(const char* name, bool lle, const std::vector<uint8_t>* rom = nullptr)
+        : content(name) {
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetCDBlockLLE(lle);
+        if (rom != nullptr) {
+            WriteBytes(content.system / "cdb105.bin", *rom);
+        }
+        REQUIRE(content.Load(core));
+    }
+};
+
+} // namespace
+
+TEST_CASE("accuracy: sh2 cache option reaches configuration", "[core][accuracy]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    RtcContent content("brimir_accuracy_sh2_cache");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    CHECK_FALSE(core.IsSH2CacheEmulationActive());
+
+    core.SetSH2CacheEmulation(true);
+    CHECK_FALSE(core.IsSH2CacheEmulationActive()); // applies at the next load
+    REQUIRE(content.Load(core));
+    CHECK(*core.GetSaturn()->configuration.system.emulateSH2Cache);
+    CHECK(core.IsSH2CacheEmulationActive());
+    CHECK(core.GetSaturn()->IsSH2CacheEmulationEnabled());
+    for (int i = 0; i < 10; ++i) {
+        core.RunFrame();
+    }
+    REQUIRE(core.GetFramebuffer() != nullptr);
+
+    SECTION("the SH-2 JIT stays off while the cache is emulated") {
+        core.SetSH2JitEnabled(true);
+        for (int i = 0; i < 10; ++i) {
+            core.RunFrame();
+        }
+        REQUIRE(core.GetSH2JitExecutor(true) != nullptr);
+        CHECK(core.GetSH2JitExecutor(true)->GetStats().blocksRun == 0);
+    }
+    SECTION("off again at the next load") {
+        core.UnloadGame();
+        core.SetSH2CacheEmulation(false);
+        REQUIRE(content.Load(core));
+        CHECK_FALSE(*core.GetSaturn()->configuration.system.emulateSH2Cache);
+        CHECK_FALSE(core.IsSH2CacheEmulationActive());
+        // Control: without the cache the JIT runs
+        core.SetSH2JitEnabled(true);
+        for (int i = 0; i < 10; ++i) {
+            core.RunFrame();
+        }
+        REQUIRE(core.GetSH2JitExecutor(true) != nullptr);
+        CHECK(core.GetSH2JitExecutor(true)->GetStats().blocksRun > 0);
+    }
+}
+
+TEST_CASE("accuracy: scsp step granularity applies live", "[core][accuracy]") {
+    CoreWrapper core;
+    core.SetSCSPStepGranularity(3); // before Initialize: applied by it
+    REQUIRE(core.Initialize());
+    CHECK(core.GetSaturn()->SCSP.GetStepGranularity() == 3);
+    core.SetSCSPStepGranularity(9);
+    CHECK(core.GetSCSPStepGranularity() == 5);
+    CHECK(core.GetSaturn()->SCSP.GetStepGranularity() == 5);
+    core.SetSCSPStepGranularity(0);
+    CHECK(core.GetSaturn()->SCSP.GetStepGranularity() == 0);
+}
+
+TEST_CASE("accuracy: cdblock lle without rom falls back to hle", "[core][accuracy]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    SECTION("no ROM") {
+        AccuracySession s("brimir_accuracy_lle_norom", true);
+        CHECK_FALSE(s.core.IsCDBlockLLEActive());
+        CHECK_FALSE(SaturnUsesCDBlockLLE(s.core));
+        CHECK_FALSE(*s.core.GetSaturn()->configuration.cdblock.useLLE);
+        const std::string& message = s.core.GetLastCDBlockMessage();
+        CHECK(message.find("cdb105.bin") != std::string::npos);
+        CHECK(message.find("high-level") != std::string::npos);
+        CHECK(s.core.GetCDBlockDescription() == "high-level");
+        for (int i = 0; i < 10; ++i) {
+            s.core.RunFrame();
+        }
+        REQUIRE(s.core.GetFramebuffer() != nullptr);
+    }
+    SECTION("a ROM of the wrong size") {
+        const std::vector<uint8_t> shortROM(32 * 1024, 0);
+        AccuracySession s("brimir_accuracy_lle_short", true, &shortROM);
+        CHECK_FALSE(s.core.IsCDBlockLLEActive());
+        CHECK_FALSE(SaturnUsesCDBlockLLE(s.core));
+        CHECK(s.core.GetLastCDBlockMessage().find("cdb105.bin is 32768 bytes") != std::string::npos);
+    }
+    SECTION("with a ROM: low-level") {
+        const auto rom = StubCDBlockROM();
+        AccuracySession s("brimir_accuracy_lle_rom", true, &rom);
+        CHECK(s.core.IsCDBlockLLEActive());
+        CHECK(SaturnUsesCDBlockLLE(s.core));
+        CHECK(s.core.GetLastCDBlockMessage().empty());
+        CHECK(s.core.GetCDBlockDescription().find("low-level (cdb105.bin") != std::string::npos);
+        CHECK(s.core.GetCDBlockDescription().find("unrecognised") != std::string::npos);
+        for (int i = 0; i < 10; ++i) {
+            s.core.RunFrame();
+        }
+        REQUIRE(s.core.GetFramebuffer() != nullptr);
+
+        // The option off at the next load: high-level again, and the ROM no longer counts as loaded
+        s.core.UnloadGame();
+        s.core.SetCDBlockLLE(false);
+        REQUIRE(s.content.Load(s.core));
+        CHECK_FALSE(s.core.IsCDBlockLLEActive());
+        CHECK_FALSE(SaturnUsesCDBlockLLE(s.core));
+        CHECK(s.core.GetLastCDBlockMessage().empty());
+    }
+    SECTION("the option off ignores a ROM") {
+        const auto rom = StubCDBlockROM();
+        AccuracySession s("brimir_accuracy_lle_off", false, &rom);
+        CHECK_FALSE(s.core.IsCDBlockLLEActive());
+        CHECK_FALSE(SaturnUsesCDBlockLLE(s.core));
+        CHECK(s.core.GetLastCDBlockMessage().empty());
+    }
+}
+
+TEST_CASE("accuracy: cross-mode state load", "[core][accuracy][savestate]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    const auto rom = StubCDBlockROM();
+    AccuracySession hle("brimir_accuracy_cross_hle", false);
+    AccuracySession lle("brimir_accuracy_cross_lle", true, &rom);
+    REQUIRE(lle.core.IsCDBlockLLEActive());
+    for (int i = 0; i < 30; ++i) {
+        hle.core.RunFrame();
+        lle.core.RunFrame();
+    }
+    const auto hleState = SaveStateBytes(hle.core);
+    const auto lleState = SaveStateBytes(lle.core);
+
+    SECTION("a low-level state in a high-level session is refused") {
+        CHECK_FALSE(hle.core.LoadState(lleState.data(), lleState.size()));
+        const std::string& error = hle.core.GetLastStateError();
+        CHECK(error.find("low-level CD Block emulation") != std::string::npos);
+        CHECK(error.find("CD Block LLE") != std::string::npos);
+        CHECK_FALSE(hle.core.IsCDBlockLLEActive());
+        CHECK_FALSE(SaturnUsesCDBlockLLE(hle.core));
+        for (int i = 0; i < 10; ++i) {
+            hle.core.RunFrame();
+        }
+        REQUIRE(hle.core.GetFramebuffer() != nullptr);
+        // Its own states still load
+        CHECK(hle.core.LoadState(hleState.data(), hleState.size()));
+    }
+    SECTION("a high-level state in a low-level session switches it to high-level, and back") {
+        REQUIRE(lle.core.LoadState(hleState.data(), hleState.size()));
+        CHECK(lle.core.GetLastStateError().empty());
+        CHECK_FALSE(lle.core.IsCDBlockLLEActive());
+        CHECK_FALSE(SaturnUsesCDBlockLLE(lle.core));
+        // The loaded state is the high-level session's: loaded there too, both run on identically
+        brimir::PrepareLockstepCore(hle.core);
+        brimir::PrepareLockstepCore(lle.core);
+        REQUIRE(lle.core.LoadState(hleState.data(), hleState.size()));
+        REQUIRE(hle.core.LoadState(hleState.data(), hleState.size()));
+        for (int i = 0; i < 20; ++i) {
+            hle.core.RunFrame();
+            lle.core.RunFrame();
+        }
+        CHECK(brimir::CompareCores(hle.core, lle.core).empty());
+
+        REQUIRE(lle.core.LoadState(lleState.data(), lleState.size()));
+        CHECK(lle.core.IsCDBlockLLEActive());
+        CHECK(SaturnUsesCDBlockLLE(lle.core));
+        for (int i = 0; i < 10; ++i) {
+            lle.core.RunFrame();
+        }
+        REQUIRE(lle.core.GetFramebuffer() != nullptr);
+    }
+    SECTION("a low-level state from another CD Block ROM is refused") {
+        const auto otherROM = StubCDBlockROM(1);
+        AccuracySession other("brimir_accuracy_cross_other", true, &otherROM);
+        REQUIRE(other.core.IsCDBlockLLEActive());
+        CHECK_FALSE(other.core.LoadState(lleState.data(), lleState.size()));
+        CHECK(other.core.GetLastStateError().find("another CD Block ROM") != std::string::npos);
+        CHECK(other.core.IsCDBlockLLEActive());
+        other.core.RunFrame();
+    }
+}
+
+TEST_CASE("accuracy: options deterministic under rollback", "[core][accuracy][savestate]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // Two BIOS-only cores with the same options; b runs every frame twice, loading the state saved before the first
+    // run (RetroArch's single-instance run-ahead). Both must stay identical in every section.
+    struct Options {
+        const char* name;
+        bool sh2Cache;
+        bool lle;
+        uint32_t granularity;
+    };
+    const Options cases[] = {
+        {"sh2 cache, granularity 5", true, false, 5},
+        {"cd block lle (stub ROM), granularity 3", false, true, 3},
+    };
+    const auto rom = StubCDBlockROM();
+    const auto dir = std::filesystem::temp_directory_path() / "brimir_accuracy_rollback";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    WriteBytes(dir / "cdb105.bin", rom);
+    for (const auto& c : cases) {
+        INFO(c.name);
+        CoreWrapper a;
+        CoreWrapper b;
+        for (CoreWrapper* core : {&a, &b}) {
+            REQUIRE(core->Initialize());
+            brimir::PrepareLockstepCore(*core);
+            REQUIRE(core->LoadIPLFromFile(UsBiosFixture().string().c_str()));
+            core->SetSH2CacheEmulation(c.sh2Cache);
+            core->SetCDBlockLLE(c.lle);
+            core->ApplyLoadTimeOptions(dir.string().c_str());
+            core->SetSCSPStepGranularity(c.granularity);
+            CHECK(core->IsCDBlockLLEActive() == c.lle);
+            CHECK(core->IsSH2CacheEmulationActive() == c.sh2Cache);
+        }
+        REQUIRE(brimir::SyncLockstepCores(a, b));
+        std::vector<uint8_t> buffer(b.GetStateSize());
+        for (int frame = 0; frame < 120; ++frame) {
+            a.RunFrame();
+            REQUIRE(b.SaveState(buffer.data(), buffer.size()));
+            b.RunFrame();
+            REQUIRE(b.LoadState(buffer.data(), buffer.size()));
+            b.RunFrame();
+        }
+        const std::string divergence = brimir::CompareCores(a, b);
+        CHECK(divergence.empty());
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }

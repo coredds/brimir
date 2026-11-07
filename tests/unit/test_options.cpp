@@ -5,6 +5,7 @@
 #include "options.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <cstring>
+#include <vector>
 
 TEST_CASE("Core options include profiling option", "[options][libretro]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
@@ -129,6 +130,60 @@ TEST_CASE("peripherals: gun crosshair option values", "[options][libretro][perip
     CHECK(found->values[3].value == nullptr);
 }
 
+TEST_CASE("accuracy: core option values and labels", "[options][libretro][accuracy]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+    const auto find = [&](const char* key) -> const retro_core_option_v2_definition* {
+        for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+            if (std::strcmp(options->definitions[i].key, key) == 0) {
+                return &options->definitions[i];
+            }
+        }
+        return nullptr;
+    };
+    struct Expected {
+        const char* key;
+        const char* desc;
+        const char* category;
+        const char* defaultValue;
+        std::vector<const char*> values;
+        const char* applies;
+    };
+    const Expected expected[] = {
+        { "brimir_sh2_cache", "SH-2 Cache Emulation", "system", "disabled", { "disabled", "enabled" },
+          "Applies when content is loaded" },
+        { "brimir_cdblock_lle", "CD Block Low-Level Emulation", "media", "disabled", { "disabled", "enabled" },
+          "Applies when content is loaded" },
+        { "brimir_scsp_granularity", "SCSP Step Granularity", "audio", "0", { "0", "1", "2", "3", "4", "5" },
+          "Applies immediately" },
+    };
+    for (const auto& e : expected) {
+        CAPTURE(e.key);
+        const auto* found = find(e.key);
+        REQUIRE(found != nullptr);
+        CHECK(std::strcmp(found->desc, e.desc) == 0);
+        REQUIRE(found->category_key != nullptr);
+        CHECK(std::strcmp(found->category_key, e.category) == 0);
+        REQUIRE(found->default_value != nullptr);
+        CHECK(std::strcmp(found->default_value, e.defaultValue) == 0);
+        REQUIRE(found->info != nullptr);
+        CHECK(std::strstr(found->info, e.applies) != nullptr);
+        size_t i = 0;
+        for (const char* value : e.values) {
+            REQUIRE(found->values[i].value != nullptr);
+            CHECK(std::strcmp(found->values[i].value, value) == 0);
+            CHECK(found->values[i].label != nullptr);
+            ++i;
+        }
+        CHECK(found->values[i].value == nullptr);
+    }
+    const auto* lle = find("brimir_cdblock_lle");
+    REQUIRE(lle != nullptr);
+    for (const char* name : brimir::CoreWrapper::kCDBlockROMFileNames) {
+        CHECK(std::strstr(lle->info, name) != nullptr);
+    }
+}
+
 TEST_CASE("Core options default values match OptionCache defaults", "[options][libretro]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);
@@ -156,6 +211,9 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_rtc_mode",             "virtual"  },
         { "brimir_cartridge",            "auto"     },
         { "brimir_gun_crosshair",        "cross"    },
+        { "brimir_sh2_cache",            "disabled" },
+        { "brimir_cdblock_lle",          "disabled" },
+        { "brimir_scsp_granularity",     "0"        },
 #ifdef BRIMIR_VULKAN
         { "brimir_renderer",             "software" },
         { "brimir_internal_resolution",  "1"        },

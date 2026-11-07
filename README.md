@@ -77,6 +77,9 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
   expansion (1MB, 4MB, 6MB), the ROM cartridges of The King of Fighters '95 and Ultraman (dumps `mpr-18811-mx.ic1`
   and `mpr-19367-mx.ic1` in the system folder), and a 4 Mbit backup memory cartridge saved to `<game>.bcr` (Beetle
   Saturn's file layout)
+- Ymir's accuracy options as core options: SH-2 cache emulation (always on for the games Ymir's database marks),
+  low-level CD Block emulation (needs the CD Block ROM, `cdb106.bin`, `cdb105.bin` or `cdb104.bin`, in the system
+  folder; without it the CD Block stays high-level) and SCSP step granularity
 
 ### Rendering
 - **Software Renderer**: Ymir's proven software renderer with pixel-perfect accuracy

@@ -16,6 +16,8 @@
 #include <ymir/db/game_db.hpp>
 #include <ymir/db/rom_cart_db.hpp>
 #include <ymir/db/ipl_db.hpp>
+#include <ymir/db/cdb_rom_db.hpp>
+#include <ymir/hw/sh1/sh1_defs.hpp>
 #include <ymir/hw/cart/cart_impl_bup.hpp>
 #include <ymir/hw/cart/cart_impl_dram.hpp>
 #include <ymir/hw/cart/cart_impl_rom.hpp>
@@ -269,6 +271,12 @@ std::string LoadROMCartDump(const std::string& systemDirectory, const char* file
     return {};
 }
 
+// "CD Block ROM v1.05", or "an unrecognised CD Block ROM" for a hash Ymir's CD Block ROM database does not list.
+std::string CDBlockROMName(const ymir::XXH128Hash& hash) {
+    const auto* info = ymir::db::GetCDBlockROMInfo(hash);
+    return info != nullptr ? "CD Block ROM v" + std::string(info->version) : std::string("an unrecognised CD Block ROM");
+}
+
 } // namespace
 
 namespace brimir {
@@ -298,6 +306,7 @@ bool CoreWrapper::Initialize() {
 
         // Apply an SH-2 JIT state chosen before initialization
         SetSH2JitEnabled(m_sh2JitEnabled);
+        SetSCSPStepGranularity(m_scspStepGranularity);
         
         // Internal backup RAM exists from the start, like on a real console (BIOS-only boots see a
         // formatted backup RAM). LoadGame replaces it with a fresh image for each game.
@@ -404,6 +413,9 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         m_gamePath = gamePath;
         m_saveDirectory = save_directory ? save_directory : "";
         m_systemDirectory = system_directory ? system_directory : "";
+
+        // Before the disc goes in: switching the CD Block mode hard-resets the system
+        ApplyLoadTimeOptions(system_directory);
 
         // Handle M3U playlists for multi-disc games
         std::filesystem::path discToLoad = gamePath;
@@ -1572,9 +1584,25 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 // alone for no cartridge.
                 state.scu.cartType = CartType::None;
             }
+            // A state of the other CD Block mode switches the system to it (Saturn::LoadState). A low-level state needs
+            // the SH-1 to hold the ROM it was saved with: the ROM is not in the state, and Saturn::LoadState is told to
+            // skip the ROM checks (the IPL ROM may differ).
+            if (state.cdblockLLE && !m_cdblockROMLoaded) {
+                m_lastStateError = "the state uses low-level CD Block emulation (" + CDBlockROMName(state.sh1.romHash) +
+                                   "), which needs CD Block LLE enabled with that ROM in the system directory "
+                                   "and the content reloaded";
+                return false;
+            }
+            if (state.cdblockLLE && state.sh1.romHash != m_cdblockROMHash) {
+                m_lastStateError = "the state was saved with another CD Block ROM (" +
+                                   CDBlockROMName(state.sh1.romHash) + ") than the loaded one (" +
+                                   CDBlockROMName(m_cdblockROMHash) + ")";
+                return false;
+            }
             if (!m_saturn->LoadState(state, true)) {
                 return false;
             }
+            m_cdblockLLEActive = state.cdblockLLE;
             if (state.brimir.valid && state.brimir.peripherals.valid) {
                 // A port whose peripheral changed since the state was saved keeps its own input state, as the
                 // peripheral keeps its own (SMPC::LoadBrimirState).
@@ -2123,6 +2151,72 @@ void CoreWrapper::SetSH2JitEnabled(bool enable) {
         m_saturn->masterSH2.SetJitExecutor(nullptr);
         m_saturn->slaveSH2.SetJitExecutor(nullptr);
     }
+}
+
+bool CoreWrapper::IsSH2CacheEmulationActive() const {
+    return m_saturn && m_saturn->IsSH2CacheEmulationEnabled();
+}
+
+void CoreWrapper::SetSCSPStepGranularity(uint32_t granularity) {
+    m_scspStepGranularity = std::min<uint32_t>(granularity, 5);
+    if (m_saturn) {
+        m_saturn->SCSP.SetStepGranularity(m_scspStepGranularity);
+    }
+}
+
+void CoreWrapper::ApplyLoadTimeOptions(const char* systemDirectory) {
+    if (!m_saturn) {
+        return;
+    }
+    // LoadDisc adds the game database's forced cache emulation on top (Saturn::ForceSH2CacheEmulation)
+    m_saturn->configuration.system.emulateSH2Cache = m_sh2CacheRequested;
+
+    m_cdblockMessage.clear();
+    bool lle = false;
+    if (m_cdblockLLERequested) {
+        const std::filesystem::path dir = systemDirectory ? systemDirectory : "";
+        std::string problems;
+        for (const char* name : kCDBlockROMFileNames) {
+            const std::filesystem::path path = dir / name;
+            std::error_code ec;
+            if (dir.empty() || !std::filesystem::is_regular_file(path, ec)) {
+                continue;
+            }
+            std::vector<uint8_t> rom;
+            uintmax_t size = 0;
+            if (!ReadFileUpTo(path, ymir::sh1::kROMSize, rom, size)) {
+                problems += std::string(" ") + name + " could not be read.";
+                continue;
+            }
+            if (size != ymir::sh1::kROMSize) {
+                problems += std::string(" ") + name + " is " + std::to_string(size) + " bytes, not " +
+                            std::to_string(ymir::sh1::kROMSize) + " (64 KiB).";
+                continue;
+            }
+            m_saturn->LoadCDBlockROM(std::span<uint8, ymir::sh1::kROMSize>(rom.data(), ymir::sh1::kROMSize));
+            m_cdblockROMHash = m_saturn->SH1.GetROMHash();
+            m_cdblockROMLoaded = true;
+            m_cdblockDescription = std::string("low-level (") + name + ", " + CDBlockROMName(m_cdblockROMHash) + ")";
+            lle = true;
+            break;
+        }
+        if (!lle) {
+            m_cdblockMessage = std::string("CD Block LLE needs the CD Block ROM (") + kCDBlockROMFileNames[0] + ", " +
+                               kCDBlockROMFileNames[1] + " or " + kCDBlockROMFileNames[2] +
+                               ", 64 KiB) in the system directory." + problems +
+                               " Using high-level CD Block emulation.";
+        }
+    }
+    if (!lle) {
+        m_cdblockROMLoaded = false;
+        m_cdblockDescription = "high-level";
+    }
+    const bool wasLLE = m_cdblockLLEActive;
+    m_saturn->configuration.cdblock.useLLE = lle; // a change hard-resets (Saturn::SetCDBlockLLE)
+    if (lle && wasLLE) {
+        m_saturn->Reset(true); // the SH-1 starts the newly loaded ROM from its reset vector
+    }
+    m_cdblockLLEActive = lle;
 }
 
 void CoreWrapper::SetSH2JitBackend(jit::BackendKind kind) {

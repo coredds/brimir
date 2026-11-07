@@ -264,6 +264,10 @@ struct OptionCache {
     std::string renderer = "software";
     std::string rtc_mode = "virtual";
     std::string cartridge = "auto";
+    std::string sh2_cache = "disabled";
+    std::string cdblock_lle = "disabled";
+    // Live: SCSP step granularity.
+    std::string scsp_granularity = "0";
     // Live (Vulkan VDP2 renderer only): applied at the next shown frame.
     std::string internal_resolution = "1";
     // Live (Vulkan renderer with VDP1 on the GPU, internal resolution above 1): applied at the next shown frame.
@@ -328,6 +332,19 @@ static bool vdp1_upscaling_requested(void) {
 }
 #endif
 
+// The SH-2 JIT is not used while SH-2 cache emulation is active (the option or the game database): logged once each
+// time the two meet (a JIT change, or content loaded with the cache).
+static bool g_jitCacheNoted = false;
+
+static void note_jit_with_sh2_cache(void) {
+    const bool conflict = g_core && g_core->IsSH2JitEnabled() && g_core->IsSH2CacheEmulationActive();
+    if (conflict && !g_jitCacheNoted) {
+        brimir_log(RETRO_LOG_INFO, "SH-2 JIT is not used while SH-2 cache emulation is active (option or game "
+                                   "database): the SH-2s run in the interpreter");
+    }
+    g_jitCacheNoted = conflict;
+}
+
 static void apply_core_options(bool force) {
     if (!g_core) return;
 
@@ -365,10 +382,12 @@ static void apply_core_options(bool force) {
     apply("brimir_sh2_jit_compile_thread",  g_options.sh2_jit_compile_thread, [](const char* v){ g_core->SetSH2JitCompileThread(strcmp(v, "disabled") != 0); });
     apply("brimir_sh2_jit",                 g_options.sh2_jit,          [](const char* v){ g_core->SetSH2JitEnabled(strcmp(v, "enabled") == 0); });
     apply("brimir_gun_crosshair",           g_options.gun_crosshair,    [](const char*){}); // read per shown frame
+    apply("brimir_scsp_granularity",        g_options.scsp_granularity, [](const char* v){ g_core->SetSCSPStepGranularity(static_cast<uint32_t>(atoi(v))); });
 
     if (const std::string warning = g_core->TakeSH2JitWorkerWarning(); !warning.empty()) {
         brimir_log(RETRO_LOG_WARN, "%s", warning.c_str());
     }
+    note_jit_with_sh2_cache();
 
     // The RTC mode is chosen at content load (retro_load_game); a live change only takes effect with the next content.
     if (!force) {
@@ -381,6 +400,16 @@ static void apply_core_options(bool force) {
         if (g_options.cartridge != cartridge) {
             g_options.cartridge = cartridge;
             brimir_log(RETRO_LOG_INFO, "Cartridge '%s' applies when content is next loaded", cartridge);
+        }
+        const char* sh2_cache = get_option_value("brimir_sh2_cache", g_options.sh2_cache.c_str());
+        if (g_options.sh2_cache != sh2_cache) {
+            g_options.sh2_cache = sh2_cache;
+            brimir_log(RETRO_LOG_INFO, "SH-2 cache emulation '%s' applies when content is next loaded", sh2_cache);
+        }
+        const char* cdblock_lle = get_option_value("brimir_cdblock_lle", g_options.cdblock_lle.c_str());
+        if (g_options.cdblock_lle != cdblock_lle) {
+            g_options.cdblock_lle = cdblock_lle;
+            brimir_log(RETRO_LOG_INFO, "CD Block LLE '%s' applies when content is next loaded", cdblock_lle);
         }
     }
 
@@ -1334,11 +1363,16 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
     if (!g_core) {
         return false;
     }
+    const bool wasLLE = g_core->IsCDBlockLLEActive();
     const bool loaded = g_core->LoadState(data, size);
     // Also after a rejected state: the view must match work RAM whatever the load left in it.
     publish_ram_view();
     g_stateLoadedBeforeRun = true;
     if (loaded) {
+        if (g_core->IsCDBlockLLEActive() != wasLLE) {
+            brimir_log(RETRO_LOG_INFO, "Save state uses %s CD Block emulation: switched to it for this session",
+                       wasLLE ? "high-level" : "low-level");
+        }
         return true;
     }
     if (!g_core->GetLastStateError().empty()) {
@@ -1561,6 +1595,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_core->SetRTCMode(g_options.rtc_mode == "host" ? brimir::RTCMode::Host : brimir::RTCMode::Virtual);
     g_options.cartridge = get_option_value("brimir_cartridge", "auto");
     g_core->SetCartridgeOverride(brimir_cartridge_choice(g_options.cartridge.c_str()));
+    g_options.sh2_cache = get_option_value("brimir_sh2_cache", "disabled");
+    g_core->SetSH2CacheEmulation(g_options.sh2_cache == "enabled");
+    g_options.cdblock_lle = get_option_value("brimir_cdblock_lle", "disabled");
+    g_core->SetCDBlockLLE(g_options.cdblock_lle == "enabled");
+    if (no_content) {
+        g_core->ApplyLoadTimeOptions(system_dir); // LoadGame applies them for content
+    }
 
     if (!no_content) {
         brimir_log(RETRO_LOG_INFO, "Loading game: %s", game->path);
@@ -1584,6 +1625,25 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             }
         }
     }
+
+    // An unrecognised ROM is used (Ymir's database lists the known dumps), with a warning
+    const std::string& cdblockDescription = g_core->GetCDBlockDescription();
+    brimir_log(cdblockDescription.find("unrecognised") != std::string::npos ? RETRO_LOG_WARN : RETRO_LOG_INFO,
+               "CD Block: %s", cdblockDescription.c_str());
+    if (const std::string& cdblockMessage = g_core->GetLastCDBlockMessage(); !cdblockMessage.empty()) {
+        brimir_log(RETRO_LOG_WARN, "CD Block: %s", cdblockMessage.c_str());
+        if (environ_cb) {
+            static std::string text;
+            text = "Brimir: " + cdblockMessage;
+            retro_message message{text.c_str(), 600};
+            environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+        }
+    }
+    if (g_core->IsSH2CacheEmulationActive()) {
+        brimir_log(RETRO_LOG_INFO, "SH-2 cache emulation: on (%s)",
+                   g_options.sh2_cache == "enabled" ? "option" : "game database");
+    }
+    g_jitCacheNoted = false;
 
     apply_fixed_rtc();
 
