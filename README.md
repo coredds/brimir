@@ -17,18 +17,18 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 - **Accuracy options** - SH-2 cache emulation, low-level CD Block emulation (needs the CD Block ROM) and SCSP step granularity. See [Accuracy options](#accuracy-options).
 - **Save-state fixes** - the state format is now version 11; states from v0.6.x and earlier versions down to version 4 still load (except Dezaemon 2 and Galaxy Force II states, see [Save states](#save-states-run-ahead-rewind-and-netplay)). Full list in [CHANGELOG.md](CHANGELOG.md).
 
-## What's New in v0.6.1
+## Previous Highlights
+
+### v0.6.1
 
 - **Crash fix** - RetroArch no longer crashes on Quick Menu > Close Content when the core uses the Vulkan renderer. Hotfix on top of v0.6.0 with no other changes; save states and saves are unaffected.
 
-## What's New in v0.6.0
+### v0.6.0
 
 - **Vulkan renderer (optional)** - set Renderer to Vulkan (applies on content load; needs RetroArch's Vulkan video driver and a Vulkan 1.2 GPU) to draw VDP1 and VDP2 with compute shaders on the GPU. At native resolution every frame and save state is identical to the software renderer, and states load in either renderer. See [Vulkan renderer](#vulkan-renderer).
 - **Internal resolution up to 4x** - Internal Resolution (live) renders backgrounds, and with VDP1 Upscaling (on by default, live) polygons and sprites, at 2x-4x: sharper 3D edges, rotated floors and distant textures. Framebuffer memory, save states, run-ahead, rewind and netplay behave exactly as at 1x.
 - **Software renderer fixes** - checking the GPU renderer against software frame by frame found and fixed several software-renderer bugs: threaded VDP2 save states and resets, VDP1 line freezes and lost lines, uninitialised VDP state, 16-colour background save states (save-state format version 5; older states convert on load), transparent meshes, mosaic line colour, colour gradation and rotated hi-res sprites.
 - **Also** - the Deinterlacing option works on its own, CHD memory use is capped, backup RAM no longer depends on a temp file, upstream Ymir CD block, SMPC, SCU, VDP and SCSP fixes, and an experimental SH-2 JIT (off by default). Full list in [CHANGELOG.md](CHANGELOG.md).
-
-## Previous Highlights
 
 ### v0.5.5
 
