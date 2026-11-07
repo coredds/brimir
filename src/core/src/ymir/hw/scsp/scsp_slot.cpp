@@ -66,6 +66,9 @@ void Slot::Reset() {
     currEGRate = releaseRate;
 
     egLevel = 0x3FF;
+    // Brimir: left uninitialized upstream (read by the EG before the first write, saved in states)
+    currEGLevel = 0;
+    egAttackBug = false;
 
     currSample = 0;
     currPhase = 0;
@@ -85,6 +88,7 @@ void Slot::Reset() {
     sample2 = 0;
 
     output = 0;
+    finalLevel = 0; // Brimir: left uninitialized upstream (saved in states)
 
     UpdateMask();
 }

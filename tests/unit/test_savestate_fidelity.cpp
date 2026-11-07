@@ -311,7 +311,8 @@ TEST_CASE("Loading a state waits for the threaded VDP1's queued draws", "[savest
             }
         }
         REQUIRE(x->LoadState(*state, true));
-        CHECK(brimir::DiffSaveStates(*state, *Save(*x)).empty());
+        const std::string diff = brimir::DiffSaveStates(*state, *Save(*x));
+        CHECK(diff == "");
     }
 }
 
@@ -340,10 +341,64 @@ TEST_CASE("Loading a state waits for the threaded VDP1 under the Vulkan renderer
             }
         }
         REQUIRE(x->LoadState(*state, true));
-        CHECK(brimir::DiffSaveStates(*state, *Save(*x)).empty());
+        const std::string diff = brimir::DiffSaveStates(*state, *Save(*x));
+        CHECK(diff == "");
     }
 }
+
+TEST_CASE("The Vulkan renderer case on a system built on garbage memory", "[savestate][fidelity][uninit][brimir]") {
+    // The case above failed on macOS arm64 only: its Saturn reused freed memory there (zeroed fresh pages elsewhere), and
+    // fields Reset left uninitialized (SCU DSP dmaAddrD0, SCSP slot currEGLevel) changed in a round trip (LoadState
+    // masks them). The same steps on a Saturn and a renderer built on filled memory.
+    const int fill = GENERATE(0xCD, 0x5A, 0xFF);
+    CAPTURE(fill);
+    alignas(Saturn) static unsigned char storage[sizeof(Saturn)];
+    std::memset(storage, fill, sizeof(storage));
+    auto *x = new (storage) Saturn();
+    brimir::gpu::VulkanVDPRenderer *vk = nullptr;
+    REQUIRE(x->VDP.UseExternalRenderer([&](vdp::VDPState &state, vdp::config::VDP2DebugRender &debug,
+                                           const vdp::config::VDP2AccessPatternsConfig &access) {
+        void *mem = ::operator new(sizeof(brimir::gpu::VulkanVDPRenderer));
+        std::memset(mem, fill, sizeof(brimir::gpu::VulkanVDPRenderer));
+        auto renderer = std::unique_ptr<brimir::gpu::VulkanVDPRenderer>(
+            new (mem) brimir::gpu::VulkanVDPRenderer(state, debug, access));
+        vk = renderer.get();
+        return renderer;
+    }) != nullptr);
+    vk->EnableThreadedVDP1(true);
+    WriteHeavyVDP1Table(*x, 40);
+    const auto state = Save(*x);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (uint32 cmd = 0; cmd < 42; ++cmd) {
+            const vdp::VDP1Command::Control control{.u16 = x->mainBus.Peek<uint16>(kVDP1VRAM + cmd * 0x20)};
+            vk->VDP1ExecuteCommand(cmd * 0x20, control);
+        }
+    }
+    REQUIRE(x->LoadState(*state, true));
+    const std::string diff = brimir::DiffSaveStates(*state, *Save(*x));
+    CHECK(diff == "");
+    x->~Saturn();
+}
 #endif
+
+TEST_CASE("A system built on garbage memory saves the same state after a load",
+          "[savestate][fidelity][uninit][brimir]") {
+    // Upstream SCUDSP::Reset left dmaAddrD0 and dmaPC uninitialized and Slot::Reset currEGLevel, egAttackBug and
+    // finalLevel: states held whatever the memory held, and LoadState masks dmaAddrD0 and currEGLevel, so a save after a
+    // load differed (and the EG read currEGLevel before writing it).
+    const int fill = GENERATE(0xCD, 0x5A, 0xFF);
+    CAPTURE(fill);
+    alignas(Saturn) static unsigned char storage[sizeof(Saturn)];
+    std::memset(storage, fill, sizeof(storage));
+    auto *x = new (storage) Saturn();
+    const auto state = Save(*x);
+    CHECK(state->scu.dsp.dmaAddrD0 == 0);
+    CHECK(state->scsp.slots[0].currEGLevel == 0);
+    REQUIRE(x->LoadState(*state, true));
+    const std::string diff = brimir::DiffSaveStates(*state, *Save(*x));
+    CHECK(diff == "");
+    x->~Saturn();
+}
 
 TEST_CASE("Loading a state restores the SCSP slot modulation inputs", "[savestate][fidelity][scsp][brimir]") {
     // Each slot reads its modulation inputs from the sound stack in pipeline steps 2-2/2-3 and uses them in step 3-2,

@@ -72,6 +72,8 @@ void SCUDSP::Reset(bool hard) {
     dmaReadAddr = 0;
     dmaWriteAddr = 0;
     dmaAddrInc = 0;
+    dmaAddrD0 = 0; // Brimir: left uninitialized upstream (saved in states; LoadState masks it)
+    dmaPC = 0;     // Brimir: left uninitialized upstream
 
     m_cyclesSpillover = 0u;
 }
@@ -288,6 +290,7 @@ void SCUDSP::SaveState(savestate::SCUDSPState &state) const {
     state.dmaWriteAddr = dmaWriteAddr;
     state.dmaAddrInc = dmaAddrInc;
     state.dmaAddrD0 = dmaAddrD0;
+    state.dmaPC = static_cast<uint8>(dmaPC); // Brimir: the state's field was never written
     state.cyclesSpillover = m_cyclesSpillover;
 }
 
@@ -333,6 +336,7 @@ void SCUDSP::LoadState(const savestate::SCUDSPState &state) {
     dmaWriteAddr = state.dmaWriteAddr & 0x7FFFFFC;
     dmaAddrInc = state.dmaAddrInc;
     dmaAddrD0 = state.dmaAddrD0 & 0x7FFFFFF;
+    dmaPC = state.dmaPC; // Brimir: the state's field was never read
     m_cyclesSpillover = state.cyclesSpillover;
 }
 
