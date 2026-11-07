@@ -204,9 +204,10 @@ bool ReadFileUpTo(const std::filesystem::path& path, size_t maxSize, std::vector
 }
 
 // Writes to a sibling temp file and renames it into place, so a failed write never truncates the existing file.
-// Returns an empty string, or what failed and where the data is. A refused rename (the file open elsewhere, an
-// antivirus scan) is retried once after a short delay; if it still fails, the complete temp file is kept.
-std::string WriteFileReplacing(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
+// Returns an empty string, or what failed and where the data is. With retryRename, a refused rename (the file open
+// elsewhere, an antivirus scan) is retried once after a short delay; if it still fails, the complete temp file is kept.
+std::string WriteFileReplacing(const std::filesystem::path& path, const std::vector<uint8_t>& data,
+                               bool retryRename) {
     auto tmpPath = path;
     tmpPath += ".tmp";
     std::error_code ec;
@@ -226,7 +227,7 @@ std::string WriteFileReplacing(const std::filesystem::path& path, const std::vec
         }
     }
     std::filesystem::rename(tmpPath, path, ec);
-    if (ec) {
+    if (ec && retryRename) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         ec.clear();
         std::filesystem::rename(tmpPath, path, ec);
@@ -664,6 +665,7 @@ void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, con
     m_hasCartridge = false;
     m_cartridgePath.clear();
     m_cartridgeSaved.clear();
+    m_cartridgeFailed.clear();
 
     const auto& disc = m_saturn->GetDisc();
     if (disc.sessions.empty()) {
@@ -812,12 +814,21 @@ bool CoreWrapper::SaveCartridgeRAM(bool force) {
         if (ram.empty() || (!force && ram == m_cartridgeSaved)) {
             return true;
         }
-        const std::string error = WriteFileReplacing(m_cartridgePath, ram);
+        // A periodic save that failed is not tried again until the game changes the cartridge once more (unload
+        // always tries, with the retry).
+        if (!force && ram == m_cartridgeFailed) {
+            return true;
+        }
+        const std::string error = WriteFileReplacing(m_cartridgePath, ram, force);
         if (!error.empty()) {
             m_cartridgeSaveError = "cartridge save failed: " + error;
+            if (!force) {
+                m_cartridgeFailed = std::move(ram);
+            }
             return false;
         }
         m_cartridgeSaved = std::move(ram);
+        m_cartridgeFailed.clear();
         return true;
     } catch (const std::exception& e) {
         m_cartridgeSaveError = std::string("cartridge save failed: ") + e.what();
@@ -970,6 +981,7 @@ void CoreWrapper::UnloadGame() {
     m_hasCartridge = false;
     m_cartridgePath.clear();
     m_cartridgeSaved.clear();
+    m_cartridgeFailed.clear();
     
     // Don't clear SRAM buffer - RetroArch needs to save it!
     // m_sramData will persist until next game load
@@ -1439,6 +1451,10 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
             port.throttleLatched = m_portInput[i].throttleLatched;
             port.throttle = m_portInput[i].throttle;
         }
+        // The session's accuracy settings (version 11; compared on load for a warning only)
+        state.brimir.settings.valid = true;
+        state.brimir.settings.sh2CacheEmulation = IsSH2CacheEmulationActive();
+        state.brimir.settings.scspStepGranularity = static_cast<uint8_t>(m_scspStepGranularity);
         // The cartridge image of the state format (savestate_codec.hpp, version 8): SCU::SaveState holds no backup
         // memory, which games write while running (run-ahead and netplay need it), and the ROM is the inserted dump.
         if (auto* bup = m_saturn->GetCartridge().As<ymir::cart::CartType::BackupMemory>()) {
@@ -1507,6 +1523,7 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
     }
 
     m_lastStateError.clear();
+    m_lastStateWarning.clear();
     try {
         // Ymir's VDP::LoadState() uses PostLoadStateSync() to refresh the
         // worker-thread copies after the main state is restored.
@@ -1624,6 +1641,22 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 // and the frontend's SRAM buffer is refreshed from it.
                 m_sramFirstLoad = false;
                 m_sramCacheDirty = true;
+            }
+            if (state.brimir.valid && state.brimir.settings.valid) {
+                // Not emulation state: this session keeps its own settings (the next frames may run differently from
+                // the saving session's)
+                const auto& saved = state.brimir.settings;
+                const bool cache = IsSH2CacheEmulationActive();
+                if (saved.sh2CacheEmulation != cache) {
+                    m_lastStateWarning = std::string("SH-2 cache emulation was ") +
+                                         (saved.sh2CacheEmulation ? "on" : "off") + " in the saving session, " +
+                                         (cache ? "on" : "off") + " here";
+                }
+                if (saved.scspStepGranularity != m_scspStepGranularity) {
+                    m_lastStateWarning += std::string(m_lastStateWarning.empty() ? "" : "; ") +
+                                          "SCSP step granularity was " + std::to_string(saved.scspStepGranularity) +
+                                          " in the saving session, " + std::to_string(m_scspStepGranularity) + " here";
+                }
             }
             return true;
         }
@@ -2155,6 +2188,10 @@ void CoreWrapper::SetSH2JitEnabled(bool enable) {
 
 bool CoreWrapper::IsSH2CacheEmulationActive() const {
     return m_saturn && m_saturn->IsSH2CacheEmulationEnabled();
+}
+
+bool CoreWrapper::IsCDBlockROMRecognised() const {
+    return m_cdblockROMLoaded && ymir::db::GetCDBlockROMInfo(m_cdblockROMHash) != nullptr;
 }
 
 void CoreWrapper::SetSCSPStepGranularity(uint32_t granularity) {

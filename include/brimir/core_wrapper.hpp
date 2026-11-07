@@ -102,8 +102,10 @@ public:
     /// ROM is the dump inserted at content load); version 7 states have no image for either. Version 9 adds the
     /// controller port peripherals' state and the bridge's input state per port (BrimirSaveState::Peripherals);
     /// version 7 and 8 states load without them. Version 10 adds the Virtua Gun jitter's random state
-    /// (BrimirSaveState::VirtuaGun); version 9 states load without it.
-    static constexpr uint32_t kSaveStateVersion = 10;
+    /// (BrimirSaveState::VirtuaGun); version 9 states load without it. Version 11 records the saving session's SH-2
+    /// cache and SCSP step granularity (BrimirSaveState::Settings, diagnostic: GetLastStateWarning); version 10
+    /// states load without them.
+    static constexpr uint32_t kSaveStateVersion = 11;
 
     /// @brief Oldest BRI2 version LoadState accepts
     static constexpr uint32_t kOldestLoadableSaveStateVersion = 4;
@@ -305,6 +307,11 @@ public:
     /// @brief Why the last LoadState() rejected a well-formed state, or an empty string
     const std::string& GetLastStateError() const { return m_lastStateError; }
 
+    /// @brief How the state the last LoadState() loaded was saved differently from this session (SH-2 cache
+    /// emulation, SCSP step granularity: not emulation state, so the session keeps its own and may run differently
+    /// from the saving one), or an empty string
+    const std::string& GetLastStateWarning() const { return m_lastStateWarning; }
+
     /// @brief Check if the emulator is initialized
     /// @return true if initialized
     bool IsInitialized() const { return m_initialized; }
@@ -363,7 +370,9 @@ public:
 
     /// @brief Writes the RAM or backup cartridge's save file (<game>.cart or .bcr) if its contents changed since the
     /// last write or the load. Reads the cartridge only (emulation state is untouched), so it may run between any
-    /// two frames. UnloadGame writes it too. A failure is kept for TakeCartridgeSaveError.
+    /// two frames. UnloadGame writes it too. A failure is kept for TakeCartridgeSaveError; a flush does not wait to
+    /// retry a refused rename, and after a failure it does nothing until the contents change again (UnloadGame still
+    /// tries, with one retry).
     /// @return false if the file could not be written
     bool FlushCartridgeSave();
 
@@ -395,9 +404,12 @@ public:
     const std::string& GetLastCDBlockMessage() const { return m_cdblockMessage; }
     /// @brief The CD Block emulation the last ApplyLoadTimeOptions chose, for the log (e.g. "high-level")
     const std::string& GetCDBlockDescription() const { return m_cdblockDescription; }
+    /// @brief Whether low-level emulation runs a CD Block ROM Ymir's database lists (false without LLE, or for an
+    /// unrecognised dump, which is used anyway)
+    bool IsCDBlockROMRecognised() const;
 
     /// @brief SCSP step granularity, 0 (a sample, 32 slots, at a time: Ymir's default) to 5 (one slot at a time).
-    /// Applies now (Ymir switches between steps live). Not part of save states.
+    /// Applies now (Ymir switches between steps live). Not emulation state: states record it for a warning only.
     void SetSCSPStepGranularity(uint32_t granularity);
     uint32_t GetSCSPStepGranularity() const { return m_scspStepGranularity; }
 
@@ -599,6 +611,7 @@ private:
     std::vector<uint8_t> m_statePayload;
     std::unique_ptr<ymir::savestate::SaveState> m_stateScratch;
     std::string m_lastStateError;
+    std::string m_lastStateWarning;
     
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;
@@ -638,6 +651,7 @@ private:
     std::string m_cartridgeDescription = "none";
     std::string m_testProductNumber; // TestSetProductNumber
     std::vector<uint8_t> m_cartridgeSaved; // the cartridge's contents as last written to or read from its file
+    std::vector<uint8_t> m_cartridgeFailed; // the contents a periodic save failed to write (not retried until changed)
     std::string m_cartridgeSaveError;
 
     // Accuracy options (SetSH2CacheEmulation, SetCDBlockLLE, SetSCSPStepGranularity)

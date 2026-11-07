@@ -1372,6 +1372,17 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
         if (g_core->IsCDBlockLLEActive() != wasLLE) {
             brimir_log(RETRO_LOG_INFO, "Save state uses %s CD Block emulation: switched to it for this session",
                        wasLLE ? "high-level" : "low-level");
+            if (environ_cb) {
+                static std::string text;
+                text = std::string("Brimir: the save state uses ") + (wasLLE ? "high-level" : "low-level") +
+                       " CD Block emulation; switched to it until the content is reloaded";
+                retro_message message{text.c_str(), 300};
+                environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+            }
+        }
+        if (const std::string& warning = g_core->GetLastStateWarning(); !warning.empty()) {
+            brimir_log(RETRO_LOG_WARN, "Save state: %s (emulation may differ from the saving session)",
+                       warning.c_str());
         }
         return true;
     }
@@ -1393,7 +1404,7 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code) {
     const char* text = code != nullptr ? code : "";
     std::optional<std::vector<brimir::CheatOp>> ops = brimir::ParseCheat(text);
     if (!ops) {
-        g_cheats.Set(index, enabled, std::string_view(text)); // empties the slot
+        g_cheats.Erase(index);
         brimir_log(RETRO_LOG_WARN, "Cheat %u: '%s' is not an Action Replay code (1AAAAAAA VVVV, 3AAAAAAA 00VV, "
                                    "DAAAAAAA VVVV, sub-codes joined with '+'); ignored", index, text);
         return;
@@ -1402,9 +1413,11 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code) {
     unsigned unknown = 0;
     unsigned malformed = 0;
     unsigned outside = 0;
+    unsigned untyped = 0;
     for (const brimir::CheatOp& op : *ops) {
         if (op.kind != brimir::CheatOp::Kind::Ignored) {
             outside += brimir::CheatAddressInWorkRam(op.address) ? 0 : 1;
+            untyped += op.noTypeDigit ? 1 : 0;
         } else if (op.reason == brimir::CheatOp::IgnoreReason::MasterCode) {
             ++master;
         } else if (op.reason == brimir::CheatOp::IgnoreReason::UnknownType) {
@@ -1415,11 +1428,20 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code) {
     }
     const size_t count = ops->size();
     g_cheats.Set(index, enabled, std::move(*ops));
-    if (unknown + malformed + outside > 0) {
+    if (untyped > 0) {
+        brimir_log(RETRO_LOG_INFO,
+                   "Cheat %u: %u sub-codes have no type digit (0AAAAAAA VVVV); written as 16-bit writes (type 1)",
+                   index, untyped);
+    }
+    if (malformed > 0) {
         brimir_log(RETRO_LOG_WARN,
-                   "Cheat %u: '%s': %zu sub-codes, ignored: %u master, %u unknown type, %u malformed (template "
-                   "values such as 00?? must be edited), %u outside work RAM",
-                   index, text, count, master, unknown, malformed, outside);
+                   "Cheat %u: '%s': %u of %zu sub-codes malformed (template values such as 00?? must be edited); "
+                   "the whole cheat is ignored",
+                   index, text, malformed, count);
+    } else if (unknown + outside > 0) {
+        brimir_log(RETRO_LOG_WARN,
+                   "Cheat %u: '%s': %zu sub-codes, ignored: %u master, %u unknown type, %u outside work RAM",
+                   index, text, count, master, unknown, outside);
     } else {
         brimir_log(RETRO_LOG_INFO, "Cheat %u %s: '%s' (%zu sub-codes, %u master codes ignored)", index,
                    enabled ? "on" : "off", text, count, master);
@@ -1628,8 +1650,14 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
     // An unrecognised ROM is used (Ymir's database lists the known dumps), with a warning
     const std::string& cdblockDescription = g_core->GetCDBlockDescription();
-    brimir_log(cdblockDescription.find("unrecognised") != std::string::npos ? RETRO_LOG_WARN : RETRO_LOG_INFO,
-               "CD Block: %s", cdblockDescription.c_str());
+    const bool unrecognisedROM = g_core->IsCDBlockLLEActive() && !g_core->IsCDBlockROMRecognised();
+    brimir_log(unrecognisedROM ? RETRO_LOG_WARN : RETRO_LOG_INFO, "CD Block: %s", cdblockDescription.c_str());
+    if (unrecognisedROM && environ_cb) {
+        static std::string text;
+        text = "Brimir: CD Block LLE uses " + cdblockDescription + "; it may not work";
+        retro_message message{text.c_str(), 600};
+        environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+    }
     if (const std::string& cdblockMessage = g_core->GetLastCDBlockMessage(); !cdblockMessage.empty()) {
         brimir_log(RETRO_LOG_WARN, "CD Block: %s", cdblockMessage.c_str());
         if (environ_cb) {

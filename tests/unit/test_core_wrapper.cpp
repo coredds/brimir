@@ -535,7 +535,7 @@ TEST_CASE("BRI2 state with a version before 4 is rejected", "[core][savestate][u
     const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
 
     STATIC_REQUIRE(CoreWrapper::kOldestLoadableSaveStateVersion == 4);
-    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 10);
+    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 11);
 
     for (const uint32_t version : {0u, 1u, 2u, 3u, CoreWrapper::kSaveStateVersion + 1}) {
         CAPTURE(version);
@@ -575,8 +575,9 @@ TEST_CASE("Version 4, 5 and 6 states (without all of the Brimir extension) still
         REQUIRE_FALSE(core.LoadState(patched.data(), patched.size()));
     }
     // Version 7 has the version 8 layout (only backup memory and ROM cartridge images differ); both end before the
-    // peripherals' state of version 9, which ends before the Virtua Gun jitter of version 10.
-    for (const uint32_t version : {7u, 8u, 9u}) {
+    // peripherals' state of version 9, which ends before the Virtua Gun jitter of version 10, which ends before the
+    // settings of version 11.
+    for (const uint32_t version : {7u, 8u, 9u, 10u}) {
         CAPTURE(version);
         const auto buf = RepackStateAs(saved, version);
         REQUIRE(core.LoadState(buf.data(), buf.size()));
@@ -644,6 +645,10 @@ std::vector<uint8_t> RepackState(const std::vector<uint8_t>& saved, uint32_t ver
         // Version 9 ends before the Virtua Gun jitter.
         payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
                        ymir::savestate::kBrimirSaveStateV9Size);
+    } else if (version == 10) {
+        // Version 10 ends before the settings.
+        payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
+                       ymir::savestate::kBrimirSaveStateV10Size);
     }
 
     std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(payload.size())));
@@ -1044,6 +1049,20 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
             REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, virtuaGun) + offsetof(G, lastJitterY), &badJitter, 4),
                                           *decoded));
         }
+        {
+            using S = B::Settings;
+            const uint8_t six = 6;
+            const uint8_t five = 5;
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, settings) + offsetof(S, valid), &two, 1), *decoded));
+            REQUIRE_FALSE(
+                DecodeSaveState(patched(offsetof(B, settings) + offsetof(S, sh2CacheEmulation), &two, 1), *decoded));
+            REQUIRE_FALSE(
+                DecodeSaveState(patched(offsetof(B, settings) + offsetof(S, scspStepGranularity), &six, 1), *decoded));
+            REQUIRE(DecodeSaveState(patched(offsetof(B, settings) + offsetof(S, scspStepGranularity), &five, 1),
+                                    *decoded));
+            // Bridge-written: a state the core saved alone has none
+            REQUIRE(DecodeSaveState(patched(offsetof(B, settings) + offsetof(S, valid), &zero, 1), *decoded));
+        }
         // Without the extension (versions 4 and 5) the same bytes are not read.
         REQUIRE(DecodeSaveState(std::span<const uint8_t>(payload.data(), ext), *decoded, 5));
         REQUIRE_FALSE(decoded->brimir.valid);
@@ -1075,11 +1094,13 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
             state->scu.cartType = type;
             state->scu.cartData.assign(size, 0);
             REQUIRE(EncodeSaveState(*state, payload));
-            // Versions 7 and 8 end before the extension's peripherals (version 9), 9 before the Virtua Gun (10).
+            // Versions 7 and 8 end before the extension's peripherals (version 9), 9 before the Virtua Gun (10), 10
+            // before the settings (11).
             const size_t ext = payload.size() - sizeof(ymir::savestate::BrimirSaveState);
-            const size_t length = version < 9    ? ext + ymir::savestate::kBrimirSaveStateV8Size
-                                  : version == 9 ? ext + ymir::savestate::kBrimirSaveStateV9Size
-                                                 : payload.size();
+            const size_t length = version < 9     ? ext + ymir::savestate::kBrimirSaveStateV8Size
+                                  : version == 9  ? ext + ymir::savestate::kBrimirSaveStateV9Size
+                                  : version == 10 ? ext + ymir::savestate::kBrimirSaveStateV10Size
+                                                  : payload.size();
             return DecodeSaveState(std::span<const uint8_t>(payload.data(), length), *decoded, version);
         };
         for (const size_t size : {512u * 1024u, 1024u * 1024u, 2u * 1024u * 1024u, 4u * 1024u * 1024u}) {
@@ -1093,6 +1114,19 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
         CHECK_FALSE(decodes(CartType::ROM, 2 * 1024 * 1024, 8));
         CHECK(decodes(CartType::ROM, 2 * 1024 * 1024, 7));
         CHECK_FALSE(decodes(CartType::ROM, 0, 7));
+    }
+
+    SECTION("CD Block mode byte other than 0 or 1") {
+        // Saturn::LoadState branches on this raw bool
+        const uint8_t two = 2;
+        std::memcpy(&state->cdblockLLE, &two, 1);
+        REQUIRE(EncodeSaveState(*state, payload));
+        REQUIRE_FALSE(DecodeSaveState(payload, *decoded));
+        const uint8_t one = 1;
+        std::memcpy(&state->cdblockLLE, &one, 1);
+        REQUIRE(EncodeSaveState(*state, payload));
+        REQUIRE(DecodeSaveState(payload, *decoded));
+        CHECK(decoded->cdblockLLE);
     }
 
     SECTION("unknown cartridge type") {
@@ -2118,7 +2152,21 @@ TEST_CASE("cartridge: a failed cartridge save is reported and the data kept", "[
     REQUIRE(std::filesystem::exists(tmp));
     CHECK(ReadAllBytes(tmp).at(0x200) == 0x42);
 
-    s.core.UnloadGame(); // fails the same way
+    // Unchanged since the failure: the periodic flush does not try again
+    std::filesystem::remove(tmp);
+    CHECK(s.core.FlushCartridgeSave());
+    CHECK(s.core.TakeCartridgeSaveError().empty());
+    CHECK_FALSE(std::filesystem::exists(tmp));
+    // Changed again: it tries (and fails) once more
+    s.core.GetSaturn()->GetCartridge().WriteByte(0x0400'0000 + (0x200 << 1) + 1, 0x43);
+    CHECK_FALSE(s.core.FlushCartridgeSave());
+    CHECK(s.core.TakeCartridgeSaveError().find("audio.bcr.tmp") != std::string::npos);
+    REQUIRE(std::filesystem::exists(tmp));
+    CHECK(ReadAllBytes(tmp).at(0x200) == 0x43);
+    CHECK(s.core.FlushCartridgeSave());
+    std::filesystem::remove(tmp);
+
+    s.core.UnloadGame(); // still tries, and fails the same way
     CHECK(s.core.TakeCartridgeSaveError().find("audio.bcr.tmp") != std::string::npos);
     std::filesystem::remove(bcr);
 }
@@ -2250,6 +2298,7 @@ TEST_CASE("accuracy: cdblock lle without rom falls back to hle", "[core][accurac
         CHECK(message.find("cdb105.bin") != std::string::npos);
         CHECK(message.find("high-level") != std::string::npos);
         CHECK(s.core.GetCDBlockDescription() == "high-level");
+        CHECK_FALSE(s.core.IsCDBlockROMRecognised());
         for (int i = 0; i < 10; ++i) {
             s.core.RunFrame();
         }
@@ -2270,6 +2319,7 @@ TEST_CASE("accuracy: cdblock lle without rom falls back to hle", "[core][accurac
         CHECK(s.core.GetLastCDBlockMessage().empty());
         CHECK(s.core.GetCDBlockDescription().find("low-level (cdb105.bin") != std::string::npos);
         CHECK(s.core.GetCDBlockDescription().find("unrecognised") != std::string::npos);
+        CHECK_FALSE(s.core.IsCDBlockROMRecognised()); // the stand-in is in no database
         for (int i = 0; i < 10; ++i) {
             s.core.RunFrame();
         }
@@ -2354,6 +2404,49 @@ TEST_CASE("accuracy: cross-mode state load", "[core][accuracy][savestate]") {
         CHECK(other.core.IsCDBlockLLEActive());
         other.core.RunFrame();
     }
+}
+
+TEST_CASE("accuracy: states record the session's settings and warn when they differ", "[core][accuracy][savestate]") {
+    const auto dir = std::filesystem::temp_directory_path() / "brimir_accuracy_settings";
+    std::filesystem::create_directories(dir);
+    const auto makeCore = [&](bool sh2Cache, uint32_t granularity) {
+        auto core = std::make_unique<CoreWrapper>();
+        REQUIRE(core->Initialize());
+        core->SetSH2CacheEmulation(sh2Cache);
+        core->ApplyLoadTimeOptions(dir.string().c_str());
+        core->SetSCSPStepGranularity(granularity);
+        REQUIRE(core->IsSH2CacheEmulationActive() == sh2Cache);
+        return core;
+    };
+    auto plain = makeCore(false, 0);
+    auto other = makeCore(true, 3);
+    const auto plainState = SaveStateBytes(*plain);
+    const auto otherState = SaveStateBytes(*other);
+
+    // The same settings: no warning
+    REQUIRE(plain->LoadState(plainState.data(), plainState.size()));
+    CHECK(plain->GetLastStateWarning().empty());
+
+    // Other settings: loads (the session keeps its own), with a warning naming both
+    REQUIRE(plain->LoadState(otherState.data(), otherState.size()));
+    const std::string warning = plain->GetLastStateWarning();
+    CHECK(warning.find("SH-2 cache emulation was on in the saving session, off here") != std::string::npos);
+    CHECK(warning.find("SCSP step granularity was 3 in the saving session, 0 here") != std::string::npos);
+    CHECK_FALSE(plain->IsSH2CacheEmulationActive());
+    CHECK(plain->GetSaturn()->SCSP.GetStepGranularity() == 0);
+
+    // A version 10 state records nothing: no warning
+    const auto v10 = RepackStateAs(otherState, 10);
+    REQUIRE(plain->LoadState(v10.data(), v10.size()));
+    CHECK(plain->GetLastStateWarning().empty());
+
+    // Only the granularity differs
+    other->SetSH2CacheEmulation(false);
+    other->ApplyLoadTimeOptions(dir.string().c_str());
+    REQUIRE(other->LoadState(plainState.data(), plainState.size()));
+    CHECK(other->GetLastStateWarning() == "SCSP step granularity was 0 in the saving session, 3 here");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
 TEST_CASE("accuracy: options deterministic under rollback", "[core][accuracy][savestate]") {

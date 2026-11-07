@@ -96,6 +96,17 @@ struct BrimirSaveState {
         uint32 lastJitterX;
         uint32 lastJitterY;
     } virtuaGun;
+
+    // From version 11 on (version 10 ends before this member): the accuracy settings of the session that saved the
+    // state, which are not emulation state (each session keeps its own). Written and read by the bridge
+    // (CoreWrapper), not by the core; the bridge warns when a loaded state's settings differ from the session's (a
+    // netplay peer or a state from another configuration may then run differently). `valid` is false in states
+    // saved by the core alone.
+    struct Settings {
+        bool valid;
+        bool sh2CacheEmulation; // active, whether from the option or the game database
+        uint8 scspStepGranularity; // 0 .. 5
+    } settings;
 };
 
 // Bytes of the extension in a version 6 payload (before scspSlots), on every supported ABI.
@@ -106,5 +117,8 @@ inline constexpr size_t kBrimirSaveStateV8Size = 819376;
 
 // Bytes of the extension in a version 9 payload (before virtuaGun), on every supported ABI.
 inline constexpr size_t kBrimirSaveStateV9Size = 819392;
+
+// Bytes of the extension in a version 10 payload (before settings), on every supported ABI.
+inline constexpr size_t kBrimirSaveStateV10Size = 819408;
 
 } // namespace ymir::savestate
