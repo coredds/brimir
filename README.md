@@ -8,7 +8,16 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Based on the upstream Ymir hardware-layer sync (2026-06-23), with selected upstream fixes through 2026-10-16 and Brimir-specific optimizations.
 
-## What's New in v0.7.0
+## What's New in v0.7.1
+
+- **BIOS Auto picks the disc's region** - a Japan/Asia-only disc boots with a Japanese BIOS, any other disc with a US/EU one (falling back to any BIOS present), and region autodetection runs a multi-region disc in the BIOS's region. See [Installation](#installation).
+- **BIOS settings in save states** - a state carries the BIOS language and settings and applies them for the session; your saved settings never change from a loaded state. See [Save states](#save-states-run-ahead-rewind-and-netplay).
+- **Controller options** - Analog Stick Deadzone, Trigger Deadzone and Mouse Sensitivity; the Shuttle Mouse moves as in Beetle Saturn. See [Controllers](#controllers).
+- **CD Block LLE validated with the real ROMs** - `cdb106.bin` and `cdb105.bin` boot the tested games, and run-ahead, rewind and netplay are exact with them (a save-state fix). See [Accuracy options](#accuracy-options).
+
+## Previous Highlights
+
+### v0.7.0
 
 - **Run-ahead and netplay** - save states now continue exactly like the uninterrupted run, so RetroArch allows run-ahead and netplay, and rewind is exact. The Saturn clock runs on emulated time by default (new RTC Mode option), and a first boot no longer stops at the BIOS clock setup screen. See [Save states, run-ahead, rewind and netplay](#save-states-run-ahead-rewind-and-netplay).
 - **Cheats and RetroAchievements** - the Saturn cheat files of RetroArch's database work (Action Replay codes), and work RAM is laid out as in Beetle Saturn, so achievement sets and cheat searches made with Beetle work too. See [Cheats](#cheats) and [RetroAchievements](#retroachievements).
@@ -16,8 +25,6 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 - **Cartridges** - The King of Fighters '95 and Ultraman with their ROM cartridge dumps, a backup memory cartridge saved in Beetle Saturn's `.bcr` layout, and a Cartridge option. See [Cartridges](#cartridges).
 - **Accuracy options** - SH-2 cache emulation, low-level CD Block emulation (needs the CD Block ROM) and SCSP step granularity. See [Accuracy options](#accuracy-options).
 - **Save-state fixes** - the state format is now version 11; states from v0.6.x and earlier versions down to version 4 still load (except Dezaemon 2 and Galaxy Force II states, see [Save states](#save-states-run-ahead-rewind-and-netplay)). Full list in [CHANGELOG.md](CHANGELOG.md).
-
-## Previous Highlights
 
 ### v0.6.1
 
@@ -123,8 +130,8 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 ## Known Limitations
 
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2*. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
-- **Controllers** — Ports 1 and 2 only (Ymir emulates no multitap). The six-axis Mission Stick, dual Mission Sticks, Twin-Stick and Stunner are not offered, and there are no deadzone or mouse sensitivity options yet.
-- **CD Block LLE** — Low-level CD Block emulation is a work in progress in Ymir, and was tested here only with a stand-in ROM (no CD Block ROM dump was available).
+- **Controllers** — Ports 1 and 2 only (Ymir emulates no multitap). The six-axis Mission Stick, dual Mission Sticks, Twin-Stick and Stunner are not offered.
+- **CD Block LLE** — Low-level CD Block emulation is a work in progress in Ymir. With the real ROMs (`cdb106.bin` v1.06, `cdb105.bin` v1.05) the BIOS menu, Sega Rally Championship, Virtua Fighter 2, Burning Rangers, Guardian Heroes and Panzer Dragoon II Zwei boot to their intros and attract modes and run exactly with run-ahead and from a state on another instance; boots take 1-2.5 s longer than with the high-level CD Block. Other games are untested.
 - **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter. The x64 backend's SH-2 time is between about 5% and 28% below the interpreter's across six games, and its native compiles run on an extra thread where the CPU has at least 4 threads (core option "SH-2 JIT Compile Thread (Experimental)"); the IR interpreter backend is about 3x slower than the interpreter (see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)). It can still stutter while a game loads a lot of new code: Burning Rangers over a long session has SH-2 time about 5% below the interpreter's, but 358 of 33,600 frames take over 16.7 ms (the interpreter: none; the worst 48 ms), and with threaded VDP, the default, the average frame of Sega Rally, Street Fighter Zero 3 and that session is 2-6% longer than the interpreter's. It uses up to 128 MB of native code per SH-2 CPU, allocated on demand. It is not used while SH-2 cache emulation is active. It stays an experimental, opt-in option for testing; the current state and the next steps are in [design/sh2-jit.md](design/sh2-jit.md) ("Where to pick up").
 
 ## Save states, run-ahead, rewind and netplay
@@ -148,13 +155,16 @@ with the controllers).
 - **BIOS settings are in save states** (the language and the other settings the BIOS keeps): loading a state applies
   the state's settings for the session only. The settings saved in the RTC file change only when the BIOS or a game
   writes them (the BIOS settings screen), never from a loaded state. States from before version 12 keep the session's.
+  A hard reset keeps a loaded state's settings for the rest of the session (reload the content to get your own back).
+  A settings change made in a frame that run-ahead or netplay later rolls back, or that rewind goes back past, still
+  reaches the RTC file (as in v0.7.0; it takes the BIOS settings screen during netplay or rewind).
 - **Save-state format**: version 12. States from older versions (version 4 on, which includes the v0.6.x states) still
   load. States are larger than before (about 800 KiB more before compression). One exception: Dezaemon 2 and Sega
   Ages: Galaxy Force II now get a backup memory cartridge under Cartridge = Auto, so their v0.6.x states (saved without
   one) are refused; set Cartridge to None and reload the content to load them.
 - **Netplay**: both machines need the same BIOS and content, and should also use:
   - the same core options, in particular SH-2 Cache Emulation and SCSP Step Granularity, which are not emulation state:
-    a state saved with other values loads, keeps the local settings and logs a warning;
+    a state saved with other values loads, keeps the local settings and logs a warning (once per content);
   - the same cheats, enabled alike: cheats are not in save states and write memory every frame;
   - the same time zone (the state holds the clock; the date shown goes through each computer's local time);
   - the same kind of computer: states hold host-order data, so netplay between different CPU architectures is not
@@ -260,7 +270,7 @@ Ymir's accuracy features, off by default (the defaults emulate exactly as before
 | Option | Values | Notes |
 |---|---|---|
 | SH-2 Cache Emulation (System) | OFF (default), ON | Applies when content is loaded. Emulates the SH-2 caches; costs some speed. Games Ymir's database marks (Astal, Dark Savior, Waku Waku 7 and others) always get it. The SH-2 JIT is not used while it is active |
-| CD Block Low-Level Emulation (Media) | OFF (default), ON | Applies when content is loaded. Runs the CD Block's own SH-1 firmware; slower, and a work in progress in Ymir. Needs the CD Block ROM (64 KiB) in the system folder as `cdb106.bin`, `cdb105.bin` or `cdb104.bin`; without one the CD Block stays high-level, with an on-screen message. A high-level save state switches the session to high-level (shown on screen); a low-level state needs this option and the same ROM |
+| CD Block Low-Level Emulation (Media) | OFF (default), ON | Applies when content is loaded. Runs the CD Block's own SH-1 firmware; slower, and a work in progress in Ymir. Needs the CD Block ROM (64 KiB) in the system folder as `cdb106.bin`, `cdb105.bin` or `cdb104.bin`; without one the CD Block stays high-level, with an on-screen message. A high-level save state switches the session to high-level (shown on screen); a low-level state needs this option and the same ROM. Validated with `cdb106.bin` and `cdb105.bin` (see [Known Limitations](#known-limitations)); save states, run-ahead, rewind and netplay are exact with them |
 | SCSP Step Granularity (Audio) | 0 (default) to 5 | Applies at once. Steps the sound processor in finer slices (0: 32 slots at a time, 5: one slot) |
 
 Threaded SCSP is not offered: Ymir does not implement it.
@@ -419,7 +429,7 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
    - `sega_101.bin` (JP v1.01, Mednafen's name)
    - `sega_100.bin` (JP v1.00, Mednafen's name)
 
-   With BIOS Selection on Auto, a disc for Japan/Asia only boots with a Japanese BIOS and any other disc with a US/EU one (files identified by their hash), falling back to any BIOS present; keep one of each region to get both. Region autodetection then runs a multi-region disc in the BIOS's region.
+   With BIOS Selection on Auto, a disc for Japan/Asia only boots with a Japanese BIOS and any other disc with a US/EU one (files identified by their hash), falling back to any BIOS present; keep one of each region to get both. Region autodetection then runs a multi-region disc in the BIOS's region (Japanese BIOS: Japan, Asia NTSC, North America, Europe; US/EU BIOS: North America, Japan, Europe, Asia NTSC, so a disc runs as PAL only when it lists neither North America nor Japan).
 3. Load a Saturn game (.cue, .chd, .ccd, .mds, .iso or .m3u playlist) through RetroArch. Raw `.bin`/`.img`/`.mdf` track files must be opened through their `.cue`/`.ccd`/`.mds` sheet.
 
 ## Core Options
