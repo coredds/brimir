@@ -1,6 +1,6 @@
 # Brimir Roadmap
 
-**Status**: Active — Ymir hardware layer synced verbatim to upstream HEAD (2026-06-23), plus targeted fixes backported through 2026-09-24
+**Status**: Active — every upstream Ymir core change up to `ff935379` (2026-11-07) reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
 **Last Updated**: 2026-11-07 — v0.7.0 libretro feature round: Action Replay cheats, RetroAchievements (Beetle layout), deterministic save states (run-ahead, netplay), all controller types, ROM and backup cartridges, accuracy options; v0.6.0 added the Vulkan renderer
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes).

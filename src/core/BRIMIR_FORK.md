@@ -130,7 +130,9 @@ with `libs/ymir-core` at `ff935379`).
   here because `SH2::MemRead` already masks misaligned addresses; see the table).
 - Ours-better: Ymir `a8a17ee` (2026-06-19, SH-2 clock factor as a 25%-10000% ratio, VBlank erase cycles no longer scaled by
   it) is not taken: `brimir_sh2_overclock` allows only 100-300%, and `VDP::UpdateResolution` (`vdp.cpp`) scales the erase
-  cycles by the factor, which keeps the erase complete at overclock (controller ruling, 2026-11-10).
+  cycles by the factor, which keeps the erase complete at overclock (controller ruling, 2026-11-10). Ymir `1d6ece6`
+  (Virtua Gun jitter drawn from `rand()`) is not taken either: Brimir's deterministic xorshift32 jitter held in save
+  states stays (see the 2026-11-06 row of "Brimir changes").
 - Taken (one commit each, `sync(core): ...`): Ymir `e2c87ed` (`Filesystem::LookupFileIndexAtFrameAddress` takes a FAD:
   `fad -= 150`; debug log and probes only), `0a9a0e2` (CD Block LLE resumes a paused audio track at the commanded FAD;
   hand-ported to the `media::Disc` drive, see the 2026-11-10 row of "Brimir changes"), `1ff3415` (`Saturn::LoadState`
@@ -138,10 +140,12 @@ with `libs/ymir-core` at `ff935379`).
   and the CD drive's `useLLE` observers follow a state of the other mode; the line is upstream's, Brimir's other
   `LoadState` changes are kept) and `ff93537` (`VDP2Memory::operator=` returns a reference). No save-state format,
   Vulkan or JIT change.
-- Verified at the end of the sync (2026-11-10): frame hashes of the BIOS and 10 games identical to v0.7.1 (1,800
-  frames, also with CD Block LLE), software and Vulkan identical in the stage 2 compare matrix with strict state compares
-(Sega Rally's 2x sample-point run only with VDP1 Upscaling off, the same as v0.7.1), per-frame
-  run-ahead and fresh-instance runs identical, and 0.7.1 states load and continue identically.
+- Verified at the end of the sync (2026-11-10): frame hashes identical to v0.7.1 (1,800 frames) for the BIOS and the
+  ten test games with default options, and with CD Block LLE for the BIOS and five games (Sega Rally, Virtua Fighter 2,
+  Daytona, Fighters Megamix, Guardian Heroes); software and Vulkan identical in the stage 2 compare matrix with strict
+  state compares (the Sega Rally 2x sample-point run differs by design with VDP1 Upscaling on, identical to v0.7.1,
+  and passes with it off; the matrix runs the 2x sample-point runs with it off); per-frame run-ahead and
+  fresh-instance runs identical, and 0.7.1 states load and continue identically.
 
 ## Brimir changes
 
