@@ -140,9 +140,11 @@ uint8_t StickThrottle(const InputSnapshot& in) {
     return AxisToByte(std::min<int32_t>(0x7FFF, -int32_t{in.rightY}), 0x7F);
 }
 
-// The movement of one axis a read takes: whole counts within [lo, hi]; the rest stays.
-int16_t TakeAxis(int32_t& kept, int32_t lo, int32_t hi) {
-    const int32_t counts = std::clamp(kept / kMouseMovementUnit, lo, hi);
+// The movement of one axis a read takes: every whole count (the mouse clamps it to its report and flags an overflow;
+// the excess is dropped, as in Mednafen); only the fraction of a count stays. |kept| <= kMouseMovementLimit, so the
+// counts fit (and negate) in an int16.
+int16_t TakeAxis(int32_t& kept) {
+    const int32_t counts = kept / kMouseMovementUnit;
     kept -= counts * kMouseMovementUnit;
     return static_cast<int16_t>(counts);
 }
@@ -277,9 +279,10 @@ ymir::peripheral::ShuttleMouseReport MapShuttleMouse(const InputSnapshot& in) {
 }
 
 void TakeMouseMovement(PortInputState& state, ymir::peripheral::ShuttleMouseReport& report) {
-    // The libretro y axis is down; the mouse (ShuttleMouse::TakeReport) turns it up, so -256 .. 255 up is 256 .. -255.
-    report.x = TakeAxis(state.mouseX, -256, 255);
-    report.y = TakeAxis(state.mouseY, -255, 256);
+    // The libretro y axis is down; the mouse (ShuttleMouse::TakeReport) turns it up. ShuttleMouse::Read and WritePDR
+    // clamp each axis to -256 .. 255 and set its overflow bit beyond.
+    report.x = TakeAxis(state.mouseX);
+    report.y = TakeAxis(state.mouseY);
 }
 
 ymir::peripheral::VirtuaGunReport MapVirtuaGun(const InputSnapshot& in, const GunScreen& screen) {

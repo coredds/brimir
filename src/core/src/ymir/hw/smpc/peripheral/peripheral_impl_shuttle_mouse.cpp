@@ -83,7 +83,9 @@ uint8 ShuttleMouse::WritePDR(uint8 ddr, uint8 value, bool exle) {
 
             m_tl = tr;
             const uint8 pos = m_reportPos;
-            m_reportPos = (m_reportPos + 1) % 9;
+            // Brimir: past the last nibble the mouse repeats it (as Mednafen) instead of starting over, which would
+            // take a new report in the middle of a read; only TH high starts a new one
+            m_reportPos = std::min<uint8>(m_reportPos + 1, 8);
             switch (pos) {
             case 0: return (m_tl << 4) | 0b1011;
             case 1: return (m_tl << 4) | 0b1111;

@@ -349,7 +349,7 @@ endfunction()
 # 4. Its movement reaches the emulation: the same input at 5 % gives states that differ outside the extension.
 # 5. Second instance as in 3 (with --input-offset), and a negative control: the plain state with the movement built up
 #    dropped (brimir_state_diff --drop-mouse-movement, which fails when there was none to drop) does not continue as
-#    the plain run.
+#    the plain run, while the same state re-encoded with nothing dropped (--reencode) does.
 foreach(devices IN ITEMS "3dpad;missionstick" "wheel;gun" "mouse;pad")
     list(GET devices 0 dev0)
     list(GET devices 1 dev1)
@@ -445,6 +445,35 @@ foreach(devices IN ITEMS "3dpad;missionstick" "wheel;gun" "mouse;pad")
                                     "frame ${k} to drop (exit ${sd_code}): the negative control would prove nothing\n"
                                     "${sd_out}${sd_err}")
             endif()
+            message(STATUS "peripherals_rollback_deterministic: negative control from the state after frame ${k}: "
+                           "${sd_out}")
+            # The control's control: the same state through the same decode and encode, nothing dropped, continues
+            # exactly as the plain run (so the difference below comes from the dropped movement, not the rewrite).
+            set(reencoded "${state_dir}/peripherals_mouse_reencoded${k}.bin")
+            execute_process(COMMAND "${STATE_DIFF}" --reencode
+                                    "${state_dir}/peripherals_mouse_plain/state_${from}.bin" "${reencoded}"
+                OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+            if(NOT sd_code EQUAL 0)
+                message(FATAL_ERROR "peripherals_rollback_deterministic: re-encoding the state after frame ${k} failed "
+                                    "(exit ${sd_code})\n${sd_out}${sd_err}")
+            endif()
+            execute_process(
+                COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 20 --device 0 ${dev0}
+                        --device 1 ${dev1} --input-pattern 7 --input-offset ${offset} ${pair_options}
+                        --load-state "${reencoded}" --save-state-every 5 "${state_dir}/peripherals_mouse_reencoded_from${k}"
+                OUTPUT_VARIABLE prb_out ERROR_VARIABLE prb_err RESULT_VARIABLE prb_code)
+            if(NOT prb_code EQUAL 0)
+                message(FATAL_ERROR "peripherals_rollback_deterministic (re-encoded control from ${k}): exit ${prb_code}\n"
+                                    "${prb_err}")
+            endif()
+            foreach(j IN ITEMS 4 9 14 19)
+                math(EXPR plain_frame "${k} + 1 + ${j}")
+                padded_frame(${j} at)
+                padded_frame(${plain_frame} expected)
+                peripheral_states_equal("mouse: the re-encoded state after frame ${k} (nothing dropped) does not continue as the plain run at frame ${plain_frame}"
+                    "${state_dir}/peripherals_mouse_reencoded_from${k}/state_${at}.bin"
+                    "${state_dir}/peripherals_mouse_plain/state_${expected}.bin")
+            endforeach()
             execute_process(
                 COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 20 --device 0 ${dev0}
                         --device 1 ${dev1} --input-pattern 7 --input-offset ${offset} ${pair_options}
@@ -481,7 +510,8 @@ endforeach()
 message(STATUS "peripherals_rollback_deterministic: the input reaches the BIOS (mouse movement included); with all six "
                "peripherals and scripted input --rollback emulates exactly the plain run (40 states per device pair), "
                "and states loaded into a fresh instance continue identically (3D pad mode, Mission Stick throttle latch "
-               "and the mouse movement built up included, 32 states), while dropping the mouse movement does not. "
+               "and the mouse movement built up included, 32 states), while dropping the mouse movement does not (the "
+               "same states re-encoded without dropping it continue identically, 8 states). "
                "The TH/TR handshake fields rest on the unit tests (the BIOS reads through INTBACK).")
 
 # accuracy_rollback_deterministic: with SH-2 cache emulation, SCSP step granularity 3 and CD Block LLE chosen without

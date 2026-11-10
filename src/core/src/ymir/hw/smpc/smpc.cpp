@@ -243,18 +243,19 @@ void SMPC::LoadBrimirState(const savestate::BrimirSaveState &ext) {
     };
     load(m_port1, ext.peripherals.ports[0]);
     load(m_port2, ext.peripherals.ports[1]);
-    if (ext.mouse.valid) {
-        const auto loadMouse = [](peripheral::PeripheralPort &port, const savestate::BrimirSaveState::Peripherals::Port &in,
+    // The Shuttle Mouse's report of the read in progress, with the handshake position restored above; a state without
+    // it (versions 9 to 11) gives an empty report, so every session loading it continues the same
+    const auto loadMouse = [&ext](peripheral::PeripheralPort &port, const savestate::BrimirSaveState::Peripherals::Port &in,
                                   const savestate::BrimirSaveState::Mouse::Port &mouse) {
-            peripheral::BasePeripheral &peripheral = port.GetPeripheral();
-            if (peripheral.GetType() == peripheral::PeripheralType::ShuttleMouse &&
-                in.type == static_cast<uint8>(peripheral::PeripheralType::ShuttleMouse)) {
-                static_cast<peripheral::ShuttleMouse &>(peripheral).LoadBrimirReport(mouse);
-            }
-        };
-        loadMouse(m_port1, ext.peripherals.ports[0], ext.mouse.ports[0]);
-        loadMouse(m_port2, ext.peripherals.ports[1], ext.mouse.ports[1]);
-    }
+        peripheral::BasePeripheral &peripheral = port.GetPeripheral();
+        if (peripheral.GetType() == peripheral::PeripheralType::ShuttleMouse &&
+            in.type == static_cast<uint8>(peripheral::PeripheralType::ShuttleMouse)) {
+            static_cast<peripheral::ShuttleMouse &>(peripheral)
+                .LoadBrimirReport(ext.mouse.valid ? mouse : savestate::BrimirSaveState::Mouse::Port{});
+        }
+    };
+    loadMouse(m_port1, ext.peripherals.ports[0], ext.mouse.ports[0]);
+    loadMouse(m_port2, ext.peripherals.ports[1], ext.mouse.ports[1]);
 }
 
 bool SMPC::ValidateState(const savestate::SMPCSaveState &state) const {

@@ -200,7 +200,7 @@ Quick Menu > Controls > Port 1/2 Controls > Device Type:
 | 3D Control Pad | Analog stick and triggers; Select switches between analog and digital mode (analog at power-on) |
 | Arcade Racer | Steering wheel on the left stick |
 | Mission Stick | Stick on the left stick, throttle on the right stick |
-| Shuttle Mouse | Mouse movement and buttons; mouse buttons 4/5 are Start. Movement is kept until the game reads the mouse (none lost, none counted twice) |
+| Shuttle Mouse | Mouse movement and buttons; mouse buttons 4/5 are Start. Movement is kept until the game reads the mouse (none counted twice; beyond one read's range the rest is dropped, as in Beetle Saturn) |
 | Virtua Gun | Light gun: trigger, reload, Start; aiming off screen and pulling the trigger reloads |
 | None | Nothing connected |
 
@@ -227,7 +227,11 @@ Analog Stick Deadzone and Trigger Deadzone (Input, apply at once; 15% by default
 reported): the stick of the 3D Control Pad, Arcade Racer and Mission Stick reads centred within that share of its
 range (a round deadzone), and the 3D Control Pad's analog L/R read released within that share of their travel; beyond
 it the rest is stretched to the full range, so there is no jump at the edge. They add to the frontend's own deadzone.
-The Mission Stick throttle has none. Mouse Sensitivity (Input, applies at once) scales the Shuttle Mouse's movement.
+The Mission Stick throttle has none. The 15% defaults (Beetle Saturn's) change these devices' output compared with
+0.7.0; 0% restores 0.7.0's mapping exactly, and the Control Pad is unaffected. Mouse Sensitivity (Input, applies at
+once) scales the Shuttle Mouse's movement; as in Beetle Saturn, a read beyond the mouse's range reports the limit
+with the overflow bit and drops the rest. For netplay, peers need the same input options (deadzones, mouse
+sensitivity): they change what the game reads.
 
 ## Cartridges
 

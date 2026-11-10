@@ -533,7 +533,7 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "Mouse Sensitivity",
         nullptr,
         "Scales the movement of the Shuttle Mouse device type. Movement is kept until the game reads the mouse, so "
-        "none is lost or counted twice. Applies immediately.",
+        "none is counted twice. Applies immediately.",
         nullptr,
         "input",
         {

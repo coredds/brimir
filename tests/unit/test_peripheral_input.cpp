@@ -353,39 +353,69 @@ TEST_CASE("mouse: unread movement carries to the next read", "[peripherals][mous
     CHECK(read.y == -6);
 }
 
-TEST_CASE("mouse: remainder beyond the report range carries over", "[peripherals][mouse]") {
+TEST_CASE("mouse: a large flick sets the overflow bits and drops the excess", "[peripherals][mouse]") {
+    // Mednafen (IODevice_Mouse_UpdateBus): a read clamps each axis to -256 .. 255, sets its overflow bit, and the
+    // excess is gone; the next read has only the movement since
     PortInputState state;
     AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(400, -300), state);
     auto r = ReadMouse(InputSnapshot{}, state);
-    CHECK(r.x == 255);  // the report's largest right movement
-    CHECK(r.y == -255); // up 255: the Saturn's +255
-    r = ReadMouse(InputSnapshot{}, state);
-    CHECK(r.x == 145);
-    CHECK(r.y == -45);
+    CHECK(r.x == 400); // every whole count; the mouse clamps it and flags the overflow
+    CHECK(r.y == -300);
     r = ReadMouse(InputSnapshot{}, state);
     CHECK(r.x == 0);
     CHECK(r.y == 0);
-    // The other direction reaches -256 (left) and +256 (down: the Saturn's -256)
-    AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(-400, 300), state);
-    r = ReadMouse(InputSnapshot{}, state);
-    CHECK(r.x == -256);
-    CHECK(r.y == 256);
-    r = ReadMouse(InputSnapshot{}, state);
-    CHECK(r.x == -144);
-    CHECK(r.y == 44);
-    // Through the core: in range, so no overflow flag; the remainder comes with the next read
+
     CoreWrapper core;
     REQUIRE(core.Initialize());
     core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
     core.SetPeripheralInput(0, Mouse(400, 300));
     auto read = ReadPort1Mouse(core);
     CHECK(read.x == 255);
+    CHECK(read.y == -256); // down 300: the Saturn's -300
+    CHECK(read.xOver);
+    CHECK(read.yOver);
+    core.SetPeripheralInput(0, Mouse(5, -3));
+    read = ReadPort1Mouse(core);
+    CHECK(read.x == 5); // only the new movement
+    CHECK(read.y == 3);
+    CHECK_FALSE(read.xOver);
+    CHECK_FALSE(read.yOver);
+    core.SetPeripheralInput(0, Mouse(-400, -300));
+    read = ReadPort1Mouse(core);
+    CHECK(read.x == -256);
+    CHECK(read.y == 255);
+    CHECK(read.xOver);
+    CHECK(read.yOver);
+    CHECK(ReadPort1Mouse(core).x == 0);
+    // The edges of the range are no overflow
+    core.SetPeripheralInput(0, Mouse(255, 256));
+    read = ReadPort1Mouse(core);
+    CHECK(read.x == 255);
     CHECK(read.y == -256);
     CHECK_FALSE(read.xOver);
     CHECK_FALSE(read.yOver);
+    core.SetPeripheralInput(0, Mouse(-256, -255));
     read = ReadPort1Mouse(core);
-    CHECK(read.x == 145);
-    CHECK(read.y == -44);
+    CHECK(read.x == -256);
+    CHECK(read.y == 255);
+    CHECK_FALSE(read.xOver);
+    CHECK_FALSE(read.yOver);
+    // A direct (TH/TR) read flags it too: nibble 3 bit 2 (X over), X clamped to 0xFF
+    core.SetPeripheralInput(0, Mouse(400, 0));
+    ymir::Saturn& saturn = *core.GetSaturn();
+    saturn.mainBus.Write<uint8>(0x010'0079, 0x60);
+    saturn.mainBus.Write<uint8>(0x010'0075, 0x60);
+    std::vector<uint8_t> nibbles;
+    bool tr = true;
+    for (int i = 0; i < 9; ++i) {
+        tr = !tr;
+        saturn.mainBus.Write<uint8>(0x010'0075, tr ? 0x20 : 0x00);
+        nibbles.push_back(static_cast<uint8_t>(saturn.mainBus.Peek<uint8>(0x010'0075) & 0x0F));
+    }
+    CHECK(nibbles[3] == 0x4); // X over, X sign clear
+    CHECK(nibbles[5] == 0xF);
+    CHECK(nibbles[6] == 0xF);
+    CHECK(ReadPort1Mouse(core).x == 0);
     // The movement kept between reads is bounded
     PortInputState bounded;
     for (int i = 0; i < 200; ++i) {
@@ -399,29 +429,36 @@ TEST_CASE("mouse: accumulation survives rollback and resets on device change", "
     CoreWrapper core;
     REQUIRE(core.Initialize());
     core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
-    core.SetPeripheralInput(0, Mouse(400, -10));
-    REQUIRE(ReadPort1Mouse(core).x == 255);
+    core.SetInputSettings(InputSettings{0, 0, 35});
+    core.SetPeripheralInput(0, Mouse(10, -10)); // 3.5 counts each
+    REQUIRE(ReadPort1Mouse(core).x == 3);       // 0.5 kept
+    core.SetPeripheralInput(0, Mouse(100, 0));  // a frame the game does not read
     std::vector<uint8_t> state(core.GetStateSize());
     REQUIRE(core.SaveState(state.data(), state.size()));
-    REQUIRE(core.GetPortInputState(0).mouseX == 145 * kMouseMovementUnit);
-    REQUIRE(ReadPort1Mouse(core).x == 145);
+    REQUIRE(core.GetPortInputState(0).mouseX == 3550);
+    REQUIRE(core.GetPortInputState(0).mouseY == -50);
+    REQUIRE(ReadPort1Mouse(core).x == 35);
 
     SECTION("in place (run-ahead, rewind)") {
         core.SetPeripheralInput(0, Mouse(33, 0)); // movement of the frame run ahead
         REQUIRE(core.LoadState(state.data(), state.size()));
-        CHECK(core.GetPortInputState(0).mouseX == 145 * kMouseMovementUnit);
+        CHECK(core.GetPortInputState(0).mouseX == 3550);
         const auto r = ReadPort1Mouse(core);
-        CHECK(r.x == 145);
+        CHECK(r.x == 35);
         CHECK(r.y == 0);
         CHECK(ReadPort1Mouse(core).x == 0);
+        CHECK(core.GetPortInputState(0).mouseX == 50); // the fraction stays
     }
     SECTION("into a fresh instance (netplay)") {
         CoreWrapper fresh;
         REQUIRE(fresh.Initialize());
         fresh.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+        fresh.SetInputSettings(InputSettings{0, 0, 35});
         fresh.SetPeripheralInput(0, Mouse(33, 21));
         REQUIRE(fresh.LoadState(state.data(), state.size()));
-        CHECK(ReadPort1Mouse(fresh).x == 145);
+        CHECK(ReadPort1Mouse(fresh).x == 35);
+        fresh.SetPeripheralInput(0, Mouse(10, 0)); // 3.5 + the 0.5 kept
+        CHECK(ReadPort1Mouse(fresh).x == 4);
     }
     SECTION("a device change clears it") {
         core.SetPeripheralInput(0, Mouse(77, 0));
@@ -439,6 +476,7 @@ TEST_CASE("mouse: accumulation survives rollback and resets on device change", "
     SECTION("a direct (TH/TR) read in progress keeps the movement it took") {
         // The first step of the handshake takes the report; a state saved in the middle of it continues with the
         // same movement, in place and in a fresh instance
+        core.SetInputSettings(InputSettings{});
         core.SetPeripheralInput(0, Mouse(0x5A, 0));
         ymir::Saturn& saturn = *core.GetSaturn();
         saturn.mainBus.Write<uint8>(0x010'0079, 0x60); // DDR1: TH and TR are outputs
@@ -489,6 +527,47 @@ TEST_CASE("mouse: accumulation survives rollback and resets on device change", "
     }
 }
 
+TEST_CASE("mouse: a handshake past its last nibble repeats it and takes no movement", "[peripherals][mouse]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+    core.SetPeripheralInput(0, Mouse(0x12, 0x34)); // Saturn y -0x34: 0xCC
+    ymir::Saturn& saturn = *core.GetSaturn();
+    saturn.mainBus.Write<uint8>(0x010'0079, 0x60);
+    saturn.mainBus.Write<uint8>(0x010'0075, 0x60);
+    bool tr = true;
+    const auto step = [&] {
+        tr = !tr;
+        saturn.mainBus.Write<uint8>(0x010'0075, tr ? 0x20 : 0x00);
+        return static_cast<uint8_t>(saturn.mainBus.Peek<uint8>(0x010'0075) & 0x0F);
+    };
+    std::vector<uint8_t> nibbles;
+    for (int i = 0; i < 9; ++i) {
+        nibbles.push_back(step());
+    }
+    REQUIRE(nibbles[0] == 0xB);
+    CHECK(nibbles[5] == 0x1);
+    CHECK(nibbles[6] == 0x2);
+    CHECK(nibbles[7] == 0xC);
+    CHECK(nibbles[8] == 0xC);
+    core.SetPeripheralInput(0, Mouse(7, 0)); // built up while the game keeps toggling
+    for (int i = 0; i < 12; ++i) {
+        CHECK(step() == nibbles[8]); // the last nibble again, not a new read
+    }
+    CHECK(core.GetPortInputState(0).mouseX == 7 * kMouseMovementUnit);
+    // TH high starts the next read, which takes it
+    saturn.mainBus.Write<uint8>(0x010'0075, 0x60);
+    tr = true;
+    nibbles.clear();
+    for (int i = 0; i < 9; ++i) {
+        nibbles.push_back(step());
+    }
+    CHECK(nibbles[0] == 0xB);
+    CHECK(nibbles[5] == 0x0);
+    CHECK(nibbles[6] == 0x7);
+    CHECK(core.GetPortInputState(0).mouseX == 0);
+}
+
 TEST_CASE("mouse: sensitivity scales movement", "[peripherals][mouse]") {
     const struct {
         unsigned percent;
@@ -524,30 +603,38 @@ TEST_CASE("mouse: sensitivity scales movement", "[peripherals][mouse]") {
 TEST_CASE("deadzone: zero equals previous mapping; continuous above threshold", "[peripherals][deadzone]") {
     PortInputState state;
     SECTION("0 %: exactly 0.7.0's mapping") {
+        // Every value of each axis (the axes map independently at 0 %), against values of the other axes across their
+        // range, extremes and centre included; every trigger value (negative ones too), with and without the digital
+        // button.
         const InputSettings zero{0, 0, 100};
-        for (int32_t v = -0x8000; v <= 0x7FFF; v += 7) {
-            for (const int16_t other : {int16_t{-0x8000}, int16_t{-12345}, int16_t{0}, int16_t{77}, int16_t{0x7FFF}}) {
-                InputSnapshot in;
-                in.leftX = static_cast<int16_t>(v);
-                in.leftY = other;
-                in.rightY = other;
-                const auto pad = MapAnalogPad(in, state, zero);
-                const auto wheel = MapArcadeRacer(in, zero);
-                const auto stick = MapMissionStick(in, state, zero);
-                if (pad.x != AxisToByte070(v, 0x80) || pad.y != AxisToByte070(other, 0x80) ||
-                    wheel.wheel != AxisToByte070(v, 0x7F) || stick.x1 != AxisToByte070(v, 0x7F) ||
-                    stick.y1 != AxisToByte070(other, 0x7F) ||
-                    stick.z1 != AxisToByte070(std::min<int32_t>(0x7FFF, -int32_t{other}), 0x7F)) {
-                    FAIL("x " << v << " y " << other);
-                }
-                // The defaults are the same mapping
-                const auto plain = MapAnalogPad(in, state);
-                if (plain.x != pad.x || plain.y != pad.y) {
-                    FAIL("default settings, x " << v << " y " << other);
+        const int16_t others[] = {int16_t{-0x8000}, int16_t{-0x7FFF}, int16_t{-12345}, int16_t{-1}, int16_t{0},
+                                  int16_t{1},       int16_t{77},      int16_t{0x4000}, int16_t{0x7FFF}};
+        for (int32_t v = -0x8000; v <= 0x7FFF; ++v) {
+            for (const int16_t other : others) {
+                for (const bool vOnX : {true, false}) {
+                    InputSnapshot in;
+                    in.leftX = vOnX ? static_cast<int16_t>(v) : other;
+                    in.leftY = vOnX ? other : static_cast<int16_t>(v);
+                    in.rightY = vOnX ? other : static_cast<int16_t>(v);
+                    const auto pad = MapAnalogPad(in, state, zero);
+                    const auto wheel = MapArcadeRacer(in, zero);
+                    const auto stick = MapMissionStick(in, state, zero);
+                    if (pad.x != AxisToByte070(in.leftX, 0x80) || pad.y != AxisToByte070(in.leftY, 0x80) ||
+                        wheel.wheel != AxisToByte070(in.leftX, 0x7F) || stick.x1 != AxisToByte070(in.leftX, 0x7F) ||
+                        stick.y1 != AxisToByte070(in.leftY, 0x7F) ||
+                        stick.z1 != AxisToByte070(std::min<int32_t>(0x7FFF, -int32_t{in.rightY}), 0x7F)) {
+                        FAIL("x " << in.leftX << " y " << in.leftY);
+                    }
+                    // The defaults are the same mapping
+                    const auto plain = MapAnalogPad(in, state);
+                    if (plain.x != pad.x || plain.y != pad.y || MapArcadeRacer(in).wheel != wheel.wheel ||
+                        MapMissionStick(in, state).x1 != stick.x1 || MapMissionStick(in, state).y1 != stick.y1) {
+                        FAIL("default settings, x " << in.leftX << " y " << in.leftY);
+                    }
                 }
             }
         }
-        for (int32_t t = 0; t <= 0x7FFF; t += 3) {
+        for (int32_t t = -0x8000; t <= 0x7FFF; ++t) {
             for (const bool digital : {false, true}) {
                 InputSnapshot in;
                 in.l2 = static_cast<int16_t>(t);

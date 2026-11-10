@@ -684,13 +684,15 @@ TEST_CASE("mouse: states before version 12 load with no movement built up", "[co
     CoreWrapper core;
     REQUIRE(core.Initialize());
     core.SetPeripheral(0, brimir::PeripheralKind::ShuttleMouse);
+    core.SetInputSettings(brimir::InputSettings{0, 0, 35});
     brimir::InputSnapshot in;
-    in.mouseX = 400;
+    in.mouseX = 10;
     core.SetPeripheralInput(0, in);
     auto& mouse = core.GetSaturn()->SMPC.GetPeripheralPort1().GetPeripheral();
     std::array<uint8_t, 3> report{};
-    mouse.Read(report); // takes 255, keeps 145
-    REQUIRE(core.GetPortInputState(0).mouseX == 145 * brimir::kMouseMovementUnit);
+    mouse.Read(report); // takes 3 of 3.5 counts
+    core.SetPeripheralInput(0, in); // a frame without a read: 0.5 + 3.5
+    REQUIRE(core.GetPortInputState(0).mouseX == 400);
     std::vector<uint8_t> saved(core.GetStateSize());
     REQUIRE(core.SaveState(saved.data(), saved.size()));
     for (const uint32_t version : {4u, 6u, 8u, 9u, 10u, 11u}) {
@@ -703,7 +705,63 @@ TEST_CASE("mouse: states before version 12 load with no movement built up", "[co
     }
     // Control: version 12 restores it
     REQUIRE(core.LoadState(saved.data(), saved.size()));
-    CHECK(core.GetPortInputState(0).mouseX == 145 * brimir::kMouseMovementUnit);
+    CHECK(core.GetPortInputState(0).mouseX == 400);
+}
+
+TEST_CASE("mouse: an older state in the middle of a direct read continues the same in every session",
+          "[core][savestate][unit][mouse]") {
+    // Versions 9-11 restore the TH/TR position but hold no mouse report: the rest of the read must not depend on the
+    // report the loading session happened to hold.
+    constexpr uint32_t kPDR1 = 0x010'0075;
+    constexpr uint32_t kDDR1 = 0x010'0079;
+    const auto startRead = [&](CoreWrapper& c, int16_t x) {
+        c.SetPeripheral(0, brimir::PeripheralKind::ShuttleMouse);
+        brimir::InputSnapshot in;
+        in.mouseX = x;
+        c.SetPeripheralInput(0, in);
+        c.GetSaturn()->mainBus.Write<uint8_t>(kDDR1, 0x60);
+        c.GetSaturn()->mainBus.Write<uint8_t>(kPDR1, 0x60);
+    };
+    const auto steps = [&](CoreWrapper& c, bool& tr, int n) {
+        std::vector<uint8_t> nibbles;
+        for (int i = 0; i < n; ++i) {
+            tr = !tr;
+            c.GetSaturn()->mainBus.Write<uint8_t>(kPDR1, tr ? 0x20 : 0x00);
+            nibbles.push_back(static_cast<uint8_t>(c.GetSaturn()->mainBus.Peek<uint8_t>(kPDR1) & 0x0F));
+        }
+        return nibbles;
+    };
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    startRead(core, 0x5A);
+    bool tr = true;
+    steps(core, tr, 3); // the read took 0x5A
+    const bool trAtSave = tr;
+    std::vector<uint8_t> saved(core.GetStateSize());
+    REQUIRE(core.SaveState(saved.data(), saved.size()));
+    const auto v11 = RepackStateAs(saved, 11);
+
+    REQUIRE(core.LoadState(v11.data(), v11.size()));
+    tr = trAtSave;
+    const auto here = steps(core, tr, 6);
+    CHECK(here[2] == 0); // X: no report in the state, so none
+    CHECK(here[3] == 0);
+
+    CoreWrapper other;
+    REQUIRE(other.Initialize());
+    startRead(other, 0x33);
+    bool otherTr = true;
+    steps(other, otherTr, 2); // this session's own report: 0x33
+    REQUIRE(other.LoadState(v11.data(), v11.size()));
+    otherTr = trAtSave;
+    CHECK(steps(other, otherTr, 6) == here);
+
+    // Control: the version 12 state keeps the report it took
+    REQUIRE(core.LoadState(saved.data(), saved.size()));
+    tr = trAtSave;
+    const auto current = steps(core, tr, 6);
+    CHECK(current[2] == 0x5);
+    CHECK(current[3] == 0xA);
 }
 
 TEST_CASE("Version 4 states have their VDP2 fetcher palette numbers converted on load",

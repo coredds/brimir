@@ -92,8 +92,9 @@ struct InputSettings {
 
 /// @brief Shuttle Mouse movement is kept in hundredths of a count (a low sensitivity loses no movement)
 inline constexpr int32_t kMouseMovementUnit = 100;
-/// @brief Bound of the movement a port keeps between reads, either axis, in kMouseMovementUnit
-inline constexpr int32_t kMouseMovementLimit = 32768 * kMouseMovementUnit;
+/// @brief Bound of the movement a port keeps between reads, either axis, in kMouseMovementUnit (whole counts fit an
+/// int16 report, negated too)
+inline constexpr int32_t kMouseMovementLimit = 32767 * kMouseMovementUnit;
 
 /// @brief Input state a port keeps across frames (held by CoreWrapper, saved in states)
 struct PortInputState {
@@ -122,10 +123,11 @@ ymir::peripheral::MissionStickReport MapMissionStick(const InputSnapshot& in, co
 /// @brief The Shuttle Mouse's buttons; the movement (zero here) is taken at each read with TakeMouseMovement
 ymir::peripheral::ShuttleMouseReport MapShuttleMouse(const InputSnapshot& in);
 
-/// @brief A read of the Shuttle Mouse (Beetle Saturn / Mednafen behaviour): it takes the movement built up since the
-/// last read and removes it from the port's state, carrying what lies beyond the report's range (-256 .. 255 counts
-/// per axis on the Saturn's axes) and any fraction of a count over to the next read. A game reading twice in one frame
-/// gets the movement once; a frame without a read loses none.
+/// @brief A read of the Shuttle Mouse (Mednafen / Beetle Saturn behaviour): it takes every whole count built up since
+/// the last read and removes it from the port's state; the mouse clamps the report to -256 .. 255 per axis and sets
+/// that axis's overflow bit beyond, so the excess is dropped (no carry to later reads). Only the fraction of a count
+/// stays (a low sensitivity loses no slow movement). A game reading twice in one frame gets the movement once; a frame
+/// without a read loses none.
 void TakeMouseMovement(PortInputState& state, ymir::peripheral::ShuttleMouseReport& report);
 
 /// @brief The emulated screen the light gun aims at: the Saturn resolution (VDP2, including hi-res and double
