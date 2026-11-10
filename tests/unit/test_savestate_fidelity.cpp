@@ -654,3 +654,59 @@ TEST_CASE("A state load restores the SH-1 serial transmit-end and multiprocessor
         }
     }
 }
+
+namespace {
+
+bool EventScheduled(const savestate::SaveState &state, core::UserEventID id) {
+    for (const auto &event : state.scheduler.events) {
+        if (event.id == id) {
+            return event.target != ~uint64{0};
+        }
+    }
+    FAIL("no such event");
+    return false;
+}
+
+} // namespace
+
+// Ymir 1ff3415: a state of the other CD Block mode switched the system with SetCDBlockLLE but left
+// configuration.cdblock.useLLE, and with it the HLE CD Block's and the CD drive's event switches (their useLLE
+// observers), at the session's mode. The next hard reset then scheduled the events of the wrong side: no CD Block at all.
+TEST_CASE("A state of the other CD Block mode switches the CD Block events with it", "[savestate][fidelity][cdblock]") {
+    auto saturn = std::make_unique<Saturn>();
+    REQUIRE_FALSE(*saturn->configuration.cdblock.useLLE);
+    const auto hle = Save(*saturn);
+    saturn->configuration.cdblock.useLLE = true; // hard-resets into low-level mode
+    const auto lle = Save(*saturn);
+    REQUIRE(lle->cdblockLLE);
+    REQUIRE_FALSE(hle->cdblockLLE);
+    CHECK(EventScheduled(*lle, core::events::CDBlockLLEDriveState));
+    CHECK_FALSE(EventScheduled(*lle, core::events::CDBlockDriveState));
+
+    SECTION("a high-level state in a low-level session") {
+        REQUIRE(saturn->LoadState(*hle, true));
+        CHECK_FALSE(*saturn->configuration.cdblock.useLLE);
+        saturn->Reset(true);
+        const auto reset = Save(*saturn);
+        CHECK_FALSE(reset->cdblockLLE);
+        CHECK(EventScheduled(*reset, core::events::CDBlockDriveState));
+        CHECK_FALSE(EventScheduled(*reset, core::events::CDBlockLLEDriveState));
+    }
+    SECTION("a low-level state in a high-level session") {
+        saturn->configuration.cdblock.useLLE = false;
+        REQUIRE(saturn->LoadState(*lle, true));
+        CHECK(*saturn->configuration.cdblock.useLLE);
+        saturn->Reset(true);
+        const auto reset = Save(*saturn);
+        CHECK(reset->cdblockLLE);
+        CHECK(EventScheduled(*reset, core::events::CDBlockLLEDriveState));
+        CHECK_FALSE(EventScheduled(*reset, core::events::CDBlockDriveState));
+    }
+    SECTION("a state of the same mode") {
+        REQUIRE(saturn->LoadState(*lle, true));
+        CHECK(*saturn->configuration.cdblock.useLLE);
+        const auto loaded = Save(*saturn);
+        CHECK(EventScheduled(*loaded, core::events::CDBlockLLEDriveState));
+        CHECK_FALSE(EventScheduled(*loaded, core::events::CDBlockDriveState));
+    }
+}
