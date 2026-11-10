@@ -9,6 +9,7 @@
 #ifdef BRIMIR_VULKAN
 #include <gpu/vdp/vulkan_vdp_renderer.hpp>
 #endif
+#include <ymir/hw/sh1/sh1_sci.hpp>
 #include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/backup_ram.hpp>
@@ -602,4 +603,39 @@ TEST_CASE("Virtua Gun jitter latches the same coordinates after a state load", "
     setUp(*fresh);
     REQUIRE(fresh->LoadState(*state, true));
     CHECK(latches(*fresh) == expected);
+}
+
+TEST_CASE("A state load restores the SH-1 serial transmit-end and multiprocessor bits",
+          "[savestate][fidelity][sh1][cdblock][brimir]") {
+    // Upstream LoadState applied the saved SSR through WriteSSR<true>, which sets TDRE, RDRF, ORER, FER and PER but
+    // not TEND, MPB and MPBT. TEND gates the SH-1's synchronous serial link to the CD drive (SH1::AdvanceSCI): with
+    // CD Block LLE a run-ahead load kept the hidden frame's TEND and the SH-1, then the whole system, diverged.
+    for (const bool saved : {false, true}) {
+        sh1::SerialCommunicationInterface sci;
+        for (auto &ch : sci.channels) {
+            ch.txEnd = saved;
+            ch.multiprocessorRxBit = saved;
+            ch.multiprocessorTxBit = saved;
+        }
+        savestate::SH1SaveState::SCI state{};
+        sci.SaveState(state);
+
+        sh1::SerialCommunicationInterface other;
+        for (auto &ch : other.channels) {
+            ch.txEnd = !saved;
+            ch.multiprocessorRxBit = !saved;
+            ch.multiprocessorTxBit = !saved;
+        }
+        other.LoadState(state);
+        for (const auto &ch : other.channels) {
+            CHECK(ch.txEnd == saved);
+            CHECK(ch.multiprocessorRxBit == saved);
+            CHECK(ch.multiprocessorTxBit == saved);
+        }
+        savestate::SH1SaveState::SCI resaved{};
+        other.SaveState(resaved);
+        for (size_t i = 0; i < 2; ++i) {
+            CHECK(resaved.channels[i].SSR == state.channels[i].SSR);
+        }
+    }
 }

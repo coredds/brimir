@@ -61,6 +61,10 @@ struct SerialCommunicationInterface {
             channels[i].TDR = state.channels[i].TDR;
             channels[i].TDRvalid = state.channels[i].TDRvalid;
             channels[i].WriteSSR<true>(state.channels[i].SSR);
+            // Brimir: WriteSSR<true> leaves TEND, MPB and MPBT alone; restore them from the saved SSR too
+            channels[i].txEnd = bit::test<2>(state.channels[i].SSR);
+            channels[i].multiprocessorRxBit = bit::test<1>(state.channels[i].SSR);
+            channels[i].multiprocessorTxBit = bit::test<0>(state.channels[i].SSR);
             channels[i].RDR = state.channels[i].RDR;
 
             channels[i].RSR = state.channels[i].RSR;
