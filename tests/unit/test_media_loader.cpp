@@ -4,6 +4,7 @@
 #include <ymir/media/binary_reader/binary_reader_mem.hpp>
 #include <ymir/media/binary_reader/binary_reader_subview.hpp>
 #include <ymir/media/disc.hpp>
+#include <ymir/media/filesystem.hpp>
 #include <ymir/media/loader/chd_hunk_cache.hpp>
 #include <ymir/media/loader/loader.hpp>
 #include <ymir/util/data_ops.hpp>
@@ -516,4 +517,84 @@ TEST_CASE("Composite reader joins a read that spans two readers", "[media][reade
     std::array<uint8_t, 4> out{};
     REQUIRE(composite.Read(2, 4, out) == 4);
     REQUIRE(out == std::array<uint8_t, 4>{3, 4, 5, 6});
+}
+
+namespace {
+
+// Writes an ISO 9660 directory record at the given offset; returns its size.
+size_t WriteDirRecord(std::vector<uint8_t>& image, size_t offset, uint32_t extent, uint32_t size, bool dir,
+                      std::string_view id) {
+    const size_t recordSize = (33 + id.size() + 1) & ~size_t{1};
+    uint8_t* rec = &image[offset];
+    rec[0] = static_cast<uint8_t>(recordSize);
+    util::WriteLE<uint32_t>(&rec[2], extent);
+    util::WriteLE<uint32_t>(&rec[10], size);
+    rec[25] = dir ? 0x02 : 0x00;
+    rec[32] = static_cast<uint8_t>(id.size());
+    std::copy(id.begin(), id.end(), &rec[33]);
+    return recordSize;
+}
+
+// A one-track data disc (2048-byte sectors from FAD 150) whose root directory holds A.BIN (LBA 24, 3 sectors) and
+// B.BIN (LBA 27, 2 sectors).
+ymir::media::Disc MakeTwoFileDisc() {
+    constexpr uint32_t kSectors = 40;
+    std::vector<uint8_t> image(kSectors * 2048, 0);
+    const auto sector = [&](uint32_t lba) { return &image[lba * 2048]; };
+    for (uint32_t lba : {16u, 17u}) {
+        uint8_t* vd = sector(lba);
+        vd[0] = lba == 16 ? 1 : 255; // primary volume descriptor, then the terminator
+        std::copy_n("CD001", 5, &vd[1]);
+        vd[6] = 1;
+    }
+    util::WriteLE<uint32_t>(&sector(16)[132], 10); // path table size
+    util::WriteLE<uint32_t>(&sector(16)[140], 18); // LSB path table at LBA 18
+    uint8_t* path = sector(18);
+    path[0] = 1;                                 // root: directory ID length 1
+    util::WriteLE<uint32_t>(&path[2], 19); // extent
+    util::WriteLE<uint16_t>(&path[6], 1);  // parent
+    size_t offset = 19 * 2048;
+    offset += WriteDirRecord(image, offset, 19, 2048, true, std::string_view("\0", 1));
+    offset += WriteDirRecord(image, offset, 19, 2048, true, std::string_view("\1", 1));
+    offset += WriteDirRecord(image, offset, 24, 3 * 2048, false, "A.BIN;1");
+    WriteDirRecord(image, offset, 27, 2 * 2048, false, "B.BIN;1");
+
+    ymir::media::Disc disc{};
+    disc.header.hwID = std::string(ymir::media::SaturnHeader::kExpectedHwId);
+    auto& session = disc.sessions.emplace_back();
+    session.numTracks = 1;
+    session.startFrameAddress = 0;
+    session.endFrameAddress = 150 + kSectors - 1;
+    auto& track = session.tracks[0];
+    track.controlADR = 0x41;
+    track.SetSectorSize(2048);
+    track.startFrameAddress = track.index01FrameAddress = 150;
+    track.endFrameAddress = session.endFrameAddress;
+    track.indices = {{150, track.endFrameAddress}};
+    track.binaryReader = std::make_unique<ymir::media::MemoryBinaryReader>(std::move(image));
+    return disc;
+}
+
+} // namespace
+
+// Ymir e2c87ed: the file lookup takes a FAD (LBA + 150), the file extents are LBAs.
+TEST_CASE("Filesystem finds the file at a frame address", "[media][filesystem]") {
+    const auto disc = MakeTwoFileDisc();
+    ymir::media::fs::Filesystem fs{};
+    REQUIRE(fs.Read(disc));
+
+    CHECK(fs.GetPathAtFrameAddress(150 + 24) == "A.BIN");
+    CHECK(fs.GetPathAtFrameAddress(150 + 25) == "A.BIN");
+    CHECK(fs.GetPathAtFrameAddress(150 + 27) == "B.BIN");
+    const auto* file = fs.GetFileAtFrameAddress(150 + 27);
+    REQUIRE(file != nullptr);
+    CHECK(file->Name() == "B.BIN");
+    CHECK(file->FrameAddress() == 27);
+
+    // Not in a file: the directory sectors, before the first FAD, past the last file
+    CHECK(fs.GetPathAtFrameAddress(150 + 19).empty());
+    CHECK(fs.GetPathAtFrameAddress(100).empty());
+    CHECK(fs.GetPathAtFrameAddress(150 + 30).empty());
+    // Before the fix the LBA of a file found it, 150 sectors early
+    CHECK(fs.GetPathAtFrameAddress(24).empty());
 }
