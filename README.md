@@ -8,15 +8,21 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed and the relevant fixes are taken, with Brimir-specific fixes and optimizations on top.
 
-## What's New in v0.7.1
+## What's New in v0.7.2
+
+- **Upstream Ymir sync** - every upstream Ymir core change up to `ff935379` (2026-11-07) reviewed: 533 commits, 4 fixes taken, 92 already in Brimir (including every game fix Ymir names in that period), Brimir's own version kept for 2, the rest skipped (mostly Ymir's GPU renderers and host CD drive support). Details in `src/core/UPSTREAM_SYNC_2026-11.md`.
+- **CD Block LLE** - resuming a paused CD audio track now continues where it was paused instead of restarting from the track's pregap.
+- No visible change otherwise: frames, save states and run-ahead behave exactly as in 0.7.1.
+
+## Previous Highlights
+
+### v0.7.1
 
 - **BIOS Auto picks the disc's region** - a Japan/Asia-only disc boots with a Japanese BIOS, any other disc with a US/EU one (falling back to any BIOS present), and region autodetection runs a multi-region disc in the BIOS's region. See [Installation](#installation).
 - **BIOS settings in save states** - a state carries the BIOS language and settings and applies them for the session; your saved settings never change from a loaded state. See [Save states](#save-states-run-ahead-rewind-and-netplay).
 - **Controller options** - Analog Stick Deadzone and Trigger Deadzone (15 % by default; 0 % = 0.7.0's mapping) and Mouse Sensitivity (100 % by default); the Shuttle Mouse moves as in Beetle Saturn. See [Controllers](#controllers).
 - **CD Block LLE validated with the real ROMs** - `cdb106.bin` and `cdb105.bin` boot the tested games, and run-ahead, rewind and netplay are exact with them in the tested games (a save-state fix). See [Accuracy options](#accuracy-options).
 - **Upgrading from 0.7.0** - states saved by 0.7.0 for non-Japanese discs were made with the Japanese BIOS (0.7.0's Auto); they load with the US/EU BIOS now, but if one misbehaves, set BIOS Selection to the Japanese BIOS to continue it. In-game saves (`.srm`) are unaffected. In Host RTC mode the new `_us_eu` settings file means the BIOS setup screen appears once.
-
-## Previous Highlights
 
 ### v0.7.0
 

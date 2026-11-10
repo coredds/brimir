@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-10
+
 ### Changed
 - **Upstream Ymir sync** - every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed and the relevant fixes are taken. Every upstream commit touching the core since Brimir's 2026-06-23 sync point was reviewed: 533 commits (532 in range plus one older one), 4 taken, 92 already in Brimir, 2 where Brimir's version is kept (`1d6ece6` Virtua Gun jitter, which Brimir keeps deterministic and held in save states, and `a8a17ee` VBlank erase time, which Brimir keeps scaling with the SH-2 overclock) and 435 skipped (mostly Ymir's GPU renderers and host CD drive support, which Brimir doesn't use). The full list with the reason for each is in `src/core/UPSTREAM_SYNC_2026-11.md`. No save-state format change: states from 0.7.1 and older load as before, and frames match 0.7.1 frame for frame for the BIOS and the ten test games with default options, and with CD Block LLE for the BIOS and five games (Sega Rally, Virtua Fighter 2, Daytona, Fighters Megamix, Guardian Heroes).
 

@@ -195,20 +195,14 @@ jobs:
 
             ### ${{ github.ref_name }}
 
-            **Added**
-            - **BIOS Auto picks the disc's region** - a Japan/Asia-only disc boots with a Japanese BIOS, any other disc with a US/EU one (falling back to any BIOS present); BIOS files are recognised by their contents. Region autodetection now runs a multi-region disc in the BIOS's region (e.g. Sega Rally USA as North America, no longer Asia).
-            - **BIOS settings in save states** - a state carries the BIOS language and settings and applies them for the session; your saved settings change only when the game or the BIOS menu saves new ones. Netplay peers no longer need matching BIOS settings.
-            - **Controller options** - Analog Stick Deadzone and Trigger Deadzone (15 % by default, as in Beetle; 0 % = 0.7.0's mapping) and Mouse Sensitivity; the Shuttle Mouse now moves as in Mednafen/Beetle (no doubled movement, no drift after fast flicks).
-            - **CD Block low-level emulation validated** with `cdb106.bin` and `cdb105.bin`: the BIOS menu and five games boot, and save states and run-ahead are exact in the tested games.
+            **Upstream Ymir sync** - every upstream Ymir core change up to `ff935379` (2026-11-07) was reviewed: 533 commits, 4 fixes taken, 92 already in Brimir (including every game fix Ymir names in that period), Brimir's own version kept for 2, and 435 skipped (mostly Ymir's GPU renderers and host CD drive support). The list with a reason for each is in `src/core/UPSTREAM_SYNC_2026-11.md`.
 
             **Fixed**
-            - The explicit BIOS choices "US v1.01" / "EU v1.00" were mislabelled: `sega_101.bin` and `sega_100.bin` are Japanese BIOS dumps (labels now JP v1.01 / JP v1.00; same files).
-            - CD Block low-level emulation: a state load didn't restore three SH-1 serial status bits, so run-ahead drifted.
+            - CD Block low-level emulation: resuming a paused CD audio track now continues where it was paused instead of restarting from the track's pregap.
+            - Loading a state of the other CD Block mode now resets the CD Block's and drive's event settings (no effect seen in normal RetroArch use).
+            - Disc file lookup offset and a VDP state copy (no output change).
 
-            **Upgrading from 0.7.0**
-            - States saved by 0.7.0 for non-Japanese discs were made with the Japanese BIOS; they load with the US/EU BIOS now, but if one misbehaves, select the Japanese BIOS to continue it. In-game saves (`.srm`) are unaffected.
-            - US/EU discs now use the `_us_eu` BIOS settings file: a language set in the Japanese BIOS isn't carried over (no setup screen in the default Virtual clock mode).
-            - The 3D Control Pad, Arcade Racer and Mission Stick get a 15 % deadzone by default; set it to 0 % for 0.7.0's mapping.
+            Frames, save states and run-ahead behave exactly as in 0.7.1 (checked on the BIOS and ten games, 40 software-vs-Vulkan compare runs, run-ahead rollback and old 0.7.1 states).
 
             **Known Limitations**
             - Vulkan at 4x: Daytona USA CE's SEGA logo and attract-mode restart stutter; rotated or distorted sprites (e.g. Astal) may differ from 1x at their edges; magnified textures stay blocky. Not tested on real Macs (MoltenVK). CD Block low-level emulation is tested on six contents only.
