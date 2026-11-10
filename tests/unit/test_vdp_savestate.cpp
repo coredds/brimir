@@ -166,3 +166,18 @@ TEST_CASE("VDP2 vertical cell scroll delay and repeat clear when the access goes
     CHECK_FALSE(nbg0.vcellScrollDelay);
     CHECK_FALSE(nbg0.vcellScrollRepeat);
 }
+
+// Ymir ff93537: the assignment (render thread reset and post-load sync) returned a copy of VRAM and CRAM.
+TEST_CASE("VDP2 memory assignment copies the contents and returns the target", "[vdp][savestate][backport]") {
+    STATIC_REQUIRE(std::is_same_v<decltype(std::declval<VDP2Memory &>() = std::declval<const VDP2Memory &>()),
+                                  VDP2Memory &>);
+    VDP2Regs regs{};
+    auto src = std::make_unique<VDP2Memory>(regs);
+    auto dst = std::make_unique<VDP2Memory>(regs);
+    src->VRAM.fill(0x5A);
+    src->CRAM.fill(0xA5);
+    VDP2Memory &result = (*dst = *src);
+    CHECK(&result == dst.get());
+    CHECK(dst->VRAM == src->VRAM);
+    CHECK(dst->CRAM == src->CRAM);
+}
