@@ -113,6 +113,21 @@ keep it on sync, and if a sync would change it, check the named tests first):
   re-run the `[jit]` tests and keep `SH2::JitSetSR`,
   `design/sh2-jit-handler-table.md` and the JIT lowering in sync.
 
+## 2026-11 upstream sync
+
+Triage of every upstream commit that touches `libs/ymir-core` from Brimir's 2026-06-23 sync point to Ymir `ff935379`
+(2026-11-07, `main`): `src/core/UPSTREAM_SYNC_2026-11.md` (532 commits: 4 take, 93 already, 1 ours-better, 434 skip;
+decisions by content, checked against a whole-tree comparison of `src/core` with `libs/ymir-core` at `ff935379`).
+
+- New upstream base: Ymir `ff935379`. Every core commit up to it is triaged; the next sync starts after it. The table's
+  Brimir commit column records where each take landed.
+- Not taken on purpose: upstream's `cd_interface`/`cd_device` rework for host CD drives (from Ymir `6ec6e27`, whose
+  game fixes 0.5.3 adapted) and the fixes to that rework's code; Brimir's CD block keeps reading the `media::Disc`.
+  Upstream's VDP restructuring for its GPU renderers and its threaded SCSP changes (Brimir runs the SCSP unthreaded)
+  are not taken either.
+- SH-2: no upstream SH-2 commit in this range is ported (Ymir `491bd62`, the pipeline refill alignment, changes nothing
+  here because `SH2::MemRead` already masks misaligned addresses; see the table).
+
 ## Brimir changes
 
 | Date | Files | Change |
