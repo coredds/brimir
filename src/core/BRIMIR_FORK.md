@@ -116,8 +116,9 @@ keep it on sync, and if a sync would change it, check the named tests first):
 ## 2026-11 upstream sync
 
 Triage of every upstream commit that touches `libs/ymir-core` from Brimir's 2026-06-23 sync point to Ymir `ff935379`
-(2026-11-07, `main`): `src/core/UPSTREAM_SYNC_2026-11.md` (532 commits: 4 take, 93 already, 1 ours-better, 434 skip;
-decisions by content, checked against a whole-tree comparison of `src/core` with `libs/ymir-core` at `ff935379`).
+(2026-11-07, `main`): `src/core/UPSTREAM_SYNC_2026-11.md` (533 rows: the 532 commits plus the pre-range `a8a17ee`;
+4 take, 92 already, 2 ours-better, 435 skip; decisions by content, checked against a whole-tree comparison of `src/core`
+with `libs/ymir-core` at `ff935379`).
 
 - New upstream base: Ymir `ff935379`. Every core commit up to it is triaged; the next sync starts after it. The table's
   Brimir commit column records where each take landed.
@@ -127,6 +128,9 @@ decisions by content, checked against a whole-tree comparison of `src/core` with
   are not taken either.
 - SH-2: no upstream SH-2 commit in this range is ported (Ymir `491bd62`, the pipeline refill alignment, changes nothing
   here because `SH2::MemRead` already masks misaligned addresses; see the table).
+- Ours-better: Ymir `a8a17ee` (2026-06-19, SH-2 clock factor as a 25%-10000% ratio, VBlank erase cycles no longer scaled by
+  it) is not taken: `brimir_sh2_overclock` allows only 100-300%, and `VDP::UpdateResolution` (`vdp.cpp`) scales the erase
+  cycles by the factor, which keeps the erase complete at overclock (controller ruling, 2026-11-10).
 
 ## Brimir changes
 
@@ -204,7 +208,8 @@ whose CD block read FIFO cursors are out of range, which upstream's `CDBlock::Va
 ## Upstream SH-2 ports
 
 Fork base: upstream Ymir hardware-layer sync of 2026-06-23 plus the backports
-listed in `CHANGELOG.md` up to v0.5.4.
+listed in `CHANGELOG.md` up to v0.5.4. The later backports and the triage of every upstream commit up to Ymir
+`ff935379` are in the "2026-11 upstream sync" section above (`UPSTREAM_SYNC_2026-11.md`).
 
 | Date | Upstream commit | Files | Notes |
 |---|---|---|---|

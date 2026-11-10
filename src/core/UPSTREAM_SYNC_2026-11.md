@@ -1,7 +1,7 @@
 # Upstream Ymir sync triage, 2026-11 (2026-06-23..ff935379)
 
 Every upstream Ymir commit since Brimir's 2026-06-23 sync point that touches `libs/ymir-core` (532 non-merge
-commits, `main` from 2026-06-23 to `ff935379`, 2026-11-07), with Brimir's decision for each. Path map: upstream
+commits, `main` from 2026-06-23 to `ff935379`, 2026-11-07), with Brimir's decision for each, plus one pre-range row (`a8a17ee`, 2026-06-19, found by the whole-tree comparison; Controller Ruling 2), 533 rows in all. Path map: upstream
 `libs/ymir-core/{include,src}` = Brimir `src/core/{include,src}`. Decisions were made by comparing each commit's change
 with Brimir's current code (not by hash: earlier backports in `CHANGELOG.md` sometimes cite other hashes), plus a
 whole-tree comparison of `src/core` with `libs/ymir-core` at `ff935379`: every upstream line Brimir lacks is explained
@@ -18,10 +18,10 @@ by a row below. Spec: `docs/superpowers/specs/2026-11-10-upstream-ymir-sync-desi
 | Decision | Commits |
 |---|---|
 | take | 4 |
-| already | 93 |
-| ours-better | 1 |
-| skip | 434 |
-| **total** | **532** |
+| already | 92 |
+| ours-better | 2 |
+| skip | 435 |
+| **total** | **533** (532 in range + 1 pre-range) |
 
 | Batch (takes) | Commits |
 |---|---|
@@ -33,7 +33,7 @@ by a row below. Spec: `docs/superpowers/specs/2026-11-10-upstream-ymir-sync-desi
 | perf/other | 1 |
 
 Skips: 305 Ymir GPU renderers and graphics backends, 55 host CD drive and the `cd_device`/`cd_interface` rework,
-8 fixes to that rework's code (Brimir kept the Disc-model CD block), 5 threaded SCSP (off in Brimir), 12 MP3/OGG
+9 of the rework's own refactor commit and fixes to its code (Brimir kept the Disc-model CD block), 5 threaded SCSP (off in Brimir), 12 MP3/OGG
 pull-request housekeeping (Brimir has its own MP3/OGG decoding), 49 others (build, documentation, debugger, frontend,
 refactors without behaviour value, and fixes that change nothing in Brimir's code).
 
@@ -60,9 +60,9 @@ The four takes, by likely effect on games:
 - **gamedb**: none.
 - **cdblock/media**:
   - `e2c87ed` fix(media): Fix file lookup FAD offset - `Filesystem::LookupFileIndexAtFrameAddress` compares an absolute FAD with file extents stored as LBAs (`extentPos`), 150 frames off; Brimir has the same code. Only feeds the CD drive's debug log and the probes (`GetPathAtFrameAddress`/`GetFileAtFrameAddress`): no emulation change.
-  - `0a9a0e2` fix(cdblock-lle): Fix resuming playback of paused audio tracks - CD Block LLE: a drive seek with index 0 means "seek to this FAD", but Brimir's `CDDrive::SetupSeek` (identical to upstream before 6ec6e27) seeks audio tracks to `indices[m_command.index]`, i.e. to the track's pregap start, so resuming a paused audio track restarts it; also `std::min(index, indices.size())` can index one past the end. Port by hand to Brimir's Disc model (only the `cd_drive.cpp` part; the `cdblock.cpp`/`cd_device_image.cpp` BCD parts belong to the rework). LLE only (off by default, validated in 0.7.1 with real ROMs): needs an LLE test with a real CD Block ROM.
+  - `0a9a0e2` fix(cdblock-lle): Fix resuming playback of paused audio tracks - CD Block LLE: a drive seek with index 0 means "seek to this FAD", but Brimir's `CDDrive::SetupSeek` (identical to upstream before 6ec6e27) seeks audio tracks to `indices[m_command.index]`, i.e. to the track's pregap start, so resuming a paused audio track restarts it; also `std::min(index, indices.size())` can index one past the end. Port by hand to Brimir's Disc model (only the `cd_drive.cpp` part; the `cdblock.cpp`/`cd_device_image.cpp` BCD parts belong to the rework). The porter must state which `m_seekOp` rule is adopted: upstream HEAD picks it from the index (index 0 gives `ReadDataSector` even on an audio track, index != 0 gives `ReadAudioSector` even on a data track), while Brimir picks it by track type (`cd_drive.cpp` 633-638), `OpReadSector` re-derives the operation from the FAD (479-483) and `CmdScan` checks it (428); keeping the track-type rule and changing only the seek target is the smaller change. LLE only (off by default, validated in 0.7.1 with real ROMs): needs an LLE test with a real CD Block ROM.
 - **cpu-sys**:
-  - `1ff3415` fix(savestates): Update CD Block LLE setting when loading save states - `Saturn::LoadState` switches the CD block mode with `SetCDBlockLLE(state.cdblockLLE)` but leaves `configuration.cdblock.useLLE` stale (Brimir has the old line); set the observable instead, which calls `SetCDBlockLLE` through its observer. Touches `Saturn::LoadState`, a Brimir-modified function (BRIMIR_FORK "Save-state fidelity" rows: `Saturn::SaveState`/`LoadState`); check `CoreWrapper::ApplyCDBlockLLE` and the LLE state-load tests.
+  - `1ff3415` fix(savestates): Update CD Block LLE setting when loading save states - `Saturn::LoadState` switches the CD block mode with `SetCDBlockLLE(state.cdblockLLE)` (Brimir has the old line), which remaps the bus and hard-resets but leaves `configuration.cdblock.useLLE` and the other `useLLE` observers stale: `CDBlock::m_eventsEnabled` (`cdblock.cpp` 67-71, also cancels the HLE events when disabled) and `CDDrive::m_eventsEnabled` (`cd_drive.cpp` 39-44, cancels the drive event), which gate the event scheduling in the two `Reset` functions. So today a cross-mode load (HLE state into an LLE session or the reverse) leaves them at the previous mode's values; only `CoreWrapper::ApplyLoadTimeOptions` (`core_wrapper.cpp` 2430) sets `useLLE` otherwise. The fix assigns `configuration.cdblock.useLLE = state.cdblockLLE`: the Saturn observer (`saturn.cpp` 165) then calls `SetCDBlockLLE`, which does nothing when the mode is unchanged. Note that every assignment `Notify()`s all observers even when the value is unchanged (`Observable::operator=`), so a same-mode load re-runs the two observers (they only re-set the flag and cancel events of the disabled side). Touches `Saturn::LoadState`, a Brimir-modified function (BRIMIR_FORK "Save-state fidelity" rows). Task 4: add a cross-mode load test (HLE state into LLE and the reverse) that checks the three flags, plus a determinism check (per-frame normal vs `--rollback` + fresh instance) on an LLE and an HLE run.
 - **vdp1**: none.
 - **vdp2**: none.
 - **perf/other**:
@@ -71,19 +71,29 @@ The four takes, by likely effect on games:
 Dependencies, Brimir-modified regions and mirrors:
 
 - `0a9a0e2` builds on upstream's cd_interface rework (6ec6e27: `BeginSeekToFrameAddress`/`BeginSeekToTrackIndex`);
-  port only its seek rule to Brimir's `CDDrive::SetupSeek` (Disc model), by hand, with a unit test of the seek target
-  (index 0 = the FAD, index n = that index's start, an index past the track's last clamped). `cd_drive.cpp` is not a
-  Brimir-modified file. No save-state change (`m_currFAD`/`m_targetFAD` are already saved).
+  port only its seek target to Brimir's `CDDrive::SetupSeek` (Disc model), by hand, with a unit test of the seek target
+  (index 0 = the FAD, index n = that index's start, an index past the track's last clamped). The porter must also state
+  which `m_seekOp` rule is adopted: upstream HEAD picks it from the index (index 0 gives `ReadDataSector` even on an
+  audio track, index != 0 gives `ReadAudioSector` even on a data track), Brimir picks it by track type
+  (`cd_drive.cpp` 633-638); `OpReadSector` re-derives the operation from the FAD (479-483) and `CmdScan` checks it (428),
+  so the track-type rule is the smaller change. `cd_drive.cpp` is not a Brimir-modified file. No save-state change
+  (`m_currFAD`, `m_targetFAD` and `m_seekOp` are already saved).
 - `1ff3415` touches `Saturn::LoadState`, which Brimir modified (BRIMIR_FORK "Save-state fidelity" rows; keep the
-  `// Brimir:` blocks). No save-state format change.
+  `// Brimir:` blocks). Today `SetCDBlockLLE(state.cdblockLLE)` leaves the other `useLLE` observers stale on a cross-mode
+  load: `CDBlock::m_eventsEnabled` (`cdblock.cpp` 67-71, also cancels the HLE events) and `CDDrive::m_eventsEnabled`
+  (`cd_drive.cpp` 39-44). The fix assigns the observable, and every assignment `Notify()`s all observers even when the
+  value is unchanged. No save-state format change. **Task 4: cross-mode load test (HLE to LLE and the reverse) with a
+  determinism check** (per-frame normal vs `--rollback` + fresh instance).
 - No take needs a Vulkan (`src/gpu`) or SH-2 JIT mirror: none changes VDP output or SH-2 behaviour.
 
-## Not in this range
+## Pre-range row
 
-Found by the whole-tree comparison, from upstream commits before 2026-06-23 that Brimir's base does not have:
-Ymir `a8a17ee` (2026-06-19: the SH-2 clock factor becomes a ratio clamped to 25%..10000%, VDP timings get a minimum of
-one cycle, and the VBlank erase cycles are no longer scaled by it). Brimir keeps the older integer `sh2OverclockFactor`,
-which no core option exposes, so it is always 100% and none of this changes emulation. Not triaged here.
+Ymir `a8a17ee` (2026-06-19) predates the sync point but Brimir's base lacks it. Controller Ruling 2: **ours-better**.
+Upstream clamps the SH-2 clock factor to 25%..10000% and stops scaling the VBlank erase cycles by it, so the erase
+completes when underclocking. Brimir offers 100-300% (`brimir_sh2_overclock`, `src/libretro/options.cpp` 408-424, applied
+through `CoreWrapper::SetSH2OverclockFactor`) and scales the erase cycles by the factor (`vdp.cpp` 822), which keeps the
+erase complete on the longer lines at overclock. Cost if wrong: an overclocked game's VBlank erase timing differs
+from Ymir's.
 
 ## Table
 
@@ -91,6 +101,7 @@ Oldest first. Batch shown for takes.
 
 | Upstream hash | Date | Subject | Decision | Reason | Brimir commit |
 |---|---|---|---|---|---|
+| `a8a17ee` | 2026-06-19 | feat(SH2): Use ratio for SH2 clock factor for more accuracy and flexibility | ours-better | before the sync point (2026-06-19), noted by the whole-tree comparison. Upstream turns the SH-2 clock factor into a ratio clamped to 25%..10000%, gives the VDP timings a minimum of one cycle and stops scaling the VBlank erase cycles by the factor so the erase completes when underclocking. Brimir allows only 100-300% (`brimir_sh2_overclock`, `src/libretro/options.cpp` 408-424, applied through `CoreWrapper::SetSH2OverclockFactor`) and scales the erase cycles with the factor (`vdp.cpp` 822), which keeps the erase complete on the longer lines at overclock; there is no underclock to protect. Controller Ruling 2. Cost if wrong: an overclocked game's VBlank erase timing differs from Ymir's | |
 | `c4f50b5` | 2026-06-23 | fix(VDP1): Copy FBRAM to renderer state when loading save states | already | 0.4.4 (2026-06-23 sync); FBRAM is now part of `mem1`, copied by the VDP1 thread's `PostLoadStateSync` case | |
 | `2578a83` | 2026-06-23 | fix(gamedb): Force fast bus timings on Resident Evil to fix start menu crashes | already | 0.4.6 (Game DB refresh); `game_db.cpp` identical to ff935379 | |
 | `d896fa7` | 2026-06-23 | fix(gamedb): Marvel Super Heroes vs. Street Fighter no longer needs the fast bus timings hack | already | 0.4.6 (Game DB refresh); `game_db.cpp` identical to ff935379 | |
@@ -145,8 +156,8 @@ Oldest first. Batch shown for takes.
 | `b19afae` | 2026-07-09 | fix(VDP2): Avoid unintentional side effects on VDP2 EXTEN register when saving states | already | 0.5.0 (EXTEN peek in save states) | |
 | `8c3241b` | 2026-07-07 | feat(cdif): Basic CD interface implementation | skip | host CD drive / cd_device rework (out of scope; RetroArch supplies the disc) | |
 | `c01c0ea` | 2026-07-07 | chore: Cleanup unused headers | skip | include cleanup | |
-| `6ec6e27` | 2026-07-08 | feat(cdblock): Use CD interface to read discs | already | 0.5.3 selectively adapted (one-based track numbers after FAD seeks, playback position reset, relative sub-Q from INDEX 01); the cd_interface refactor itself is not taken (host-drive plumbing) | |
-| `8d09201` | 2026-07-11 | fix(cdblock-hle): Detect end of track correctly when requested the last track and/or index | skip | fixes code from upstream's cd_interface/cd_device rework (6ec6e27 and later), which Brimir did not take; Brimir's Disc-model CD block has no such code path (track/index end-of-play check) | |
+| `6ec6e27` | 2026-07-08 | feat(cdblock): Use CD interface to read discs | skip | the cd_interface refactor itself is not taken (host-drive plumbing); its game-relevant parts were adapted in 0.5.3 (one-based track numbers after FAD seeks, playback position reset, relative sub-Q from INDEX 01) | |
+| `8d09201` | 2026-07-11 | fix(cdblock-hle): Detect end of track correctly when requested the last track and/or index | skip | deliberate pre-existing divergence: since the rework upstream treats an end index of 0 as 99 (play to the end of the track) and an end track of 0 as the last track; Brimir (`SetupGenericPlayback`, `cdblock.cpp` 826-858) takes track 0 / index 0 only for an all-zero end parameter, otherwise clamps the end index 0 to 1 and plays to the end of that index. Not changed here; revisit only if a game needs it | |
 | `86903e3` | 2026-07-11 | fix(cdblock-hle): Fix buffer tracing when resetting all partitions | skip | CD block partition tracer (debugger), not in Brimir | |
 | `e280cbb` | 2026-07-11 | fix(cdif): Fix crash caused by not converting BCD values for first and last track numbers | skip | fixes code from upstream's cd_interface/cd_device rework (6ec6e27 and later), which Brimir did not take; Brimir's Disc-model CD block has no such code path (`TOC::LoadFrom` in `cd_defs.cpp`) | |
 | `b8110b8` | 2026-07-12 | chore: Fix numerous cases of missing `#include`s | already | 0.5.4 (selected `<cassert>` hunk); the other hunks are in files Brimir does not have (`cd_defs.hpp`, `cd_utils.hpp`, `media_defs.cpp`) | |
@@ -196,8 +207,8 @@ Oldest first. Batch shown for takes.
 | `256ab2c` | 2026-07-13 | chore(media): Implement cleanup methods for ISO 9660 objects | skip | chore: `Clear()` helpers for ISO 9660 structs used by the cd_device rework; Brimir's parser fills what it reads | |
 | `05d74f3` | 2026-07-13 | feat(media): Allow building file systems for any valid ISO 9660 disc, not just Saturn discs | skip | feature: file systems for non-Saturn ISO 9660 discs, built on the cd_device rework | |
 | `ae4debc` | 2026-07-14 | fix(cdblock-hle): Fix resuming playback when playing audio tracks | skip | fixes code from upstream's cd_interface/cd_device rework (6ec6e27 and later), which Brimir did not take; Brimir's Disc-model CD block has no such code path (`BeginSeekToTrackIndex`/`ReadSector` plumbing and BCD); Brimir's HLE resumes from `m_status.frameAddress` | |
-| `0a9a0e2` | 2026-07-14 | fix(cdblock-lle): Fix resuming playback of paused audio tracks | take (cdblock/media) | CD Block LLE: a drive seek with index 0 means "seek to this FAD", but Brimir's `CDDrive::SetupSeek` (identical to upstream before 6ec6e27) seeks audio tracks to `indices[m_command.index]`, i.e. to the track's pregap start, so resuming a paused audio track restarts it; also `std::min(index, indices.size())` can index one past the end. Port by hand to Brimir's Disc model (only the `cd_drive.cpp` part; the `cdblock.cpp`/`cd_device_image.cpp` BCD parts belong to the rework). LLE only (off by default, validated in 0.7.1 with real ROMs): needs an LLE test with a real CD Block ROM. | |
-| `1ff3415` | 2026-07-14 | fix(savestates): Update CD Block LLE setting when loading save states | take (cpu-sys) | `Saturn::LoadState` switches the CD block mode with `SetCDBlockLLE(state.cdblockLLE)` but leaves `configuration.cdblock.useLLE` stale (Brimir has the old line); set the observable instead, which calls `SetCDBlockLLE` through its observer. Touches `Saturn::LoadState`, a Brimir-modified function (BRIMIR_FORK "Save-state fidelity" rows: `Saturn::SaveState`/`LoadState`); check `CoreWrapper::ApplyCDBlockLLE` and the LLE state-load tests. | |
+| `0a9a0e2` | 2026-07-14 | fix(cdblock-lle): Fix resuming playback of paused audio tracks | take (cdblock/media) | CD Block LLE: a drive seek with index 0 means "seek to this FAD", but Brimir's `CDDrive::SetupSeek` (identical to upstream before 6ec6e27) seeks audio tracks to `indices[m_command.index]`, i.e. to the track's pregap start, so resuming a paused audio track restarts it; also `std::min(index, indices.size())` can index one past the end. Port by hand to Brimir's Disc model (only the `cd_drive.cpp` part; the `cdblock.cpp`/`cd_device_image.cpp` BCD parts belong to the rework). The porter must state which `m_seekOp` rule is adopted: upstream HEAD picks it from the index (index 0 gives `ReadDataSector` even on an audio track, index != 0 gives `ReadAudioSector` even on a data track), while Brimir picks it by track type (`cd_drive.cpp` 633-638), `OpReadSector` re-derives the operation from the FAD (479-483) and `CmdScan` checks it (428); keeping the track-type rule and changing only the seek target is the smaller change. LLE only (off by default, validated in 0.7.1 with real ROMs): needs an LLE test with a real CD Block ROM. | |
+| `1ff3415` | 2026-07-14 | fix(savestates): Update CD Block LLE setting when loading save states | take (cpu-sys) | `Saturn::LoadState` switches the CD block mode with `SetCDBlockLLE(state.cdblockLLE)` (Brimir has the old line), which remaps the bus and hard-resets but leaves `configuration.cdblock.useLLE` and the other `useLLE` observers stale: `CDBlock::m_eventsEnabled` (`cdblock.cpp` 67-71, also cancels the HLE events when disabled) and `CDDrive::m_eventsEnabled` (`cd_drive.cpp` 39-44, cancels the drive event), which gate the event scheduling in the two `Reset` functions. So today a cross-mode load (HLE state into an LLE session or the reverse) leaves them at the previous mode's values; only `CoreWrapper::ApplyLoadTimeOptions` (`core_wrapper.cpp` 2430) sets `useLLE` otherwise. The fix assigns `configuration.cdblock.useLLE = state.cdblockLLE`: the Saturn observer (`saturn.cpp` 165) then calls `SetCDBlockLLE`, which does nothing when the mode is unchanged. Note that every assignment `Notify()`s all observers even when the value is unchanged (`Observable::operator=`), so a same-mode load re-runs the two observers (they only re-set the flag and cancel events of the disabled side). Touches `Saturn::LoadState`, a Brimir-modified function (BRIMIR_FORK "Save-state fidelity" rows). Task 4: add a cross-mode load test (HLE state into LLE and the reverse) that checks the three flags, plus a determinism check (per-frame normal vs `--rollback` + fresh instance) on an LLE and an HLE run. | |
 | `f67f154` | 2026-07-14 | fix(cdblock): More BCD shenanigans | skip | fixes code from upstream's cd_interface/cd_device rework (6ec6e27 and later), which Brimir did not take; Brimir's Disc-model CD block has no such code path (BCD in `DiscPosition`, host seek) | |
 | `734a00b` | 2026-07-14 | fix(cdif-host): Add missing function implementation for dummy host CD interface | skip | host CD drive (out of scope) | |
 | `2c898ba` | 2026-07-14 | fix(cdif-linux): Implement Linux CD device interface | skip | host CD drive (out of scope) | |
