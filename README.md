@@ -401,20 +401,21 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 
 1. Copy `brimir_libretro.dll` to your RetroArch `cores/` directory.
 2. Place a compatible Saturn BIOS file in the RetroArch `system/` directory. Supported BIOS files (any one will work):
-   - `sega_101.bin` (US v1.01)
-   - `mpr-17933.bin` (US v1.00)
-   - `sega_100.bin` (EU v1.00)
+   - `mpr-17933.bin` (US/EU v1.00)
+   - `Sega Saturn BIOS (EUR).bin` (US/EU)
    - `Sega Saturn BIOS v1.01 (JAP).bin`
    - `Sega Saturn BIOS v1.00 (JAP).bin`
+   - `sega_101.bin` (JP v1.01, Mednafen's name)
+   - `sega_100.bin` (JP v1.00, Mednafen's name)
 
-   With BIOS Selection on Auto, a Japan-only disc boots with a Japanese BIOS and any other disc with a US/EU one (files identified by their hash), falling back to any BIOS present; keep one of each region to get both.
+   With BIOS Selection on Auto, a disc for Japan/Asia only boots with a Japanese BIOS and any other disc with a US/EU one (files identified by their hash), falling back to any BIOS present; keep one of each region to get both. Region autodetection then runs a multi-region disc in the BIOS's region.
 3. Load a Saturn game (.cue, .chd, .ccd, .mds, .iso or .m3u playlist) through RetroArch. Raw `.bin`/`.img`/`.mdf` track files must be opened through their `.cue`/`.ccd`/`.mds` sheet.
 
 ## Core Options
 
 | Category | Option | Values |
 |----------|--------|--------|
-| System | BIOS Selection | Auto, JP v1.01, JP v1.00, US v1.01, US v1.00, EU v1.00, EU alt |
+| System | BIOS Selection | Auto, JP v1.01, JP v1.00, JP v1.01 (sega_101.bin), US v1.00, JP v1.00 (sega_100.bin), EU alt |
 | System | Auto-Detect Region from Disc | On/Off |
 | System | RTC Mode | Virtual (default), Host; applies on content load (see [Save states](#save-states-run-ahead-rewind-and-netplay)) |
 | System | Cartridge | Auto (default), None, 1 MB RAM, 4 MB RAM, Backup Memory, The King of Fighters '95 ROM, Ultraman ROM; applies on content load (see [Cartridges](#cartridges)) |

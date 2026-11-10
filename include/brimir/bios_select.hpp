@@ -2,11 +2,11 @@
 
 // BIOS choice for brimir_bios = auto: the BIOS of the disc's region, else any available one.
 //
-// The disc's region comes from the area codes in its header: a disc for Japan only ("J"; with the Asia NTSC codes, "JT"
-// or "JTK") gets the Japanese BIOS; a disc that also lists a western region (U, B, E, A or L: "JTUE", "JUE") or no
-// Japan at all gets the US/EU one. No content or an unreadable disc keeps the 0.7.0 order (Japanese first).
-// The SMPC area code stays region autodetection's (brimir_autodetect_region), which can differ from the BIOS region
-// on a multi-region disc; the BIOS checks the disc against that area code, not against its own region.
+// The disc's region comes from the area codes in its header: a disc that lists only Japanese-hardware regions (J, T Asia
+// NTSC, K Korea: "J", "JT", "T") gets the Japanese BIOS; a disc that lists a western region (U, B, E, A or L: "TU",
+// "JTU", "JTUE") gets the US/EU one. No content or an unreadable disc keeps the 0.7.0 order (Japanese first).
+// Region autodetection (brimir_autodetect_region) then picks the SMPC area code in the order of the loaded BIOS's
+// region (PreferredAreaOrder), so a multi-region disc runs in the BIOS's region.
 //
 // File names do not say a BIOS's region reliably (sega_101.bin and sega_100.bin are Japanese dumps under Mednafen's
 // names), so the files are identified by hash (Ymir's IPL ROM database) as they are tried; only a file the database
@@ -41,5 +41,14 @@ using BiosIdentify = std::function<std::optional<DiscRegion>(const std::string& 
 // The file to use for `region`: the first candidate of the region (by hash, else by name); none of them available:
 // the first candidate that loads; nothing loads: nullopt. Unknown region: the first candidate that loads.
 std::optional<std::string> ChooseAutoBios(DiscRegion region, const BiosIdentify& identify);
+
+// Region autodetection's preferred SMPC area codes (Japan 0x1, Asia NTSC 0x2, North America 0x4, Europe PAL 0xC) for a
+// BIOS of `biosRegion`: its own regions first. Unknown: Ymir's default order (North America, Japan, Europe, Asia NTSC).
+// A disc listing none of them gets the first area code it lists (Saturn::AutodetectRegion).
+std::vector<uint8_t> PreferredAreaOrder(DiscRegion biosRegion);
+
+// Whether retro_load_game chooses the BIOS: always for brimir_bios = auto (nullptr: the default, auto), so each content
+// gets its region's BIOS; an explicit choice only while no BIOS is loaded (as in 0.7.0).
+bool ShouldSelectBios(const char* biosOption, bool iplLoaded);
 
 } // namespace brimir

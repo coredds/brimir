@@ -695,6 +695,8 @@ private:
 
     /// @brief Returns the region suffix to use for the SMPC persistent data file.
     std::string GetSMPCRegionSuffix() const;
+    /// Region autodetection's preferred order for the loaded BIOS (PreferredAreaOrder); LoadGame, before the disc
+    void ApplyPreferredRegionOrder();
 
     /// @brief Callback invoked by the core when persistent SMPC data should be saved.
     static void OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, void *ctx);

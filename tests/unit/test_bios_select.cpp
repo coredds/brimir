@@ -2,6 +2,7 @@
 
 #include <brimir/bios_select.hpp>
 #include <brimir/core_wrapper.hpp>
+#include <brimir/lockstep.hpp>
 
 #include <algorithm>
 #include <filesystem>
@@ -92,9 +93,12 @@ std::filesystem::path WriteSaturnIso(const std::filesystem::path& dir, const std
 TEST_CASE("bios auto: disc area codes select the region", "[bios][auto]") {
     CHECK(DiscRegionFromAreaCodes(0) == DiscRegion::Unknown);
     CHECK(DiscRegionFromAreaCodes(kJ) == DiscRegion::Japan);
-    // Japan with the Asia NTSC codes: still a Japanese disc
+    // Japanese-hardware regions only (J, T Asia NTSC, K Korea): the JP BIOS
     CHECK(DiscRegionFromAreaCodes(kJ | kT) == DiscRegion::Japan);
     CHECK(DiscRegionFromAreaCodes(kJ | kT | kK) == DiscRegion::Japan);
+    CHECK(DiscRegionFromAreaCodes(kT) == DiscRegion::Japan);
+    CHECK(DiscRegionFromAreaCodes(kK) == DiscRegion::Japan);
+    CHECK(DiscRegionFromAreaCodes(kT | kK) == DiscRegion::Japan);
     CHECK(DiscRegionFromAreaCodes(kU) == DiscRegion::UsEu);
     CHECK(DiscRegionFromAreaCodes(kE) == DiscRegion::UsEu);
     CHECK(DiscRegionFromAreaCodes(kU | kE) == DiscRegion::UsEu);
@@ -105,9 +109,10 @@ TEST_CASE("bios auto: disc area codes select the region", "[bios][auto]") {
     CHECK(DiscRegionFromAreaCodes(kJ | kB) == DiscRegion::UsEu);
     CHECK(DiscRegionFromAreaCodes(kJ | kA) == DiscRegion::UsEu);
     CHECK(DiscRegionFromAreaCodes(kJ | kL) == DiscRegion::UsEu);
-    // Other regions: the US/EU BIOS
-    CHECK(DiscRegionFromAreaCodes(kT) == DiscRegion::UsEu);
-    CHECK(DiscRegionFromAreaCodes(kK) == DiscRegion::UsEu);
+    CHECK(DiscRegionFromAreaCodes(kK | kB) == DiscRegion::UsEu);
+    // Western regions only
+    CHECK(DiscRegionFromAreaCodes(kB) == DiscRegion::UsEu);
+    CHECK(DiscRegionFromAreaCodes(kA | kL) == DiscRegion::UsEu);
 }
 
 TEST_CASE("bios auto: Japanese disc picks the JP BIOS", "[bios][auto]") {
@@ -135,7 +140,8 @@ TEST_CASE("bios auto: US disc picks the US/EU BIOS", "[bios][auto]") {
     folder.files = {{kJp101, DiscRegion::Japan}, {kUs, DiscRegion::UsEu}};
     CHECK(ChooseAutoBios(DiscRegion::UsEu, folder.Identify()) == std::optional<std::string>(kUs));
 
-    // sega_101.bin is a Japanese dump (Mednafen's name): identified by hash, skipped for a US disc
+    // sega_101.bin is a Japanese dump (Mednafen's name), skipped for a US disc (hash and name agree here; the
+    // "name and hash disagree" case below tells them apart)
     FakeBiosFolder mednafen;
     mednafen.files = {{"sega_101.bin", DiscRegion::Japan}, {kJp101, DiscRegion::Japan}, {kUs, DiscRegion::UsEu}};
     CHECK(ChooseAutoBios(DiscRegion::UsEu, mednafen.Identify()) == std::optional<std::string>(kUs));
@@ -285,4 +291,183 @@ TEST_CASE("bios auto: the core loads the BIOS of the disc's region", "[bios][aut
     SECTION("none") {
         CHECK(load(&usDisc).first.empty());
     }
+}
+
+TEST_CASE("bios auto: the hash decides when name and hash disagree", "[bios][auto]") {
+    // US disc: a US/EU dump under a Japanese name is chosen over a real Japanese one (by name alone: neither file is
+    // US/EU, so the fallback would take the first candidate that loads, kJp101)
+    FakeBiosFolder usDump;
+    usDump.files = {{kJp101, DiscRegion::Japan}, {kJp100, DiscRegion::UsEu}};
+    CHECK(ChooseAutoBios(DiscRegion::UsEu, usDump.Identify()) == std::optional<std::string>(kJp100));
+
+    // Japanese disc: a Japanese dump under the EUR name is chosen over a real US one (by name alone: kUs)
+    FakeBiosFolder jpDump;
+    jpDump.files = {{kUs, DiscRegion::UsEu}, {"Sega Saturn BIOS (EUR).bin", DiscRegion::Japan}};
+    CHECK(ChooseAutoBios(DiscRegion::Japan, jpDump.Identify()) ==
+          std::optional<std::string>("Sega Saturn BIOS (EUR).bin"));
+}
+
+TEST_CASE("bios auto: selection runs on every content load", "[bios][auto]") {
+    // Auto (and the default, nullptr) chooses on each load; an explicit choice only while no BIOS is loaded
+    CHECK(brimir::ShouldSelectBios("auto", false));
+    CHECK(brimir::ShouldSelectBios("auto", true));
+    CHECK(brimir::ShouldSelectBios(nullptr, true));
+    CHECK(brimir::ShouldSelectBios("jp_101", false));
+    CHECK_FALSE(brimir::ShouldSelectBios("jp_101", true));
+    CHECK_FALSE(brimir::ShouldSelectBios("us_100", true));
+}
+
+namespace {
+
+// A content folder (system, saves) with synthetic discs, for LoadGame.
+struct RegionContent {
+    TempDir dir;
+    std::filesystem::path system;
+    std::filesystem::path saves;
+
+    explicit RegionContent(const char* name) : dir(name), system(dir.path / "system"), saves(dir.path / "saves") {
+        std::filesystem::create_directories(system);
+        std::filesystem::create_directories(saves);
+    }
+    std::filesystem::path Disc(const char* areas) {
+        return WriteSaturnIso(dir.path, std::string("disc_") + areas + ".iso", areas);
+    }
+    void AddBios(const char* name) {
+        std::filesystem::copy_file(Fixture(name), system / name, std::filesystem::copy_options::overwrite_existing);
+    }
+    // Loads the BIOS and the disc as retro_load_game does with brimir_bios = auto; returns the SMPC area code.
+    uint8_t Load(CoreWrapper& core, const std::filesystem::path& disc) {
+        const std::string path = disc.string();
+        const std::string chosen = core.LoadAutoIPL(
+            system.string().c_str(), DiscRegionFromAreaCodes(core.ReadContentAreaCodes(path.c_str())));
+        REQUIRE_FALSE(chosen.empty());
+        REQUIRE(core.LoadGame(path.c_str(), saves.string().c_str(), system.string().c_str()));
+        brimir::ApplyFixedRtc(core, brimir::kDeterministicRtcDate); // same clock for every run (FrameHash)
+        return core.GetSaturn()->SMPC.GetAreaCode();
+    }
+};
+
+uint64_t FrameHash(const CoreWrapper& core) {
+    const auto* pixels = static_cast<const uint8_t*>(core.GetFramebuffer());
+    uint64_t hash = 1469598103934665603ull;
+    for (unsigned y = 0; y < core.GetFramebufferHeight(); ++y) {
+        const uint8_t* row = pixels + static_cast<size_t>(y) * core.GetFramebufferPitch();
+        for (unsigned x = 0; x < core.GetFramebufferWidth() * 4; ++x) {
+            hash = (hash ^ row[x]) * 1099511628211ull;
+        }
+    }
+    return hash;
+}
+
+} // namespace
+
+TEST_CASE("bios auto: region autodetection prefers the BIOS's regions", "[bios][auto][region]") {
+    using Order = std::vector<uint8_t>;
+    CHECK(brimir::PreferredAreaOrder(DiscRegion::UsEu) == Order{0x4, 0xC, 0x1, 0x2});
+    CHECK(brimir::PreferredAreaOrder(DiscRegion::Japan) == Order{0x1, 0x2, 0x4, 0xC});
+    CHECK(brimir::PreferredAreaOrder(DiscRegion::Unknown) == Order{0x4, 0x1, 0xC, 0x2}); // Ymir's default
+
+    if (!std::filesystem::exists(Fixture(kJp101)) || !std::filesystem::exists(Fixture(kUs))) {
+        SKIP("JP/US BIOS fixtures missing");
+    }
+    RegionContent content("brimir_bios_auto_region");
+    auto area = [&](const char* areas) {
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        return content.Load(core, content.Disc(areas));
+    };
+
+    SECTION("US/EU BIOS: North America, then Europe") {
+        content.AddBios(kUs);
+        CHECK(area("TU") == 0x4);   // Sega Rally Championship (USA); 0.7.0: 0x2 (Asia NTSC)
+        CHECK(area("JTU") == 0x4);  // Panzer Dragoon II Zwei (USA); 0.7.0: 0x1
+        CHECK(area("JTUE") == 0x4);
+        CHECK(area("U") == 0x4);
+        CHECK(area("JE") == 0xC);
+        CHECK(area("E") == 0xC);
+        CHECK(area("J") == 0x1); // fallback BIOS: the disc's only region
+    }
+    SECTION("Japanese BIOS: Japan, then Asia NTSC") {
+        content.AddBios(kJp101);
+        CHECK(area("JT") == 0x1);
+        CHECK(area("J") == 0x1);
+        CHECK(area("T") == 0x2);
+        CHECK(area("TU") == 0x2);
+        CHECK(area("U") == 0x4);
+    }
+    SECTION("both BIOSes: the disc's BIOS and area code agree") {
+        content.AddBios(kUs);
+        content.AddBios(kJp101);
+        CHECK(area("TU") == 0x4);
+        CHECK(area("JTU") == 0x4);
+        CHECK(area("JT") == 0x1);
+        CHECK(area("T") == 0x2);
+    }
+    SECTION("autodetection disabled: the area code is left alone") {
+        content.AddBios(kUs);
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        core.SetAutodetectRegion(false);
+        CHECK(content.Load(core, content.Disc("TU")) == 0x1); // the SMPC's power-on default
+    }
+}
+
+TEST_CASE("bios auto: a second content load switches the BIOS", "[bios][auto]") {
+    if (!std::filesystem::exists(Fixture(kJp101)) || !std::filesystem::exists(Fixture(kUs))) {
+        SKIP("JP/US BIOS fixtures missing");
+    }
+    RegionContent content("brimir_bios_auto_reload");
+    content.AddBios(kUs);
+    content.AddBios(kJp101);
+    const auto usDisc = content.Disc("U");
+    const auto jpDisc = content.Disc("J");
+    constexpr int kFrames = 300;
+
+    // Reference: a fresh core with the Japanese disc
+    CoreWrapper fresh;
+    REQUIRE(fresh.Initialize());
+    REQUIRE(content.Load(fresh, jpDisc) == 0x1);
+    REQUIRE(fresh.GetLoadedIPLRegion() == DiscRegion::Japan);
+    for (int i = 0; i < kFrames; ++i) {
+        fresh.RunFrame();
+    }
+    const uint64_t expected = FrameHash(fresh);
+    fresh.UnloadGame();
+
+    // The check tells the BIOSes apart: the US/EU BIOS shows another frame for the same disc
+    {
+        CoreWrapper other;
+        REQUIRE(other.Initialize());
+        REQUIRE(other.LoadIPLFromFile((content.system / kUs).string().c_str()));
+        const std::string path = jpDisc.string();
+        REQUIRE(other.LoadGame(path.c_str(), content.saves.string().c_str(), content.system.string().c_str()));
+        brimir::ApplyFixedRtc(other, brimir::kDeterministicRtcDate);
+        for (int i = 0; i < kFrames; ++i) {
+            other.RunFrame();
+        }
+        CHECK(FrameHash(other) != expected);
+        other.UnloadGame();
+    }
+    std::filesystem::remove(content.system / "brimir_saturn_rtc_jp.smpc");
+    std::filesystem::remove(content.system / "brimir_saturn_rtc_us_eu.smpc");
+
+    // The same core: US disc (US/EU BIOS), unload, Japanese disc (Japanese BIOS)
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    CHECK(content.Load(core, usDisc) == 0x4);
+    CHECK(core.GetLoadedIPLRegion() == DiscRegion::UsEu);
+    for (int i = 0; i < 60; ++i) {
+        core.RunFrame();
+    }
+    core.UnloadGame();
+    CHECK(std::filesystem::exists(content.system / "brimir_saturn_rtc_us_eu.smpc"));
+
+    CHECK(content.Load(core, jpDisc) == 0x1);
+    CHECK(core.GetLoadedIPLRegion() == DiscRegion::Japan);
+    for (int i = 0; i < kFrames; ++i) {
+        core.RunFrame();
+    }
+    CHECK(FrameHash(core) == expected); // the Japanese BIOS booted from its reset vector
+    core.UnloadGame();
+    CHECK(std::filesystem::exists(content.system / "brimir_saturn_rtc_jp.smpc"));
 }

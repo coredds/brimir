@@ -78,6 +78,18 @@ constexpr uint32_t kLegacyStateMagic = 0x4D495242; // "BRIM" in LE
 static_assert(brimir::CoreWrapper::kSaveStateVersion == brimir::kSaveStatePayloadVersion,
               "the BRI2 header version is the codec's payload version");
 
+// The loaded IPL's region per Ymir's IPL ROM database; nullopt without a system or for a dump it does not list.
+std::optional<ymir::db::SystemRegion> IPLSystemRegion(const ymir::Saturn *saturn) {
+    if (!saturn) {
+        return std::nullopt;
+    }
+    const auto *info = ymir::db::GetIPLROMInfo(saturn->GetIPLHash());
+    if (!info) {
+        return std::nullopt;
+    }
+    return info->region;
+}
+
 bool IsM3UPath(const std::filesystem::path &path) {
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -619,6 +631,9 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             return false;
         }
 
+        // Region autodetection (in LoadDisc and below) prefers the loaded BIOS's regions (bios_select.hpp)
+        ApplyPreferredRegionOrder();
+
         // Load the disc into the emulator first
         try {
             m_saturn->LoadDisc(std::move(disc));
@@ -1049,16 +1064,11 @@ void CoreWrapper::ApplyRTCMode() {
 }
 
 std::string CoreWrapper::GetSMPCRegionSuffix() const {
-    if (!m_saturn) {
+    const auto region = IPLSystemRegion(m_saturn.get());
+    if (!region) {
         return "none";
     }
-
-    const auto *info = ymir::db::GetIPLROMInfo(m_saturn->GetIPLHash());
-    if (!info) {
-        return "none";
-    }
-
-    switch (info->region) {
+    switch (*region) {
     case ymir::db::SystemRegion::US_EU: return "us_eu";
     case ymir::db::SystemRegion::JP: return "jp";
     case ymir::db::SystemRegion::KR: return "asia";
@@ -1371,18 +1381,28 @@ bool CoreWrapper::LoadIPLFromFile(const char* path) {
 }
 
 DiscRegion CoreWrapper::GetLoadedIPLRegion() const {
-    if (!m_iplLoaded || !m_saturn) {
+    if (!m_iplLoaded) {
         return DiscRegion::Unknown;
     }
-    const auto *info = ymir::db::GetIPLROMInfo(m_saturn->GetIPLHash());
-    if (!info) {
-        return DiscRegion::Unknown;
-    }
-    switch (info->region) {
+    switch (IPLSystemRegion(m_saturn.get()).value_or(ymir::db::SystemRegion::None)) {
     case ymir::db::SystemRegion::US_EU: return DiscRegion::UsEu;
     case ymir::db::SystemRegion::JP: return DiscRegion::Japan;
     default: return DiscRegion::Unknown;
     }
+}
+
+void CoreWrapper::ApplyPreferredRegionOrder() {
+    using Region = ymir::core::config::sys::Region;
+    std::vector<Region> regions;
+    for (const uint8_t area : PreferredAreaOrder(GetLoadedIPLRegion())) {
+        switch (area) {
+        case 0x1: regions.push_back(Region::Japan); break;
+        case 0x2: regions.push_back(Region::AsiaNTSC); break;
+        case 0x4: regions.push_back(Region::NorthAmerica); break;
+        case 0xC: regions.push_back(Region::EuropePAL); break;
+        }
+    }
+    m_saturn->configuration.system.preferredRegionOrder = regions; // notifies Saturn::UpdatePreferredRegionOrder
 }
 
 uint16_t CoreWrapper::ReadContentAreaCodes(const char* path) const {

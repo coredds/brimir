@@ -1543,12 +1543,12 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         brimir_log(RETRO_LOG_INFO, "Save directory: %s", save_dir);
     }
     
-    // Load BIOS if not already loaded
-    if (!g_core->IsIPLLoaded()) {
+    // Get BIOS preference from core options
+    const char* bios_pref = get_option_value("brimir_bios", "auto");
+
+    // Load the BIOS: Auto chooses for each content (its region), an explicit choice once
+    if (brimir::ShouldSelectBios(bios_pref, g_core->IsIPLLoaded())) {
         brimir_log(RETRO_LOG_INFO, "Loading BIOS...");
-        
-        // Get BIOS preference from core options
-        const char* bios_pref = get_option_value("brimir_bios", "auto");
         
         // Map of BIOS option keys to filenames
         struct BIOSEntry {
@@ -1609,10 +1609,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             brimir_log(RETRO_LOG_ERROR, "Failed to load BIOS. Place one of the following in system directory: %s", system_dir);
             brimir_log(RETRO_LOG_ERROR, "  - Sega Saturn BIOS v1.01 (JAP).bin (JP v1.01 - recommended)");
             brimir_log(RETRO_LOG_ERROR, "  - Sega Saturn BIOS v1.00 (JAP).bin (JP v1.00)");
-            brimir_log(RETRO_LOG_ERROR, "  - sega_101.bin (US v1.01)");
-            brimir_log(RETRO_LOG_ERROR, "  - mpr-17933.bin (US v1.00)");
-            brimir_log(RETRO_LOG_ERROR, "  - sega_100.bin (EU v1.00)");
-            brimir_log(RETRO_LOG_ERROR, "  - Sega Saturn BIOS (EUR).bin");
+            brimir_log(RETRO_LOG_ERROR, "  - sega_101.bin (JP v1.01)");
+            brimir_log(RETRO_LOG_ERROR, "  - mpr-17933.bin (US/EU v1.00)");
+            brimir_log(RETRO_LOG_ERROR, "  - sega_100.bin (JP v1.00)");
+            brimir_log(RETRO_LOG_ERROR, "  - Sega Saturn BIOS (EUR).bin (US/EU)");
             brimir_log(RETRO_LOG_ERROR, "Note: sega1003.bin (JP v1.003) is NOT supported due to compatibility issues");
             return false;
         }

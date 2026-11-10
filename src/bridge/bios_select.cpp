@@ -5,6 +5,7 @@
 #include "brimir/bios_select.hpp"
 
 #include <array>
+#include <cstring>
 
 namespace brimir {
 
@@ -27,12 +28,20 @@ constexpr std::array<BiosFile, 6> kBiosFiles = {{
 }};
 
 // ymir::media::AreaCode bits
-constexpr uint16_t kAreaJapan = 1u << 0x1; // J
+constexpr uint16_t kAreaJapanese = (1u << 0x1)  // J Japan
+                                 | (1u << 0x2)  // T Asia NTSC
+                                 | (1u << 0x6); // K Korea
 constexpr uint16_t kAreaWest = (1u << 0x4)  // U North America
                              | (1u << 0x5)  // B Central/South America NTSC
                              | (1u << 0xA)  // A Asia PAL
                              | (1u << 0xC)  // E Europe PAL
                              | (1u << 0xD); // L Central/South America PAL
+
+// SMPC area codes
+constexpr uint8_t kSmpcJapan = 0x1;
+constexpr uint8_t kSmpcAsiaNTSC = 0x2;
+constexpr uint8_t kSmpcNorthAmerica = 0x4;
+constexpr uint8_t kSmpcEuropePAL = 0xC;
 
 } // namespace
 
@@ -40,7 +49,20 @@ DiscRegion DiscRegionFromAreaCodes(uint16_t areaCodes) {
     if (areaCodes == 0) {
         return DiscRegion::Unknown;
     }
-    return (areaCodes & kAreaJapan) && !(areaCodes & kAreaWest) ? DiscRegion::Japan : DiscRegion::UsEu;
+    return (areaCodes & kAreaJapanese) && !(areaCodes & kAreaWest) ? DiscRegion::Japan : DiscRegion::UsEu;
+}
+
+std::vector<uint8_t> PreferredAreaOrder(DiscRegion biosRegion) {
+    switch (biosRegion) {
+    case DiscRegion::Japan: return {kSmpcJapan, kSmpcAsiaNTSC, kSmpcNorthAmerica, kSmpcEuropePAL};
+    case DiscRegion::UsEu: return {kSmpcNorthAmerica, kSmpcEuropePAL, kSmpcJapan, kSmpcAsiaNTSC};
+    default: return {kSmpcNorthAmerica, kSmpcJapan, kSmpcEuropePAL, kSmpcAsiaNTSC};
+    }
+}
+
+bool ShouldSelectBios(const char* biosOption, bool iplLoaded) {
+    const bool autoOption = biosOption == nullptr || std::strcmp(biosOption, "auto") == 0;
+    return autoOption || !iplLoaded;
 }
 
 std::vector<std::string> BiosCandidatesForRegion(DiscRegion region) {
