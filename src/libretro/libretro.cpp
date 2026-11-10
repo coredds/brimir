@@ -1480,6 +1480,28 @@ static void apply_fixed_rtc(void) {
                text(guest).c_str());
 }
 
+static const char* brimir_region_name(brimir::DiscRegion region) {
+    switch (region) {
+    case brimir::DiscRegion::Japan: return "Japan";
+    case brimir::DiscRegion::UsEu: return "US/EU";
+    default: return "unknown";
+    }
+}
+
+// A disc header's area code symbols from the ymir::media::AreaCode bitmap ("none" for 0).
+static std::string brimir_area_letters(uint16_t area_codes) {
+    static constexpr struct { unsigned bit; char letter; } kAreas[] = {
+        {0x1, 'J'}, {0x2, 'T'}, {0x4, 'U'}, {0x5, 'B'}, {0x6, 'K'}, {0xA, 'A'}, {0xC, 'E'}, {0xD, 'L'},
+    };
+    std::string letters;
+    for (const auto& area : kAreas) {
+        if (area_codes & (1u << area.bit)) {
+            letters += area.letter;
+        }
+    }
+    return letters.empty() ? "none" : letters;
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // No content (SET_SUPPORT_NO_GAME): the BIOS runs on its own, like brimir_bench without --game.
     const bool no_content = game == nullptr;
@@ -1569,33 +1591,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
                 }
             }
         } else {
-            // Auto-detect: try Japanese BIOS first for better compatibility
-            // Japanese games work better with Japanese BIOS
-            // Note: sega1003.bin (JP v1.003) is NOT included - it has compatibility issues
-            const char* preferred_order[] = {
-                "Sega Saturn BIOS v1.01 (JAP).bin", // JP v1.01 (try first)
-                "Sega Saturn BIOS v1.00 (JAP).bin", // JP v1.00
-                "sega_101.bin",  // US v1.01
-                "mpr-17933.bin", // US v1.00
-                "sega_100.bin",  // EU v1.00
-                "Sega Saturn BIOS (EUR).bin"
-            };
-            
-            for (const char* filename : preferred_order) {
-                char bios_path[4096];
-                snprintf(bios_path, sizeof(bios_path), "%s%c%s", system_dir,
-#ifdef _WIN32
-                    '\\',
-#else
-                    '/',
-#endif
-                    filename);
-                
-                if (g_core->LoadIPLFromFile(bios_path)) {
-                    brimir_log(RETRO_LOG_INFO, "Auto-detected and loaded BIOS: %s", filename);
-                    bios_loaded = true;
-                    break;
-                }
+            // Auto: the BIOS of the disc's region, else any available one; no content: Japanese first (bios_select.hpp)
+            const uint16_t area_codes = g_core->ReadContentAreaCodes(no_content ? nullptr : game->path);
+            const brimir::DiscRegion region = brimir::DiscRegionFromAreaCodes(area_codes);
+            const std::string filename = g_core->LoadAutoIPL(system_dir, region);
+            if (!filename.empty()) {
+                const brimir::DiscRegion loaded = g_core->GetLoadedIPLRegion();
+                brimir_log(RETRO_LOG_INFO,
+                           "Auto-detected and loaded BIOS: %s (disc areas: %s, disc region: %s, BIOS region: %s)",
+                           filename.c_str(), brimir_area_letters(area_codes).c_str(), brimir_region_name(region),
+                           brimir_region_name(loaded));
+                bios_loaded = true;
             }
         }
         

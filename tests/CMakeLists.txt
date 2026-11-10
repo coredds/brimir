@@ -31,6 +31,8 @@ add_executable(brimir_tests
     unit/test_vdp_external_renderer.cpp
     # Core wrapper tests (audio volume, rotation, overscan crop)
     unit/test_core_wrapper.cpp
+    # brimir_bios = auto: the BIOS of the disc's region
+    unit/test_bios_select.cpp
     unit/test_savestate_fidelity.cpp
     unit/test_profiler.cpp
     # Beetle-compatible work RAM view (RETRO_MEMORY_SYSTEM_RAM, memory map)

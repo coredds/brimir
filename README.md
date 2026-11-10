@@ -406,6 +406,8 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
    - `sega_100.bin` (EU v1.00)
    - `Sega Saturn BIOS v1.01 (JAP).bin`
    - `Sega Saturn BIOS v1.00 (JAP).bin`
+
+   With BIOS Selection on Auto, a Japan-only disc boots with a Japanese BIOS and any other disc with a US/EU one (files identified by their hash), falling back to any BIOS present; keep one of each region to get both.
 3. Load a Saturn game (.cue, .chd, .ccd, .mds, .iso or .m3u playlist) through RetroArch. Raw `.bin`/`.img`/`.mdf` track files must be opened through their `.cue`/`.ccd`/`.mds` sheet.
 
 ## Core Options

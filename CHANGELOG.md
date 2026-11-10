@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **BIOS Auto picks the disc's region** - with `brimir_bios = auto` the core reads the disc's area codes before choosing the BIOS: a Japan-only disc (`J`, also `JT`) gets a Japanese BIOS, every other disc (including multi-region ones such as `JTU`/`JTUE`) a US/EU one; when no BIOS of that region is in the system directory, any available one is used, and with no content the order stays as before (Japanese first). BIOS files are identified by their hash, so the Japanese dumps named `sega_101.bin`/`sega_100.bin` (Mednafen's names) are not taken for a US/EU BIOS. The clock and settings file follows the BIOS loaded (`brimir_saturn_rtc_jp.smpc` or `_us_eu.smpc`), as before; explicit BIOS choices are unchanged.
+
 ## [0.7.0] - 2026-11-07
 
 ### Added

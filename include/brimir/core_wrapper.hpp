@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "audio_ring_buffer.hpp"
+#include "bios_select.hpp"
 #include "peripheral_input.hpp"
 #include "profiler.hpp"
 
@@ -201,6 +202,18 @@ public:
     /// @brief Check if BIOS/IPL is loaded
     /// @return true if BIOS is loaded
     bool IsIPLLoaded() const { return m_iplLoaded; }
+
+    /// @brief The region of the loaded BIOS per Ymir's IPL ROM database (Unknown: none loaded, not listed, Korean)
+    DiscRegion GetLoadedIPLRegion() const;
+
+    /// @brief The compatible area codes (ymir::media::AreaCode bitmap) of the disc LoadGame would load from `path`
+    /// (for an M3U, its first disc or the frontend's initial image), read without loading it; 0 when unreadable.
+    uint16_t ReadContentAreaCodes(const char* path) const;
+
+    /// @brief brimir_bios = auto: loads the BIOS of `region` (the content's, DiscRegionFromAreaCodes; no content:
+    /// Unknown) from `system_dir`, else any available one (bios_select.hpp). Returns the chosen file name, empty when
+    /// none loads.
+    std::string LoadAutoIPL(const char* system_dir, DiscRegion region);
 
     /// @brief Get the currently configured console region for libretro reporting
     ConsoleRegion GetConsoleRegion() const;

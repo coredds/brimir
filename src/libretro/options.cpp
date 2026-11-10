@@ -41,7 +41,7 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_bios",
         "BIOS Selection",
         nullptr,
-        "Select which BIOS file to use. Auto will search in priority order.",
+        "Select which BIOS file to use. Auto uses a BIOS of the disc's region (Japan-only discs: Japanese; others: US/EU), else any BIOS found.",
         nullptr,
         "system",
         {

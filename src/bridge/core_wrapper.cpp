@@ -78,6 +78,43 @@ constexpr uint32_t kLegacyStateMagic = 0x4D495242; // "BRIM" in LE
 static_assert(brimir::CoreWrapper::kSaveStateVersion == brimir::kSaveStatePayloadVersion,
               "the BRI2 header version is the codec's payload version");
 
+bool IsM3UPath(const std::filesystem::path &path) {
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return ext == ".m3u" || ext == ".m3u8";
+}
+
+// The M3U's disc paths (absolute; relative entries are relative to the M3U). False when it cannot be opened.
+bool ReadM3UEntries(const std::filesystem::path &m3uPath, std::vector<std::filesystem::path> &entries) {
+    entries.clear();
+    std::ifstream m3uFile(m3uPath);
+    if (!m3uFile) {
+        return false;
+    }
+    std::string line;
+    const std::filesystem::path m3uDir = m3uPath.parent_path();
+    while (std::getline(m3uFile, line)) {
+        // Trim whitespace
+        size_t start = 0;
+        while (start < line.size() && (line[start] == ' ' || line[start] == '\t' || line[start] == '\r')) start++;
+        size_t end = line.size();
+        while (end > start && (line[end-1] == ' ' || line[end-1] == '\t' || line[end-1] == '\r')) end--;
+        if (start >= end || line[start] == '#') continue;
+        std::string entry = line.substr(start, end - start);
+        std::filesystem::path entryPath(entry);
+        if (entryPath.is_relative()) {
+            entryPath = m3uDir / entryPath;
+        }
+        entries.push_back(std::filesystem::absolute(entryPath));
+    }
+    return true;
+}
+
+// The M3U entry LoadGame loads: the frontend's initial image when set and valid, else the first.
+size_t InitialM3UIndex(bool initialSet, unsigned initialIndex, size_t count) {
+    return initialSet && initialIndex < count ? initialIndex : 0;
+}
+
 bool LoadPersistentSMPCDataFromFile(ymir::smpc::PersistentSMPCData &data,
                                     const std::filesystem::path &path) {
     std::ifstream in{path, std::ios::binary};
@@ -424,33 +461,13 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
 
         // Handle M3U playlists for multi-disc games
         std::filesystem::path discToLoad = gamePath;
-        std::string ext = gamePath.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        
-        if (ext == ".m3u" || ext == ".m3u8") {
+
+        if (IsM3UPath(gamePath)) {
             // Parse M3U file
-            m_discList.clear();
-            std::ifstream m3uFile(gamePath);
-            if (!m3uFile) {
+            if (!ReadM3UEntries(gamePath, m_discList)) {
                 m_lastError = "Failed to open M3U file: " + gamePath.string();
                 m_initialDiscSet = false;
                 return false;
-            }
-            std::string line;
-            std::filesystem::path m3uDir = gamePath.parent_path();
-            while (std::getline(m3uFile, line)) {
-                // Trim whitespace
-                size_t start = 0;
-                while (start < line.size() && (line[start] == ' ' || line[start] == '\t' || line[start] == '\r')) start++;
-                size_t end = line.size();
-                while (end > start && (line[end-1] == ' ' || line[end-1] == '\t' || line[end-1] == '\r')) end--;
-                if (start >= end || line[start] == '#') continue;
-                std::string entry = line.substr(start, end - start);
-                std::filesystem::path entryPath(entry);
-                if (entryPath.is_relative()) {
-                    entryPath = m3uDir / entryPath;
-                }
-                m_discList.push_back(std::filesystem::absolute(entryPath));
             }
             if (m_discList.empty()) {
                 m_lastError = "M3U file contains no valid disc entries";
@@ -458,10 +475,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                 return false;
             }
             // Determine which disc to load
-            size_t loadIndex = 0;
-            if (m_initialDiscSet && m_initialDiscIndex < m_discList.size()) {
-                loadIndex = m_initialDiscIndex;
-            }
+            const size_t loadIndex = InitialM3UIndex(m_initialDiscSet, m_initialDiscIndex, m_discList.size());
             m_currentDiscIndex = loadIndex;
             discToLoad = m_discList[loadIndex];
         } else {
@@ -1356,6 +1370,67 @@ bool CoreWrapper::LoadIPLFromFile(const char* path) {
     }
 }
 
+DiscRegion CoreWrapper::GetLoadedIPLRegion() const {
+    if (!m_iplLoaded || !m_saturn) {
+        return DiscRegion::Unknown;
+    }
+    const auto *info = ymir::db::GetIPLROMInfo(m_saturn->GetIPLHash());
+    if (!info) {
+        return DiscRegion::Unknown;
+    }
+    switch (info->region) {
+    case ymir::db::SystemRegion::US_EU: return DiscRegion::UsEu;
+    case ymir::db::SystemRegion::JP: return DiscRegion::Japan;
+    default: return DiscRegion::Unknown;
+    }
+}
+
+uint16_t CoreWrapper::ReadContentAreaCodes(const char* path) const {
+    if (!path || path[0] == '\0') {
+        return 0;
+    }
+    try {
+        std::filesystem::path discPath(path);
+        if (IsM3UPath(discPath)) {
+            std::vector<std::filesystem::path> entries;
+            if (!ReadM3UEntries(discPath, entries) || entries.empty()) {
+                return 0;
+            }
+            discPath = entries[InitialM3UIndex(m_initialDiscSet, m_initialDiscIndex, entries.size())];
+        }
+        // Not preloaded: the loaders read only the header and the track layout
+        ymir::media::Disc disc;
+        if (!ymir::media::LoadDisc(discPath, disc, false, [](ymir::media::MessageType, std::string) {}) ||
+            disc.sessions.empty() || !disc.header.IsValid()) {
+            return 0;
+        }
+        return static_cast<uint16_t>(disc.header.compatAreaCode);
+    } catch (...) {
+        return 0;
+    }
+}
+
+std::string CoreWrapper::LoadAutoIPL(const char* system_dir, DiscRegion region) {
+    if (!system_dir) {
+        return {};
+    }
+    const std::filesystem::path dir(system_dir);
+    std::string loaded; // the file in the IPL now
+    const auto chosen = ChooseAutoBios(region, [&](const std::string& name) -> std::optional<DiscRegion> {
+        if (!LoadIPLFromFile((dir / name).string().c_str())) {
+            return std::nullopt;
+        }
+        loaded = name;
+        return GetLoadedIPLRegion();
+    });
+    if (!chosen) {
+        return {};
+    }
+    if (*chosen != loaded && !LoadIPLFromFile((dir / *chosen).string().c_str())) {
+        return {};
+    }
+    return *chosen;
+}
 
 const void* CoreWrapper::GetFramebuffer() const {
     return m_displayPointer ? m_displayPointer : m_framebuffer.data();
