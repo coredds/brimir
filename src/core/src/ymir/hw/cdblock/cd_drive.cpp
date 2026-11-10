@@ -633,8 +633,13 @@ FORCE_INLINE void CDDrive::SetupSeek(bool read) {
             if (track == nullptr || (track->controlADR & 0x40)) {
                 m_seekOp = Operation::ReadDataSector;
             } else {
-                const uint8 index = std::min<uint8>(m_command.index, track->indices.size());
-                m_currFAD = m_targetFAD = track->indices[index].startFrameAddress - 4;
+                // Index 0 seeks to the FAD itself (resuming a paused track), another index to the start of that index.
+                // Brimir: an index the track does not have also seeks to the FAD (upstream seeks nowhere since its
+                // cd_interface rework; this code used to read one past the end of the index list). The operation stays
+                // chosen by track type: upstream picks it by index, which reads an audio resume as data.
+                if (m_command.index != 0 && m_command.index < track->indices.size()) {
+                    m_currFAD = m_targetFAD = track->indices[m_command.index].startFrameAddress - 4;
+                }
                 m_seekOp = Operation::ReadAudioSector;
             }
         }

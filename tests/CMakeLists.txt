@@ -17,6 +17,7 @@ add_executable(brimir_tests
     # devlog must never throw (issue #7: crash on Close Content in GUI frontends)
     unit/test_dev_log.cpp
     unit/test_cdblock_hle.cpp
+    unit/test_cd_drive_lle.cpp
     unit/test_game_db.cpp
     # Ymir hardware-layer backport regressions (SMPC, VDP1, VDP2)
     unit/test_hw_backports.cpp
