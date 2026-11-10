@@ -2369,7 +2369,17 @@ void CoreWrapper::SetSCSPStepGranularity(uint32_t granularity) {
     }
 }
 
+std::string CoreWrapper::TakeStateWarningToReport() {
+    if (m_lastStateWarning.empty() || std::find(m_reportedStateWarnings.begin(), m_reportedStateWarnings.end(),
+                                                m_lastStateWarning) != m_reportedStateWarnings.end()) {
+        return {};
+    }
+    m_reportedStateWarnings.push_back(m_lastStateWarning);
+    return m_lastStateWarning;
+}
+
 void CoreWrapper::ApplyLoadTimeOptions(const char* systemDirectory) {
+    m_reportedStateWarnings.clear();
     if (!m_saturn) {
         return;
     }

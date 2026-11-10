@@ -4,8 +4,8 @@
 #include <ymir/util/inline.hpp>
 #include <ymir/util/size_ops.hpp>
 
-#include <algorithm>
-#include <cstring>
+#include <algorithm> // Brimir: std::min, std::fill (upstream relies on transitive includes)
+#include <cstring>   // Brimir: std::memcmp, std::memcpy in BrimirReadData/BrimirWriteData
 #include <fstream>
 #include <string_view>
 

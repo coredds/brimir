@@ -334,6 +334,11 @@ public:
     /// from the saving one), or an empty string
     const std::string& GetLastStateWarning() const { return m_lastStateWarning; }
 
+    /// @brief GetLastStateWarning() if it was not reported yet for this content, else an empty string; marks it
+    /// reported. Each distinct warning is reported once per content (LoadGame or ApplyLoadTimeOptions starts again):
+    /// run-ahead and rewind load states with the same settings every frame.
+    std::string TakeStateWarningToReport();
+
     /// @brief Check if the emulator is initialized
     /// @return true if initialized
     bool IsInitialized() const { return m_initialized; }
@@ -636,6 +641,7 @@ private:
     std::unique_ptr<ymir::savestate::SaveState> m_stateScratch;
     std::string m_lastStateError;
     std::string m_lastStateWarning;
+    std::vector<std::string> m_reportedStateWarnings; // TakeStateWarningToReport, since the content was loaded
     
     // Backup RAM (SRAM) data cached for libretro access
     mutable std::vector<uint8_t> m_sramData;

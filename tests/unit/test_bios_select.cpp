@@ -363,7 +363,7 @@ uint64_t FrameHash(const CoreWrapper& core) {
 
 TEST_CASE("bios auto: region autodetection prefers the BIOS's regions", "[bios][auto][region]") {
     using Order = std::vector<uint8_t>;
-    CHECK(brimir::PreferredAreaOrder(DiscRegion::UsEu) == Order{0x4, 0xC, 0x1, 0x2});
+    CHECK(brimir::PreferredAreaOrder(DiscRegion::UsEu) == Order{0x4, 0x1, 0xC, 0x2}); // Ymir's default: NTSC before PAL
     CHECK(brimir::PreferredAreaOrder(DiscRegion::Japan) == Order{0x1, 0x2, 0x4, 0xC});
     CHECK(brimir::PreferredAreaOrder(DiscRegion::Unknown) == Order{0x4, 0x1, 0xC, 0x2}); // Ymir's default
 
@@ -377,13 +377,14 @@ TEST_CASE("bios auto: region autodetection prefers the BIOS's regions", "[bios][
         return content.Load(core, content.Disc(areas));
     };
 
-    SECTION("US/EU BIOS: North America, then Europe") {
+    SECTION("US/EU BIOS: North America, then Japan, then Europe") {
         content.AddBios(kUs);
         CHECK(area("TU") == 0x4);   // Sega Rally Championship (USA); 0.7.0: 0x2 (Asia NTSC)
         CHECK(area("JTU") == 0x4);  // Panzer Dragoon II Zwei (USA); 0.7.0: 0x1
         CHECK(area("JTUE") == 0x4);
         CHECK(area("U") == 0x4);
-        CHECK(area("JE") == 0xC);
+        CHECK(area("JE") == 0x1); // Japan before Europe
+        CHECK(area("TE") == 0xC); // Europe before Asia NTSC
         CHECK(area("E") == 0xC);
         CHECK(area("J") == 0x1); // fallback BIOS: the disc's only region
     }

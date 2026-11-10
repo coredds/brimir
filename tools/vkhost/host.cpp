@@ -10,6 +10,7 @@
 #include <bit>
 #include <chrono>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -598,10 +599,16 @@ static void LogMemoryMap(const std::vector<retro_memory_descriptor>& map, const 
                  ramSize, achievements ? "supported" : "not declared", map.size());
     for (size_t i = 0; i < map.size(); ++i) {
         const retro_memory_descriptor& d = map[i];
-        const auto* ptr = static_cast<const uint8_t*>(d.ptr) + d.offset;
+        // Integer addresses: no pointer arithmetic on a null or foreign pointer
         char where[64] = "outside RETRO_MEMORY_SYSTEM_RAM";
-        if (d.ptr != nullptr && ram != nullptr && ptr >= ram && ptr + d.len <= ram + ramSize) {
-            std::snprintf(where, sizeof(where), "RETRO_MEMORY_SYSTEM_RAM + 0x%zx", static_cast<size_t>(ptr - ram));
+        if (d.ptr != nullptr && ram != nullptr) {
+            const uintptr_t base = reinterpret_cast<uintptr_t>(ram);
+            const uintptr_t at = reinterpret_cast<uintptr_t>(d.ptr);
+            if (at >= base && at - base <= ramSize && d.offset <= ramSize - (at - base) &&
+                d.len <= ramSize - (at - base) - d.offset) {
+                std::snprintf(where, sizeof(where), "RETRO_MEMORY_SYSTEM_RAM + 0x%zx",
+                              static_cast<size_t>(at - base + d.offset));
+            }
         }
         std::fprintf(stderr, "vkhost: memory map %zu: flags 0x%llx start 0x%08zx len 0x%zx (%s) -> %s\n", i,
                      static_cast<unsigned long long>(d.flags), static_cast<size_t>(d.start), static_cast<size_t>(d.len),
@@ -920,7 +927,13 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
         return true;
     case kEnv(RETRO_ENVIRONMENT_SET_MEMORY_MAPS): {
         const auto* map = static_cast<const retro_memory_map*>(data);
-        m_memoryMap.assign(map->descriptors, map->descriptors + map->num_descriptors);
+        if (map == nullptr || (map->descriptors == nullptr && map->num_descriptors != 0)) {
+            return false;
+        }
+        m_memoryMap.clear();
+        if (map->num_descriptors != 0) {
+            m_memoryMap.assign(map->descriptors, map->descriptors + map->num_descriptors);
+        }
         m_memoryMapLogged = false;
         return true;
     }

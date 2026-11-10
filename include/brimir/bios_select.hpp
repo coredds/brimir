@@ -43,8 +43,9 @@ using BiosIdentify = std::function<std::optional<DiscRegion>(const std::string& 
 std::optional<std::string> ChooseAutoBios(DiscRegion region, const BiosIdentify& identify);
 
 // Region autodetection's preferred SMPC area codes (Japan 0x1, Asia NTSC 0x2, North America 0x4, Europe PAL 0xC) for a
-// BIOS of `biosRegion`: its own regions first. Unknown: Ymir's default order (North America, Japan, Europe, Asia NTSC).
-// A disc listing none of them gets the first area code it lists (Saturn::AutodetectRegion).
+// BIOS of `biosRegion`. Japanese BIOS: Japan, Asia NTSC, North America, Europe. US/EU BIOS and Unknown: Ymir's default
+// order (North America, Japan, Europe, Asia NTSC), so a disc runs as PAL only when it lists neither North America nor
+// Japan ("JE" runs as Japan). A disc listing none of them gets the first area code it lists (Saturn::AutodetectRegion).
 std::vector<uint8_t> PreferredAreaOrder(DiscRegion biosRegion);
 
 // Whether retro_load_game chooses the BIOS: always for brimir_bios = auto (nullptr: the default, auto), so each content

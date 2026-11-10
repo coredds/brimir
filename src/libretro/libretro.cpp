@@ -1393,8 +1393,8 @@ RETRO_API bool retro_unserialize(const void* data, size_t size) {
                 environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
             }
         }
-        if (const std::string& warning = g_core->GetLastStateWarning(); !warning.empty()) {
-            brimir_log(RETRO_LOG_WARN, "Save state: %s (emulation may differ from the saving session)",
+        if (const std::string warning = g_core->TakeStateWarningToReport(); !warning.empty()) {
+            brimir_log(RETRO_LOG_WARN, "Save state: %s (emulation may differ from the saving session; logged once)",
                        warning.c_str());
         }
         return true;

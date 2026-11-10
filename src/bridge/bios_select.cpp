@@ -55,8 +55,7 @@ DiscRegion DiscRegionFromAreaCodes(uint16_t areaCodes) {
 std::vector<uint8_t> PreferredAreaOrder(DiscRegion biosRegion) {
     switch (biosRegion) {
     case DiscRegion::Japan: return {kSmpcJapan, kSmpcAsiaNTSC, kSmpcNorthAmerica, kSmpcEuropePAL};
-    case DiscRegion::UsEu: return {kSmpcNorthAmerica, kSmpcEuropePAL, kSmpcJapan, kSmpcAsiaNTSC};
-    default: return {kSmpcNorthAmerica, kSmpcJapan, kSmpcEuropePAL, kSmpcAsiaNTSC};
+    default: return {kSmpcNorthAmerica, kSmpcJapan, kSmpcEuropePAL, kSmpcAsiaNTSC}; // US/EU BIOS too: Ymir's default
     }
 }
 

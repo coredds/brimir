@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <random>
 #include <span>
 #include <string>
 #include <utility>
@@ -205,31 +206,21 @@ TEST_CASE("SetAudioVolume does not break audio output", "[audio][integration]") 
 
     std::vector<int16_t> buf(2048 * 2);
 
-    // 0% volume
+    // 0% volume: silence
     core.SetAudioVolume(0);
     core.RunFrame();
-    size_t samples0 = core.GetAudioSamples(buf.data(), 2048);
+    const size_t samples0 = core.GetAudioSamples(buf.data(), 2048);
+    CHECK(samples0 <= 2048);
+    CHECK(std::all_of(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(samples0 * 2),
+                      [](int16_t s) { return s == 0; }));
 
-    // 100% volume
+    // 100% and 200% volume (the latter must not overflow: samples are int16_t, so only the count is checked)
     core.SetAudioVolume(100);
     core.RunFrame();
-    size_t samples100 = core.GetAudioSamples(buf.data(), 2048);
-
-    // 200% volume (should not overflow)
+    CHECK(core.GetAudioSamples(buf.data(), 2048) <= 2048);
     core.SetAudioVolume(200);
     core.RunFrame();
-    size_t samples200 = core.GetAudioSamples(buf.data(), 2048);
-
-    // Default — verify samples not obviously corrupt
-    if (samples100 > 0) {
-        for (size_t i = 0; i < samples100 * 2; ++i) {
-            REQUIRE(buf[i] >= -32768);
-            REQUIRE(buf[i] <= 32767);
-        }
-    }
-
-    (void)samples0;
-    (void)samples200;
+    CHECK(core.GetAudioSamples(buf.data(), 2048) <= 2048);
 }
 
 // ============================================================
@@ -1633,7 +1624,8 @@ struct RtcContent {
     std::filesystem::path cue;
 
     explicit RtcContent(const char* name) {
-        root = std::filesystem::temp_directory_path() / name;
+        // A unique folder per instance, so test runs in parallel (or a folder left by a crashed run) do not collide
+        root = std::filesystem::temp_directory_path() / (std::string(name) + "_" + std::to_string(std::random_device{}()));
         std::filesystem::remove_all(root);
         saves = root / "saves";
         system = root / "system";
@@ -1913,54 +1905,69 @@ TEST_CASE("rtc: a v0.6.x state keeps the clock running from its own uptime", "[c
     // wrap: thousands of years) or above it (a jump by the difference).
     const int64_t hostMode = util::datetime::to_timestamp(util::datetime::kDefaultDateTime);
     RtcContent content("brimir_rtc_olduptime_test");
-    CoreWrapper core;
-    REQUIRE(core.Initialize());
-    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
-    core.SetRTCMode(RTCMode::Virtual);
-    REQUIRE(content.Load(core));
-    const auto runFrames = [&](int n) {
+    const auto start = [&](CoreWrapper& core) {
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetRTCMode(RTCMode::Virtual);
+        REQUIRE(content.Load(core));
+    };
+    const auto runFrames = [](CoreWrapper& core, int n) {
         for (int i = 0; i < n; ++i) {
             core.RunFrame();
         }
     };
-    const auto saveV5 = [&] {
+    uint64_t uptime = 0; // scheduler count of the last state saved
+    const auto saveV5 = [&](CoreWrapper& core) {
         std::vector<uint8_t> saved(core.GetStateSize());
         REQUIRE(core.SaveState(saved.data(), saved.size()));
-        return RepackState(saved, 5, [&](ymir::savestate::SaveState& s) { s.smpc.rtcTimestamp = hostMode; });
+        return RepackState(saved, 5, [&](ymir::savestate::SaveState& s) {
+            s.smpc.rtcTimestamp = hostMode;
+            uptime = s.scheduler.currCount;
+        });
     };
-    runFrames(30);
-    const auto early = saveV5(); // 0.5 s of uptime
-    runFrames(900);
-    const auto late = saveV5(); // 15.5 s of uptime
+    CoreWrapper core;
+    start(core);
+    runFrames(core, 30);
+    const auto early = saveV5(core); // 0.5 s of uptime
+    const uint64_t earlyUptime = uptime;
+    runFrames(core, 900);
+    const auto late = saveV5(core); // 15.5 s of uptime
+    const uint64_t lateUptime = uptime;
 
     // The session's clock now, and after the load plus kFrames frames (10 s)
     constexpr int kFrames = 600;
-    const auto check = [&](int64_t start) {
-        runFrames(kFrames);
-        core.GetSaturn()->SMPC.SyncVirtualRTC();
-        CHECK(std::llabs(PersistentData(core).rtc.timestamp - (start + 10)) <= 2);
-        const auto guest = util::datetime::to_timestamp(core.GetSaturn()->SMPC.GetRTC().GetDateTime());
-        CHECK(std::llabs(guest - (start + 10)) <= 2);
-        core.UnloadGame();
-        CHECK(std::llabs(RtcFileTimestamp(content.RtcFile()) - (start + 10)) <= 2);
+    const auto check = [&](CoreWrapper& session, int64_t begin) {
+        runFrames(session, kFrames);
+        session.GetSaturn()->SMPC.SyncVirtualRTC();
+        CHECK(std::llabs(PersistentData(session).rtc.timestamp - (begin + 10)) <= 2);
+        const auto guest = util::datetime::to_timestamp(session.GetSaturn()->SMPC.GetRTC().GetDateTime());
+        CHECK(std::llabs(guest - (begin + 10)) <= 2);
+        session.UnloadGame();
+        CHECK(std::llabs(RtcFileTimestamp(content.RtcFile()) - (begin + 10)) <= 2);
     };
-    const auto sessionNow = [&] {
-        core.GetSaturn()->SMPC.SyncVirtualRTC();
-        return PersistentData(core).rtc.timestamp;
+    const auto sessionNow = [](CoreWrapper& session) {
+        session.GetSaturn()->SMPC.SyncVirtualRTC();
+        return PersistentData(session).rtc.timestamp;
     };
 
     SECTION("uptime below the session's last RTC sync") {
-        const int64_t start = sessionNow();
+        const int64_t begin = sessionNow(core);
+        saveV5(core);
+        REQUIRE(earlyUptime < uptime);
         REQUIRE(core.LoadState(early.data(), early.size()));
-        check(start);
+        check(core, begin);
     }
     SECTION("uptime above the session's") {
+        // A fresh core: a reloaded one keeps its scheduler count, so its uptime would not start again
         core.UnloadGame();
-        REQUIRE(content.Load(core)); // uptime starts again
-        runFrames(30);
-        const int64_t start = sessionNow();
-        REQUIRE(core.LoadState(late.data(), late.size()));
-        check(start);
+        CoreWrapper fresh;
+        start(fresh);
+        runFrames(fresh, 30);
+        const int64_t begin = sessionNow(fresh);
+        saveV5(fresh);
+        REQUIRE(lateUptime > uptime);
+        REQUIRE(fresh.LoadState(late.data(), late.size()));
+        check(fresh, begin);
     }
 }
 
@@ -2004,15 +2011,15 @@ std::filesystem::path JpBiosFixture() {
     return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / "Sega Saturn BIOS v1.01 (JAP).bin";
 }
 
-// An RTC file (layout above) with these settings and a virtual clock at 2001-09-09
-void WriteRtcSettingsFile(const std::filesystem::path& path, const Smem& smem, uint8_t ste) {
+// An RTC file (layout above) with these settings and a virtual clock (default 2001-09-09)
+void WriteRtcSettingsFile(const std::filesystem::path& path, const Smem& smem, uint8_t ste,
+                          int64_t timestamp = 1000000000) {
     std::ofstream out(path, std::ios::binary);
     const char header[4] = {1, 0, 0, 0};
     out.write(header, sizeof(header));
     out.write(reinterpret_cast<const char*>(smem.data()), smem.size());
     out.put(static_cast<char>(ste));
     const int64_t offset = 0;
-    const int64_t timestamp = 1000000000;
     out.write(reinterpret_cast<const char*>(&offset), 8);
     out.write(reinterpret_cast<const char*>(&timestamp), 8);
 }
@@ -2083,8 +2090,8 @@ struct SettingsSession {
     RtcContent content;
     CoreWrapper core;
 
-    SettingsSession(const char* name, const Smem& smem, uint8_t ste) : content(name) {
-        WriteRtcSettingsFile(content.RtcFile(), smem, ste);
+    SettingsSession(const char* name, const Smem& smem, uint8_t ste, int64_t timestamp = 1000000000) : content(name) {
+        WriteRtcSettingsFile(content.RtcFile(), smem, ste, timestamp);
         REQUIRE(core.Initialize());
         REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
         core.SetRTCMode(RTCMode::Virtual);
@@ -2138,7 +2145,10 @@ TEST_CASE("smpc settings: state load does not overwrite the saved settings", "[c
             SettingsSession a("brimir_smpc_settings_keep_a", kSettingsA, 1);
             saved = a.Save();
         }
-        SettingsSession b("brimir_smpc_settings_keep_b", kSettingsB, 1);
+        // b's file holds a clock 30 days after a's, so the persisted clock tells which one the session ran on
+        constexpr int64_t kStateClock = 1000000000;
+        constexpr int64_t kSessionClock = kStateClock + 30 * 86400;
+        SettingsSession b("brimir_smpc_settings_keep_b", kSettingsB, 1, kSessionClock);
         REQUIRE(b.core.LoadState(saved.data(), saved.size()));
         for (int i = 0; i < 30; ++i) {
             b.core.RunFrame();
@@ -2148,8 +2158,8 @@ TEST_CASE("smpc settings: state load does not overwrite the saved settings", "[c
         const auto file = ReadRtcFileSettings(b.content.RtcFile());
         CHECK(file.smem == kSettingsB);
         CHECK(file.ste);
-        // The clock is still persisted from the session (0.7.0 behaviour): the state's, run on by 30 frames
-        CHECK(RtcFileTimestamp(b.content.RtcFile()) >= 1000000000);
+        // The clock is still persisted from the session (0.7.0 behaviour): the state's, run on by 30 frames (0.5 s)
+        CHECK(std::llabs(RtcFileTimestamp(b.content.RtcFile()) - kStateClock) <= 2);
         // The next session starts with the user's settings
         REQUIRE(b.content.Load(b.core));
         CHECK(PersistentData(b.core).SMEM == kSettingsB);
@@ -2186,6 +2196,38 @@ TEST_CASE("smpc settings: state load does not overwrite the saved settings", "[c
         CHECK(ReadRtcFileSettings(content.RtcFile()).smem == kSettingsB);
         CHECK(FileBytes(jpFile) == jpBytes);
     }
+}
+
+TEST_CASE("smpc settings: a first boot writes the settings file at unload", "[core][rtc][smpc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // No RTC file: the session's settings (and, in virtual mode, its clock) reach a new file when it unloads
+    const RTCMode mode = GENERATE(RTCMode::Virtual, RTCMode::Host);
+    const bool virtualMode = mode == RTCMode::Virtual;
+    INFO((virtualMode ? "virtual" : "host"));
+    RtcContent content(virtualMode ? "brimir_smpc_settings_firstboot_virtual" : "brimir_smpc_settings_firstboot_host");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    core.SetRTCMode(mode);
+    REQUIRE(content.Load(core));
+    for (int i = 0; i < 30; ++i) {
+        core.RunFrame();
+    }
+    CHECK_FALSE(std::filesystem::exists(content.RtcFile()));
+    core.UnloadGame();
+    REQUIRE(std::filesystem::exists(content.RtcFile()));
+    const auto file = ReadRtcFileSettings(content.RtcFile());
+    CHECK(file.smem == Smem{0, 0, 0, 0});
+    CHECK(file.ste == virtualMode); // virtual: configured (no BIOS setup screen); host: the BIOS asks, as before
+    if (virtualMode) {
+        CHECK(std::llabs(RtcFileTimestamp(content.RtcFile()) - HostEpochSeconds()) <= 120);
+    }
+    // The next session reads the file back
+    REQUIRE(content.Load(core));
+    CHECK(PersistentData(core).SMEM == Smem{0, 0, 0, 0});
+    CHECK(PersistentData(core).STE == virtualMode);
 }
 
 TEST_CASE("smpc settings: guest SETSMEM updates the file", "[core][rtc][savestate][smpc]") {
@@ -3017,18 +3059,84 @@ TEST_CASE("accuracy: states record the session's settings and warn when they dif
     CHECK_FALSE(plain->IsSH2CacheEmulationActive());
     CHECK(plain->GetSaturn()->SCSP.GetStepGranularity() == 0);
 
+    // Reported (logged) once per content: run-ahead loads the same state every frame
+    CHECK(plain->TakeStateWarningToReport() == warning);
+    CHECK(plain->TakeStateWarningToReport().empty());
+    REQUIRE(plain->LoadState(otherState.data(), otherState.size()));
+    CHECK(plain->GetLastStateWarning() == warning);
+    CHECK(plain->TakeStateWarningToReport().empty());
+    plain->ApplyLoadTimeOptions(dir.string().c_str()); // the next content (LoadGame applies them too)
+    REQUIRE(plain->LoadState(otherState.data(), otherState.size()));
+    CHECK(plain->TakeStateWarningToReport() == warning);
+
     // A version 10 state records nothing: no warning
     const auto v10 = RepackStateAs(otherState, 10);
     REQUIRE(plain->LoadState(v10.data(), v10.size()));
     CHECK(plain->GetLastStateWarning().empty());
+    CHECK(plain->TakeStateWarningToReport().empty());
 
     // Only the granularity differs
     other->SetSH2CacheEmulation(false);
     other->ApplyLoadTimeOptions(dir.string().c_str());
     REQUIRE(other->LoadState(plainState.data(), plainState.size()));
     CHECK(other->GetLastStateWarning() == "SCSP step granularity was 0 in the saving session, 3 here");
+    // Each distinct warning is reported
+    CHECK(other->TakeStateWarningToReport() == "SCSP step granularity was 0 in the saving session, 3 here");
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("rollback: double-density interlace and hi-res stay deterministic", "[core][savestate][rollback][vdp]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // The vkhost check rollback_deterministic runs the BIOS menu, which never leaves progressive normal resolution, so
+    // it cannot see the interlace and hi-res state of the save-state fixes (TVSTAT.ODD, the latched HCNT, a pending
+    // TVMD change, the other field's framebuffers). Here the BIOS runs with TVMD switched every 40 frames between
+    // double-density interlace hi-res, single-density interlace and progressive (each switch is pending until the next
+    // top border, across the state loads), with and without the deinterlace enhancement. Core b runs every frame twice,
+    // loading the state saved before the first run (RetroArch's single-instance run-ahead); a runs each frame once.
+    const bool deinterlace = GENERATE(false, true);
+    INFO("deinterlace " << deinterlace);
+    constexpr uint32_t kTVMD = 0x5F8'0000;
+    const auto workload = [](CoreWrapper& core, int frame) {
+        if (frame < 60 || frame % 40 != 0) {
+            return;
+        }
+        static constexpr uint16_t kModes[] = {
+            0x8000 | 0x00C0 | 0x0002, // display on, double-density interlace, hi-res (640)
+            0x8000 | 0x0080 | 0x0001, // single-density interlace, 352
+            0x8000,                   // progressive, 320
+        };
+        core.GetSaturn()->mainBus.Write<uint16_t>(kTVMD, kModes[(frame / 40) % 3]);
+    };
+    CoreWrapper a;
+    CoreWrapper b;
+    for (CoreWrapper* core : {&a, &b}) {
+        REQUIRE(core->Initialize());
+        brimir::PrepareLockstepCore(*core);
+        REQUIRE(core->LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core->SetDeinterlacing(deinterlace);
+    }
+    REQUIRE(brimir::SyncLockstepCores(a, b));
+    std::vector<uint8_t> buffer(b.GetStateSize());
+    bool sawDoubleDensity = false;
+    for (int frame = 0; frame < 360; ++frame) {
+        workload(a, frame);
+        a.RunFrame();
+        REQUIRE(b.SaveState(buffer.data(), buffer.size()));
+        workload(b, frame);
+        b.RunFrame();
+        REQUIRE(b.LoadState(buffer.data(), buffer.size()));
+        workload(b, frame);
+        b.RunFrame();
+        sawDoubleDensity = sawDoubleDensity || a.GetFramebufferHeight() >= 448;
+        if (frame % 20 == 19) {
+            INFO("after frame " << frame);
+            REQUIRE(brimir::CompareCores(a, b).empty());
+        }
+    }
+    CHECK(sawDoubleDensity); // the workload reached the output
 }
 
 TEST_CASE("accuracy: options deterministic under rollback", "[core][accuracy][savestate]") {

@@ -605,10 +605,16 @@ void VDP::LoadState(const savestate::VDPSaveState &state, const savestate::Brimi
         UpdateResolution<true>();
     }
     if (brimir != nullptr && brimir->virtuaGun.valid && brimir->virtuaGun.jitterState != 0) {
-        // Brimir: the Virtua Gun jitter (states from version 10 on; older ones keep the running values)
+        // Brimir: the Virtua Gun jitter (states from version 10 on)
         m_virtuaGunJitterState = brimir->virtuaGun.jitterState;
         m_virtuaGunLastJitterX = brimir->virtuaGun.lastJitterX & 3;
         m_virtuaGunLastJitterY = brimir->virtuaGun.lastJitterY & 3;
+    } else {
+        // Brimir: older states hold none; it starts over as after a hard reset, so every load of such a state continues
+        // the same way (in place or in another instance)
+        m_virtuaGunJitterState = kVirtuaGunJitterSeed;
+        m_virtuaGunLastJitterX = 0;
+        m_virtuaGunLastJitterY = 0;
     }
 
     switch (m_state.VPhase) {

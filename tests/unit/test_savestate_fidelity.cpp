@@ -603,6 +603,21 @@ TEST_CASE("Virtua Gun jitter latches the same coordinates after a state load", "
     setUp(*fresh);
     REQUIRE(fresh->LoadState(*state, true));
     CHECK(latches(*fresh) == expected);
+
+    // A state without the jitter (before version 10) starts it over from the seed, as a hard reset does, so it
+    // continues the same way in place and in another instance (it kept the running jitter before 0.7.1)
+    auto seeded = std::make_unique<Saturn>();
+    setUp(*seeded);
+    const auto fromSeed = latches(*seeded);
+    auto old = std::make_unique<savestate::SaveState>(*state);
+    old->brimir.virtuaGun = {};
+    REQUIRE(saturn->LoadState(*old, true));
+    CHECK(latches(*saturn) == fromSeed);
+    auto other = std::make_unique<Saturn>();
+    setUp(*other);
+    latches(*other); // a different running jitter
+    REQUIRE(other->LoadState(*old, true));
+    CHECK(latches(*other) == fromSeed);
 }
 
 TEST_CASE("A state load restores the SH-1 serial transmit-end and multiprocessor bits",

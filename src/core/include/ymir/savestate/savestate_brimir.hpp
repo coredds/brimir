@@ -89,7 +89,7 @@ struct BrimirSaveState {
 
     // From version 10 on (version 9 ends before this member): the Virtua Gun jitter of VDP::ExternalLatch (enabled
     // for Death Crimson), whose random numbers come from this xorshift32 state (never zero) and avoid repeating the
-    // last value on each axis.
+    // last value on each axis. A state without it (`valid` false) restarts the jitter from its seed (VDP::LoadState).
     struct VirtuaGun {
         bool valid;
         uint32 jitterState;
@@ -111,8 +111,9 @@ struct BrimirSaveState {
     // From version 12 on (in a version 11 payload these bytes are the struct's tail padding, cleared on load): the BIOS
     // settings the SMPC keeps (SMEM, written by SETSMEM: language, sound mode and the like; STE, false until they are
     // set), which the guest reads with INTBACK and the state lacked, so a state loaded into a session with other
-    // settings (netplay, another machine) ran differently. Saved by SMPC::SaveBrimirState and applied by SMPC::LoadBrimirState; the bridge (CoreWrapper)
-    // never writes a loaded state's settings to the frontend's settings file.
+    // settings (netplay, another machine) ran differently. Saved by SMPC::SaveBrimirState and applied by
+    // SMPC::LoadBrimirState; the bridge (CoreWrapper) never writes a loaded state's settings to the frontend's settings
+    // file.
     struct SMPCSettings {
         bool valid;
         std::array<uint8, 4> SMEM;

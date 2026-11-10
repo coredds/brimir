@@ -414,7 +414,7 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_
         static_assert(from <= ymir::savestate::kBrimirSaveStateV8Size);
         std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
     } else if (version == 9) {
-        // virtuaGun: valid false, the running jitter is kept, as version 9 loaded
+        // virtuaGun: valid false, the jitter starts over from its seed (VDP::LoadState)
         using ymir::savestate::BrimirSaveState;
         constexpr size_t from = offsetof(BrimirSaveState, virtuaGun);
         static_assert(from <= ymir::savestate::kBrimirSaveStateV9Size);
