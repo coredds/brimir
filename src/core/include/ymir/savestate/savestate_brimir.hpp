@@ -118,6 +118,27 @@ struct BrimirSaveState {
         std::array<uint8, 4> SMEM;
         bool STE;
     } smpcSettings;
+
+    // From version 12 on too (it made the struct larger than version 11's, so a version 12 payload under a version 11
+    // header is refused): the Shuttle Mouse movement per port. Each read of the mouse (INTBACK, or the first step of a
+    // TH/TR handshake) takes the movement built up since the last one, so what is built up is input state that a
+    // run-ahead frame or a netplay peer must see the same, and a handshake in progress reads the report it took.
+    // `valid` is set by SMPC::SaveBrimirState; states before version 12 have none (no movement built up).
+    struct Mouse {
+        bool valid;
+        struct Port {
+            // Written and read by the bridge (CoreWrapper): the movement built up since the last read, in hundredths
+            // of a count (libretro axes: right and down positive), bounded by brimir::kMouseMovementLimit.
+            sint32 accumX;
+            sint32 accumY;
+            // Saved by the core (ShuttleMouse::SaveBrimirReport): the report the last read took (Saturn axes), which
+            // the rest of a TH/TR handshake reads; buttons: bit 0 left, 1 right, 2 middle, 3 start.
+            sint16 reportX;
+            sint16 reportY;
+            uint8 reportButtons;
+        };
+        std::array<Port, 2> ports;
+    } mouse;
 };
 
 // Bytes of the extension in a version 6 payload (before scspSlots), on every supported ABI.

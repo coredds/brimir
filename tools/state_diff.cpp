@@ -3,6 +3,7 @@
 // Licensed under GPL-3.0
 //
 //   brimir_state_diff [--strict] <a.state> <b.state>
+//   brimir_state_diff --drop-mouse-movement <in.state> <out.state>   (test only: DropMouseMovement below)
 //
 // Decodes two retro_serialize states (BRI2 header, LZ4 payload, savestate_codec.hpp) and compares the renderer section
 // (VDPSaveState::VDPRendererSaveState) field by field. Both renderers save the software renderer's layout, but the
@@ -114,10 +115,55 @@ bool CharEq(const Renderer::CharacterSaveState &a, const Renderer::CharacterSave
 
 } // namespace
 
+// Test only (vkhost check peripherals_rollback_deterministic, negative control): writes a copy of a state without the
+// Shuttle Mouse movement built up on either port, as a load that failed to restore it would leave it. Exit status 0 when
+// a port had movement to drop, 4 when none had (the control would prove nothing), 2 on a read or write error.
+int DropMouseMovement(const char *in, const char *out) {
+    auto state = std::make_unique<SaveState>();
+    if (!Load(in, *state)) {
+        return 2;
+    }
+    bool any = false;
+    for (size_t i = 0; i < state->brimir.mouse.ports.size(); ++i) {
+        auto &port = state->brimir.mouse.ports[i];
+        std::printf("port %zu: movement built up x=%d y=%d (hundredths of a count), dropped\n", i + 1,
+                    static_cast<int>(port.accumX), static_cast<int>(port.accumY));
+        any = any || port.accumX != 0 || port.accumY != 0;
+        port.accumX = 0;
+        port.accumY = 0;
+    }
+    std::vector<uint8_t> payload;
+    if (!brimir::EncodeSaveState(*state, payload)) {
+        return 2;
+    }
+    std::vector<uint8_t> data(16 + static_cast<size_t>(LZ4_compressBound(static_cast<int>(payload.size()))));
+    const int compressed = LZ4_compress_default(reinterpret_cast<const char *>(payload.data()),
+                                                reinterpret_cast<char *>(data.data() + 16),
+                                                static_cast<int>(payload.size()), static_cast<int>(data.size() - 16));
+    if (compressed <= 0) {
+        return 2;
+    }
+    const uint32_t header[4] = {kMagic, brimir::kSaveStatePayloadVersion, static_cast<uint32_t>(payload.size()),
+                                static_cast<uint32_t>(compressed)};
+    std::memcpy(data.data(), header, sizeof(header));
+    data.resize(16 + static_cast<size_t>(compressed));
+    std::ofstream file(out, std::ios::binary);
+    file.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (!file) {
+        std::fprintf(stderr, "%s: cannot write\n", out);
+        return 2;
+    }
+    return any ? 0 : 4;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && std::strcmp(argv[1], "--drop-mouse-movement") == 0) {
+        return DropMouseMovement(argv[2], argv[3]);
+    }
     const bool strict = argc == 4 && std::strcmp(argv[1], "--strict") == 0;
     if (argc != 3 && !strict) {
-        std::fprintf(stderr, "Usage: brimir_state_diff [--strict] <a.state> <b.state>\n");
+        std::fprintf(stderr, "Usage: brimir_state_diff [--strict] <a.state> <b.state>\n"
+                             "       brimir_state_diff --drop-mouse-movement <in.state> <out.state>\n");
         return 1;
     }
     const char *pathA = argv[argc - 2];

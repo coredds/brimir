@@ -483,6 +483,73 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "cross"
     },
     {
+        // Live: the next frame's input (libretro.cpp, CoreWrapper::SetInputSettings).
+        "brimir_analog_deadzone",
+        "Analog Stick Deadzone",
+        nullptr,
+        "Inner deadzone of the analog stick of the 3D Control Pad, Arcade Racer and Mission Stick device types, as a "
+        "share of the stick's range: inside it the stick reads centred, beyond it the rest of the range is stretched "
+        "to the full range (no jump at the edge). It adds to any deadzone set in the frontend's input settings. 0% "
+        "reads the stick as reported. Applies immediately.",
+        nullptr,
+        "input",
+        {
+            { "0", "0%" },
+            { "5", "5%" },
+            { "10", "10%" },
+            { "15", "15%" },
+            { "20", "20%" },
+            { "25", "25%" },
+            { "30", "30%" },
+            { nullptr, nullptr }
+        },
+        "15"
+    },
+    {
+        // Live, like brimir_analog_deadzone.
+        "brimir_trigger_deadzone",
+        "Trigger Deadzone",
+        nullptr,
+        "Inner deadzone of the analog L and R triggers of the 3D Control Pad device type, as a share of their travel: "
+        "a trigger pulled less reads released, the rest of the travel is stretched to the full range. It adds to any "
+        "deadzone set in the frontend's input settings. 0% reads the triggers as reported. Applies immediately.",
+        nullptr,
+        "input",
+        {
+            { "0", "0%" },
+            { "5", "5%" },
+            { "10", "10%" },
+            { "15", "15%" },
+            { "20", "20%" },
+            { "25", "25%" },
+            { "30", "30%" },
+            { nullptr, nullptr }
+        },
+        "15"
+    },
+    {
+        // Live, like brimir_analog_deadzone.
+        "brimir_mouse_sensitivity",
+        "Mouse Sensitivity",
+        nullptr,
+        "Scales the movement of the Shuttle Mouse device type. Movement is kept until the game reads the mouse, so "
+        "none is lost or counted twice. Applies immediately.",
+        nullptr,
+        "input",
+        {
+            { "5", "5%" },     { "10", "10%" },   { "15", "15%" },   { "20", "20%" },   { "25", "25%" },
+            { "30", "30%" },   { "35", "35%" },   { "40", "40%" },   { "45", "45%" },   { "50", "50%" },
+            { "55", "55%" },   { "60", "60%" },   { "65", "65%" },   { "70", "70%" },   { "75", "75%" },
+            { "80", "80%" },   { "85", "85%" },   { "90", "90%" },   { "95", "95%" },   { "100", "100%" },
+            { "105", "105%" }, { "110", "110%" }, { "115", "115%" }, { "120", "120%" }, { "125", "125%" },
+            { "130", "130%" }, { "135", "135%" }, { "140", "140%" }, { "145", "145%" }, { "150", "150%" },
+            { "155", "155%" }, { "160", "160%" }, { "165", "165%" }, { "170", "170%" }, { "175", "175%" },
+            { "180", "180%" }, { "185", "185%" }, { "190", "190%" }, { "195", "195%" }, { "200", "200%" },
+            { nullptr, nullptr }
+        },
+        "100"
+    },
+    {
         "brimir_profiling",
         "Performance Profiling",
         nullptr,
@@ -535,6 +602,34 @@ brimir::CartridgeChoice brimir_cartridge_choice(const char* value) {
         }
     }
     return CartridgeChoice::Auto;
+}
+
+namespace {
+
+// A percentage option value: a multiple of 5 within [min, max], else the fallback (the option's default).
+unsigned percent_value(const char* value, unsigned min, unsigned max, unsigned fallback) {
+    if (value == nullptr || *value == '\0') {
+        return fallback;
+    }
+    unsigned n = 0;
+    for (const char* c = value; *c != '\0'; ++c) {
+        if (*c < '0' || *c > '9' || n > max) {
+            return fallback;
+        }
+        n = n * 10 + static_cast<unsigned>(*c - '0');
+    }
+    return n >= min && n <= max && n % 5 == 0 ? n : fallback;
+}
+
+} // namespace
+
+brimir::InputSettings brimir_input_settings(const char* analog_deadzone, const char* trigger_deadzone,
+                                            const char* mouse_sensitivity) {
+    brimir::InputSettings settings;
+    settings.analogDeadzone = percent_value(analog_deadzone, 0, 30, 15);
+    settings.triggerDeadzone = percent_value(trigger_deadzone, 0, 30, 15);
+    settings.mouseSensitivity = percent_value(mouse_sensitivity, 5, 200, 100);
+    return settings;
 }
 
 const struct retro_core_options_v2* brimir_get_core_options_v2(void) {

@@ -344,11 +344,21 @@ function(padded_frame k out)
     string(SUBSTRING "0000${k}" ${start} 5 padded)
     set(${out} "${padded}" PARENT_SCOPE)
 endfunction()
+# The Shuttle Mouse (Beetle-like movement: each read takes what was built up since the last one) runs at 35 %
+# sensitivity, so reads leave fractions of a count built up, which the states must carry:
+# 4. Its movement reaches the emulation: the same input at 5 % gives states that differ outside the extension.
+# 5. Second instance as in 3 (with --input-offset), and a negative control: the plain state with the movement built up
+#    dropped (brimir_state_diff --drop-mouse-movement, which fails when there was none to drop) does not continue as
+#    the plain run.
 foreach(devices IN ITEMS "3dpad;missionstick" "wheel;gun" "mouse;pad")
     list(GET devices 0 dev0)
     list(GET devices 1 dev1)
-    foreach(mode IN ITEMS plain rollback noinput)
-        set(extra --input-pattern 7 --save-state-every 5 "${state_dir}/peripherals_${dev0}_${mode}")
+    set(pair_options "")
+    if(dev0 STREQUAL "mouse")
+        set(pair_options --option brimir_mouse_sensitivity=35)
+    endif()
+    foreach(mode IN ITEMS plain rollback noinput lowsens)
+        set(extra --input-pattern 7 --save-state-every 5 "${state_dir}/peripherals_${dev0}_${mode}" ${pair_options})
         if(mode STREQUAL "rollback")
             list(APPEND extra --rollback)
         elseif(mode STREQUAL "noinput")
@@ -356,6 +366,12 @@ foreach(devices IN ITEMS "3dpad;missionstick" "wheel;gun" "mouse;pad")
                 continue()
             endif()
             set(extra "")
+        elseif(mode STREQUAL "lowsens")
+            if(NOT dev0 STREQUAL "mouse")
+                continue()
+            endif()
+            set(extra --input-pattern 7 --save-state-every 5 "${state_dir}/peripherals_${dev0}_${mode}"
+                      --option brimir_mouse_sensitivity=5)
         endif()
         execute_process(
             COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 200 --hash --device 0 ${dev0}
@@ -379,13 +395,26 @@ foreach(devices IN ITEMS "3dpad;missionstick" "wheel;gun" "mouse;pad")
             "${state_dir}/peripherals_${dev0}_plain/state_${padded}.bin"
             "${state_dir}/peripherals_${dev0}_rollback/state_${padded}.bin")
     endforeach()
-    if(dev0 STREQUAL "3dpad")
+    if(dev0 STREQUAL "mouse")
+        foreach(k IN ITEMS 99 199)
+            padded_frame(${k} at)
+            execute_process(COMMAND "${STATE_DIFF}" --strict "${state_dir}/peripherals_mouse_plain/state_${at}.bin"
+                                    "${state_dir}/peripherals_mouse_lowsens/state_${at}.bin"
+                OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+            string(REGEX MATCH "strict: [^\n]*" sd_strict "${sd_out}")
+            if(NOT sd_code EQUAL 3 OR NOT sd_strict OR sd_strict MATCHES "^strict: brimir state differs")
+                message(FATAL_ERROR "peripherals_rollback_deterministic: the mouse movement does not reach the emulation "
+                                    "(35 % and 5 % sensitivity after frame ${k}: exit ${sd_code}, ${sd_strict})\n${sd_err}")
+            endif()
+        endforeach()
+    endif()
+    if(dev0 STREQUAL "3dpad" OR dev0 STREQUAL "mouse")
         foreach(k IN ITEMS 19 59 99 139)
             padded_frame(${k} from)
             math(EXPR offset "${k} + 1")
             execute_process(
                 COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 20 --device 0 ${dev0}
-                        --device 1 ${dev1} --input-pattern 7 --input-offset ${offset}
+                        --device 1 ${dev1} --input-pattern 7 --input-offset ${offset} ${pair_options}
                         --load-state "${state_dir}/peripherals_${dev0}_plain/state_${from}.bin"
                         --save-state-every 5 "${state_dir}/peripherals_${dev0}_from${k}"
                 OUTPUT_VARIABLE prb_out ERROR_VARIABLE prb_err RESULT_VARIABLE prb_code)
@@ -397,16 +426,62 @@ foreach(devices IN ITEMS "3dpad;missionstick" "wheel;gun" "mouse;pad")
                 math(EXPR plain_frame "${k} + 1 + ${j}")
                 padded_frame(${j} at)
                 padded_frame(${plain_frame} expected)
-                peripheral_states_equal("second instance from the state after frame ${k}: its state after frame ${plain_frame} differs from the plain run's"
+                peripheral_states_equal("${dev0}+${dev1}: second instance from the state after frame ${k}: its state after frame ${plain_frame} differs from the plain run's"
                     "${state_dir}/peripherals_${dev0}_from${k}/state_${at}.bin"
                     "${state_dir}/peripherals_${dev0}_plain/state_${expected}.bin")
             endforeach()
         endforeach()
     endif()
+    if(dev0 STREQUAL "mouse")
+        foreach(k IN ITEMS 59 139)
+            padded_frame(${k} from)
+            math(EXPR offset "${k} + 1")
+            set(dropped "${state_dir}/peripherals_mouse_dropped${k}.bin")
+            execute_process(COMMAND "${STATE_DIFF}" --drop-mouse-movement
+                                    "${state_dir}/peripherals_mouse_plain/state_${from}.bin" "${dropped}"
+                OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+            if(NOT sd_code EQUAL 0)
+                message(FATAL_ERROR "peripherals_rollback_deterministic: no mouse movement built up in the state after "
+                                    "frame ${k} to drop (exit ${sd_code}): the negative control would prove nothing\n"
+                                    "${sd_out}${sd_err}")
+            endif()
+            execute_process(
+                COMMAND "${VKHOST}" --bios "${BIOS}" --fixed-date --warmup 0 --frames 20 --device 0 ${dev0}
+                        --device 1 ${dev1} --input-pattern 7 --input-offset ${offset} ${pair_options}
+                        --load-state "${dropped}" --save-state-every 5 "${state_dir}/peripherals_mouse_dropped_from${k}"
+                OUTPUT_VARIABLE prb_out ERROR_VARIABLE prb_err RESULT_VARIABLE prb_code)
+            if(NOT prb_code EQUAL 0)
+                message(FATAL_ERROR "peripherals_rollback_deterministic (negative control from ${k}): exit ${prb_code}\n"
+                                    "${prb_err}")
+            endif()
+            set(control_differs FALSE)
+            foreach(j IN ITEMS 4 9 14 19)
+                math(EXPR plain_frame "${k} + 1 + ${j}")
+                padded_frame(${j} at)
+                padded_frame(${plain_frame} expected)
+                execute_process(COMMAND "${STATE_DIFF}" --strict
+                                        "${state_dir}/peripherals_mouse_dropped_from${k}/state_${at}.bin"
+                                        "${state_dir}/peripherals_mouse_plain/state_${expected}.bin"
+                    OUTPUT_VARIABLE sd_out ERROR_VARIABLE sd_err RESULT_VARIABLE sd_code)
+                if(sd_code EQUAL 3)
+                    set(control_differs TRUE)
+                elseif(NOT sd_code EQUAL 0)
+                    message(FATAL_ERROR "peripherals_rollback_deterministic (negative control): state_diff exit ${sd_code}\n"
+                                        "${sd_out}${sd_err}")
+                endif()
+            endforeach()
+            if(NOT control_differs)
+                message(FATAL_ERROR "peripherals_rollback_deterministic: a load without the mouse movement built up "
+                                    "(state after frame ${k}) still continued as the plain run: the continuation check "
+                                    "does not see the movement")
+            endif()
+        endforeach()
+    endif()
 endforeach()
-message(STATUS "peripherals_rollback_deterministic: the input reaches the BIOS; with all six peripherals and scripted "
-               "input --rollback emulates exactly the plain run (40 states per device pair), and states loaded into a "
-               "fresh instance continue identically (3D pad mode and Mission Stick throttle latch included, 16 states). "
+message(STATUS "peripherals_rollback_deterministic: the input reaches the BIOS (mouse movement included); with all six "
+               "peripherals and scripted input --rollback emulates exactly the plain run (40 states per device pair), "
+               "and states loaded into a fresh instance continue identically (3D pad mode, Mission Stick throttle latch "
+               "and the mouse movement built up included, 32 states), while dropping the mouse movement does not. "
                "The TH/TR handshake fields rest on the unit tests (the BIOS reads through INTBACK).")
 
 # accuracy_rollback_deterministic: with SH-2 cache emulation, SCSP step granularity 3 and CD Block LLE chosen without

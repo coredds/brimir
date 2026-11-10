@@ -207,6 +207,20 @@ void SMPC::SaveBrimirState(savestate::BrimirSaveState &ext) const {
     save(m_port1, ext.peripherals.ports[0]);
     save(m_port2, ext.peripherals.ports[1]);
     ext.peripherals.valid = true;
+    // The Shuttle Mouse's report of the read in progress (the movement built up is the bridge's)
+    const auto saveMouse = [](const peripheral::PeripheralPort &port, savestate::BrimirSaveState::Mouse::Port &out) {
+        const peripheral::BasePeripheral &peripheral = port.GetPeripheral();
+        if (peripheral.GetType() == peripheral::PeripheralType::ShuttleMouse) {
+            static_cast<const peripheral::ShuttleMouse &>(peripheral).SaveBrimirReport(out);
+        } else {
+            out.reportX = 0;
+            out.reportY = 0;
+            out.reportButtons = 0;
+        }
+    };
+    saveMouse(m_port1, ext.mouse.ports[0]);
+    saveMouse(m_port2, ext.mouse.ports[1]);
+    ext.mouse.valid = true;
     ext.smpcSettings.SMEM = SMEM;
     ext.smpcSettings.STE = m_STE;
     ext.smpcSettings.valid = true;
@@ -229,6 +243,18 @@ void SMPC::LoadBrimirState(const savestate::BrimirSaveState &ext) {
     };
     load(m_port1, ext.peripherals.ports[0]);
     load(m_port2, ext.peripherals.ports[1]);
+    if (ext.mouse.valid) {
+        const auto loadMouse = [](peripheral::PeripheralPort &port, const savestate::BrimirSaveState::Peripherals::Port &in,
+                                  const savestate::BrimirSaveState::Mouse::Port &mouse) {
+            peripheral::BasePeripheral &peripheral = port.GetPeripheral();
+            if (peripheral.GetType() == peripheral::PeripheralType::ShuttleMouse &&
+                in.type == static_cast<uint8>(peripheral::PeripheralType::ShuttleMouse)) {
+                static_cast<peripheral::ShuttleMouse &>(peripheral).LoadBrimirReport(mouse);
+            }
+        };
+        loadMouse(m_port1, ext.peripherals.ports[0], ext.mouse.ports[0]);
+        loadMouse(m_port2, ext.peripherals.ports[1], ext.mouse.ports[1]);
+    }
 }
 
 bool SMPC::ValidateState(const savestate::SMPCSaveState &state) const {

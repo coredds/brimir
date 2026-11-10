@@ -680,6 +680,32 @@ std::vector<uint8_t> RepackStateAs(const std::vector<uint8_t>& saved, uint32_t v
 
 } // namespace
 
+TEST_CASE("mouse: states before version 12 load with no movement built up", "[core][savestate][unit][mouse]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetPeripheral(0, brimir::PeripheralKind::ShuttleMouse);
+    brimir::InputSnapshot in;
+    in.mouseX = 400;
+    core.SetPeripheralInput(0, in);
+    auto& mouse = core.GetSaturn()->SMPC.GetPeripheralPort1().GetPeripheral();
+    std::array<uint8_t, 3> report{};
+    mouse.Read(report); // takes 255, keeps 145
+    REQUIRE(core.GetPortInputState(0).mouseX == 145 * brimir::kMouseMovementUnit);
+    std::vector<uint8_t> saved(core.GetStateSize());
+    REQUIRE(core.SaveState(saved.data(), saved.size()));
+    for (const uint32_t version : {4u, 6u, 8u, 9u, 10u, 11u}) {
+        CAPTURE(version);
+        core.SetPeripheralInput(0, in);
+        const auto buf = RepackStateAs(saved, version);
+        REQUIRE(core.LoadState(buf.data(), buf.size()));
+        CHECK(core.GetPortInputState(0).mouseX == 0);
+        CHECK(core.GetPortInputState(0).mouseY == 0);
+    }
+    // Control: version 12 restores it
+    REQUIRE(core.LoadState(saved.data(), saved.size()));
+    CHECK(core.GetPortInputState(0).mouseX == 145 * brimir::kMouseMovementUnit);
+}
+
 TEST_CASE("Version 4 states have their VDP2 fetcher palette numbers converted on load",
           "[core][savestate][unit][regression][brimir]") {
     CoreWrapper core;
@@ -1086,6 +1112,33 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
             CHECK_FALSE(decoded->brimir.smpcSettings.STE);
             CHECK(decoded->brimir.smpcSettings.SMEM == std::array<uint8_t, 4>{});
             CHECK(decoded->brimir.peripherals.valid); // what version 11 has is still read
+        }
+        {
+            using Mo = B::Mouse;
+            const size_t port1 = offsetof(B, mouse) + offsetof(Mo, ports) + sizeof(Mo::Port);
+            const uint8_t badButtons = 0x10;
+            const int32_t past = brimir::kMouseMovementLimit + 1;
+            const int32_t limit = -brimir::kMouseMovementLimit;
+            const int16_t anyMovement = -300;
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, mouse) + offsetof(Mo, valid), &zero, 1), *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, mouse) + offsetof(Mo, valid), &two, 1), *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(port1 + offsetof(Mo::Port, reportButtons), &badButtons, 1), *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(port1 + offsetof(Mo::Port, accumX), &past, 4), *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, mouse) + offsetof(Mo, ports) + offsetof(Mo::Port, accumY),
+                                                  &past, 4),
+                                          *decoded));
+            REQUIRE(DecodeSaveState(patched(port1 + offsetof(Mo::Port, accumY), &limit, 4), *decoded));
+            CHECK(decoded->brimir.mouse.ports[1].accumY == limit);
+            // The report of a read in progress is clamped by the mouse's Read; any value loads
+            REQUIRE(DecodeSaveState(patched(port1 + offsetof(Mo::Port, reportX), &anyMovement, 2), *decoded));
+            // Version 11 ends before it: cleared, not checked
+            const size_t v11 = ext + ymir::savestate::kBrimirSaveStateV11Size;
+            const auto bad = patched(port1 + offsetof(Mo::Port, accumX), &past, 4);
+            REQUIRE(DecodeSaveState(std::span<const uint8_t>(bad.data(), v11), *decoded, 11));
+            CHECK_FALSE(decoded->brimir.mouse.valid);
+            CHECK(decoded->brimir.mouse.ports[1].accumX == 0);
+            // ... and a version 12 payload under a version 11 header is longer than version 11: refused
+            REQUIRE_FALSE(DecodeSaveState(payload, *decoded, 11));
         }
         // Without the extension (versions 4 and 5) the same bytes are not read.
         REQUIRE(DecodeSaveState(std::span<const uint8_t>(payload.data(), ext), *decoded, 5));

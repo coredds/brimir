@@ -4,6 +4,7 @@
 #include <brimir/peripheral_input.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 namespace brimir {
 
@@ -82,17 +83,68 @@ uint8_t AxisToByte(int32_t v, int32_t center) {
 }
 
 // Analog trigger (0 .. 0x7FFF) to 0x00 .. 0xFF; a frontend without analog triggers reports 0, so the digital button
-// then gives a full press.
-uint8_t TriggerToByte(int16_t analog, bool digital) {
+// then gives a full press. A deadzone of `percent` of the travel reads as released (the analog value decides, not the
+// digital button), the rest is rescaled to the full travel; 0 % is the plain conversion.
+uint8_t TriggerToByte(int16_t analog, bool digital, unsigned percent) {
     if (analog > 0) {
-        return static_cast<uint8_t>(std::min<int32_t>(255, (int32_t{analog} * 255 + 0x3FFF) / 0x7FFF));
+        int32_t t = analog;
+        if (percent != 0) {
+            const int32_t edge = 0x7FFF * static_cast<int32_t>(percent) / 100;
+            t = t <= edge ? 0 : (t - edge) * 0x7FFF / (0x7FFF - edge);
+        }
+        return static_cast<uint8_t>(std::min<int32_t>(255, (t * 255 + 0x3FFF) / 0x7FFF));
     }
     return digital ? 0xFF : 0x00;
+}
+
+// floor(sqrt(n)), exact (integer arithmetic keeps the mapping the same on every host: netplay)
+int64_t ISqrt(int64_t n) {
+    int64_t r = static_cast<int64_t>(std::sqrt(static_cast<double>(n)));
+    while (r * r > n) {
+        --r;
+    }
+    while ((r + 1) * (r + 1) <= n) {
+        ++r;
+    }
+    return r;
+}
+
+// Radial deadzone of `percent` of a stick's range: inside it the stick is centred, outside the distance from its edge
+// is rescaled to the full range along the stick's direction (continuous at the edge; corners clamp). 0 % leaves the
+// stick as it is.
+struct Stick {
+    int32_t x;
+    int32_t y;
+};
+
+Stick StickDeadzone(int32_t x, int32_t y, unsigned percent) {
+    if (percent == 0) {
+        return {x, y};
+    }
+    constexpr int64_t kRange = 0x8000;
+    const int64_t edge = kRange * percent / 100;
+    const int64_t r = ISqrt(int64_t{x} * x + int64_t{y} * y);
+    if (r <= edge) {
+        return {0, 0};
+    }
+    const int64_t num = (r - edge) * kRange;
+    const int64_t den = (kRange - edge) * r;
+    const auto scale = [&](int32_t v) {
+        return static_cast<int32_t>(std::clamp<int64_t>(v * num / den, -0x8000, 0x7FFF));
+    };
+    return {scale(x), scale(y)};
 }
 
 // Mission Stick throttle from the right stick's Y axis: up is more (0xFF), centre 0x7F.
 uint8_t StickThrottle(const InputSnapshot& in) {
     return AxisToByte(std::min<int32_t>(0x7FFF, -int32_t{in.rightY}), 0x7F);
+}
+
+// The movement of one axis a read takes: whole counts within [lo, hi]; the rest stays.
+int16_t TakeAxis(int32_t& kept, int32_t lo, int32_t hi) {
+    const int32_t counts = std::clamp(kept / kMouseMovementUnit, lo, hi);
+    kept -= counts * kMouseMovementUnit;
+    return static_cast<int16_t>(counts);
 }
 
 // libretro screen coordinate (-0x7FFF .. 0x7FFF across the image) to a pixel of an image `size` pixels across.
@@ -149,7 +201,16 @@ const char* PeripheralKindName(PeripheralKind kind) {
     return "?";
 }
 
-void AdvancePortInput(PeripheralKind kind, const InputSnapshot& in, PortInputState& state) {
+void AdvancePortInput(PeripheralKind kind, const InputSnapshot& in, PortInputState& state,
+                      const InputSettings& settings) {
+    if (kind == PeripheralKind::ShuttleMouse) {
+        const auto add = [&](int32_t& kept, int16_t movement) {
+            const int64_t sum = int64_t{kept} + int64_t{movement} * settings.mouseSensitivity;
+            kept = static_cast<int32_t>(std::clamp<int64_t>(sum, -kMouseMovementLimit, kMouseMovementLimit));
+        };
+        add(state.mouseX, in.mouseX);
+        add(state.mouseY, in.mouseY);
+    }
     const uint16_t pressed = static_cast<uint16_t>(in.joypad & ~state.prevButtons);
     if (kind == PeripheralKind::AnalogPad && Pressed(pressed, RETRO_DEVICE_ID_JOYPAD_SELECT)) {
         state.analogMode = !state.analogMode;
@@ -169,27 +230,33 @@ ymir::peripheral::ControlPadReport MapControlPad(const InputSnapshot& in) {
     return {.buttons = MapButtons(in.joypad, kControlPadMap)};
 }
 
-ymir::peripheral::AnalogPadReport MapAnalogPad(const InputSnapshot& in, const PortInputState& state) {
+ymir::peripheral::AnalogPadReport MapAnalogPad(const InputSnapshot& in, const PortInputState& state,
+                                               const InputSettings& settings) {
+    const Stick stick = StickDeadzone(in.leftX, in.leftY, settings.analogDeadzone);
     return {
         .buttons = MapButtons(in.joypad, kAnalogPadMap),
         .analog = state.analogMode,
-        .x = AxisToByte(in.leftX, 0x80),
-        .y = AxisToByte(in.leftY, 0x80),
-        .l = TriggerToByte(in.l2, Pressed(in.joypad, RETRO_DEVICE_ID_JOYPAD_L2)),
-        .r = TriggerToByte(in.r2, Pressed(in.joypad, RETRO_DEVICE_ID_JOYPAD_R2)),
+        .x = AxisToByte(stick.x, 0x80),
+        .y = AxisToByte(stick.y, 0x80),
+        .l = TriggerToByte(in.l2, Pressed(in.joypad, RETRO_DEVICE_ID_JOYPAD_L2), settings.triggerDeadzone),
+        .r = TriggerToByte(in.r2, Pressed(in.joypad, RETRO_DEVICE_ID_JOYPAD_R2), settings.triggerDeadzone),
     };
 }
 
-ymir::peripheral::ArcadeRacerReport MapArcadeRacer(const InputSnapshot& in) {
-    return {.buttons = MapButtons(in.joypad, kArcadeRacerMap), .wheel = AxisToByte(in.leftX, 0x7F)};
+ymir::peripheral::ArcadeRacerReport MapArcadeRacer(const InputSnapshot& in, const InputSettings& settings) {
+    // The wheel is the stick's X axis alone
+    const Stick wheel = StickDeadzone(in.leftX, 0, settings.analogDeadzone);
+    return {.buttons = MapButtons(in.joypad, kArcadeRacerMap), .wheel = AxisToByte(wheel.x, 0x7F)};
 }
 
-ymir::peripheral::MissionStickReport MapMissionStick(const InputSnapshot& in, const PortInputState& state) {
+ymir::peripheral::MissionStickReport MapMissionStick(const InputSnapshot& in, const PortInputState& state,
+                                                     const InputSettings& settings) {
+    const Stick stick = StickDeadzone(in.leftX, in.leftY, settings.analogDeadzone);
     return {
         .buttons = MapButtons(in.joypad, kMissionStickMap),
         .sixAxis = false,
-        .x1 = AxisToByte(in.leftX, 0x7F),
-        .y1 = AxisToByte(in.leftY, 0x7F),
+        .x1 = AxisToByte(stick.x, 0x7F),
+        .y1 = AxisToByte(stick.y, 0x7F),
         .z1 = state.throttleLatched ? state.throttle : StickThrottle(in),
         .x2 = 0x7F,
         .y2 = 0x7F,
@@ -204,9 +271,15 @@ ymir::peripheral::ShuttleMouseReport MapShuttleMouse(const InputSnapshot& in) {
         .left = (in.mouseButtons & S::kMouseLeft) != 0,
         .middle = (in.mouseButtons & S::kMouseMiddle) != 0,
         .right = (in.mouseButtons & S::kMouseRight) != 0,
-        .x = in.mouseX,
-        .y = in.mouseY,
+        .x = 0,
+        .y = 0,
     };
+}
+
+void TakeMouseMovement(PortInputState& state, ymir::peripheral::ShuttleMouseReport& report) {
+    // The libretro y axis is down; the mouse (ShuttleMouse::TakeReport) turns it up, so -256 .. 255 up is 256 .. -255.
+    report.x = TakeAxis(state.mouseX, -256, 255);
+    report.y = TakeAxis(state.mouseY, -255, 256);
 }
 
 ymir::peripheral::VirtuaGunReport MapVirtuaGun(const InputSnapshot& in, const GunScreen& screen) {

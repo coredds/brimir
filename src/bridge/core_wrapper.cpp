@@ -1579,6 +1579,9 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
             port.analogMode = m_portInput[i].analogMode;
             port.throttleLatched = m_portInput[i].throttleLatched;
             port.throttle = m_portInput[i].throttle;
+            // The Shuttle Mouse movement built up since its last read (version 12; its report is the core's)
+            state.brimir.mouse.ports[i].accumX = m_portInput[i].mouseX;
+            state.brimir.mouse.ports[i].accumY = m_portInput[i].mouseY;
         }
         // The session's accuracy settings (version 11; compared on load for a warning only)
         state.brimir.settings.valid = true;
@@ -1771,16 +1774,23 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 return false;
             }
             m_cdblockLLEActive = state.cdblockLLE;
-            if (state.brimir.valid && state.brimir.peripherals.valid) {
+            for (unsigned i = 0; i < 2; ++i) {
+                const auto& port = state.brimir.peripherals.ports[i];
+                const auto& smpcPort = i == 0 ? m_saturn->SMPC.GetPeripheralPort1() : m_saturn->SMPC.GetPeripheralPort2();
+                const bool sameType = state.brimir.valid && state.brimir.peripherals.valid &&
+                                      port.type == static_cast<uint8_t>(smpcPort.GetPeripheral().GetType());
                 // A port whose peripheral changed since the state was saved keeps its own input state, as the
                 // peripheral keeps its own (SMPC::LoadBrimirState).
-                for (unsigned i = 0; i < 2; ++i) {
-                    const auto& port = state.brimir.peripherals.ports[i];
-                    const auto& smpcPort = i == 0 ? m_saturn->SMPC.GetPeripheralPort1() : m_saturn->SMPC.GetPeripheralPort2();
-                    if (port.type == static_cast<uint8_t>(smpcPort.GetPeripheral().GetType())) {
-                        m_portInput[i] = {port.prevButtons, port.analogMode, port.throttleLatched, port.throttle};
-                    }
+                if (sameType) {
+                    m_portInput[i].prevButtons = port.prevButtons;
+                    m_portInput[i].analogMode = port.analogMode;
+                    m_portInput[i].throttleLatched = port.throttleLatched;
+                    m_portInput[i].throttle = port.throttle;
                 }
+                // The mouse movement built up: as saved, else none (states before version 12, another device)
+                const bool mouse = sameType && state.brimir.mouse.valid;
+                m_portInput[i].mouseX = mouse ? state.brimir.mouse.ports[i].accumX : 0;
+                m_portInput[i].mouseY = mouse ? state.brimir.mouse.ports[i].accumY : 0;
             }
             if (bupCart != nullptr && !state.scu.cartData.empty()) {
                 // SCU::LoadState keeps the inserted backup cartridge; its data as saved, like the internal backup RAM
@@ -2093,15 +2103,15 @@ ymir::peripheral::PeripheralReport CoreWrapper::MapPortReport(unsigned port, con
         break;
     case PeripheralKind::AnalogPad:
         report.type = PeripheralType::AnalogPad;
-        report.report.analogPad = MapAnalogPad(input, state);
+        report.report.analogPad = MapAnalogPad(input, state, m_inputSettings);
         break;
     case PeripheralKind::ArcadeRacer:
         report.type = PeripheralType::ArcadeRacer;
-        report.report.arcadeRacer = MapArcadeRacer(input);
+        report.report.arcadeRacer = MapArcadeRacer(input, m_inputSettings);
         break;
     case PeripheralKind::MissionStick:
         report.type = PeripheralType::MissionStick;
-        report.report.missionStick = MapMissionStick(input, state);
+        report.report.missionStick = MapMissionStick(input, state, m_inputSettings);
         break;
     case PeripheralKind::ShuttleMouse:
         report.type = PeripheralType::ShuttleMouse;
@@ -2119,22 +2129,29 @@ void CoreWrapper::SetPeripheralInput(unsigned port, const InputSnapshot& input) 
     if (!m_initialized || !m_saturn || port > 1) {
         return;
     }
-    AdvancePortInput(m_portKind[port], input, m_portInput[port]);
+    AdvancePortInput(m_portKind[port], input, m_portInput[port], m_inputSettings);
     m_portReport[port] = MapPortReport(port, input);
 }
 
 // The peripheral asks for its report whenever the game reads it (INTBACK or a port register access); it gets this
-// frame's mapped report when it is the peripheral the report was mapped for.
-void CoreWrapper::OnPeripheralReport1(ymir::peripheral::PeripheralReport& report) {
-    if (report.type == m_portReport[0].type) {
-        report.report = m_portReport[0].report;
+// frame's mapped report when it is the peripheral the report was mapped for. The Shuttle Mouse asks once per read
+// (ShuttleMouse::TakeReport), which takes the movement built up since its previous read.
+void CoreWrapper::HandPeripheralReport(unsigned port, ymir::peripheral::PeripheralReport& report) {
+    if (report.type != m_portReport[port].type) {
+        return;
+    }
+    report.report = m_portReport[port].report;
+    if (report.type == ymir::peripheral::PeripheralType::ShuttleMouse) {
+        TakeMouseMovement(m_portInput[port], report.report.shuttleMouse);
     }
 }
 
+void CoreWrapper::OnPeripheralReport1(ymir::peripheral::PeripheralReport& report) {
+    HandPeripheralReport(0, report);
+}
+
 void CoreWrapper::OnPeripheralReport2(ymir::peripheral::PeripheralReport& report) {
-    if (report.type == m_portReport[1].type) {
-        report.report = m_portReport[1].report;
-    }
+    HandPeripheralReport(1, report);
 }
 
 void CoreWrapper::SetAudioInterpolation(const char* mode) {

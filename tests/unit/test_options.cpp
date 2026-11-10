@@ -5,6 +5,7 @@
 #include "options.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <cstring>
+#include <string>
 #include <vector>
 
 TEST_CASE("Core options include profiling option", "[options][libretro]") {
@@ -130,6 +131,64 @@ TEST_CASE("peripherals: gun crosshair option values", "[options][libretro][perip
     CHECK(found->values[3].value == nullptr);
 }
 
+TEST_CASE("controllers: deadzone and mouse sensitivity option values and labels", "[options][libretro][peripherals]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+    const auto find = [&](const char* key) -> const retro_core_option_v2_definition* {
+        for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+            if (std::strcmp(options->definitions[i].key, key) == 0) {
+                return &options->definitions[i];
+            }
+        }
+        return nullptr;
+    };
+    const struct {
+        const char* key;
+        const char* desc;
+        const char* defaultValue;
+        int first;
+        int last;
+    } expected[] = {
+        { "brimir_analog_deadzone", "Analog Stick Deadzone", "15", 0, 30 },
+        { "brimir_trigger_deadzone", "Trigger Deadzone", "15", 0, 30 },
+        { "brimir_mouse_sensitivity", "Mouse Sensitivity", "100", 5, 200 },
+    };
+    for (const auto& e : expected) {
+        CAPTURE(e.key);
+        const auto* found = find(e.key);
+        REQUIRE(found != nullptr);
+        CHECK(std::strcmp(found->desc, e.desc) == 0);
+        REQUIRE(found->category_key != nullptr);
+        CHECK(std::strcmp(found->category_key, "input") == 0);
+        REQUIRE(found->default_value != nullptr);
+        CHECK(std::strcmp(found->default_value, e.defaultValue) == 0);
+        REQUIRE(found->info != nullptr);
+        CHECK(std::strstr(found->info, "Applies immediately") != nullptr);
+        size_t i = 0;
+        for (int percent = e.first; percent <= e.last; percent += 5, ++i) {
+            CAPTURE(percent);
+            REQUIRE(found->values[i].value != nullptr);
+            CHECK(std::to_string(percent) == found->values[i].value);
+            REQUIRE(found->values[i].label != nullptr);
+            CHECK(std::to_string(percent) + "%" == found->values[i].label);
+        }
+        CHECK(found->values[i].value == nullptr);
+    }
+    // The option values as settings (the libretro layer's parse)
+    const brimir::InputSettings settings = brimir_input_settings("0", "30", "5");
+    CHECK(settings.analogDeadzone == 0);
+    CHECK(settings.triggerDeadzone == 30);
+    CHECK(settings.mouseSensitivity == 5);
+    // Out-of-range or unknown values fall back to the option defaults
+    const brimir::InputSettings fallback = brimir_input_settings("31", "bogus", "201");
+    CHECK(fallback.analogDeadzone == 15);
+    CHECK(fallback.triggerDeadzone == 15);
+    CHECK(fallback.mouseSensitivity == 100);
+    const brimir::InputSettings none = brimir_input_settings(nullptr, nullptr, nullptr);
+    CHECK(none.analogDeadzone == 15);
+    CHECK(none.mouseSensitivity == 100);
+}
+
 TEST_CASE("accuracy: core option values and labels", "[options][libretro][accuracy]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);
@@ -211,6 +270,9 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_rtc_mode",             "virtual"  },
         { "brimir_cartridge",            "auto"     },
         { "brimir_gun_crosshair",        "cross"    },
+        { "brimir_analog_deadzone",      "15"       },
+        { "brimir_trigger_deadzone",     "15"       },
+        { "brimir_mouse_sensitivity",    "100"      },
         { "brimir_sh2_cache",            "disabled" },
         { "brimir_cdblock_lle",          "disabled" },
         { "brimir_scsp_granularity",     "0"        },

@@ -3,6 +3,8 @@
 
 #include <brimir/savestate_codec.hpp>
 
+#include <brimir/peripheral_input.hpp>
+
 #include <ymir/hw/cart/rom_cart_defs.hpp>
 #include <ymir/hw/smpc/peripheral/peripheral_defs.hpp>
 #include <ymir/hw/vdp/vdp1_defs.hpp>
@@ -28,12 +30,18 @@ using ymir::savestate::SMPCSaveState;
 // CoreWrapper::kSaveStateVersion.
 static_assert(sizeof(void*) != 8 || sizeof(SCUSaveState) == 2496, "SCUSaveState changed: update the serializer");
 static_assert(sizeof(void*) != 8 || sizeof(SMPCSaveState) == 144, "SMPCSaveState changed: update the serializer");
-static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819424,
+static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819456,
               "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
-// Version 12's smpcSettings took the version 11 struct's tail padding (the size above did not change): pinned too.
+// Version 12's smpcSettings took the version 11 struct's tail padding; its mouse made the struct larger than version
+// 11's (so a version 12 payload under a version 11 header is refused): both pinned too.
 static_assert(offsetof(ymir::savestate::BrimirSaveState, smpcSettings) == 819411 &&
                   sizeof(ymir::savestate::BrimirSaveState::SMPCSettings) == 6,
               "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
+static_assert(offsetof(ymir::savestate::BrimirSaveState, mouse) == 819420 &&
+                  sizeof(ymir::savestate::BrimirSaveState::Mouse) == 36,
+              "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
+static_assert(sizeof(ymir::savestate::BrimirSaveState) > ymir::savestate::kBrimirSaveStateV11Size,
+              "a version 12 payload must not fit a version 11 header");
 
 // Counts bytes (out == nullptr) or writes them.
 class Writer {
@@ -215,7 +223,7 @@ void VisitSMPC(Archive& ar, State& smpc) {
 // version 6 has only its first kBrimirSaveStateV6Size bytes (no scspSlots; read with Reader::RawPrefix), and versions
 // 7 and 8 only the first kBrimirSaveStateV8Size bytes (no peripherals), version 9 the first kBrimirSaveStateV9Size
 // bytes (no virtuaGun), version 10 the first kBrimirSaveStateV10Size bytes (no settings), version 11 the first
-// kBrimirSaveStateV11Size bytes (padding where smpcSettings is).
+// kBrimirSaveStateV11Size bytes (padding where smpcSettings is, and no mouse).
 template <typename Archive, typename State>
 void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     auto& [scheduler, system, msh2, ssh2, scu, smpc, vdp, scsp, cdblockLLE, cdblock, sh1, ygr, cddrive, cdblockDRAM,
@@ -342,6 +350,17 @@ bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext, uint32_t 
         if (byte(ext.smpcSettings.valid) != 1 || byte(ext.smpcSettings.STE) > 1) {
             return false;
         }
+        // Saved by the core in every state too; the movement built up is bounded (AdvancePortInput), the buttons are
+        // four bits. The report's movement is any value (ShuttleMouse clamps it when read).
+        if (byte(ext.mouse.valid) != 1) {
+            return false;
+        }
+        for (const auto& port : ext.mouse.ports) {
+            if (port.accumX < -kMouseMovementLimit || port.accumX > kMouseMovementLimit ||
+                port.accumY < -kMouseMovementLimit || port.accumY > kMouseMovementLimit || port.reportButtons > 0xF) {
+                return false;
+            }
+        }
     }
     return ext.scsp.dspProgramLength <= 128;
 }
@@ -407,7 +426,8 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_
         static_assert(from == ymir::savestate::kBrimirSaveStateV10Size);
         std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
     } else if (version == 11) {
-        // smpcSettings (read from the version 11 padding): valid false, the session keeps its BIOS settings
+        // smpcSettings (read from the version 11 padding): valid false, the session keeps its BIOS settings; mouse
+        // (after version 11's end): valid false, no movement built up
         using ymir::savestate::BrimirSaveState;
         constexpr size_t from = offsetof(BrimirSaveState, smpcSettings);
         static_assert(from <= ymir::savestate::kBrimirSaveStateV11Size);

@@ -106,7 +106,9 @@ public:
     /// (BrimirSaveState::VirtuaGun); version 9 states load without it. Version 11 records the saving session's SH-2
     /// cache and SCSP step granularity (BrimirSaveState::Settings, diagnostic: GetLastStateWarning); version 10
     /// states load without them. Version 12 adds the BIOS settings (SMPC SMEM and STE,
-    /// BrimirSaveState::SMPCSettings), applied for the session on load; version 11 states keep the session's.
+    /// BrimirSaveState::SMPCSettings), applied for the session on load; version 11 states keep the session's. It also
+    /// adds the Shuttle Mouse movement built up per port and the report of a read in progress
+    /// (BrimirSaveState::Mouse); older states load with none built up.
     static constexpr uint32_t kSaveStateVersion = 12;
 
     /// @brief Oldest BRI2 version LoadState accepts
@@ -234,8 +236,14 @@ public:
     /// (AdvancePortInput) and the report its peripheral reads during the frame is mapped (peripheral_input.hpp).
     void SetPeripheralInput(unsigned port, const InputSnapshot& input);
 
-    /// @brief The port's input state across frames (3D Control Pad mode, Mission Stick throttle latch); in states
+    /// @brief The port's input state across frames (3D Control Pad mode, Mission Stick throttle latch, Shuttle Mouse
+    /// movement built up); in states
     const PortInputState& GetPortInputState(unsigned port) const { return m_portInput[port & 1]; }
+
+    /// @brief Controller options (deadzones, mouse sensitivity); live: they apply from the next SetPeripheralInput.
+    /// Not in save states (each session keeps its own, like the other options). Default: 0.7.0's mapping.
+    void SetInputSettings(const InputSettings& settings) { m_inputSettings = settings; }
+    const InputSettings& GetInputSettings() const { return m_inputSettings; }
 
     /// @brief The screen the Virtua Gun aims at: the current Saturn resolution and the overscan crop and rotation
     GunScreen GetGunScreen() const;
@@ -607,6 +615,7 @@ private:
     std::array<PeripheralKind, 2> m_portKind{PeripheralKind::ControlPad, PeripheralKind::ControlPad};
     std::array<PortInputState, 2> m_portInput{};
     std::array<ymir::peripheral::PeripheralReport, 2> m_portReport{};
+    InputSettings m_inputSettings{};
 
     /// @brief Connects m_portKind[port] to the Saturn's port and resets its input to released controls
     void ConnectPeripheral(unsigned port);
@@ -614,6 +623,7 @@ private:
     ymir::peripheral::PeripheralReport MapPortReport(unsigned port, const InputSnapshot& input) const;
 
     // Peripheral report callbacks
+    void HandPeripheralReport(unsigned port, ymir::peripheral::PeripheralReport& report);
     void OnPeripheralReport1(ymir::peripheral::PeripheralReport& report);
     void OnPeripheralReport2(ymir::peripheral::PeripheralReport& report);
     

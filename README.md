@@ -200,7 +200,7 @@ Quick Menu > Controls > Port 1/2 Controls > Device Type:
 | 3D Control Pad | Analog stick and triggers; Select switches between analog and digital mode (analog at power-on) |
 | Arcade Racer | Steering wheel on the left stick |
 | Mission Stick | Stick on the left stick, throttle on the right stick |
-| Shuttle Mouse | Mouse movement and buttons; mouse buttons 4/5 are Start |
+| Shuttle Mouse | Mouse movement and buttons; mouse buttons 4/5 are Start. Movement is kept until the game reads the mouse (none lost, none counted twice) |
 | Virtua Gun | Light gun: trigger, reload, Start; aiming off screen and pulling the trigger reloads |
 | None | Nothing connected |
 
@@ -222,6 +222,12 @@ The analog devices follow Beetle Saturn's mapping:
 Gun Crosshair (Input, applies at once): `Cross` (default), `Dot` or `Off`; red for port 1, blue for port 2. It is
 drawn on the shown frame only (the game does not see it), with the software and the Vulkan renderer. A device change
 applies between frames, also with run-ahead, and a state saved with one device loads with another.
+
+Analog Stick Deadzone and Trigger Deadzone (Input, apply at once; 15% by default, 0% reads the sticks and triggers as
+reported): the stick of the 3D Control Pad, Arcade Racer and Mission Stick reads centred within that share of its
+range (a round deadzone), and the 3D Control Pad's analog L/R read released within that share of their travel; beyond
+it the rest is stretched to the full range, so there is no jump at the edge. They add to the frontend's own deadzone.
+The Mission Stick throttle has none. Mouse Sensitivity (Input, applies at once) scales the Shuttle Mouse's movement.
 
 ## Cartridges
 
@@ -441,6 +447,9 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | Media | Preload Disc to RAM | On/Off |
 | Media | CD Block Low-Level Emulation | On/Off (default Off; needs the CD Block ROM; applies on content load; see [Accuracy options](#accuracy-options)) |
 | Input | Gun Crosshair | Cross (default), Dot, Off |
+| Input | Analog Stick Deadzone | 0% to 30% in 5% steps (default 15%) |
+| Input | Trigger Deadzone | 0% to 30% in 5% steps (default 15%) |
+| Input | Mouse Sensitivity | 5% to 200% in 5% steps (default 100%) |
 
 ## Project Structure
 

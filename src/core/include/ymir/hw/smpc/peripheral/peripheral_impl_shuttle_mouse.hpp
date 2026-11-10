@@ -22,9 +22,16 @@ public:
     // Brimir: save states
     void SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const override;
     void LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) override;
+    // Brimir: the report the last read took (a TH/TR handshake in progress reads it)
+    void SaveBrimirReport(savestate::BrimirSaveState::Mouse::Port &state) const;
+    void LoadBrimirReport(const savestate::BrimirSaveState::Mouse::Port &state);
 
 private:
-    ShuttleMouseReport m_report;
+    // Brimir: asks for the report at the start of each read (Read, the first step of a TH/TR handshake), not at every
+    // port access (UpdateInputs): the report's movement is what was built up since the previous read.
+    void TakeReport();
+
+    ShuttleMouseReport m_report{}; // Brimir: initialized (a handshake resumed by a state load may read it untaken)
 
     uint8 m_reportPos = 0;
     bool m_tl = false;

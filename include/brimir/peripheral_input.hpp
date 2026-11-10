@@ -4,7 +4,8 @@
 // The libretro layer polls one InputSnapshot per port and frame (what the port's device type needs) and the bridge
 // (CoreWrapper::SetPeripheralInput) turns it into the report of the Ymir peripheral connected to the port with the
 // pure functions below. Edge-triggered controls (the 3D Control Pad's mode switch, the Mission Stick's throttle latch)
-// keep their state in PortInputState, which CoreWrapper holds per port and puts in save states.
+// and the Shuttle Mouse's movement built up between reads keep their state in PortInputState, which CoreWrapper holds
+// per port and puts in save states.
 //
 // RetroPad layouts (the Control Pad keeps Brimir's original layout; the other devices follow Beetle Saturn's, whose
 // analog L/R triggers and shift paddles need L2/R2):
@@ -77,23 +78,55 @@ struct InputSnapshot {
     static constexpr uint8_t kMouseButton5 = 1u << 4;
 };
 
+/// @brief Controller options in percent (brimir_analog_deadzone, brimir_trigger_deadzone, brimir_mouse_sensitivity;
+/// the libretro layer applies them). These defaults map exactly as 0.7.0 did.
+struct InputSettings {
+    /// Sticks of the 3D Control Pad, Arcade Racer (wheel) and Mission Stick: a radial deadzone of 0-30 % of the
+    /// stick's range, the rest rescaled to the full range (no jump at its edge). The Mission Stick throttle has none.
+    unsigned analogDeadzone = 0;
+    /// Analog L/R of the 3D Control Pad: a linear deadzone of 0-30 % of the travel, the rest rescaled
+    unsigned triggerDeadzone = 0;
+    /// Shuttle Mouse movement scale, 5-200 %
+    unsigned mouseSensitivity = 100;
+};
+
+/// @brief Shuttle Mouse movement is kept in hundredths of a count (a low sensitivity loses no movement)
+inline constexpr int32_t kMouseMovementUnit = 100;
+/// @brief Bound of the movement a port keeps between reads, either axis, in kMouseMovementUnit
+inline constexpr int32_t kMouseMovementLimit = 32768 * kMouseMovementUnit;
+
 /// @brief Input state a port keeps across frames (held by CoreWrapper, saved in states)
 struct PortInputState {
     uint16_t prevButtons = 0;     ///< RetroPad buttons of the previous frame (edges)
     bool analogMode = true;       ///< 3D Control Pad: analog mode (the pad's power-on mode); Select toggles it
     bool throttleLatched = false; ///< Mission Stick: R3 holds the throttle where it was
     uint8_t throttle = 0;         ///< Mission Stick: the latched throttle value
+    /// Shuttle Mouse: the movement built up since the last read (libretro axes: right and down positive, in
+    /// kMouseMovementUnit, sensitivity applied); each read takes what fits in its report (TakeMouseMovement)
+    int32_t mouseX = 0;
+    int32_t mouseY = 0;
 };
 
-/// @brief Applies this frame's edges to the port's state (before mapping), then remembers the buttons
-void AdvancePortInput(PeripheralKind kind, const InputSnapshot& in, PortInputState& state);
+/// @brief Applies this frame's edges to the port's state (before mapping), then remembers the buttons; adds a Shuttle
+/// Mouse's movement to what it has built up since the last read
+void AdvancePortInput(PeripheralKind kind, const InputSnapshot& in, PortInputState& state,
+                      const InputSettings& settings = {});
 
 /// @brief Reports per peripheral (Ymir conventions: buttons 0 = pressed)
 ymir::peripheral::ControlPadReport MapControlPad(const InputSnapshot& in);
-ymir::peripheral::AnalogPadReport MapAnalogPad(const InputSnapshot& in, const PortInputState& state);
-ymir::peripheral::ArcadeRacerReport MapArcadeRacer(const InputSnapshot& in);
-ymir::peripheral::MissionStickReport MapMissionStick(const InputSnapshot& in, const PortInputState& state);
+ymir::peripheral::AnalogPadReport MapAnalogPad(const InputSnapshot& in, const PortInputState& state,
+                                               const InputSettings& settings = {});
+ymir::peripheral::ArcadeRacerReport MapArcadeRacer(const InputSnapshot& in, const InputSettings& settings = {});
+ymir::peripheral::MissionStickReport MapMissionStick(const InputSnapshot& in, const PortInputState& state,
+                                                     const InputSettings& settings = {});
+/// @brief The Shuttle Mouse's buttons; the movement (zero here) is taken at each read with TakeMouseMovement
 ymir::peripheral::ShuttleMouseReport MapShuttleMouse(const InputSnapshot& in);
+
+/// @brief A read of the Shuttle Mouse (Beetle Saturn / Mednafen behaviour): it takes the movement built up since the
+/// last read and removes it from the port's state, carrying what lies beyond the report's range (-256 .. 255 counts
+/// per axis on the Saturn's axes) and any fraction of a count over to the next read. A game reading twice in one frame
+/// gets the movement once; a frame without a read loses none.
+void TakeMouseMovement(PortInputState& state, ymir::peripheral::ShuttleMouseReport& report);
 
 /// @brief The emulated screen the light gun aims at: the Saturn resolution (VDP2, including hi-res and double
 /// interlace) and the output transforms between it and the frame the frontend shows (CoreWrapper::OnFrameComplete)

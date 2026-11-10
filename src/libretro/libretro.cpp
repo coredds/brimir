@@ -274,6 +274,10 @@ struct OptionCache {
     std::string vdp1_upscaling = "enabled";
     // Live: the next shown frame.
     std::string gun_crosshair = "cross";
+    // Live: the next frame's input (CoreWrapper::SetInputSettings).
+    std::string analog_deadzone = "15";
+    std::string trigger_deadzone = "15";
+    std::string mouse_sensitivity = "100";
 } g_options;
 
 // Light gun crosshairs of this frame (option brimir_gun_crosshair), drawn on the shown frame only.
@@ -382,6 +386,15 @@ static void apply_core_options(bool force) {
     apply("brimir_sh2_jit_compile_thread",  g_options.sh2_jit_compile_thread, [](const char* v){ g_core->SetSH2JitCompileThread(strcmp(v, "disabled") != 0); });
     apply("brimir_sh2_jit",                 g_options.sh2_jit,          [](const char* v){ g_core->SetSH2JitEnabled(strcmp(v, "enabled") == 0); });
     apply("brimir_gun_crosshair",           g_options.gun_crosshair,    [](const char*){}); // read per shown frame
+    // The three controller options form one setting, applied from all three cached values.
+    const auto apply_input_settings = [](const char*) {
+        g_core->SetInputSettings(brimir_input_settings(g_options.analog_deadzone.c_str(),
+                                                       g_options.trigger_deadzone.c_str(),
+                                                       g_options.mouse_sensitivity.c_str()));
+    };
+    apply("brimir_analog_deadzone",         g_options.analog_deadzone,  apply_input_settings);
+    apply("brimir_trigger_deadzone",        g_options.trigger_deadzone, apply_input_settings);
+    apply("brimir_mouse_sensitivity",       g_options.mouse_sensitivity, apply_input_settings);
     apply("brimir_scsp_granularity",        g_options.scsp_granularity, [](const char* v){ g_core->SetSCSPStepGranularity(static_cast<uint32_t>(atoi(v))); });
 
     if (const std::string warning = g_core->TakeSH2JitWorkerWarning(); !warning.empty()) {

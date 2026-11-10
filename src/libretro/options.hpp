@@ -5,6 +5,7 @@
 #pragma once
 
 #include "libretro.h"
+#include <brimir/peripheral_input.hpp>
 #include <string>
 
 namespace brimir {
@@ -13,6 +14,11 @@ enum class CartridgeChoice; // core_wrapper.hpp
 
 // Get core options v2 structure
 const struct retro_core_options_v2* brimir_get_core_options_v2(void);
+
+// The controller options (brimir_analog_deadzone, brimir_trigger_deadzone, brimir_mouse_sensitivity) as settings; a
+// missing or unknown value is the option's default (15, 15, 100).
+brimir::InputSettings brimir_input_settings(const char* analog_deadzone, const char* trigger_deadzone,
+                                            const char* mouse_sensitivity);
 
 // The cartridge a brimir_cartridge value chooses (Auto for nullptr or an unknown value).
 brimir::CartridgeChoice brimir_cartridge_choice(const char* value);

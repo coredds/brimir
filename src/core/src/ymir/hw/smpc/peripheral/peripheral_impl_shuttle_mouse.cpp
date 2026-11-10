@@ -10,6 +10,11 @@ ShuttleMouse::ShuttleMouse(CBPeripheralReport callback)
     : BasePeripheral(PeripheralType::ShuttleMouse, 0xE, callback) {}
 
 void ShuttleMouse::UpdateInputs() {
+    // Brimir: the report is taken by each read (TakeReport), not by every port access
+}
+
+// Brimir: was the body of UpdateInputs
+void ShuttleMouse::TakeReport() {
     PeripheralReport report{
         .type = PeripheralType::ShuttleMouse,
         .report = {.shuttleMouse = {.start = false, .left = false, .middle = false, .right = false, .x = 0, .y = 0}}};
@@ -24,6 +29,8 @@ uint8 ShuttleMouse::GetReportLength() const {
 
 void ShuttleMouse::Read(std::span<uint8> out) {
     assert(out.size() == 3);
+
+    TakeReport(); // Brimir
 
     const sint16 x = std::clamp<sint16>(m_report.x, -256, 255);
     const sint16 y = std::clamp<sint16>(m_report.y, -256, 255);
@@ -60,6 +67,9 @@ uint8 ShuttleMouse::WritePDR(uint8 ddr, uint8 value, bool exle) {
             m_reset ^= tr;
             return (!m_reset << 4) | 0b0000;
         } else if (m_reportPos == 0 || tr != m_tl) {
+            if (m_reportPos == 0) {
+                TakeReport(); // Brimir: the first step of a handshake is the read
+            }
             const sint16 x = std::clamp<sint16>(m_report.x, -256, 255);
             const sint16 y = std::clamp<sint16>(m_report.y, -256, 255);
             const bool xOver = m_report.x < -256 || m_report.x > 255;
@@ -104,6 +114,22 @@ void ShuttleMouse::LoadBrimirState(const savestate::BrimirSaveState::Peripherals
     m_reportPos = state.reportPos % 9;
     m_tl = state.tl;
     m_reset = state.mouseReset;
+}
+
+void ShuttleMouse::SaveBrimirReport(savestate::BrimirSaveState::Mouse::Port &state) const {
+    state.reportX = m_report.x;
+    state.reportY = m_report.y;
+    state.reportButtons = (m_report.left << 0u) | (m_report.right << 1u) | (m_report.middle << 2u) |
+                          (m_report.start << 3u);
+}
+
+void ShuttleMouse::LoadBrimirReport(const savestate::BrimirSaveState::Mouse::Port &state) {
+    m_report.x = state.reportX;
+    m_report.y = state.reportY;
+    m_report.left = bit::test<0>(state.reportButtons);
+    m_report.right = bit::test<1>(state.reportButtons);
+    m_report.middle = bit::test<2>(state.reportButtons);
+    m_report.start = bit::test<3>(state.reportButtons);
 }
 
 } // namespace ymir::peripheral

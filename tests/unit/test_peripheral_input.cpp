@@ -20,6 +20,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace brimir;
@@ -60,6 +61,58 @@ InputSnapshot Pad(uint16_t joypad) {
     InputSnapshot in;
     in.joypad = joypad;
     return in;
+}
+
+// Brimir 0.7.0's axis and trigger conversions (peripheral_input.cpp AxisToByte, TriggerToByte), copied verbatim: the
+// reference a 0 % deadzone must match exactly.
+uint8_t AxisToByte070(int32_t v, int32_t center) {
+    v = std::clamp<int32_t>(v, -0x8000, 0x7FFF);
+    if (v < 0) {
+        return static_cast<uint8_t>(center - ((-v) * center + 0x4000) / 0x8000);
+    }
+    return static_cast<uint8_t>(center + (v * (255 - center) + 0x3FFF) / 0x7FFF);
+}
+
+uint8_t TriggerToByte070(int16_t analog, bool digital) {
+    if (analog > 0) {
+        return static_cast<uint8_t>(std::min<int32_t>(255, (int32_t{analog} * 255 + 0x3FFF) / 0x7FFF));
+    }
+    return digital ? 0xFF : 0x00;
+}
+
+InputSnapshot Mouse(int16_t x, int16_t y, uint8_t buttons = 0) {
+    InputSnapshot in;
+    in.mouseX = x;
+    in.mouseY = y;
+    in.mouseButtons = buttons;
+    return in;
+}
+
+// One read of the mouse at the bridge level: this frame's buttons and the movement it takes.
+ymir::peripheral::ShuttleMouseReport ReadMouse(const InputSnapshot& in, PortInputState& state) {
+    auto report = MapShuttleMouse(in);
+    TakeMouseMovement(state, report);
+    return report;
+}
+
+// One INTBACK-style read of port 1's Shuttle Mouse through the core (UpdateInputs then Read): the movement as the
+// Saturn gets it (x right, y up), clamped to the report as ShuttleMouse::Read does, with the overflow flags.
+struct MouseRead {
+    int x;
+    int y;
+    bool xOver;
+    bool yOver;
+};
+
+MouseRead ReadPort1Mouse(CoreWrapper& core) {
+    auto& peripheral = core.GetSaturn()->SMPC.GetPeripheralPort1().GetPeripheral();
+    peripheral.UpdateInputs();
+    std::array<uint8_t, 3> report{};
+    peripheral.Read(report);
+    const bool xSign = (report[0] & 0x10) != 0;
+    const bool ySign = (report[0] & 0x20) != 0;
+    return {xSign ? report[1] - 256 : report[1], ySign ? report[2] - 256 : report[2], (report[0] & 0x40) != 0,
+            (report[0] & 0x80) != 0};
 }
 
 } // namespace
@@ -231,12 +284,14 @@ TEST_CASE("peripherals: Mission Stick mapping", "[peripherals]") {
 }
 
 TEST_CASE("peripherals: Shuttle Mouse mapping", "[peripherals]") {
-    InputSnapshot in;
-    in.mouseX = -300;
-    in.mouseY = 12;
-    in.mouseButtons = InputSnapshot::kMouseLeft | InputSnapshot::kMouseMiddle;
+    PortInputState state;
+    InputSnapshot in = Mouse(-200, 12, InputSnapshot::kMouseLeft | InputSnapshot::kMouseMiddle);
+    AdvancePortInput(PeripheralKind::ShuttleMouse, in, state);
     auto r = MapShuttleMouse(in);
-    CHECK(r.x == -300);
+    CHECK(r.x == 0); // the movement comes with each read
+    CHECK(r.y == 0);
+    TakeMouseMovement(state, r);
+    CHECK(r.x == -200);
     CHECK(r.y == 12); // libretro: down is positive, as Ymir's report (which inverts it for the Saturn)
     CHECK(r.left);
     CHECK(r.middle);
@@ -247,6 +302,342 @@ TEST_CASE("peripherals: Shuttle Mouse mapping", "[peripherals]") {
     CHECK(r.right);
     CHECK(r.start);
     CHECK_FALSE(r.left);
+    // Other devices build up no movement
+    PortInputState pad;
+    AdvancePortInput(PeripheralKind::ControlPad, Mouse(50, 50), pad);
+    CHECK(pad.mouseX == 0);
+    CHECK(pad.mouseY == 0);
+}
+
+TEST_CASE("mouse: two reads in one frame don't double movement", "[peripherals][mouse]") {
+    SECTION("bridge") {
+        PortInputState state;
+        AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(10, -7), state);
+        auto r = ReadMouse(Mouse(10, -7), state);
+        CHECK(r.x == 10);
+        CHECK(r.y == -7);
+        r = ReadMouse(Mouse(10, -7), state);
+        CHECK(r.x == 0);
+        CHECK(r.y == 0);
+    }
+    SECTION("INTBACK reads through the core") {
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+        core.SetPeripheralInput(0, Mouse(10, -7));
+        auto r = ReadPort1Mouse(core);
+        CHECK(r.x == 10);
+        CHECK(r.y == 7); // the Saturn's y is up
+        r = ReadPort1Mouse(core);
+        CHECK(r.x == 0);
+        CHECK(r.y == 0);
+    }
+}
+
+TEST_CASE("mouse: unread movement carries to the next read", "[peripherals][mouse]") {
+    PortInputState state;
+    AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(10, 3), state);
+    AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(-4, 3), state); // a frame without a read
+    AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(20, 3), state);
+    auto r = ReadMouse(Mouse(20, 3), state);
+    CHECK(r.x == 26);
+    CHECK(r.y == 9);
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+    core.SetPeripheralInput(0, Mouse(10, 3));
+    core.SetPeripheralInput(0, Mouse(20, 3));
+    const auto read = ReadPort1Mouse(core);
+    CHECK(read.x == 30);
+    CHECK(read.y == -6);
+}
+
+TEST_CASE("mouse: remainder beyond the report range carries over", "[peripherals][mouse]") {
+    PortInputState state;
+    AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(400, -300), state);
+    auto r = ReadMouse(InputSnapshot{}, state);
+    CHECK(r.x == 255);  // the report's largest right movement
+    CHECK(r.y == -255); // up 255: the Saturn's +255
+    r = ReadMouse(InputSnapshot{}, state);
+    CHECK(r.x == 145);
+    CHECK(r.y == -45);
+    r = ReadMouse(InputSnapshot{}, state);
+    CHECK(r.x == 0);
+    CHECK(r.y == 0);
+    // The other direction reaches -256 (left) and +256 (down: the Saturn's -256)
+    AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(-400, 300), state);
+    r = ReadMouse(InputSnapshot{}, state);
+    CHECK(r.x == -256);
+    CHECK(r.y == 256);
+    r = ReadMouse(InputSnapshot{}, state);
+    CHECK(r.x == -144);
+    CHECK(r.y == 44);
+    // Through the core: in range, so no overflow flag; the remainder comes with the next read
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+    core.SetPeripheralInput(0, Mouse(400, 300));
+    auto read = ReadPort1Mouse(core);
+    CHECK(read.x == 255);
+    CHECK(read.y == -256);
+    CHECK_FALSE(read.xOver);
+    CHECK_FALSE(read.yOver);
+    read = ReadPort1Mouse(core);
+    CHECK(read.x == 145);
+    CHECK(read.y == -44);
+    // The movement kept between reads is bounded
+    PortInputState bounded;
+    for (int i = 0; i < 200; ++i) {
+        AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(0x7FFF, -0x8000), bounded, InputSettings{0, 0, 200});
+    }
+    CHECK(bounded.mouseX == kMouseMovementLimit);
+    CHECK(bounded.mouseY == -kMouseMovementLimit);
+}
+
+TEST_CASE("mouse: accumulation survives rollback and resets on device change", "[peripherals][mouse][savestate]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+    core.SetPeripheralInput(0, Mouse(400, -10));
+    REQUIRE(ReadPort1Mouse(core).x == 255);
+    std::vector<uint8_t> state(core.GetStateSize());
+    REQUIRE(core.SaveState(state.data(), state.size()));
+    REQUIRE(core.GetPortInputState(0).mouseX == 145 * kMouseMovementUnit);
+    REQUIRE(ReadPort1Mouse(core).x == 145);
+
+    SECTION("in place (run-ahead, rewind)") {
+        core.SetPeripheralInput(0, Mouse(33, 0)); // movement of the frame run ahead
+        REQUIRE(core.LoadState(state.data(), state.size()));
+        CHECK(core.GetPortInputState(0).mouseX == 145 * kMouseMovementUnit);
+        const auto r = ReadPort1Mouse(core);
+        CHECK(r.x == 145);
+        CHECK(r.y == 0);
+        CHECK(ReadPort1Mouse(core).x == 0);
+    }
+    SECTION("into a fresh instance (netplay)") {
+        CoreWrapper fresh;
+        REQUIRE(fresh.Initialize());
+        fresh.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+        fresh.SetPeripheralInput(0, Mouse(33, 21));
+        REQUIRE(fresh.LoadState(state.data(), state.size()));
+        CHECK(ReadPort1Mouse(fresh).x == 145);
+    }
+    SECTION("a device change clears it") {
+        core.SetPeripheralInput(0, Mouse(77, 0));
+        core.SetPeripheral(0, PeripheralKind::ControlPad);
+        core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+        CHECK(core.GetPortInputState(0).mouseX == 0);
+        CHECK(ReadPort1Mouse(core).x == 0);
+        // A state saved with the mouse loads into a port with another device: that device's state (none built up)
+        core.SetPeripheral(0, PeripheralKind::AnalogPad);
+        REQUIRE(core.LoadState(state.data(), state.size()));
+        CHECK(core.GetPortInputState(0).mouseX == 0);
+        core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+        CHECK(ReadPort1Mouse(core).x == 0);
+    }
+    SECTION("a direct (TH/TR) read in progress keeps the movement it took") {
+        // The first step of the handshake takes the report; a state saved in the middle of it continues with the
+        // same movement, in place and in a fresh instance
+        core.SetPeripheralInput(0, Mouse(0x5A, 0));
+        ymir::Saturn& saturn = *core.GetSaturn();
+        saturn.mainBus.Write<uint8>(0x010'0079, 0x60); // DDR1: TH and TR are outputs
+        saturn.mainBus.Write<uint8>(0x010'0075, 0x60); // PDR1: TH high, the handshake starts over
+        const auto step = [](ymir::Saturn& s, bool tr) {
+            s.mainBus.Write<uint8>(0x010'0075, tr ? 0x20 : 0x00);
+            return static_cast<uint8_t>(s.mainBus.Peek<uint8>(0x010'0075) & 0x0F);
+        };
+        bool tr = true;
+        for (int i = 0; i < 3; ++i) {
+            step(saturn, tr = !tr);
+        }
+        std::vector<uint8_t> mid(core.GetStateSize());
+        REQUIRE(core.SaveState(mid.data(), mid.size()));
+        const bool trAtSave = tr;
+        const auto rest = [&](ymir::Saturn& s) {
+            std::vector<uint8_t> nibbles;
+            bool t = trAtSave;
+            for (int i = 0; i < 6; ++i) {
+                nibbles.push_back(step(s, t = !t));
+            }
+            return nibbles;
+        };
+        const auto expected = rest(saturn);
+        CHECK(expected[2] == 0x5); // X high nibble
+        CHECK(expected[3] == 0xA); // X low nibble
+        core.SetPeripheralInput(0, Mouse(9, 9));
+        REQUIRE(core.LoadState(mid.data(), mid.size()));
+        CHECK(rest(saturn) == expected);
+        CoreWrapper fresh;
+        REQUIRE(fresh.Initialize());
+        fresh.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+        fresh.SetPeripheralInput(0, Mouse(9, 9));
+        REQUIRE(fresh.LoadState(mid.data(), mid.size()));
+        CHECK(rest(*fresh.GetSaturn()) == expected);
+        // The next handshake gets only what was built up since: nothing
+        saturn.mainBus.Write<uint8>(0x010'0075, 0x60);
+        REQUIRE(core.LoadState(mid.data(), mid.size()));
+        (void)rest(saturn);
+        saturn.mainBus.Write<uint8>(0x010'0075, 0x60);
+        tr = true;
+        std::vector<uint8_t> next;
+        for (int i = 0; i < 9; ++i) {
+            next.push_back(step(saturn, tr = !tr));
+        }
+        CHECK(next[5] == 0);
+        CHECK(next[6] == 0);
+    }
+}
+
+TEST_CASE("mouse: sensitivity scales movement", "[peripherals][mouse]") {
+    const struct {
+        unsigned percent;
+        int x;
+        int y;
+    } cases[] = {{5, 5, -2}, {100, 100, -40}, {200, 200, -80}};
+    for (const auto& c : cases) {
+        CAPTURE(c.percent);
+        PortInputState state;
+        AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(100, -40), state, InputSettings{0, 0, c.percent});
+        const auto r = ReadMouse(InputSnapshot{}, state);
+        CHECK(r.x == c.x);
+        CHECK(r.y == c.y);
+    }
+    // At 5 % small movements still add up (the fraction of a count is kept)
+    PortInputState slow;
+    for (int i = 0; i < 20; ++i) {
+        AdvancePortInput(PeripheralKind::ShuttleMouse, Mouse(1, -1), slow, InputSettings{0, 0, 5});
+        const auto r = ReadMouse(InputSnapshot{}, slow);
+        CHECK(r.x == (i == 19 ? 1 : 0));
+        CHECK(r.y == (i == 19 ? -1 : 0));
+    }
+    // Through the core (the option)
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetPeripheral(0, PeripheralKind::ShuttleMouse);
+    core.SetInputSettings(InputSettings{0, 0, 200});
+    core.SetPeripheralInput(0, Mouse(50, 0));
+    CHECK(ReadPort1Mouse(core).x == 100);
+    CHECK(core.GetInputSettings().mouseSensitivity == 200);
+}
+
+TEST_CASE("deadzone: zero equals previous mapping; continuous above threshold", "[peripherals][deadzone]") {
+    PortInputState state;
+    SECTION("0 %: exactly 0.7.0's mapping") {
+        const InputSettings zero{0, 0, 100};
+        for (int32_t v = -0x8000; v <= 0x7FFF; v += 7) {
+            for (const int16_t other : {int16_t{-0x8000}, int16_t{-12345}, int16_t{0}, int16_t{77}, int16_t{0x7FFF}}) {
+                InputSnapshot in;
+                in.leftX = static_cast<int16_t>(v);
+                in.leftY = other;
+                in.rightY = other;
+                const auto pad = MapAnalogPad(in, state, zero);
+                const auto wheel = MapArcadeRacer(in, zero);
+                const auto stick = MapMissionStick(in, state, zero);
+                if (pad.x != AxisToByte070(v, 0x80) || pad.y != AxisToByte070(other, 0x80) ||
+                    wheel.wheel != AxisToByte070(v, 0x7F) || stick.x1 != AxisToByte070(v, 0x7F) ||
+                    stick.y1 != AxisToByte070(other, 0x7F) ||
+                    stick.z1 != AxisToByte070(std::min<int32_t>(0x7FFF, -int32_t{other}), 0x7F)) {
+                    FAIL("x " << v << " y " << other);
+                }
+                // The defaults are the same mapping
+                const auto plain = MapAnalogPad(in, state);
+                if (plain.x != pad.x || plain.y != pad.y) {
+                    FAIL("default settings, x " << v << " y " << other);
+                }
+            }
+        }
+        for (int32_t t = 0; t <= 0x7FFF; t += 3) {
+            for (const bool digital : {false, true}) {
+                InputSnapshot in;
+                in.l2 = static_cast<int16_t>(t);
+                in.r2 = static_cast<int16_t>(0x7FFF - t);
+                in.joypad = digital ? static_cast<uint16_t>(Bit(RETRO_DEVICE_ID_JOYPAD_L2) | Bit(RETRO_DEVICE_ID_JOYPAD_R2))
+                                    : uint16_t{0};
+                const auto pad = MapAnalogPad(in, state, zero);
+                if (pad.l != TriggerToByte070(in.l2, digital) || pad.r != TriggerToByte070(in.r2, digital)) {
+                    FAIL("trigger " << t << " digital " << digital);
+                }
+            }
+        }
+    }
+    for (const unsigned percent : {15u, 30u}) {
+        CAPTURE(percent);
+        const InputSettings settings{percent, percent, 100};
+        const int32_t stickEdge = 0x8000 * static_cast<int32_t>(percent) / 100;
+        const int32_t triggerEdge = 0x7FFF * static_cast<int32_t>(percent) / 100;
+        SECTION("stick: centred inside, rescaled continuously to the full range outside (" +
+                std::to_string(percent) + " %)") {
+            int last = -1;
+            for (int32_t v = 0; v <= 0x7FFF; v += 16) {
+                InputSnapshot in;
+                in.leftX = static_cast<int16_t>(v);
+                const int x = MapAnalogPad(in, state, settings).x;
+                if (v <= stickEdge) {
+                    if (x != 0x80) {
+                        FAIL("inside the deadzone at " << v << ": " << x);
+                    }
+                } else if (x < last || x - last > 1) {
+                    FAIL("jump at " << v << ": " << last << " -> " << x);
+                }
+                last = x;
+            }
+            InputSnapshot in;
+            in.leftX = 0x7FFF;
+            CHECK(MapAnalogPad(in, state, settings).x == 0xFF);
+            CHECK(MapArcadeRacer(in, settings).wheel == 0xFF);
+            in.leftX = -0x8000;
+            in.leftY = -0x8000; // a corner: beyond the range, clamped
+            CHECK(MapAnalogPad(in, state, settings).x == 0x00);
+            CHECK(MapAnalogPad(in, state, settings).y == 0x00);
+            CHECK(MapMissionStick(in, state, settings).x1 == 0x00);
+            // Just past the edge: one step from the centre
+            in = {};
+            in.leftX = static_cast<int16_t>(-(stickEdge + 64));
+            CHECK(MapAnalogPad(in, state, settings).x >= 0x7F);
+            CHECK(MapArcadeRacer(in, settings).wheel >= 0x7E);
+            // Radial: each axis inside alone, but the diagonal outside moves both axes
+            const int16_t inside = static_cast<int16_t>(stickEdge * 8 / 10);
+            in = {};
+            in.leftX = inside;
+            CHECK(MapAnalogPad(in, state, settings).x == 0x80);
+            in.leftY = inside;
+            const auto diagonal = MapAnalogPad(in, state, settings);
+            CHECK(diagonal.x > 0x80);
+            CHECK(diagonal.y > 0x80);
+            const auto missionDiagonal = MapMissionStick(in, state, settings);
+            CHECK(missionDiagonal.x1 > 0x7F);
+            CHECK(missionDiagonal.y1 > 0x7F);
+            // The throttle has no deadzone
+            in = {};
+            in.rightY = static_cast<int16_t>(-inside);
+            CHECK(MapMissionStick(in, state, settings).z1 == AxisToByte070(inside, 0x7F));
+        }
+        SECTION("trigger: released inside, rescaled continuously outside (" + std::to_string(percent) + " %)") {
+            int last = -1;
+            for (int32_t t = 8; t <= 0x7FFF; t += 8) {
+                InputSnapshot in;
+                in.l2 = static_cast<int16_t>(t);
+                in.joypad = Bit(RETRO_DEVICE_ID_JOYPAD_L2); // the frontend's digital L2 may already be on
+                const int l = MapAnalogPad(in, state, settings).l;
+                if (t <= triggerEdge) {
+                    if (l != 0) {
+                        FAIL("inside the deadzone at " << t << ": " << l);
+                    }
+                } else if (l < last || l - last > 1) {
+                    FAIL("jump at " << t << ": " << last << " -> " << l);
+                }
+                last = l;
+            }
+            InputSnapshot in;
+            in.r2 = 0x7FFF;
+            CHECK(MapAnalogPad(in, state, settings).r == 0xFF);
+            // Without analog triggers the digital button is still a full press
+            in.r2 = 0;
+            in.joypad = Bit(RETRO_DEVICE_ID_JOYPAD_R2);
+            CHECK(MapAnalogPad(in, state, settings).r == 0xFF);
+        }
+    }
 }
 
 TEST_CASE("peripherals: Virtua Gun coordinates", "[peripherals]") {

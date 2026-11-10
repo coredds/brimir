@@ -87,7 +87,8 @@ public:
     }
 
     // Brimir: the state kept between reads, for save states (savestate_brimir.hpp). The report itself is not part of
-    // it: UpdateInputs runs before every read. LoadBrimirState gets a state saved from a peripheral of this type.
+    // it: UpdateInputs runs before every read (except the Shuttle Mouse's, which takes it at the start of a read and
+    // saves it apart: ShuttleMouse::SaveBrimirReport). LoadBrimirState gets a state saved from a peripheral of this type.
     virtual void SaveBrimirState(savestate::BrimirSaveState::Peripherals::Port &state) const {}
     virtual void LoadBrimirState(const savestate::BrimirSaveState::Peripherals::Port &state) {}
 
