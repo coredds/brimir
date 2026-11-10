@@ -1,7 +1,8 @@
 # Upstream Ymir sync triage, 2026-11 (2026-06-23..ff935379)
 
 Every upstream Ymir commit since Brimir's 2026-06-23 sync point that touches `libs/ymir-core` (532 non-merge
-commits, `main` from 2026-06-23 to `ff935379`, 2026-11-07), with Brimir's decision for each, plus one pre-range row (`a8a17ee`, 2026-06-19, found by the whole-tree comparison; Controller Ruling 2), 533 rows in all. Path map: upstream
+commits, `main` from 2026-06-23 to `ff935379`, 2026-11-07), with Brimir's decision for each, plus one pre-range row
+(`a8a17ee`, 2026-06-19, found by the whole-tree comparison; Controller Ruling 2), 533 rows in all. Path map: upstream
 `libs/ymir-core/{include,src}` = Brimir `src/core/{include,src}`. Decisions were made by comparing each commit's change
 with Brimir's current code (not by hash: earlier backports in `CHANGELOG.md` sometimes cite other hashes), plus a
 whole-tree comparison of `src/core` with `libs/ymir-core` at `ff935379`: every upstream line Brimir lacks is explained
@@ -49,8 +50,8 @@ Virtua Fighter 2, Virtua Gun games).
 
 The four takes, by likely effect on games:
 
-1. `0a9a0e2` (CD Block LLE only, off by default): resuming a paused CD audio track restarts it from the track's pregap
-   in Brimir; upstream names no game. The only take that can change what a game does.
+1. `0a9a0e2` (CD Block LLE only, off by default): resuming a paused CD audio track restarted it from the track's pregap
+   in Brimir before the take; upstream names no game. The only take that can change what a game does.
 2. `1ff3415`: the CD block mode setting stays in sync after loading a state of the other mode (session behaviour, not
    emulation output).
 3. `e2c87ed`, `ff93537`: no output change (debug file lookup; one wasted VRAM/CRAM copy per assignment).
@@ -71,12 +72,13 @@ The four takes, by likely effect on games:
 Dependencies, Brimir-modified regions and mirrors:
 
 - `0a9a0e2` builds on upstream's cd_interface rework (6ec6e27: `BeginSeekToFrameAddress`/`BeginSeekToTrackIndex`);
-  port only its seek target to Brimir's `CDDrive::SetupSeek` (Disc model), by hand, with a unit test of the seek target
-  (index 0 = the FAD, index n = that index's start, an index past the track's last clamped). The porter must also state
-  which `m_seekOp` rule is adopted: upstream HEAD picks it from the index (index 0 gives `ReadDataSector` even on an
-  audio track, index != 0 gives `ReadAudioSector` even on a data track), Brimir picks it by track type
-  (`cd_drive.cpp` 633-638); `OpReadSector` re-derives the operation from the FAD (479-483) and `CmdScan` checks it (428),
-  so the track-type rule is the smaller change. `cd_drive.cpp` is not a Brimir-modified file. No save-state change
+  only its seek target is ported, by hand, to Brimir's `CDDrive::SetupSeek` (Disc model; `7af52fc`), with unit tests of
+  the seek target (`[cdblock-lle]`): index 0 = the commanded FAD, index n = that index's start, and an index the track
+  does not have also seeks to the commanded FAD (Brimir's choice; upstream HEAD seeks to an invalid address there). The
+  `m_seekOp` rule adopted is Brimir's track-type rule (`ReadAudioSector` on an audio track), not upstream HEAD's index
+  rule (index 0 gives `ReadDataSector` even on an audio track); `OpReadSector` re-derives the operation from the FAD at
+  the first sector and `CmdScan` checks it, so only the seek target changes. `cd_drive.cpp` is now a Brimir-modified
+  file (the `// Brimir:` block in `SetupSeek`, BRIMIR_FORK "Brimir changes" row of 2026-11-10). No save-state change
   (`m_currFAD`, `m_targetFAD` and `m_seekOp` are already saved).
 - `1ff3415` touches `Saturn::LoadState`, which Brimir modified (BRIMIR_FORK "Save-state fidelity" rows; keep the
   `// Brimir:` blocks). Today `SetCDBlockLLE(state.cdblockLLE)` leaves the other `useLLE` observers stale on a cross-mode

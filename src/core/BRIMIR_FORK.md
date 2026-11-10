@@ -138,6 +138,10 @@ with `libs/ymir-core` at `ff935379`).
   and the CD drive's `useLLE` observers follow a state of the other mode; the line is upstream's, Brimir's other
   `LoadState` changes are kept) and `ff93537` (`VDP2Memory::operator=` returns a reference). No save-state format,
   Vulkan or JIT change.
+- Verified at the end of the sync (2026-11-10): frame hashes of the BIOS and 10 games identical to v0.7.1 (1,800
+  frames, also with CD Block LLE), software and Vulkan identical in the stage 2 compare matrix with strict state compares
+(Sega Rally's 2x sample-point run only with VDP1 Upscaling off, the same as v0.7.1), per-frame
+  run-ahead and fresh-instance runs identical, and 0.7.1 states load and continue identically.
 
 ## Brimir changes
 
@@ -215,9 +219,9 @@ whose CD block read FIFO cursors are out of range, which upstream's `CDBlock::Va
 
 ## Upstream SH-2 ports
 
-Fork base: upstream Ymir hardware-layer sync of 2026-06-23 plus the backports
-listed in `CHANGELOG.md` up to v0.5.4. The later backports and the triage of every upstream commit up to Ymir
-`ff935379` are in the "2026-11 upstream sync" section above (`UPSTREAM_SYNC_2026-11.md`).
+Fork base: upstream Ymir `ff935379` (2026-11-07), the 2026-11 upstream sync (the triage of every upstream commit from
+the 2026-06-23 sync point, see the "2026-11 upstream sync" section above and `UPSTREAM_SYNC_2026-11.md`). Before it:
+the 2026-06-23 sync plus the backports listed in `CHANGELOG.md`.
 
 | Date | Upstream commit | Files | Notes |
 |---|---|---|---|

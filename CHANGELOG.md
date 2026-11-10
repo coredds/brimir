@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Upstream Ymir sync** - the Ymir hardware layer is now based on upstream Ymir `ff935379` (2026-11-07). Every upstream commit touching the core since Brimir's 2026-06-23 sync point was reviewed: 533 commits (532 in range plus one older one), 4 taken, 92 already in Brimir, 2 where Brimir's version is kept and 435 skipped (mostly Ymir's GPU renderers and host CD drive support, which Brimir doesn't use). The full list with the reason for each is in `src/core/UPSTREAM_SYNC_2026-11.md`. No save-state format change: states from 0.7.1 and older load as before, and the BIOS and the ten test games run frame for frame as in 0.7.1 (default options and CD Block LLE).
+
+### Fixed
+- **CD Block LLE: resuming paused CD audio** - with `brimir_cdblock_lle` on, resuming a paused CD audio track restarted it from the track's pregap instead of continuing where it was paused (Ymir `0a9a0e2`, ported by hand to Brimir's CD drive; an index the track doesn't have now also seeks to the requested position instead of reading past the index list).
+- **State of the other CD Block mode** - loading a high-level CD Block state into a low-level session (or the reverse) switched the mode but left the CD Block's and CD drive's event settings at the old mode, so after a later hard reset neither CD Block's drive events ran (Ymir `1ff3415`).
+- **Disc file lookup offset** - looking up the file at a disc position was 150 sectors off (Ymir `e2c87ed`); only the debug log and the test probes use it.
+- **VDP state copy** - copying the VDP2 memory returned a copy instead of a reference, copying VRAM and CRAM a second time on each threaded-VDP2 state load and reset (Ymir `ff93537`); no output change.
+
+### Not taken (Brimir's version kept)
+- **Virtua Gun jitter** (Ymir `1d6ece6`) - Death Crimson's gun jitter stays Brimir's deterministic version held in save states (upstream draws it from `rand()`), so run-ahead and netplay stay exact.
+- **VBlank erase with overclocking** (Ymir `a8a17ee`) - upstream stops scaling the VBlank erase time by the SH-2 clock factor to support underclocking; Brimir only allows 100-300 % (`brimir_sh2_overclock`) and keeps scaling it, so the erase stays complete at overclock.
+
 ## [0.7.1] - 2026-11-10
 
 ### Added
