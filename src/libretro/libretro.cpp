@@ -1620,7 +1620,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         
         if (!bios_loaded) {
             brimir_log(RETRO_LOG_ERROR, "Failed to load BIOS. Place one of the following in system directory: %s", system_dir);
-            brimir_log(RETRO_LOG_ERROR, "  - Sega Saturn BIOS v1.01 (JAP).bin (JP v1.01 - recommended)");
+            brimir_log(RETRO_LOG_ERROR, "  - Sega Saturn BIOS v1.01 (JAP).bin (JP v1.01)");
             brimir_log(RETRO_LOG_ERROR, "  - Sega Saturn BIOS v1.00 (JAP).bin (JP v1.00)");
             brimir_log(RETRO_LOG_ERROR, "  - sega_101.bin (JP v1.01)");
             brimir_log(RETRO_LOG_ERROR, "  - mpr-17933.bin (US/EU v1.00)");
