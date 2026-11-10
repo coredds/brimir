@@ -243,6 +243,7 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requi
 | **v0.5.5** ✅ | Hotfix: no crash on Quick Menu > Close Content on Windows (#7) |
 | ~~**v0.5.6**~~ | Not released (v0.6.0 followed v0.5.5). Cheats came in v0.7.0 from RetroArch's database instead of an internal one |
 | **v0.6.0** ✅ | Vulkan renderer (VDP1/VDP2 on the GPU, internal resolution up to 4x), software renderer fixes, SH-2 JIT (experimental) |
+| **v0.7.1** ✅ | BIOS Auto by disc region (and region autodetect following the BIOS), BIOS settings in save states, Beetle-like mouse, deadzone and sensitivity options, CD Block LLE validated with real ROMs |
 | **v0.7.0** ✅ | Libretro features: Action Replay cheats, RetroAchievements, deterministic save states (run-ahead, netplay), RTC mode, all controller types, ROM/backup cartridges, accuracy options |
 | **v0.8.0+** | JIT compiler (Phase 2), VDP2 debug overlay exposure |
 | **v1.0.0** | JIT stable, 85%+ compatibility, RetroArch core inclusion |

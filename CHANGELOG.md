@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-10
+
 ### Added
 - **Controller deadzones and mouse sensitivity** - new core options (Input category, applied at once): `brimir_analog_deadzone` ("Analog Stick Deadzone", 0-30 % in 5 % steps, default 15 %) for the sticks of the 3D Control Pad, Arcade Racer and Mission Stick (a round deadzone, the rest of the range stretched to the full range, so no jump at its edge; the Mission Stick throttle has none), `brimir_trigger_deadzone` ("Trigger Deadzone", 0-30 %, default 15 %) for the 3D Control Pad's analog L/R, and `brimir_mouse_sensitivity` ("Mouse Sensitivity", 5-200 %, default 100 %). The 15 % defaults (Beetle Saturn's) change the 3D Control Pad, Arcade Racer and Mission Stick output compared with 0.7.0 (a small centre deadzone); set them to 0 % to get 0.7.0's mapping exactly. The Control Pad (the default device) is unaffected. Netplay peers need the same input options (deadzones, mouse sensitivity).
 

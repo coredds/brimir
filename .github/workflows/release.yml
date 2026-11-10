@@ -196,22 +196,22 @@ jobs:
             ### ${{ github.ref_name }}
 
             **Added**
-            - **Run-ahead and netplay** - save states now continue exactly like the uninterrupted run (16 save-state fixes; state format version 11, older states still load), so RetroArch allows run-ahead and netplay, and rewind is exact. New RTC Mode option (Virtual by default): the Saturn clock runs on emulated time, and a first boot no longer stops at the BIOS clock setup screen.
-            - **Cheats and RetroAchievements** - the Saturn cheat files of RetroArch's database work (Action Replay codes; all 1,698 codes of the 192 files parse), and work RAM is laid out as in Beetle Saturn, so achievement sets and cheat searches made with Beetle work too.
-            - **Every Saturn controller** - 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse and Virtua Gun (with a crosshair option) on both ports; the Control Pad is unchanged.
-            - **Cartridges** - The King of Fighters '95 and Ultraman with their ROM dumps (`mpr-18811-mx.ic1`, `mpr-19367-mx.ic1` in the system folder), a backup memory cartridge saved as `<game>.bcr` (Beetle-compatible), and a Cartridge option.
-            - **Accuracy options** - SH-2 cache emulation, low-level CD Block emulation (needs `cdb106.bin`, `cdb105.bin` or `cdb104.bin`) and SCSP step granularity.
+            - **BIOS Auto picks the disc's region** - a Japan/Asia-only disc boots with a Japanese BIOS, any other disc with a US/EU one (falling back to any BIOS present); BIOS files are recognised by their contents. Region autodetection now runs a multi-region disc in the BIOS's region (e.g. Sega Rally USA as North America, no longer Asia).
+            - **BIOS settings in save states** - a state carries the BIOS language and settings and applies them for the session; your saved settings change only when the game or the BIOS menu saves new ones. Netplay peers no longer need matching BIOS settings.
+            - **Controller options** - Analog Stick Deadzone and Trigger Deadzone (15 % by default, as in Beetle; 0 % = 0.7.0's mapping) and Mouse Sensitivity; the Shuttle Mouse now moves as in Mednafen/Beetle (no doubled movement, no drift after fast flicks).
+            - **CD Block low-level emulation validated** with `cdb106.bin` and `cdb105.bin`: the BIOS menu and five games boot, and save states and run-ahead are exact in the tested games.
 
             **Fixed**
-            - Save states that changed what happened next after a load (affected rewind and run-ahead), the Virtua Gun's random jitter outside save states, and a stray `brimir_saturn_rtc_none.smpc` written to the system folder on exit.
+            - The explicit BIOS choices "US v1.01" / "EU v1.00" were mislabelled: `sega_101.bin` and `sega_100.bin` are Japanese BIOS dumps (labels now JP v1.01 / JP v1.00; same files).
+            - CD Block low-level emulation: a state load didn't restore three SH-1 serial status bits, so run-ahead drifted.
 
-            **Notes**
-            - Loading a state now also restores in-game saves (internal backup RAM and backup cartridge), as in Beetle Saturn: saves made after the state are rolled back. Rewinding or loading an older state also moves the Saturn clock back.
-            - Netplay peers should use the same BIOS language/settings, core options and cheats.
-            - Dezaemon 2 and Galaxy Force II now get a backup cartridge under Cartridge = Auto; their v0.6.x states need Cartridge = None.
+            **Upgrading from 0.7.0**
+            - States saved by 0.7.0 for non-Japanese discs were made with the Japanese BIOS; they load with the US/EU BIOS now, but if one misbehaves, select the Japanese BIOS to continue it. In-game saves (`.srm`) are unaffected.
+            - US/EU discs now use the `_us_eu` BIOS settings file: a language set in the Japanese BIOS isn't carried over (no setup screen in the default Virtual clock mode).
+            - The 3D Control Pad, Arcade Racer and Mission Stick get a 15 % deadzone by default; set it to 0 % for 0.7.0's mapping.
 
             **Known Limitations**
-            - Vulkan at 4x: Daytona USA CE's SEGA logo and attract-mode restart stutter; rotated or distorted sprites (e.g. Astal) may differ from 1x at their edges; magnified textures stay blocky. Not tested on real Macs (MoltenVK). CD Block low-level emulation is untested with a real ROM.
+            - Vulkan at 4x: Daytona USA CE's SEGA logo and attract-mode restart stutter; rotated or distorted sprites (e.g. Astal) may differ from 1x at their edges; magnified textures stay blocky. Not tested on real Macs (MoltenVK). CD Block low-level emulation is tested on six contents only.
             - Interlaced / high-res titles (e.g., *Virtua Fighter 2*) may still show audio dropouts on CPU-bound setups when deinterlacing is enabled. Use Deinterlacing Mode = `None` for the best performance in these titles.
 
             See [CHANGELOG.md](https://github.com/coredds/brimir/blob/master/CHANGELOG.md) for full details.

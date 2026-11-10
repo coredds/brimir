@@ -12,7 +12,7 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 - **BIOS Auto picks the disc's region** - a Japan/Asia-only disc boots with a Japanese BIOS, any other disc with a US/EU one (falling back to any BIOS present), and region autodetection runs a multi-region disc in the BIOS's region. See [Installation](#installation).
 - **BIOS settings in save states** - a state carries the BIOS language and settings and applies them for the session; your saved settings never change from a loaded state. See [Save states](#save-states-run-ahead-rewind-and-netplay).
-- **Controller options** - Analog Stick Deadzone, Trigger Deadzone and Mouse Sensitivity (15 % by default; 0 % = 0.7.0's mapping); the Shuttle Mouse moves as in Beetle Saturn. See [Controllers](#controllers).
+- **Controller options** - Analog Stick Deadzone and Trigger Deadzone (15 % by default; 0 % = 0.7.0's mapping) and Mouse Sensitivity (100 % by default); the Shuttle Mouse moves as in Beetle Saturn. See [Controllers](#controllers).
 - **CD Block LLE validated with the real ROMs** - `cdb106.bin` and `cdb105.bin` boot the tested games, and run-ahead, rewind and netplay are exact with them in the tested games (a save-state fix). See [Accuracy options](#accuracy-options).
 - **Upgrading from 0.7.0** - states saved by 0.7.0 for non-Japanese discs were made with the Japanese BIOS (0.7.0's Auto); they load with the US/EU BIOS now, but if one misbehaves, set BIOS Selection to the Japanese BIOS to continue it. In-game saves (`.srm`) are unaffected. In Host RTC mode the new `_us_eu` settings file means the BIOS setup screen appears once.
 
