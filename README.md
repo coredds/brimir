@@ -145,13 +145,14 @@ with the controllers).
   keep the current clock instead.
 - **Backup RAM is in save states** (the internal one and a backup memory cartridge), as in Beetle Saturn: loading a
   state also rolls back in-game saves made after it was saved.
-- **Save-state format**: version 11. States from older versions (version 4 on, which includes the v0.6.x states) still
+- **BIOS settings are in save states** (the language and the other settings the BIOS keeps): loading a state applies
+  the state's settings for the session only. The settings saved in the RTC file change only when the BIOS or a game
+  writes them (the BIOS settings screen), never from a loaded state. States from before version 12 keep the session's.
+- **Save-state format**: version 12. States from older versions (version 4 on, which includes the v0.6.x states) still
   load. States are larger than before (about 800 KiB more before compression). One exception: Dezaemon 2 and Sega
   Ages: Galaxy Force II now get a backup memory cartridge under Cartridge = Auto, so their v0.6.x states (saved without
   one) are refused; set Cartridge to None and reload the content to load them.
 - **Netplay**: both machines need the same BIOS and content, and should also use:
-  - the same BIOS language and settings, since save states do not carry them (each machine keeps its own, from its
-    RTC file) and games that read them may run differently;
   - the same core options, in particular SH-2 Cache Emulation and SCSP Step Granularity, which are not emulation state:
     a state saved with other values loads, keeps the local settings and logs a warning;
   - the same cheats, enabled alike: cheats are not in save states and write memory every frame;

@@ -96,9 +96,16 @@ public:
     [[nodiscard]] bool ValidateState(const savestate::SMPCSaveState &state) const;
     void LoadState(const savestate::SMPCSaveState &state);
 
-    // Brimir: the peripherals' state kept between reads (BrimirSaveState::Peripherals, core fields only)
+    // Brimir: the peripherals' state kept between reads (BrimirSaveState::Peripherals, core fields only) and the BIOS
+    // settings (BrimirSaveState::SMPCSettings)
     void SaveBrimirState(savestate::BrimirSaveState &ext) const;
     void LoadBrimirState(const savestate::BrimirSaveState &ext);
+
+    // Brimir: number of SETSMEM commands run since construction, so the frontend can tell a persist the guest's
+    // settings write caused (SETSMEM persists the data) from the others (SETTIME, the frontend's own)
+    [[nodiscard]] uint64 GetSETSMEMCount() const {
+        return m_brimirSETSMEMCount;
+    }
 
 private:
     std::array<uint8, 7> IREG;
@@ -107,6 +114,8 @@ private:
     std::array<uint8, 4> SMEM;
 
     bool m_STE; // false = forces system configuration on boot up
+
+    uint64 m_brimirSETSMEMCount = 0; // Brimir: see GetSETSMEMCount
 
     bool m_resetDisable; // RESD flag, masks the Reset state
     bool m_resetState;   // State of the console's Reset button

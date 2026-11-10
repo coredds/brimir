@@ -549,6 +549,14 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
             }
             m_saturn->SMPC.LoadPersistentData(smpcData);
         }
+        // The user's BIOS settings, kept for the file whatever a loaded state applies to the session
+        {
+            ymir::smpc::PersistentSMPCData session{};
+            m_saturn->SMPC.SavePersistentData(session);
+            m_savedSMEM = session.SMEM;
+            m_savedSTE = session.STE;
+            m_seenSETSMEMCount = m_saturn->SMPC.GetSETSMEMCount();
+        }
         ApplyRTCMode();
 
         // Set up the canonical .srm path the frontend normally manages. If the
@@ -1088,13 +1096,26 @@ void CoreWrapper::OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, 
     if (!self) {
         return;
     }
+    // Only the guest changes the user's BIOS settings (SETSMEM, e.g. the BIOS settings screen); a state load applies
+    // its own to the session alone, so the file keeps the user's and the session's clock (as before).
+    if (self->m_saturn) {
+        const uint64_t setsmemCount = self->m_saturn->SMPC.GetSETSMEMCount();
+        if (setsmemCount != self->m_seenSETSMEMCount) {
+            self->m_seenSETSMEMCount = setsmemCount;
+            self->m_savedSMEM = data.SMEM;
+            self->m_savedSTE = data.STE;
+        }
+    }
     const auto& path = self->m_smpcPath;
     if (path.empty()) {
         return;
     }
+    ymir::smpc::PersistentSMPCData file = data;
+    file.SMEM = self->m_savedSMEM;
+    file.STE = self->m_savedSTE;
     std::error_code dirError;
     std::filesystem::create_directories(path.parent_path(), dirError);
-    SavePersistentSMPCDataToFile(data, path);
+    SavePersistentSMPCDataToFile(file, path);
 }
 
 void* CoreWrapper::GetSRAMData() {

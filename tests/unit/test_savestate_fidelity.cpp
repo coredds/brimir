@@ -508,6 +508,35 @@ TEST_CASE("Save state round trip keeps the SMPC port registers", "[savestate][fi
     CHECK(resaved->smpc.EXLE == 0);
 }
 
+TEST_CASE("A fresh system keeps the SMPC BIOS settings", "[savestate][fidelity][smpc][brimir]") {
+    // SMEM (the BIOS language and the like) and STE, which the guest reads with INTBACK, were not in the state: a
+    // session with other settings read its own after a load.
+    auto saturn = std::make_unique<Saturn>();
+    smpc::PersistentSMPCData data{};
+    saturn->SMPC.SavePersistentData(data);
+    data.SMEM = {0x03, 0x11, 0x22, 0x33};
+    data.STE = true;
+    saturn->SMPC.LoadPersistentData(data);
+    const auto state = Save(*saturn);
+    CHECK(state->brimir.smpcSettings.valid);
+
+    auto fresh = FreshWith(*state);
+    smpc::PersistentSMPCData loaded{};
+    fresh->SMPC.SavePersistentData(loaded);
+    CHECK(loaded.SMEM == data.SMEM);
+    CHECK(loaded.STE);
+
+    // Without the extension's settings (older states) the system keeps its own
+    auto old = Save(*saturn);
+    old->brimir.smpcSettings = {};
+    auto other = std::make_unique<Saturn>();
+    REQUIRE(other->LoadState(*old, true));
+    smpc::PersistentSMPCData kept{};
+    other->SMPC.SavePersistentData(kept);
+    CHECK(kept.SMEM == std::array<uint8, 4>{});
+    CHECK_FALSE(kept.STE);
+}
+
 TEST_CASE("A fresh system keeps the other field's VDP1 framebuffer", "[savestate][fidelity][vdp][vdp1][brimir]") {
     // With deinterlacing, the software renderer keeps the other field of double-density interlace in altFBRAM; the
     // first frame after a load combines it with the loaded fields. Upstream did not save it.

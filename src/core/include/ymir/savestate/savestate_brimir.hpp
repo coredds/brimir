@@ -107,6 +107,17 @@ struct BrimirSaveState {
         bool sh2CacheEmulation; // active, whether from the option or the game database
         uint8 scspStepGranularity; // 0 .. 5
     } settings;
+
+    // From version 12 on (in a version 11 payload these bytes are the struct's tail padding, cleared on load): the BIOS
+    // settings the SMPC keeps (SMEM, written by SETSMEM: language, sound mode and the like; STE, false until they are
+    // set), which the guest reads with INTBACK and the state lacked, so a state loaded into a session with other
+    // settings (netplay, another machine) ran differently. Saved by SMPC::SaveBrimirState and applied by SMPC::LoadBrimirState; the bridge (CoreWrapper)
+    // never writes a loaded state's settings to the frontend's settings file.
+    struct SMPCSettings {
+        bool valid;
+        std::array<uint8, 4> SMEM;
+        bool STE;
+    } smpcSettings;
 };
 
 // Bytes of the extension in a version 6 payload (before scspSlots), on every supported ABI.
@@ -120,5 +131,9 @@ inline constexpr size_t kBrimirSaveStateV9Size = 819392;
 
 // Bytes of the extension in a version 10 payload (before settings), on every supported ABI.
 inline constexpr size_t kBrimirSaveStateV10Size = 819408;
+
+// Bytes of the extension in a version 11 payload (the whole version 11 struct; smpcSettings took its tail padding), on
+// every supported ABI.
+inline constexpr size_t kBrimirSaveStateV11Size = 819424;
 
 } // namespace ymir::savestate

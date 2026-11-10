@@ -30,6 +30,10 @@ static_assert(sizeof(void*) != 8 || sizeof(SCUSaveState) == 2496, "SCUSaveState 
 static_assert(sizeof(void*) != 8 || sizeof(SMPCSaveState) == 144, "SMPCSaveState changed: update the serializer");
 static_assert(sizeof(ymir::savestate::BrimirSaveState) == 819424,
               "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
+// Version 12's smpcSettings took the version 11 struct's tail padding (the size above did not change): pinned too.
+static_assert(offsetof(ymir::savestate::BrimirSaveState, smpcSettings) == 819411 &&
+                  sizeof(ymir::savestate::BrimirSaveState::SMPCSettings) == 6,
+              "BrimirSaveState changed: bump CoreWrapper::kSaveStateVersion and convert older states");
 
 // Counts bytes (out == nullptr) or writes them.
 class Writer {
@@ -210,7 +214,8 @@ void VisitSMPC(Archive& ar, State& smpc) {
 // version: payloads from version 6 on end with the Brimir extension (savestate_brimir.hpp); earlier ones lack it,
 // version 6 has only its first kBrimirSaveStateV6Size bytes (no scspSlots; read with Reader::RawPrefix), and versions
 // 7 and 8 only the first kBrimirSaveStateV8Size bytes (no peripherals), version 9 the first kBrimirSaveStateV9Size
-// bytes (no virtuaGun), version 10 the first kBrimirSaveStateV10Size bytes (no settings).
+// bytes (no virtuaGun), version 10 the first kBrimirSaveStateV10Size bytes (no settings), version 11 the first
+// kBrimirSaveStateV11Size bytes (padding where smpcSettings is).
 template <typename Archive, typename State>
 void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     auto& [scheduler, system, msh2, ssh2, scu, smpc, vdp, scsp, cdblockLLE, cdblock, sh1, ygr, cddrive, cdblockDRAM,
@@ -234,8 +239,12 @@ void Visit(Archive& ar, State& s, uint32_t version = kSaveStatePayloadVersion) {
     ar.Raw(ssh2SpilloverCycles);
     ar.Raw(sh1SpilloverCycles);
     ar.Raw(sh1FracCycles);
-    if (version >= 11) {
+    if (version >= 12) {
         ar.Raw(brimir);
+    } else if (version == 11) {
+        if constexpr (std::is_same_v<Archive, Reader>) {
+            ar.RawPrefix(brimir, ymir::savestate::kBrimirSaveStateV11Size);
+        }
     } else if (version == 10) {
         if constexpr (std::is_same_v<Archive, Reader>) {
             ar.RawPrefix(brimir, ymir::savestate::kBrimirSaveStateV10Size);
@@ -328,6 +337,12 @@ bool ValidBrimirExtension(const ymir::savestate::BrimirSaveState &ext, uint32_t 
             return false;
         }
     }
+    if (version >= 12) {
+        // Saved by the core (SMPC::SaveBrimirState) in every state; SMEM is any four bytes
+        if (byte(ext.smpcSettings.valid) != 1 || byte(ext.smpcSettings.STE) > 1) {
+            return false;
+        }
+    }
     return ext.scsp.dspProgramLength <= 128;
 }
 
@@ -390,6 +405,12 @@ bool DecodeSaveState(std::span<const uint8_t> payload, SaveState& state, uint32_
         using ymir::savestate::BrimirSaveState;
         constexpr size_t from = offsetof(BrimirSaveState, settings);
         static_assert(from == ymir::savestate::kBrimirSaveStateV10Size);
+        std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
+    } else if (version == 11) {
+        // smpcSettings (read from the version 11 padding): valid false, the session keeps its BIOS settings
+        using ymir::savestate::BrimirSaveState;
+        constexpr size_t from = offsetof(BrimirSaveState, smpcSettings);
+        static_assert(from <= ymir::savestate::kBrimirSaveStateV11Size);
         std::memset(reinterpret_cast<uint8_t*>(&state.brimir) + from, 0, sizeof(BrimirSaveState) - from);
     }
     if (!reader.Done()) {

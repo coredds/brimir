@@ -207,9 +207,17 @@ void SMPC::SaveBrimirState(savestate::BrimirSaveState &ext) const {
     save(m_port1, ext.peripherals.ports[0]);
     save(m_port2, ext.peripherals.ports[1]);
     ext.peripherals.valid = true;
+    ext.smpcSettings.SMEM = SMEM;
+    ext.smpcSettings.STE = m_STE;
+    ext.smpcSettings.valid = true;
 }
 
 void SMPC::LoadBrimirState(const savestate::BrimirSaveState &ext) {
+    if (ext.smpcSettings.valid) {
+        // Not persisted here: the frontend's settings change only when the guest writes them (SETSMEM)
+        SMEM = ext.smpcSettings.SMEM;
+        m_STE = ext.smpcSettings.STE;
+    }
     if (!ext.peripherals.valid) {
         return;
     }
@@ -918,6 +926,7 @@ void SMPC::SETSMEM() {
     SMEM[2] = IREG[2];
     SMEM[3] = IREG[3];
     m_STE = true;
+    ++m_brimirSETSMEMCount; // Brimir: before the persist, which the frontend then knows the guest's write caused
     PersistData();
 
     SF = false; // done processing

@@ -535,7 +535,7 @@ TEST_CASE("BRI2 state with a version before 4 is rejected", "[core][savestate][u
     const size_t savedSize = 16 + static_cast<size_t>(compressedSize);
 
     STATIC_REQUIRE(CoreWrapper::kOldestLoadableSaveStateVersion == 4);
-    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 11);
+    STATIC_REQUIRE(CoreWrapper::kSaveStateVersion == 12);
 
     for (const uint32_t version : {0u, 1u, 2u, 3u, CoreWrapper::kSaveStateVersion + 1}) {
         CAPTURE(version);
@@ -576,14 +576,17 @@ TEST_CASE("Version 4, 5 and 6 states (without all of the Brimir extension) still
     }
     // Version 7 has the version 8 layout (only backup memory and ROM cartridge images differ); both end before the
     // peripherals' state of version 9, which ends before the Virtua Gun jitter of version 10, which ends before the
-    // settings of version 11.
-    for (const uint32_t version : {7u, 8u, 9u, 10u}) {
+    // settings of version 11. Version 12's BIOS settings took version 11's tail padding: same size, so a version 12
+    // payload under a version 11 header loads as version 11 (its BIOS settings cleared) until the extension grows.
+    for (const uint32_t version : {7u, 8u, 9u, 10u, 11u}) {
         CAPTURE(version);
         const auto buf = RepackStateAs(saved, version);
         REQUIRE(core.LoadState(buf.data(), buf.size()));
         std::vector<uint8_t> patched = saved;
         std::memcpy(patched.data() + 4, &version, sizeof(version));
-        REQUIRE_FALSE(core.LoadState(patched.data(), patched.size()));
+        if (version < 11 || sizeof(ymir::savestate::BrimirSaveState) != ymir::savestate::kBrimirSaveStateV11Size) {
+            REQUIRE_FALSE(core.LoadState(patched.data(), patched.size()));
+        }
     }
     core.RunFrame();
     REQUIRE(core.GetFramebuffer() != nullptr);
@@ -649,6 +652,10 @@ std::vector<uint8_t> RepackState(const std::vector<uint8_t>& saved, uint32_t ver
         // Version 10 ends before the settings.
         payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
                        ymir::savestate::kBrimirSaveStateV10Size);
+    } else if (version == 11) {
+        // Version 11 holds the version 11 struct (the BIOS settings took its tail padding).
+        payload.resize(payload.size() - sizeof(ymir::savestate::BrimirSaveState) +
+                       ymir::savestate::kBrimirSaveStateV11Size);
     }
 
     std::vector<uint8_t> buf(16 + LZ4_compressBound(static_cast<int>(payload.size())));
@@ -1062,6 +1069,23 @@ TEST_CASE("Save-state payload decoder rejects truncated and malformed payloads",
                                     *decoded));
             // Bridge-written: a state the core saved alone has none
             REQUIRE(DecodeSaveState(patched(offsetof(B, settings) + offsetof(S, valid), &zero, 1), *decoded));
+        }
+        {
+            using M = B::SMPCSettings;
+            const uint8_t any = 0xFF;
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, smpcSettings) + offsetof(M, valid), &zero, 1), *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, smpcSettings) + offsetof(M, valid), &two, 1), *decoded));
+            REQUIRE_FALSE(DecodeSaveState(patched(offsetof(B, smpcSettings) + offsetof(M, STE), &two, 1), *decoded));
+            REQUIRE(DecodeSaveState(patched(offsetof(B, smpcSettings) + offsetof(M, SMEM) + 3, &any, 1), *decoded));
+            CHECK(decoded->brimir.smpcSettings.SMEM[3] == 0xFF);
+            // Version 11 holds padding there: not checked, and cleared (the session keeps its settings)
+            const size_t v11 = ext + ymir::savestate::kBrimirSaveStateV11Size;
+            const auto padded = patched(offsetof(B, smpcSettings) + offsetof(M, STE), &two, 1);
+            REQUIRE(DecodeSaveState(std::span<const uint8_t>(padded.data(), v11), *decoded, 11));
+            CHECK_FALSE(decoded->brimir.smpcSettings.valid);
+            CHECK_FALSE(decoded->brimir.smpcSettings.STE);
+            CHECK(decoded->brimir.smpcSettings.SMEM == std::array<uint8_t, 4>{});
+            CHECK(decoded->brimir.peripherals.valid); // what version 11 has is still read
         }
         // Without the extension (versions 4 and 5) the same bytes are not read.
         REQUIRE(DecodeSaveState(std::span<const uint8_t>(payload.data(), ext), *decoded, 5));
@@ -1850,6 +1874,300 @@ TEST_CASE("rtc: a virtual-mode state restores its own clock", "[core][rtc][saves
     core.GetSaturn()->SMPC.LoadPersistentData(data);
     REQUIRE(core.LoadState(saved.data(), saved.size()));
     CHECK(PersistentData(core).rtc.timestamp == kStart);
+}
+
+// ============================================================
+// BIOS settings (SMPC SMEM and STE) in save states
+// ============================================================
+
+namespace {
+
+using Smem = std::array<uint8_t, 4>;
+
+// Two sets of BIOS settings (SMEM holds the language, sound mode and the like; STE says they were set)
+constexpr Smem kSettingsA{0x03, 0x11, 0x22, 0x33};
+constexpr Smem kSettingsB{0x01, 0x44, 0x55, 0x66};
+constexpr Smem kSettingsC{0x05, 0x77, 0x88, 0x99};
+
+std::filesystem::path JpBiosFixture() {
+    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / "Sega Saturn BIOS v1.01 (JAP).bin";
+}
+
+// An RTC file (layout above) with these settings and a virtual clock at 2001-09-09
+void WriteRtcSettingsFile(const std::filesystem::path& path, const Smem& smem, uint8_t ste) {
+    std::ofstream out(path, std::ios::binary);
+    const char header[4] = {1, 0, 0, 0};
+    out.write(header, sizeof(header));
+    out.write(reinterpret_cast<const char*>(smem.data()), smem.size());
+    out.put(static_cast<char>(ste));
+    const int64_t offset = 0;
+    const int64_t timestamp = 1000000000;
+    out.write(reinterpret_cast<const char*>(&offset), 8);
+    out.write(reinterpret_cast<const char*>(&timestamp), 8);
+}
+
+std::vector<uint8_t> FileBytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+struct RtcFileSettings {
+    Smem smem;
+    bool ste;
+};
+
+RtcFileSettings ReadRtcFileSettings(const std::filesystem::path& path) {
+    const auto bytes = FileBytes(path);
+    REQUIRE(bytes.size() == 25);
+    RtcFileSettings settings{};
+    std::memcpy(settings.smem.data(), bytes.data() + 4, 4);
+    REQUIRE(bytes[8] <= 1);
+    settings.ste = bytes[8] != 0;
+    return settings;
+}
+
+constexpr uint32_t kSMPCIREG0 = 0x010'0001;
+constexpr uint32_t kSMPCCOMREG = 0x010'001F;
+constexpr uint32_t kSMPCOREG0 = 0x010'0021;
+constexpr uint32_t kSMPCSF = 0x010'0063;
+
+// A command issued by the guest as the BIOS does: IREGs, SF set, COMREG; then the system runs until SMPC clears SF.
+void GuestSMPCCommand(ymir::Saturn& saturn, std::initializer_list<uint8_t> iregs, uint8_t command) {
+    uint32_t address = kSMPCIREG0;
+    for (const uint8_t value : iregs) {
+        saturn.mainBus.Write<uint8_t>(address, value);
+        address += 2;
+    }
+    saturn.mainBus.Write<uint8_t>(kSMPCSF, 1);
+    saturn.mainBus.Write<uint8_t>(kSMPCCOMREG, command);
+    uint64_t cycles = 0;
+    while ((saturn.mainBus.Peek<uint8_t>(kSMPCSF) & 1) != 0 && cycles < 200000) {
+        cycles += saturn.StepMasterSH2();
+    }
+    REQUIRE((saturn.mainBus.Peek<uint8_t>(kSMPCSF) & 1) == 0);
+}
+
+// What the guest reads of the settings: INTBACK's SMPC status (OREG0 bit 7 = STE, OREG12-15 = SMEM)
+RtcFileSettings GuestReadSettings(ymir::Saturn& saturn) {
+    GuestSMPCCommand(saturn, {0x01, 0x00, 0xF0}, 0x10);
+    RtcFileSettings read{};
+    read.ste = (saturn.mainBus.Peek<uint8_t>(kSMPCOREG0) & 0x80) != 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+        read.smem[i] = saturn.mainBus.Peek<uint8_t>(kSMPCOREG0 + 2 * (12 + i));
+    }
+    return read;
+}
+
+void GuestSETSMEM(ymir::Saturn& saturn, const Smem& smem) {
+    GuestSMPCCommand(saturn, {smem[0], smem[1], smem[2], smem[3]}, 0x17);
+}
+
+// SETTIME 2002-03-04 05:06:07 (BCD year, weekday/month, day, hour, minute, second)
+void GuestSETTIME(ymir::Saturn& saturn) {
+    GuestSMPCCommand(saturn, {0x20, 0x02, 0x13, 0x04, 0x05, 0x06, 0x07}, 0x16);
+}
+
+// A session with the US BIOS whose RTC file holds the given settings
+struct SettingsSession {
+    RtcContent content;
+    CoreWrapper core;
+
+    SettingsSession(const char* name, const Smem& smem, uint8_t ste) : content(name) {
+        WriteRtcSettingsFile(content.RtcFile(), smem, ste);
+        REQUIRE(core.Initialize());
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        core.SetRTCMode(RTCMode::Virtual);
+        REQUIRE(content.Load(core));
+    }
+
+    std::vector<uint8_t> Save() {
+        std::vector<uint8_t> saved(core.GetStateSize());
+        REQUIRE(core.SaveState(saved.data(), saved.size()));
+        return saved;
+    }
+};
+
+} // namespace
+
+TEST_CASE("smpc settings: state carries SMEM and STE", "[core][rtc][savestate][smpc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // Saved in a session with settings A, loaded into a fresh session with settings B: the guest reads A.
+    std::vector<uint8_t> saved;
+    {
+        SettingsSession a("brimir_smpc_settings_carry_a", kSettingsA, 1);
+        for (int i = 0; i < 10; ++i) {
+            a.core.RunFrame();
+        }
+        saved = a.Save();
+    }
+    SettingsSession b("brimir_smpc_settings_carry_b", kSettingsB, 0);
+    REQUIRE(PersistentData(b.core).SMEM == kSettingsB);
+    REQUIRE(b.core.LoadState(saved.data(), saved.size()));
+    const auto data = PersistentData(b.core);
+    CHECK(data.SMEM == kSettingsA);
+    CHECK(data.STE);
+    const auto read = GuestReadSettings(*b.core.GetSaturn());
+    CHECK(read.smem == kSettingsA);
+    CHECK(read.ste);
+    // A state saved after the load carries them again (rewind, run-ahead)
+    const auto again = b.Save();
+    CHECK(b.core.LoadState(again.data(), again.size()));
+    CHECK(PersistentData(b.core).SMEM == kSettingsA);
+}
+
+TEST_CASE("smpc settings: state load does not overwrite the saved settings", "[core][rtc][savestate][smpc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    SECTION("state of the same BIOS") {
+        std::vector<uint8_t> saved;
+        {
+            SettingsSession a("brimir_smpc_settings_keep_a", kSettingsA, 1);
+            saved = a.Save();
+        }
+        SettingsSession b("brimir_smpc_settings_keep_b", kSettingsB, 1);
+        REQUIRE(b.core.LoadState(saved.data(), saved.size()));
+        for (int i = 0; i < 30; ++i) {
+            b.core.RunFrame();
+        }
+        REQUIRE(PersistentData(b.core).SMEM == kSettingsA);
+        b.core.UnloadGame();
+        const auto file = ReadRtcFileSettings(b.content.RtcFile());
+        CHECK(file.smem == kSettingsB);
+        CHECK(file.ste);
+        // The clock is still persisted from the session (0.7.0 behaviour): the state's, run on by 30 frames
+        CHECK(RtcFileTimestamp(b.content.RtcFile()) >= 1000000000);
+        // The next session starts with the user's settings
+        REQUIRE(b.content.Load(b.core));
+        CHECK(PersistentData(b.core).SMEM == kSettingsB);
+    }
+    SECTION("state from a Japanese BIOS session in a US/EU BIOS session") {
+        if (!std::filesystem::exists(JpBiosFixture())) {
+            SKIP("JP BIOS fixture missing");
+        }
+        RtcContent content("brimir_smpc_settings_region");
+        const auto jpFile = content.system / "brimir_saturn_rtc_jp.smpc";
+        WriteRtcSettingsFile(jpFile, kSettingsA, 1);
+        WriteRtcSettingsFile(content.RtcFile(), kSettingsB, 1);
+        std::vector<uint8_t> saved;
+        {
+            CoreWrapper jp;
+            REQUIRE(jp.Initialize());
+            REQUIRE(jp.LoadIPLFromFile(JpBiosFixture().string().c_str()));
+            jp.SetRTCMode(RTCMode::Virtual);
+            REQUIRE(content.Load(jp));
+            REQUIRE(PersistentData(jp).SMEM == kSettingsA);
+            saved.resize(jp.GetStateSize());
+            REQUIRE(jp.SaveState(saved.data(), saved.size()));
+            jp.UnloadGame();
+        }
+        const auto jpBytes = FileBytes(jpFile);
+        CoreWrapper us;
+        REQUIRE(us.Initialize());
+        REQUIRE(us.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+        us.SetRTCMode(RTCMode::Virtual);
+        REQUIRE(content.Load(us));
+        REQUIRE(us.LoadState(saved.data(), saved.size()));
+        CHECK(PersistentData(us).SMEM == kSettingsA);
+        us.UnloadGame();
+        CHECK(ReadRtcFileSettings(content.RtcFile()).smem == kSettingsB);
+        CHECK(FileBytes(jpFile) == jpBytes);
+    }
+}
+
+TEST_CASE("smpc settings: guest SETSMEM updates the file", "[core][rtc][savestate][smpc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    SettingsSession s("brimir_smpc_settings_setsmem", kSettingsB, 0);
+    ymir::Saturn& saturn = *s.core.GetSaturn();
+    SECTION("without a state load") {
+        GuestSETSMEM(saturn, kSettingsC);
+        // SETSMEM persists at once
+        auto file = ReadRtcFileSettings(s.content.RtcFile());
+        CHECK(file.smem == kSettingsC);
+        CHECK(file.ste);
+        s.core.UnloadGame();
+        file = ReadRtcFileSettings(s.content.RtcFile());
+        CHECK(file.smem == kSettingsC);
+        CHECK(file.ste);
+    }
+    SECTION("after a state with other settings was loaded") {
+        // A state with settings A applies them for the session
+        auto data = PersistentData(s.core);
+        data.SMEM = kSettingsA;
+        data.STE = true;
+        saturn.SMPC.LoadPersistentData(data);
+        const auto saved = s.Save();
+        data.SMEM = kSettingsB;
+        data.STE = false;
+        saturn.SMPC.LoadPersistentData(data);
+        REQUIRE(s.core.LoadState(saved.data(), saved.size()));
+        REQUIRE(PersistentData(s.core).SMEM == kSettingsA);
+
+        // A guest SETTIME persists the clock, not the state's settings
+        GuestSETTIME(saturn);
+        auto file = ReadRtcFileSettings(s.content.RtcFile());
+        CHECK(file.smem == kSettingsB);
+        CHECK_FALSE(file.ste);
+        const auto clock = util::datetime::to_timestamp(saturn.SMPC.GetRTC().GetDateTime());
+        CHECK(std::llabs(RtcFileTimestamp(s.content.RtcFile()) - clock) <= 2);
+
+        SECTION("SETSMEM with new settings") {
+            GuestSETSMEM(saturn, kSettingsC);
+            CHECK(PersistentData(s.core).SMEM == kSettingsC);
+            s.core.UnloadGame();
+            file = ReadRtcFileSettings(s.content.RtcFile());
+            CHECK(file.smem == kSettingsC);
+            CHECK(file.ste);
+        }
+        SECTION("SETSMEM with the state's settings (the guest chose them)") {
+            GuestSETSMEM(saturn, kSettingsA);
+            s.core.UnloadGame();
+            file = ReadRtcFileSettings(s.content.RtcFile());
+            CHECK(file.smem == kSettingsA);
+            CHECK(file.ste);
+        }
+        SECTION("then another state load: the guest's settings stay in the file") {
+            GuestSETSMEM(saturn, kSettingsC);
+            REQUIRE(s.core.LoadState(saved.data(), saved.size()));
+            CHECK(PersistentData(s.core).SMEM == kSettingsA);
+            s.core.UnloadGame();
+            CHECK(ReadRtcFileSettings(s.content.RtcFile()).smem == kSettingsC);
+        }
+    }
+}
+
+TEST_CASE("smpc settings: v4-v11 states keep the session's settings", "[core][rtc][savestate][smpc]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    SettingsSession s("brimir_smpc_settings_old", kSettingsB, 0);
+    ymir::Saturn& saturn = *s.core.GetSaturn();
+    auto data = PersistentData(s.core);
+    data.SMEM = kSettingsA;
+    data.STE = true;
+    saturn.SMPC.LoadPersistentData(data);
+    const auto saved = s.Save();
+    data.SMEM = kSettingsC;
+    data.STE = false;
+    saturn.SMPC.LoadPersistentData(data);
+    for (const uint32_t version : {4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u}) {
+        CAPTURE(version);
+        const auto old = RepackStateAs(saved, version);
+        REQUIRE(s.core.LoadState(old.data(), old.size()));
+        const auto loaded = PersistentData(s.core);
+        CHECK(loaded.SMEM == kSettingsC);
+        CHECK_FALSE(loaded.STE);
+    }
+    // Control: the current version applies the state's
+    REQUIRE(s.core.LoadState(saved.data(), saved.size()));
+    CHECK(PersistentData(s.core).SMEM == kSettingsA);
+    CHECK(PersistentData(s.core).STE);
+    s.core.UnloadGame();
+    CHECK(ReadRtcFileSettings(s.content.RtcFile()).smem == kSettingsB);
 }
 
 // ============================================================

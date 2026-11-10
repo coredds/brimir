@@ -9,7 +9,8 @@
 //   - scu:  each field in declaration order; cartData as uint32 length + bytes
 //   - smpc: each field in declaration order; intback.report as uint32 length + bytes and
 //           intback.reportOffset as uint64
-//   - brimir (the last member): raw bytes from version 11 on; version 10 payloads hold only its first
+//   - brimir (the last member): raw bytes from version 12 on; version 11 payloads hold its first
+//     kBrimirSaveStateV11Size bytes (padding where smpcSettings is), version 10 payloads only its first
 //     kBrimirSaveStateV10Size bytes (no settings), version 9 payloads its first
 //     kBrimirSaveStateV9Size bytes (no virtuaGun either), version 7 and 8 payloads its first kBrimirSaveStateV8Size bytes
 //     (no peripherals either), version 6 payloads its first kBrimirSaveStateV6Size bytes (no scspSlots either);
@@ -37,7 +38,7 @@ inline constexpr size_t kMaxSaveStateINTBACKReportSize = 2 * (2 + 255);
 inline constexpr size_t kMaxSaveStateCartDataSize = 6 * 1024 * 1024;
 
 /// @brief Payload layout version EncodeSaveState writes (CoreWrapper::kSaveStateVersion, the BRI2 header version)
-inline constexpr uint32_t kSaveStatePayloadVersion = 11;
+inline constexpr uint32_t kSaveStatePayloadVersion = 12;
 
 /// @brief Size of the payload EncodeSaveState writes for this state
 size_t EncodedSaveStateSize(const ymir::savestate::SaveState& state);
@@ -58,7 +59,8 @@ void ResetSaveState(ymir::savestate::SaveState& state);
 /// @param version the payload version: 4 and 5 end before `brimir` (the extension is then cleared: `brimir.valid`
 /// false, so the state loads as it did in those versions); 6 ends before `brimir.scspSlots` (it and every later member
 /// of the extension cleared: their `valid` false); 7 and 8 end before `brimir.peripherals`, 9 before
-/// `brimir.virtuaGun`, 10 before `brimir.settings` (cleared likewise). Every
+/// `brimir.virtuaGun`, 10 before `brimir.settings` (cleared likewise); 11 holds padding where
+/// `brimir.smpcSettings` is (cleared: the session keeps its BIOS settings). Every
 /// member is written (or cleared), so state may hold a previous
 /// state's values.
 /// @return false if the payload is truncated, has trailing bytes, or holds an invalid length,

@@ -105,8 +105,9 @@ public:
     /// version 7 and 8 states load without them. Version 10 adds the Virtua Gun jitter's random state
     /// (BrimirSaveState::VirtuaGun); version 9 states load without it. Version 11 records the saving session's SH-2
     /// cache and SCSP step granularity (BrimirSaveState::Settings, diagnostic: GetLastStateWarning); version 10
-    /// states load without them.
-    static constexpr uint32_t kSaveStateVersion = 11;
+    /// states load without them. Version 12 adds the BIOS settings (SMPC SMEM and STE,
+    /// BrimirSaveState::SMPCSettings), applied for the session on load; version 11 states keep the session's.
+    static constexpr uint32_t kSaveStateVersion = 12;
 
     /// @brief Oldest BRI2 version LoadState accepts
     static constexpr uint32_t kOldestLoadableSaveStateVersion = 4;
@@ -633,6 +634,11 @@ private:
     std::filesystem::path m_srmPath;       // Canonical .srm path (also managed by the frontend)
     std::filesystem::path m_smpcBaseDir;   // Directory for system-wide RTC persistent data files
     std::filesystem::path m_smpcPath;      // RTC file of the BIOS region at LoadGame (empty: no persistence)
+    // The BIOS settings the RTC file holds (the user's): read at LoadGame, changed only by a guest SETSMEM. A loaded
+    // state's settings apply to the session (the SMPC's) without reaching the file.
+    std::array<uint8_t, 4> m_savedSMEM{};
+    bool m_savedSTE = false;
+    uint64_t m_seenSETSMEMCount = 0; // SMPC::GetSETSMEMCount when m_savedSMEM was last taken
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh
     mutable uint32_t m_framesSinceLastSRAMSync = 0;  // Frames since last SRAM sync
     bool m_sramFirstLoad = true;  // True until first frame runs (for .srm loading)
