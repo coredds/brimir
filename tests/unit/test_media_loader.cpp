@@ -597,4 +597,8 @@ TEST_CASE("Filesystem finds the file at a frame address", "[media][filesystem]")
     CHECK(fs.GetPathAtFrameAddress(150 + 30).empty());
     // Before the fix the LBA of a file found it, 150 sectors early
     CHECK(fs.GetPathAtFrameAddress(24).empty());
+    // Not changed by the fix (upstream has the same code): files are keyed by their last sector and looked up with
+    // upper_bound, so a file's last sector is not found. Only the debug log and the probes use the lookup.
+    CHECK(fs.GetPathAtFrameAddress(150 + 26).empty());
+    CHECK(fs.GetPathAtFrameAddress(150 + 28).empty());
 }
