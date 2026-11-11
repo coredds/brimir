@@ -252,7 +252,9 @@ Used by the performance harness (`tools/perf/`, `prove.ps1`) to prove a change l
   (4 little-endian bytes) and the int16 samples (L, R, ... as little-endian bytes), `tools/stream_hash.hpp`.
 - `--save-state-every N <dir>` writes the raw core state (what `--dump-state` writes) to `<dir>/frame_<i>.state` after
   measured frames i = N-1, 2N-1, ... and prints `state <i> <bytes> <hash>` (64-bit FNV-1a of the state bytes). `<dir>`
-  must exist. At about 7 MB per state, N = 1 over 600 frames writes about 4 GB.
+  must exist; `<dir>` = `-` prints the lines without writing any file. N must be at least 1. At about 7 MB per
+  state, N = 1 over 600 frames writes about 4 GB (`prove.ps1` therefore hashes with `-` and writes only the first
+  differing state, in a second run with `--frames i+1 --save-state-every i+1 <dir>`).
 - `--fixed-rtc` (without `--state`): the RTC runs on the virtual clock from `--lockstep`'s date instead of the host
   clock, so two runs from boot (the BIOS menu) produce identical work RAM and states. A state carries its own RTC.
 

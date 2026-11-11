@@ -18,13 +18,14 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 
-$vsrun = Join-Path $PerfScratch 'vsrun.cmd'
-if (-not (Test-Path -LiteralPath $vsrun)) { throw "Missing $vsrun (runs a command inside the VS x64 developer environment)" }
+# Runs a command inside the VS x64 developer environment (vswhere + vcvarsall).
+$vsrun = Join-Path $PSScriptRoot 'vsrun.cmd'
 
 if ($PSCmdlet.ParameterSetName -eq 'Commit') {
     $full = (git -C $PerfRepo rev-parse --verify "$Commit^{commit}").Trim()
     if ($LASTEXITCODE -ne 0) { throw "Unknown commit: $Commit" }
     $src = Join-Path $PerfScratch "perf-base-$($full.Substring(0, 7))"
+    git -C $PerfRepo worktree prune # drops registrations of worktree folders deleted by hand
     if (-not (Test-Path -LiteralPath (Join-Path $src '.git'))) {
         git -C $PerfRepo worktree add --detach $src $full | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "git worktree add failed" }
@@ -74,10 +75,19 @@ foreach ($t in $Targets) {
     if (-not $f) { throw "Target $t produced nothing in $bin" }
     $files[$f.Name] = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
 }
+# The uncommitted changes as built: SHA-256 of `git diff HEAD --binary` plus each untracked file's SHA-256.
+$diffText = (git -C $src diff HEAD --binary) -join "`n"
+$diffSha = if ($diffText) { (Get-FileHash -InputStream ([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($diffText))) -Algorithm SHA256).Hash } else { '' }
+$untracked = [ordered]@{}
+foreach ($f in @(git -C $src ls-files --others --exclude-standard)) {
+    if ($f) { $untracked[$f] = (Get-FileHash -LiteralPath (Join-Path $src $f) -Algorithm SHA256).Hash }
+}
 $compiler = (Select-String -LiteralPath (Join-Path $build 'CMakeCache.txt') -Pattern '^CMAKE_CXX_COMPILER:' | Select-Object -First 1).Line
 [ordered]@{
     commit       = $commitNow
     status       = $statusNow
+    diffSha256   = $diffSha
+    untracked    = $untracked
     source       = $src
     cmake        = ($cmakeArgs + '-G Ninja') -join ' '
     compiler     = $compiler

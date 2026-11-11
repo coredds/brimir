@@ -69,14 +69,15 @@ function New-PerfSysDir([string]$Dir, [string]$Window, [string]$Records, [string
     return $bios
 }
 
-# brimir_bench arguments for a window (without --frames and mode options).
-function Get-PerfBenchArgs([string]$Window, [string]$SysDir, [string]$Bios, [string]$Records, [string]$Roms) {
+# brimir_bench arguments for a window (without --frames and mode options). -NoWarmup: --warmup 0 (prove.ps1 hashes
+# every frame from the state load or boot; it adds the window's warmup to --frames).
+function Get-PerfBenchArgs([string]$Window, [string]$SysDir, [string]$Bios, [string]$Records, [string]$Roms, [switch]$NoWarmup) {
     $w = $PerfWindows[$Window]
     $a = @('--bios', $Bios)
     if ($w.game) {
         $a += @('--game', (Join-Path $Roms $w.game), '--system-dir', $SysDir, '--state', (Join-Path $Records "states\$Window.state"))
     }
-    $a += @('--warmup', "$($w.warmup)")
+    $a += @('--warmup', $(if ($NoWarmup) { '0' } else { "$($w.warmup)" }))
     return $a
 }
 
@@ -106,7 +107,7 @@ function Get-PerfProvenance([string]$BinDir) {
 }
 
 function Get-PerfMedian([double[]]$Values) {
-    $s = @($Values | Sort-Object)
+    $s = @($Values | Where-Object { -not [double]::IsNaN($_) } | Sort-Object)
     if ($s.Count -eq 0) { return [double]::NaN }
     if ($s.Count % 2) { return $s[[int][math]::Floor($s.Count / 2)] }
     return ($s[$s.Count / 2 - 1] + $s[$s.Count / 2]) / 2

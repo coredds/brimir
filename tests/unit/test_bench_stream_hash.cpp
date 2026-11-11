@@ -6,7 +6,9 @@
 #include "../../tools/stream_hash.hpp"
 
 #include <brimir/core_wrapper.hpp>
+#include <ymir/sys/saturn.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -24,15 +26,38 @@ std::vector<int16_t> Tone(size_t stereoFrames) {
     return pcm;
 }
 
-// Per-frame audio hashes of `frames` frames of a fresh core (no BIOS image: the core runs zeroed IPL).
-std::vector<uint64_t> CoreAudioHashes(int frames, size_t& totalSamples) {
+// Keys on SCSP slot 0 playing a looped 16-bit square wave of `amplitude` from sound RAM at full level, direct out, so a
+// core without a BIOS image (which is silent) produces audio.
+void PlayTone(brimir::CoreWrapper& core, int16_t amplitude) {
+    auto& bus = core.GetSaturn()->mainBus; // SCSP sound RAM at 0x5A00000, registers at 0x5B00000
+    constexpr uint32_t kWave = 0x1000;
+    constexpr uint16_t kLength = 0x40; // samples
+    for (uint16_t i = 0; i < kLength; ++i) {
+        bus.Write<uint16_t>(0x5A00000 + kWave + i * 2u, static_cast<uint16_t>(i < kLength / 2 ? amplitude : -amplitude));
+    }
+    bus.Write<uint16_t>(0x5B00000 + 0x400, 0x000F);           // MVOL 15
+    bus.Write<uint16_t>(0x5B00000 + 0x02, kWave & 0xFFFF);     // SA
+    bus.Write<uint16_t>(0x5B00000 + 0x04, 0);                  // LSA
+    bus.Write<uint16_t>(0x5B00000 + 0x06, kLength);            // LEA
+    bus.Write<uint16_t>(0x5B00000 + 0x08, 0x001F);             // AR 31, D1R/D2R 0
+    bus.Write<uint16_t>(0x5B00000 + 0x0A, 0x001F);             // DL 0, RR 31
+    bus.Write<uint16_t>(0x5B00000 + 0x0C, 0x0000);             // TL 0 (full level)
+    bus.Write<uint16_t>(0x5B00000 + 0x10, 0x0000);             // OCT 0, FNS 0
+    bus.Write<uint16_t>(0x5B00000 + 0x16, 0xE000);             // DISDL 7, DIPAN 0 (centre)
+    bus.Write<uint16_t>(0x5B00000 + 0x00, 0x1820 | (kWave >> 16)); // KYONEX, KYONB, normal loop, 16-bit PCM
+}
+
+// Per-frame audio hashes of `frames` frames of a fresh core playing PlayTone(amplitude).
+std::vector<uint64_t> CoreAudioHashes(int frames, int16_t amplitude, size_t& totalSamples, size_t& nonZero) {
     brimir::CoreWrapper core;
     REQUIRE(core.Initialize());
     core.SetThreadedVDP1(false);
     core.SetThreadedVDP2(false);
+    PlayTone(core, amplitude);
     std::vector<int16_t> chunk(2048 * 2);
     std::vector<uint64_t> hashes;
     totalSamples = 0;
+    nonZero = 0;
     for (int f = 0; f < frames; ++f) {
         core.RunFrame();
         std::vector<int16_t> pcm;
@@ -40,6 +65,7 @@ std::vector<uint64_t> CoreAudioHashes(int frames, size_t& totalSamples) {
             pcm.insert(pcm.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(n * 2));
         }
         totalSamples += pcm.size() / 2;
+        nonZero += static_cast<size_t>(std::count_if(pcm.begin(), pcm.end(), [](int16_t s) { return s != 0; }));
         hashes.push_back(HashAudio(pcm.data(), pcm.size() / 2));
     }
     return hashes;
@@ -93,12 +119,28 @@ TEST_CASE("State hash is stable and covers every byte", "[bench]") {
     CHECK(HashBytes(data.data(), data.size() - 1) != h);
 }
 
-TEST_CASE("Audio hashes of a core's output are the same on every run", "[bench]") {
+TEST_CASE("Audio hashes of a core's output are the same on every run and follow the audio", "[bench]") {
     size_t samplesA = 0;
     size_t samplesB = 0;
-    const auto a = CoreAudioHashes(30, samplesA);
-    const auto b = CoreAudioHashes(30, samplesB);
+    size_t samplesC = 0;
+    size_t nonZeroA = 0;
+    size_t nonZeroB = 0;
+    size_t nonZeroC = 0;
+    const auto a = CoreAudioHashes(30, 0x2000, samplesA, nonZeroA);
+    const auto b = CoreAudioHashes(30, 0x2000, samplesB, nonZeroB);
     CHECK(samplesA > 0); // the frames produced audio
+    INFO("non-zero samples: " << nonZeroA);
+    REQUIRE(nonZeroA > 0); // and it is not silence
+    CHECK(nonZeroA == nonZeroB);
     CHECK(samplesA == samplesB);
     CHECK(a == b);
+
+    // The same tone one step louder: as many samples, other hashes on the frames that carry the tone
+    const auto c = CoreAudioHashes(30, 0x2001, samplesC, nonZeroC);
+    CHECK(samplesC == samplesA);
+    size_t differing = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        differing += a[i] != c[i] ? 1 : 0;
+    }
+    CHECK(differing > 0);
 }

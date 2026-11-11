@@ -124,7 +124,8 @@ void PrintUsage(std::FILE* out) {
         "  --save-state-every N <dir>\n"
         "                after every Nth measured frame (i = N-1, 2N-1, ...), write the raw core state to\n"
         "                <dir>/frame_<i>.state and print 'state <i> <bytes> <hash>' (64-bit FNV-1a of the state).\n"
-        "                <dir> must exist. Not with --lockstep or --dump-at.\n"
+        "                <dir> must exist; '-' prints the lines without writing files. N >= 1. Not with\n"
+        "                --lockstep or --dump-at.\n"
         "  --fixed-rtc   without --state: run the RTC on the virtual (emulated-time) clock from 1994-11-22\n"
         "                00:00:00 (--lockstep's date) instead of the host clock, so two runs from boot match\n"
         "                (save states included). A save state carries its own RTC time. Not with --lockstep\n"
@@ -379,7 +380,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (args.saveStateEvery > 0) {
+    if (args.saveStateEvery > 0 && args.saveStateDir != "-") {
         std::error_code ec;
         if (!std::filesystem::is_directory(args.saveStateDir, ec)) {
             std::fprintf(stderr, "--save-state-every directory does not exist: %s\n", args.saveStateDir.c_str());
@@ -724,12 +725,14 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                 std::fprintf(stderr, "SaveState failed after measured frame %d\n", i);
                 return 2;
             }
-            const auto path = std::filesystem::path(args.saveStateDir) / ("frame_" + std::to_string(i) + ".state");
-            std::ofstream out(path, std::ios::binary | std::ios::trunc);
-            out.write(reinterpret_cast<const char*>(stateData.data()), static_cast<std::streamsize>(stateData.size()));
-            if (!out) {
-                std::fprintf(stderr, "Failed to write %s\n", path.string().c_str());
-                return 2;
+            if (args.saveStateDir != "-") {
+                const auto path = std::filesystem::path(args.saveStateDir) / ("frame_" + std::to_string(i) + ".state");
+                std::ofstream out(path, std::ios::binary | std::ios::trunc);
+                out.write(reinterpret_cast<const char*>(stateData.data()), static_cast<std::streamsize>(stateData.size()));
+                if (!out) {
+                    std::fprintf(stderr, "Failed to write %s\n", path.string().c_str());
+                    return 2;
+                }
             }
             stateHashes.push_back({i, stateData.size(), brimir_tools::HashBytes(stateData.data(), stateData.size())});
         }
