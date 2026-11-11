@@ -243,6 +243,22 @@ frame 0 320x224 65d0bc3658c2307f
 outside the timed region. It cannot be combined with `--lockstep` or `--dump-at`. The Ymir core library also logs
 to stdout, so filter for lines that start with `frame `.
 
+### Audio hashes, per-frame states, fixed RTC
+
+Used by the performance harness (`tools/perf/`, `prove.ps1`) to prove a change leaves the output byte for byte alone.
+
+- `--audio-hash` drains the core's audio output after every measured frame (and once before the window, dropping the
+  warmup's output) and prints `audio <i> <samples> <hash>`: the stereo sample count and a 64-bit FNV-1a of the count
+  (4 little-endian bytes) and the int16 samples (L, R, ... as little-endian bytes), `tools/stream_hash.hpp`.
+- `--save-state-every N <dir>` writes the raw core state (what `--dump-state` writes) to `<dir>/frame_<i>.state` after
+  measured frames i = N-1, 2N-1, ... and prints `state <i> <bytes> <hash>` (64-bit FNV-1a of the state bytes). `<dir>`
+  must exist. At about 7 MB per state, N = 1 over 600 frames writes about 4 GB.
+- `--fixed-rtc` (without `--state`): the RTC runs on the virtual clock from `--lockstep`'s date instead of the host
+  clock, so two runs from boot (the BIOS menu) produce identical work RAM and states. A state carries its own RTC.
+
+The lines are printed after the `frame` lines, outside the timed region; none of the three can be combined with
+`--lockstep` or `--dump-at` (`--fixed-rtc` only not with `--lockstep`).
+
 ## brimir_vkhost - headless libretro host
 
 A frontend without a window: it loads the built `brimir_libretro` library dynamically (LoadLibrary/dlopen), as

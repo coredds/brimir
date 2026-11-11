@@ -11,6 +11,7 @@
 #include <brimir/lockstep.hpp>
 
 #include "frame_hash.hpp"
+#include "stream_hash.hpp"
 
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
@@ -50,6 +51,10 @@ struct Args {
     bool cdPreload = true;     // the core's default (brimir_cd_preload enabled)
     bool threadedVdp = true;   // the core's default; --no-threaded-vdp renders VDP1/VDP2 on the emulation thread
     bool hash = false;         // --hash: print a frame hash per measured frame
+    bool audioHash = false;    // --audio-hash: print a hash of each measured frame's PCM output
+    int saveStateEvery = 0;    // --save-state-every N <dir>: write the core state after every Nth measured frame
+    std::string saveStateDir;
+    bool fixedRtc = false;     // --fixed-rtc: without --state, run the RTC on the virtual clock at the lockstep date
     bool backendGiven = false; // --jit-backend given explicitly
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
     bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
@@ -66,7 +71,8 @@ void PrintUsage(std::FILE* out) {
         "                    [--sh2-jit [--jit-backend ir|x64] [--jit-sync-compile]] --dump-at N --dump-state <file>\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
         "                    --lockstep N [--lockstep-reload K] [--jit-backend ir|x64] [--jit-sync-compile]\n"
-        "       (all forms also accept --no-cd-preload and --no-threaded-vdp)\n"
+        "       (all forms also accept --no-cd-preload and --no-threaded-vdp; the first form also --hash,\n"
+        "       --audio-hash, --save-state-every N <dir> and --fixed-rtc)\n"
         "       brimir_bench --help\n"
         "\n"
         "  --bios        Saturn BIOS image (required)\n"
@@ -112,6 +118,17 @@ void PrintUsage(std::FILE* out) {
         "  --hash        print one line per measured frame, 'frame <i> <w>x<h> <hash>' (64-bit FNV-1a of the\n"
         "                size and XRGB8888 pixels, the same as brimir_vkhost --hash). Not with --lockstep or\n"
         "                --dump-at.\n"
+        "  --audio-hash  print one line per measured frame, 'audio <i> <samples> <hash>' (64-bit FNV-1a of the\n"
+        "                stereo sample count and the frame's int16 PCM samples, see tools/stream_hash.hpp). The\n"
+        "                audio output is drained after every measured frame. Not with --lockstep or --dump-at.\n"
+        "  --save-state-every N <dir>\n"
+        "                after every Nth measured frame (i = N-1, 2N-1, ...), write the raw core state to\n"
+        "                <dir>/frame_<i>.state and print 'state <i> <bytes> <hash>' (64-bit FNV-1a of the state).\n"
+        "                <dir> must exist. Not with --lockstep or --dump-at.\n"
+        "  --fixed-rtc   without --state: run the RTC on the virtual (emulated-time) clock from 1994-11-22\n"
+        "                00:00:00 (--lockstep's date) instead of the host clock, so two runs from boot match\n"
+        "                (save states included). A save state carries its own RTC time. Not with --lockstep\n"
+        "                (which always does this).\n"
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -156,6 +173,27 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
         }
         if (opt == "--hash") {
             args.hash = true;
+            continue;
+        }
+        if (opt == "--audio-hash") {
+            args.audioHash = true;
+            continue;
+        }
+        if (opt == "--fixed-rtc") {
+            args.fixedRtc = true;
+            continue;
+        }
+        if (opt == "--save-state-every") { // two values: N and the directory
+            if (i + 2 >= argc) {
+                std::fprintf(stderr, "--save-state-every needs N and a directory\n");
+                return ParseResult::Error;
+            }
+            if (!ParseInt(argv[i + 1], args.saveStateEvery) || args.saveStateEvery == 0) {
+                std::fprintf(stderr, "Invalid --save-state-every value: %s\n", argv[i + 1]);
+                return ParseResult::Error;
+            }
+            args.saveStateDir = argv[i + 2];
+            i += 2;
             continue;
         }
         if (i + 1 >= argc) {
@@ -235,6 +273,14 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     }
     if (args.hash && (args.lockstep >= 0 || args.dumpAt >= 0)) {
         std::fprintf(stderr, "--hash cannot be combined with --lockstep or --dump-at\n");
+        return ParseResult::Error;
+    }
+    if (args.fixedRtc && args.lockstep >= 0) {
+        std::fprintf(stderr, "--fixed-rtc cannot be combined with --lockstep\n");
+        return ParseResult::Error;
+    }
+    if ((args.audioHash || args.saveStateEvery > 0) && (args.lockstep >= 0 || args.dumpAt >= 0)) {
+        std::fprintf(stderr, "--audio-hash and --save-state-every cannot be combined with --lockstep or --dump-at\n");
         return ParseResult::Error;
     }
     if (args.lockstepReload > 0 && args.lockstep < 0) {
@@ -330,6 +376,13 @@ int main(int argc, char** argv) {
         std::error_code ec;
         if (!std::filesystem::is_directory(args.systemDir, ec)) {
             std::fprintf(stderr, "--system-dir is not an existing directory: %s\n", args.systemDir.c_str());
+            return 2;
+        }
+    }
+    if (args.saveStateEvery > 0) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(args.saveStateDir, ec)) {
+            std::fprintf(stderr, "--save-state-every directory does not exist: %s\n", args.saveStateDir.c_str());
             return 2;
         }
     }
@@ -580,6 +633,10 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     if (const int rc = LoadContent(core, args, saveDir, systemDir, args.sh2Jit, false); rc != 0) {
         return rc;
     }
+    if (args.fixedRtc && args.state.empty() && !brimir::ApplyFixedRtc(core, brimir::kDeterministicRtcDate)) {
+        std::fprintf(stderr, "Failed to fix the RTC date\n");
+        return 2;
+    }
 
     if (args.dumpAt >= 0) {
         for (int i = 0; i < args.dumpAt; ++i) {
@@ -614,6 +671,27 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         uint64_t hash;
     };
     std::vector<FrameHash> frameHashes;
+    struct StreamHash {
+        int frame;
+        size_t size;
+        uint64_t hash;
+    };
+    std::vector<StreamHash> audioHashes;
+    std::vector<StreamHash> stateHashes;
+    std::vector<int16_t> audioChunk(2048 * 2);
+    std::vector<int16_t> frameAudio;
+    // Drains the core's audio output (one frame's worth) into frameAudio.
+    const auto drainAudio = [&] {
+        frameAudio.clear();
+        while (const size_t n = core.GetAudioSamples(audioChunk.data(), 2048)) {
+            frameAudio.insert(frameAudio.end(), audioChunk.begin(),
+                              audioChunk.begin() + static_cast<std::ptrdiff_t>(n * 2));
+        }
+    };
+    if (args.audioHash) {
+        drainAudio(); // the warmup's output is not part of the window
+    }
+    std::vector<uint8_t> stateData;
     // JIT compile work per measured frame (both CPUs), to explain the slowest frames.
     std::vector<CompileCounters> frameCompiles;
     frameCompiles.reserve(static_cast<size_t>(args.frames));
@@ -634,6 +712,26 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             const unsigned h = core.GetFramebufferHeight();
             frameHashes.push_back(
                 {w, h, brimir_tools::HashFrame(w, h, core.GetFramebuffer(), core.GetFramebufferPitch())});
+        }
+        if (args.audioHash) {
+            drainAudio();
+            const size_t samples = frameAudio.size() / 2;
+            audioHashes.push_back({i, samples, brimir_tools::HashAudio(frameAudio.data(), samples)});
+        }
+        if (args.saveStateEvery > 0 && (i + 1) % args.saveStateEvery == 0) {
+            stateData.assign(core.GetStateSize(), 0);
+            if (!core.SaveState(stateData.data(), stateData.size())) {
+                std::fprintf(stderr, "SaveState failed after measured frame %d\n", i);
+                return 2;
+            }
+            const auto path = std::filesystem::path(args.saveStateDir) / ("frame_" + std::to_string(i) + ".state");
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(stateData.data()), static_cast<std::streamsize>(stateData.size()));
+            if (!out) {
+                std::fprintf(stderr, "Failed to write %s\n", path.string().c_str());
+                return 2;
+            }
+            stateHashes.push_back({i, stateData.size(), brimir_tools::HashBytes(stateData.data(), stateData.size())});
         }
         const CompileCounters after = ReadCompileCounters(core);
         frameCompiles.push_back({after.compiles - before.compiles, after.nativeCompiles - before.nativeCompiles,
@@ -658,6 +756,12 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     for (size_t i = 0; i < frameHashes.size(); ++i) {
         std::printf("frame %zu %ux%u %016llx\n", i, frameHashes[i].w, frameHashes[i].h,
                     static_cast<unsigned long long>(frameHashes[i].hash));
+    }
+    for (const StreamHash& a : audioHashes) {
+        std::printf("audio %d %zu %016llx\n", a.frame, a.size, static_cast<unsigned long long>(a.hash));
+    }
+    for (const StreamHash& s : stateHashes) {
+        std::printf("state %d %zu %016llx\n", s.frame, s.size, static_cast<unsigned long long>(s.hash));
     }
 
     double total = 0.0;

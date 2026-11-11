@@ -108,6 +108,8 @@ add_executable(brimir_tests
     unit/test_vdp1_front.cpp
     # brimir_vkhost's sample-point mapping and sharpness metric (tools/vkhost/sample_points.hpp, header-only)
     unit/test_vkhost_sample_points.cpp
+    # brimir_bench's --audio-hash and --save-state-every hashes (tools/stream_hash.hpp, header-only)
+    unit/test_bench_stream_hash.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
