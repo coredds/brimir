@@ -137,7 +137,11 @@ target_compile_definitions(brimir-core PUBLIC "Ymir_ENABLE_DEVLOG=$<BOOL:${Brimi
 target_compile_definitions(brimir-core PUBLIC "Ymir_DEV_ASSERTIONS=$<BOOL:${Brimir_ENABLE_DEV_ASSERTIONS}>")
 target_compile_definitions(brimir-core PUBLIC "Ymir_DEV_BUILD=$<BOOL:${Brimir_DEV_BUILD}>")
 target_compile_definitions(brimir-core PUBLIC "Ymir_EXTRA_INLINING=$<BOOL:${Brimir_EXTRA_INLINING}>")
-target_compile_definitions(brimir-core PUBLIC "Ymir_DISABLE_FORCE_INLINE=$<BOOL:${Brimir_DISABLE_FORCE_INLINE}>")
+# Brimir: inline.hpp tests `defined(Ymir_DISABLE_FORCE_INLINE)`, so define it only when the option is ON (defining it as
+# 0 turned FORCE_INLINE, NO_INLINE and FLATTEN off in every build; BRIMIR_FORK.md, performance)
+if (Brimir_DISABLE_FORCE_INLINE)
+    target_compile_definitions(brimir-core PUBLIC Ymir_DISABLE_FORCE_INLINE)
+endif ()
 target_compile_definitions(brimir-core PUBLIC "TOML_EXCEPTIONS=0")
 
 ## Generate the export header for Ymir

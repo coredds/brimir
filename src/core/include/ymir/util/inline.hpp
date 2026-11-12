@@ -76,20 +76,6 @@ For use with functions that heavily impact build times.
     #define FLATTEN
 #endif
 
-// Brimir: BRIMIR_HOT_INLINE forces inlining in optimized builds whatever Ymir_DISABLE_FORCE_INLINE says. Brimir's
-// CMake always defines Ymir_DISABLE_FORCE_INLINE (as 0 or 1) and the check above only tests that it is defined, so
-// FORCE_INLINE is plain `inline` in every Brimir build. Used on the SH-2 interpreter's hot path (BRIMIR_FORK.md,
-// "Performance changes").
-#if !defined(NDEBUG)
-    #define BRIMIR_HOT_INLINE inline
-#elif defined(__clang__) || defined(__GNUC__)
-    #define BRIMIR_HOT_INLINE [[gnu::always_inline]] inline
-#elif defined(_MSC_VER)
-    #define BRIMIR_HOT_INLINE __forceinline
-#else
-    #define BRIMIR_HOT_INLINE inline
-#endif
-
 #if Ymir_EXTRA_INLINING && defined(__clang__)
     #define FORCE_INLINE_EX FORCE_INLINE
     #define FLATTEN_EX FLATTEN
