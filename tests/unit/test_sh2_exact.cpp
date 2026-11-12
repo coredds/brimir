@@ -11,7 +11,8 @@
 // Covered mechanisms: FRT/WDT reads and writes after long busy and SLEEP idle stretches, FRT compare/overflow and
 // WDT interval interrupts, interrupts raised by INTC (IPR) and SR writes, DMAC transfers as channels and DMAOR are
 // toggled (with the transfer-end interrupt), and instruction fetch across a 64 KiB bus page boundary, from a handler
-// page and from a page remapped while code runs from it (both fetch-buffer alignments). Every program runs with the
+// page and from a page remapped while code runs from it (both fetch-buffer alignments), misaligned loads and stores,
+// and stores to a read-only array page (Task 2b). Every program runs with the
 // plain interpreter and with SH-2 cache emulation (Advance<false, true>, cache enabled), and with two scheduler
 // patterns.
 
@@ -661,6 +662,61 @@ void SetupMisaligned(Driver &d) {
     d.rig->Load(s);
 }
 
+// Byte, word and longword stores to a read-only array page (cached and cache-through addresses: the store is dropped,
+// the SH-2 fast path must leave it to Bus::Write), each read back and logged, as are the RAM loads around them.
+std::array<uint8_t, 0x10000> g_rom;
+
+void SetupReadOnly(Driver &d) {
+    Asm a;
+    a.Label("start");
+    a << MovBS(1, 5) << MovWS(2, 5) << MovLS(4, 5); // cached
+    a << MovBS(6, 5) << MovWS(7, 5) << MovLS(8, 5); // cache-through
+    a << MovBL(3, 1);
+    a.Log(3);
+    a << MovWL(3, 2);
+    a.Log(3);
+    a << MovLL(3, 4);
+    a.Log(3);
+    a << MovBL(3, 6);
+    a.Log(3);
+    a << MovWL(3, 7);
+    a.Log(3);
+    a << MovLL(3, 8);
+    a.Log(3);
+    a << MovLL(3, 9); // RAM next to the ROM page
+    a.Log(3);
+    a << AddI(5, 0x11) << AddI(1, 4) << AddI(2, 4) << AddI(4, 4) << AddI(6, 4) << AddI(7, 4) << AddI(8, 4)
+      << AddI(9, 4);
+    a << Dt(12);
+    a.Bf("again");
+    a << kSleepOp;
+    a.Label("again");
+    a.Bra("start");
+    a << kNop;
+    d.rig->WriteCode(kCode, a.Finish());
+    for (uint32_t i = 0; i < g_rom.size(); ++i) {
+        g_rom[i] = static_cast<uint8_t>(i * 7 + 3);
+    }
+    d.rig->bus.MapArray(0x6030000, 0x603FFFF, g_rom, false);
+    for (uint32_t i = 0; i < 0x40; i += 4) {
+        d.rig->Write32(0x06040000 + i, 0x0A0B0C0Du * (i / 4 + 1));
+    }
+
+    auto s = d.rig->BaseState(kCode);
+    s.R[1] = 0x06030011; // byte
+    s.R[2] = 0x06030022; // word
+    s.R[4] = 0x06030034; // long
+    s.R[6] = 0x26030041; // byte, cache-through
+    s.R[7] = 0x26030052; // word, cache-through
+    s.R[8] = 0x26030064; // long, cache-through
+    s.R[5] = 0xA1B2C3D4; // stored value
+    s.R[9] = 0x06040000; // RAM
+    s.R[12] = 5;         // passes
+    s.R[14] = kLog;
+    s.R[15] = kStack;
+    d.rig->Load(s);
+}
+
 struct Program {
     const char *name;
     void (*setup)(Driver &);
@@ -668,14 +724,15 @@ struct Program {
     Expected expected;
 };
 
-// Expected digests recorded at 40aa9d1 (before the Task 2 changes). Do not update them for a speed-up: a different
-// digest means the change is not cycle-exact.
+// Expected digests recorded at 40aa9d1 (before the Task 2 changes; "readonly-page" on 95f6efc, whose core is
+// 40aa9d1's). Do not update them for a speed-up: a different digest means the change is not cycle-exact.
 const Program kPrograms[] = {
     {"frt-idle", SetupFrtIdle, 700000, {{{0xDA7F4ACE0713814Eull, 0xB579D6F80430E3D4ull}, {0x45F718F711F56E54ull, 0x2FA6236A7F57507Cull}}}},
     {"timer-interrupts", SetupTimerInterrupts, 300000, {{{0x0E70E0CBB714810Dull, 0xE49CF04E795E7066ull}, {0x1A38E3A987323463ull, 0xED6B154AFDFD3FD3ull}}}},
     {"dma", SetupDma, 20000, {{{0x40B754E186D7DAACull, 0x1170965F5963CA21ull}, {0x758635C11D6CC52Cull, 0x312D5A4D2BB0AC78ull}}}},
     {"fetch", SetupFetch, 3000, {{{0x5311A29B64C7C105ull, 0x3BF075019663476Aull}, {0xEEA8BA4CAB32E32Full, 0xF0E6F8187E88D362ull}}}},
     {"misaligned", SetupMisaligned, 3000, {{{0xBBF0A6397D8D95BCull, 0xC046BAEDBAEBD7CAull}, {0xCB31DD192074EFC2ull, 0xB83D3AFB886E2C5Bull}}}},
+    {"readonly-page", SetupReadOnly, 3000, {{{0x830594F280F3CC61ull, 0xFEFA6178AE2B78C0ull}, {0x0235F723D7772B11ull, 0x45FEB51EF901E22Dull}}}},
 };
 
 } // namespace
@@ -726,8 +783,8 @@ TEST_CASE("SH-2 exact program logs", "[.sh2dump]") {
     }
 }
 
-// The same programs must give the same results whatever the order the tests run in and whether timers were caught
-// up lazily: running a program twice in a row on fresh rigs gives the same digest.
+// The same programs must give the same results whatever the order the tests run in: running a program twice in a row
+// on fresh rigs gives the same digest (no state leaks between rigs).
 TEST_CASE("SH-2 exact runs are reproducible", "[sh2][exact]") {
     for (const Program &prog : kPrograms) {
         Driver a{false};
