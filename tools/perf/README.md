@@ -75,7 +75,7 @@ tools\perf\measure.ps1 -A <bin dir> -B <bin dir> -Windows vf2,megamix -Modes unt
 
 - **Isolation.** Each bench is started with `ProcessorAffinity` = one logical CPU per physical core, leaving out
   CPU 0's core (`-Affinity <hex mask>` to override), and `PriorityClass` High. Before each run the script samples the
-  whole machine's CPU load for 1 s (`GetSystemTimes`) and waits (up to `-QuietWaitSeconds`, 60) until it is at most
+  whole machine's CPU load for 1 s (`GetSystemTimes`) and waits (up to `-QuietWaitSeconds`, 120) until it is at most
   `-MaxLoad` (5 %); a run started above that is flagged busy (`-RequireQuiet` fails instead). The affinity, priority
   and active power scheme are recorded in `provenance.json`. One discarded warm-up run per build starts the session.
 - **Self-check** (`-SelfCheck`): A against A on `-SelfCheckWindows` (gh, vf2) x the modes for `-SelfCheckRounds` (4)
@@ -86,7 +86,7 @@ tools\perf\measure.ps1 -A <bin dir> -B <bin dir> -Windows vf2,megamix -Modes unt
   ratio as a change %, with [min..max] over the rounds. The verdict is `faster`/`SLOWER` only if at least 80 % of the
   rounds have the sign of the median (4 of 5, 5 of 6), else `noise`; `keep` marks faster by 3 % or more.
 - **Outliers.** A run whose p50 is more than `-OutlierPercent` (8 %) from its cell's median is re-run (up to
-  `-MaxReruns`, 2) and the re-run used in its round; rejected runs are listed in `measure.md` and `rejected.csv`.
+  `-MaxReruns`, 3) and the re-run used in its round; rejected runs are listed in `measure.md` and `rejected.csv`.
 - **Stages.** The same paired change, range and verdict for the SH-2 time (master + slave, from the SH-2 host-time
   profiling) and "other" (`Ymir_RunFrame` minus SH-2: VDP, SCSP, SCU, CD block, ...), from the bench's per-run
   averages. In thr mode "other" includes the emulation thread's wait for the VDP threads at the end of the frame: a VDP

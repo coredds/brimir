@@ -120,10 +120,21 @@ try {
                         $first = "$kind at frame $frameNo from load (window frame $($frameNo - $PerfWindows[$p.window].warmup)): base '$($b[$i])' new '$($n[$i])'"
                         if ($kind -eq 'state') {
                             # Write just that state on both sides (--save-state-every i+1 over i+1 frames) for brimir_state_diff.
+                            # The re-run must succeed and reproduce the detected hash, else the kept state is not the one
+                            # that differed.
                             foreach ($side in 'base', 'new') {
                                 $dir = Join-Path $u.out "states\$tag-$side"
                                 New-Item -ItemType Directory -Force $dir | Out-Null
-                                $null = & $runBench $side ($frameNo + 1) @('--save-state-every', "$($frameNo + 1)", $dir) '-state'
+                                $re = & $runBench $side ($frameNo + 1) @('--save-state-every', "$($frameNo + 1)", $dir) '-state'
+                                $want = if ($side -eq 'base') { $b[$i] } else { $n[$i] }
+                                $got = @($re.lines | Where-Object { $_.StartsWith("state $frameNo ") }) | Select-Object -First 1
+                                if ($re.exit -ne 0) {
+                                    Write-Warning "$tag ${side}: state re-run failed (exit $($re.exit)); the kept state may be missing"
+                                    $first += " [$side state re-run exit $($re.exit)]"
+                                } elseif ($got -ne $want) {
+                                    Write-Warning "$tag ${side}: state re-run gave '$got', expected '$want'; the kept state is not the detected one"
+                                    $first += " [$side state re-run mismatch: '$got']"
+                                }
                             }
                         }
                         break
