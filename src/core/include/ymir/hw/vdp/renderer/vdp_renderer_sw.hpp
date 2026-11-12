@@ -180,13 +180,18 @@ public:
     }
 
     // Brimir: test hooks for the NBG character-run fast path (VDP2DrawNormalScrollCharRuns): off forces the per-dot
-    // path, and the count is the dots the fast path drew. Not exposed as an option. Call between frames with
-    // unthreaded VDP2 rendering (plain members written by the drawing thread).
+    // path, and the count is the dots the fast path drew, over NBG0-3 and both fields. Not exposed as an option. Call
+    // between frames, with the VDP2 render threads idle (the switch is a plain flag the threads read; the counters are
+    // plain per-field values, each written only by the thread drawing that field: the VDP2 render thread draws
+    // field 0, the deinterlace render thread the alternate field).
     void SetNBGFastPathForTesting(bool enabled) {
         m_NBGFastPath = enabled;
     }
     uint64 GetNBGFastPathDotsForTesting() const {
-        return m_NBGFastPathDots;
+        return m_NBGFastPathDots[0].dots + m_NBGFastPathDots[1].dots;
+    }
+    uint64 GetNBGFastPathFieldDotsForTesting(bool altField) const {
+        return m_NBGFastPathDots[altField].dots;
     }
     // Brimir: an NBG's layer output (index 0-3) of the last drawn line (field 1: the deinterlaced alternate field).
     const std::array<Color888, kMaxResH> &GetNBGColorsForTesting(bool altField, uint32 index) const {
@@ -714,7 +719,12 @@ private:
     // Brimir: GetVDP1QuadTerminationsForTesting; not atomic, valid only with unthreaded VDP1 rendering
     uint64 m_VDP1QuadTerminations = 0;
     bool m_NBGFastPath = true;    // Brimir: SetNBGFastPathForTesting
-    uint64 m_NBGFastPathDots = 0; // Brimir: GetNBGFastPathDotsForTesting
+    // Brimir: GetNBGFastPathDotsForTesting. One counter per field, on separate cache lines: the field's renderer thread
+    // is its only writer.
+    struct alignas(64) NBGFastPathCounter {
+        uint64 dots = 0;
+    };
+    std::array<NBGFastPathCounter, 2> m_NBGFastPathDots;
 
     struct VDP1PixelParams {
         VDP1Command::DrawMode mode;
@@ -1223,7 +1233,7 @@ private:
     template <CharacterMode charMode, bool fourCellChar, ColorFormat colorFormat, uint32 colorMode>
     void VDP2DrawNormalScrollCharRuns(const VDP2Regs &regs2, const BGParams &bgParams, LayerOutput &layerOut,
                                       VRAMFetcher &vramFetcher, std::span<const bool> windowState,
-                                      uint32 &fracScrollX, uint32 scrollInc, uint32 scrollY);
+                                      uint32 &fracScrollX, uint32 scrollInc, uint32 scrollY, bool altField);
 
     // Draws a normal bitmap BG scanline.
     //

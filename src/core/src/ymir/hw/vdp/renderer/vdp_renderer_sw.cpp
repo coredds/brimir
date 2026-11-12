@@ -4630,7 +4630,7 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawNormalScrollBG(const VDP2Regs &regs2
     uint32 firstX = 0;
     if (m_NBGFastPath && !bgParams.mosaicEnable && !vcellScrollEnable) {
         VDP2DrawNormalScrollCharRuns<charMode, fourCellChar, colorFormat, colorMode>(
-            regs2, bgParams, layerOut, vramFetcher, windowState, fracScrollX, bgState.scrollIncH, fracScrollY >> 8u);
+            regs2, bgParams, layerOut, vramFetcher, windowState, fracScrollX, bgState.scrollIncH, fracScrollY >> 8u, altField);
         firstX = m_HRes;
     }
     for (uint32 x = firstX; x < m_HRes; x++) {
@@ -4720,7 +4720,7 @@ template <SoftwareVDPRenderer::CharacterMode charMode, bool fourCellChar, ColorF
 NO_INLINE void SoftwareVDPRenderer::VDP2DrawNormalScrollCharRuns(const VDP2Regs &regs2, const BGParams &bgParams,
                                                                  LayerOutput &layerOut, VRAMFetcher &vramFetcher,
                                                                  std::span<const bool> windowState, uint32 &fracScrollX,
-                                                                 uint32 scrollInc, uint32 scrollY) {
+                                                                 uint32 scrollInc, uint32 scrollY, bool altField) {
     static constexpr bool twoWordChar = charMode == CharacterMode::TwoWord;
     static constexpr bool extChar = charMode == CharacterMode::OneWordExtended;
     static constexpr uint32 fourCellCharValue = fourCellChar ? 1 : 0;
@@ -4973,7 +4973,7 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawNormalScrollCharRuns(const VDP2Regs 
             x++;
         }
     }
-    m_NBGFastPathDots += fastDots;
+    m_NBGFastPathDots[altField].dots += fastDots; // each field's renderer thread writes its own counter
 }
 
 template <ColorFormat colorFormat, uint32 colorMode, bool useVCellScroll, bool deinterlace>

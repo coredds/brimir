@@ -155,8 +155,8 @@ void Setup(Vdp2SceneWriter &w, std::mt19937 &rng, Kind kind, uint32_t combo, uin
     const uint32_t charMode = (combo / 10) % 3; // 0 two words, 1 one word, 2 one word extended
     const uint32_t cramMode = (combo / 30) % 3;
 
-    // 32-bit dots need 8 character reads: normal resolution only
-    w.Reg(TVMD, static_cast<uint16_t>(format == 4 ? tvmd & ~0x0002 : tvmd));
+    // 32-bit dots need 8 character reads: normal resolution only (HRESO bits 1 and 2 clear)
+    w.Reg(TVMD, static_cast<uint16_t>(format == 4 ? tvmd & ~0x0006 : tvmd));
     // The CRAM mode before the CRAM writes (mode 0 mirrors them into both halves)
     w.Reg(RAMCTL, static_cast<uint16_t>((cramMode << 12) | (Rand16(rng) & 0x0300)));
     FillSceneMemory(w, rng);
@@ -265,7 +265,8 @@ struct PairResult {
     uint64_t comparedLines = 0;
     uint64_t visibleDots = 0;  // NBG0 dots (field 0) with a non-zero priority over the compared lines
     uint64_t distinctColors = 0; // distinct NBG0 colours among them (up to 64 counted)
-    uint64_t fastDots = 0;     // the fast-path renderer
+    uint64_t fastDots = 0;     // the fast-path renderer's dots, NBG0-3 and both fields
+    uint64_t fastDotsAlt = 0;  // ... of the alternate field only (drawn by the deinterlace thread when threaded)
     uint64_t fallbackDots = 0; // the forced-off renderer (must stay 0)
     uint32_t frames = 0;
     std::array<std::array<bool, 4>, 4> charPatDelay{};    // [NBG][bank] after the last frame
@@ -275,7 +276,8 @@ struct PairResult {
 // Renders `frames` frames of a scene (setup, then onLine before every line) with the fast path on (renderer 0) and
 // forced off (renderer 1) and compares.
 PairResult RunPair(const std::function<void(Vdp2SceneWriter &)> &setup,
-                   const std::function<void(Vdp2SceneWriter &)> &onLine, bool deinterlace, uint32_t frames) {
+                   const std::function<void(Vdp2SceneWriter &)> &onLine, bool deinterlace, uint32_t frames,
+                   bool threaded = false) {
     config::Enhancements enhancements{};
     enhancements.deinterlace = deinterlace;
     std::array<std::unique_ptr<VDPState>, 2> states{std::make_unique<VDPState>(), std::make_unique<VDPState>()};
@@ -297,6 +299,14 @@ PairResult RunPair(const std::function<void(Vdp2SceneWriter &)> &setup,
     Vdp2SceneWriter writer{enhancements};
     writer.Attach(*states[0], *renderers[0]);
     writer.Attach(*states[1], *renderers[1]);
+    if (threaded) {
+        // The configuration of the libretro core: threaded VDP2 with the threaded deinterlacer. The layer outputs are
+        // only read between frames then (the threads are idle after VDP2EndFrame), not line by line.
+        for (auto &renderer : renderers) {
+            renderer->EnableThreadedVDP2(true);
+            renderer->EnableThreadedDeinterlacer(true);
+        }
+    }
 
     uint32_t frame = 0;
     std::vector<uint32_t> seenColors;
@@ -341,11 +351,13 @@ PairResult RunPair(const std::function<void(Vdp2SceneWriter &)> &setup,
         }
     };
     // Before RenderLine(y) the layer outputs hold line y - 1's
-    writer.lineObserver = [&](const Vdp2SceneWriter &, const VDPState &, uint32_t y) {
-        if (y > 0) {
-            compareLayers("after", y - 1);
-        }
-    };
+    if (!threaded) {
+        writer.lineObserver = [&](const Vdp2SceneWriter &, const VDPState &, uint32_t y) {
+            if (y > 0) {
+                compareLayers("after", y - 1);
+            }
+        };
+    }
 
     setup(writer);
     for (frame = 0; frame < frames; ++frame) {
@@ -384,24 +396,32 @@ PairResult RunPair(const std::function<void(Vdp2SceneWriter &)> &setup,
         result.vramDataOffset[n] = states[0]->regs2.bgParams[n + 1].vramDataOffset;
     }
     result.fastDots = renderers[0]->GetNBGFastPathDotsForTesting();
+    result.fastDotsAlt = renderers[0]->GetNBGFastPathFieldDotsForTesting(true);
     result.fallbackDots = renderers[1]->GetNBGFastPathDotsForTesting();
+    if (threaded) {
+        for (auto &renderer : renderers) {
+            renderer->EnableThreadedVDP2(false);
+        }
+    }
     return result;
 }
 
-PairResult RunRandomPair(uint32_t seed, Kind kind, uint32_t combo, uint16_t tvmd, bool deinterlace, uint32_t frames) {
+PairResult RunRandomPair(uint32_t seed, Kind kind, uint32_t combo, uint16_t tvmd, bool deinterlace, uint32_t frames,
+                         bool threaded = false) {
     std::mt19937 lineRng{seed ^ 0x9E3779B9u};
     return RunPair(
         [&](Vdp2SceneWriter &w) {
             std::mt19937 rng{seed};
             Setup(w, rng, kind, combo, tvmd);
         },
-        [&](Vdp2SceneWriter &w) { OnLine(w, lineRng, kind); }, deinterlace, frames);
+        [&](Vdp2SceneWriter &w) { OnLine(w, lineRng, kind); }, deinterlace, frames, threaded);
 }
 
-// TVMD: display on, horizontal resolution (normal 320/352, hi-res 640/704), interlace (none, single, double density)
+// TVMD: display on, horizontal resolution HRESO 0-7 (320/352/640/704, and with bit 2 the exclusive monitor modes of the
+// same widths), interlace (none, single, double density), border
 uint16_t TvmdFor(std::mt19937 &rng) {
     static constexpr uint16_t kInterlace[] = {0x0000, 0x0080, 0x00C0};
-    return static_cast<uint16_t>(0x8000 | Rand(rng, 4) | kInterlace[Rand(rng, 3)] | (Rand(rng, 2) << 4));
+    return static_cast<uint16_t>(0x8000 | Rand(rng, 8) | kInterlace[Rand(rng, 3)] | (Rand(rng, 2) << 4));
 }
 
 } // namespace
@@ -420,9 +440,10 @@ TEST_CASE("NBG character-run fast path matches the per-dot path on eligible scen
     CHECK(r.firstDifference.empty());
     CHECK(r.frames == 3);
     CHECK(r.comparedLines >= 3 * 224);
-    // Non-vacuous: the fast path drew most of the line dots of NBG0 alone, the forced-off renderer none
+    // Non-vacuous: the fast path drew dots (counted over NBG0-3 and both fields: at least a quarter of one 320-dot
+    // layer's lines; NBG0 is always on), the forced-off renderer none, ...
     CHECK(r.fastDots >= 3 * 224 * 320 / 4);
-    // ... and NBG0 shows content: visible dots in many colours
+    // ... and NBG0 itself shows content: visible dots in many colours
     CAPTURE(r.visibleDots, r.distinctColors);
     CHECK(r.visibleDots >= 1000);
     CHECK(r.distinctColors >= 16);
@@ -441,9 +462,29 @@ TEST_CASE("NBG character-run fast path matches the per-dot path when lines switc
     INFO(r.firstDifference);
     CHECK(r.firstDifference.empty());
     CHECK(r.comparedLines >= 3 * 224);
+    CHECK(r.fastDots > 0);
     CHECK(r.fallbackDots == 0);
 }
 
+TEST_CASE("NBG character-run fast path matches the per-dot path with the threaded VDP2 and deinterlace renderers",
+          "[vdp][vdp2][nbg][fastpath][threaded][brimir]") {
+    // The libretro core's default: threaded VDP2 plus the threaded deinterlacer, which draws the alternate field of
+    // an interlaced frame on its own thread while the VDP2 thread draws the first (the dot counters are per field so
+    // that the two threads never write the same one; run under TSan to check the whole path).
+    const uint32_t combo = GENERATE(range(0u, 90u, 11u));
+    const uint16_t interlace = GENERATE(uint16_t{0x0080}, uint16_t{0x00C0});
+    const uint16_t resolution = GENERATE(uint16_t{0}, uint16_t{1}, uint16_t{2}, uint16_t{3});
+    const uint16_t tvmd = static_cast<uint16_t>(0x8000 | interlace | resolution);
+    CAPTURE(combo, tvmd);
+
+    const PairResult r = RunRandomPair(9000 + combo, Kind::Mixed, combo, tvmd, true, 3, true);
+    INFO(r.firstDifference);
+    CHECK(r.firstDifference.empty());
+    CHECK(r.frames == 3);
+    CHECK(r.fastDots > 0);
+    CHECK(r.fastDotsAlt > 0); // the alternate field's thread drew fast-path lines too
+    CHECK(r.fallbackDots == 0);
+}
 TEST_CASE("NBG character-run fast path keeps the character pattern delay and the data access offset",
           "[vdp][vdp2][nbg][fastpath][brimir]") {
     // Cycle patterns that CalcAccessPatterns (vdp_state.hpp) turns into a character pattern delay (NBG0: a character
