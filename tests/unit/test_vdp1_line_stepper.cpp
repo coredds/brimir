@@ -22,7 +22,11 @@ using ymir::vdp::CoordS32;
 // libs/ymir-core/include/ymir/hw/vdp/renderer/common/vdp1_steppers.hpp lines 234-489), verbatim except for:
 // - the name (OldLineStepper);
 // - the two minor-step loops of SystemClip stop after kHangCap iterations and set `hung` (a terminating loop takes
-//   at most 4096 iterations with 13 bits: the accumulator visits each of its at most 4096 cycle values once).
+//   at most 4096 iterations with 13 bits: the accumulator visits each of its at most 4096 cycle values once);
+// - the accumulator updates wrap explicitly (WrapAdd / WrapSub), as the current stepper's do: the upstream code relies
+//   on signed overflow wrapping, which is undefined behaviour, and GCC -O3 broke the hang detection (and the next
+//   test lines) once FORCE_INLINE was enabled (Task 2b). The values are the same as with the wrapping the old code
+//   got from MSVC and from GCC before.
 template <sint32 t_bits = 13>
 struct OldLineStepper {
     static constexpr sint32 kCoordMask = std::max(0x7FF, (1 << (t_bits - 2)) - 1);
@@ -150,7 +154,7 @@ struct OldLineStepper {
             m_x += m_xMajInc * startClip;
             m_y += m_yMajInc * startClip;
             for (uint32 i = 0; i < startClip; ++i) {
-                m_accum -= m_num;
+                m_accum = ymir::vdp::WrapSub(m_accum, m_num);
                 if (m_den != 0) {
                     uint32 iterations = 0; // test-only
                     while (m_accum <= m_accumTarget) {
@@ -158,7 +162,7 @@ struct OldLineStepper {
                             hung = true;
                             return 0u;
                         }
-                        m_accum += m_den;
+                        m_accum = ymir::vdp::WrapAdd(m_accum, m_den);
                         m_x += m_xMinInc;
                         m_y += m_yMinInc;
                     }
@@ -184,7 +188,7 @@ struct OldLineStepper {
             m_yEnd = m_y;
             sint32 tempAccum = m_accum;
             for (uint32 i = 0; i < endClip; ++i) {
-                tempAccum -= m_num;
+                tempAccum = ymir::vdp::WrapSub(tempAccum, m_num);
                 if (m_den != 0) {
                     uint32 iterations = 0; // test-only
                     while (tempAccum <= m_accumTarget) {
@@ -192,7 +196,7 @@ struct OldLineStepper {
                             hung = true;
                             return 0u;
                         }
-                        tempAccum += m_den;
+                        tempAccum = ymir::vdp::WrapAdd(tempAccum, m_den);
                         m_xEnd += m_xMinInc;
                         m_yEnd += m_yMinInc;
                     }
@@ -216,9 +220,9 @@ struct OldLineStepper {
         ++m_step;
         m_x += m_xMajInc;
         m_y += m_yMajInc;
-        m_accum -= m_num;
+        m_accum = ymir::vdp::WrapSub(m_accum, m_num);
         if (m_accum <= m_accumTarget) {
-            m_accum += m_den;
+            m_accum = ymir::vdp::WrapAdd(m_accum, m_den);
             m_x += m_xMinInc;
             m_y += m_yMinInc;
             return m_antiAlias;
