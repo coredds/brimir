@@ -64,7 +64,7 @@ tools\perf\prove.ps1 -Base <bin dir> -New <bin dir> [-States] [-NoAudio] [-Frame
 - Base and new run one after the other per window x mode; `-Jobs` (default 6) pairs run at once.
 - Output (`-Out`, default `%TEMP%\opencode\perf-prove\<timestamp>`): `prove.md`, `prove.csv`, `provenance.json`,
   `logs\<window>-<mode>-<base|new>.txt`.
-- Time (16 threads): frames + audio about 3 min; with `-States` about 10 min.
+- Time (16 threads): frames + audio about 2.5 min; with `-States` about 3 min.
 
 ## measure.ps1 - paired timing
 
@@ -91,6 +91,11 @@ tools\perf\measure.ps1 -A <bin dir> -B <bin dir> -Windows vf2,megamix -Modes unt
   profiling) and "other" (`Ymir_RunFrame` minus SH-2: VDP, SCSP, SCU, CD block, ...), from the bench's per-run
   averages. In thr mode "other" includes the emulation thread's wait for the VDP threads at the end of the frame: a VDP
   speed-up may show only in unthr, or in thr only as less waiting.
+- **Same bench on both sides.** brimir_bench is built into the LTO/IPO set with the core, so a change to the bench's
+  own code moves the core's code generation: Task 0's bench (2620854) measured 0-1.5 % slower in p50 and 3-6 % in
+  the SH-2 split than f395c6f's on the identical core (consistent over 6 rounds; Astal, which runs the cache-emulation
+  SH-2 path, unchanged). Measure against a base whose `tools/brimir_bench.cpp` matches the new build (Task 0 or later),
+  so only the change under test differs.
 - **Keep/drop decisions:** measure the windows and mode the task targets with `-Windows ... -Modes ... -Rounds 8` or
   more on a quiet machine (nothing else running: no ctest, WSL or builds), after a `-SelfCheck`.
 - Output: `measure.md`, `measure-summary.csv`, `measure.csv` (every run with load, wait and status), `rejected.csv`,

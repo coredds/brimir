@@ -294,7 +294,7 @@ $md += $summary | ForEach-Object {
     "| $($_.window) | $($_.mode) | $(& $f $_.A_p50) | $(& $f $_.B_p50) | $(& $f $_.p50_change) [$(& $f $_.p50_min)..$(& $f $_.p50_max)] | $($_.p50_sameSign) | $($_.p50_verdict) | $(if ($_.keep3) { 'yes' } else { '' }) | $(& $f $_.sh2_change) [$(& $f $_.sh2_min)..$(& $f $_.sh2_max)] | $($_.sh2_verdict) | $(& $f $_.other_change) [$(& $f $_.other_min)..$(& $f $_.other_max)] | $($_.other_verdict) |"
 }
 if ($rejected.Count) {
-    $md += @('', 'Rejected runs: ' + (($rejected | ForEach-Object { "$($_.tag) $(& $f $_.p50)" }) -join ', '))
+    $md += @('', ('Rejected runs: ' + (($rejected | ForEach-Object { "$($_.tag) $(& $f $_.p50)" }) -join ', ')))
 }
 $md | Set-Content (Join-Path $Out 'measure.md') -Encoding utf8
 $md | Write-Host
