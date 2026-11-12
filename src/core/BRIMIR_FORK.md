@@ -100,6 +100,16 @@ keep it on sync, and if a sync would change it, check the named tests first):
   is upstream's; the explanatory comment ("Also write back to the main state, ...", on the Byte case) is
   Brimir's own text.
 
+## Performance changes (keep on every sync)
+
+Byte-identical speed-ups of the 2026-11 performance round (`docs/superpowers/specs/2026-11-11-performance-design.md`):
+frames, audio, save-state bytes and cycle counts are unchanged, proven per change with `tools/perf/prove.ps1`. A sync
+must keep them; when upstream changes the code they shadow, port the change into both paths and rerun the named tests.
+
+| Change | Where | Notes |
+|---|---|---|
+| NBG character-run fast path (2026-11-12) | `vdp_renderer_sw.cpp`: `VDP2DrawNormalScrollCharRuns` (new) and its call at the top of `VDP2DrawNormalScrollBG`'s dot loop (`firstX`); `vdp_renderer_sw.hpp`: its declaration, `m_NBGFastPath` / `m_NBGFastPathDots` and the `*ForTesting` hooks | Lines without mosaic or vertical cell scroll (any horizontal zoom) are drawn per run of dots that stay in one cell of one plane: the address work and character fetch of `VDP2FetchScrollBGPixel` once per run, each dot decoded as `VDP2FetchCharacterPixel` + `VDP2FetchPixel`. It duplicates their logic, including the character pattern delay (2x2 second-dot step), the data access offset hack and the character data cache: an upstream change to `VDP2FetchScrollBGPixel`, `VDP2FetchCharacterPixel`, `VDP2FetchPixel`, `VDP2FetchCRAMColor` or the NBG part of `VDP2DrawNormalScrollBG` must be ported into `VDP2DrawNormalScrollCharRuns` too. Test: `tests/unit/test_vdp2_nbg_fastpath.cpp` (`[fastpath]`, fast path vs forced per-dot path on random scenes). Not an option: always on (the hooks are for tests). |
+
 ## Rules
 
 - Keep Brimir changes minimal and mark each one with a `// Brimir:` comment.

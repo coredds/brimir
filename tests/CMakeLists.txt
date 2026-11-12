@@ -89,6 +89,8 @@ add_executable(brimir_tests
     unit/vdp2_subpixel_reference.cpp
     unit/test_vdp2_subpixel_reference.cpp
     unit/test_vdp2_front.cpp
+    # The software renderer's NBG character-run fast path against its per-dot path (seeded random scenes)
+    unit/test_vdp2_nbg_fastpath.cpp
     # CPU reference of the GPU VDP1 back half (keyed fragments, per-word ordered resolve, erase, CPU writes) fed by the
     # VDP1 front half, against software
     unit/vdp1_raster_reference.cpp

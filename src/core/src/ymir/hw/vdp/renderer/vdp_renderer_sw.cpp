@@ -4625,7 +4625,15 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawNormalScrollBG(const VDP2Regs &regs2
         vcellScrollY = readCellScrollY(true);
     }
 
-    for (uint32 x = 0; x < m_HRes; x++) {
+    // Brimir: character-run fast path for lines without mosaic or vertical cell scroll (vcellScrollY stays 0). It
+    // draws the whole line, so the per-dot loop below starts past its end.
+    uint32 firstX = 0;
+    if (m_NBGFastPath && !bgParams.mosaicEnable && !vcellScrollEnable) {
+        VDP2DrawNormalScrollCharRuns<charMode, fourCellChar, colorFormat, colorMode>(
+            regs2, bgParams, layerOut, vramFetcher, windowState, fracScrollX, bgState.scrollIncH, fracScrollY >> 8u);
+        firstX = m_HRes;
+    }
+    for (uint32 x = firstX; x < m_HRes; x++) {
         // Apply horizontal mosaic or vertical cell-scrolling
         // Mosaic takes priority
         if (bgParams.mosaicEnable) {
@@ -4693,6 +4701,279 @@ NO_INLINE void SoftwareVDPRenderer::VDP2DrawNormalScrollBG(const VDP2Regs &regs2
             bgParams, regs2, bgParams.pageBaseAddresses, bgParams.pageShiftH, bgParams.pageShiftV, scrollCoord,
             vramFetcher);
     }
+}
+
+// Brimir: character-run fast path of VDP2DrawNormalScrollBG, for lines without mosaic or vertical cell scroll (any
+// horizontal step, so zoomed and line-zoomed lines too). A run is a stretch of dots whose (data-offset-shifted) scroll
+// coordinate stays in one cell of one plane, up to the next window dot. The address work of VDP2FetchScrollBGPixel
+// and its character fetch state machine are done once per run, with exactly the per-dot effects:
+//   - the run's first dot fetches the character (or, for 2x2 characters with the pattern delay, updates lastCellX)
+//     exactly as VDP2FetchScrollBGPixel does;
+//   - the second dot sees the same character index, so only the 2x2 delayed cell step can apply (currChar switches
+//     when entering cell X 1 right after the fetch); the dots from there on use that character;
+//   - the later dots see the same character index and cell: the per-dot path changes nothing for them.
+// Each dot is then decoded as VDP2FetchCharacterPixel + VDP2FetchPixel do (drawDot below), with the per-line parts
+// (VRAM, special function codes, modes) and the per-character parts (flips, cell address, palette, priority) hoisted.
+// The vertical cell scroll and mosaic cases stay on the per-dot path.
+// Window dots only get priority 0, as in the per-dot path, and do not touch the fetcher.
+template <SoftwareVDPRenderer::CharacterMode charMode, bool fourCellChar, ColorFormat colorFormat, uint32 colorMode>
+NO_INLINE void SoftwareVDPRenderer::VDP2DrawNormalScrollCharRuns(const VDP2Regs &regs2, const BGParams &bgParams,
+                                                                 LayerOutput &layerOut, VRAMFetcher &vramFetcher,
+                                                                 std::span<const bool> windowState, uint32 &fracScrollX,
+                                                                 uint32 scrollInc, uint32 scrollY) {
+    static constexpr bool twoWordChar = charMode == CharacterMode::TwoWord;
+    static constexpr bool extChar = charMode == CharacterMode::OneWordExtended;
+    static constexpr uint32 fourCellCharValue = fourCellChar ? 1 : 0;
+    static constexpr bool largePalette = colorFormat != ColorFormat::Palette16;
+    static constexpr bool paletteFormat = IsPaletteColorFormat(colorFormat);
+
+    const uint32 pageShiftH = bgParams.pageShiftH;
+    const uint32 pageShiftV = bgParams.pageShiftV;
+
+    // The vertical coordinate is the same for the whole line (see VDP2FetchScrollBGPixel)
+    const uint32 planeY = (scrollY >> (9 + pageShiftV)) & 1u;
+    const uint32 pageY = bit::extract<9>(scrollY) & pageShiftV;
+    const uint32 charPatY = bit::extract<3, 8>(scrollY) >> fourCellCharValue;
+    const uint32 cellY = bit::extract<3>(scrollY) & fourCellCharValue;
+    const uint32 dotY = bit::extract<0, 2>(scrollY);
+
+    // Per-line parts of VDP2FetchPixel
+    auto &vram = VDP2GetRendererVRAM();
+    const bool enableTransparency = bgParams.enableTransparency;
+    const auto &specFuncCode = regs2.specialFunctionCodes[bgParams.specialFunctionSelect];
+    const SpecialColorCalcMode specialColorCalcMode = bgParams.specialColorCalcMode;
+    const bool colorCalcEnable = bgParams.colorCalcEnable;
+    const PriorityMode priorityMode = bgParams.priorityMode;
+
+    // Per-character state of the dot decoder (VDP2FetchCharacterPixel's flips and cell address, VDP2FetchPixel's
+    // palette, priority and colour calculation inputs)
+    struct CharDecode {
+        uint32 cellAddress;
+        uint32 flipX;
+        uint32 dotY;
+        uint32 palNum;
+        uint8 priority;     // final priority unless perDotPriority
+        bool perDotPriority; // PerDot priority with the special priority bit: OR the colour data match
+        bool specColorCalc;
+    } cd{};
+
+    auto setupChar = [&](Character ch, uint32 cellIndex) {
+        cd.flipX = 0;
+        cd.dotY = dotY;
+        if (ch.flipH) {
+            cd.flipX = 7;
+            if (bgParams.cellSizeShift > 0) {
+                cellIndex ^= 1;
+            }
+        }
+        if (ch.flipV) {
+            cd.dotY ^= 7;
+            if (bgParams.cellSizeShift > 0) {
+                cellIndex ^= 2;
+            }
+        }
+        if constexpr (colorFormat == ColorFormat::RGB888) {
+            cellIndex <<= 3;
+        } else if constexpr (colorFormat == ColorFormat::RGB555) {
+            cellIndex <<= 2;
+        } else if constexpr (colorFormat != ColorFormat::Palette16) {
+            cellIndex <<= 1;
+        }
+        cd.cellAddress = (ch.charNum + cellIndex) << 5u;
+        cd.palNum = ch.palNum << 4u;
+        cd.specColorCalc = ch.specColorCalc;
+
+        const bool specPriority = ch.specPriority;
+        uint8 priority = bgParams.priorityNumber;
+        cd.perDotPriority = false;
+        if (priorityMode == PriorityMode::PerCharacter) {
+            priority &= ~1;
+            priority |= (uint8)specPriority;
+        } else if (priorityMode == PriorityMode::PerDot) {
+            priority &= ~1;
+            cd.perDotPriority = paletteFormat && specPriority;
+        }
+        cd.priority = priority;
+    };
+
+    // VDP2FetchPixel's character data fetch
+    auto fetchCharData = [&](uint32 address) {
+        if (vramFetcher.UpdateCharacterDataAddress(address)) {
+            const uint32 bank = (address >> 17u) & 3u;
+            if (!bgParams.charPatAccess[bank]) {
+                util::WriteNE<uint64>(vramFetcher.charData.data(), 0);
+                return;
+            }
+            const uint64 data = util::ReadNE<uint64>(&vram[address & 0x7FFF8]);
+            util::WriteNE<uint64>(vramFetcher.charData.data(), data);
+        }
+    };
+
+    auto specialColorCalcFlag = [&](uint8 specColorCode, bool colorMSB) {
+        using enum SpecialColorCalcMode;
+        switch (specialColorCalcMode) {
+        case PerScreen: return colorCalcEnable;
+        case PerCharacter: return colorCalcEnable && cd.specColorCalc;
+        case PerDot: return colorCalcEnable && cd.specColorCalc && specFuncCode.colorMatches[specColorCode];
+        case ColorDataMSB: return colorCalcEnable && colorMSB;
+        }
+        util::unreachable();
+    };
+
+    // One dot at layer position x from cell dot dotX (before flipping), as VDP2FetchCharacterPixel + VDP2FetchPixel
+    auto drawDot = [&](uint32 x, uint32 dotX) {
+        dotX ^= cd.flipX;
+        const uint32 dotOffset = dotX + cd.dotY * 8;
+        Pixel pixel{};
+        uint8 colorData;
+        if constexpr (colorFormat == ColorFormat::Palette16) {
+            const uint32 dotAddress = cd.cellAddress + (dotOffset >> 1u);
+            fetchCharData(dotAddress);
+            const uint8 dotData = (vramFetcher.charData[dotAddress & 7] >> ((~dotX & 1) * 4)) & 0xF;
+            if (enableTransparency && dotData == 0) {
+                layerOut.pixels.SetPixel(x, pixel);
+                return;
+            }
+            const uint32 colorIndex = cd.palNum | dotData;
+            colorData = bit::extract<1, 3>(dotData);
+            pixel.color = VDP2FetchCRAMColor<colorMode>(bgParams.cramOffset, colorIndex);
+            pixel.specialColorCalc = specialColorCalcFlag(colorData, pixel.color.msb);
+        } else if constexpr (colorFormat == ColorFormat::Palette256) {
+            const uint32 dotAddress = cd.cellAddress + dotOffset;
+            fetchCharData(dotAddress);
+            const uint8 dotData = vramFetcher.charData[dotAddress & 7];
+            if (enableTransparency && dotData == 0) {
+                layerOut.pixels.SetPixel(x, pixel);
+                return;
+            }
+            const uint32 colorIndex = (cd.palNum & 0x700) | dotData;
+            colorData = bit::extract<1, 3>(dotData);
+            pixel.color = VDP2FetchCRAMColor<colorMode>(bgParams.cramOffset, colorIndex);
+            pixel.specialColorCalc = specialColorCalcFlag(colorData, pixel.color.msb);
+        } else if constexpr (colorFormat == ColorFormat::Palette2048) {
+            const uint32 dotAddress = cd.cellAddress + dotOffset * sizeof(uint16);
+            fetchCharData(dotAddress);
+            const uint16 dotData = util::ReadBE<uint16>(&vramFetcher.charData[dotAddress & 6]);
+            if (enableTransparency && (dotData & 0x7FF) == 0) {
+                layerOut.pixels.SetPixel(x, pixel);
+                return;
+            }
+            const uint32 colorIndex = dotData & 0x7FF;
+            colorData = bit::extract<1, 3>(dotData);
+            pixel.color = VDP2FetchCRAMColor<colorMode>(bgParams.cramOffset, colorIndex);
+            pixel.specialColorCalc = specialColorCalcFlag(colorData, pixel.color.msb);
+        } else if constexpr (colorFormat == ColorFormat::RGB555) {
+            const uint32 dotAddress = cd.cellAddress + dotOffset * sizeof(uint16);
+            fetchCharData(dotAddress);
+            const uint16 dotData = util::ReadBE<uint16>(&vramFetcher.charData[dotAddress & 6]);
+            if (enableTransparency && !bit::test<15>(dotData)) {
+                layerOut.pixels.SetPixel(x, pixel);
+                return;
+            }
+            pixel.color = ConvertRGB555to888(Color555{.u16 = dotData});
+            pixel.specialColorCalc = specialColorCalcFlag(0b111, true);
+        } else if constexpr (colorFormat == ColorFormat::RGB888) {
+            const uint32 dotAddress = cd.cellAddress + dotOffset * sizeof(uint32);
+            fetchCharData(dotAddress);
+            const uint32 dotData = util::ReadBE<uint32>(&vramFetcher.charData[dotAddress & 4]);
+            if (enableTransparency && !bit::test<31>(dotData)) {
+                layerOut.pixels.SetPixel(x, pixel);
+                return;
+            }
+            pixel.color.u32 = dotData;
+            pixel.specialColorCalc = specialColorCalcFlag(0b111, true);
+        }
+
+        pixel.priority = cd.priority;
+        if constexpr (paletteFormat) {
+            if (cd.perDotPriority) {
+                pixel.priority |= static_cast<uint8>(specFuncCode.colorMatches[colorData]);
+            }
+        }
+        layerOut.pixels.SetPixel(x, pixel);
+    };
+
+    uint64 fastDots = 0;
+    uint32 x = 0;
+    while (x < m_HRes) {
+        if (windowState[x]) {
+            // Make pixel transparent if inside active window area
+            layerOut.pixels.priority[x] = 0;
+            fracScrollX += scrollInc;
+            x++;
+            continue;
+        }
+
+        // Plane and bank from the unshifted coordinate, then the data access shift (the World Heroes Perfect hack)
+        const uint32 baseScrollX = fracScrollX >> 8u;
+        const uint32 planeX = (baseScrollX >> (9 + pageShiftH)) & 1u;
+        const uint32 plane = planeX + (planeY << 1u);
+        const uint32 pageBaseAddress = bgParams.pageBaseAddresses[plane];
+        const uint32 bank = (pageBaseAddress >> 17u) & 3u;
+        const uint32 dataOffset = bgParams.vramDataOffset[bank];
+        const uint32 scrollX = baseScrollX + dataOffset;
+
+        const uint32 pageX = bit::extract<9>(scrollX) & pageShiftH;
+        const uint32 page = pageX + (pageY << 1u);
+        const uint32 pageOffset = page << kPageSizes[fourCellChar][twoWordChar];
+        const uint32 charPatX = bit::extract<3, 8>(scrollX) >> fourCellCharValue;
+        const uint32 charIndex = charPatX + (charPatY << (6u - fourCellCharValue));
+        const uint32 cellX = bit::extract<3>(scrollX) & fourCellCharValue;
+        const uint32 cellIndex = cellX + (cellY << 1u);
+
+        // The first dot's character fetch, as in VDP2FetchScrollBGPixel
+        if (vramFetcher.lastCharIndex != charIndex) {
+            vramFetcher.lastCharIndex = charIndex;
+            const uint32 pageAddress = pageBaseAddress + pageOffset;
+            const Character ch =
+                twoWordChar
+                    ? VDP2FetchTwoWordCharacter(bgParams, pageAddress, charIndex)
+                    : VDP2FetchOneWordCharacter<fourCellChar, largePalette, extChar>(bgParams, pageAddress, charIndex);
+            vramFetcher.currChar = bgParams.charPatDelay[bank] ? vramFetcher.nextChar : ch;
+            vramFetcher.nextChar = ch;
+        } else if constexpr (fourCellChar) {
+            if (bgParams.charPatDelay[bank] && vramFetcher.lastCellX != cellX) {
+                vramFetcher.lastCellX = cellX;
+                if (cellX == 1) {
+                    vramFetcher.currChar = vramFetcher.nextChar;
+                }
+            }
+        }
+        setupChar(vramFetcher.currChar, cellIndex);
+        drawDot(x, bit::extract<0, 2>(scrollX));
+        fastDots++;
+        fracScrollX += scrollInc;
+        x++;
+
+        // The rest of the run: dots in the same unshifted cell (so the same plane and bank) and the same shifted cell
+        const uint32 runBaseCell = baseScrollX >> 3u;
+        const uint32 runCell = scrollX >> 3u;
+        [[maybe_unused]] bool secondDot = true;
+        while (x < m_HRes && !windowState[x]) {
+            const uint32 nextBaseScrollX = fracScrollX >> 8u;
+            const uint32 nextScrollX = nextBaseScrollX + dataOffset;
+            if ((nextBaseScrollX >> 3u) != runBaseCell || (nextScrollX >> 3u) != runCell) {
+                break;
+            }
+            if constexpr (fourCellChar) {
+                if (secondDot) {
+                    secondDot = false;
+                    if (bgParams.charPatDelay[bank] && vramFetcher.lastCellX != cellX) {
+                        vramFetcher.lastCellX = cellX;
+                        if (cellX == 1) {
+                            vramFetcher.currChar = vramFetcher.nextChar;
+                            setupChar(vramFetcher.currChar, cellIndex);
+                        }
+                    }
+                }
+            }
+            drawDot(x, bit::extract<0, 2>(nextScrollX));
+            fastDots++;
+            fracScrollX += scrollInc;
+            x++;
+        }
+    }
+    m_NBGFastPathDots += fastDots;
 }
 
 template <ColorFormat colorFormat, uint32 colorMode, bool useVCellScroll, bool deinterlace>

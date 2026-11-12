@@ -179,6 +179,26 @@ public:
         return m_VDP1QuadTerminations;
     }
 
+    // Brimir: test hooks for the NBG character-run fast path (VDP2DrawNormalScrollCharRuns): off forces the per-dot
+    // path, and the count is the dots the fast path drew. Not exposed as an option. Call between frames with
+    // unthreaded VDP2 rendering (plain members written by the drawing thread).
+    void SetNBGFastPathForTesting(bool enabled) {
+        m_NBGFastPath = enabled;
+    }
+    uint64 GetNBGFastPathDotsForTesting() const {
+        return m_NBGFastPathDots;
+    }
+    // Brimir: an NBG's layer output (index 0-3) of the last drawn line (field 1: the deinterlaced alternate field).
+    const std::array<Color888, kMaxResH> &GetNBGColorsForTesting(bool altField, uint32 index) const {
+        return m_layerOutputs[altField][index + 2].pixels.color;
+    }
+    const std::array<uint8, kMaxResH> &GetNBGPrioritiesForTesting(bool altField, uint32 index) const {
+        return m_layerOutputs[altField][index + 2].pixels.priority;
+    }
+    const std::array<bool, kMaxResH> &GetNBGSpecialColorCalcForTesting(bool altField, uint32 index) const {
+        return m_layerOutputs[altField][index + 2].pixels.specialColorCalc;
+    }
+
     // Brimir: read-only access to the VDP1 auxiliary framebuffers for the external (Vulkan) renderer's VDP2 sprite
     // layer. Not synchronized with a threaded VDP1: call VDP1SyncFB (or rely on a framebuffer swap) first.
     const SpriteFB &GetAltFBRAM(uint8 fbIndex) const {
@@ -693,6 +713,8 @@ private:
     bool m_VDP1QuadTermination = true; // Brimir: SetVDP1QuadTerminationForTesting
     // Brimir: GetVDP1QuadTerminationsForTesting; not atomic, valid only with unthreaded VDP1 rendering
     uint64 m_VDP1QuadTerminations = 0;
+    bool m_NBGFastPath = true;    // Brimir: SetNBGFastPathForTesting
+    uint64 m_NBGFastPathDots = 0; // Brimir: GetNBGFastPathDotsForTesting
 
     struct VDP1PixelParams {
         VDP1Command::DrawMode mode;
@@ -1193,6 +1215,15 @@ private:
     void VDP2DrawNormalScrollBG(const VDP2Regs &regs2, const BGParams &bgParams, LayerOutput &layerOut,
                                 const NBGLayerState &bgState, VRAMFetcher &vramFetcher,
                                 std::span<const bool> windowState, bool altField);
+
+    // Brimir: the character-run fast path of VDP2DrawNormalScrollBG (lines without mosaic or vertical cell scroll).
+    // Draws the line's m_HRes dots one run at a time: the dots whose scroll coordinate stays in one cell of one plane,
+    // up to the next window dot, share the plane/page/character/cell address work and the character fetch. Same
+    // output and fetcher state as the per-dot path; advances fracScrollX by scrollInc per dot.
+    template <CharacterMode charMode, bool fourCellChar, ColorFormat colorFormat, uint32 colorMode>
+    void VDP2DrawNormalScrollCharRuns(const VDP2Regs &regs2, const BGParams &bgParams, LayerOutput &layerOut,
+                                      VRAMFetcher &vramFetcher, std::span<const bool> windowState,
+                                      uint32 &fracScrollX, uint32 scrollInc, uint32 scrollY);
 
     // Draws a normal bitmap BG scanline.
     //

@@ -24,6 +24,7 @@ tests/
     ├── test_vdp_composite.cpp       # VDP2 layer compositing
     ├── test_vdp_savestate.cpp       # VDP2 renderer state across save/load, vertical cell scroll flags
     ├── test_vdp_uninit_state.cpp   # VDP state built on dirty (0xCD) memory equals state built on zeroed memory
+    ├── test_vdp2_nbg_fastpath.cpp   # NBG character-run fast path vs the forced per-dot path ([fastpath], random scenes)
     ├── test_profiler.cpp            # Profiler
     ├── test_audio_ring_buffer.cpp   # Audio ring buffer
     ├── test_media_loader.cpp        # CUE/CCD loading, compressed audio tracks, sector alignment
