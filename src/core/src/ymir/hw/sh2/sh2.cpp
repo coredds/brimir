@@ -500,11 +500,16 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
         }
     }
 
-    while (m_cyclesExecuted < cycles) {
+    // Brimir: the count is kept in a local and stored after every instruction (nothing in InterpretNext writes
+    // m_cyclesExecuted; GetCurrentCycleCount reads the stored value), so the loop does not reload it from memory
+    // (BRIMIR_FORK.md, performance).
+    uint64 cyclesExecuted = m_cyclesExecuted;
+    while (cyclesExecuted < cycles) {
         // [[maybe_unused]] const uint32 prevPC = PC; // debug aid
 
         // TODO: choose between interpreter (cached or uncached) and JIT recompiler
-        m_cyclesExecuted += InterpretNext<debug, emulateCache>();
+        cyclesExecuted += InterpretNext<debug, emulateCache>();
+        m_cyclesExecuted = cyclesExecuted;
 
         // If PC is not in any of these places, something went horribly wrong
 
@@ -919,14 +924,17 @@ FLATTEN BRIMIR_HOT_INLINE uint16 SH2::FetchInstruction(uint32 address) { // Brim
     return m_fetchedOpcodes;
 }
 
-// Brimir: MemRead without cache emulation, inline for an aligned access to an array page in partition 000 (cache
-// area, no cache emulated), 001 or 101 (cache-through): the same bytes m_bus.Read returns there. Misaligned accesses,
-// other partitions and handler pages take MemRead (BRIMIR_FORK.md, "Performance changes").
+// Brimir: MemRead without cache emulation, inline for an access to an array page in partition 000 (cache area, no
+// cache emulated), 001 or 101 (cache-through): the same bytes m_bus.Read returns there. A misaligned address is
+// aligned down as MemRead does (its trace is compiled out at this log level; with it compiled in, misaligned
+// accesses take MemRead). Other partitions and handler pages take MemRead (BRIMIR_FORK.md, "Performance changes").
 template <mem_primitive T, bool instrFetch, bool emulateCache>
 BRIMIR_HOT_INLINE T SH2::MemReadFast(uint32 address) {
     if constexpr (!emulateCache) {
-        if ((address & (sizeof(T) - 1u)) == 0 && ((0b00100011u >> (address >> 29u)) & 1u) != 0) {
-            if (const uint8 *ptr = m_bus.ArrayReadPointer(address & 0x7FFFFFF)) {
+        constexpr bool kAlignDown = !devlog::trace_enabled<grp::mem>;
+        if ((kAlignDown || (address & (sizeof(T) - 1u)) == 0) &&
+            ((0b00100011u >> (address >> 29u)) & 1u) != 0) {
+            if (const uint8 *ptr = m_bus.ArrayReadPointer(address & 0x7FFFFFF & ~(sizeof(T) - 1u))) {
                 return util::ReadBE<T>(ptr);
             }
         }
@@ -938,8 +946,10 @@ BRIMIR_HOT_INLINE T SH2::MemReadFast(uint32 address) {
 template <mem_primitive T, bool debug, bool emulateCache>
 BRIMIR_HOT_INLINE void SH2::MemWriteFast(uint32 address, T value) {
     if constexpr (!emulateCache) {
-        if ((address & (sizeof(T) - 1u)) == 0 && ((0b00100011u >> (address >> 29u)) & 1u) != 0) {
-            if (uint8 *ptr = m_bus.ArrayWritePointer(address & 0x7FFFFFF)) {
+        constexpr bool kAlignDown = !devlog::trace_enabled<grp::mem>;
+        if ((kAlignDown || (address & (sizeof(T) - 1u)) == 0) &&
+            ((0b00100011u >> (address >> 29u)) & 1u) != 0) {
+            if (uint8 *ptr = m_bus.ArrayWritePointer(address & 0x7FFFFFF & ~(sizeof(T) - 1u))) {
                 util::WriteBE<T>(ptr, value);
                 return;
             }
@@ -1035,6 +1045,17 @@ template <mem_primitive T>
 template <mem_primitive T, bool write, bool emulateCache>
 BRIMIR_HOT_INLINE uint64 SH2::AccessCycles(uint32 address) { // Brimir: forced (BRIMIR_FORK.md, performance)
     const uint32 partition = (address >> 29u) & 0b111;
+    if constexpr (!emulateCache) {
+        // Brimir: the values of the switch below without cache emulation, as branches instead of a jump table
+        // (BRIMIR_FORK.md, performance)
+        if (partition == 0b000) {
+            return 1;
+        }
+        if (partition == 0b001 || partition == 0b101) {
+            return m_bus.GetAccessCycles<T, write>(address);
+        }
+        return partition == 0b111 ? 4 : 1;
+    }
     switch (partition) {
     case 0b000: // cache
         if constexpr (emulateCache && !write) {
@@ -2617,6 +2638,15 @@ BRIMIR_HOT_INLINE uint64 SH2::InterpretNext() { // Brimir: forced into the Advan
     case OpcodeType::IllegalSlot:
         AdvancePC<debug, emulateCache, true>();
         return EnterException<debug, emulateCache>(xvSlotIllegalInstr);
+
+    // Brimir: every decoded opcode has a case; this lets the compiler drop the jump table's range check
+    // (util::unreachable is a call where MSVC does not inline it) (BRIMIR_FORK.md, performance)
+    default:
+#if defined(_MSC_VER) && !defined(__clang__)
+        __assume(0);
+#else
+        __builtin_unreachable();
+#endif
     }
 
     util::unreachable();
@@ -2629,10 +2659,16 @@ template uint64 SH2::InterpretNext<true, true>();
 
 // Brimir: the instruction handlers below are FORCE_INLINE, which is plain `inline` in Brimir builds (see
 // BRIMIR_HOT_INLINE in inline.hpp). Forced here, so they stay inline in InterpretNext now that InterpretNext is forced
-// into the Advance loop (BRIMIR_FORK.md, performance). Restored after the handlers.
+// into the Advance loop; except with optimizing MSVC, where each handler is its own function: inlined, they exhaust
+// MSVC's inlining budget for the loop, which then calls small helpers (std::array::operator[], bit::extract,
+// util::ReadBE) instead of inlining them (BRIMIR_FORK.md, performance). Restored after the handlers.
 #pragma push_macro("FORCE_INLINE")
 #undef FORCE_INLINE
-#define FORCE_INLINE BRIMIR_HOT_INLINE
+#if defined(_MSC_VER) && !defined(__clang__) && defined(NDEBUG)
+    #define FORCE_INLINE __declspec(noinline) inline
+#else
+    #define FORCE_INLINE BRIMIR_HOT_INLINE
+#endif
 
 #define DECODE_RN8 const uint32 rn = bit::extract<8, 11>(opcode);
 #define DECODE_RM8 const uint32 rm = bit::extract<8, 11>(opcode);
