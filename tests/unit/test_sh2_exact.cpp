@@ -608,6 +608,59 @@ void SetupFetch(Driver &d) {
     d.rig->Load(s);
 }
 
+// Misaligned word and longword loads and stores (aligned down by the SH-2 emulation) in cached RAM, cache-through RAM
+// and MMIO, plus aligned ones around them; every value read is logged.
+void SetupMisaligned(Driver &d) {
+    Asm a;
+    a.Label("start");
+    a << MovWL(3, 1);
+    a.Log(3);
+    a << MovLL(3, 2);
+    a.Log(3);
+    a << MovLL(3, 4);
+    a.Log(3);
+    a << MovWL(3, 8);
+    a.Log(3);
+    a << MovLL(3, 9);
+    a.Log(3);
+    a << MovWS(6, 5) << MovLS(7, 5) << MovWS(10, 5) << MovLS(11, 5); // misaligned stores (log area, MMIO)
+    a << MovWL(3, 6);
+    a.Log(3);
+    a << MovLL(3, 7);
+    a.Log(3);
+    a << MovLL(3, 11);
+    a.Log(3);
+    a << AddI(1, 1) << AddI(2, 1) << AddI(4, 1) << AddI(8, 1) << AddI(9, 1) << AddI(6, 1) << AddI(7, 1)
+      << AddI(10, 1) << AddI(11, 1);
+    a << Dt(12);
+    a.Bf("again");
+    a << kSleepOp;
+    a.Label("again");
+    a.Bra("start");
+    a << kNop;
+    d.rig->WriteCode(kCode, a.Finish());
+    for (uint32_t i = 0; i < 0x40; i += 4) {
+        d.rig->Write32(0x06040000 + i, 0x01020304u * (i / 4 + 1));
+        d.rig->mmio.data[0x80 + i] = static_cast<uint8_t>(0x80 + i);
+    }
+
+    auto s = d.rig->BaseState(kCode);
+    s.R[1] = 0x06040001;  // word, odd
+    s.R[2] = 0x06040006;  // long, +2
+    s.R[4] = 0x26040013;  // long, +3, cache-through
+    s.R[5] = 0xA1B2C3D4;  // stored value
+    s.R[6] = kLog + 0x7001;  // word store, odd
+    s.R[7] = kLog + 0x7012;  // long store, +2
+    s.R[8] = 0x22000081;  // MMIO word, odd
+    s.R[9] = 0x22000086;  // MMIO long, +2
+    s.R[10] = 0x22000091; // MMIO word store, odd
+    s.R[11] = 0x220000A2; // MMIO long store, +2
+    s.R[12] = 5;          // passes
+    s.R[14] = kLog;
+    s.R[15] = kStack;
+    d.rig->Load(s);
+}
+
 struct Program {
     const char *name;
     void (*setup)(Driver &);
@@ -622,6 +675,7 @@ const Program kPrograms[] = {
     {"timer-interrupts", SetupTimerInterrupts, 300000, {{{0x0E70E0CBB714810Dull, 0xE49CF04E795E7066ull}, {0x1A38E3A987323463ull, 0xED6B154AFDFD3FD3ull}}}},
     {"dma", SetupDma, 20000, {{{0x40B754E186D7DAACull, 0x1170965F5963CA21ull}, {0x758635C11D6CC52Cull, 0x312D5A4D2BB0AC78ull}}}},
     {"fetch", SetupFetch, 3000, {{{0x5311A29B64C7C105ull, 0x3BF075019663476Aull}, {0xEEA8BA4CAB32E32Full, 0xF0E6F8187E88D362ull}}}},
+    {"misaligned", SetupMisaligned, 3000, {{{0xBBF0A6397D8D95BCull, 0xC046BAEDBAEBD7CAull}, {0xCB31DD192074EFC2ull, 0xB83D3AFB886E2C5Bull}}}},
 };
 
 } // namespace
