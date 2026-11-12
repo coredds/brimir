@@ -268,6 +268,24 @@ public:
         }
     }
 
+    /// @brief Brimir: the host pointer `Read` uses for `address` when its page is a plain array, else nullptr (the
+    /// SH-2 interpreter's inline fast path, BRIMIR_FORK.md "Performance changes").
+    /// @param[in] address the address, already aligned to the access size
+    BRIMIR_HOT_INLINE const uint8 *ArrayReadPointer(uint32 address) const {
+        address &= kAddressMask;
+        const MemoryPage &entry = m_pages[address >> pageGranularityBits];
+        return entry.array != nullptr ? &entry.array[address & kPageMask] : nullptr;
+    }
+
+    /// @brief Brimir: the host pointer `Write` stores to for `address` when its page is a writable array, else nullptr
+    /// (read-only arrays and handler pages go through `Write`).
+    /// @param[in] address the address, already aligned to the access size
+    BRIMIR_HOT_INLINE uint8 *ArrayWritePointer(uint32 address) const {
+        address &= kAddressMask;
+        const MemoryPage &entry = m_pages[address >> pageGranularityBits];
+        return entry.array != nullptr && entry.arrayWritable ? &entry.array[address & kPageMask] : nullptr;
+    }
+
     /// @brief Determines if the given access is blocked.
     /// @param[in] address the address to check
     /// @param[in] size the number of bytes to be accessed

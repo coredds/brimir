@@ -32,7 +32,7 @@ struct WatchdogTimer {
     }
 
     // Advances the cycle counter to the specified amount
-    FORCE_INLINE Event AdvanceTo(uint64 cycles) {
+    BRIMIR_HOT_INLINE Event AdvanceTo(uint64 cycles) { // Brimir: forced (BRIMIR_FORK.md, performance)
         // Must be monotonically increasing
         assert(cycles >= m_cycleCount);
 

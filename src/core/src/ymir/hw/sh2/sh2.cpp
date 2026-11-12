@@ -910,7 +910,7 @@ void SH2::MemWrite(uint32 address, T value) {
 }
 
 template <bool emulateCache>
-FLATTEN FORCE_INLINE uint16 SH2::FetchInstruction(uint32 address) {
+FLATTEN BRIMIR_HOT_INLINE uint16 SH2::FetchInstruction(uint32 address) { // Brimir: forced (BRIMIR_FORK.md)
     const uint32 index = bit::extract<1>(address);
     if (index == 0) {
         RefillPipeline<emulateCache>();
@@ -919,39 +919,69 @@ FLATTEN FORCE_INLINE uint16 SH2::FetchInstruction(uint32 address) {
     return m_fetchedOpcodes;
 }
 
-template <bool emulateCache>
-FLATTEN FORCE_INLINE void SH2::RefillPipeline() {
-    m_fetchedOpcodes = MemRead<uint32, true, false, emulateCache>(PC);
+// Brimir: MemRead without cache emulation, inline for an aligned access to an array page in partition 000 (cache
+// area, no cache emulated), 001 or 101 (cache-through): the same bytes m_bus.Read returns there. Misaligned accesses,
+// other partitions and handler pages take MemRead (BRIMIR_FORK.md, "Performance changes").
+template <mem_primitive T, bool instrFetch, bool emulateCache>
+BRIMIR_HOT_INLINE T SH2::MemReadFast(uint32 address) {
+    if constexpr (!emulateCache) {
+        if ((address & (sizeof(T) - 1u)) == 0 && ((0b00100011u >> (address >> 29u)) & 1u) != 0) {
+            if (const uint8 *ptr = m_bus.ArrayReadPointer(address & 0x7FFFFFF)) {
+                return util::ReadBE<T>(ptr);
+            }
+        }
+    }
+    return MemRead<T, instrFetch, false, emulateCache>(address);
+}
+
+// Brimir: MemWrite's counterpart of MemReadFast, for writable array pages.
+template <mem_primitive T, bool debug, bool emulateCache>
+BRIMIR_HOT_INLINE void SH2::MemWriteFast(uint32 address, T value) {
+    if constexpr (!emulateCache) {
+        if ((address & (sizeof(T) - 1u)) == 0 && ((0b00100011u >> (address >> 29u)) & 1u) != 0) {
+            if (uint8 *ptr = m_bus.ArrayWritePointer(address & 0x7FFFFFF)) {
+                util::WriteBE<T>(ptr, value);
+                return;
+            }
+        }
+    }
+    MemWrite<T, false, debug, emulateCache>(address, value);
 }
 
 template <bool emulateCache>
-FLATTEN FORCE_INLINE uint8 SH2::MemReadByte(uint32 address) {
-    return MemRead<uint8, false, false, emulateCache>(address);
+FLATTEN BRIMIR_HOT_INLINE void SH2::RefillPipeline() { // Brimir: forced, MemReadFast (BRIMIR_FORK.md)
+    m_fetchedOpcodes = MemReadFast<uint32, true, emulateCache>(PC);
+}
+
+// Brimir: the Mem{Read,Write}{Byte,Word,Long} wrappers are forced and use the Mem{Read,Write}Fast paths.
+template <bool emulateCache>
+FLATTEN BRIMIR_HOT_INLINE uint8 SH2::MemReadByte(uint32 address) {
+    return MemReadFast<uint8, false, emulateCache>(address);
 }
 
 template <bool emulateCache, bool instrFetch>
-FLATTEN FORCE_INLINE uint16 SH2::MemReadWord(uint32 address) {
-    return MemRead<uint16, instrFetch, false, emulateCache>(address);
+FLATTEN BRIMIR_HOT_INLINE uint16 SH2::MemReadWord(uint32 address) {
+    return MemReadFast<uint16, instrFetch, emulateCache>(address);
 }
 
 template <bool emulateCache, bool instrFetch>
-FLATTEN FORCE_INLINE uint32 SH2::MemReadLong(uint32 address) {
-    return MemRead<uint32, instrFetch, false, emulateCache>(address);
+FLATTEN BRIMIR_HOT_INLINE uint32 SH2::MemReadLong(uint32 address) {
+    return MemReadFast<uint32, instrFetch, emulateCache>(address);
 }
 
 template <bool debug, bool emulateCache>
-FLATTEN FORCE_INLINE void SH2::MemWriteByte(uint32 address, uint8 value) {
-    MemWrite<uint8, false, debug, emulateCache>(address, value);
+FLATTEN BRIMIR_HOT_INLINE void SH2::MemWriteByte(uint32 address, uint8 value) {
+    MemWriteFast<uint8, debug, emulateCache>(address, value);
 }
 
 template <bool debug, bool emulateCache>
-FLATTEN FORCE_INLINE void SH2::MemWriteWord(uint32 address, uint16 value) {
-    MemWrite<uint16, false, debug, emulateCache>(address, value);
+FLATTEN BRIMIR_HOT_INLINE void SH2::MemWriteWord(uint32 address, uint16 value) {
+    MemWriteFast<uint16, debug, emulateCache>(address, value);
 }
 
 template <bool debug, bool emulateCache>
-FLATTEN FORCE_INLINE void SH2::MemWriteLong(uint32 address, uint32 value) {
-    MemWrite<uint32, false, debug, emulateCache>(address, value);
+FLATTEN BRIMIR_HOT_INLINE void SH2::MemWriteLong(uint32 address, uint32 value) {
+    MemWriteFast<uint32, debug, emulateCache>(address, value);
 }
 
 template <bool emulateCache>
@@ -1003,7 +1033,7 @@ template <mem_primitive T>
 }
 
 template <mem_primitive T, bool write, bool emulateCache>
-FORCE_INLINE_EX uint64 SH2::AccessCycles(uint32 address) {
+BRIMIR_HOT_INLINE uint64 SH2::AccessCycles(uint32 address) { // Brimir: forced (BRIMIR_FORK.md, performance)
     const uint32 partition = (address >> 29u) & 0b111;
     switch (partition) {
     case 0b000: // cache
@@ -1821,7 +1851,7 @@ FORCE_INLINE_EX void SH2::OnChipRegWriteLong(uint32 address, uint32 value) {
     }
 }
 
-FORCE_INLINE uint64 SH2::GetCurrentCycleCount() const {
+BRIMIR_HOT_INLINE uint64 SH2::GetCurrentCycleCount() const { // Brimir: forced (BRIMIR_FORK.md, performance)
     return *m_currCount + m_cyclesExecuted;
 }
 
@@ -1830,7 +1860,7 @@ FORCE_INLINE uint64 SH2::WritebackCycles(Ts... regs) {
     return ((regs == m_wbReg) || ...) ? 1 : 0;
 }
 
-FLATTEN FORCE_INLINE bool SH2::IsDMATransferActive(const DMAChannel &ch) const {
+FLATTEN BRIMIR_HOT_INLINE bool SH2::IsDMATransferActive(const DMAChannel &ch) const { // Brimir: forced
     // AE never occurs and NMIF is never set, so both checks can be safely skipped
     return ch.IsEnabled() && DMAOR.DME /*&& !DMAOR.NMIF && !DMAOR.AE*/;
 }
@@ -1971,8 +2001,13 @@ FORCE_INLINE bool SH2::StepDMAC(uint32 channel) {
 }
 
 template <bool debug, bool emulateCache>
-FORCE_INLINE void SH2::AdvanceDMA(uint64 cycles) {
+BRIMIR_HOT_INLINE void SH2::AdvanceDMA(uint64 cycles) {
     for (uint32 i = 0; i < 2; ++i) {
+        // Brimir: inline idle check (StepDMAC returns false right away for an inactive channel), so an Advance with
+        // no transfer running does not call StepDMAC (BRIMIR_FORK.md, performance).
+        if (!IsDMATransferActive(m_dmaChannels[i])) {
+            continue;
+        }
         // HACK: run full transfers to fix sprite glitches in Golden Axe - The Duel
         while (StepDMAC<debug, emulateCache>(i)) {
         }
@@ -1985,7 +2020,7 @@ FORCE_INLINE void SH2::AdvanceDMA(uint64 cycles) {
 }
 
 template <bool write>
-FORCE_INLINE void SH2::AdvanceWDT() {
+BRIMIR_HOT_INLINE void SH2::AdvanceWDT() { // Brimir: forced (BRIMIR_FORK.md, performance)
     const uint64 cycles = GetCurrentCycleCount() + (write ? 4 : 0);
 
     switch (WDT.AdvanceTo(cycles)) {
@@ -2020,7 +2055,7 @@ FORCE_INLINE void SH2::ExecuteDiv64() {
 }
 
 template <bool write>
-FORCE_INLINE void SH2::AdvanceFRT() {
+BRIMIR_HOT_INLINE void SH2::AdvanceFRT() { // Brimir: forced (BRIMIR_FORK.md, performance)
     const uint64 cycles = GetCurrentCycleCount() + (write ? 4 : 0);
 
     switch (FRT.AdvanceTo(cycles)) {
@@ -2245,7 +2280,7 @@ FORCE_INLINE uint64 SH2::EnterException(uint8 vectorNumber) {
 // Instruction interpreters
 
 template <bool debug, bool emulateCache>
-FORCE_INLINE_EX uint64 SH2::InterpretNext() {
+BRIMIR_HOT_INLINE uint64 SH2::InterpretNext() { // Brimir: forced into the Advance loop (BRIMIR_FORK.md, performance)
     if (std::bit_cast<uint16>(m_intrFlags) == kIntrFlagsPendingAllowed) [[unlikely]] {
         // Service interrupt
         const uint8 vecNum = INTC.GetVector(INTC.pending.source);
@@ -2591,6 +2626,13 @@ template uint64 SH2::InterpretNext<false, false>();
 template uint64 SH2::InterpretNext<false, true>();
 template uint64 SH2::InterpretNext<true, false>();
 template uint64 SH2::InterpretNext<true, true>();
+
+// Brimir: the instruction handlers below are FORCE_INLINE, which is plain `inline` in Brimir builds (see
+// BRIMIR_HOT_INLINE in inline.hpp). Forced here, so they stay inline in InterpretNext now that InterpretNext is forced
+// into the Advance loop (BRIMIR_FORK.md, performance). Restored after the handlers.
+#pragma push_macro("FORCE_INLINE")
+#undef FORCE_INLINE
+#define FORCE_INLINE BRIMIR_HOT_INLINE
 
 #define DECODE_RN8 const uint32 rn = bit::extract<8, 11>(opcode);
 #define DECODE_RM8 const uint32 rm = bit::extract<8, 11>(opcode);
@@ -4685,6 +4727,8 @@ FORCE_INLINE uint64 SH2::RTS() {
 #undef DECODE_I_U
 #undef DECODE_I_S
 #undef DECODE_NI
+
+#pragma pop_macro("FORCE_INLINE") // Brimir: see push_macro above
 
 // -----------------------------------------------------------------------------
 // Brimir: SH-2 JIT hook

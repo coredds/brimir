@@ -848,6 +848,13 @@ private:
     template <mem_primitive T, bool poke, bool debug, bool emulateCache>
     void MemWrite(uint32 address, T value);
 
+    // Brimir: inline fast path of MemRead/MemWrite for array pages in the partitions that go straight to the bus
+    // without cache emulation; everything else calls MemRead/MemWrite (BRIMIR_FORK.md, "Performance changes").
+    template <mem_primitive T, bool instrFetch, bool emulateCache>
+    T MemReadFast(uint32 address);
+    template <mem_primitive T, bool debug, bool emulateCache>
+    void MemWriteFast(uint32 address, T value);
+
     template <bool emulateCache>
     uint16 FetchInstruction(uint32 address);
     template <bool emulateCache>
