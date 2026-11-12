@@ -67,6 +67,8 @@ add_executable(brimir_tests
     unit/test_jit_opcodes.cpp
     unit/test_jit_executor.cpp
     unit/test_sh2_state_diff.cpp
+    # SH-2 interpreter cycle-exact digests (timers, interrupts, DMAC, fetch across pages/remaps) for the speed-ups
+    unit/test_sh2_exact.cpp
     unit/test_jit_integration.cpp
     unit/test_jit_lockstep.cpp
     unit/jit_test_backend.cpp
