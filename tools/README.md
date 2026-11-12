@@ -257,6 +257,10 @@ Used by the performance harness (`tools/perf/`, `prove.ps1`) to prove a change l
   differing state, in a second run with `--frames i+1 --save-state-every i+1 <dir>`).
 - `--fixed-rtc` (without `--state`): the RTC runs on the virtual clock from `--lockstep`'s date instead of the host
   clock, so two runs from boot (the BIOS menu) produce identical work RAM and states. A state carries its own RTC.
+  With or without `--state`, `--fixed-rtc` also runs the bench process on UTC (`TZ=UTC0`): the core converts RTC dates
+  with the C library's local time, so the RTC timestamp and the date the guest reads would otherwise follow the host's
+  zone rules (e.g. glibc applies historical daylight saving time, the MSVC runtime the current year's rules) and states
+  from different hosts or architectures would differ. The core itself keeps following the user's local time.
 
 The lines are printed after the `frame` lines, outside the timed region; none of the three can be combined with
 `--lockstep` or `--dump-at` (`--fixed-rtc` only not with `--lockstep`).

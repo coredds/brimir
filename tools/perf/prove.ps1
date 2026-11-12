@@ -24,6 +24,7 @@ param(
     [string]$Out = ''
 )
 $ErrorActionPreference = 'Stop'
+$previousTz = $env:TZ
 try {
     . (Join-Path $PSScriptRoot 'common.ps1')
     $Audio = -not $NoAudio
@@ -48,6 +49,10 @@ try {
         if ($help -notmatch '--fixed-rtc') { $fixedRtc = $false }
     }
     if (-not $fixedRtc -and $windowList -contains 'bios') { Write-Warning 'A bench has no --fixed-rtc: the bios window runs on the host clock' }
+    # The core converts RTC dates with the C library's local time, whose zone rules differ between hosts and C
+    # libraries (state bytes then differ by the zone offset). Every bench run here is on UTC: benches from before
+    # --fixed-rtc pinned the zone itself follow TZ too (MSVC runtime and glibc), and the parallel runspaces inherit it.
+    $env:TZ = 'UTC0'
 
     $prov = [ordered]@{ base = Get-PerfProvenance $Base; new = Get-PerfProvenance $New }
     $prov | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Out 'provenance.json') -Encoding utf8
@@ -178,4 +183,6 @@ try {
     Write-Host "prove.ps1 error: $_" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace
     exit 2
+} finally {
+    $env:TZ = $previousTz
 }

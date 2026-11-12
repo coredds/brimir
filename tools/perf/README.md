@@ -61,6 +61,12 @@ tools\perf\prove.ps1 -Base <bin dir> -New <bin dir> [-States] [-NoAudio] [-Frame
   or a script/setup error (the first non-empty stderr line of each side is shown in the `checked` column).
 - Base and new must be different benches (SHA-256): comparing a bench with itself aborts with `SELF-COMPARE` unless
   `-AllowSame` (harness self-checks only).
+- Time zone: every bench runs with `TZ=UTC0`, and `--fixed-rtc` (bios window) also pins the bench process to UTC
+  (Task 2b). The core converts RTC dates with the C library's local time, so the RTC timestamp in the save state (and
+  the date a game reads from a state's timestamp) followed the host's zone rules: the bios state differed from frame 0
+  between the Windows x64 bench and the aarch64 bench under glibc (Brazil's 1994 daylight saving time, 3600 s). Runs
+  on another host or architecture (the aarch64 qemu checks) need `--fixed-rtc` or `TZ=UTC0` as well; benches from
+  before Task 2b follow `TZ` too.
 - Base and new run one after the other per window x mode; `-Jobs` (default 6) pairs run at once.
 - Output (`-Out`, default `%TEMP%\opencode\perf-prove\<timestamp>`): `prove.md`, `prove.csv`, `provenance.json`,
   `logs\<window>-<mode>-<base|new>.txt`.

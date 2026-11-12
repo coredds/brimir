@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -54,7 +55,7 @@ struct Args {
     bool audioHash = false;    // --audio-hash: print a hash of each measured frame's PCM output
     int saveStateEvery = 0;    // --save-state-every N <dir>: write the core state after every Nth measured frame
     std::string saveStateDir;
-    bool fixedRtc = false;     // --fixed-rtc: without --state, run the RTC on the virtual clock at the lockstep date
+    bool fixedRtc = false;     // --fixed-rtc: process on UTC; without --state, RTC on the virtual clock at the lockstep date
     bool backendGiven = false; // --jit-backend given explicitly
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
     bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
@@ -129,7 +130,9 @@ void PrintUsage(std::FILE* out) {
         "  --fixed-rtc   without --state: run the RTC on the virtual (emulated-time) clock from 1994-11-22\n"
         "                00:00:00 (--lockstep's date) instead of the host clock, so two runs from boot match\n"
         "                (save states included). A save state carries its own RTC time. Not with --lockstep\n"
-        "                (which always does this).\n"
+        "                (which always does this). Also runs the process on UTC (with or without --state), so\n"
+        "                the RTC timestamp and the date the guest reads do not depend on the host's time zone:\n"
+        "                runs on different hosts and architectures produce the same states.\n"
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -356,6 +359,20 @@ bool CreateRunDirectory(std::filesystem::path& out) {
     return false;
 }
 
+// The core converts the RTC between wall-clock dates and timestamps with the C library's mktime/localtime, so the
+// timestamp held in the RTC (and in save states) and the date the guest reads follow the host's time zone rules (glibc
+// applies Brazil's 1994 daylight saving time, the MSVC runtime the current year's rules). Running the process on UTC
+// makes both the same on every host. Only the bench does this: the core keeps following the user's local time.
+void PinUtcTimeZone() {
+#ifdef _WIN32
+    _putenv_s("TZ", "UTC0");
+    _tzset();
+#else
+    setenv("TZ", "UTC0", 1);
+    tzset();
+#endif
+}
+
 int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir);
 
 } // namespace
@@ -371,6 +388,9 @@ int main(int argc, char** argv) {
         return 1;
     case ParseResult::Ok:
         break;
+    }
+    if (args.fixedRtc) {
+        PinUtcTimeZone();
     }
 
     if (!args.systemDir.empty()) {
