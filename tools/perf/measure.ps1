@@ -20,10 +20,10 @@ param(
     [string[]]$Extra = @(),
     [string]$Affinity = '',            # hex mask; default: one logical CPU per physical core, without CPU 0's core
     [double]$MaxLoad = 5,              # % CPU used by others before a run
-    [int]$QuietWaitSeconds = 60,
+    [int]$QuietWaitSeconds = 120,
     [switch]$RequireQuiet,             # fail instead of running (flagged) when the machine stays busy
     [double]$OutlierPercent = 8,       # a run this far from its cell's median p50 is re-run
-    [int]$MaxReruns = 2,
+    [int]$MaxReruns = 3,
     [switch]$SelfCheck,
     [string]$SelfCheckWindows = 'gh,vf2',
     [int]$SelfCheckRounds = 4,
@@ -216,10 +216,48 @@ foreach ($side in 'A', 'B') {
     Write-Host "warm-up run $side done (discarded)"
 }
 
+# Re-runs a run that failed, started on a busy machine (load above MaxLoad after QuietWaitSeconds), or lies more than
+# OutlierPercent from its cell's median p50 (median of the cell's quiet runs), up to MaxReruns times each; the last try
+# is used in its round. Rejected runs go to $Rejected.
+function Invoke-PerfReruns($Rows, $Exes, [string[]]$WindowSet, [string[]]$ModeSet, [string]$Prefix, $Rejected) {
+    foreach ($w in $WindowSet) {
+        foreach ($m in $ModeSet) {
+            foreach ($side in 'A', 'B') {
+                $cell = @($Rows | Where-Object { $_.window -eq $w -and $_.mode -eq $m -and $_.build -eq $side -and $_.status -eq 'used' })
+                $quiet = @($cell | Where-Object { -not $_.busy -and $_.exit -eq 0 })
+                $med = Get-PerfMedian ([double[]]@($(if ($quiet.Count) { $quiet.p50 } else { $cell.p50 })))
+                foreach ($run in $cell) {
+                    $try = 0
+                    $current = $run
+                    while ($try -lt $MaxReruns -and ($current.exit -ne 0 -or $current.busy -or [double]::IsNaN($current.p50) -or
+                            [math]::Abs($current.p50 / $med - 1) * 100 -gt $OutlierPercent)) {
+                        $try++
+                        $current.status = 'rejected'
+                        $Rejected.Add($current)
+                        $redo = Invoke-PerfRun $side $Exes[$side] $w $m "$Prefix$w-$m-$side-r$($run.round)-rerun$try"
+                        $redo | Add-Member round $run.round
+                        $redo | Add-Member status 'used'
+                        $Rows.Add($redo)
+                        Write-Host ("{0}rerun r{1} {2,-8} {3,-5} {4}: {5:n3}{6} -> {7:n3}{8} ms/frame (median {9:n3})" -f $Prefix, $run.round, $w, $m, $side,
+                            $current.p50, $(if ($current.busy) { ' (busy)' } else { '' }), $redo.p50, $(if ($redo.busy) { ' (busy)' } else { '' }), $med)
+                        $current = $redo
+                    }
+                }
+            }
+        }
+    }
+}
+
+$rejected = [System.Collections.Generic.List[object]]::new()
 $selfCheckResult = $null
 if ($SelfCheck) {
     $scWindows = @(Select-PerfWindows $SelfCheckWindows)
-    $scRows = Invoke-PerfRounds @{ A = $bench.A; B = $bench.A } $scWindows $modeList $SelfCheckRounds 'selfcheck-' (Join-Path $Out 'selfcheck.csv')
+    $scExes = @{ A = $bench.A; B = $bench.A }
+    $scCsv = Join-Path $Out 'selfcheck.csv'
+    $scRows = Invoke-PerfRounds $scExes $scWindows $modeList $SelfCheckRounds 'selfcheck-' $scCsv
+    Invoke-PerfReruns $scRows $scExes $scWindows $modeList 'selfcheck-' $rejected
+    Remove-Item -LiteralPath $scCsv
+    $scRows | ForEach-Object { Write-PerfRow $_ $scCsv }
     $selfCheckResult = @(Get-PerfSummary $scRows $scWindows $modeList)
     $selfCheckResult | Export-Csv (Join-Path $Out 'selfcheck-summary.csv') -NoTypeInformation
     $selfCheckResult | Format-Table window, mode, A_p50, p50_change, p50_min, p50_max, p50_spread -AutoSize | Out-String | Write-Host
@@ -232,32 +270,7 @@ if ($SelfCheck) {
 }
 
 $rows = Invoke-PerfRounds $bench $windowList $modeList $Rounds '' $csv
-
-# Re-run outliers: a run more than OutlierPercent from its cell's median p50 (up to MaxReruns tries each).
-$rejected = [System.Collections.Generic.List[object]]::new()
-foreach ($w in $windowList) {
-    foreach ($m in $modeList) {
-        foreach ($side in 'A', 'B') {
-            $cell = @($rows | Where-Object { $_.window -eq $w -and $_.mode -eq $m -and $_.build -eq $side -and $_.status -eq 'used' })
-            $med = Get-PerfMedian ([double[]]@($cell.p50))
-            foreach ($run in $cell) {
-                $try = 0
-                $current = $run
-                while ($try -lt $MaxReruns -and ($current.exit -ne 0 -or [double]::IsNaN($current.p50) -or [math]::Abs($current.p50 / $med - 1) * 100 -gt $OutlierPercent)) {
-                    $try++
-                    $current.status = 'rejected'
-                    $rejected.Add($current)
-                    $redo = Invoke-PerfRun $side $bench[$side] $w $m "$w-$m-$side-r$($run.round)-rerun$try"
-                    $redo | Add-Member round $run.round
-                    $redo | Add-Member status 'used'
-                    $rows.Add($redo)
-                    Write-Host ("rerun r{0} {1,-8} {2,-5} {3}: {4:n3} -> {5:n3} ms/frame (median {6:n3})" -f $run.round, $w, $m, $side, $current.p50, $redo.p50, $med)
-                    $current = $redo
-                }
-            }
-        }
-    }
-}
+Invoke-PerfReruns $rows $bench $windowList $modeList '' $rejected
 Remove-Item -LiteralPath $csv
 $rows | ForEach-Object { Write-PerfRow $_ $csv }
 $rejected | ForEach-Object { Write-PerfRow $_ (Join-Path $Out 'rejected.csv') }
@@ -269,7 +282,7 @@ $summary | Export-Csv (Join-Path $Out 'measure-summary.csv') -NoTypeInformation
 $f = { param($v) if ($v -is [double] -and [double]::IsNaN($v)) { '-' } else { '{0:n2}' -f $v } }
 $busy = @($rows | Where-Object { $_.status -eq 'used' -and $_.busy }).Count
 $md = @("# measure: A $($prov.A.commit) vs B $($prov.B.commit)", '',
-    "$Rounds paired rounds (A,B / B,A alternating), $Frames frames per window$(if ($Extra) { ", extra: $($Extra -join ' ')" }), CPUs $($prov.affinityCpus) at High priority, $power. Wall $([math]::Round($sw.Elapsed.TotalMinutes)) min; $($rejected.Count) runs rejected as outliers (> $OutlierPercent % from the cell median) and re-run; $busy used runs started above $MaxLoad % background load.", '',
+    "$Rounds paired rounds (A,B / B,A alternating), $Frames frames per window$(if ($Extra) { ", extra: $($Extra -join ' ')" }), CPUs $($prov.affinityCpus) at High priority, $power. Wall $([math]::Round($sw.Elapsed.TotalMinutes)) min; $($rejected.Count) runs rejected and re-run (failed, started above $MaxLoad % background load, or > $OutlierPercent % from the cell median; self-check included); $busy used runs still started above $MaxLoad %.", '',
     'Change = median over rounds of B/A - 1 (p50 ms/frame; SH-2 and other from the bench averages), [min..max] over the rounds. Verdict faster/SLOWER needs the same sign in >= 80 % of the rounds; "keep" = faster by >= 3 %. In thr mode "other" includes the wait for the VDP threads.', '')
 if ($selfCheckResult) {
     $md += "Self-check A vs A ($SelfCheckRounds rounds): " + (($selfCheckResult | ForEach-Object { "$($_.window) $($_.mode) $(& $f $_.p50_change) % [$(& $f $_.p50_min)..$(& $f $_.p50_max)]" }) -join '; ')
