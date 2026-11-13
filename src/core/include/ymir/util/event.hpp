@@ -5,6 +5,8 @@
 @brief Defines `util::Event`, a synchronization primitive that blocks threads until a signal is raised.
 */
 
+#include <cstdint> // Brimir: SpinWait
+
 #if defined(_WIN32)
     #include <ymir/core/types.hpp>
 
@@ -80,6 +82,11 @@ public:
     /// @brief Waits until the event is signaled.
     void Wait();
 
+    /// @brief Brimir: checks the signal up to `spins` times (with a CPU pause hint) before blocking in `Wait()`.
+    /// For hand-offs that usually complete within microseconds, where the kernel wake-up would dominate.
+    /// @param[in] spins the number of checks before blocking
+    void SpinWait(uint32_t spins);
+
     /// @brief Signals the event and notifies all waiting threads.
     void Set();
 
@@ -108,6 +115,11 @@ public:
     void Wait() {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_condVar.wait(lock, [this] { return m_set; });
+    }
+
+    /// @brief Brimir: as `Wait()` (no spinning in the generic implementation).
+    void SpinWait(uint32_t) {
+        Wait();
     }
 
     /// @brief Signals the event and notifies all waiting threads.

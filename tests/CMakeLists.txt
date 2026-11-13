@@ -69,6 +69,8 @@ add_executable(brimir_tests
     unit/test_sh2_state_diff.cpp
     # SH-2 interpreter cycle-exact digests (timers, interrupts, DMAC, fetch across pages/remaps) for the speed-ups
     unit/test_sh2_exact.cpp
+    # util::Event::SpinWait (threaded deinterlacer hand-off)
+    unit/test_event_spinwait.cpp
     unit/test_jit_integration.cpp
     unit/test_jit_lockstep.cpp
     unit/jit_test_backend.cpp

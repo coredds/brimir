@@ -60,6 +60,11 @@ namespace grp {
 
 namespace {
 
+// Brimir: how many times the threaded deinterlacer's per-line hand-off checks the other thread's signal before
+// blocking (util::Event::SpinWait). A line takes tens of microseconds; a kernel wake-up per line and side made the
+// frame wait-bound once the main field rendered faster than the alternate one (BRIMIR_FORK.md, performance).
+constexpr uint32 kDeinterlaceSpinChecks = 4096;
+
 // Brimir: the VDP2 register fields the renderer itself writes while preparing a line (VDP2PrepareLine:
 // CalcAccessPatterns, CalcVCellScrollDelay, UpdateRotationPageBaseAddresses). The unthreaded renderer writes them in
 // m_state.regs2; the VDP2 render thread writes them in its own copy, which receives every register write in order, so
@@ -857,7 +862,8 @@ void SoftwareVDPRenderer::VDP2RenderThread() {
                 (this->*m_fnVDP2DrawLine)(event.drawLine.vcnt, false);
                 if (deinterlaceRender && interlaced) {
                     if (threadedDeinterlacer) {
-                        rctx.deinterlaceRenderEndSignal.Wait();
+                        // Brimir: spin briefly first, the other field is usually microseconds away (performance)
+                        rctx.deinterlaceRenderEndSignal.SpinWait(kDeinterlaceSpinChecks);
                         rctx.deinterlaceRenderEndSignal.Reset();
                     } else {
                         (this->*m_fnVDP2DrawLine)(event.drawLine.vcnt, true);
@@ -962,7 +968,7 @@ void SoftwareVDPRenderer::VDP2DeinterlaceRenderThread() {
     auto &rctx = m_vdp2RenderingContext;
 
     while (true) {
-        rctx.deinterlaceRenderBeginSignal.Wait();
+        rctx.deinterlaceRenderBeginSignal.SpinWait(kDeinterlaceSpinChecks); // Brimir: the next line is usually close
         rctx.deinterlaceRenderBeginSignal.Reset();
         if (rctx.deinterlaceShutdown) {
             rctx.deinterlaceShutdown = false;

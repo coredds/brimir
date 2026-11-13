@@ -22,7 +22,34 @@
     #include <sys/umtx.h>
 #endif
 
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    #include <immintrin.h>
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+    #include <intrin.h>
+#endif
+
 namespace util {
+
+#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__)
+
+// Brimir: spin-then-block wait (see event.hpp).
+void Event::SpinWait(uint32_t spins) {
+    for (uint32_t i = 0; i < spins; ++i) {
+        if (m_value.load(std::memory_order_acquire) != 0) {
+            return;
+        }
+    #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+        _mm_pause();
+    #elif defined(_MSC_VER) && defined(_M_ARM64)
+        __yield();
+    #elif defined(__aarch64__) || defined(__arm__)
+        __asm__ __volatile__("yield");
+    #endif
+    }
+    Wait();
+}
+
+#endif
 
 #if defined(_WIN32)
 
