@@ -3190,3 +3190,242 @@ TEST_CASE("accuracy: options deterministic under rollback", "[core][accuracy][sa
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+// ============================================================
+// Save-state round trip: the state just saved is not decoded again
+// ============================================================
+
+namespace {
+
+// The running session's emulated state: Saturn::SaveState encoded, outside CoreWrapper::SaveState (which keeps the
+// last saved state for LoadState)
+std::vector<uint8_t> RunningState(CoreWrapper& core) {
+    auto state = std::make_unique<ymir::savestate::SaveState>();
+    ResetSaveState(*state);
+    core.GetSaturn()->SaveState(*state);
+    std::vector<uint8_t> bytes;
+    REQUIRE(EncodeSaveState(*state, bytes));
+    return bytes;
+}
+
+uint32_t SavedCompressedSize(const std::vector<uint8_t>& buffer) {
+    uint32_t compressedSize = 0;
+    std::memcpy(&compressedSize, buffer.data() + 12, 4);
+    return compressedSize;
+}
+
+// An initialized core that ran a few frames: on the US BIOS when the fixture is there (a state with real contents),
+// else without one
+void StartRoundTripCore(CoreWrapper& core, int frames) {
+    REQUIRE(core.Initialize());
+    brimir::PrepareLockstepCore(core);
+    if (std::filesystem::exists(UsBiosFixture())) {
+        REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    }
+    for (int i = 0; i < frames; ++i) {
+        core.RunFrame();
+    }
+}
+
+} // namespace
+
+TEST_CASE("savestate round trip: the payload is compressed as LZ4_compress_default does", "[core][savestate][unit]") {
+    CoreWrapper core;
+    StartRoundTripCore(core, 90);
+    for (int save = 0; save < 2; ++save) { // the second one with the compression state already used
+        const auto buffer = SaveStateBytes(core);
+        uint32_t payloadSize = 0;
+        std::memcpy(&payloadSize, buffer.data() + 8, 4);
+        const uint32_t compressedSize = SavedCompressedSize(buffer);
+        std::vector<uint8_t> payload(payloadSize);
+        REQUIRE(LZ4_decompress_safe(reinterpret_cast<const char*>(buffer.data() + 16),
+                                    reinterpret_cast<char*>(payload.data()), static_cast<int>(compressedSize),
+                                    static_cast<int>(payloadSize)) == static_cast<int>(payloadSize));
+        std::vector<uint8_t> reference(LZ4_compressBound(static_cast<int>(payloadSize)));
+        const int n = LZ4_compress_default(reinterpret_cast<const char*>(payload.data()),
+                                           reinterpret_cast<char*>(reference.data()), static_cast<int>(payloadSize),
+                                           static_cast<int>(reference.size()));
+        REQUIRE(n == static_cast<int>(compressedSize));
+        CHECK(std::memcmp(reference.data(), buffer.data() + 16, compressedSize) == 0);
+        core.RunFrame();
+    }
+}
+
+TEST_CASE("savestate round trip: loading the state just saved continues as the decoded state does",
+          "[core][savestate][unit]") {
+    // a runs plainly; b rolls back every frame as run-ahead does (save, run, load the bytes just saved: the decoded
+    // state is reused); c loads each state after saving a newer one (decoded from its bytes)
+    CoreWrapper a;
+    CoreWrapper b;
+    CoreWrapper c;
+    for (CoreWrapper* core : {&a, &b, &c}) {
+        StartRoundTripCore(*core, 0);
+    }
+    REQUIRE(brimir::SyncLockstepCores(a, b));
+    REQUIRE(brimir::SyncLockstepCores(a, c));
+    const uint64_t reusedB = b.GetReusedStateLoads();
+    const uint64_t reusedC = c.GetReusedStateLoads();
+    std::vector<uint8_t> buffer(b.GetStateSize());
+    std::vector<uint8_t> newer(c.GetStateSize());
+    std::vector<uint8_t> frontendTail(b.GetStateSize()); // the frontend's buffer may hold anything after the state
+    constexpr int kFrames = 90;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        a.RunFrame();
+
+        REQUIRE(b.SaveState(buffer.data(), buffer.size()));
+        b.RunFrame();
+        if (frame % 2 == 0) {
+            REQUIRE(b.LoadState(buffer.data(), buffer.size()));
+        } else {
+            frontendTail = buffer;
+            std::fill(frontendTail.begin() + 16 + SavedCompressedSize(buffer), frontendTail.end(), uint8_t{0xA5});
+            REQUIRE(b.LoadState(frontendTail.data(), frontendTail.size()));
+        }
+        b.RunFrame();
+
+        REQUIRE(c.SaveState(buffer.data(), buffer.size()));
+        c.RunFrame();
+        REQUIRE(c.SaveState(newer.data(), newer.size()));
+        REQUIRE(c.LoadState(buffer.data(), buffer.size()));
+        c.RunFrame();
+    }
+    CHECK(b.GetReusedStateLoads() == reusedB + kFrames);
+    CHECK(c.GetReusedStateLoads() == reusedC);
+    CHECK(brimir::CompareCores(a, b).empty());
+    CHECK(brimir::CompareCores(a, c).empty());
+    CHECK((RunningState(b) == RunningState(c)));
+    CHECK((SaveStateBytes(b) == SaveStateBytes(c)));
+
+    // Once another state was loaded, the last saved one is decoded again
+    const auto first = SaveStateBytes(b);
+    const auto atFirst = RunningState(b);
+    b.RunFrame();
+    const auto second = SaveStateBytes(b);
+    const auto atSecond = RunningState(b);
+    REQUIRE_FALSE((atFirst == atSecond));
+    const uint64_t reused = b.GetReusedStateLoads();
+    REQUIRE(b.LoadState(first.data(), first.size()));
+    CHECK((RunningState(b) == atFirst));
+    REQUIRE(b.LoadState(second.data(), second.size()));
+    CHECK((RunningState(b) == atSecond));
+    CHECK(b.GetReusedStateLoads() == reused);
+}
+
+TEST_CASE("savestate round trip: a rejected state leaves the running session unchanged", "[core][savestate][unit]") {
+    CoreWrapper core;
+    StartRoundTripCore(core, 30);
+    const auto saved = SaveStateBytes(core); // the core keeps this one's decoded state
+    const auto atSave = RunningState(core);
+    const uint32_t compressedSize = SavedCompressedSize(saved);
+    core.RunFrame();
+
+    std::vector<uint8_t> bad = saved;
+    size_t badSize = bad.size();
+    bool reused = false;        // rejected after reusing the decoded state (the bytes are the ones just saved)
+    bool savedLoadsAfter = true; // the session still loads the saved state afterwards
+    const auto patchVersion = [&](uint32_t version) { std::memcpy(bad.data() + 4, &version, 4); };
+
+    SECTION("corrupt LZ4 data") {
+        // First sequence: no literals, a match 65535 bytes before the start of the output
+        bad[16] = 0x0F;
+        bad[17] = 0xFF;
+        bad[18] = 0xFF;
+        REQUIRE(std::memcmp(bad.data(), saved.data(), 19) != 0);
+    }
+    SECTION("LZ4 data cut short") {
+        const uint32_t shorter = compressedSize - 1;
+        std::memcpy(bad.data() + 12, &shorter, 4);
+    }
+    SECTION("a version newer than this build") {
+        patchVersion(CoreWrapper::kSaveStateVersion + 1);
+    }
+    SECTION("a version before 4") {
+        patchVersion(3);
+    }
+    SECTION("the saved state after the cartridge changed") {
+        core.GetSaturn()->InsertCartridge<ymir::cart::DRAM8MbitCartridge>();
+        reused = true;
+        savedLoadsAfter = false;
+    }
+    SECTION("a cartridge the session does not have") {
+        bad = RepackState(saved, CoreWrapper::kSaveStateVersion, [](ymir::savestate::SaveState& s) {
+            s.scu.cartType = ymir::savestate::SCUSaveState::CartType::DRAM32Mbit;
+            s.scu.cartData.assign(4 * 1024 * 1024, 0x5A);
+        });
+        badSize = bad.size();
+    }
+    SECTION("a Brimir extension field out of range") {
+        bad = RepackState(saved, CoreWrapper::kSaveStateVersion,
+                          [](ymir::savestate::SaveState& s) { s.brimir.vdp.VTimingField = 2; });
+        badSize = bad.size();
+    }
+    SECTION("an invalid CD block mode bool") {
+        bad = RepackState(saved, CoreWrapper::kSaveStateVersion,
+                          [](ymir::savestate::SaveState& s) { std::memset(&s.cdblockLLE, 2, 1); });
+        badSize = bad.size();
+    }
+    SECTION("a buffer shorter than the saved state") {
+        badSize = 16 + static_cast<size_t>(compressedSize) - 1;
+    }
+    SECTION("a header only") {
+        badSize = 16;
+    }
+
+    const size_t stateSize = core.GetStateSize(); // a cartridge inserted above changes it
+    const auto before = RunningState(core);
+    const auto cartBefore = core.GetSaturn()->GetCartridge().GetType();
+    const uint64_t reusedBefore = core.GetReusedStateLoads();
+    CHECK_FALSE(core.LoadState(bad.data(), badSize));
+    CHECK(core.GetReusedStateLoads() == reusedBefore + (reused ? 1 : 0));
+    CHECK((RunningState(core) == before));
+    CHECK(core.GetSaturn()->GetCartridge().GetType() == cartBefore);
+    CHECK(core.GetStateSize() == stateSize);
+
+    core.RunFrame();
+    REQUIRE(core.GetFramebuffer() != nullptr);
+    if (savedLoadsAfter) {
+        REQUIRE(core.LoadState(saved.data(), saved.size()));
+        CHECK((RunningState(core) == atSave));
+    }
+    CHECK(core.GetStateSize() == stateSize);
+}
+
+TEST_CASE("savestate round trip: a state from another CD Block ROM or mode leaves the session unchanged",
+          "[core][savestate][accuracy]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    const auto rom = StubCDBlockROM();
+    const auto otherROM = StubCDBlockROM(1);
+    AccuracySession lle("brimir_roundtrip_lle", true, &rom);
+    AccuracySession hle("brimir_roundtrip_hle", false);
+    AccuracySession other("brimir_roundtrip_other_rom", true, &otherROM);
+    for (int i = 0; i < 20; ++i) {
+        for (CoreWrapper* core : {&lle.core, &hle.core, &other.core}) {
+            core->RunFrame();
+        }
+    }
+    const auto lleState = SaveStateBytes(lle.core);
+    // Each session just saved its own state too (kept for LoadState)
+    for (CoreWrapper* core : {&hle.core, &other.core}) {
+        (void)SaveStateBytes(*core);
+    }
+
+    const auto rejected = [](CoreWrapper& core, const std::vector<uint8_t>& state) {
+        const auto before = RunningState(core);
+        const size_t stateSize = core.GetStateSize();
+        const bool lleBefore = core.IsCDBlockLLEActive();
+        CHECK_FALSE(core.LoadState(state.data(), state.size()));
+        CHECK((RunningState(core) == before));
+        CHECK(core.GetStateSize() == stateSize);
+        CHECK(core.IsCDBlockLLEActive() == lleBefore);
+        core.RunFrame();
+    };
+    SECTION("another CD Block ROM") {
+        rejected(other.core, lleState);
+        CHECK(other.core.GetLastStateError().find("another CD Block ROM") != std::string::npos);
+    }
+    SECTION("low-level CD Block state in a high-level session") {
+        rejected(hle.core, lleState);
+    }
+}

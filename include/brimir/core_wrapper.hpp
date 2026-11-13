@@ -326,6 +326,10 @@ public:
     /// @return true if successful
     bool LoadState(const void* data, size_t size);
 
+    /// @brief How many LoadState() calls took the decoded state of the last SaveState() instead of decompressing and
+    /// decoding the buffer (it held exactly the bytes that SaveState() wrote, as in run-ahead)
+    uint64_t GetReusedStateLoads() const { return m_reusedStateLoads; }
+
     /// @brief Why the last LoadState() rejected a well-formed state, or an empty string
     const std::string& GetLastStateError() const { return m_lastStateError; }
 
@@ -639,6 +643,14 @@ private:
     // that rewind and run-ahead do not reallocate them every frame
     std::vector<uint8_t> m_statePayload;
     std::unique_ptr<ymir::savestate::SaveState> m_stateScratch;
+    // The bytes the last successful SaveState() wrote (header and compressed payload) while m_stateScratch still holds
+    // the state they encode: LoadState() of exactly these bytes (run-ahead loads the state it just saved) checks that
+    // state instead of decompressing and decoding it again
+    std::vector<uint8_t> m_savedStateBytes;
+    bool m_stateScratchIsSaved = false;
+    uint64_t m_reusedStateLoads = 0;
+    // LZ4_compress_fast_extState's state (LZ4_sizeofState() bytes, pointer-aligned), allocated once
+    std::vector<uint64_t> m_lz4State;
     std::string m_lastStateError;
     std::string m_lastStateWarning;
     std::vector<std::string> m_reportedStateWarnings; // TakeStateWarningToReport, since the content was loaded

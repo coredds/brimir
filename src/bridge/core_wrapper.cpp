@@ -1564,6 +1564,7 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         return false;
     }
 
+    m_stateScratchIsSaved = false;
     try {
         // Ymir's software renderer handles its own worker-thread synchronization
         // in VDP::SaveState() via PreSaveStateSync(). The libretro frontend
@@ -1617,14 +1618,20 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         std::memcpy(out + 4, &version, 4);
         std::memcpy(out + 8, &uncompSize, 4);
 
-        // Compress with LZ4
+        // Compress with LZ4 (LZ4_compress_default's output: it runs LZ4_compress_fast_extState with acceleration 1
+        // on a stack state; this one is allocated once)
         int srcSize = static_cast<int>(m_statePayload.size());
         int dstCapacity = static_cast<int>(std::min<size_t>(size - 16, static_cast<size_t>(INT32_MAX)));
-        int compressedSize = LZ4_compress_default(
+        if (m_lz4State.empty()) {
+            m_lz4State.resize((static_cast<size_t>(LZ4_sizeofState()) + sizeof(uint64_t) - 1) / sizeof(uint64_t));
+        }
+        int compressedSize = LZ4_compress_fast_extState(
+            m_lz4State.data(),
             reinterpret_cast<const char*>(m_statePayload.data()),
             reinterpret_cast<char*>(out + 16),
             srcSize,
-            dstCapacity
+            dstCapacity,
+            1
         );
 
         if (compressedSize <= 0) {
@@ -1635,6 +1642,8 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         // any trailing bytes that the frontend may have written.
         std::memcpy(out + 12, &compressedSize, 4);
 
+        m_savedStateBytes.assign(out, out + 16 + static_cast<size_t>(compressedSize));
+        m_stateScratchIsSaved = true;
         return true;
     } catch (const std::exception& e) {
         (void)e;
@@ -1691,20 +1700,33 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 return false;
             }
 
-            m_statePayload.resize(payloadSize);
-            int result = LZ4_decompress_safe(
-                reinterpret_cast<const char*>(in + 16),
-                reinterpret_cast<char*>(m_statePayload.data()),
-                static_cast<int>(compressedSize),
-                static_cast<int>(payloadSize)
-            );
-            if (result != static_cast<int>(payloadSize)) {
-                return false;
-            }
-            // DecodeSaveState writes or clears every member for any version, so the scratch state needs no reset.
+            // The bytes the last SaveState wrote: the scratch state still holds what they decode to (DecodeSaveState
+            // reads back every member EncodeSaveState wrote, and the bools of a saved state are 0 or 1), so only
+            // DecodeSaveState's checks of the decoded members run. The scratch is changed below either way.
+            const bool reuse = m_stateScratchIsSaved && compressedSize + 16 == m_savedStateBytes.size() &&
+                               std::memcmp(in, m_savedStateBytes.data(), m_savedStateBytes.size()) == 0;
+            m_stateScratchIsSaved = false;
             auto& state = Scratch(m_stateScratch);
-            if (!DecodeSaveState(m_statePayload, state, version)) {
-                return false;
+            if (reuse) {
+                ++m_reusedStateLoads;
+                if (!ValidDecodedSaveState(state, version)) {
+                    return false;
+                }
+            } else {
+                m_statePayload.resize(payloadSize);
+                int result = LZ4_decompress_safe(
+                    reinterpret_cast<const char*>(in + 16),
+                    reinterpret_cast<char*>(m_statePayload.data()),
+                    static_cast<int>(compressedSize),
+                    static_cast<int>(payloadSize)
+                );
+                if (result != static_cast<int>(payloadSize)) {
+                    return false;
+                }
+                // DecodeSaveState writes or clears every member for any version, so the scratch state needs no reset.
+                if (!DecodeSaveState(m_statePayload, state, version)) {
+                    return false;
+                }
             }
             if (version == 4) {
                 UpgradeVersion4SaveState(state);

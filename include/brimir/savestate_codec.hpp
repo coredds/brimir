@@ -69,6 +69,10 @@ void ResetSaveState(ymir::savestate::SaveState& state);
 bool DecodeSaveState(std::span<const uint8_t> payload, ymir::savestate::SaveState& state,
                      uint32_t version = kSaveStatePayloadVersion);
 
+/// @brief The checks DecodeSaveState applies to the members it read (the CD block mode bool, the cartridge image size
+/// for its type, the INTBACK report offset, the Brimir extension from version 6 on)
+bool ValidDecodedSaveState(const ymir::savestate::SaveState& state, uint32_t version = kSaveStatePayloadVersion);
+
 /// @brief Converts a state decoded from a version 4 payload to the current meaning of its fields.
 /// Version 4 stored the VDP2 VRAM fetchers' character palette numbers shifted right by 4, which lost
 /// the low bits of 16-colour characters; version 5 stores them whole. The conversion restores the
