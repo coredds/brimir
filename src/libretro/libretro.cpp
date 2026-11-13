@@ -1766,6 +1766,9 @@ RETRO_API void retro_unload_game(void) {
     // the process dies (issue #7). Log it instead so the cause is visible in the frontend log.
     try {
         if (g_core) {
+            // Read by brimir_vkhost (its state proofs check that run-ahead loads took the reuse path)
+            brimir_log(RETRO_LOG_INFO, "Save states: %llu loads reused the state just saved",
+                       static_cast<unsigned long long>(g_core->GetReusedStateLoads()));
             g_core->UnloadGame();
             log_cartridge_save_error();
             g_cartridgeFlushFrames = 0;

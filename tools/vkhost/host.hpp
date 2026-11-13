@@ -278,6 +278,9 @@ public:
     // With --vulkan: the compute pipelines the core created (complete after Unload).
     uint64_t ComputePipelines() const { return m_vulkan ? m_vulkan->ComputePipelines() : m_computePipelines; }
     bool HadContext() const { return m_contextResets > 0; }
+    // retro_unserialize calls that reused the state just saved (CoreWrapper::GetReusedStateLoads; the core logs it at
+    // retro_unload_game, so complete after Unload).
+    uint64_t ReusedStateLoads() const { return m_reusedStateLoads; }
 
     // Adds this instance's counters and problems (Vulkan ones too; complete after Unload).
     void FillReport(RunReport& report) const;
@@ -390,6 +393,7 @@ private:
     std::map<std::string, std::string> m_overrides; // --option, --set-option-at
     bool m_optionsUpdated = false;                  // GET_VARIABLE_UPDATE reports true once
     uint32_t m_frameScale = 0;                      // "Internal resolution: frames at Nx"
+    uint64_t m_reusedStateLoads = 0;                // "Save states: N loads reused the state just saved"
     uint64_t m_systemAvInfoCalls = 0;
     uint64_t m_geometryCalls = 0;
     std::set<unsigned> m_unsupportedLogged;

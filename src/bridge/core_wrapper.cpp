@@ -1032,6 +1032,11 @@ void CoreWrapper::UnloadGame() {
     m_cartridgePath.clear();
     m_cartridgeSaved.clear();
     m_cartridgeFailed.clear();
+
+    // The last saved state belongs to this content: the next content's loads never reuse it
+    m_stateScratchIsSaved = false;
+    m_savedStateBytes.clear();
+    m_savedStateBytes.shrink_to_fit();
     
     // Don't clear SRAM buffer - RetroArch needs to save it!
     // m_sramData will persist until next game load
@@ -1709,6 +1714,26 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             auto& state = Scratch(m_stateScratch);
             if (reuse) {
                 ++m_reusedStateLoads;
+#ifndef NDEBUG
+                {
+                    // Debug builds: the reused scratch is what the bytes decode to (both encode to the same payload)
+                    std::vector<uint8_t> payload(payloadSize);
+                    const int result = LZ4_decompress_safe(reinterpret_cast<const char*>(in + 16),
+                                                           reinterpret_cast<char*>(payload.data()),
+                                                           static_cast<int>(compressedSize),
+                                                           static_cast<int>(payloadSize));
+                    auto decoded = std::make_unique<ymir::savestate::SaveState>();
+                    std::vector<uint8_t> decodedPayload;
+                    std::vector<uint8_t> scratchPayload;
+                    const bool same = result == static_cast<int>(payloadSize) &&
+                                      DecodeSaveState(payload, *decoded, version) &&
+                                      EncodeSaveState(*decoded, decodedPayload) &&
+                                      EncodeSaveState(state, scratchPayload) && decodedPayload == scratchPayload &&
+                                      scratchPayload == payload;
+                    assert(same && "the reused state is what the saved bytes decode to");
+                    (void)same;
+                }
+#endif
                 if (!ValidDecodedSaveState(state, version)) {
                     return false;
                 }

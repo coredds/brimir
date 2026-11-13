@@ -299,6 +299,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_deferImageRead = m_vulkan ? config.deferImageRead : 0;
     m_deferred.clear();
     m_frameScale = 0;
+    m_reusedStateLoads = 0;
     m_optionsUpdated = false;
     m_systemAvInfoCalls = 0;
     m_geometryCalls = 0;
@@ -692,6 +693,12 @@ void LibretroHost::CoreLogLine(const char* text) {
         unsigned long long fence = 0;
         if (std::sscanf(line, "VDP1 sync submit fence 0x%llx", &fence) == 1) {
             m_vulkan->NoteSyncFence(fence);
+        }
+    }
+    if (const char* line = std::strstr(text, "Save states: ")) {
+        unsigned long long loads = 0;
+        if (std::sscanf(line, "Save states: %llu loads reused the state just saved", &loads) == 1) {
+            m_reusedStateLoads = loads;
         }
     }
     if (const char* line = std::strstr(text, "Internal resolution: frames at ")) {

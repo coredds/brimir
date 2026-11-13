@@ -3311,6 +3311,19 @@ TEST_CASE("savestate round trip: loading the state just saved continues as the d
     CHECK(b.GetReusedStateLoads() == reused);
 }
 
+TEST_CASE("savestate round trip: unloading the content forgets the state just saved", "[core][savestate][unit]") {
+    CoreWrapper core;
+    StartRoundTripCore(core, 30);
+    const auto saved = SaveStateBytes(core);
+    const auto atSave = RunningState(core);
+    core.RunFrame();
+    core.UnloadGame();
+    const uint64_t reused = core.GetReusedStateLoads();
+    REQUIRE(core.LoadState(saved.data(), saved.size()));
+    CHECK(core.GetReusedStateLoads() == reused); // decoded from its bytes
+    CHECK((RunningState(core) == atSave));
+}
+
 TEST_CASE("savestate round trip: a rejected state leaves the running session unchanged", "[core][savestate][unit]") {
     CoreWrapper core;
     StartRoundTripCore(core, 30);

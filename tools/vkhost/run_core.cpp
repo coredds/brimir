@@ -341,6 +341,10 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     const uint64_t coreMemoryAtEnd = host.CoreMemoryLive();
     host.Unload();
     host.FillReport(report);
+    if (config.rollback || config.stateRoundtrip > 0) {
+        std::fprintf(stderr, "vkhost: %llu state loads reused the state just saved\n",
+                     static_cast<unsigned long long>(host.ReusedStateLoads()));
+    }
     if (config.failAllocAboveMiB != 0 || config.failAllocTotalAboveMiB != 0 || config.failOutputImagesAbove != 0 ||
         config.failOutputImagesFirst >= 0) {
         std::fprintf(stderr, "vkhost: vulkan: %llu allocations refused (--fail-alloc-above %llu, "
