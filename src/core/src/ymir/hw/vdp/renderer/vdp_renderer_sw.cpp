@@ -4306,6 +4306,225 @@ FORCE_INLINE static void Color888CompositeRatioPerPixelMasked(const std::span<Co
     }
 }
 
+// Brimir: the layer sort of VDP2ComposeLine's fast path. Inserts one layer into the per-dot top-3 key lists (keys
+// stored as three arrays, entry 0 topmost) where its priority is non-zero (and, for the sprite layer, its special type
+// is Normal; special == nullptr for the other layers). A key is layerKey | (priority << 3) truncated to 8 bits, as
+// upstream's push() computes it. Upstream inserts with "key > entry[i]" and shifts the rest down; for a sorted list
+// that equals the max/min network below (an equal key leaves the same values either way), and a skipped dot is key 0,
+// which the network leaves unchanged (keys are >= 0).
+FORCE_INLINE static void ComposeSortInsert(uint8 *key0, uint8 *key1, uint8 *key2, const uint8 *priority,
+                                           const SpriteData::Special *special, uint8 layerKey, uint32 count) {
+    static_assert(static_cast<uint8>(SpriteData::Special::Normal) == 0);
+    uint32 i = 0;
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i keyBits = _mm_set1_epi8(static_cast<char>(layerKey));
+    const __m128i prioMask = _mm_set1_epi8(static_cast<char>(0xF8));
+    for (; i + 16 <= count; i += 16) {
+        const __m128i prio = _mm_loadu_si128(reinterpret_cast<const __m128i *>(priority + i));
+        // (priority << 3) & 0xFF per byte: the 16-bit shift moves bits across bytes only into the cleared low 3 bits
+        __m128i key = _mm_or_si128(_mm_and_si128(_mm_slli_epi16(prio, 3), prioMask), keyBits);
+        key = _mm_andnot_si128(_mm_cmpeq_epi8(prio, zero), key);
+        if (special != nullptr) {
+            const __m128i spec = _mm_loadu_si128(reinterpret_cast<const __m128i *>(special + i));
+            key = _mm_and_si128(_mm_cmpeq_epi8(spec, zero), key);
+        }
+        const __m128i e0 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(key0 + i));
+        const __m128i e1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(key1 + i));
+        const __m128i e2 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(key2 + i));
+        const __m128i t0 = _mm_min_epu8(e0, key);
+        const __m128i t1 = _mm_min_epu8(e1, t0);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(key0 + i), _mm_max_epu8(e0, key));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(key1 + i), _mm_max_epu8(e1, t0));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(key2 + i), _mm_max_epu8(e2, t1));
+    }
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    const uint8x16_t keyBits = vdupq_n_u8(layerKey);
+    for (; i + 16 <= count; i += 16) {
+        const uint8x16_t prio = vld1q_u8(priority + i);
+        // vshlq_n_u8 truncates to 8 bits like the uint8 key
+        uint8x16_t key = vorrq_u8(vshlq_n_u8(prio, 3), keyBits);
+        key = vandq_u8(key, vtstq_u8(prio, prio));
+        if (special != nullptr) {
+            const uint8x16_t spec = vld1q_u8(reinterpret_cast<const uint8 *>(special + i));
+            key = vandq_u8(key, vceqq_u8(spec, vdupq_n_u8(0)));
+        }
+        const uint8x16_t e0 = vld1q_u8(key0 + i);
+        const uint8x16_t e1 = vld1q_u8(key1 + i);
+        const uint8x16_t e2 = vld1q_u8(key2 + i);
+        const uint8x16_t t0 = vminq_u8(e0, key);
+        const uint8x16_t t1 = vminq_u8(e1, t0);
+        vst1q_u8(key0 + i, vmaxq_u8(e0, key));
+        vst1q_u8(key1 + i, vmaxq_u8(e1, t0));
+        vst1q_u8(key2 + i, vmaxq_u8(e2, t1));
+    }
+#endif
+
+    for (; i < count; i++) {
+        uint8 key = static_cast<uint8>(layerKey | (priority[i] << 3u));
+        if (priority[i] == 0 || (special != nullptr && special[i] != SpriteData::Special::Normal)) {
+            key = 0;
+        }
+        const uint8 e0 = key0[i];
+        const uint8 e1 = key1[i];
+        const uint8 t0 = std::min(e0, key);
+        const uint8 t1 = std::min(e1, t0);
+        key0[i] = std::max(e0, key);
+        key1[i] = std::max(e1, t0);
+        key2[i] = std::max(key2[i], t1);
+    }
+}
+
+// Brimir: a stack entry of the fast path's sort keys into the layer index (~key & 7) and priority (key >> 3) arrays,
+// as upstream converts each entry.
+FORCE_INLINE static void ComposeKeysToStack(const uint8 *keys, uint8 *layers,
+                                            uint8 *priorities, uint32 count) {
+    uint32 i = 0;
+#if defined(_M_X64) || defined(__x86_64__)
+    const __m128i layerMask = _mm_set1_epi8(7);
+    const __m128i prioMask = _mm_set1_epi8(0x1F);
+    for (; i + 16 <= count; i += 16) {
+        const __m128i key = _mm_loadu_si128(reinterpret_cast<const __m128i *>(keys + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(layers + i), _mm_andnot_si128(key, layerMask));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(priorities + i), _mm_and_si128(_mm_srli_epi16(key, 3), prioMask));
+    }
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    for (; i + 16 <= count; i += 16) {
+        const uint8x16_t key = vld1q_u8(keys + i);
+        vst1q_u8(layers + i, vbicq_u8(vdupq_n_u8(7), key));
+        vst1q_u8(priorities + i, vshrq_n_u8(key, 3));
+    }
+#endif
+    for (; i < count; i++) {
+        layers[i] = static_cast<uint8>(~keys[i] & 7u);
+        priorities[i] = keys[i] >> 3u;
+    }
+}
+
+// Brimir: layer 0 flags of VDP2ComposeLine's fast path, one layer at a time: for the dots whose top stack entry (keys,
+// the sort keys of entry 0) is `layer`, ORs in the colour calculation flag (colorCalc[x]), the shadow enable
+// (shadowSource[x], or shadowConstant when null) and the colour offset enable. The flag arrays start all false.
+FORCE_INLINE static void ComposeGatherLayerFlags(const uint8 *keys, uint32 layer, const bool *colorCalc,
+                                                 const bool *shadowSource, bool shadowConstant,
+                                                 bool colorOffsetConstant, bool *colorCalcOut, bool *shadowOut,
+                                                 bool *colorOffsetOut, uint32 count) {
+    static_assert(sizeof(bool) == 1);
+    uint32 i = 0;
+#if defined(_M_X64) || defined(__x86_64__)
+    const __m128i layerMask = _mm_set1_epi8(7);
+    const __m128i layerValue = _mm_set1_epi8(static_cast<char>(layer));
+    const __m128i shadowValue = _mm_set1_epi8(shadowConstant ? 1 : 0);
+    const __m128i colorOffsetValue = _mm_set1_epi8(colorOffsetConstant ? 1 : 0);
+    for (; i + 16 <= count; i += 16) {
+        const __m128i key = _mm_loadu_si128(reinterpret_cast<const __m128i *>(keys + i));
+        const __m128i match = _mm_cmpeq_epi8(_mm_andnot_si128(key, layerMask), layerValue);
+        const __m128i cc = _mm_loadu_si128(reinterpret_cast<const __m128i *>(colorCalc + i));
+        const __m128i shadow = shadowSource != nullptr
+                                   ? _mm_loadu_si128(reinterpret_cast<const __m128i *>(shadowSource + i))
+                                   : shadowValue;
+        __m128i *ccOut = reinterpret_cast<__m128i *>(colorCalcOut + i);
+        __m128i *shadowOutV = reinterpret_cast<__m128i *>(shadowOut + i);
+        __m128i *offsetOut = reinterpret_cast<__m128i *>(colorOffsetOut + i);
+        _mm_storeu_si128(ccOut, _mm_or_si128(_mm_loadu_si128(ccOut), _mm_and_si128(match, cc)));
+        _mm_storeu_si128(shadowOutV, _mm_or_si128(_mm_loadu_si128(shadowOutV), _mm_and_si128(match, shadow)));
+        _mm_storeu_si128(offsetOut,
+                         _mm_or_si128(_mm_loadu_si128(offsetOut), _mm_and_si128(match, colorOffsetValue)));
+    }
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    const uint8x16_t layerMask = vdupq_n_u8(7);
+    const uint8x16_t layerValue = vdupq_n_u8(static_cast<uint8>(layer));
+    const uint8x16_t shadowValue = vdupq_n_u8(shadowConstant ? 1 : 0);
+    const uint8x16_t colorOffsetValue = vdupq_n_u8(colorOffsetConstant ? 1 : 0);
+    for (; i + 16 <= count; i += 16) {
+        const uint8x16_t key = vld1q_u8(keys + i);
+        const uint8x16_t match = vceqq_u8(vbicq_u8(layerMask, key), layerValue);
+        const uint8x16_t cc = vld1q_u8(reinterpret_cast<const uint8 *>(colorCalc + i));
+        const uint8x16_t shadow =
+            shadowSource != nullptr ? vld1q_u8(reinterpret_cast<const uint8 *>(shadowSource + i)) : shadowValue;
+        uint8 *ccOut = reinterpret_cast<uint8 *>(colorCalcOut + i);
+        uint8 *shadowOutB = reinterpret_cast<uint8 *>(shadowOut + i);
+        uint8 *offsetOut = reinterpret_cast<uint8 *>(colorOffsetOut + i);
+        vst1q_u8(ccOut, vorrq_u8(vld1q_u8(ccOut), vandq_u8(match, cc)));
+        vst1q_u8(shadowOutB, vorrq_u8(vld1q_u8(shadowOutB), vandq_u8(match, shadow)));
+        vst1q_u8(offsetOut, vorrq_u8(vld1q_u8(offsetOut), vandq_u8(match, colorOffsetValue)));
+    }
+#endif
+    for (; i < count; i++) {
+        if ((~keys[i] & 7u) == layer) {
+            colorCalcOut[i] = colorCalcOut[i] || colorCalc[i];
+            shadowOut[i] = shadowOut[i] || (shadowSource != nullptr ? shadowSource[i] : shadowConstant);
+            colorOffsetOut[i] = colorOffsetOut[i] || colorOffsetConstant;
+        }
+    }
+}
+
+// Brimir: completes the fast path's layer 0 flags: no colour calculation inside the colour calculation window; shadow
+// only where the sprite priority is not below the top layer's (keys >> 3) and the sprite dot is a normal shadow or
+// (msbShadow: no sprite window) has the shadow/window bit set.
+FORCE_INLINE static void ComposeFinishLayer0Flags(const uint8 *keys, const bool *colorCalcWindow,
+                                                  const uint8 *spritePriority, const SpriteData::Special *spriteSpecial,
+                                                  const bool *spriteShadowOrWindow, bool msbShadow,
+                                                  bool *colorCalcOut, bool *shadowOut, uint32 count) {
+    static_assert(static_cast<uint8>(SpriteData::Special::Shadow) == 1);
+    uint32 i = 0;
+#if defined(_M_X64) || defined(__x86_64__)
+    const __m128i one = _mm_set1_epi8(1);
+    const __m128i prioMask = _mm_set1_epi8(0x1F);
+    const __m128i msbMask = msbShadow ? _mm_set1_epi8(-1) : _mm_setzero_si128();
+    for (; i + 16 <= count; i += 16) {
+        __m128i *ccOut = reinterpret_cast<__m128i *>(colorCalcOut + i);
+        __m128i *shadowOutV = reinterpret_cast<__m128i *>(shadowOut + i);
+        const __m128i window = _mm_loadu_si128(reinterpret_cast<const __m128i *>(colorCalcWindow + i));
+        _mm_storeu_si128(ccOut, _mm_andnot_si128(window, _mm_loadu_si128(ccOut)));
+
+        const __m128i key = _mm_loadu_si128(reinterpret_cast<const __m128i *>(keys + i));
+        const __m128i topPriority = _mm_and_si128(_mm_srli_epi16(key, 3), prioMask);
+        const __m128i priority = _mm_loadu_si128(reinterpret_cast<const __m128i *>(spritePriority + i));
+        const __m128i notBelow = _mm_cmpeq_epi8(_mm_max_epu8(priority, topPriority), priority);
+        const __m128i special = _mm_loadu_si128(reinterpret_cast<const __m128i *>(spriteSpecial + i));
+        const __m128i sow = _mm_loadu_si128(reinterpret_cast<const __m128i *>(spriteShadowOrWindow + i));
+        const __m128i shadowDot =
+            _mm_or_si128(_mm_cmpeq_epi8(special, one), _mm_and_si128(msbMask, _mm_cmpeq_epi8(sow, one)));
+        _mm_storeu_si128(shadowOutV, _mm_and_si128(_mm_loadu_si128(shadowOutV), _mm_and_si128(notBelow, shadowDot)));
+    }
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    const uint8x16_t one = vdupq_n_u8(1);
+    const uint8x16_t msbMask = vdupq_n_u8(msbShadow ? 0xFF : 0x00);
+    for (; i + 16 <= count; i += 16) {
+        uint8 *ccOut = reinterpret_cast<uint8 *>(colorCalcOut + i);
+        uint8 *shadowOutB = reinterpret_cast<uint8 *>(shadowOut + i);
+        const uint8x16_t window = vld1q_u8(reinterpret_cast<const uint8 *>(colorCalcWindow + i));
+        vst1q_u8(ccOut, vbicq_u8(vld1q_u8(ccOut), window));
+
+        const uint8x16_t topPriority = vshrq_n_u8(vld1q_u8(keys + i), 3);
+        const uint8x16_t notBelow = vcgeq_u8(vld1q_u8(spritePriority + i), topPriority);
+        const uint8x16_t special = vld1q_u8(reinterpret_cast<const uint8 *>(spriteSpecial + i));
+        const uint8x16_t sow = vld1q_u8(reinterpret_cast<const uint8 *>(spriteShadowOrWindow + i));
+        const uint8x16_t shadowDot = vorrq_u8(vceqq_u8(special, one), vandq_u8(msbMask, vceqq_u8(sow, one)));
+        vst1q_u8(shadowOutB, vandq_u8(vld1q_u8(shadowOutB), vandq_u8(notBelow, shadowDot)));
+    }
+#endif
+    for (; i < count; i++) {
+        colorCalcOut[i] = colorCalcOut[i] && !colorCalcWindow[i];
+        const bool shadowDot = spriteSpecial[i] == SpriteData::Special::Shadow || (msbShadow && spriteShadowOrWindow[i]);
+        shadowOut[i] = shadowOut[i] && spritePriority[i] >= (keys[i] >> 3u) && shadowDot;
+    }
+}
+
+
+// Brimir: constant flag lines for VDP2ComposeLine's fast path
+static constexpr auto kComposeAllFalse = [] {
+    std::array<bool, kMaxResH> arr{};
+    arr.fill(false);
+    return arr;
+}();
+static constexpr auto kComposeAllTrue = [] {
+    std::array<bool, kMaxResH> arr{};
+    arr.fill(true);
+    return arr;
+}();
+
 template <bool deinterlace, bool transparentMeshes>
 FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs &regs2, bool altField) {
     const VDP2State &state2 = m_state.state2;
@@ -4328,13 +4547,50 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
     auto &scanline_layers = composeLineBuffers.scanline_layers;
     const auto &scanline_layerPrios = composeLineBuffers.scanline_layerPrios;
 
+    // Brimir: fast path for the layer sort, the layer 0 gather and the colour calculation gathers below (same buffer
+    // contents); upstream's loops stay as the reference for the tests.
+    const bool fastPath = m_composeFastPath;
+
+    // Brimir: the fast path's sort keys (see ComposeSortInsert), entry 0 topmost
+    alignas(16) std::array<uint8, kMaxResH> sortKey0;
+    alignas(16) std::array<uint8, kMaxResH> sortKey1;
+    alignas(16) std::array<uint8, kMaxResH> sortKey2;
+
     // Determine layer order
     std::array<std::array<uint8, 3>, kMaxResH> layerSortOrder;
     static constexpr std::array<uint8, 3> kLayerSortOrderInit{uint8(LYR_Back ^ 7), uint8(LYR_Back ^ 7),
                                                               uint8(LYR_Back ^ 7)};
-    std::fill_n(layerSortOrder.begin(), m_HRes, kLayerSortOrderInit);
+    // Brimir: the layers the fast path inserted, plus the back screen (every dot's stack holds only these)
+    uint32 sortedLayers = 1u << LYR_Back;
+    if (fastPath) {
+        m_VDP2FastPathLines[altField].compose++;
+        std::fill_n(sortKey0.begin(), m_HRes, uint8(LYR_Back ^ 7));
+        std::fill_n(sortKey1.begin(), m_HRes, uint8(LYR_Back ^ 7));
+        std::fill_n(sortKey2.begin(), m_HRes, uint8(LYR_Back ^ 7));
+        for (uint32 layer = 0; layer < m_layerOutputs[altField].size(); layer++) {
+            if (!state2.layerEnabled[layer]) {
+                continue;
+            }
+            const LayerOutput &output = m_layerOutputs[altField][layer];
+            if (AllZeroU8(std::span{output.pixels.priority}.first(m_HRes))) {
+                continue;
+            }
+            ComposeSortInsert(sortKey0.data(), sortKey1.data(), sortKey2.data(), output.pixels.priority.data(),
+                              layer == LYR_Sprite ? spriteLayerAttrs.specialType.data() : nullptr,
+                              static_cast<uint8>(layer ^ 7u), m_HRes);
+            sortedLayers |= 1u << layer;
+        }
+        // LayerIndex is a uint8 enum: written through uint8 pointers
+        const std::array<const uint8 *, 3> stackKeys{sortKey0.data(), sortKey1.data(), sortKey2.data()};
+        for (uint32 i = 0; i < 3; i++) {
+            ComposeKeysToStack(stackKeys[i], reinterpret_cast<uint8 *>(scanline_layers[i].data()),
+                               composeLineBuffers.scanline_layerPrios[i].data(), m_HRes);
+        }
+    } else {
+        std::fill_n(layerSortOrder.begin(), m_HRes, kLayerSortOrderInit);
+    }
 
-    for (uint32 layer = 0; layer < m_layerOutputs[altField].size(); layer++) {
+    for (uint32 layer = 0; !fastPath && layer < m_layerOutputs[altField].size(); layer++) {
         if (!state2.layerEnabled[layer]) {
             continue;
         }
@@ -4390,11 +4646,11 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
             }
         }
     }
-    for (uint32 x = 0; x < m_HRes; x++) {
+    for (uint32 x = 0; !fastPath && x < m_HRes; x++) {
         const auto &entry = layerSortOrder[x];
         for (int i = 0; i < 3; i++) {
-            composeLineBuffers.scanline_layers[x][i] = static_cast<LayerIndex>(bit::extract<0, 2>(~entry[i]));
-            composeLineBuffers.scanline_layerPrios[x][i] = entry[i] >> 3u;
+            composeLineBuffers.scanline_layers[i][x] = static_cast<LayerIndex>(bit::extract<0, 2>(~entry[i]));
+            composeLineBuffers.scanline_layerPrios[i][x] = entry[i] >> 3u;
         }
     }
 
@@ -4415,12 +4671,11 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
                     continue;
                 }
 
-                const std::array<uint8, 3> &layerPrios = scanline_layerPrios[x];
                 for (int i = 0; i < 3; i++) {
                     // The sprite layer has the highest priority on ties, so the priority check can be simplified.
                     // Sprite pixels drawn of top of mesh pixels erase the corresponding pixels from the mesh layer,
                     // therefore the mesh layer can be considered always on top of the sprite layer.
-                    if (priority >= layerPrios[i]) {
+                    if (priority >= scanline_layerPrios[i][x]) {
                         scanline_meshLayers[x] = i;
                         break;
                     }
@@ -4482,8 +4737,112 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
     auto &layer0BlendMeshLayer = composeLineBuffers.layer0BlendMeshLayer;
     auto &layer0ShadowEnabled = composeLineBuffers.layer0ShadowEnabled;
     auto &layer0ColorOffsetEnabled = composeLineBuffers.layer0ColorOffsetEnabled;
-    for (uint32 x = 0; x < m_HRes; x++) {
-        const LayerIndex layer = scanline_layers[x][0];
+
+    // Brimir: the fast path's per-layer sources, indexed by LayerIndex (LYR_LineColor never reaches the stack): the
+    // colour array (the back screen as a line of its colour), the colour calculation flags (an array or all false/all
+    // true: isColorCalcEnabled and, for the BGs, the special colour calculation flag), the shadow enable and the colour
+    // offset enable.
+    alignas(16) std::array<Color888, kMaxResH> backColors;
+    alignas(16) std::array<bool, kMaxResH> spriteColorCalc;
+    std::array<const Color888 *, 8> layerColors;
+    if (fastPath) {
+        std::fill_n(backColors.begin(), m_HRes, state2.lineBackLayerState.backColor);
+        for (uint32 layer = 0; layer < 6; layer++) {
+            layerColors[layer] = m_layerOutputs[altField][layer].pixels.color.data();
+        }
+        layerColors[LYR_Back] = backColors.data();
+        layerColors[LYR_LineColor] = backColors.data();
+
+        std::array<const bool *, 8> colorCalcSource;
+        std::array<bool, 8> shadowEnable;
+        std::array<bool, 8> colorOffsetEnable;
+        const SpriteParams &spriteParams = regs2.spriteParams;
+        if (spriteParams.colorCalcEnable) {
+            const auto &pixels = m_layerOutputs[altField][LYR_Sprite].pixels;
+            const uint8 value = spriteParams.colorCalcValue;
+            using enum SpriteColorCalculationCondition;
+            switch (spriteParams.colorCalcCond) {
+            case PriorityLessThanOrEqual:
+                for (uint32 x = 0; x < m_HRes; x++) {
+                    spriteColorCalc[x] =
+                        !(restrictedColorCalc && pixels.specialColorCalc[x]) && pixels.priority[x] <= value;
+                }
+                break;
+            case PriorityEqual:
+                for (uint32 x = 0; x < m_HRes; x++) {
+                    spriteColorCalc[x] =
+                        !(restrictedColorCalc && pixels.specialColorCalc[x]) && pixels.priority[x] == value;
+                }
+                break;
+            case PriorityGreaterThanOrEqual:
+                for (uint32 x = 0; x < m_HRes; x++) {
+                    spriteColorCalc[x] =
+                        !(restrictedColorCalc && pixels.specialColorCalc[x]) && pixels.priority[x] >= value;
+                }
+                break;
+            case MsbEqualsOne:
+                for (uint32 x = 0; x < m_HRes; x++) {
+                    spriteColorCalc[x] =
+                        !(restrictedColorCalc && pixels.specialColorCalc[x]) && pixels.color[x].msb == 1;
+                }
+                break;
+            default: util::unreachable();
+            }
+            colorCalcSource[LYR_Sprite] = spriteColorCalc.data();
+        } else {
+            colorCalcSource[LYR_Sprite] = kComposeAllFalse.data();
+        }
+        shadowEnable[LYR_Sprite] = false; // per dot: the sprite's shadow/window flag
+        for (uint32 layer = LYR_RBG0; layer <= LYR_NBG3; layer++) {
+            const auto &bgParams = regs2.bgParams[layer - LYR_RBG0];
+            const bool enabled =
+                bgParams.colorCalcEnable && !(restrictedColorCalc && IsPaletteColorFormat(bgParams.colorFormat));
+            colorCalcSource[layer] =
+                enabled ? m_layerOutputs[altField][layer].pixels.specialColorCalc.data() : kComposeAllFalse.data();
+            shadowEnable[layer] = bgParams.shadowEnable;
+        }
+        colorCalcSource[LYR_Back] =
+            regs2.backScreenParams.colorCalcEnable ? kComposeAllTrue.data() : kComposeAllFalse.data();
+        shadowEnable[LYR_Back] = regs2.backScreenParams.shadowEnable;
+        colorCalcSource[LYR_LineColor] = kComposeAllFalse.data();
+        shadowEnable[LYR_LineColor] = false;
+        for (uint32 layer = 0; layer <= LYR_Back; layer++) {
+            colorOffsetEnable[layer] =
+                regs2.colorOffsetEnable[layer] && regs2.colorOffset[regs2.colorOffsetSelect[layer]].nonZero;
+        }
+        colorOffsetEnable[LYR_LineColor] = false;
+
+        for (uint32 x = 0; x < m_HRes; x++) {
+            layer0Pixels[x] = layerColors[~sortKey0[x] & 7u][x];
+        }
+
+        // The flags of each layer that can be on top (the sorted layers and the back screen), then the colour
+        // calculation window and the shadow conditions
+        std::memset(layer0ColorCalcEnabled.data(), 0, m_HRes);
+        std::memset(layer0ShadowEnabled.data(), 0, m_HRes);
+        std::memset(layer0ColorOffsetEnabled.data(), 0, m_HRes);
+        for (uint32 layer = 0; layer < 8; layer++) {
+            if (sortedLayers & (1u << layer)) {
+                ComposeGatherLayerFlags(sortKey0.data(), layer, colorCalcSource[layer],
+                                        layer == LYR_Sprite ? spriteLayerAttrs.shadowOrWindow.data() : nullptr,
+                                        shadowEnable[layer], colorOffsetEnable[layer], layer0ColorCalcEnabled.data(),
+                                        layer0ShadowEnabled.data(), layer0ColorOffsetEnabled.data(), m_HRes);
+            }
+        }
+        ComposeFinishLayer0Flags(sortKey0.data(), m_colorCalcWindow[altField].data(),
+                                 m_layerOutputs[altField][LYR_Sprite].pixels.priority.data(),
+                                 spriteLayerAttrs.specialType.data(), spriteLayerAttrs.shadowOrWindow.data(),
+                                 !regs2.spriteParams.useSpriteWindow, layer0ColorCalcEnabled.data(),
+                                 layer0ShadowEnabled.data(), m_HRes);
+        if constexpr (transparentMeshes) {
+            for (uint32 x = 0; x < m_HRes; x++) {
+                layer0BlendMeshLayer[x] = scanline_meshLayers[x] == 0;
+            }
+        }
+    }
+
+    for (uint32 x = 0; !fastPath && x < m_HRes; x++) {
+        const LayerIndex layer = scanline_layers[0][x];
 
         // Color
         layer0Pixels[x] = getLayerColor(layer, x);
@@ -4505,7 +4864,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
         }
 
         // Shadow
-        if (m_layerOutputs[altField][LYR_Sprite].pixels.priority[x] < scanline_layerPrios[x][0]) {
+        if (m_layerOutputs[altField][LYR_Sprite].pixels.priority[x] < scanline_layerPrios[0][x]) {
             // Sprite layer is beneath top layer
             layer0ShadowEnabled[x] = false;
         } else {
@@ -4555,9 +4914,39 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
         auto &layer1BlendMeshLayer = composeLineBuffers.layer1BlendMeshLayer;
         auto &layer0LineColorEnabled = composeLineBuffers.layer0LineColorEnabled;
         auto &layer0LineColors = composeLineBuffers.layer0LineColors;
-        for (uint32 x = 0; x < m_HRes; x++) {
-            const LayerIndex layer0 = scanline_layers[x][0];
-            const LayerIndex layer1 = scanline_layers[x][1];
+        if (fastPath) {
+            // Brimir: per layer: line colour screen enable and whether it takes the RBG's per-dot line colour
+            std::array<bool, 8> lineColorEnable{};
+            std::array<bool, 8> rbgLineColor{};
+            if (!colorGradEnabled) {
+                lineColorEnable[LYR_Sprite] = regs2.spriteParams.lineColorScreenEnable;
+                for (uint32 layer = LYR_RBG0; layer <= LYR_NBG3; layer++) {
+                    lineColorEnable[layer] = regs2.bgParams[layer - LYR_RBG0].lineColorScreenEnable;
+                }
+                rbgLineColor[LYR_RBG0] = true;
+                rbgLineColor[LYR_NBG0_RBG1] = regs2.bgEnabled[5];
+            }
+            const Color888 lineColor = state2.lineBackLayerState.lineColor;
+            for (uint32 x = 0; x < m_HRes; x++) {
+                const uint32 layer0 = ~sortKey0[x] & 7u;
+                const uint32 layer1 = ~sortKey1[x] & 7u;
+
+                layer1Pixels[x] = layerColors[layer1][x];
+                if constexpr (transparentMeshes) {
+                    layer1BlendMeshLayer[x] = scanline_meshLayers[x] == 1;
+                }
+
+                const bool lineColorEnabled = lineColorEnable[layer0];
+                layer0LineColorEnabled[x] = lineColorEnabled;
+                if (lineColorEnabled) {
+                    layer0LineColors[x] =
+                        rbgLineColor[layer0] ? m_rbgLineColors[layer0 - LYR_RBG0][x >> xShift] : lineColor;
+                }
+            }
+        }
+        for (uint32 x = 0; !fastPath && x < m_HRes; x++) {
+            const LayerIndex layer0 = scanline_layers[0][x];
+            const LayerIndex layer1 = scanline_layers[1][x];
 
             // Layer 1 colors
             layer1Pixels[x] = getLayerColor(layer1, x);
@@ -4600,7 +4989,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
             // Compute color gradation
             auto &mask = composeLineBuffers.colorGradEnabled;
             for (uint32 x = 0; x < m_HRes; x++) {
-                mask[x] = scanline_layers[x][0] == colorGradLayer || scanline_layers[x][1] == colorGradLayer;
+                mask[x] = scanline_layers[0][x] == colorGradLayer || scanline_layers[1][x] == colorGradLayer;
             }
 
             auto &input = m_layerOutputs[altField][colorGradLayer].pixels.color;
@@ -4616,8 +5005,8 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
 
             // Set layer 1 output to the color gradation screen where the designated screen is the topmost two layers
             for (uint32 x = 0; x < m_HRes; x++) {
-                if (scanline_layers[x][0] == colorGradLayer || scanline_layers[x][1] == colorGradLayer) {
-                    scanline_layers[x][1] = colorGradLayer;
+                if (scanline_layers[0][x] == colorGradLayer || scanline_layers[1][x] == colorGradLayer) {
+                    scanline_layers[1][x] = colorGradLayer;
                     layer1Pixels[x] = output[x];
                 }
             }
@@ -4629,9 +5018,9 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
 
             // Gather pixels for layer 2
             for (uint32 x = 0; x < m_HRes; x++) {
-                layer1ColorCalcEnabled[x] = isColorCalcEnabled(scanline_layers[x][1], x);
+                layer1ColorCalcEnabled[x] = isColorCalcEnabled(scanline_layers[1][x], x);
                 if (layer1ColorCalcEnabled[x]) {
-                    layer2Pixels[x] = getLayerColor(scanline_layers[x][2], x);
+                    layer2Pixels[x] = getLayerColor(scanline_layers[2][x], x);
                 }
                 if constexpr (transparentMeshes) {
                     layer2BlendMeshLayer[x] = scanline_meshLayers[x] == 2;
@@ -4677,7 +5066,31 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
         } else {
             // Gather color ratio info
             auto &scanline_ratio = composeLineBuffers.scanline_ratio;
-            for (uint32 x = 0; x < m_HRes; x++) {
+            if (fastPath) {
+                // Brimir: per-layer ratios (the sprite's is per dot); the stack entry is read after the colour
+                // gradation may have replaced entry 1
+                std::array<uint8, 8> layerRatio{};
+                for (uint32 layer = LYR_RBG0; layer <= LYR_NBG3; layer++) {
+                    layerRatio[layer] = regs2.bgParams[layer - LYR_RBG0].colorCalcRatio;
+                }
+                layerRatio[LYR_Back] = regs2.backScreenParams.colorCalcRatio;
+                const uint32 stackIndex = colorCalcParams.useSecondScreenRatio;
+                const bool lineRatio = colorCalcParams.useSecondScreenRatio;
+                const uint8 lineScreenRatio = regs2.lineScreenParams.colorCalcRatio;
+                for (uint32 x = 0; x < m_HRes; x++) {
+                    if (!layer0ColorCalcEnabled[x]) {
+                        continue;
+                    }
+                    if (lineRatio && layer0LineColorEnabled[x]) {
+                        scanline_ratio[x] = lineScreenRatio;
+                    } else {
+                        const LayerIndex layer = scanline_layers[stackIndex][x];
+                        scanline_ratio[x] =
+                            layer == LYR_Sprite ? spriteLayerAttrs.colorCalcRatio[x] : layerRatio[layer];
+                    }
+                }
+            }
+            for (uint32 x = 0; !fastPath && x < m_HRes; x++) {
                 if (!layer0ColorCalcEnabled[x]) {
                     continue;
                 }
@@ -4685,7 +5098,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
                 if (colorCalcParams.useSecondScreenRatio && layer0LineColorEnabled[x]) {
                     scanline_ratio[x] = regs2.lineScreenParams.colorCalcRatio;
                 } else {
-                    const LayerIndex layer = scanline_layers[x][colorCalcParams.useSecondScreenRatio];
+                    const LayerIndex layer = scanline_layers[colorCalcParams.useSecondScreenRatio][x];
                     switch (layer) {
                     case LYR_Sprite: scanline_ratio[x] = spriteLayerAttrs.colorCalcRatio[x]; break;
                     case LYR_Back: scanline_ratio[x] = regs2.backScreenParams.colorCalcRatio; break;
@@ -4712,7 +5125,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
     if (AnyBool(std::span{layer0ColorOffsetEnabled}.first(m_HRes))) {
         for (uint32 x = 0; Color888 &outputColor : framebufferOutput) {
             if (layer0ColorOffsetEnabled[x]) {
-                const auto &colorOffset = regs2.colorOffset[regs2.colorOffsetSelect[scanline_layers[x][0]]];
+                const auto &colorOffset = regs2.colorOffset[regs2.colorOffsetSelect[scanline_layers[0][x]]];
                 outputColor.r = kColorOffsetLUT[colorOffset.r][outputColor.r];
                 outputColor.g = kColorOffsetLUT[colorOffset.g][outputColor.g];
                 outputColor.b = kColorOffsetLUT[colorOffset.b][outputColor.b];
@@ -4829,14 +5242,14 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
                 case OverlayType::LayerStack: //
                 {
                     const uint8 layerLevel = overlay.layerStackIndex < 3 ? overlay.layerStackIndex : 0;
-                    const uint32 layerNum = static_cast<uint32>(scanline_layers[x][layerLevel]);
+                    const uint32 layerNum = static_cast<uint32>(scanline_layers[layerLevel][x]);
                     overlayColor = overlay.layerColors[layerNum];
                     break;
                 }
                 case OverlayType::PriorityStack: //
                 {
                     const uint8 layerLevel = overlay.priorityStackIndex < 3 ? overlay.priorityStackIndex : 0;
-                    const uint32 layerNum = static_cast<uint32>(scanline_layerPrios[x][layerLevel]);
+                    const uint32 layerNum = static_cast<uint32>(scanline_layerPrios[layerLevel][x]);
                     overlayColor = overlay.priorityColors[layerNum];
                     break;
                 }
@@ -4880,7 +5293,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
                 case OverlayType::ColorCalc: //
                 {
                     const uint8 stackIndex = overlay.colorCalcStackIndex <= 1 ? overlay.colorCalcStackIndex : 0;
-                    overlayColor = isColorCalcEnabled(scanline_layers[x][stackIndex], x)
+                    overlayColor = isColorCalcEnabled(scanline_layers[stackIndex][x], x)
                                        ? overlay.colorCalcEnableColor
                                        : overlay.colorCalcDisableColor;
                     break;
@@ -4888,7 +5301,7 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2ComposeLine(uint32 y, const VDP2Regs 
                 case OverlayType::ColorGradation: //
                 {
                     const uint8 stackIndex = overlay.colorGradStackIndex <= 1 ? overlay.colorGradStackIndex : 0;
-                    const LayerIndex stackLayer = scanline_layers[x][stackIndex];
+                    const LayerIndex stackLayer = scanline_layers[stackIndex][x];
                     if (stackLayer <= LYR_NBG3) {
                         const ColorGradScreen screen = kColorGradScreens[stackLayer];
                         overlayColor = screen == colorCalcParams.colorGradScreen ? overlay.colorGradEnableColor

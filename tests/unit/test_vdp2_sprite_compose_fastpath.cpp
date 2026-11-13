@@ -1,8 +1,9 @@
-// The software renderer's sprite layer fast path (SoftwareVDPRenderer::VDP2DrawSpriteLayerFast) against upstream's
-// per-dot code: two renderers get the same seeded random scenes through the scene harness, one with the fast path
-// forced off (SetSpriteFastPathForTesting), and must agree on the sprite and transparent mesh layer outputs (colour,
-// priority, special colour calculation flag, colour calculation ratio, shadow/window flag, special type; both fields)
-// after every line and on every frame.
+// The software renderer's sprite layer and compose fast paths (SoftwareVDPRenderer::VDP2DrawSpriteLayerFast and the
+// fast sections of VDP2ComposeLine) against upstream's per-dot code: two renderers get the same seeded random scenes
+// through the scene harness, one with both fast paths forced off (SetSpriteFastPathForTesting,
+// SetComposeFastPathForTesting), and must agree on the sprite and transparent mesh layer outputs (colour, priority,
+// special colour calculation flag, colour calculation ratio, shadow/window flag, special type; both fields) after every
+// line and on every frame.
 //
 // The scenes cover every sprite type (by combo) on 16-bit and 8-bit framebuffers, rotated or not (TVMR), palette and
 // mixed palette/RGB data, the sprite window (normal and inverted), framebuffer contents with transparent runs of every
@@ -418,12 +419,12 @@ struct PairResult {
     uint64_t shadowDots = 0;     // field 0 sprite dots of the normal shadow type
     uint64_t windowDots = 0;     // field 0 sprite dots with the shadow/window flag set
     uint64_t distinctColors = 0; // in the last frame (up to 64 counted)
-    uint64_t fastSpriteLines = 0;
-    uint64_t fallbackSpriteLines = 0;
+    uint64_t fastSpriteLines = 0, fastComposeLines = 0;
+    uint64_t fallbackSpriteLines = 0, fallbackComposeLines = 0;
     uint32_t frames = 0;
 };
 
-// Renders `frames` frames of a scene with the fast path on (renderer 0) and forced off (renderer 1) and compares.
+// Renders `frames` frames of a scene with the fast paths on (renderer 0) and forced off (renderer 1) and compares.
 PairResult RunPair(uint32_t seed, const SceneConfig &c, uint32_t frames, bool threaded = false) {
     config::Enhancements enhancements{};
     enhancements.deinterlace = c.deinterlace;
@@ -435,6 +436,7 @@ PairResult RunPair(uint32_t seed, const SceneConfig &c, uint32_t frames, bool th
         std::make_unique<SoftwareVDPRenderer>(*states[0], debug, access),
         std::make_unique<SoftwareVDPRenderer>(*states[1], debug, access)};
     renderers[1]->SetSpriteFastPathForTesting(false);
+    renderers[1]->SetComposeFastPathForTesting(false);
 
     std::array<std::vector<uint32_t>, 2> outputs;
     for (uint32_t i = 0; i < 2; ++i) {
@@ -534,14 +536,16 @@ PairResult RunPair(uint32_t seed, const SceneConfig &c, uint32_t frames, bool th
         }
     }
     result.fastSpriteLines = renderers[0]->GetSpriteFastPathLinesForTesting();
+    result.fastComposeLines = renderers[0]->GetComposeFastPathLinesForTesting();
     result.fallbackSpriteLines = renderers[1]->GetSpriteFastPathLinesForTesting();
+    result.fallbackComposeLines = renderers[1]->GetComposeFastPathLinesForTesting();
     return result;
 }
 
 } // namespace
 
-TEST_CASE("Sprite layer fast path matches upstream's per-dot code on random scenes",
-          "[vdp][vdp2][sprite][fastpath][brimir]") {
+TEST_CASE("Sprite layer and compose fast paths match upstream's per-dot code on random scenes",
+          "[vdp][vdp2][sprite][compose][fastpath][brimir]") {
     // 64 combos: sprite type 0-F x 16-bit, 8-bit, rotated 16-bit, rotated 8-bit framebuffer
     const uint32_t combo = GENERATE(range(0u, 64u));
     const SceneConfig c = ConfigFor(combo);
@@ -552,9 +556,11 @@ TEST_CASE("Sprite layer fast path matches upstream's per-dot code on random scen
     CHECK(r.firstDifference.empty());
     CHECK(r.frames == 3);
     CHECK(r.comparedLines >= 3 * 224);
-    // Non-vacuous: the fast path drew every line, the forced-off renderer none ...
+    // Non-vacuous: both fast paths drew every line, the forced-off renderer none ...
     CHECK(r.fastSpriteLines >= 3 * 224);
+    CHECK(r.fastComposeLines >= 3 * 224);
     CHECK(r.fallbackSpriteLines == 0);
+    CHECK(r.fallbackComposeLines == 0);
     // ... the sprite layer showed dots, the frame has content
     CAPTURE(r.spriteDots, r.meshDots, r.shadowDots, r.windowDots, r.distinctColors);
     CHECK(r.distinctColors >= 16);
@@ -599,8 +605,8 @@ TEST_CASE("Sprite layer fast path covers normal shadow and shadow/window dots",
     }
 }
 
-TEST_CASE("Sprite layer fast path matches with the threaded VDP2 and deinterlace renderers",
-          "[vdp][vdp2][sprite][fastpath][threaded][brimir]") {
+TEST_CASE("Sprite layer and compose fast paths match with the threaded VDP2 and deinterlace renderers",
+          "[vdp][vdp2][sprite][compose][fastpath][threaded][brimir]") {
     // The libretro core's default: threaded VDP2 plus the threaded deinterlacer (the alternate field drawn on its own
     // thread); frames compared
     const uint32_t combo = GENERATE(range(0u, 64u, 9u));
@@ -615,5 +621,7 @@ TEST_CASE("Sprite layer fast path matches with the threaded VDP2 and deinterlace
     CHECK(r.firstDifference.empty());
     CHECK(r.frames == 3);
     CHECK(r.fastSpriteLines > 0);
+    CHECK(r.fastComposeLines > 0);
     CHECK(r.fallbackSpriteLines == 0);
+    CHECK(r.fallbackComposeLines == 0);
 }

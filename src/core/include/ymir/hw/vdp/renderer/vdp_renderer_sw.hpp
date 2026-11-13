@@ -204,13 +204,20 @@ public:
         return m_layerOutputs[altField][index + 2].pixels.specialColorCalc;
     }
 
-    // Brimir: test hooks for the sprite layer fast path (VDP2DrawSpriteLayerFast): off forces upstream's per-dot code;
-    // the count is the lines the fast path drew, over both fields. Same threading rules as the NBG hooks above.
+    // Brimir: test hooks for the sprite layer and compose fast paths (VDP2DrawSpriteLayerFast, the fast sections of
+    // VDP2ComposeLine): off forces upstream's per-dot code; the counts are the lines each fast path drew, over both
+    // fields. Same threading rules as the NBG hooks above.
     void SetSpriteFastPathForTesting(bool enabled) {
         m_spriteFastPath = enabled;
     }
+    void SetComposeFastPathForTesting(bool enabled) {
+        m_composeFastPath = enabled;
+    }
     uint64 GetSpriteFastPathLinesForTesting() const {
         return m_VDP2FastPathLines[0].sprite + m_VDP2FastPathLines[1].sprite;
+    }
+    uint64 GetComposeFastPathLinesForTesting() const {
+        return m_VDP2FastPathLines[0].compose + m_VDP2FastPathLines[1].compose;
     }
     // Brimir: the sprite layer (mesh = the transparent mesh layer) outputs of the last drawn line: colour, priority,
     // special colour calculation flag, colour calculation ratio, shadow/window flag, special type.
@@ -745,9 +752,11 @@ private:
     uint64 m_VDP1QuadTerminations = 0;
     bool m_NBGFastPath = true;    // Brimir: SetNBGFastPathForTesting
     bool m_spriteFastPath = true; // Brimir: SetSpriteFastPathForTesting
-    // Brimir: GetSpriteFastPathLinesForTesting, one per field like m_NBGFastPathDots.
+    bool m_composeFastPath = true; // Brimir: SetComposeFastPathForTesting
+    // Brimir: Get{Sprite,Compose}FastPathLinesForTesting, one per field like m_NBGFastPathDots.
     struct alignas(64) VDP2FastPathLineCounter {
         uint64 sprite = 0;
+        uint64 compose = 0;
     };
     std::array<VDP2FastPathLineCounter, 2> m_VDP2FastPathLines;
     // Brimir: GetNBGFastPathDotsForTesting. One counter per field, on separate cache lines: the field's renderer thread
@@ -1038,8 +1047,10 @@ private:
     // NOTE: These are stored as member variables to avoid stack overflow on threads with limited stack space
     // (e.g. 512 KiB on macOS).
     struct ComposeLineBuffers {
-        alignas(16) std::array<std::array<LayerIndex, 3>, kMaxResH> scanline_layers;
-        alignas(16) std::array<std::array<uint8, 3>, kMaxResH> scanline_layerPrios;
+        // Brimir: indexed [stack entry][x] (upstream: [x][stack entry]), so the compose fast path fills them with
+        // vector stores
+        alignas(16) std::array<std::array<LayerIndex, kMaxResH>, 3> scanline_layers;
+        alignas(16) std::array<std::array<uint8, kMaxResH>, 3> scanline_layerPrios;
         alignas(16) std::array<uint8, kMaxResH> scanline_meshLayers;
         alignas(16) std::array<Color888, kMaxResH> layer0Pixels;
         alignas(16) std::array<bool, kMaxResH> layer0ColorCalcEnabled;
