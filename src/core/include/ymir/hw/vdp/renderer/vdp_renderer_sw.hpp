@@ -216,6 +216,9 @@ public:
     uint64 GetSpriteFastPathLinesForTesting() const {
         return m_VDP2FastPathLines[0].sprite + m_VDP2FastPathLines[1].sprite;
     }
+    uint64 GetSpriteZeroRunDotsForTesting() const {
+        return m_VDP2FastPathLines[0].spriteZeroDots + m_VDP2FastPathLines[1].spriteZeroDots;
+    }
     uint64 GetComposeFastPathLinesForTesting() const {
         return m_VDP2FastPathLines[0].compose + m_VDP2FastPathLines[1].compose;
     }
@@ -756,6 +759,7 @@ private:
     // Brimir: Get{Sprite,Compose}FastPathLinesForTesting, one per field like m_NBGFastPathDots.
     struct alignas(64) VDP2FastPathLineCounter {
         uint64 sprite = 0;
+        uint64 spriteZeroDots = 0; // dots filled by the transparent-run fill (sprite and mesh layers)
         uint64 compose = 0;
     };
     std::array<VDP2FastPathLineCounter, 2> m_VDP2FastPathLines;
@@ -1069,6 +1073,11 @@ private:
         alignas(16) std::array<Color888, kMaxResH> meshTempColors;
         alignas(16) std::array<bool, kMaxResH> colorGradEnabled;
         alignas(16) std::array<Color888, kMaxResH> colorGradLayerColors;
+        // Brimir: the compose fast path's sort keys (three stack entries), back screen line and sprite colour
+        // calculation flags
+        alignas(16) std::array<std::array<uint8, kMaxResH>, 3> sortKeys;
+        alignas(16) std::array<Color888, kMaxResH> backColors;
+        alignas(16) std::array<bool, kMaxResH> spriteColorCalc;
     };
 
     // Pre-allocated buffers for VDP2ComposeLine for primary and alternate fields.
@@ -1214,19 +1223,11 @@ private:
     void VDP2DrawSpritePixel(uint32 x, const VDP2Regs &regs2, const VDP1RegTVMR &tvmr, const SpriteParams &params,
                              const SpriteFB &fbram, uint32 fbramOffset);
 
-    // Brimir: the per-line fast path of VDP2DrawSpriteLayer. Fills runs of transparent (zero) framebuffer data with the
-    // line's transparent dot and decodes the other dots with the sprite type's bit fields looked up once per line (no
-    // per-dot type switch); same stores as VDP2DrawSpritePixel (including the fields it leaves untouched), so the
-    // layer outputs are identical.
-    template <uint32 colorMode, bool rotate, bool altField, bool transparentMeshes>
+    // Brimir: the fast path of VDP2DrawSpriteLayer for lines that are not rotated. Fills runs of transparent (zero)
+    // framebuffer data with the line's transparent dot (the stores VDP2DrawSpritePixel makes for it) and draws every
+    // other dot with VDP2DrawSpritePixel, so the layer outputs are identical.
+    template <uint32 colorMode, bool altField, bool transparentMeshes>
     void VDP2DrawSpriteLayerFast(uint32 y, const VDP2Regs &regs2);
-
-    // Brimir: the line constants of VDP2DrawSpriteLayerFast and its per-dot decode (one dot of the sprite layer, or of
-    // the transparent mesh layer with applyMesh).
-    struct SpriteLineFast;
-    template <uint32 colorMode, bool applyMesh>
-    void VDP2DrawSpriteDotFast(const SpriteLineFast &line, uint32 x, const SpriteFB &fbram, uint32 fbramOffset,
-                               LayerOutput &layerOut, SpriteLayerAttributes &layerAttrs);
 
     // Draws the current VDP2 scanline of the specified normal background layer.
     //

@@ -81,7 +81,7 @@ uint32_t SpriteColorBits(uint32_t type) {
 
 struct SceneConfig {
     uint32_t spriteType = 0;
-    uint16_t tvmr = 0; // VDP1 TVMR: bit 0 8-bit framebuffer, bit 1 rotation
+    uint16_t tvmr = 0; // VDP1 TVMR: bit 0 8-bit framebuffer, bit 1 rotation, bit 2 HDTV
     bool mixed = false;
     bool spriteWindow = false;
     bool meshes = false; // transparent meshes enhancement, meshed polygons drawn
@@ -100,6 +100,9 @@ SceneConfig ConfigFor(uint32_t combo) {
     SceneConfig c;
     c.spriteType = combo % 16;
     c.tvmr = static_cast<uint16_t>((combo / 16) % 4);
+    if (Rand(rng, 4) == 0) {
+        c.tvmr |= 4; // HDTV: no doubled or halved readout, 512x512 framebuffer
+    }
     c.mixed = Rand(rng, 2) == 1;
     c.spriteWindow = Rand(rng, 3) == 0;
     c.meshes = Rand(rng, 2) == 1;
@@ -420,6 +423,7 @@ struct PairResult {
     uint64_t windowDots = 0;     // field 0 sprite dots with the shadow/window flag set
     uint64_t distinctColors = 0; // in the last frame (up to 64 counted)
     uint64_t fastSpriteLines = 0, fastComposeLines = 0;
+    uint64_t zeroRunDots = 0; // dots the fast path filled from transparent runs
     uint64_t fallbackSpriteLines = 0, fallbackComposeLines = 0;
     uint32_t frames = 0;
 };
@@ -537,6 +541,7 @@ PairResult RunPair(uint32_t seed, const SceneConfig &c, uint32_t frames, bool th
     }
     result.fastSpriteLines = renderers[0]->GetSpriteFastPathLinesForTesting();
     result.fastComposeLines = renderers[0]->GetComposeFastPathLinesForTesting();
+    result.zeroRunDots = renderers[0]->GetSpriteZeroRunDotsForTesting();
     result.fallbackSpriteLines = renderers[1]->GetSpriteFastPathLinesForTesting();
     result.fallbackComposeLines = renderers[1]->GetComposeFastPathLinesForTesting();
     return result;
@@ -556,8 +561,15 @@ TEST_CASE("Sprite layer and compose fast paths match upstream's per-dot code on 
     CHECK(r.firstDifference.empty());
     CHECK(r.frames == 3);
     CHECK(r.comparedLines >= 3 * 224);
-    // Non-vacuous: both fast paths drew every line, the forced-off renderer none ...
-    CHECK(r.fastSpriteLines >= 3 * 224);
+    // Non-vacuous: both fast paths drew every line (the sprite one only unrotated lines), the forced-off renderer none,
+    // and the transparent-run fill was taken where it applies (unrotated, not the exclusive monitor's single width) ...
+    if ((c.tvmr & 2) == 0) {
+        CHECK(r.fastSpriteLines >= 3 * 224);
+        if ((c.tvmd & 4) == 0) {
+            CAPTURE(r.zeroRunDots);
+            CHECK(r.zeroRunDots > 0);
+        }
+    }
     CHECK(r.fastComposeLines >= 3 * 224);
     CHECK(r.fallbackSpriteLines == 0);
     CHECK(r.fallbackComposeLines == 0);
@@ -620,7 +632,9 @@ TEST_CASE("Sprite layer and compose fast paths match with the threaded VDP2 and 
     INFO(r.firstDifference);
     CHECK(r.firstDifference.empty());
     CHECK(r.frames == 3);
-    CHECK(r.fastSpriteLines > 0);
+    if ((c.tvmr & 2) == 0) {
+        CHECK(r.fastSpriteLines > 0); // rotated lines take upstream's loop
+    }
     CHECK(r.fastComposeLines > 0);
     CHECK(r.fallbackSpriteLines == 0);
     CHECK(r.fallbackComposeLines == 0);

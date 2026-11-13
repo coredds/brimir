@@ -97,6 +97,7 @@ add_executable(brimir_tests
     unit/test_vdp2_nbg_fastpath.cpp
     # ... and its sprite layer and compose fast paths against upstream's per-dot code
     unit/test_vdp2_sprite_compose_fastpath.cpp
+    unit/test_vdp2_compose_simd.cpp
     # CPU reference of the GPU VDP1 back half (keyed fragments, per-word ordered resolve, erase, CPU writes) fed by the
     # VDP1 front half, against software
     unit/vdp1_raster_reference.cpp
