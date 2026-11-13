@@ -84,8 +84,11 @@ $prov = [ordered]@{
     powerScheme = $power; maxLoad = $MaxLoad; rounds = $Rounds; frames = $Frames; extra = ($Extra -join ' ')
 }
 $prov | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Out 'provenance.json') -Encoding utf8
-Write-Host "A: $($prov.A.commit)  bench $($prov.A.benchSha256.Substring(0, 16))  ($A)"
-Write-Host "B: $($prov.B.commit)  bench $($prov.B.benchSha256.Substring(0, 16))  ($B)"
+foreach ($side in 'A', 'B') {
+    $p = $prov[$side]
+    $dirtyNote = if ($p.status) { '  DIRTY build (git status recorded in measure.md)' } else { '' }
+    Write-Host "${side}: $($p.commit)  bench $($p.benchSha256.Substring(0, 16))  ($($p.binDir))$dirtyNote"
+}
 Write-Host "CPU affinity $($prov.affinity) (CPUs $($prov.affinityCpus)), High priority; $power"
 Write-Host "out: $Out"
 
@@ -284,6 +287,12 @@ $busy = @($rows | Where-Object { $_.status -eq 'used' -and $_.busy }).Count
 $md = @("# measure: A $($prov.A.commit) vs B $($prov.B.commit)", '',
     "$Rounds paired rounds (A,B / B,A alternating), $Frames frames per window$(if ($Extra) { ", extra: $($Extra -join ' ')" }), CPUs $($prov.affinityCpus) at High priority, $power. Wall $([math]::Round($sw.Elapsed.TotalMinutes)) min; $($rejected.Count) runs rejected and re-run (failed, started above $MaxLoad % background load, or > $OutlierPercent % from the cell median; self-check included); $busy used runs still started above $MaxLoad %.", '',
     'Change = median over rounds of B/A - 1 (p50 ms/frame; SH-2 and other from the bench averages), [min..max] over the rounds. Verdict faster/SLOWER needs the same sign in >= 80 % of the rounds; "keep" = faster by >= 3 %. In thr mode "other" includes the wait for the VDP threads.', '')
+foreach ($side in 'A', 'B') {
+    $p = $prov[$side]
+    $st = if ($null -eq $p.status) { '(no provenance.json)' } elseif ($p.status) { 'DIRTY: ' + (($p.status -split "`r?`n" | Where-Object { $_ }) -join '; ') } else { 'clean' }
+    $md += "${side}: $($p.commit), bench $($p.benchSha256.Substring(0, 16)), ``git status --porcelain`` at build: $st ($($p.binDir))"
+}
+$md += ''
 if ($selfCheckResult) {
     $md += "Self-check A vs A ($SelfCheckRounds rounds): " + (($selfCheckResult | ForEach-Object { "$($_.window) $($_.mode) $(& $f $_.p50_change) % [$(& $f $_.p50_min)..$(& $f $_.p50_max)]" }) -join '; ')
     $md += ''

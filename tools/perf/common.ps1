@@ -96,6 +96,7 @@ function Get-PerfProvenance([string]$BinDir) {
         $p = Get-Content -LiteralPath $prov -Raw | ConvertFrom-Json
         $info.commit = $p.commit
         $info.dirty = [bool]$p.status
+        $info.status = [string]$p.status # `git status --porcelain` of the source when it was built
         $info.config = $p.cmake
         if ($p.files.'brimir_bench.exe' -and $p.files.'brimir_bench.exe' -ne $info.benchSha256) {
             $info.warning = 'brimir_bench.exe changed since provenance.json was written'
