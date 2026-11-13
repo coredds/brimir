@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <limits>
+#include <thread> // Brimir: hardware_concurrency (deinterlacer hand-off)
 
 #if defined(_M_X64) || defined(__x86_64__)
     #include <immintrin.h>
@@ -62,8 +63,10 @@ namespace {
 
 // Brimir: how many times the threaded deinterlacer's per-line hand-off checks the other thread's signal before
 // blocking (util::Event::SpinWait). A line takes tens of microseconds; a kernel wake-up per line and side made the
-// frame wait-bound once the main field rendered faster than the alternate one (BRIMIR_FORK.md, performance).
-constexpr uint32 kDeinterlaceSpinChecks = 4096;
+// frame wait-bound once the main field rendered faster than the alternate one (BRIMIR_FORK.md, performance). Only with
+// 4 or more hardware threads, as the JIT's compile thread (src/jit/src/compile_worker.cpp): with fewer, the spinning
+// thread competes with the one it waits for. SpinWait(0) is a plain Wait().
+const uint32 kDeinterlaceSpinChecks = std::thread::hardware_concurrency() >= 4 ? 4096 : 0;
 
 // Brimir: the VDP2 register fields the renderer itself writes while preparing a line (VDP2PrepareLine:
 // CalcAccessPatterns, CalcVCellScrollDelay, UpdateRotationPageBaseAddresses). The unthreaded renderer writes them in
