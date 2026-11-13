@@ -12,6 +12,15 @@
 #include <string>
 #include <string_view>
 
+// Brimir: rarely taken helpers that SH2::Advance would otherwise pull in. With optimizing MSVC they are left to the
+// compiler (plain `inline`, as before FORCE_INLINE was enabled), so their code does not use up MSVC's inlining budget
+// for the Advance loop; GCC and Clang keep them forced (BRIMIR_FORK.md, performance).
+#if defined(_MSC_VER) && !defined(__clang__) && defined(NDEBUG)
+    #define BRIMIR_SH2_COLD_INLINE inline
+#else
+    #define BRIMIR_SH2_COLD_INLINE FORCE_INLINE
+#endif
+
 namespace ymir::sh2 {
 
 // -----------------------------------------------------------------------------
@@ -2052,7 +2061,7 @@ FORCE_INLINE void SH2::AdvanceWDT() { // Brimir: forced (BRIMIR_FORK.md, perform
 }
 
 template <bool debug>
-FORCE_INLINE void SH2::ExecuteDiv32() {
+BRIMIR_SH2_COLD_INLINE void SH2::ExecuteDiv32() {
     DIVU.DVDNTL = DIVU.DVDNT;
     DIVU.DVDNTH = static_cast<sint32>(DIVU.DVDNT) >> 31;
     TraceBegin32x32Division<debug>(m_tracer, DIVU.DVDNTL, DIVU.DVSR, DIVU.DVCR.OVFIE);
@@ -2064,7 +2073,7 @@ FORCE_INLINE void SH2::ExecuteDiv32() {
 }
 
 template <bool debug>
-FORCE_INLINE void SH2::ExecuteDiv64() {
+BRIMIR_SH2_COLD_INLINE void SH2::ExecuteDiv64() {
     TraceBegin64x32Division<debug>(m_tracer,
                                    (static_cast<sint64>(DIVU.DVDNTH) << 32ll) | static_cast<sint64>(DIVU.DVDNTL),
                                    DIVU.DVSR, DIVU.DVCR.OVFIE);
@@ -2086,7 +2095,7 @@ FORCE_INLINE void SH2::AdvanceFRT() { // Brimir: forced (BRIMIR_FORK.md, perform
     }
 }
 
-FORCE_INLINE void SH2::TriggerFRTInputCapture() {
+BRIMIR_SH2_COLD_INLINE void SH2::TriggerFRTInputCapture() {
     // TODO: FRT.TCR.IEDGA
     FRT.ICR = FRT.FRC;
     FRT.FTCSR.ICF = 1;
@@ -2098,7 +2107,7 @@ FORCE_INLINE void SH2::TriggerFRTInputCapture() {
 // -----------------------------------------------------------------------------
 // Interrupts
 
-FORCE_INLINE void SH2::SetExternalInterrupt(uint8 level, uint8 vector) {
+BRIMIR_SH2_COLD_INLINE void SH2::SetExternalInterrupt(uint8 level, uint8 vector) {
     assert(level < 16);
 
     static constexpr InterruptSource source = InterruptSource::IRL;
@@ -2177,7 +2186,7 @@ void SH2::RecalcInterrupts() {
 // -------------------------------------------------------------------------
 // Debugger
 
-FORCE_INLINE bool SH2::CheckBreakpoint() {
+BRIMIR_SH2_COLD_INLINE bool SH2::CheckBreakpoint() {
     if (IsBreakpointSetInBitmap(PC)) {
         m_debugBreakMgr->SignalDebugBreak(debug::DebugBreakInfo::SH2Breakpoint(IsMaster(), PC));
         return true;
@@ -2185,7 +2194,7 @@ FORCE_INLINE bool SH2::CheckBreakpoint() {
     return false;
 }
 
-FORCE_INLINE bool SH2::CheckWatchpoints(const DecodedMemAccesses &mem) {
+BRIMIR_SH2_COLD_INLINE bool SH2::CheckWatchpoints(const DecodedMemAccesses &mem) {
     if (!mem.anyAccess) {
         return false;
     }
@@ -2194,7 +2203,7 @@ FORCE_INLINE bool SH2::CheckWatchpoints(const DecodedMemAccesses &mem) {
     return wtpt1 || wtpt2;
 }
 
-FORCE_INLINE bool SH2::CheckWatchpoint(const DecodedMemAccesses::Access &access) {
+BRIMIR_SH2_COLD_INLINE bool SH2::CheckWatchpoint(const DecodedMemAccesses::Access &access) {
     uint32 address;
 
     using AccType = DecodedMemAccesses::Type;
@@ -2277,7 +2286,7 @@ FORCE_INLINE_EX void SH2::AdvancePC() {
 }
 
 template <bool debug, bool emulateCache>
-FORCE_INLINE uint64 SH2::EnterException(uint8 vectorNumber) {
+BRIMIR_SH2_COLD_INLINE uint64 SH2::EnterException(uint8 vectorNumber) {
     const uint32 address1 = R[15] - 4;
     const uint32 address2 = R[15] - 8;
     const uint32 address3 = VBR + (static_cast<uint32>(vectorNumber) << 2u);
