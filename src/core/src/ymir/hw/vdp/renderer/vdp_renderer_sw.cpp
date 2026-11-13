@@ -2747,6 +2747,12 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawLineColorAndBackScreens(uint32 y,
 
 template <uint32 colorMode, bool rotate, bool altField, bool transparentMeshes>
 NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayer(uint32 y, const VDP2Regs &regs2) {
+    // Brimir: per-line fast path (same output); upstream's per-dot loop below is the reference for the tests
+    if (m_spriteFastPath) {
+        VDP2DrawSpriteLayerFast<colorMode, rotate, altField, transparentMeshes>(y, regs2);
+        return;
+    }
+
     // VDP1 scaling:
     // 2x horz resolution: VDP1 TVM=000 and VDP2 HRESO=01x
     // 1/2x horz readout:  VDP1 TVM=001 and VDP2 HRESO=00x
@@ -2911,6 +2917,316 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawSpritePixel(uint32 x, const VDP2R
     layerAttrs.colorCalcRatio[x] = params.colorCalcRatios[spriteData.colorCalcRatio];
     layerAttrs.shadowOrWindow[x] = spriteData.shadowOrWindow;
     layerAttrs.specialType[x] = spriteData.special;
+}
+
+// Brimir: the bit fields of each sprite type, VDP2FetchSpriteData's switch as data. A field the type does not have has
+// a zero mask (and shift); shadowBits is the colour data width GetSpecialPattern uses.
+struct SpriteTypeFields {
+    uint16 colorMask;
+    uint8 ccShift;
+    uint8 ccMask;
+    uint8 prioShift;
+    uint8 prioMask;
+    bool shadowOrWindow;
+    uint8 shadowBits;
+};
+
+static constexpr std::array<SpriteTypeFields, 16> kSpriteTypeFields{{
+    {0x7FF, 11, 7, 14, 3, false, 11}, // 0x0
+    {0x7FF, 11, 3, 13, 7, false, 11}, // 0x1
+    {0x7FF, 11, 7, 14, 1, true, 11},  // 0x2
+    {0x7FF, 11, 3, 13, 3, true, 11},  // 0x3
+    {0x3FF, 10, 7, 13, 3, true, 10},  // 0x4
+    {0x7FF, 11, 1, 12, 7, true, 11},  // 0x5
+    {0x3FF, 10, 3, 12, 7, true, 10},  // 0x6
+    {0x1FF, 9, 7, 12, 7, true, 9},    // 0x7
+    {0x7F, 0, 0, 7, 1, false, 7},     // 0x8
+    {0x3F, 6, 1, 7, 1, false, 6},     // 0x9
+    {0x3F, 0, 0, 6, 3, false, 6},     // 0xA
+    {0x3F, 6, 3, 0, 0, false, 6},     // 0xB
+    {0xFF, 0, 0, 7, 1, false, 8},     // 0xC
+    {0xFF, 6, 1, 7, 1, false, 8},     // 0xD
+    {0xFF, 0, 0, 6, 3, false, 8},     // 0xE
+    {0xFF, 6, 3, 0, 0, false, 8},     // 0xF
+}};
+
+struct SoftwareVDPRenderer::SpriteLineFast {
+    const SpriteParams *params;
+    const bool *window; // the sprite layer's window (also used for the mesh layer, as VDP2DrawSpritePixel does)
+    SpriteTypeFields fields;
+    uint16 shadowMask;  // GetSpecialPattern: colour data bits
+    uint16 shadowValue; // ... and the normal shadow value
+    bool pixel8Bits;    // TVMR.TVM bit 0: 8-bit framebuffer reads
+    bool widen8;        // 16-bit sprite types (0-7) on 8-bit reads: upper byte set
+    bool mixedFormat;
+    bool rgbCheck;      // mixed format RGB dots can be transparent ...
+    uint16 rgbMask;     // ... when these bits are zero
+    bool spriteWindow;  // sprite window in use and enabled
+    bool spriteWindowInverted;
+};
+
+template <uint32 colorMode, bool applyMesh>
+FORCE_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteDotFast(const SpriteLineFast &line, uint32 x,
+                                                             const SpriteFB &fbram, uint32 fbramOffset,
+                                                             LayerOutput &layerOut,
+                                                             SpriteLayerAttributes &layerAttrs) {
+    // The same cases and stores as VDP2DrawSpritePixel + VDP2FetchSpriteData
+    if (line.window[x]) {
+        layerOut.pixels.priority[x] = 0;
+        layerAttrs.shadowOrWindow[x] = false;
+        layerAttrs.specialType[x] = SpriteData::Special::Transparent;
+        return;
+    }
+
+    const SpriteParams &params = *line.params;
+    uint16 rawData = 0;
+    if (line.mixedFormat) {
+        const uint16 spriteDataValue = util::ReadBE<uint16>(&fbram[(fbramOffset * sizeof(uint16)) & 0x3FFFE]);
+        if (bit::test<15>(spriteDataValue)) {
+            if (line.rgbCheck && (spriteDataValue & line.rgbMask) == 0) {
+                layerOut.pixels.priority[x] = 0;
+                layerAttrs.shadowOrWindow[x] = false;
+                layerAttrs.specialType[x] = SpriteData::Special::Transparent;
+                return;
+            }
+
+            layerOut.pixels.color[x] = ConvertRGB555to888(Color555{spriteDataValue});
+            layerOut.pixels.priority[x] = params.priorities[0];
+            layerOut.pixels.specialColorCalc[x] = false;
+
+            layerAttrs.colorCalcRatio[x] = params.colorCalcRatios[0];
+            layerAttrs.shadowOrWindow[x] = false;
+            layerAttrs.specialType[x] = SpriteData::Special::Normal;
+            return;
+        }
+        rawData = spriteDataValue;
+    }
+
+    if (line.pixel8Bits) {
+        rawData = fbram[fbramOffset & 0x3FFFF];
+        if (line.widen8 && (!applyMesh || rawData != 0)) {
+            rawData |= 0xFF00;
+        }
+    } else if (!line.mixedFormat) {
+        rawData = util::ReadBE<uint16>(&fbram[(fbramOffset * sizeof(uint16)) & 0x3FFFE]);
+    }
+
+    const SpriteTypeFields &fields = line.fields;
+    const uint32 colorData = rawData & fields.colorMask;
+    const uint32 colorCalcRatio = (rawData >> fields.ccShift) & fields.ccMask;
+    const uint32 priority = (rawData >> fields.prioShift) & fields.prioMask;
+    const bool shadowOrWindow = fields.shadowOrWindow && bit::test<15>(rawData);
+    const SpriteData::Special special = (rawData & 0x7FFF) == 0 ? SpriteData::Special::Transparent
+                                        : (rawData & line.shadowMask) == line.shadowValue
+                                            ? SpriteData::Special::Shadow
+                                            : SpriteData::Special::Normal;
+
+    if (line.spriteWindow && shadowOrWindow != line.spriteWindowInverted) {
+        layerOut.pixels.priority[x] = 0;
+        layerAttrs.shadowOrWindow[x] = true;
+        layerAttrs.specialType[x] = SpriteData::Special::Transparent;
+        return;
+    }
+
+    layerOut.pixels.color[x] = VDP2FetchCRAMColor<colorMode>(0, params.colorDataOffset + colorData);
+    layerOut.pixels.priority[x] =
+        special == SpriteData::Special::Transparent && !shadowOrWindow ? 0 : params.priorities[priority];
+    layerOut.pixels.specialColorCalc[x] = true;
+
+    layerAttrs.colorCalcRatio[x] = params.colorCalcRatios[colorCalcRatio];
+    layerAttrs.shadowOrWindow[x] = shadowOrWindow;
+    layerAttrs.specialType[x] = special;
+}
+
+template <uint32 colorMode, bool rotate, bool altField, bool transparentMeshes>
+NO_INLINE void SoftwareVDPRenderer::VDP2DrawSpriteLayerFast(uint32 y, const VDP2Regs &regs2) {
+    // Line setup as in VDP2DrawSpriteLayer
+    const VDP1RegTVMR &tvmr = VDP2GetVDP1TVMR();
+    const bool exclMon = (regs2.TVMD.HRESOn & 0b100) != 0;
+    const bool doubleResH = !tvmr.hdtvEnable && !tvmr.pixel8Bits && (regs2.TVMD.HRESOn & 0b110) == 0b010;
+    const bool halfResH = !tvmr.hdtvEnable && tvmr.pixel8Bits && (regs2.TVMD.HRESOn & 0b110) == 0b000;
+    const uint32 xOutputShift = doubleResH || exclMon ? 1 : 0;
+    const uint32 xReadoutShift = halfResH ? 1 : 0;
+    const uint32 maxX = m_HRes >> xOutputShift;
+    [[maybe_unused]] const uint32 xCoordShift = (m_HRes > kMaxNormalResH && xOutputShift == 0) ? 1 : 0;
+
+    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+
+    const SpriteParams &params = regs2.spriteParams;
+    auto &layerOut = m_layerOutputs[altField][0];
+    auto &layerAttrs = m_spriteLayerAttrs[altField];
+
+    const uint8 fbIndex = m_state.fbIndex.display;
+    const auto &fbram = doubleDensity && altField ? m_altFBRAM[fbIndex] : m_state.mem1.FBRAM[fbIndex];
+
+    [[maybe_unused]] auto &meshLayerOut = m_meshLayerOutput[altField];
+    [[maybe_unused]] auto &meshLayerAttrs = m_meshLayerAttrs[altField];
+    [[maybe_unused]] const auto &meshFB = m_meshFBRAM[doubleDensity && altField][fbIndex];
+
+    // The type is SPCTL bits 3-0
+    SpriteLineFast line;
+    line.params = &params;
+    line.window = layerAttrs.window.data();
+    line.fields = kSpriteTypeFields[params.type & 0xF];
+    line.shadowMask = static_cast<uint16>((1u << line.fields.shadowBits) - 1u);
+    line.shadowValue = static_cast<uint16>((1u << line.fields.shadowBits) - 2u);
+    line.pixel8Bits = tvmr.pixel8Bits;
+    line.widen8 = params.type < 8;
+    line.mixedFormat = params.mixedFormat;
+    line.rgbCheck = params.type >= 8 || (params.type >= 2 && params.useSpriteWindow);
+    line.rgbMask = params.type >= 8 ? 0x00FF : 0x7FFF;
+    line.spriteWindow = params.useSpriteWindow && params.spriteWindowEnabled;
+    line.spriteWindowInverted = params.spriteWindowInverted;
+
+    m_VDP2FastPathLines[altField].sprite++;
+
+    uint32 x = 0;
+    if constexpr (!rotate) {
+        // Transparent runs: a zero framebuffer value decodes to the same dot everywhere on the line (colour data 0,
+        // transparent, no shadow/window bit), unless the sprite window is inverted (that dot only sets the window
+        // attributes) or an 8-bit read of a 16-bit sprite type sets the upper byte (the sprite layer only; mesh dots
+        // keep a zero byte zero). Blocks of 8 dots whose framebuffer bytes are all zero and whose window is clear are
+        // filled with that dot. Dots written contiguously (normal resolution or the doubled hi-res output), no wrap of
+        // the framebuffer address within the block. Not with 8-bit reads in mixed format: the RGB check reads the
+        // 16-bit word at twice the dot's offset, outside the block's bytes.
+        const bool contiguous = xOutputShift == 0 || doubleResH;
+        const bool mixed8 = tvmr.pixel8Bits && line.mixedFormat;
+        if (contiguous && !mixed8 && !(line.spriteWindow && line.spriteWindowInverted)) {
+            const Color888 zeroColor = VDP2FetchCRAMColor<colorMode>(0, params.colorDataOffset);
+            const uint8 zeroRatio = params.colorCalcRatios[0];
+            const uint32 lineOffset = y * tvmr.fbSizeH;
+            const bool *window = layerAttrs.window.data();
+            const bool pixel8 = tvmr.pixel8Bits;
+            const bool spriteZeroRuns = !pixel8 || !line.widen8;
+            // Framebuffer bytes of a block: 8 words, or 8 bytes (16 with the halved readout, read every other byte)
+            const uint32 blockBytes = pixel8 ? (8u << xReadoutShift) : 16u;
+
+            auto zeroBytes = [blockBytes](const SpriteFB &fb, uint32 address) {
+                uint64 a, b = 0;
+                std::memcpy(&a, &fb[address], sizeof(a));
+                if (blockBytes > 8) {
+                    std::memcpy(&b, &fb[address + 8], sizeof(b));
+                }
+                return (a | b) == 0;
+            };
+            auto fillZero = [&](LayerOutput &out, SpriteLayerAttributes &attrs, uint32 first, uint32 count) {
+                Color888 *color = &out.pixels.color[first];
+                for (uint32 i = 0; i < count; i++) {
+                    color[i] = zeroColor;
+                }
+                static_assert(sizeof(bool) == 1 && sizeof(SpriteData::Special) == 1);
+                std::memset(&out.pixels.priority[first], 0, count);
+                std::memset(&out.pixels.specialColorCalc[first], true, count);
+                std::memset(&attrs.colorCalcRatio[first], zeroRatio, count);
+                std::memset(&attrs.shadowOrWindow[first], false, count);
+                std::memset(&attrs.specialType[first], static_cast<uint8>(SpriteData::Special::Transparent), count);
+            };
+
+            // Whole blocks before the line end or an address wrap
+            uint32 blocks = 0;
+            while ((blocks + 1) * 8 <= maxX) {
+                const uint32 base = ((blocks * 8) << xReadoutShift) + lineOffset;
+                const uint32 address = pixel8 ? base & 0x3FFFF : (base * sizeof(uint16)) & 0x3FFFE;
+                if (address + blockBytes > 0x40000) {
+                    break;
+                }
+                blocks++;
+            }
+
+            // One pass per layer (they write disjoint outputs): zero blocks extend a run, filled when it ends; other
+            // blocks are decoded dot by dot
+            auto drawLayer = [&](auto applyMeshTag, const SpriteFB &fb, LayerOutput &out,
+                                 SpriteLayerAttributes &attrs, bool zeroRuns) {
+                static constexpr bool applyMesh = decltype(applyMeshTag)::value;
+                uint32 runStart = 0;
+                for (uint32 block = 0; block < blocks; block++) {
+                    const uint32 bx = block * 8;
+                    const uint32 base = (bx << xReadoutShift) + lineOffset;
+                    const uint32 address = pixel8 ? base & 0x3FFFF : (base * sizeof(uint16)) & 0x3FFFE;
+                    const uint32 xx = bx << xOutputShift;
+                    if (zeroRuns) {
+                        uint64 w0, w1 = 0;
+                        std::memcpy(&w0, &window[xx], sizeof(w0));
+                        if (xOutputShift != 0) {
+                            std::memcpy(&w1, &window[xx + 8], sizeof(w1));
+                        }
+                        if ((w0 | w1) == 0 && zeroBytes(fb, address)) {
+                            continue;
+                        }
+                    }
+                    if (runStart < block) {
+                        fillZero(out, attrs, (runStart * 8) << xOutputShift, ((block - runStart) * 8) << xOutputShift);
+                    }
+                    runStart = block + 1;
+                    for (uint32 i = 0; i < 8; i++) {
+                        const uint32 dx = (bx + i) << xOutputShift;
+                        VDP2DrawSpriteDotFast<colorMode, applyMesh>(line, dx, fb, base + (i << xReadoutShift), out,
+                                                                    attrs);
+                        if (doubleResH) {
+                            out.pixels.CopyPixel(dx, dx + 1);
+                            attrs.CopyAttrs(dx, dx + 1);
+                        }
+                    }
+                }
+                if (runStart < blocks) {
+                    fillZero(out, attrs, (runStart * 8) << xOutputShift, ((blocks - runStart) * 8) << xOutputShift);
+                }
+            };
+
+            drawLayer(std::false_type{}, fbram, layerOut, layerAttrs, spriteZeroRuns);
+            if constexpr (transparentMeshes) {
+                drawLayer(std::true_type{}, meshFB, meshLayerOut, meshLayerAttrs, true);
+            }
+            x = blocks * 8;
+        }
+    }
+
+    for (; x < maxX; x++) {
+        const uint32 xx = x << xOutputShift;
+
+        uint32 fbramOffset;
+        if constexpr (rotate) {
+            const auto &rotParamOut = m_rotParamLineOutputs[0];
+            const auto &coord = rotParamOut.spriteCoords[x >> xCoordShift];
+            if (coord.x() < 0 || coord.x() >= tvmr.fbSizeH || coord.y() < 0 || coord.y() >= tvmr.fbSizeV) {
+                layerOut.pixels.priority[xx] = 0;
+                layerAttrs.shadowOrWindow[xx] = false;
+                layerAttrs.specialType[xx] = SpriteData::Special::Transparent;
+                if (doubleResH) {
+                    layerOut.pixels.CopyPixel(xx, xx + 1);
+                    layerAttrs.CopyAttrs(xx, xx + 1);
+                }
+                if constexpr (transparentMeshes) {
+                    // As upstream: the special type goes to the sprite layer's attributes
+                    meshLayerOut.pixels.priority[xx] = 0;
+                    meshLayerAttrs.shadowOrWindow[xx] = false;
+                    layerAttrs.specialType[xx] = SpriteData::Special::Transparent;
+                    if (doubleResH) {
+                        meshLayerOut.pixels.CopyPixel(xx, xx + 1);
+                        meshLayerAttrs.CopyAttrs(xx, xx + 1);
+                    }
+                }
+                continue;
+            }
+            fbramOffset = coord.x() + coord.y() * tvmr.fbSizeH;
+        } else {
+            fbramOffset = (x << xReadoutShift) + y * tvmr.fbSizeH;
+        }
+
+        VDP2DrawSpriteDotFast<colorMode, false>(line, xx, fbram, fbramOffset, layerOut, layerAttrs);
+        if (doubleResH) {
+            layerOut.pixels.CopyPixel(xx, xx + 1);
+            layerAttrs.CopyAttrs(xx, xx + 1);
+        }
+
+        if constexpr (transparentMeshes) {
+            VDP2DrawSpriteDotFast<colorMode, true>(line, xx, meshFB, fbramOffset, meshLayerOut, meshLayerAttrs);
+            if (doubleResH) {
+                meshLayerOut.pixels.CopyPixel(xx, xx + 1);
+                meshLayerAttrs.CopyAttrs(xx, xx + 1);
+            }
+        }
+    }
 }
 
 template <uint32 bgIndex, bool deinterlace>

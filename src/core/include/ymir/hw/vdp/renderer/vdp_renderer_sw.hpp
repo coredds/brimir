@@ -204,6 +204,31 @@ public:
         return m_layerOutputs[altField][index + 2].pixels.specialColorCalc;
     }
 
+    // Brimir: test hooks for the sprite layer fast path (VDP2DrawSpriteLayerFast): off forces upstream's per-dot code;
+    // the count is the lines the fast path drew, over both fields. Same threading rules as the NBG hooks above.
+    void SetSpriteFastPathForTesting(bool enabled) {
+        m_spriteFastPath = enabled;
+    }
+    uint64 GetSpriteFastPathLinesForTesting() const {
+        return m_VDP2FastPathLines[0].sprite + m_VDP2FastPathLines[1].sprite;
+    }
+    // Brimir: the sprite layer (mesh = the transparent mesh layer) outputs of the last drawn line: colour, priority,
+    // special colour calculation flag, colour calculation ratio, shadow/window flag, special type.
+    struct SpriteLayerView {
+        const std::array<Color888, kMaxResH> &color;
+        const std::array<uint8, kMaxResH> &priority;
+        const std::array<bool, kMaxResH> &specialColorCalc;
+        const std::array<uint8, kMaxResH> &colorCalcRatio;
+        const std::array<bool, kMaxResH> &shadowOrWindow;
+        const std::array<SpriteData::Special, kMaxResH> &specialType;
+    };
+    SpriteLayerView GetSpriteLayerForTesting(bool altField, bool mesh) const {
+        const auto &out = mesh ? m_meshLayerOutput[altField] : m_layerOutputs[altField][0];
+        const auto &attrs = mesh ? m_meshLayerAttrs[altField] : m_spriteLayerAttrs[altField];
+        return {out.pixels.color,   out.pixels.priority,  out.pixels.specialColorCalc,
+                attrs.colorCalcRatio, attrs.shadowOrWindow, attrs.specialType};
+    }
+
     // Brimir: read-only access to the VDP1 auxiliary framebuffers for the external (Vulkan) renderer's VDP2 sprite
     // layer. Not synchronized with a threaded VDP1: call VDP1SyncFB (or rely on a framebuffer swap) first.
     const SpriteFB &GetAltFBRAM(uint8 fbIndex) const {
@@ -719,6 +744,12 @@ private:
     // Brimir: GetVDP1QuadTerminationsForTesting; not atomic, valid only with unthreaded VDP1 rendering
     uint64 m_VDP1QuadTerminations = 0;
     bool m_NBGFastPath = true;    // Brimir: SetNBGFastPathForTesting
+    bool m_spriteFastPath = true; // Brimir: SetSpriteFastPathForTesting
+    // Brimir: GetSpriteFastPathLinesForTesting, one per field like m_NBGFastPathDots.
+    struct alignas(64) VDP2FastPathLineCounter {
+        uint64 sprite = 0;
+    };
+    std::array<VDP2FastPathLineCounter, 2> m_VDP2FastPathLines;
     // Brimir: GetNBGFastPathDotsForTesting. One counter per field, on separate cache lines: the field's renderer thread
     // is its only writer.
     struct alignas(64) NBGFastPathCounter {
@@ -1171,6 +1202,20 @@ private:
     template <uint32 colorMode, bool altField, bool transparentMeshes, bool applyMesh>
     void VDP2DrawSpritePixel(uint32 x, const VDP2Regs &regs2, const VDP1RegTVMR &tvmr, const SpriteParams &params,
                              const SpriteFB &fbram, uint32 fbramOffset);
+
+    // Brimir: the per-line fast path of VDP2DrawSpriteLayer. Fills runs of transparent (zero) framebuffer data with the
+    // line's transparent dot and decodes the other dots with the sprite type's bit fields looked up once per line (no
+    // per-dot type switch); same stores as VDP2DrawSpritePixel (including the fields it leaves untouched), so the
+    // layer outputs are identical.
+    template <uint32 colorMode, bool rotate, bool altField, bool transparentMeshes>
+    void VDP2DrawSpriteLayerFast(uint32 y, const VDP2Regs &regs2);
+
+    // Brimir: the line constants of VDP2DrawSpriteLayerFast and its per-dot decode (one dot of the sprite layer, or of
+    // the transparent mesh layer with applyMesh).
+    struct SpriteLineFast;
+    template <uint32 colorMode, bool applyMesh>
+    void VDP2DrawSpriteDotFast(const SpriteLineFast &line, uint32 x, const SpriteFB &fbram, uint32 fbramOffset,
+                               LayerOutput &layerOut, SpriteLayerAttributes &layerAttrs);
 
     // Draws the current VDP2 scanline of the specified normal background layer.
     //
