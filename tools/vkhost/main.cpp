@@ -111,7 +111,8 @@ void PrintUsage(std::FILE* out) {
         "  --load-state <file>  retro_unserialize <file> before the first frame (after the context exists)\n"
         "  --runahead    run-ahead simulation: before each frame one hidden frame (video disabled; not rolled\n"
         "                back, so compare with a software --runahead run), and a second instance of the core\n"
-        "                (refused a hardware context) running one frame per frame with audio and video disabled\n"
+        "                (refused a hardware context) running one frame per frame with audio and video disabled;\n"
+        "                with --vulkan the second instance must decline to load (RetroArch then runs one instance)\n"
         "  --rollback    RetroArch's single-instance run-ahead of one frame: per frame one hidden frame, retro_serialize,\n"
         "                the recorded frame, retro_unserialize (the recorded frames run one frame ahead; compare with\n"
         "                a software --rollback run)\n"
@@ -1244,6 +1245,8 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(report.secondaryFrames),
                      static_cast<unsigned long long>(report.secondaryHardwareFrames),
                      report.secondaryHadContext ? "yes" : "none");
+        std::fprintf(stderr, "vkhost: runahead: second instance declined to load %llu times\n",
+                     static_cast<unsigned long long>(report.secondaryDeclines));
     }
     for (const std::string& problem : report.problems) {
         std::fprintf(stderr, "vkhost: FAILED: %s\n", problem.c_str());

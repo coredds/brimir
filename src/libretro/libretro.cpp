@@ -8,6 +8,7 @@
 #include "brimir/core_wrapper.hpp"
 #include "brimir/lockstep.hpp"
 #include "brimir/ram_view.hpp"
+#include "hw_context_owner.hpp"
 
 #ifdef BRIMIR_VULKAN
 #include "libretro_vulkan.hpp"
@@ -94,6 +95,13 @@ static constexpr unsigned kMaxHeight = 512;
 // accepted SET_HW_RENDER for the loaded content. The output is live between context_reset and context_destroy;
 // the frontend calls both after retro_load_game, possibly from inside other libretro calls (driver reinit).
 static bool g_vulkanRequested = false;
+// This copy of the library's token in the process-wide hardware context claim (hw_context_owner.hpp): claimed while
+// g_vulkanRequested, also dropped when the library is unloaded without retro_deinit (a stale claim would make the
+// next copy loaded into the process decline its own content).
+static char g_hwContextToken;
+static struct HwContextReleaseAtUnload {
+    ~HwContextReleaseAtUnload() { brimir::libretro::ReleaseHwContext(&g_hwContextToken); }
+} g_hwContextReleaseAtUnload;
 static std::unique_ptr<brimir::libretro::VulkanOutput> g_vulkanOutput;
 static bool g_vulkanPresentErrorLogged = false;
 // The Vulkan VDP renderer (VDP2 on the GPU) could not be installed or attached on the current context: software
@@ -1083,6 +1091,7 @@ RETRO_API void retro_deinit(void) {
         g_vulkanOutput.reset();
     }
     g_vulkanRequested = false;
+    brimir::libretro::ReleaseHwContext(&g_hwContextToken);
 #endif
     if (g_core) {
         // Same rule as retro_unload_game: never let an exception reach the frontend.
@@ -1526,6 +1535,21 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
 
+#ifdef BRIMIR_VULKAN
+    // RetroArch's run-ahead second instance while the main instance renders through the hardware context: its frames
+    // are the ones shown and could never reach that context (black picture). Checked before anything is loaded or
+    // requested (RetroArch 1.22.2 would hand this copy's SET_HW_RENDER callbacks to the main instance's context).
+    // RetroArch then destroys this copy (retro_unload_game, retro_deinit: the main instance's claim stays) and runs
+    // run-ahead on the main instance alone.
+    if (std::strcmp(get_option_value("brimir_renderer", "software"), "vulkan") == 0 &&
+        brimir::libretro::HwContextHeldByOther(&g_hwContextToken)) {
+        brimir_log(RETRO_LOG_WARN, "Another instance of Brimir in this process renders through the hardware context "
+                                   "(run-ahead second instance): not loading the content in this one, the frontend "
+                                   "runs run-ahead on a single instance instead");
+        return false;
+    }
+#endif
+
     // New content may report the same resolution as the previous one; force a
     // geometry update on its first frame regardless.
     reset_frame_state();
@@ -1715,6 +1739,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
                                                        log_cb, reason)) {
         case VulkanRequest::Accepted:
             g_vulkanRequested = true;
+            brimir::libretro::ClaimHwContext(&g_hwContextToken);
             brimir_log(RETRO_LOG_INFO, "Vulkan renderer requested");
             break;
         case VulkanRequest::NotVulkanDriver:
@@ -1794,6 +1819,7 @@ RETRO_API void retro_unload_game(void) {
 #ifdef BRIMIR_VULKAN
     // The frontend destroys the context (context_destroy) before unloading; nothing GPU-side happens here.
     g_vulkanRequested = false;
+    brimir::libretro::ReleaseHwContext(&g_hwContextToken);
 #endif
 }
 

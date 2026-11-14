@@ -864,11 +864,16 @@ check_software_reference(software_runahead)
 if("${software_runahead_hashes}" STREQUAL "${software_hashes}")
     fail(software_runahead "the hidden frames did not advance the emulation")
 endif()
+# The software renderer keeps RetroArch's second instance; with the Vulkan renderer it declines (the main instance
+# holds the hardware context, RetroArch shows the second instance's frames), at load and when it is created again.
+require_log(software_runahead "second instance ran 360 frames, 0 hardware frames, context none")
+require_log(software_runahead "second instance declined to load 0 times")
 run_vkhost(runahead --vulkan --runahead)
 check_run(runahead 300 REFERENCE software_runahead)
 check_vulkan_counters(runahead)
 check_vdp2_renderer(runahead)
-require_log(runahead "second instance ran 360 frames, 0 hardware frames, context none")
+require_log(runahead "second instance ran 0 frames, 0 hardware frames, context none")
+require_log(runahead "second instance declined to load 2 times")
 
 # Internal resolution (brimir_internal_resolution). The Vulkan runs hash the sample points (--hash-sample: the native
 # image of the N x frame's sample points, the scale followed from the core's "frames at Nx" log line); the menu is
@@ -1423,7 +1428,8 @@ run_vkhost(gpu_vdp1_runahead --vulkan --gpu-vdp1 --runahead)
 check_run(gpu_vdp1_runahead 300 REFERENCE software_runahead)
 check_vulkan_counters(gpu_vdp1_runahead)
 check_vdp2_renderer(gpu_vdp1_runahead)
-require_log(gpu_vdp1_runahead "second instance ran 360 frames, 0 hardware frames, context none")
+require_log(gpu_vdp1_runahead "second instance ran 0 frames, 0 hardware frames, context none")
+require_log(gpu_vdp1_runahead "second instance declined to load 2 times")
 # ... a driver reinit inside retro_run: the detach syncs the GPU framebuffers into software, the attach uploads them.
 run_vkhost(gpu_vdp1_reset_in_run --vulkan --gpu-vdp1 --reset-in-run 150)
 check_run(gpu_vdp1_reset_in_run 300)
@@ -1552,7 +1558,8 @@ foreach(name IN ITEMS vdp1_nx_toggle_weave vdp1_nx_toggle_runahead)
         fail(${name} "presented scales '${scales}', expected 2x, 4x, 3x")
     endif()
 endforeach()
-require_log(vdp1_nx_toggle_runahead "second instance ran 360 frames, 0 hardware frames, context none")
+require_log(vdp1_nx_toggle_runahead "second instance ran 0 frames, 0 hardware frames, context none")
+require_log(vdp1_nx_toggle_runahead "second instance declined to load 2 times")
 require_log(vdp1_nx_toggle_runahead "N x sprite frames shown [1-9][0-9]*, hidden [1-9][0-9]*; N x VDP1 passes shown [1-9][0-9]*, hidden [1-9]")
 message(STATUS "vdp1_nx_toggle: live VDP1 upscaling off/on and 2x -> 4x -> 3x with weave and run-ahead, identical to "
                "software at the sample points, no SET_SYSTEM_AV_INFO")

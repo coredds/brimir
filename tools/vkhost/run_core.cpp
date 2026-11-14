@@ -149,26 +149,50 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     // not rolled back and the comparison is against a software run with the same --runahead pattern.
     // - Single-instance run-ahead: before each displayed frame the main instance runs one hidden frame with video
     //   disabled (GET_AUDIO_VIDEO_ENABLE without RETRO_AV_ENABLE_VIDEO): no GPU work may happen in it.
-    // - Second instance: RetroArch refuses SET_HW_RENDER (and the negotiation interface) there, so it runs on
-    //   software; it is a separate copy of the library, and runs one frame with audio and video disabled per
-    //   displayed frame.
+    // - Second instance: a separate copy of the library that runs one frame with audio and video disabled per
+    //   displayed frame; it never gets a hardware context. On RetroArch's vulkan driver its GET_PREFERRED_HW_RENDER
+    //   reports Vulkan (secondInstanceOnVulkan). RetroArch shows the second instance's frames, which cannot reach the
+    //   context the main instance holds (a black picture), so a core holding one must decline the second instance's
+    //   retro_load_game; RetroArch then destroys it (retro_unload_game, retro_deinit) and runs single-instance
+    //   run-ahead. RetroArch creates it again at the next content load or run-ahead change: modelled by a second
+    //   attempt half way, which must decline too (the declined copy's unload left the main instance's claim). A
+    //   software main instance has no context to share and its second instance loads.
+    RunReport report;
     LibretroHost secondary;
+    bool secondaryLoaded = false;
+    uint64_t secondaryDeclines = 0;
+    fs::path secondaryCopy;
+    HostConfig second;
+    const fs::path secondSaveDir = scratch.Path() / "save2";
+    const auto loadSecondary = [&] {
+        secondaryLoaded = secondary.Load(second, systemDir.string(), secondSaveDir.string());
+        if (secondaryLoaded) {
+            return;
+        }
+        if (!host.HadContext()) {
+            throw std::runtime_error("loading the run-ahead instance failed");
+        }
+        ++secondaryDeclines;
+        secondary.Unload();
+        RunReport declinedReport;
+        secondary.FillReport(declinedReport);
+        report.problems.insert(report.problems.end(), declinedReport.problems.begin(), declinedReport.problems.end());
+    };
     if (config.runahead) {
-        fs::path copy = scratch.Path() / ("runahead_" + fs::path(config.corePath).filename().string());
+        secondaryCopy = scratch.Path() / ("runahead_" + fs::path(config.corePath).filename().string());
         std::error_code ec;
-        fs::copy_file(config.corePath, copy, fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(config.corePath, secondaryCopy, fs::copy_options::overwrite_existing, ec);
         if (ec) {
             throw std::runtime_error("cannot copy the core for the run-ahead instance: " + ec.message());
         }
-        const fs::path secondSaveDir = scratch.Path() / "save2";
         fs::create_directories(secondSaveDir);
-        HostConfig second = effective;
-        second.corePath = copy.string();
+        second = effective;
+        second.corePath = secondaryCopy.string();
         second.vulkan = false;
         second.refuseHw = true;
-        if (!secondary.Load(second, systemDir.string(), secondSaveDir.string())) {
-            throw std::runtime_error("loading the run-ahead instance failed");
-        }
+        second.secondInstance = true;
+        second.secondInstanceOnVulkan = config.vulkan;
+        loadSecondary();
     }
 
     // Times the sink so the report can separate hashing/PPM writing from the frame cost.
@@ -183,7 +207,6 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         double seconds = 0;
     } timedSink(sink);
 
-    RunReport report;
     std::vector<std::string> stateProblems;
     std::vector<uint8_t> state;
 
@@ -262,7 +285,10 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
             }
             ++rollbacks;
         }
-        if (config.runahead) {
+        if (config.runahead && !secondaryLoaded && i == total / 2) {
+            loadSecondary();
+        }
+        if (secondaryLoaded) {
             secondary.SetAvEnable(0);
             secondary.RunFrame(nullptr);
             ++secondaryFrames;
@@ -329,14 +355,22 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         report.secondaryFrames = secondaryFrames;
         report.secondaryHardwareFrames = secondary.HardwareFrames();
         report.secondaryHadContext = secondary.HadContext();
+        report.secondaryDeclines = secondaryDeclines;
         if (report.secondaryHardwareFrames != 0 || report.secondaryHadContext) {
             report.problems.push_back("the run-ahead instance got a hardware context or sent hardware frames");
         }
-        secondary.Unload();
-        RunReport secondaryReport;
-        secondary.FillReport(secondaryReport);
-        report.problems.insert(report.problems.end(), secondaryReport.problems.begin(),
-                               secondaryReport.problems.end());
+        if (secondaryLoaded && host.HadContext()) {
+            report.problems.push_back("the run-ahead second instance loaded while the main instance holds the hardware "
+                                      "context: RetroArch shows its frames, which cannot reach that context (a black "
+                                      "picture)");
+        }
+        if (secondaryLoaded) {
+            secondary.Unload();
+            RunReport secondaryReport;
+            secondary.FillReport(secondaryReport);
+            report.problems.insert(report.problems.end(), secondaryReport.problems.begin(),
+                                   secondaryReport.problems.end());
+        }
     }
     const uint64_t coreMemoryAtEnd = host.CoreMemoryLive();
     host.Unload();

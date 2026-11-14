@@ -3,6 +3,7 @@
 add_library(brimir_libretro_api OBJECT
     libretro.cpp
     options.cpp
+    hw_context_owner.cpp
 )
 
 target_include_directories(brimir_libretro_api PUBLIC

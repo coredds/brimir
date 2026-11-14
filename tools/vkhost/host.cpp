@@ -240,6 +240,9 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     }
     m_refuseHw = config.refuseHw;
     m_preferGl = config.preferGl;
+    m_secondInstance = config.secondInstance;
+    m_secondInstanceOnVulkan = config.secondInstanceOnVulkan;
+    m_loadGameFailed = false;
     m_growMaskAt = config.growMaskAt;
     m_resetInRun = config.resetInRun;
     m_resetInPresent = config.resetInPresent;
@@ -384,6 +387,7 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     }
     if (!m_api->load_game(hasGame ? &game : nullptr)) {
         std::fprintf(stderr, "vkhost: retro_load_game failed\n");
+        m_loadGameFailed = true;
         return false;
     }
     m_contentLoaded = true;
@@ -465,9 +469,12 @@ void LibretroHost::Unload() {
             }
             m_contextLive = false;
         }
-        if (m_contentLoaded) {
+        if (m_contentLoaded || (m_secondInstance && m_loadGameFailed)) {
+            // RetroArch's runahead_secondary_core_destroy unloads the second instance's content whether or not its
+            // retro_load_game succeeded
             m_api->unload_game();
             m_contentLoaded = false;
+            m_loadGameFailed = false;
         }
         if (m_vulkan) {
             m_vulkan->DestroyContext();
@@ -957,6 +964,10 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
             *static_cast<unsigned*>(data) = m_preferGl ? RETRO_HW_CONTEXT_OPENGL : RETRO_HW_CONTEXT_VULKAN;
             return true;
         }
+        if (m_secondInstanceOnVulkan) {
+            *static_cast<unsigned*>(data) = RETRO_HW_CONTEXT_VULKAN;
+            return true;
+        }
         if (m_refuseHw) {
             // RetroArch on the gl driver with driver switching disabled: reports gl, returns false.
             *static_cast<unsigned*>(data) = RETRO_HW_CONTEXT_OPENGL;
@@ -964,6 +975,10 @@ bool LibretroHost::Environment(unsigned rawCmd, void* data) {
         return false;
     case kEnv(RETRO_ENVIRONMENT_SET_HW_RENDER): {
         auto* callback = static_cast<retro_hw_render_callback*>(data);
+        if (m_secondInstanceOnVulkan) {
+            Problem("SET_HW_RENDER from the run-ahead second instance: RetroArch 1.22.2 accepts it and hands this "
+                    "copy's callbacks to the main instance's context");
+        }
         if (!m_vulkan || m_refuseHw || callback->context_type != RETRO_HW_CONTEXT_VULKAN) {
             std::fprintf(stderr, "vkhost: SET_HW_RENDER (context type %d) refused\n",
                          static_cast<int>(callback->context_type));

@@ -68,6 +68,13 @@ struct HostConfig {
     bool runahead = false; // --runahead: run-ahead simulation (hidden frames, a second instance without context)
     bool rollback = false; // --rollback: RetroArch's single-instance run-ahead (hidden frame, save, frame, load)
     bool preferGl = false; // --preferred-hw gl: GET_PREFERRED_HW_RENDER reports GL (SET_HW_RENDER still accepted)
+    // --runahead's second instance, as RetroArch 1.22.2 creates and destroys it (runahead.c): a failed
+    // retro_load_game is followed by retro_unload_game and retro_deinit.
+    bool secondInstance = false;
+    // ... on RetroArch's vulkan driver: its GET_PREFERRED_HW_RENDER reaches RetroArch's and reports Vulkan.
+    // SET_HW_RENDER and the negotiation interface are refused (refuseHw); a SET_HW_RENDER is a problem (1.22.2
+    // accepts it and hands this copy's callbacks to the main instance's context).
+    bool secondInstanceOnVulkan = false;
     uint32_t fakeApi = 0;  // --fake-api X.Y: the core is told the GPU supports only this Vulkan version
     int growMaskAt = -1;   // --grow-mask F: sync mask 0b1 until frame F, then 0b111
     bool noValidation = false;      // --no-validation: do not load the validation layer (timing runs)
@@ -210,6 +217,7 @@ struct RunReport {
     uint64_t secondaryFrames = 0;          // run-ahead: frames the second instance ran
     uint64_t secondaryHardwareFrames = 0;  // run-ahead: must stay 0
     bool secondaryHadContext = false;      // run-ahead: must stay false
+    uint64_t secondaryDeclines = 0;        // run-ahead: the second instance's retro_load_game failed (held context)
     double recordSeconds = 0;   // wall time of the recorded frames' retro_run calls (sink time included)
     double sinkSeconds = 0;     // of which in FrameSink::OnFrame (hash, PPM)
     double readbackSeconds = 0; // of which in the host's set_image readback (Vulkan)
@@ -340,6 +348,9 @@ private:
     std::unique_ptr<VulkanProvider> m_vulkan;
     bool m_refuseHw = false;
     bool m_preferGl = false;
+    bool m_secondInstance = false;
+    bool m_secondInstanceOnVulkan = false;
+    bool m_loadGameFailed = false; // retro_load_game returned false (a second instance is still unloaded)
     int m_growMaskAt = -1;
     HostFrame m_lastFrame; // repeated for video_refresh(NULL)
     struct DeferredFrame {
