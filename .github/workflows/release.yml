@@ -195,14 +195,15 @@ jobs:
 
             ### ${{ github.ref_name }}
 
-            **Upstream Ymir sync** - every upstream Ymir core change up to `ff935379` (2026-11-07) was reviewed: 533 commits, 4 fixes taken, 92 already in Brimir (including every game fix Ymir names in that period), Brimir's own version kept for 2, and 435 skipped (mostly Ymir's GPU renderers and host CD drive support). The list with a reason for each is in `src/core/UPSTREAM_SYNC_2026-11.md`.
+            **Performance** - the software renderer and the SH-2 interpreter are much faster, with byte-identical output. Median frame time on 9 test windows (BIOS menu and eight games), against 0.7.2: 20-64 % shorter with threaded VDP (the default) and 29-61 % shorter without it, on every window. Examples with threaded VDP: Virtua Fighter 2 18.4 -> 6.7 ms, Fighters Megamix 17.6 -> 6.9 ms, Street Fighter Zero 3 11.1 -> 4.8 ms. The Vulkan renderer at 1x is 7-9 % faster, and a single-instance run-ahead frame 23-39 % cheaper.
+            - VDP2 backgrounds drawn per character run; sprite layer skips empty 8-dot blocks; layer compose vectorised (SSE2 / NEON).
+            - Leaner SH-2 interpreter (inlined hot path, RAM/ROM fast path); the core's forced-inline hints are now active.
+            - Run-ahead reuses the state it just saved instead of decoding it again.
+            - Threaded VDP1: less emulation-thread time (the render thread's counter has its own cache line).
 
-            **Fixed**
-            - CD Block low-level emulation: resuming a paused CD audio track now continues where it was paused instead of restarting from the track's pregap.
-            - Loading a state of the other CD Block mode now resets the CD Block's and drive's event settings (no effect seen in normal RetroArch use).
-            - Disc file lookup offset and a VDP state copy (no output change).
+            **No output change** - frames, audio, save-state bytes and cycle counts are identical to 0.7.2. Checked per frame on all 9 windows with and without threaded VDP, through the libretro core with the software and Vulkan renderers (plain, save/load every frame, run-ahead), on the aarch64 build, with the 40 software-vs-Vulkan compare runs and the JIT lockstep check. States from 0.7.2 and older load as before.
 
-            Frames, save states and run-ahead behave exactly as in 0.7.1 (checked on the BIOS and ten games, 40 software-vs-Vulkan compare runs, run-ahead rollback and old 0.7.1 states).
+            Timings are from Windows (MSVC, Ryzen 7 5700G); Linux and macOS builds got faster in the same direction but were not re-measured at the end. In threaded mode, the deinterlacer hand-off spins briefly before blocking on CPUs with 4 or more hardware threads (timing only).
 
             **Known Limitations**
             - Vulkan at 4x: Daytona USA CE's SEGA logo and attract-mode restart stutter; rotated or distorted sprites (e.g. Astal) may differ from 1x at their edges; magnified textures stay blocky. Not tested on real Macs (MoltenVK). CD Block low-level emulation is tested on six contents only.

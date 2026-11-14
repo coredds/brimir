@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-14
+
 ### Performance
 - **Faster software rendering and SH-2 emulation, with identical output.** Measured against 0.7.2 with the same benchmark on the 9 test windows (BIOS menu, Sega Rally, Virtua Fighter 2, Burning Rangers, Panzer Dragoon II Zwei, Fighters Megamix, Guardian Heroes, Street Fighter Zero 3, Astal). Builds were Release + LTO with MSVC, as released, on the development PC (Ryzen 7 5700G, 8-core Zen 3, Windows 11). The GCC and Clang builds were measured to move in the same direction when the inlining change was made, but they were not measured again at the end of the round. The median frame time is 20-64 % shorter with threaded VDP (the default) and 29-61 % shorter without it, on every window. Examples with threaded VDP: Virtua Fighter 2 18.4 -> 6.7 ms, Fighters Megamix 17.6 -> 6.9 ms, Street Fighter Zero 3 11.1 -> 4.8 ms, Sega Rally 7.0 -> 5.0 ms, Astal 9.0 -> 7.3 ms. With the Vulkan renderer at 1x, frames are 7-9 % shorter. A run-ahead frame (single instance) is 23-27 % shorter with threaded VDP and 30-39 % shorter without it (Guardian Heroes, Burning Rangers). Per area, each measured against the build before it:
   - **VDP2 backgrounds**: normal scroll backgrounds are drawn per run of dots inside one character cell, not dot by dot. This cut frame time by 9.7-41 % without threaded VDP (Fighters Megamix -41 %, Virtua Fighter 2 -39 %, Street Fighter Zero 3 -35 %).

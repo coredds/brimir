@@ -8,13 +8,17 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed and the relevant fixes are taken, with Brimir-specific fixes and optimizations on top.
 
-## What's New in v0.7.2
+## What's New in v0.8.0
+
+- **Much faster software rendering and SH-2 emulation** - the median frame time is 20-64 % shorter with threaded VDP (the default) and 29-61 % shorter without it, on every test window (for example Virtua Fighter 2 18.4 -> 6.7 ms, Fighters Megamix 17.6 -> 6.9 ms). The Vulkan renderer at 1x is 7-9 % faster and single-instance run-ahead 23-39 % cheaper. See [Performance](#performance).
+- **No output change** - frames, audio, save states and cycle counts are byte-identical to 0.7.2, and states from 0.7.2 and older load as before.
+
+## Previous Highlights
+
+### v0.7.2
 
 - **Upstream Ymir sync** - every upstream Ymir core change up to `ff935379` (2026-11-07) reviewed: 533 commits, 4 fixes taken, 92 already in Brimir (including every game fix Ymir names in that period), Brimir's own version kept for 2, the rest skipped (mostly Ymir's GPU renderers and host CD drive support). Details in `src/core/UPSTREAM_SYNC_2026-11.md`.
 - **CD Block LLE** - resuming a paused CD audio track now continues where it was paused instead of restarting from the track's pregap.
-- No visible change otherwise: frames, save states and run-ahead behave exactly as in 0.7.1.
-
-## Previous Highlights
 
 ### v0.7.1
 
@@ -136,7 +140,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 
 ## Performance
 
-The 2026-11 performance round (in the next release) made the software renderer and the SH-2 interpreter faster without changing any output. Frames, audio and save states are byte-identical to 0.7.2. On the development PC (Ryzen 7 5700G, Release + LTO, MSVC on Windows; GCC and Clang builds moved in the same direction when measured during the round but were not re-measured at the end), the median frame time over 9 test windows is 20-64 % shorter with threaded VDP and 29-61 % shorter without it. With threaded VDP, Virtua Fighter 2 dropped from 18.4 to 6.7 ms and Fighters Megamix from 17.6 to 6.9 ms. Single-instance run-ahead frames are 23-39 % shorter. Details per area are in `CHANGELOG.md`. The harness used to prove and measure each change is in `tools/perf/`.
+The 2026-11 performance round (v0.8.0) made the software renderer and the SH-2 interpreter faster without changing any output. Frames, audio and save states are byte-identical to 0.7.2. On the development PC (Ryzen 7 5700G, Release + LTO, MSVC on Windows; GCC and Clang builds moved in the same direction when measured during the round but were not re-measured at the end), the median frame time over 9 test windows is 20-64 % shorter with threaded VDP and 29-61 % shorter without it. With threaded VDP, Virtua Fighter 2 dropped from 18.4 to 6.7 ms and Fighters Megamix from 17.6 to 6.9 ms. Single-instance run-ahead frames are 23-39 % shorter. Details per area are in `CHANGELOG.md`. The harness used to prove and measure each change is in `tools/perf/`.
 
 ARM devices have not been measured. Scaled from the PC profile (a Cortex-A77-class prime core at about 0.6x the PC's single-thread speed), the software renderer would now keep every test window under the 16.7 ms frame budget on a Snapdragon 865-class device, where 0.7.2 was estimated at 11-35 ms. The SH-2 interpreter (aarch64 has no native JIT) and the deinterlacer in interlaced games are the limits there.
 
