@@ -23,6 +23,8 @@ add_executable(brimir_tests
     unit/test_hw_backports.cpp
     # VDP1 line stepper: clip termination and explicit wrapping
     unit/test_vdp1_line_stepper.cpp
+    # Threaded VDP1: the render thread sees the emulator thread's writes in order (matches unthreaded)
+    unit/test_vdp1_threaded_events.cpp
     unit/test_dirty_bitmap.cpp
     # VDP color calculation tests
     unit/test_vdp_color_calc.cpp

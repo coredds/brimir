@@ -239,6 +239,12 @@ public:
                 attrs.colorCalcRatio, attrs.shadowOrWindow, attrs.specialType};
     }
 
+    // Brimir: test hook: the VDP1 render thread's copy of VRAM and the framebuffers. Only meaningful with threaded VDP1
+    // and the thread idle (after PreSaveStateSync).
+    const VDP1Memory &GetVDP1RendererMemoryForTesting() const {
+        return m_vdp1RenderingContext.vdp1.mem;
+    }
+
     // Brimir: read-only access to the VDP1 auxiliary framebuffers for the external (Vulkan) renderer's VDP2 sprite
     // layer. Not synchronized with a threaded VDP1: call VDP1SyncFB (or rely on a framebuffer swap) first.
     const SpriteFB &GetAltFBRAM(uint8 fbIndex) const {
@@ -428,8 +434,10 @@ private:
         std::array<VDP1RenderEvent, 64> pendingEvents;
         size_t pendingEventsCount = 0;
 
-        std::atomic_uint32_t cmdFence{0};
-        uint32 cmdCount{0};
+        // Brimir: the VDP1 thread bumps the fence after every event; on its own cache line so that it doesn't share
+        // one with the emulator thread's pending batch (pendingEventsCount, cmdCount)
+        alignas(64) std::atomic_uint32_t cmdFence{0};
+        alignas(64) uint32 cmdCount{0};
 
         struct VDP1 {
             VDP1Regs regs;
