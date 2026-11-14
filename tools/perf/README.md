@@ -108,6 +108,43 @@ tools\perf\measure.ps1 -A <bin dir> -B <bin dir> -Windows vf2,megamix -Modes unt
   `selfcheck*.csv`, `logs\`, `provenance.json`. Time: about 25 s per run (1200 frames); the full default (6 rounds x 9
   windows x 2 modes x 2 builds = 216 runs) takes about 1.5 h, so split it by `-Windows` to stay under 2 h shells.
 
+- **Self-check window.** Threaded vf2 can't serve as a self-check window on a busy desktop: its deinterlacer threads
+  gave a 13 % A-vs-A spread in the final round. Use `-SelfCheckWindows gh` (1-2 % spread).
+
+## Against a release older than the harness
+
+Benches from before Task 0 (v0.7.2 and older) have no `--audio-hash`, `--save-state-every` or `--fixed-rtc`. The bench
+is also part of the LTO set, so a different bench source moves the core's code. To compare against such a release, build
+the release's core with the current bench source:
+
+```powershell
+git worktree add --detach $env:TEMP\opencode\perf-v072-hb f395c6f
+git -C $env:TEMP\opencode\perf-v072-hb checkout <head> -- tools/brimir_bench.cpp tools/stream_hash.hpp
+tools\perf\baseline.ps1 -Tree $env:TEMP\opencode\perf-v072-hb
+```
+
+The bench source only adds tools and changes no output. `prove.ps1 -NoAudio` of the original v0.7.2 bench against
+this build was identical on 18/18 windows.
+
+## Results of the 2026-11 round
+
+Head `765ba81` against v0.7.2 (the build above), 8 rounds, p50 ms/frame, v0.7.2 -> head:
+
+| window | threaded | unthreaded |
+|---|---|---|
+| bios | 7.71 -> 4.00 (-48 %) | 9.86 -> 5.89 (-40 %) |
+| rally | 7.03 -> 4.97 (-29 %) | 15.14 -> 10.47 (-31 %) |
+| vf2 | 18.43 -> 6.72 (-64 %) | 41.96 -> 16.19 (-61 %) |
+| burning | 9.08 -> 6.78 (-25 %) | 15.31 -> 9.81 (-36 %) |
+| pdz | 8.04 -> 6.00 (-25 %) | 13.66 -> 9.02 (-34 %) |
+| megamix | 17.62 -> 6.91 (-61 %) | 39.38 -> 16.17 (-59 %) |
+| gh | 7.18 -> 5.03 (-30 %) | 12.20 -> 6.83 (-44 %) |
+| sfz3 | 11.09 -> 4.80 (-57 %) | 16.55 -> 7.57 (-54 %) |
+| astal | 9.03 -> 7.25 (-20 %) | 16.46 -> 11.72 (-29 %) |
+
+Every round had the same sign (8/8). The machine ran on the Balanced power plan, with Zoom and Radeon Software open,
+using `measure.ps1`'s isolation.
+
 ## Typical task flow
 
 ```powershell

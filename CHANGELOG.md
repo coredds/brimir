@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- **Faster software rendering and SH-2 emulation, with identical output.** Measured against 0.7.2 with the same benchmark on the 9 test windows (BIOS menu, Sega Rally, Virtua Fighter 2, Burning Rangers, Panzer Dragoon II Zwei, Fighters Megamix, Guardian Heroes, Street Fighter Zero 3, Astal). Builds were Release + LTO with MSVC, as released, on the development PC (8-core Zen 3, Windows 11). The median frame time is 20-64 % shorter with threaded VDP (the default) and 29-61 % shorter without it, on every window. Examples with threaded VDP: Virtua Fighter 2 18.4 -> 6.7 ms, Fighters Megamix 17.6 -> 6.9 ms, Street Fighter Zero 3 11.1 -> 4.8 ms, Sega Rally 7.0 -> 5.0 ms, Astal 9.0 -> 7.3 ms. With the Vulkan renderer at 1x, frames are 7-9 % shorter. A run-ahead frame (single instance) is 23-27 % shorter with threaded VDP and 30-39 % shorter without it (Guardian Heroes, Burning Rangers). Per area, each measured against the build before it:
+  - **VDP2 backgrounds**: normal scroll backgrounds are drawn per run of dots inside one character cell, not dot by dot. This cut frame time by 10-41 % without threaded VDP (Fighters Megamix -41 %, Virtua Fighter 2 -39 %, Street Fighter Zero 3 -35 %).
+  - **Sprite layer**: 8-dot blocks with no sprite data are filled in one step. This cut frame time by 4-8 % without threaded VDP on the sprite-heavy windows.
+  - **Layer compose**: layer sorting and the per-layer flag gathers are vectorised with SSE2 on x86-64 and NEON on ARM. This cut frame time by 11-19 % without threaded VDP on Virtua Fighter 2, Fighters Megamix, Street Fighter Zero 3 and the BIOS menu.
+  - **SH-2 interpreter**: the hot path is inlined, memory access has a fast path for RAM and ROM pages, and the MSVC code layout is leaner. The SH-2 time is 20-25 % shorter (Astal 7 %, which uses cache emulation).
+  - **Inlining**: the core's forced-inline hints (`FORCE_INLINE`) are now active. They did nothing in earlier Brimir builds. Frame time is up to 12 % shorter with MSVC, 6-10 % with GCC and 4-11 % with Clang. In threaded mode, the hand-off between the deinterlacer threads now spins briefly before blocking (only on CPUs with 4 or more threads).
+  - **Run-ahead**: loading the state that was just saved reuses the decoded state instead of decoding it again, and LZ4 compression keeps its work buffer between saves. The save + load round trip is 16-19 % shorter (load 2.0-2.7 -> 0.9-1.1 ms). This helps single-instance run-ahead and loading the last saved state. Rewind, netplay and older states use the normal load path.
+  - **Threaded VDP1**: the VDP1 render thread's progress counter now has its own cache line, away from the fields the emulation thread writes for every VDP1 write. Frame time is 3-5 % shorter on Sega Rally, Fighters Megamix and Burning Rangers.
+- **Tried and dropped** (no measurable gain): SCSP DSP program pre-decoding and an idle-slot fast path (1.6 % at most, combined), lazy SH-2 timer catch-up (1 % at most), batching VDP1 VRAM writes into ranges (no gain once the counter had its own cache line), 128-byte alignment of the VDP1 thread fields (slower) and a per-line sprite type decode. The x64 SH-2 JIT and MSVC PGO were measured before this work and left out: the JIT was 0-20 % slower than the interpreter and PGO gained about 1 %. The JIT is unchanged and stays experimental.
+- **No output change.** Frames, audio, save-state bytes and cycle counts are byte-identical to 0.7.2. This was checked after every change and again for the whole set:
+  - per-frame frame, audio and save-state hashes on all 9 windows, with and without threaded VDP
+  - the libretro core's frames and save states with plain runs, a save/load every frame and run-ahead, with the software and Vulkan renderers
+  - the aarch64 build (under qemu), whose frames, audio and states match the x86-64 0.7.2 build
+  - the 40-run software-vs-Vulkan comparison, which is still identical
+  - the JIT lockstep check
+  - the save-state rejection tests (a wrong or corrupt state is still refused, and the running game is left untouched)
+
+  Save states from 0.7.2 and older load as before.
+
 ## [0.7.2] - 2026-11-10
 
 ### Changed
