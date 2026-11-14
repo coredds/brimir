@@ -13,6 +13,7 @@
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <functional>
@@ -482,10 +483,13 @@ TEST_CASE("Threaded VDP1 matches unthreaded on a running system (SH-2 stores, SC
         REQUIRE(a.vram == b.vram);
         REQUIRE(a.displayFB == b.displayFB);
         REQUIRE(a.drawFB == b.drawFB);
-        if (a.drawFB != std::vector<uint8>(a.drawFB.size(), 0) ||
-            a.displayFB != std::vector<uint8>(a.displayFB.size(), 0)) {
+        // The draw framebuffer holds the sprites of this round (the CPU framebuffer stores of a round change at most
+        // three bytes of it): count the rounds in which it holds a drawn image, not just a stored byte
+        const auto nonZero = std::count_if(a.drawFB.begin(), a.drawFB.end(), [](uint8 v) { return v != 0; });
+        if (nonZero > 256) {
             ++drawsSeen;
         }
     }
-    CHECK(drawsSeen > 0); // the VDP1 drew
+    INFO("rounds with a drawn image in the draw framebuffer: " << drawsSeen << " of 24");
+    CHECK(drawsSeen >= 18);
 }
