@@ -25,6 +25,12 @@ tests/
     ├── test_vdp_savestate.cpp       # VDP2 renderer state across save/load, vertical cell scroll flags
     ├── test_vdp_uninit_state.cpp   # VDP state built on dirty (0xCD) memory equals state built on zeroed memory
     ├── test_vdp2_nbg_fastpath.cpp   # NBG character-run fast path vs the forced per-dot path ([fastpath], random scenes)
+    ├── test_vdp2_sprite_compose_fastpath.cpp  # Sprite layer and compose fast paths vs the per-dot code ([sprite][compose][fastpath])
+    ├── test_vdp2_compose_simd.cpp   # Compose SIMD helpers (vector and scalar) vs references ([compose])
+    ├── test_vdp1_threaded_events.cpp  # Threaded VDP1 vs unthreaded: VRAM, framebuffers, save/load ([vdp1][threaded])
+    ├── test_sh2_exact.cpp           # SH-2 interpreter cycle-exact digests, with and without cache emulation ([sh2][exact])
+    ├── test_event_spinwait.cpp      # util::Event::SpinWait, the threaded deinterlacer hand-off ([util][event])
+    ├── test_bench_stream_hash.cpp   # brimir_bench audio and state stream hashes ([bench])
     ├── test_profiler.cpp            # Profiler
     ├── test_audio_ring_buffer.cpp   # Audio ring buffer
     ├── test_media_loader.cpp        # CUE/CCD loading, compressed audio tracks, sector alignment
