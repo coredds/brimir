@@ -10,6 +10,7 @@
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
 #include "jit_test_backend.hpp"
+#include "test_fixtures.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -33,8 +34,7 @@ const char* const kBIOSCandidates[] = {
 };
 
 std::filesystem::path FixturesDir() {
-    // tests/unit/<this file> -> tests/fixtures
-    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures";
+    return brimir::test::FixturesDir();
 }
 
 std::vector<std::filesystem::path> AvailableBIOS() {

@@ -11,16 +11,27 @@
 #                       Device report shows the software fallback instead)
 # Exit 0 only when every assertion of every scenario holds.
 #
-# Needs: RetroArch (com.retroarch) installed, `adb root` allowed (a google_apis userdebug image), the US BIOS
-# mpr-17933.bin in <bios-dir> (only read; pushed into a scratch directory in the app's data folder).
+# Needs: RetroArch installed, `adb root` allowed (a google_apis userdebug image), the US BIOS mpr-17933.bin in
+# <bios-dir> (only read; pushed into a scratch directory in the app's data folder, removed on exit, also after a
+# failure).
+#
+# Local only, never in CI: starting the core needs a tap on RetroArch's "Start Core" menu entry (see below).
+#
+# Lasting changes on the device (left in place for re-runs): the core in <app data>/cores/brimir_libretro_android.so
+# and, with E2E_INFO=1, brimir_libretro.info in <app data>/info/ (both owned by the app); RetroArch granted
+# READ/WRITE_EXTERNAL_STORAGE (pm grant); `settings put secure immersive_mode_confirmations confirmed`; adbd running
+# as root. RetroArch's own retroarch.cfg is not touched (the run uses its own configuration file).
 #
 # Environment:
 #   ADB        adb command (default `adb`). From WSL with the Windows SDK:
 #              ADB=/mnt/c/Users/<you>/AppData/Local/Android/Sdk/platform-tools/adb.exe (local paths are converted
 #              with wslpath when ADB ends in .exe)
+#   PKG        RetroArch's package (default com.retroarch)
 #   E2E_WAIT   seconds RetroArch runs per scenario (default 20)
-#   E2E_OUT    local output folder for the logs (default ./e2e-retroarch-out)
+#   E2E_OUT    local output folder for logs and screenshots (default: a new mktemp -d folder, printed)
 #   E2E_INFO   1 (default) installs resources/info/brimir_libretro.info; 0 removes it from the info directory
+#   E2E_TAP    "x y" of the "Start Core" entry (default computed for a portrait phone)
+#   E2E_KEEP   1 keeps the scratch folder on the device
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
@@ -32,16 +43,24 @@ BIOS_DIR=$2
 shift 2
 SCENARIOS=("$@")
 [ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(software runahead-software runahead-vulkan)
+for s in "${SCENARIOS[@]}"; do
+    case "$s" in
+        software | runahead-software | runahead-vulkan) ;;
+        *) echo "error: unknown scenario $s (software, runahead-software, runahead-vulkan)" >&2; exit 2 ;;
+    esac
+done
 
 ADB=${ADB:-adb}
 WAIT=${E2E_WAIT:-20}
-OUT=${E2E_OUT:-./e2e-retroarch-out}
+OUT=${E2E_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/brimir-e2e-retroarch.XXXXXX")}
 INSTALL_INFO=${E2E_INFO:-1}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 BIOS=$BIOS_DIR/mpr-17933.bin
 VERSION=$(sed -n 's/^ *VERSION \([0-9][0-9.]*\).*/\1/p' "$REPO/CMakeLists.txt" | head -n1)
+VERSION_RE=${VERSION//./\\.}
 
-PKG=com.retroarch
+PKG=${PKG:-com.retroarch}
+# The activity class keeps RetroArch's Java package whatever the application id
 ACTIVITY=$PKG/com.retroarch.browser.retroactivity.RetroActivityFuture
 DATA=/data/user/0/$PKG
 CORES=$DATA/cores
@@ -63,6 +82,16 @@ sh_root() { "$ADB" shell "$*" | tr -d '\r'; }
 
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
+echo "output: $OUT"
+
+device_ready=0
+cleanup() {
+    if [ $device_ready = 1 ]; then
+        "$ADB" shell "am force-stop $PKG; rm -f /data/local/tmp/brimir-e2e.png" >/dev/null 2>&1 || true
+        [ "${E2E_KEEP:-0}" = 1 ] || "$ADB" shell "rm -rf $E2E" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
 
 adbq wait-for-device
 if [ "$(sh_root id -u)" != "0" ]; then
@@ -71,6 +100,7 @@ if [ "$(sh_root id -u)" != "0" ]; then
     adbq wait-for-device
 fi
 [ "$(sh_root id -u)" = "0" ] || { echo "error: adb root is not available on this device" >&2; exit 2; }
+device_ready=1
 sh_root pm path $PKG | grep -q package: || { echo "error: $PKG is not installed" >&2; exit 2; }
 APK=$(sh_root pm path $PKG | head -n1 | sed 's/^package://')
 APP_UID=$(sh_root stat -c %u $DATA)
@@ -121,7 +151,6 @@ run_scenario() {
         software) ;;
         runahead-software) runahead=true ;;
         runahead-vulkan) runahead=true renderer=vulkan ;;
-        *) echo "error: unknown scenario $name" >&2; exit 2 ;;
     esac
     local video=gl
     [ "$renderer" = vulkan ] && video=vulkan
@@ -215,13 +244,13 @@ EOF
         fi
     }
     [ -n "$pid" ] || { echo "  FAIL RetroArch was not running after ${WAIT}s"; ok=0; }
-    check "core version" "Brimir.{0,40}$VERSION" 1
+    check "core version" "Brimir $VERSION_RE initializing" 1
     check "device report" "Device report: " 1
     check "300 frames ran" "Performance Profile \(300 frames\)" 1
     if [ "$runahead" = true ]; then
         # RetroArch copies the core to <cores>/retroarch_temp/ and dlopens the copy as the second instance.
         local inits
-        inits=$(grep -c "Brimir $VERSION initializing" "$OUT/$name.retroarch.log" || true)
+        inits=$(grep -cE "Brimir $VERSION_RE initializing" "$OUT/$name.retroarch.log" || true)
         if [ "$inits" -ge 2 ]; then echo "  ok   second copy initialised ($inits retro_init calls)"; else
             echo "  FAIL second copy initialised ($inits retro_init calls)"; ok=0; fi
         if [ "$renderer" = software ]; then
@@ -248,5 +277,5 @@ EOF
 for s in "${SCENARIOS[@]}"; do
     run_scenario "$s"
 done
-[ "${E2E_KEEP:-0}" = 1 ] || sh_root rm -rf $E2E
+echo "output: $OUT"
 exit $FAILED

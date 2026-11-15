@@ -12,7 +12,7 @@
 #               (local paths are converted with wslpath for adb.exe and for a host bench ending in .exe)
 #   FRAMES      frames to hash (default 300)
 #   BENCH_ARGS  extra brimir_bench arguments for both sides (e.g. --sh2-jit)
-#   HASH_OUT    output folder (default ./e2e-bench-hash-out): android.txt, host.txt, the hash lines and the diff
+#   HASH_OUT    output folder (default: a new mktemp -d folder, printed): android.txt, host.txt, the hash lines, the diff
 # The inputs are only read: copies go to /data/local/tmp/brimir-hash on the device (removed at the end) and to a fresh
 # local scratch directory for the RTC files (the core may write them back).
 set -euo pipefail
@@ -30,7 +30,7 @@ RTC=${6:-}
 ADB=${ADB:-adb}
 FRAMES=${FRAMES:-300}
 read -r -a EXTRA <<<"${BENCH_ARGS:-}"
-OUT=${HASH_OUT:-./e2e-bench-hash-out}
+OUT=${HASH_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/brimir-bench-hash.XXXXXX")}
 DEV=/data/local/tmp/brimir-hash
 
 for f in "$ABENCH" "$HBENCH" "$BIOS" ${GAME:+"$GAME"} ${STATE:+"$STATE"}; do
@@ -43,11 +43,19 @@ win_path() { # $1: tool, $2: path
 }
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
+echo "output: $OUT"
 SCRATCH=$(mktemp -d)
-trap 'rm -rf "$SCRATCH"' EXIT
+device_used=0
+cleanup() {
+    rm -rf "$SCRATCH"
+    # No BIOS, disc or state copy stays on the device, whatever failed
+    [ $device_used = 0 ] || "$ADB" shell "rm -rf $DEV" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 # Android side.
 "$ADB" wait-for-device
+device_used=1
 "$ADB" shell "rm -rf $DEV && mkdir -p $DEV/sys"
 "$ADB" push "$(win_path "$ADB" "$ABENCH")" $DEV/brimir_bench >/dev/null
 "$ADB" push "$(win_path "$ADB" "$BIOS")" $DEV/bios.bin >/dev/null
@@ -82,14 +90,16 @@ grep -E '^(frame|audio) [0-9]+ ' "$OUT/android.txt" >"$OUT/android.hashes.txt" |
 grep -E '^(frame|audio) [0-9]+ ' "$OUT/host.txt" >"$OUT/host.hashes.txt" || true
 na=$(grep -c '^frame ' "$OUT/android.hashes.txt" || true)
 nh=$(grep -c '^frame ' "$OUT/host.hashes.txt" || true)
-distinct=$(grep '^frame ' "$OUT/host.hashes.txt" | awk '{print $4}' | sort -u | wc -l)
-echo "frame hash lines: android $na, host $nh (distinct frame hashes: $distinct)"
-if [ "$na" != "$FRAMES" ] || [ "$nh" != "$FRAMES" ]; then
-    echo "FAIL: expected $FRAMES frame hash lines on each side (see $OUT/android.txt, $OUT/host.txt)"
+aa=$(grep -c '^audio ' "$OUT/android.hashes.txt" || true)
+ah=$(grep -c '^audio ' "$OUT/host.hashes.txt" || true)
+distinct=$( (grep '^frame ' "$OUT/host.hashes.txt" || true) | awk '{print $4}' | sort -u | wc -l)
+echo "frame hash lines: android $na, host $nh (distinct frame hashes: $distinct); audio hash lines: android $aa, host $ah"
+if [ "$na" != "$FRAMES" ] || [ "$nh" != "$FRAMES" ] || [ "$aa" != "$FRAMES" ] || [ "$ah" != "$FRAMES" ]; then
+    echo "FAIL: expected $FRAMES frame and $FRAMES audio hash lines on each side (see $OUT/android.txt, $OUT/host.txt)"
     exit 1
 fi
 if diff "$OUT/host.hashes.txt" "$OUT/android.hashes.txt" >"$OUT/diff.txt"; then
-    echo "PASS: $FRAMES frame and $(grep -c '^audio ' "$OUT/host.hashes.txt") audio hash lines identical"
+    echo "PASS: $FRAMES frame and $FRAMES audio hash lines identical"
 else
     echo "FAIL: hash lines differ (first: $(grep -m1 '^[<>]' "$OUT/diff.txt"); see $OUT/diff.txt)"
     exit 1

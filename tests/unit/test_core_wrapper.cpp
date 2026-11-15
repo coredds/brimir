@@ -4,6 +4,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "unit/frame_path_cases.hpp"
+#include "unit/test_fixtures.hpp"
 #include <brimir/core_wrapper.hpp>
 #include <brimir/savestate_codec.hpp>
 #include <brimir/jit/executor.hpp>
@@ -1675,7 +1676,7 @@ struct RtcContent {
 };
 
 std::filesystem::path UsBiosFixture() {
-    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / "mpr-17933.bin";
+    return brimir::test::FixturesDir() / "mpr-17933.bin";
 }
 
 ymir::smpc::PersistentSMPCData PersistentData(CoreWrapper& core) {
@@ -2016,7 +2017,7 @@ constexpr Smem kSettingsB{0x01, 0x44, 0x55, 0x66};
 constexpr Smem kSettingsC{0x05, 0x77, 0x88, 0x99};
 
 std::filesystem::path JpBiosFixture() {
-    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / "Sega Saturn BIOS v1.01 (JAP).bin";
+    return brimir::test::FixturesDir() / "Sega Saturn BIOS v1.01 (JAP).bin";
 }
 
 // An RTC file (layout above) with these settings and a virtual clock (default 2001-09-09)
@@ -2338,7 +2339,7 @@ TEST_CASE("smpc settings: v4-v11 states keep the session's settings", "[core][rt
 namespace {
 
 std::filesystem::path Fixture(const char* name) {
-    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / name;
+    return brimir::test::FixturesDir() / name;
 }
 
 std::vector<uint8_t> ReadAllBytes(const std::filesystem::path& path) {

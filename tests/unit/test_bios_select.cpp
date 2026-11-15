@@ -1,4 +1,5 @@
 #include "catch_amalgamated.hpp"
+#include "test_fixtures.hpp"
 
 #include <brimir/bios_select.hpp>
 #include <brimir/core_wrapper.hpp>
@@ -58,7 +59,7 @@ struct FakeBiosFolder {
 };
 
 std::filesystem::path Fixture(const char* name) {
-    return std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" / name;
+    return brimir::test::FixturesDir() / name;
 }
 
 // A temp folder removed at scope exit.

@@ -1,4 +1,5 @@
 #include "catch_amalgamated.hpp"
+#include "test_fixtures.hpp"
 
 #include <brimir/cheat_engine.hpp>
 
@@ -591,7 +592,7 @@ TEST_CASE("cheats: out-of-WRAM address ignored with no write", "[cheats]") {
 }
 
 TEST_CASE("cheats: sample .cht fixture parses", "[cheats]") {
-    const fs::path dir = fs::path(BRIMIR_SOURCE_DIR) / "tests" / "fixtures" / "cht";
+    const fs::path dir = brimir::test::FixturesDir() / "cht";
     REQUIRE(fs::is_directory(dir));
     const SweepResult r = Sweep(dir);
     PrintSweep("cht fixture", r);

@@ -1,4 +1,5 @@
 #include <catch_amalgamated.hpp>
+#include "test_fixtures.hpp"
 
 #include <ymir/media/binary_reader/binary_reader_composite.hpp>
 #include <ymir/media/binary_reader/binary_reader_mem.hpp>
@@ -29,14 +30,9 @@
 
 namespace {
 
-// Returns the directory containing the test executable.
-std::filesystem::path TestBinaryDir() {
-    return std::filesystem::path(__FILE__).parent_path().parent_path();
-}
-
 // Returns the fixtures/audio directory.
 std::filesystem::path AudioFixturesDir() {
-    return TestBinaryDir() / "fixtures" / "audio";
+    return brimir::test::FixturesDir() / "audio";
 }
 
 // Creates a uniquely named temporary directory under the system temp path.

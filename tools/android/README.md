@@ -119,8 +119,34 @@ RetroArch: the universal APK from the libretro buildbot (`https://buildbot.libre
 
 ### Installing the core in RetroArch
 
+The user's route, checked without root on the Android 14 image with RetroArch 1.22.2 (screenshots and logs in the
+task 5 evidence, `fix1/install-route/`): copy `brimir_libretro_android.so` to the phone's `Download` folder; in
+RetroArch, Load Core > Install or Restore a Core (it opens `/storage/emulated/0/RetroArch/downloads`; go up twice to
+`/storage/emulated/0/`, open `Download`) and tap the file. RetroArch copies it unchanged (same SHA-256) to its cores
+folder under the same name, `brimir_libretro_android.so`, and returns to the main menu. Load Core then lists it:
+
+- without `brimir_libretro.info` as `brimir_libretro_android.so` ("License: N/A"); the core loads, the title bar shows
+  `Brimir (0.8.1)` (from the core itself), Start Core runs the BIOS menu (`Performance Profile (300 frames)` in the log
+  with the BIOS in `/storage/emulated/0/RetroArch/system/` and `brimir_profiling` enabled in
+  `RetroArch/config/Brimir/Brimir.opt`), and run-ahead with the second instance behaves as with the root install (both
+  copies loaded, no `Failed to create second instance`);
+- with a user-writable Core Info folder (`libretro_info_path` set to `/storage/emulated/0/RetroArch/info`, holding
+  `brimir_libretro.info`) as "Sega - Saturn (Brimir)", "License: GPLv3"; Information > Core Information shows the
+  info file's metadata and the firmware list with present/missing status. That folder replaces the bundled one (other
+  cores' info files are then not found unless copied there too). The app's own info folder
+  `/data/user/0/<package>/info/` needs root.
+
+After run-ahead with the second instance, a `retroarch_temp` folder (the copy RetroArch loads as the second instance)
+can appear in the Load Core list when RetroArch was closed without cleaning up.
+
+Package names: the universal APK is `com.retroarch`; the arm64 APK (`RetroArch_aarch64.apk`, label "RetroArch
+(AArch64)", native code arm64-v8a and x86_64) is `com.retroarch.aarch64`, so its folders are
+`/data/user/0/com.retroarch.aarch64/...` and `/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg`;
+the activity classes are the same (`com.retroarch.browser.mainmenu.MainMenuActivity`,
+`com.retroarch.browser.retroactivity.RetroActivityFuture`). Both 1.22.2 APKs target SDK 28.
+
 RetroArch loads cores from `/data/user/0/com.retroarch/cores/` (`libretro_directory`); the folder exists once RetroArch
-has run. As root: copy `brimir_libretro_android.so` there, owned by the app's user, with the SELinux label of the app's
+has run. The scripts install as root: copy `brimir_libretro_android.so` there, owned by the app's user, with the SELinux label of the app's
 data folder (`chcon`; `restorecon` right after a reinstall can apply the previous install's categories, and the app is
 then denied). `brimir_libretro.info` goes to `/data/user/0/com.retroarch/info/`: RetroArch matches it to
 `brimir_libretro_android.so` (it drops the `_android` suffix). Without it the core still loads, starts without content
@@ -150,12 +176,22 @@ bash tools/android/emulator_tests.sh build-android-x86_64/bin/brimir_tests "~[gp
   calls (the second copy, which RetroArch copies to `cores/retroarch_temp/` and loads into the same process); software:
   no `Failed to create second instance` and both copies mapped; Vulkan: the core's decline message and RetroArch's
   single-instance fallback (or, when the GPU misses the baseline, the software fallback in the device report). Exit 0
-  only when every check holds.
-- `e2e_bench_hash.sh` runs `--hash --audio-hash --fixed-rtc --frames $FRAMES --warmup 0 $BENCH_ARGS` on both sides and
-  compares the per-frame video and audio hash lines.
-- `emulator_tests.sh` recreates `tests/fixtures` at the source path the binary was compiled from (the tests find
-  fixtures through `__FILE__`) and runs `brimir_tests` in `/data/local/tmp/brimir` as the shell user (`RUN_AS=root`,
-  `TEST_ENV="TMPDIR="` to unset TMPDIR).
+  only when every check holds. Scenario names are checked before anything runs; the scratch folder (with the BIOS
+  copy) is removed on exit, also after a failure. `PKG` selects the RetroArch package (e.g. `com.retroarch.aarch64`).
+  It leaves on the device: the core (and info file) in RetroArch's folders, the storage permission granted (`pm grant`),
+  `immersive_mode_confirmations` set, adbd as root. Local only: the "Start Core" tap makes it unsuitable for CI.
+- `e2e_bench_hash.sh` runs `--hash --audio-hash --fixed-rtc --frames $FRAMES --warmup 0 $BENCH_ARGS` on both sides,
+  requires `$FRAMES` frame and `$FRAMES` audio hash lines on each side and compares them. The device folder with the
+  BIOS/disc copies is removed on exit, also after a failure.
+- Both write their logs to `E2E_OUT` / `HASH_OUT`, by default a new `mktemp -d` folder (printed), never inside the
+  repository.
+- `emulator_tests.sh` copies `brimir_tests` and `tests/fixtures` (without `*.bin` / `*.ic1` images) to
+  `/data/local/tmp/brimir` and runs the binary there with `BRIMIR_TEST_FIXTURES_DIR=/data/local/tmp/brimir/fixtures`
+  (the tests' fixtures folder, by default the source tree's) and `TMPDIR=/data/local/tmp/brimir/tmp`; it needs no root
+  and works whatever the checkout path or the place the binary was built (CI). `BIOS_DIR=<folder>` adds BIOS images
+  (otherwise the BIOS cases skip). `RUN_AS=shell` (default), `root`, a uid or an app package (e.g. `com.retroarch`:
+  what an app may do; needs `adb root`); `TEST_ENV="TMPDIR="` unsets TMPDIR (libc++'s Android default is
+  `/data/local/tmp`, writable for the shell user, not for apps). Everything it created is removed on exit.
 
 ### What was proven (2026-11-15, emulator 36.1.9, x86_64 core from this branch)
 
@@ -170,6 +206,8 @@ with the RetroArch nightly:
 - `brimir_bench` on the emulator and the Windows x64 build give identical frame and audio hashes for 300 frames of the
   BIOS menu and of a game window from a save state, with the interpreter and with the SH-2 JIT (the x86_64 build
   has the x64 JIT).
-- `brimir_tests "~[gpu]"` passes on both images as the shell user (one case skips on every platform by design).
+- `brimir_tests "~[gpu]"` passes on both images as the shell user (one case skips on every platform by design). One
+  intermittent failure was seen on the Android 14 image: "Sprite layer and compose fast paths match with the threaded
+  VDP2 and deinterlace renderers" (2 of 40 repeats; 0 of 40 on Windows); see the task 5 report.
 
 Not covered by the emulator: API 26 devices, arm64 code (the A56 test covers it), real-device GPU drivers.
