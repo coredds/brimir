@@ -160,10 +160,11 @@ from boot and from a gameplay state, software and Vulkan renderers: every frame 
 run-ahead against a normal run on the BIOS menu with each controller type and each accuracy option (and on four games
 with the controllers).
 
-- **Run-ahead "Use Second Instance" works with the software renderer only.** With the Vulkan renderer
-  (`brimir_renderer` = `vulkan`) RetroArch shows its one-time "failed to create secondary instance" message and runs
-  run-ahead on one instance, which is exact too. (Before v0.8.1 this setting gave sound but a black picture.)
-  Single-instance run-ahead works with both renderers.
+- **Run-ahead "Use Second Instance" works with the software renderer only.** When the Vulkan renderer is in use
+  (`brimir_renderer` = `vulkan` on RetroArch's `vulkan` video driver), RetroArch shows "Failed to create second
+  instance. Run-Ahead will now use only one instance." (once per content load) and runs run-ahead on one instance,
+  which is exact too. Otherwise the core runs the software renderer and the second instance works. (Before v0.8.1 the
+  Vulkan case gave sound but a black picture.) Single-instance run-ahead works with both renderers.
 - **RTC Mode** (System, applies when content is loaded): `Virtual` (default) runs the Saturn's clock on emulated time,
   so states replay the same date. It starts at your computer's local time and continues from the clock saved in the
   per-region RTC file in the system folder. A first boot with no RTC file no longer shows the BIOS language and clock
@@ -363,8 +364,9 @@ Vulkan 1.2 baseline). Release builds include it, but it has not been tried on a 
 - Burning Rangers at 4x: its slowest 1% of frames take 10-11 ms of VDP1 GPU time on the test GPU (a Radeon RX 9060
   XT), close to the 12 ms target, and up to 18 ms at worst; a slower GPU may drop frames there. Use 2x or 3x then.
 - Run-ahead renders every hidden frame at the internal resolution too, so it multiplies the GPU cost.
-- Run-ahead's "Use Second Instance" is not available with this renderer (a second copy of the core cannot get the
-  Vulkan context): RetroArch says so once and runs run-ahead on one instance.
+- Run-ahead's "Use Second Instance" is not available while this renderer is in use (a second copy of the core cannot
+  get the Vulkan context): RetroArch shows "Failed to create second instance. Run-Ahead will now use only one
+  instance." once per content load and runs run-ahead on one instance.
 - Run-ahead, netplay and save states: a state load keeps the upscaled VDP1 drawing of every framebuffer whose
   contents the loaded state does not change (run-ahead and netplay load one every frame, so this is the usual case);
   a framebuffer the load changes starts again from its native pixels until the game draws it again.
