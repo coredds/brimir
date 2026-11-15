@@ -3465,11 +3465,11 @@ std::string Utf8(const std::filesystem::path& path) {
 // Points temp_directory_path() at `path` (Windows: GetTempPath reads TMP, then TEMP; POSIX: TMPDIR)
 class ScopedTempDir {
 public:
-    explicit ScopedTempDir(const std::string& path) {
-        for (const char* name : kVars) {
-            const char* old = std::getenv(name);
-            m_saved.push_back(old ? std::optional<std::string>(old) : std::nullopt);
-            Set(name, path.c_str());
+    explicit ScopedTempDir(const std::filesystem::path& path) {
+        for (const Char* name : kVars) {
+            const Char* old = Get(name);
+            m_saved.push_back(old ? std::optional<String>(old) : std::nullopt);
+            Set(name, path.native().c_str());
         }
     }
     ~ScopedTempDir() {
@@ -3482,11 +3482,18 @@ public:
 
 private:
 #ifdef _WIN32
-    static constexpr const char* kVars[] = {"TMP", "TEMP"};
-    static void Set(const char* name, const char* value) { _putenv_s(name, value ? value : ""); }
+    // The wide variants: the saved value (a user profile path) is restored intact whatever its characters
+    using Char = wchar_t;
+    using String = std::wstring;
+    static constexpr const Char* kVars[] = {L"TMP", L"TEMP"};
+    static const Char* Get(const Char* name) { return _wgetenv(name); }
+    static void Set(const Char* name, const Char* value) { _wputenv_s(name, value ? value : L""); }
 #else
-    static constexpr const char* kVars[] = {"TMPDIR"};
-    static void Set(const char* name, const char* value) {
+    using Char = char;
+    using String = std::string;
+    static constexpr const Char* kVars[] = {"TMPDIR"};
+    static const Char* Get(const Char* name) { return std::getenv(name); }
+    static void Set(const Char* name, const Char* value) {
         if (value) {
             setenv(name, value, 1);
         } else {
@@ -3494,7 +3501,7 @@ private:
         }
     }
 #endif
-    std::vector<std::optional<std::string>> m_saved;
+    std::vector<std::optional<String>> m_saved;
 };
 
 // An audio CD in a scratch folder named `folder` (UTF-8 allowed), with system/ and the given disc and track names
@@ -3586,7 +3593,7 @@ TEST_CASE("android-paths: no save directory and an unusable temp directory do no
         core->SetCartridgeOverride(CartridgeChoice::Backup);
         backupCart = true;
     }
-    ScopedTempDir tempDir(missing.string());
+    ScopedTempDir tempDir(missing);
     {
         std::error_code ec;
         (void)std::filesystem::temp_directory_path(ec);
@@ -3656,4 +3663,186 @@ TEST_CASE("android-paths: a content URI fails to load with a reason", "[core][an
     CHECK_THAT(core.GetLastError(), ContainsSubstring(uri));
     CHECK_THAT(core.GetLastError(), ContainsSubstring("file path"));
     REQUIRE(core.IsInitialized());
+}
+
+
+// ============================================================
+// Disc swap and state callbacks: no exception crosses the libretro boundary
+// (libretro.cpp is not part of brimir_tests: these cover the CoreWrapper calls its callbacks make)
+// ============================================================
+
+namespace {
+
+// A path whose status check fails with an error other than "not found" (std::filesystem::exists without an error code
+// throws for it): a link that points at itself through a second link (ELOOP on POSIX; a junction pair on Windows,
+// where creating a symbolic link needs a privilege). Empty when the link loop cannot be made here.
+std::filesystem::path LinkLoopPath(const std::filesystem::path& dir) {
+    const std::filesystem::path a = dir / "loop_a";
+    std::error_code ec;
+#ifdef _WIN32
+    const std::string command = "\"cd /d \"" + dir.string() +
+                                "\" && mkdir loop_a && mklink /J loop_b loop_a >nul && rmdir loop_a && "
+                                "mklink /J loop_a loop_b >nul\" 2>nul";
+    if (std::system(command.c_str()) != 0) {
+        return {};
+    }
+#else
+    const std::filesystem::path b = dir / "loop_b";
+    std::filesystem::create_directory_symlink(b, a, ec);
+    if (ec) {
+        return {};
+    }
+    std::filesystem::create_directory_symlink(a, b, ec);
+    if (ec) {
+        return {};
+    }
+#endif
+    (void)std::filesystem::exists(a, ec);
+    return ec ? a : std::filesystem::path{};
+}
+
+#ifndef _WIN32
+// Longer than any POSIX file system takes (ENAMETOOLONG)
+std::filesystem::path OverlongPath(const std::filesystem::path& dir) {
+    std::filesystem::path path = dir;
+    for (int i = 0; i < 200; ++i) {
+        path /= std::string(200, 'a');
+    }
+    return path / "disc.cue";
+}
+#endif
+
+struct ScratchDir {
+    std::filesystem::path root;
+    explicit ScratchDir(const char* name) {
+        root = std::filesystem::temp_directory_path() / (std::string(name) + "_" + std::to_string(std::random_device{}()));
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+    }
+    ~ScratchDir() {
+        // Windows: a junction is removed as a link, not followed
+        std::error_code ec;
+        std::filesystem::remove(root / "loop_a", ec);
+        std::filesystem::remove(root / "loop_b", ec);
+        std::filesystem::remove_all(root, ec);
+    }
+};
+
+// A core with one playlist entry `path`, as the frontend's replace_image_index builds it
+void AddDisc(CoreWrapper& core, const std::filesystem::path& path) {
+    REQUIRE(core.AddDiscIndex());
+    REQUIRE(core.ReplaceDiscIndex(static_cast<unsigned>(core.GetNumDiscs() - 1), path.string().c_str()));
+}
+
+} // namespace
+
+TEST_CASE("android-paths: SetDiscIndex with an unreadable disc path fails with a reason, without throwing",
+          "[core][android-paths]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    ScratchDir scratch("brimir_unreadable_disc_4b");
+    std::filesystem::path path;
+    SECTION("a link loop") {
+        path = LinkLoopPath(scratch.root);
+        if (path.empty()) {
+            SKIP("cannot create a link loop here");
+        }
+    }
+#ifndef _WIN32
+    SECTION("a path longer than the file system takes") {
+        path = OverlongPath(scratch.root);
+    }
+#endif
+    // The precondition: the check itself fails (a not-found answer would be the old, harmless path)
+    std::error_code ec;
+    (void)std::filesystem::exists(path, ec);
+    REQUIRE(ec);
+    CHECK_THROWS(std::filesystem::exists(path));
+
+    AddDisc(core, path);
+    bool swapped = true;
+    REQUIRE_NOTHROW(swapped = core.SetDiscIndex(0));
+    CHECK_FALSE(swapped);
+    INFO(core.GetLastError());
+    CHECK_FALSE(core.GetLastError().empty());
+    CHECK(core.GetCurrentDiscIndex() == 0);
+}
+
+TEST_CASE("android-paths: SetDiscIndex with a missing disc file fails with a reason", "[core][android-paths]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    AddDisc(core, std::filesystem::temp_directory_path() / "brimir_no_such_disc_4b.cue");
+    bool swapped = true;
+    REQUIRE_NOTHROW(swapped = core.SetDiscIndex(0));
+    CHECK_FALSE(swapped);
+    CHECK_FALSE(core.GetLastError().empty());
+}
+
+TEST_CASE("android-paths: SetDiscIndex with a file that is not a disc image fails, without throwing",
+          "[core][android-paths]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    ScratchDir scratch("brimir_bad_disc_4b");
+    const auto& root = scratch.root;
+
+    std::filesystem::path disc;
+    SECTION("a CUE sheet of garbage") {
+        disc = root / "garbage.cue";
+        std::ofstream(disc, std::ios::binary) << "this is not a cue sheet\n\x01\x02\x03\xff\xfe";
+    }
+    SECTION("an empty file") {
+        disc = root / "empty.cue";
+        std::ofstream(disc, std::ios::binary);
+    }
+    SECTION("a CUE sheet whose track is missing") {
+        disc = root / "missing_track.cue";
+        std::ofstream(disc, std::ios::binary) << "FILE \"nope.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n";
+    }
+    SECTION("a CUE sheet whose track cannot be examined (the loader's file checks throw)") {
+        if (LinkLoopPath(root).empty()) {
+            SKIP("cannot create a link loop here");
+        }
+        disc = root / "loop_track.cue";
+        std::ofstream(disc, std::ios::binary)
+            << "FILE \"loop_a\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n";
+    }
+    SECTION("a folder named like a disc image") {
+        disc = root / "folder.cue";
+        std::filesystem::create_directories(disc);
+    }
+    SECTION("an image of a few bytes") {
+        disc = root / "tiny.iso";
+        std::ofstream(disc, std::ios::binary) << "CD001";
+    }
+    INFO(disc.string());
+    AddDisc(core, disc);
+    bool swapped = true;
+    REQUIRE_NOTHROW(swapped = core.SetDiscIndex(0));
+    CHECK_FALSE(swapped);
+    INFO(core.GetLastError());
+    CHECK_FALSE(core.GetLastError().empty());
+    CHECK(core.GetCurrentDiscIndex() == 0);
+}
+
+TEST_CASE("android-paths: the state and disc-list calls behind the libretro callbacks do not throw",
+          "[core][android-paths]") {
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    std::vector<uint8_t> garbage(4096, 0xA5);
+    char text[16];
+    REQUIRE_NOTHROW(core.GetStateSize());
+    REQUIRE_NOTHROW(core.SaveState(garbage.data(), 4));
+    REQUIRE_NOTHROW(core.SaveState(nullptr, 0));
+    REQUIRE_NOTHROW(core.LoadState(garbage.data(), garbage.size()));
+    REQUIRE_NOTHROW(core.LoadState(nullptr, 0));
+    CHECK_FALSE(core.LoadState(garbage.data(), garbage.size()));
+    REQUIRE_NOTHROW(core.SetEjectState(true));
+    REQUIRE_NOTHROW(core.GetEjectState());
+    REQUIRE_NOTHROW(core.GetNumDiscs());
+    REQUIRE_NOTHROW(core.GetCurrentDiscIndex());
+    REQUIRE_NOTHROW(core.AddDiscIndex());
+    REQUIRE_NOTHROW(core.ReplaceDiscIndex(0, "x.cue"));
+    REQUIRE_NOTHROW(core.GetDiscPath(0, text, sizeof text));
+    REQUIRE_NOTHROW(core.GetDiscLabel(0, text, sizeof text));
+    REQUIRE_NOTHROW(core.SetInitialDisc(0, "x.cue"));
 }

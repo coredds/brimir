@@ -91,6 +91,8 @@ std::optional<ymir::db::SystemRegion> IPLSystemRegion(const ymir::Saturn *saturn
 }
 
 // The frontend's paths are UTF-8 (libretro); a path made from a narrow string is in the ANSI code page on Windows.
+// A frontend that passes ANSI (non-UTF-8) paths on Windows therefore fails to load content with non-ASCII names;
+// libretro and RetroArch pass UTF-8.
 std::filesystem::path PathFromUtf8(const char *text) {
     const std::string_view view(text);
     return std::filesystem::path(std::u8string(view.begin(), view.end()));
@@ -940,7 +942,8 @@ void CoreWrapper::LoadCartridgeRAM() {
         return;
     }
 
-    if (!std::filesystem::exists(m_cartridgePath)) {
+    std::error_code existsError;
+    if (!std::filesystem::exists(m_cartridgePath, existsError)) {
         return;
     }
 
@@ -2646,8 +2649,13 @@ bool CoreWrapper::SetDiscIndex(unsigned index) {
         m_currentDiscIndex = m_discList.size();
         return true;
     }
+    m_lastError.clear();
     const auto& discPath = m_discList[index];
-    if (!std::filesystem::exists(discPath)) {
+    // Error codes: the file system can fail for more than a missing file (permissions, link loops, a name too long)
+    std::error_code existsError;
+    if (!std::filesystem::exists(discPath, existsError)) {
+        m_lastError = existsError ? "Cannot access disc file " + PathToUtf8(discPath) + ": " + existsError.message()
+                                  : "Disc file not found: " + PathToUtf8(discPath);
         return false;
     }
     // Validate that we can parse the disc before ejecting the current one
@@ -2658,9 +2666,19 @@ bool CoreWrapper::SetDiscIndex(unsigned index) {
             m_lastError += message;
         }
     };
-    if (!ymir::media::LoadDisc(discPath, disc, m_discPreload, loaderCallback)) {
+    bool loaded = false;
+    try {
+        loaded = ymir::media::LoadDisc(discPath, disc, m_discPreload, loaderCallback);
+    } catch (const std::exception& e) {
+        m_lastError = std::string("Exception during disc load: ") + e.what();
+        return false;
+    } catch (...) {
+        m_lastError = "Unknown exception during disc load";
+        return false;
+    }
+    if (!loaded) {
         if (m_lastError.empty()) {
-            m_lastError = "Failed to load disc: " + discPath.string();
+            m_lastError = "Failed to load disc: " + PathToUtf8(discPath);
         }
         return false;
     }

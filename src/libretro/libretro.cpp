@@ -1408,54 +1408,79 @@ RETRO_API void retro_run(void) {
     log_device_report_once();
 }
 
-RETRO_API size_t retro_serialize_size(void) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) {
-        return 0;
+// The state and disc-control callbacks (not retro_run: a swallowed exception there would hide a broken state) can
+// reach file system and allocation failures; an exception must never cross into the frontend (RetroArch's C code
+// terminates on it, or worse). It is logged and the callback answers `fallback`.
+template <typename T, typename F>
+static T guarded_callback(const char* name, T fallback, F&& body) {
+    try {
+        return body();
+    } catch (const std::exception& e) {
+        brimir_log(RETRO_LOG_WARN, "%s: exception: %s", name, e.what());
+    } catch (...) {
+        brimir_log(RETRO_LOG_WARN, "%s: unknown exception", name);
     }
-    return g_core->GetStateSize();
+    return fallback;
+}
+
+RETRO_API size_t retro_serialize_size(void) {
+    return guarded_callback("retro_serialize_size", size_t{0}, [&]() -> size_t {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) {
+            return 0;
+        }
+        return g_core->GetStateSize();
+    });
 }
 
 RETRO_API bool retro_serialize(void* data, size_t size) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) {
-        return false;
-    }
-    return g_core->SaveState(data, size);
+    return guarded_callback("retro_serialize", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) {
+            return false;
+        }
+        return g_core->SaveState(data, size);
+    });
 }
 
 RETRO_API bool retro_unserialize(const void* data, size_t size) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) {
-        return false;
-    }
-    const bool wasLLE = g_core->IsCDBlockLLEActive();
-    const bool loaded = g_core->LoadState(data, size);
-    // Also after a rejected state: the view must match work RAM whatever the load left in it.
-    publish_ram_view();
-    g_stateLoadedBeforeRun = true;
-    if (loaded) {
-        if (g_core->IsCDBlockLLEActive() != wasLLE) {
-            brimir_log(RETRO_LOG_INFO, "Save state uses %s CD Block emulation: switched to it for this session",
-                       wasLLE ? "high-level" : "low-level");
-            if (environ_cb) {
-                static std::string text;
-                text = std::string("Brimir: the save state uses ") + (wasLLE ? "high-level" : "low-level") +
-                       " CD Block emulation; switched to it until the content is reloaded";
-                retro_message message{text.c_str(), 300};
-                environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+    return guarded_callback("retro_unserialize", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) {
+            return false;
+        }
+        const bool wasLLE = g_core->IsCDBlockLLEActive();
+        // Its own guard: the view below is published whatever the load did
+        const bool loaded = guarded_callback("retro_unserialize", false, [&]() -> bool {
+            return g_core->LoadState(data, size);
+        });
+        // Also after a rejected state: the view must match work RAM whatever the load left in it.
+        publish_ram_view();
+        g_stateLoadedBeforeRun = true;
+        if (loaded) {
+            if (g_core->IsCDBlockLLEActive() != wasLLE) {
+                brimir_log(RETRO_LOG_INFO, "Save state uses %s CD Block emulation: switched to it for this session",
+                           wasLLE ? "high-level" : "low-level");
+                if (environ_cb) {
+                    static std::string text;
+                    text = std::string("Brimir: the save state uses ") + (wasLLE ? "high-level" : "low-level") +
+                           " CD Block emulation; switched to it until the content is reloaded";
+                    retro_message message{text.c_str(), 300};
+                    environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+                }
             }
+            if (const std::string warning = g_core->TakeStateWarningToReport(); !warning.empty()) {
+                brimir_log(RETRO_LOG_WARN,
+                           "Save state: %s (emulation may differ from the saving session; logged once)",
+                           warning.c_str());
+            }
+            return true;
         }
-        if (const std::string warning = g_core->TakeStateWarningToReport(); !warning.empty()) {
-            brimir_log(RETRO_LOG_WARN, "Save state: %s (emulation may differ from the saving session; logged once)",
-                       warning.c_str());
+        if (!g_core->GetLastStateError().empty()) {
+            brimir_log(RETRO_LOG_WARN, "Save state rejected: %s", g_core->GetLastStateError().c_str());
         }
-        return true;
-    }
-    if (!g_core->GetLastStateError().empty()) {
-        brimir_log(RETRO_LOG_WARN, "Save state rejected: %s", g_core->GetLastStateError().c_str());
-    }
-    return false;
+        return false;
+    });
 }
 
 RETRO_API void retro_cheat_reset(void) {
@@ -1719,6 +1744,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             const std::string& error = g_core->GetLastError();
             brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
                 error.empty() ? "(no error message)" : error.c_str());
+            log_backup_ram_save_error();
             return false;
         }
 
@@ -1873,67 +1899,93 @@ RETRO_API void retro_unload_game(void) {
 // Disk control callbacks
 
 static bool disk_set_eject_state(bool ejected) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    return g_core->SetEjectState(ejected);
+    return guarded_callback("disk_set_eject_state", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        return g_core->SetEjectState(ejected);
+    });
 }
 
 static bool disk_get_eject_state(void) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    return g_core->GetEjectState();
+    return guarded_callback("disk_get_eject_state", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        return g_core->GetEjectState();
+    });
 }
 
 static unsigned disk_get_image_index(void) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return 0;
-    return static_cast<unsigned>(g_core->GetCurrentDiscIndex());
+    return guarded_callback("disk_get_image_index", 0u, [&]() -> unsigned {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return 0;
+        return static_cast<unsigned>(g_core->GetCurrentDiscIndex());
+    });
 }
 
 static bool disk_set_image_index(unsigned index) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    return g_core->SetDiscIndex(index);
+    return guarded_callback("disk_set_image_index", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        if (g_core->SetDiscIndex(index)) {
+            return true;
+        }
+        if (!g_core->GetLastError().empty()) {
+            brimir_log(RETRO_LOG_WARN, "Disc swap to image %u failed: %s", index, g_core->GetLastError().c_str());
+        }
+        return false;
+    });
 }
 
 static unsigned disk_get_num_images(void) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return 0;
-    return static_cast<unsigned>(g_core->GetNumDiscs());
+    return guarded_callback("disk_get_num_images", 0u, [&]() -> unsigned {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return 0;
+        return static_cast<unsigned>(g_core->GetNumDiscs());
+    });
 }
 
 static bool disk_replace_image_index(unsigned index, const struct retro_game_info* info) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    if (info) {
-        return g_core->ReplaceDiscIndex(index, info->path);
-    } else {
-        return g_core->ReplaceDiscIndex(index, nullptr);
-    }
+    return guarded_callback("disk_replace_image_index", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        if (info) {
+            return g_core->ReplaceDiscIndex(index, info->path);
+        } else {
+            return g_core->ReplaceDiscIndex(index, nullptr);
+        }
+    });
 }
 
 static bool disk_add_image_index(void) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    return g_core->AddDiscIndex();
+    return guarded_callback("disk_add_image_index", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        return g_core->AddDiscIndex();
+    });
 }
 
 static bool disk_set_initial_image(unsigned index, const char* path) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    return g_core->SetInitialDisc(index, path);
+    return guarded_callback("disk_set_initial_image", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        return g_core->SetInitialDisc(index, path);
+    });
 }
 
 static bool disk_get_image_path(unsigned index, char* s, size_t len) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    return g_core->GetDiscPath(index, s, len);
+    return guarded_callback("disk_get_image_path", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        return g_core->GetDiscPath(index, s, len);
+    });
 }
 
 static bool disk_get_image_label(unsigned index, char* s, size_t len) {
-    std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
-    if (!g_core) return false;
-    return g_core->GetDiscLabel(index, s, len);
+    return guarded_callback("disk_get_image_label", false, [&]() -> bool {
+        std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+        if (!g_core) return false;
+        return g_core->GetDiscLabel(index, s, len);
+    });
 }
 
 RETRO_API unsigned retro_get_region(void) {
