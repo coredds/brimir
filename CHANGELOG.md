@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Black screen with run-ahead "Use Second Instance" and the Vulkan renderer** - with `brimir_renderer` = `vulkan`, run-ahead set to "Use Second Instance" gave sound but a black picture. RetroArch shows the second instance's frames, and a second copy of the core cannot get the Vulkan context the first one holds, so it never drew anything. The core now declines to start a second copy while another copy holds the hardware context. RetroArch then shows its one-time "failed to create secondary instance" message and runs run-ahead on one instance, with the picture. Nothing emulated changes: frames, audio and save states are identical to 0.8.0. With the software renderer the second instance loads and works as before.
+
 ## [0.8.0] - 2026-11-14
 
 ### Performance
