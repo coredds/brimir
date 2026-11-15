@@ -133,6 +133,10 @@ target_link_libraries(brimir_tests PRIVATE
     brimir-vdp2-front
     brimir-vdp1-front
 )
+if(ANDROID)
+    # Catch2 writes its debug output to the Android log (__android_log_write).
+    target_link_libraries(brimir_tests PRIVATE log)
+endif()
 
 # Vulkan GPU renderer (src/gpu)
 if(BRIMIR_VULKAN)

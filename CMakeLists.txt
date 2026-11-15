@@ -29,10 +29,13 @@ option(Brimir_ENABLE_IPO "Enable IPO/LTO for brimir-core" ${BRIMIR_LTO})
 option(BRIMIR_JIT_X64 "Build the SH-2 JIT x64 native backend (asmjit; x86-64 targets only)" ON)
 option(BRIMIR_VDP1_PROBE "Count VDP1 work per frame for brimir_vkhost --probe (diagnostic builds only)" OFF)
 
-# Vulkan GPU renderer (src/gpu). Default ON on the desktop release targets: Windows x64, Linux x64/arm64, macOS arm64.
+# Vulkan GPU renderer (src/gpu). Default ON on the release targets: Windows x64, Linux x64/arm64, macOS arm64, Android
+# arm64-v8a (and x86_64, built for emulator testing only).
 set(brimir_vulkan_default OFF)
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|x64)$")
+    if(ANDROID AND ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
+        set(brimir_vulkan_default ON)
+    elseif(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|x64)$")
         set(brimir_vulkan_default ON)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|aarch64|arm64)$")
         set(brimir_vulkan_default ON)
@@ -189,12 +192,23 @@ if(BRIMIR_VULKAN)
 endif()
 
 # Platform-specific link dependencies
-if(UNIX)
+if(ANDROID)
+    # Bionic has the pthread functions in libc (the NDK ships no libpthread).
+    target_link_libraries(brimir_libretro PRIVATE dl)
+elseif(UNIX)
     target_link_libraries(brimir_libretro PRIVATE pthread dl)
 endif()
 
 # Set output name
-if(WIN32)
+if(ANDROID)
+    # RetroArch for Android names its cores <name>_libretro_android.so. Segments aligned for 16 KB page devices.
+    set_target_properties(brimir_libretro PROPERTIES
+        OUTPUT_NAME "brimir_libretro_android"
+        SUFFIX ".so"
+        PREFIX ""
+    )
+    target_link_options(brimir_libretro PRIVATE -Wl,-z,max-page-size=16384 -Wl,--no-undefined)
+elseif(WIN32)
     set_target_properties(brimir_libretro PROPERTIES
         OUTPUT_NAME "brimir_libretro"
         SUFFIX ".dll"
