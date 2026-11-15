@@ -14,6 +14,9 @@ add_executable(brimir_tests
     # One hardware context owner per process (run-ahead second instance)
     ../src/libretro/hw_context_owner.cpp
     unit/test_hw_context_owner.cpp
+    # The device report line (renderer, GPU, Vulkan version, threads, fallback)
+    ../src/libretro/device_report.cpp
+    unit/test_device_report.cpp
     # Basic smoke tests
     unit/test_basic.cpp
     unit/test_bitmask_enum.cpp

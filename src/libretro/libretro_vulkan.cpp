@@ -42,6 +42,8 @@ struct NegotiationState {
     // It is on a GPU that meets the baseline, with exactly the features and extensions gpu_version.hpp lists. When
     // no GPU did, create_device2 still made a device (on the frontend's GPU) for the copy-only output.
     bool baseline = false;
+    // ... and then why each GPU offered missed the baseline (for the device report).
+    std::string rejections;
 };
 NegotiationState g_negotiation;
 
@@ -188,6 +190,7 @@ bool CreateDevice2(retro_vulkan_context *context, VkInstance instance, VkPhysica
                    retro_vulkan_create_device_wrapper_t createDeviceWrapper, void *opaque) {
     g_negotiation.device = VK_NULL_HANDLE;
     g_negotiation.baseline = false;
+    g_negotiation.rejections.clear();
     InstanceFunctions fn;
     if (!context || instance == VK_NULL_HANDLE || !getInstanceProcAddr || !createDeviceWrapper ||
         !fn.Load(instance, getInstanceProcAddr)) {
@@ -303,6 +306,7 @@ bool CreateDevice2(retro_vulkan_context *context, VkInstance instance, VkPhysica
     context->presentation_queue_family_index = family;
     g_negotiation.device = device;
     g_negotiation.baseline = baseline;
+    g_negotiation.rejections = baseline ? std::string() : rejections;
     return true;
 }
 
@@ -377,6 +381,8 @@ VulkanRequest RequestVulkanContext(retro_environment_t environment, retro_hw_con
 // ---------------------------------------------------------------------------------------------------------------
 
 struct VulkanOutput::Impl {
+    DeviceInfo contextDevice; // VulkanOutput::ContextDevice
+
     struct Slot {
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -1541,15 +1547,21 @@ void VulkanOutput::ContextDestroy() {
     // The frontend destroys the negotiated device after this; a new one comes through create_device2 again.
     g_negotiation.device = VK_NULL_HANDLE;
     g_negotiation.baseline = false;
+    g_negotiation.rejections.clear();
 }
 
 void VulkanOutput::Abandon() {
     m_impl->Abandon();
 }
 
+const VulkanOutput::DeviceInfo &VulkanOutput::ContextDevice() const {
+    return m_impl->contextDevice;
+}
+
 bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &reason) {
     Impl &m = *m_impl;
     reason.clear();
+    m.contextDevice = {};
     const retro_hw_render_interface *raw = nullptr;
     if (!environment || !environment(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &raw) || raw == nullptr) {
         reason = "the frontend provided no hardware render interface";
@@ -1620,6 +1632,11 @@ bool VulkanOutput::ContextReset(retro_environment_t environment, std::string &re
                               [iface] { iface->unlock_queue(iface->handle); });
     m.device = std::move(device);
     m.iface = iface;
+    m.contextDevice.name = m.device->Properties().deviceName;
+    m.contextDevice.apiVersion = m.device->Properties().apiVersion;
+    if (negotiated && !g_negotiation.baseline) {
+        m.contextDevice.baselineRejection = g_negotiation.rejections;
+    }
 
     // The compute frame output needs Vulkan 1.2, a compute queue and the baseline features and limits (gpu_version.hpp;
     // the limits are those of the VDP2 pipelines, so the GPU renderer uses the same check). Without them the frames

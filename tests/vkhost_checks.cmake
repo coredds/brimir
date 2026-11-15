@@ -235,6 +235,17 @@ check_software_reference(software)
 if(NOT EXISTS "${sw_state}")
     fail(software "no state saved")
 endif()
+# The device report (src/libretro/device_report.hpp), once per content load: no Vulkan device seen.
+set(device_report_software
+    "Device report: renderer software; GPU \"none\"; Vulkan API none \\(renderer needs 1\\.2\\); host threads [1-9][0-9]*; fallback \"none\"")
+require_log(software "${device_report_software}")
+string(REGEX MATCHALL "Device report: " device_reports "${software_err}")
+list(LENGTH device_reports device_report_count)
+if(NOT device_report_count EQUAL 1)
+    fail(software "${device_report_count} device report lines, expected 1")
+endif()
+string(REGEX MATCH "Device report: [^\r\n]*" software_device_report "${software_err}")
+message(STATUS "software: ${software_device_report}")
 
 # ram_view: RETRO_MEMORY_SYSTEM_RAM is the 2 MiB Beetle-compatible work RAM view (Low at 0, High at 0x100000; the
 # memory map's two descriptors point into it) and the core declares achievements. A frontend write into the view (as
@@ -635,6 +646,10 @@ check_vulkan_counters(vulkan)
 check_vdp2_renderer(vulkan)
 require_log(vulkan "device created through create_device2")
 require_log(vulkan "Vulkan frame output ready")
+# The device report: the host's GPU (lavapipe in CI: "llvmpipe (...)") at 1.2 or later, no fallback.
+require_log(vulkan "Device report: renderer vulkan; GPU \"[^\"]+\"; Vulkan API 1\\.[2-9][0-9]*\\.[0-9]+ \\(renderer needs 1\\.2\\); host threads [1-9][0-9]*; fallback \"none\"")
+string(REGEX MATCH "Device report: [^\r\n]*" vulkan_device_report "${vulkan_err}")
+message(STATUS "vulkan: ${vulkan_device_report}")
 # The two states' renderer sections may differ only in the line-local fetcher caches on brimir_state_diff's allowlist
 # (tools/state_diff.cpp); anything carried from line to line or frame to frame must match, and so must the VDP1
 # framebuffers (vdp.FBRAM, displayFB: compared strictly, the runs are at the same frame of the same content).
@@ -655,6 +670,7 @@ run_vkhost(refused --vulkan --refuse-hw)
 check_run(refused 0)
 check_software_renderer(refused)
 require_log(refused "Vulkan renderer unavailable, falling back to software")
+require_log(refused "Device report: renderer software; GPU \"none\"; Vulkan API none [^\r\n]*; fallback \"the frontend refused a Vulkan context")
 
 # A frontend on another video driver that would switch drivers: the core does not even ask.
 run_vkhost(preferred_gl --vulkan --preferred-hw gl)
@@ -663,6 +679,7 @@ check_vulkan_counters(preferred_gl)
 check_software_renderer(preferred_gl)
 require_log(preferred_gl
     "Vulkan renderer selected but the frontend video driver is not Vulkan; using software")
+require_log(preferred_gl "Device report: renderer software; GPU \"none\"; Vulkan API none [^\r\n]*; fallback \"the frontend's video driver is not Vulkan")
 if(preferred_gl_err MATCHES "SET_HW_RENDER")
     fail(preferred_gl "the core called SET_HW_RENDER")
 endif()
@@ -676,6 +693,11 @@ check_software_renderer(copy_only)
 require_log(copy_only "device created through create_device2")
 require_log(copy_only "no GPU meets the GPU renderer's baseline")
 require_log(copy_only "using copy-only frame output")
+# The device report: software (frames identical to the software run, checked above), the GPU at the faked 1.1 and the
+# baseline check's rejection text.
+require_log(copy_only "Device report: renderer software; GPU \"[^\"]+\"; Vulkan API 1\\.1\\.[0-9]+ \\(renderer needs 1\\.2\\); host threads [1-9][0-9]*; fallback \"[^\"]*Vulkan 1\\.1 < 1\\.2\"")
+string(REGEX MATCH "Device report: [^\r\n]*" copy_only_device_report "${copy_only_err}")
+message(STATUS "copy_only: ${copy_only_device_report}")
 
 # ... with rotation (90 swaps the axes) and the medium overscan crop: the bridge's transformed frame, as in software.
 set(transform_options --option brimir_rotation=90 --option brimir_overscan=2)
@@ -762,6 +784,13 @@ check_run(reset 300)
 check_vulkan_counters(reset)
 check_vdp2_renderer(reset)
 require_log(reset "context resets 2,")
+# One device report per content load, also with a second context_reset.
+require_log(reset "Device report: renderer vulkan;")
+string(REGEX MATCHALL "Device report: " device_reports "${reset_err}")
+list(LENGTH device_reports device_report_count)
+if(NOT device_report_count EQUAL 1)
+    fail(reset "${device_report_count} device report lines, expected 1")
+endif()
 
 # The same from inside retro_run (RetroArch reinits inside SET_SYSTEM_AV_INFO, which PAL content sends): the core
 # gets context_destroy and context_reset while it holds its own lock.

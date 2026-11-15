@@ -94,6 +94,16 @@ public:
     bool Live() const;
     VulkanOutputMode Mode() const;
 
+    // The GPU of the last ContextReset as the core saw it (kept from then, no Vulkan call): the name and apiVersion of
+    // its properties (empty and 0 when no device was wrapped). baselineRejection: why create_device2 found no GPU that
+    // meets the baseline (gpu_version.hpp), when the context's device is the one it then made below it; else empty.
+    struct DeviceInfo {
+        std::string name;
+        uint32_t apiVersion = 0;
+        std::string baselineRejection;
+    };
+    const DeviceInfo &ContextDevice() const;
+
     // Compute mode: presents a native frame (XBGR8888, tightly packed) with the output transforms: waits for the
     // frontend's sync slot, records the upload and conversion, submits (queue lock held only around vkQueueSubmit)
     // and hands the slot's image over with set_image. Sets outW/outH to the size to report to video_cb. Returns

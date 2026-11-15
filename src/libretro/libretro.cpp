@@ -9,6 +9,7 @@
 #include "brimir/lockstep.hpp"
 #include "brimir/ram_view.hpp"
 #include "hw_context_owner.hpp"
+#include "device_report.hpp"
 
 #ifdef BRIMIR_VULKAN
 #include "libretro_vulkan.hpp"
@@ -29,6 +30,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 // Libretro callbacks
@@ -84,6 +86,12 @@ static unsigned int g_lastHeight = 0;
 static size_t g_profileFrameCount = 0;
 
 static void reset_frame_state(void);
+
+// The device report (device_report.hpp): logged once per content load, at the end of the first retro_run, when the
+// renderer is final (after context_reset, and after a driver reinit inside that run). g_deviceReport collects the GPU
+// and the fallback reason as the content load and the context callbacks decide them.
+static brimir::libretro::DeviceReport g_deviceReport;
+static bool g_deviceReportLogged = false;
 
 // Largest frame the core reports (SET_GEOMETRY ignores max_*; changing them through SET_SYSTEM_AV_INFO reinits the
 // frontend's video driver, so they are fixed per content).
@@ -194,6 +202,8 @@ static void reset_frame_state(void) {
     g_lastWidth = 0;
     g_lastHeight = 0;
     g_profileFrameCount = 0;
+    g_deviceReport = {};
+    g_deviceReportLogged = false;
 #ifdef BRIMIR_VULKAN
     g_presentedScale = 0;
     g_internalResolutionNoopLogged = false;
@@ -586,6 +596,7 @@ static void sync_vdp_renderer(void) {
         }
         if (!g_vulkanOutput->RendererAttached()) {
             g_vulkanRendererFailed = true;
+            g_deviceReport.fallbackReason = "Vulkan VDP2 renderer unavailable: " + error;
             g_core->UseSoftwareRenderer();
             brimir_log(RETRO_LOG_WARN, "Vulkan VDP2 renderer unavailable (%s); software renderer with the GPU frame output",
                        error.c_str());
@@ -642,6 +653,12 @@ static void RETRO_CALLCONV vulkan_context_reset(void) {
     const bool live = g_vulkanOutput->ContextReset(environ_cb, reason);
     g_vulkanPresentErrorLogged = false;
     g_vulkanRendererFailed = false;
+    const brimir::libretro::VulkanOutput::DeviceInfo& device = g_vulkanOutput->ContextDevice();
+    g_deviceReport.gpuName = device.name;
+    g_deviceReport.vulkanApiVersion = device.apiVersion;
+    // The baseline check's own words when create_device2 found no GPU meeting it (e.g. "<GPU>: Vulkan 1.1 < 1.2")
+    g_deviceReport.fallbackReason =
+        live && !reason.empty() && !device.baselineRejection.empty() ? device.baselineRejection : reason;
     if (!live) {
         // No usable device at all, and too late to fall back (the frontend runs its Vulkan driver now): keep
         // handing over software frames, which RetroArch's vulkan driver does not show.
@@ -686,6 +703,8 @@ static void log_vulkan_output_change(brimir::libretro::VulkanOutputMode before, 
     if (g_vulkanOutput->Mode() != before) {
         brimir_log(RETRO_LOG_WARN, "Vulkan frame output changed to %s: %s", vulkan_mode_name(g_vulkanOutput->Mode()),
                    error.c_str());
+        g_deviceReport.fallbackReason =
+            std::string("Vulkan frame output changed to ") + vulkan_mode_name(g_vulkanOutput->Mode()) + ": " + error;
     } else if (!error.empty() && !g_vulkanPresentErrorLogged) {
         g_vulkanPresentErrorLogged = true;
         brimir_log(RETRO_LOG_ERROR, "Vulkan frame output failed: %s", error.c_str());
@@ -1245,6 +1264,24 @@ static void flush_cartridge_save(void) {
     }
 }
 
+// Once per content load, at the end of the first retro_run (g_deviceReport).
+static void log_device_report_once(void) {
+    if (g_deviceReportLogged) {
+        return;
+    }
+    g_deviceReportLogged = true;
+    brimir::libretro::DeviceReport report = g_deviceReport;
+    report.hostThreads = std::thread::hardware_concurrency();
+#ifdef BRIMIR_VULKAN
+    report.vulkanRenderer = g_vulkanOutput && g_vulkanOutput->RendererAttached();
+    if (g_vulkanRequested && !report.vulkanRenderer && report.fallbackReason.empty()) {
+        report.fallbackReason = g_vulkanOutput && g_vulkanOutput->Live() ? "the Vulkan VDP2 renderer is not attached"
+                                                                         : "no Vulkan context from the frontend yet";
+    }
+#endif
+    brimir_log(RETRO_LOG_INFO, "%s", brimir::libretro::FormatDeviceReport(report).c_str());
+}
+
 RETRO_API void retro_run(void) {
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
     if (!g_core) {
@@ -1362,6 +1399,7 @@ RETRO_API void retro_run(void) {
     }
 
     flush_cartridge_save();
+    log_device_report_once();
 }
 
 RETRO_API size_t retro_serialize_size(void) {
@@ -1750,6 +1788,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             brimir_log(RETRO_LOG_WARN, "Vulkan renderer unavailable, falling back to software: %s", reason.c_str());
             break;
         }
+        g_deviceReport.fallbackReason = g_vulkanRequested ? std::string() : reason;
     }
     note_internal_resolution(); // the software renderer: native frames
 #endif
