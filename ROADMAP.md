@@ -243,6 +243,7 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requi
 | **v0.5.5** ✅ | Hotfix: no crash on Quick Menu > Close Content on Windows (#7) |
 | ~~**v0.5.6**~~ | Not released (v0.6.0 followed v0.5.5). Cheats came in v0.7.0 from RetroArch's database instead of an internal one |
 | **v0.6.0** ✅ | Vulkan renderer (VDP1/VDP2 on the GPU, internal resolution up to 4x), software renderer fixes, SH-2 JIT (experimental) |
+| **v0.8.1** ✅ | Fix: black screen with run-ahead "Use Second Instance" and the Vulkan renderer (falls back to one instance) |
 | **v0.8.0** ✅ | Performance round: software renderer and SH-2 interpreter 20-64 % faster per frame, output byte-identical to 0.7.2 |
 | **v0.7.2** ✅ | Selective upstream Ymir sync to `ff935379` (533 commits reviewed, 4 fixes taken) |
 | **v0.7.1** ✅ | BIOS Auto by disc region (and region autodetect following the BIOS), BIOS settings in save states, Beetle-like mouse, deadzone and sensitivity options, CD Block LLE validated with real ROMs |

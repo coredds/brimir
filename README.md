@@ -8,12 +8,17 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed and the relevant fixes are taken, with Brimir-specific fixes and optimizations on top.
 
-## What's New in v0.8.0
+## What's New in v0.8.1
+
+- **Run-ahead "Use Second Instance" with the Vulkan renderer** - this gave sound but a black picture. RetroArch now falls back to run-ahead on one instance, with the picture (it says "Failed to create second instance. Run-Ahead will now use only one instance." once per content load). The software renderer keeps the second instance. See [Save states](#save-states-run-ahead-rewind-and-netplay).
+- No other change: frames, audio and save states are identical to 0.8.0.
+
+## Previous Highlights
+
+### v0.8.0
 
 - **Much faster software rendering and SH-2 emulation** - the median frame time is 20-64 % shorter with threaded VDP (the default) and 29-61 % shorter without it, on every test window (for example Virtua Fighter 2 18.4 -> 6.7 ms, Fighters Megamix 17.6 -> 6.9 ms). The Vulkan renderer at 1x is 7-9 % faster and single-instance run-ahead 23-39 % cheaper. See [Performance](#performance).
 - **No output change** - frames, audio, save states and cycle counts are byte-identical to 0.7.2, and states from 0.7.2 and older load as before.
-
-## Previous Highlights
 
 ### v0.7.2
 
