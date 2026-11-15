@@ -105,6 +105,14 @@ endif()
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Android: the core exports the libretro API only (RETRO_API in libretro.h is visibility("default")). Set before the
+# subdirectories so every target, vendored ones included, compiles with hidden visibility.
+if(ANDROID)
+    set(CMAKE_C_VISIBILITY_PRESET hidden)
+    set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+    set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+endif()
+
 # Subdirectories - Core emulator library dependencies
 include(cmake/YmirDeps.cmake)
 
@@ -201,13 +209,18 @@ endif()
 
 # Set output name
 if(ANDROID)
-    # RetroArch for Android names its cores <name>_libretro_android.so. Segments aligned for 16 KB page devices.
+    # RetroArch for Android names its cores <name>_libretro_android.so. Segments aligned for 16 KB page devices. No
+    # symbol of the static libraries (vendored, C++ runtime) is re-exported; the version script also hides what hidden
+    # visibility cannot (libc++ marks its templates' typeinfo default, e.g. std::function's).
+    set(brimir_android_exports ${CMAKE_CURRENT_SOURCE_DIR}/src/libretro/android_exports.map)
     set_target_properties(brimir_libretro PROPERTIES
         OUTPUT_NAME "brimir_libretro_android"
         SUFFIX ".so"
         PREFIX ""
+        LINK_DEPENDS ${brimir_android_exports}
     )
-    target_link_options(brimir_libretro PRIVATE -Wl,-z,max-page-size=16384 -Wl,--no-undefined)
+    target_link_options(brimir_libretro PRIVATE -Wl,-z,max-page-size=16384 -Wl,--no-undefined -Wl,--exclude-libs,ALL
+                        -Wl,--version-script=${brimir_android_exports})
 elseif(WIN32)
     set_target_properties(brimir_libretro PROPERTIES
         OUTPUT_NAME "brimir_libretro"

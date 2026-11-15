@@ -56,3 +56,35 @@ From Windows PowerShell, through WSL:
 ```powershell
 wsl -e bash -lc "export ANDROID_NDK_HOME=~/android-ndk/android-ndk-r30 && cd /mnt/c/path/to/Brimir && bash tools/android/build.sh arm64-v8a"
 ```
+
+## Check the core
+
+```bash
+bash tools/android/check_elf.sh build-android-arm64-v8a/lib/brimir_libretro_android.so arm64-v8a
+bash tools/android/test_check_elf.sh   # tests the checker itself
+```
+
+`check_elf.sh <core.so> <arm64-v8a|x86_64>` prints `check_elf: ok` (exit 0) when the core is fit to ship, otherwise one
+`FAIL: <reason>` line per failed check (exit 1):
+
+- `machine`: the ELF machine matches the ABI (64-bit AArch64 or x86-64).
+- `DT_NEEDED`: the core needs only `libc.so`, `libm.so`, `libdl.so` and `liblog.so` (the C++ runtime is static).
+- `alignment`: every `PT_LOAD` segment is aligned to at least 0x4000, so the core loads on 16 KB page devices.
+- `exports`: the exported dynamic symbols are exactly the libretro API in `libretro_exports.txt` (the `retro_*`
+  functions the core defines, as in the Linux build's `nm -D`); update the list when the core implements another
+  libretro function.
+- `name`: the file is `brimir_libretro_android.so`.
+
+It uses `llvm-readelf` and `llvm-nm` of the pinned NDK, found as `build.sh` finds it (`ndk_env.sh`).
+`test_check_elf.sh` builds tiny shared objects with the NDK clang that each break one check (4 KB alignment, a
+`libc++_shared.so` dependency, an extra exported symbol, a wrong file name, the wrong machine) and expects each to fail
+for that reason only; it also checks the Linux x64 core in `build-wsl` as `arm64-v8a` (skipped when missing) and expects
+the built Android cores to pass.
+
+The Android build compiles every target with hidden visibility and links the core with `-Wl,--exclude-libs,ALL` and the
+version script `src/libretro/android_exports.map` (`retro_*` only; libc++ marks some of its typeinfo default, which hidden
+visibility alone does not hide). This is safe for RetroArch's run-ahead second instance, which loads the core twice into
+one process: each copy keeps its own static C++ runtime and its own globals (no symbol of one copy can bind to the other,
+which the hidden exports make more certain, not less), and the hardware-context claim that makes the second copy decline
+Vulkan (`src/libretro/hw_context_owner.*`) uses process memory found through an environment variable, not exported
+symbols, and is unchanged.

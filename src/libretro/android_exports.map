@@ -1,0 +1,5 @@
+/* Android: the core's dynamic symbols are the libretro API only (CMakeLists.txt, tools/android/check_elf.sh). */
+{
+    global: retro_*;
+    local: *;
+};

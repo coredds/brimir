@@ -30,53 +30,9 @@ fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 
-NDK_VERSION=$(tr -d '[:space:]' < tools/android/ndk-version.txt)
-SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
-PIN_NDK=${SDK:+$SDK/ndk/$NDK_VERSION}
-
-# Pkg.Revision of the NDK at $1, empty when it has none.
-ndk_version() {
-    sed -n 's/^Pkg.Revision *= *//p' "$1/source.properties" 2>/dev/null | tr -d '[:space:]' || true
-}
-
-# The NDK must be the pinned version: ANDROID_NDK_HOME when it is, else the SDK's ndk/<pin>. BRIMIR_ALLOW_NDK_MISMATCH=1
-# accepts another version in ANDROID_NDK_HOME (local experiments only, never for a release build).
-NDK=""
-NDK_SOURCE=""
-if [ -n "${ANDROID_NDK_HOME:-}" ] && [ "$(ndk_version "$ANDROID_NDK_HOME")" = "$NDK_VERSION" ]; then
-    NDK=$ANDROID_NDK_HOME
-    NDK_SOURCE="ANDROID_NDK_HOME"
-elif [ -n "$PIN_NDK" ] && [ "$(ndk_version "$PIN_NDK")" = "$NDK_VERSION" ]; then
-    NDK=$PIN_NDK
-    NDK_SOURCE="derived from the pin: \$ANDROID_SDK_ROOT (or \$ANDROID_HOME)/ndk/$NDK_VERSION"
-    if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-        echo "note: ANDROID_NDK_HOME ($ANDROID_NDK_HOME) is version '$(ndk_version "$ANDROID_NDK_HOME")'," \
-             "not the pinned $NDK_VERSION; using $NDK" >&2
-    fi
-elif [ -n "${ANDROID_NDK_HOME:-}" ] && [ "${BRIMIR_ALLOW_NDK_MISMATCH:-0}" = 1 ]; then
-    NDK=$ANDROID_NDK_HOME
-    NDK_SOURCE="ANDROID_NDK_HOME"
-    found=$(ndk_version "$NDK")
-    echo "warning: BRIMIR_ALLOW_NDK_MISMATCH=1: using NDK $NDK, version '${found:-unknown}'," \
-         "pinned is $NDK_VERSION" >&2
-else
-    echo "error: no Android NDK $NDK_VERSION (tools/android/ndk-version.txt); see tools/android/README.md" >&2
-    if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-        found=$(ndk_version "$ANDROID_NDK_HOME")
-        echo "  ANDROID_NDK_HOME=$ANDROID_NDK_HOME is version '${found:-unknown}'" \
-             "(set BRIMIR_ALLOW_NDK_MISMATCH=1 to use it anyway)" >&2
-    else
-        echo "  ANDROID_NDK_HOME is not set" >&2
-    fi
-    if [ -n "$PIN_NDK" ]; then
-        found=$(ndk_version "$PIN_NDK")
-        [ -n "$found" ] && found="version $found" || found="missing or not an NDK"
-        echo "  $PIN_NDK (derived from the pin under \$ANDROID_SDK_ROOT or \$ANDROID_HOME): $found" >&2
-    else
-        echo "  neither ANDROID_SDK_ROOT nor ANDROID_HOME is set" >&2
-    fi
-    exit 1
-fi
+# shellcheck source=tools/android/ndk_env.sh
+. tools/android/ndk_env.sh
+ndk_find || exit 1
 TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
 if [ ! -f "$TOOLCHAIN" ]; then
     echo "error: $NDK ($NDK_SOURCE) is not an Android NDK (no build/cmake/android.toolchain.cmake);" \
