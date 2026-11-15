@@ -410,6 +410,11 @@ public:
     /// @brief Takes why the last cartridge save failed (the file and where the data is), or an empty string
     std::string TakeCartridgeSaveError() { return std::exchange(m_cartridgeSaveError, std::string{}); }
 
+    /// @brief Takes why the core cannot write (LoadGame: no save directory and no usable temp directory) or could
+    /// not write (UnloadGame) the internal backup RAM's <game>.srm, or an empty string. The frontend's own save of
+    /// the backup RAM (RETRO_MEMORY_SAVE_RAM) is separate.
+    std::string TakeBackupRAMSaveError() { return std::exchange(m_backupRAMSaveError, std::string{}); }
+
     /// @brief Writes data into a backup memory cartridge (data byte i at bus address 2i + 1), only the bytes that
     /// differ; data must be the cartridge's size. Used by LoadState (public for the cost measurement test).
     static void RestoreBackupCartData(ymir::cart::BackupMemoryCartridge& cart, std::span<const uint8_t> data);
@@ -701,6 +706,7 @@ private:
     std::vector<uint8_t> m_cartridgeSaved; // the cartridge's contents as last written to or read from its file
     std::vector<uint8_t> m_cartridgeFailed; // the contents a periodic save failed to write (not retried until changed)
     std::string m_cartridgeSaveError;
+    std::string m_backupRAMSaveError; // TakeBackupRAMSaveError
 
     // Accuracy options (SetSH2CacheEmulation, SetCDBlockLLE, SetSCSPStepGranularity)
     bool m_sh2CacheRequested = false;

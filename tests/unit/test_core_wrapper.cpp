@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <random>
 #include <span>
 #include <string>
@@ -1631,9 +1632,15 @@ struct RtcContent {
         system = root / "system";
         std::filesystem::create_directories(saves);
         std::filesystem::create_directories(system);
+        cue = root / "audio.cue";
+        WriteAudioDisc(cue, "track.wav");
+    }
+
+    // An audio CD image: a CUE sheet naming one silent WAV track (trackName, next to the sheet; UTF-8 in the sheet)
+    static void WriteAudioDisc(const std::filesystem::path& cuePath, const std::filesystem::path& trackName) {
         const uint32_t dataSize = 2352 * 75; // one second of CD audio
         {
-            std::ofstream wav(root / "track.wav", std::ios::binary);
+            std::ofstream wav(cuePath.parent_path() / trackName, std::ios::binary);
             const auto u32 = [&](uint32_t v) { wav.write(reinterpret_cast<const char*>(&v), 4); };
             const auto u16 = [&](uint16_t v) { wav.write(reinterpret_cast<const char*>(&v), 2); };
             wav.write("RIFF", 4);
@@ -1651,8 +1658,9 @@ struct RtcContent {
             const std::vector<char> silence(dataSize, 0);
             wav.write(silence.data(), silence.size());
         }
-        cue = root / "audio.cue";
-        std::ofstream(cue, std::ios::binary) << "FILE \"track.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n";
+        const std::u8string track = trackName.u8string();
+        std::ofstream(cuePath, std::ios::binary) << "FILE \"" << std::string(track.begin(), track.end())
+                                                 << "\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n";
     }
     ~RtcContent() {
         std::error_code ec;
@@ -3441,4 +3449,211 @@ TEST_CASE("savestate round trip: a state from another CD Block ROM or mode leave
     SECTION("low-level CD Block state in a high-level session") {
         rejected(hle.core, lleState);
     }
+}
+// ============================================================
+// Android paths: unwritable save/temp locations and odd content paths
+// ============================================================
+
+namespace {
+
+// What libretro hands the core: UTF-8 bytes
+std::string Utf8(const std::filesystem::path& path) {
+    const std::u8string text = path.u8string();
+    return {text.begin(), text.end()};
+}
+
+// Points temp_directory_path() at `path` (Windows: GetTempPath reads TMP, then TEMP; POSIX: TMPDIR)
+class ScopedTempDir {
+public:
+    explicit ScopedTempDir(const std::string& path) {
+        for (const char* name : kVars) {
+            const char* old = std::getenv(name);
+            m_saved.push_back(old ? std::optional<std::string>(old) : std::nullopt);
+            Set(name, path.c_str());
+        }
+    }
+    ~ScopedTempDir() {
+        for (size_t i = 0; i < std::size(kVars); ++i) {
+            Set(kVars[i], m_saved[i] ? m_saved[i]->c_str() : nullptr);
+        }
+    }
+    ScopedTempDir(const ScopedTempDir&) = delete;
+    ScopedTempDir& operator=(const ScopedTempDir&) = delete;
+
+private:
+#ifdef _WIN32
+    static constexpr const char* kVars[] = {"TMP", "TEMP"};
+    static void Set(const char* name, const char* value) { _putenv_s(name, value ? value : ""); }
+#else
+    static constexpr const char* kVars[] = {"TMPDIR"};
+    static void Set(const char* name, const char* value) {
+        if (value) {
+            setenv(name, value, 1);
+        } else {
+            unsetenv(name);
+        }
+    }
+#endif
+    std::vector<std::optional<std::string>> m_saved;
+};
+
+// An audio CD in a scratch folder named `folder` (UTF-8 allowed), with system/ and the given disc and track names
+struct AndroidPathContent {
+    std::filesystem::path root;
+    std::filesystem::path system;
+    std::filesystem::path cue;
+
+    AndroidPathContent(const std::u8string& folder, const std::u8string& cueName, const std::u8string& trackName) {
+        root = std::filesystem::temp_directory_path() /
+               std::filesystem::path(folder + u8"_" + std::filesystem::path(std::to_string(std::random_device{}())).u8string());
+        std::filesystem::remove_all(root);
+        system = root / "system";
+        std::filesystem::create_directories(system);
+        cue = root / std::filesystem::path(cueName);
+        RtcContent::WriteAudioDisc(cue, std::filesystem::path(trackName));
+    }
+    ~AndroidPathContent() {
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+    }
+};
+
+std::unique_ptr<CoreWrapper> StartAndroidPathCore() {
+    auto core = std::make_unique<CoreWrapper>();
+    REQUIRE(core->Initialize());
+    REQUIRE(core->LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    return core;
+}
+
+void RunFrames(CoreWrapper& core, int frames) {
+    for (int i = 0; i < frames; ++i) {
+        core.RunFrame();
+    }
+    REQUIRE(core.GetFramebuffer() != nullptr);
+}
+
+} // namespace
+
+TEST_CASE("android-paths: a save directory that cannot be created does not stop loading", "[core][android-paths]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    AndroidPathContent content(u8"brimir_android_unwritable_saves", u8"audio.cue", u8"track.wav");
+    // A regular file where a folder would have to be: no save directory can be created below it
+    const auto blocker = content.root / "blocker";
+    std::ofstream(blocker).put('x');
+    const auto saves = blocker / "saves";
+
+    const auto core = StartAndroidPathCore();
+    bool backupCart = false;
+    SECTION("internal backup RAM only") {}
+    SECTION("with a backup memory cartridge") {
+        core->SetCartridgeOverride(CartridgeChoice::Backup);
+        backupCart = true;
+    }
+    bool loaded = false;
+    REQUIRE_NOTHROW(loaded = core->LoadGame(Utf8(content.cue).c_str(), Utf8(saves).c_str(), Utf8(content.system).c_str()));
+    INFO(core->GetLastError());
+    REQUIRE(loaded);
+    if (backupCart) {
+        CHECK(core->GetSaturn()->GetCartridge().GetType() == ymir::cart::CartType::BackupMemory);
+    }
+    RunFrames(*core, 60);
+    REQUIRE_NOTHROW(core->UnloadGame());
+    std::error_code ec;
+    CHECK_FALSE(std::filesystem::exists(saves, ec));
+    // The failed writes are reported (the frontend logs them)
+    const std::string srmError = core->TakeBackupRAMSaveError();
+    INFO(srmError);
+    CHECK_FALSE(srmError.empty());
+    if (backupCart) {
+        CHECK_FALSE(core->TakeCartridgeSaveError().empty());
+    }
+}
+
+TEST_CASE("android-paths: no save directory and an unusable temp directory do not stop loading",
+          "[core][android-paths]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    AndroidPathContent content(u8"brimir_android_no_temp", u8"audio.cue", u8"track.wav");
+    const auto missing = content.root / "missing_tmp";
+
+    const auto core = StartAndroidPathCore();
+    bool backupCart = false;
+    SECTION("internal backup RAM only") {}
+    SECTION("with a backup memory cartridge") {
+        core->SetCartridgeOverride(CartridgeChoice::Backup);
+        backupCart = true;
+    }
+    ScopedTempDir tempDir(missing.string());
+    {
+        std::error_code ec;
+        (void)std::filesystem::temp_directory_path(ec);
+        REQUIRE(ec); // the precondition: the temp directory is unusable, as on Android
+    }
+    bool loaded = false;
+    REQUIRE_NOTHROW(loaded = core->LoadGame(Utf8(content.cue).c_str(), nullptr, Utf8(content.system).c_str()));
+    INFO(core->GetLastError());
+    REQUIRE(loaded);
+    // Reported at load: the core has nowhere to write its saves
+    const std::string srmError = core->TakeBackupRAMSaveError();
+    INFO(srmError);
+    CHECK_FALSE(srmError.empty());
+    if (backupCart) {
+        CHECK(core->GetSaturn()->GetCartridge().GetType() == ymir::cart::CartType::BackupMemory);
+        INFO(core->GetCartridgeDescription());
+        CHECK(core->GetCartridgeDescription().find("not saved") != std::string::npos);
+        CHECK_FALSE(core->GetLastCartridgeMessage().empty());
+    }
+    RunFrames(*core, 60);
+    REQUIRE_NOTHROW(core->UnloadGame());
+    std::error_code ec;
+    CHECK_FALSE(std::filesystem::exists(missing, ec));
+}
+
+TEST_CASE("android-paths: a content path with spaces and non-ASCII characters loads", "[core][android-paths]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // "Sega Rally ' e-acute Nihon": the folder, the CUE sheet and its track all carry the name
+    const std::u8string name = u8"Sega Rally ' \u00e9 \u65e5\u672c";
+    AndroidPathContent content(u8"brimir android " + name, name + u8".cue", name + u8" (Track 1).wav");
+    const auto saves = content.root / std::filesystem::path(u8"saves \u00e9");
+
+    const auto core = StartAndroidPathCore();
+    bool backupCart = false;
+    SECTION("internal backup RAM only") {}
+    SECTION("with a backup memory cartridge") {
+        core->SetCartridgeOverride(CartridgeChoice::Backup);
+        backupCart = true;
+    }
+    bool loaded = false;
+    REQUIRE_NOTHROW(loaded = core->LoadGame(Utf8(content.cue).c_str(), Utf8(saves).c_str(), Utf8(content.system).c_str()));
+    INFO(core->GetLastError());
+    REQUIRE(loaded);
+    RunFrames(*core, 60);
+    REQUIRE_NOTHROW(core->UnloadGame());
+    // The core's own saves carry the content's name
+    CHECK(std::filesystem::exists(saves / std::filesystem::path(name + u8".srm")));
+    if (backupCart) {
+        CHECK(std::filesystem::exists(saves / std::filesystem::path(name + u8".bcr")));
+    }
+    CHECK(core->TakeBackupRAMSaveError().empty());
+    CHECK(core->TakeCartridgeSaveError().empty());
+}
+
+TEST_CASE("android-paths: a content URI fails to load with a reason", "[core][android-paths]") {
+    using Catch::Matchers::ContainsSubstring;
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    const char* uri = "content://com.android.providers/document/1";
+    bool loaded = true;
+    REQUIRE_NOTHROW(loaded = core.LoadGame(uri, nullptr, nullptr));
+    CHECK_FALSE(loaded);
+    CHECK_FALSE(core.IsGameLoaded());
+    CHECK_THAT(core.GetLastError(), ContainsSubstring(uri));
+    CHECK_THAT(core.GetLastError(), ContainsSubstring("file path"));
+    REQUIRE(core.IsInitialized());
 }

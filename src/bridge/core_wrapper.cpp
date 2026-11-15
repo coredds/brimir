@@ -90,6 +90,18 @@ std::optional<ymir::db::SystemRegion> IPLSystemRegion(const ymir::Saturn *saturn
     return info->region;
 }
 
+// The frontend's paths are UTF-8 (libretro); a path made from a narrow string is in the ANSI code page on Windows.
+std::filesystem::path PathFromUtf8(const char *text) {
+    const std::string_view view(text);
+    return std::filesystem::path(std::u8string(view.begin(), view.end()));
+}
+
+// For messages: path::string() is in the ANSI code page on Windows and throws for a character it cannot hold.
+std::string PathToUtf8(const std::filesystem::path &path) {
+    const std::u8string text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+
 bool IsM3UPath(const std::filesystem::path &path) {
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
@@ -454,12 +466,16 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
 
     std::filesystem::path gamePath;
     try {
-        gamePath = std::filesystem::path(path);
+        gamePath = PathFromUtf8(path);
         
         // Check if file/directory exists
         std::error_code existsError;
         if (!std::filesystem::exists(gamePath, existsError)) {
-            m_lastError = "Game file not found: " + gamePath.string();
+            m_lastError = "Game file not found: " + PathToUtf8(gamePath);
+            if (std::string_view(path).find("://") != std::string_view::npos) {
+                // e.g. an Android content:// URI: Brimir reads files only
+                m_lastError += " (a URI, not a file path: the frontend must give the core a file path)";
+            }
             return false;
         }
         
@@ -477,7 +493,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         if (IsM3UPath(gamePath)) {
             // Parse M3U file
             if (!ReadM3UEntries(gamePath, m_discList)) {
-                m_lastError = "Failed to open M3U file: " + gamePath.string();
+                m_lastError = "Failed to open M3U file: " + PathToUtf8(gamePath);
                 m_initialDiscSet = false;
                 return false;
             }
@@ -512,10 +528,10 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // (GetPersistentSMPCDataPath() returns an empty path).
         m_smpcBaseDir.clear();
         if (system_directory && system_directory[0] != '\0') {
-            m_smpcBaseDir = std::filesystem::path(system_directory);
+            m_smpcBaseDir = PathFromUtf8(system_directory);
         } else if (save_directory && save_directory[0] != '\0') {
             // Fallback to save directory if no system_directory provided
-            m_smpcBaseDir = std::filesystem::path(save_directory);
+            m_smpcBaseDir = PathFromUtf8(save_directory);
         }
         if (!m_smpcBaseDir.empty()) {
             std::error_code dirError;
@@ -563,10 +579,21 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // frontend did not preload the .srm into m_sramData (e.g. because the
         // core is being driven outside libretro or the memory pointer was not
         // ready in time), load it ourselves so saves are visible to the game.
+        const std::filesystem::path srmName = std::filesystem::path(gameFileName) += ".srm";
+        m_backupRAMSaveError.clear();
         if (save_directory && save_directory[0] != '\0') {
-            m_srmPath = std::filesystem::path(save_directory) / (gameFileName.string() + ".srm");
+            m_srmPath = PathFromUtf8(save_directory) / srmName;
         } else {
-            m_srmPath = std::filesystem::temp_directory_path() / (gameFileName.string() + ".srm");
+            // Android: an app cannot use the temp directory (missing or not writable); the core then writes no .srm
+            std::error_code tempError;
+            const std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempError);
+            if (tempError) {
+                m_srmPath.clear();
+                m_backupRAMSaveError = "no save directory and no usable temp directory (" + tempError.message() +
+                                       "): the core does not write " + PathToUtf8(srmName) + " this session";
+            } else {
+                m_srmPath = tempDir / srmName;
+            }
         }
 
         std::error_code srmError;
@@ -723,11 +750,20 @@ void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, con
         return;
     }
 
-    const auto savePath = [&](const char* extension) {
-        const std::filesystem::path dir = (save_directory && save_directory[0] != '\0')
-                                              ? std::filesystem::path(save_directory)
-                                              : std::filesystem::temp_directory_path();
-        return dir / (gamePath.stem().string() + extension);
+    // Empty (not saved, with a message) when there is no save directory and no usable temp directory (Android)
+    const auto savePath = [&](const char* extension) -> std::filesystem::path {
+        const std::filesystem::path name = gamePath.stem() += extension;
+        if (save_directory && save_directory[0] != '\0') {
+            return PathFromUtf8(save_directory) / name;
+        }
+        std::error_code tempError;
+        const std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempError);
+        if (tempError) {
+            m_cartridgeMessage = "no save directory and no usable temp directory (" + tempError.message() +
+                                 "): the cartridge is not saved this session.";
+            return {};
+        }
+        return tempDir / name;
     };
 
     try {
@@ -754,13 +790,13 @@ void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, con
             ymir::bup::BackupMemory bup;
             bup.CreateInMemory(ymir::bup::BackupMemorySize::_4Mbit); // formatted
             std::error_code ec;
-            bool persist = true;
+            bool persist = !path.empty();
             if (std::filesystem::exists(path, ec)) {
                 std::vector<uint8_t> data;
                 uintmax_t size = 0;
                 if (!ReadFileUpTo(path, kBackupCartSize, data, size) || size != kBackupCartSize) {
                     persist = false;
-                    m_cartridgeMessage = path.filename().string() +
+                    m_cartridgeMessage = PathToUtf8(path.filename()) +
                                          (size != 0 && size != kBackupCartSize
                                               ? " is " + std::to_string(size) + " bytes, not " +
                                                     std::to_string(kBackupCartSize) + " (4 Mbit backup cartridge)"
@@ -774,8 +810,9 @@ void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, con
                 }
             }
             m_saturn->InsertCartridge<ymir::cart::BackupMemoryCartridge>(std::move(bup));
-            m_cartridgeDescription = "4 Mbit backup memory (" + path.filename().string() +
-                                     (persist ? ")" : ", not saved)");
+            m_cartridgeDescription = path.empty() ? std::string("4 Mbit backup memory (not saved)")
+                                                  : "4 Mbit backup memory (" + PathToUtf8(path.filename()) +
+                                                        (persist ? ")" : ", not saved)");
             if (persist) {
                 m_cartridgePath = path;
             }
@@ -1015,8 +1052,13 @@ void CoreWrapper::UnloadGame() {
             if (srmFile) {
                 srmFile.write(reinterpret_cast<const char*>(m_sramData.data()), m_sramData.size());
             }
+            if (!srmFile) {
+                m_backupRAMSaveError = "could not write " + PathToUtf8(m_srmPath) +
+                                       (dirEc ? " (" + dirEc.message() + ")" : std::string{});
+            }
         } catch (...) {
             // Non-critical: the frontend may still have saved the buffer.
+            m_backupRAMSaveError = "could not write the backup RAM file";
         }
     }
 

@@ -1247,6 +1247,12 @@ static void log_cartridge_save_error(void) {
     }
 }
 
+static void log_backup_ram_save_error(void) {
+    if (const std::string error = g_core->TakeBackupRAMSaveError(); !error.empty()) {
+        brimir_log(RETRO_LOG_WARN, "Backup RAM: %s", error.c_str());
+    }
+}
+
 static void flush_cartridge_save(void) {
     const bool afterLoad = std::exchange(g_stateLoadedBeforeRun, false);
     int av = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
@@ -1717,6 +1723,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
 
         brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
+        log_backup_ram_save_error();
         brimir_log(RETRO_LOG_INFO, "Cartridge: %s", g_core->GetCartridgeDescription().c_str());
         if (const std::string& cartMessage = g_core->GetLastCartridgeMessage(); !cartMessage.empty()) {
             brimir_log(RETRO_LOG_WARN, "Cartridge: %s", cartMessage.c_str());
@@ -1835,6 +1842,7 @@ RETRO_API void retro_unload_game(void) {
                        static_cast<unsigned long long>(g_core->GetReusedStateLoads()));
             g_core->UnloadGame();
             log_cartridge_save_error();
+            log_backup_ram_save_error();
             g_cartridgeFlushFrames = 0;
             g_stateLoadedBeforeRun = false;
 #ifdef BRIMIR_VULKAN
