@@ -11,7 +11,7 @@ add_executable(brimir_tests
     # Options metadata (compiled directly from libretro layer)
     ../src/libretro/options.cpp
     unit/test_options.cpp
-    # One hardware context owner per process (run-ahead second instance); which savestate contexts store states
+    # One hardware context owner per process (run-ahead second instance)
     ../src/libretro/hw_context_owner.cpp
     unit/test_hw_context_owner.cpp
     # Basic smoke tests

@@ -1423,7 +1423,7 @@ check_vulkan_counters(gpu_vdp1_roundtrip)
 check_vdp2_renderer(gpu_vdp1_roundtrip)
 require_log(gpu_vdp1_roundtrip "360 state round trips")
 check_sync_counts(gpu_vdp1_roundtrip)
-# ... run-ahead (hidden frames, a second instance on software).
+# ... run-ahead (hidden frames; the second instance declines to load, at load and half way, so it never runs).
 run_vkhost(gpu_vdp1_runahead --vulkan --gpu-vdp1 --runahead)
 check_run(gpu_vdp1_runahead 300 REFERENCE software_runahead)
 check_vulkan_counters(gpu_vdp1_runahead)
