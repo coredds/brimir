@@ -1057,7 +1057,7 @@ RETRO_API void retro_set_input_state(retro_input_state_t cb) {
 }
 
 RETRO_API void retro_init(void) {
-    brimir_log(RETRO_LOG_INFO, "Brimir initializing...");
+    brimir_log(RETRO_LOG_INFO, "Brimir " BRIMIR_VERSION " initializing...");
     brimir_log(RETRO_LOG_INFO, "Based on Ymir emulator by StrikerX3");
     
     {

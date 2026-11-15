@@ -88,3 +88,88 @@ one process: each copy keeps its own static C++ runtime and its own globals (no 
 which the hidden exports make more certain, not less), and the hardware-context claim that makes the second copy decline
 Vulkan (`src/libretro/hw_context_owner.*`) uses process memory found through an environment variable, not exported
 symbols, and is unchanged.
+
+## Test on the Android emulator
+
+The x86_64 build runs in the SDK's Android emulator (x86_64 images, hardware acceleration: WHPX on Windows, KVM on
+Linux). The scripts are bash; adb is taken from `ADB` (default `adb`). From WSL with the Windows SDK:
+`export ADB=/mnt/c/Users/<you>/AppData/Local/Android/Sdk/platform-tools/adb.exe` (the scripts convert local paths with
+`wslpath` when `ADB` ends in `.exe`).
+
+### Emulator setup (once)
+
+```powershell
+# SDK command-line tools in <SDK>\cmdline-tools\latest; Java 17
+sdkmanager "system-images;android-34;google_apis;x86_64"            # google_apis (not Play): adb root works
+avdmanager create avd -n brimir-x86_64 -k "system-images;android-34;google_apis;x86_64" -d pixel_6
+sdkmanager "system-images;android-35;google_apis_ps16k;x86_64"      # optional: 16 KB pages
+avdmanager create avd -n brimir-x86_64-16k -k "system-images;android-35;google_apis_ps16k;x86_64" -d pixel_6
+emulator -avd brimir-x86_64 -no-window -no-audio -no-snapshot -no-boot-anim -gpu host
+adb emu kill                                                        # when done
+```
+
+Use `-gpu host`: the guest then gets the host GPU's Vulkan through gfxstream (an RX 9060 XT reported Vulkan 1.3).
+With `-gpu swiftshader_indirect` the guest reports SwiftShader Vulkan 1.2, and RetroArch's Vulkan video driver killed
+the emulator (host log `Failed to unbox VkDevice`), so the Vulkan scenario needs `-gpu host`.
+
+RetroArch: the universal APK from the libretro buildbot (`https://buildbot.libretro.com/stable/1.22.2/android/RetroArch.apk`),
+`adb install RetroArch.apk`. RetroArch 1.22.2 does not start on a 16 KB-page system: its own
+`libretroarch-activity.so` has 4 KB-aligned segments and the linker crashes loading it. The nightly
+(`https://buildbot.libretro.com/nightly/android/RetroArch.apk`, November 2026) is 16 KB aligned and runs there.
+
+### Installing the core in RetroArch
+
+RetroArch loads cores from `/data/user/0/com.retroarch/cores/` (`libretro_directory`); the folder exists once RetroArch
+has run. As root: copy `brimir_libretro_android.so` there, owned by the app's user, with the SELinux label of the app's
+data folder (`chcon`; `restorecon` right after a reinstall can apply the previous install's categories, and the app is
+then denied). `brimir_libretro.info` goes to `/data/user/0/com.retroarch/info/`: RetroArch matches it to
+`brimir_libretro_android.so` (it drops the `_android` suffix). Without it the core still loads, starts without content
+and runs run-ahead with a second instance (RetroArch assumes deterministic save states and learns "no content needed"
+from the core); the info file supplies the display name, the firmware list and the database.
+
+### Scripts
+
+```bash
+bash tools/android/build.sh x86_64 --tests
+# RetroArch end to end: BIOS menu, device report, 300 frames, run-ahead second instance (software and Vulkan)
+bash tools/android/e2e_retroarch.sh build-android-x86_64/lib/brimir_libretro_android.so <bios-dir>
+# Frame hashes: Android bench against a host bench, BIOS window (add <disc> <state> <rtc-dir> for a game window)
+bash tools/android/e2e_bench_hash.sh build-android-x86_64/bin/brimir_bench build/bin/brimir_bench.exe <bios-dir>/mpr-17933.bin
+# Unit tests on the device (Catch2 arguments pass through)
+bash tools/android/emulator_tests.sh build-android-x86_64/bin/brimir_tests "~[gpu]"
+```
+
+- `e2e_retroarch.sh <core.so> <bios-dir> [software|runahead-software|runahead-vulkan ...]` needs `adb root`, RetroArch
+  installed and `mpr-17933.bin` in `<bios-dir>`. It installs the core and info file, writes a scratch configuration
+  (logging to a file, `brimir_profiling=enabled`, system folder with the BIOS copy) in the app's data folder, starts
+  RetroArch through an intent (`-e LIBRETRO <core> -e CONFIGFILE <cfg>`; no `ROM`), and taps "Start Core": without
+  content RetroArch opens its menu with the core loaded, injected key events do not reach the menu and its network
+  command interface is not built for Android (`E2E_TAP="x y"` overrides the tap position). After `E2E_WAIT` seconds
+  (20) it collects RetroArch's log, logcat, the process maps and a screenshot into `E2E_OUT` and checks: `Brimir <version>
+  initializing`, the `Device report:` line, `Performance Profile (300 frames)`; with run-ahead also two `retro_init`
+  calls (the second copy, which RetroArch copies to `cores/retroarch_temp/` and loads into the same process); software:
+  no `Failed to create second instance` and both copies mapped; Vulkan: the core's decline message and RetroArch's
+  single-instance fallback (or, when the GPU misses the baseline, the software fallback in the device report). Exit 0
+  only when every check holds.
+- `e2e_bench_hash.sh` runs `--hash --audio-hash --fixed-rtc --frames $FRAMES --warmup 0 $BENCH_ARGS` on both sides and
+  compares the per-frame video and audio hash lines.
+- `emulator_tests.sh` recreates `tests/fixtures` at the source path the binary was compiled from (the tests find
+  fixtures through `__FILE__`) and runs `brimir_tests` in `/data/local/tmp/brimir` as the shell user (`RUN_AS=root`,
+  `TEST_ENV="TMPDIR="` to unset TMPDIR).
+
+### What was proven (2026-11-15, emulator 36.1.9, x86_64 core from this branch)
+
+On Android 14 (`google_apis`, 4 KB pages) with RetroArch 1.22.2, and on Android 15 `google_apis_ps16k` (16 KB pages)
+with the RetroArch nightly:
+
+- RetroArch loads the core and runs the BIOS menu (first-boot language screen) for well over 300 frames, software and
+  Vulkan renderer (`Device report: renderer vulkan; GPU "AMD Radeon RX 9060 XT"; Vulkan API 1.3.0`).
+- Run-ahead with the second instance: with the software renderer both copies of the core are loaded in one process and
+  run; with the Vulkan renderer the second copy declines and RetroArch falls back to run-ahead on one instance while
+  frames keep advancing.
+- `brimir_bench` on the emulator and the Windows x64 build give identical frame and audio hashes for 300 frames of the
+  BIOS menu and of a game window from a save state, with the interpreter and with the SH-2 JIT (the x86_64 build
+  has the x64 JIT).
+- `brimir_tests "~[gpu]"` passes on both images as the shell user (one case skips on every platform by design).
+
+Not covered by the emulator: API 26 devices, arm64 code (the A56 test covers it), real-device GPU drivers.
