@@ -12,6 +12,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# No job writes to the repository; uploading artifacts and the cache need no token permission.
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -97,6 +101,14 @@ jobs:
         env:
           TSAN_OPTIONS: halt_on_error=1 suppressions=${{ github.workspace }}/tests/tsan_suppressions.txt
         run: ./build/bin/brimir_tests "[jit]"
+
+      # No suppressions file: the VDP1 TVMD race fix (each VDP1 command and erase uses the TVMD of the emulation thread
+      # at issue time) must stay race free. Before the fix this reported 4 TVMD/VRes races (evidence task5c,
+      # fr1-tsan-nosupp-tvmd-prefix.txt), after it none. Other threaded VDP races are not fixed: only [tvmd] is filtered.
+      - name: Test the VDP1 TVMD fix without suppressions
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ./build/bin/brimir_tests "[tvmd]"
 
   # The [gpu] tests on Mesa's lavapipe (software Vulkan) with the Khronos validation layer: headless device, compute
   # helpers, zero validation errors. BRIMIR_REQUIRE_VULKAN=1 makes a missing device or layer fail instead of SKIP.
@@ -276,6 +288,7 @@ jobs:
           name: brimir-android-arm64
           path: dist/brimir-android-arm64.zip
           if-no-files-found: error
+          retention-days: 14
 
       # Same build-id as the packaged core: for symbolicating crash reports.
       - name: Upload the unstripped core
@@ -284,6 +297,7 @@ jobs:
           name: brimir-android-arm64-unstripped
           path: build-android-arm64-v8a/lib/brimir_libretro_android.so
           if-no-files-found: error
+          retention-days: 14
 
   # brimir_tests on an x86_64 Android emulator (API 34, google_apis), no BIOS (the BIOS cases skip), no GPU cases
   # (~[gpu]); tools/android/emulator_tests.sh copies the binary and tests/fixtures to /data/local/tmp/brimir. Not a
