@@ -389,7 +389,7 @@ public:
     static constexpr size_t kBackupCartSize = 512 * 1024;
     /// @brief During play the save RAM buffer (GetSRAMData) is refreshed from the emulated backup RAM at least every
     /// this many frames, so a frontend's periodic save of the pointer it kept (RetroArch's autosave) sees in-game saves.
-    static constexpr uint32_t kSRAMSyncInterval = 300;
+    static constexpr uint32_t kSRAMSyncInterval = 60;
 
     /// @brief Choose the cartridge. Applies at the next LoadGame (the cartridge is inserted before the BIOS boots).
     void SetCartridgeOverride(CartridgeChoice choice) { m_cartridgeChoice = choice; }
