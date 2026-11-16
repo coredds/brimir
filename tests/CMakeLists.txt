@@ -31,6 +31,8 @@ add_executable(brimir_tests
     unit/test_vdp1_line_stepper.cpp
     # Threaded VDP1: the render thread sees the emulator thread's writes in order (matches unthreaded)
     unit/test_vdp1_threaded_events.cpp
+    # VDP1 commands, erases and CPU framebuffer writes use TVMD as issued (threaded VDP1/VDP2 match unthreaded)
+    unit/test_vdp1_tvmd_issue.cpp
     unit/test_dirty_bitmap.cpp
     # VDP color calculation tests
     unit/test_vdp_color_calc.cpp
