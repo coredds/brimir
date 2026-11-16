@@ -1,0 +1,5 @@
+TESTED ON
+  - x86_64 Android emulator (Android 14 and 15)
+  - Galaxy A56 (Mali-G615, Android 15): works, Vulkan ran
+NOT tested: Adreno phones.
+Testing reports are welcome.

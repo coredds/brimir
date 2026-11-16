@@ -142,14 +142,90 @@ jobs:
           name: brimir-macos-arm64
           path: artifact/
 
+  # The Android core (arm64-v8a), as ci.yml's build-android (tools/android/README.md) but without the Linux x64 core that
+  # only serves a test case. A dry run (started by hand, no tag) uploads brimir-android-arm64: the phone test build.
+  build-android-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build zip unzip file
+
+      # Fails a tag build while ANDROID-INSTALL.txt still says "in testing"; a dry run passes (the release job checks
+      # again).
+      - name: Release text guard
+        run: bash tools/android/check_release_text.sh tools/android/ANDROID-INSTALL.txt "$GITHUB_REF"
+
+      - name: Pinned Android NDK
+        run: |
+          pin=$(tr -d '[:space:]' < tools/android/ndk-version.txt)
+          echo "pin $pin; ANDROID_HOME=$ANDROID_HOME; ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-unset}"
+          ls "$ANDROID_HOME/ndk" || true
+          if [ ! -f "$ANDROID_HOME/ndk/$pin/source.properties" ]; then
+            echo "NDK $pin is not on the runner: installing it"
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$pin" > /dev/null
+          fi
+          grep Pkg.Revision "$ANDROID_HOME/ndk/$pin/source.properties"
+
+      - name: Build the arm64-v8a core
+        run: bash tools/android/build.sh arm64-v8a
+
+      - name: Check the core
+        run: bash tools/android/check_elf.sh build-android-arm64-v8a/lib/brimir_libretro_android.so arm64-v8a
+
+      - name: Package
+        run: |
+          mkdir -p dist/stripped
+          bash tools/android/package.sh build-android-arm64-v8a/lib/brimir_libretro_android.so \
+            dist/brimir-android-arm64.zip
+          unzip -l dist/brimir-android-arm64.zip
+          unzip -q dist/brimir-android-arm64.zip brimir_libretro_android.so -d dist/stripped
+          file build-android-arm64-v8a/lib/brimir_libretro_android.so dist/stripped/brimir_libretro_android.so
+          sha256sum build-android-arm64-v8a/lib/brimir_libretro_android.so dist/stripped/brimir_libretro_android.so \
+            dist/brimir-android-arm64.zip
+
+      - name: Check the packaged (stripped) core
+        run: bash tools/android/check_elf.sh dist/stripped/brimir_libretro_android.so arm64-v8a
+
+      - name: Test the Android scripts
+        env:
+          HOST_CORE: "skip:no Linux x64 core in the release build (ci.yml's build-android runs this case)"
+          X86_64_CORE: "skip:the x86_64 core is not released (ci.yml's android-emulator-tests checks it)"
+        run: |
+          bash tools/android/test_check_elf.sh
+          bash tools/android/test_package.sh
+          bash tools/android/test_check_release_text.sh
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: brimir-android-arm64
+          path: dist/brimir-android-arm64.zip
+          if-no-files-found: error
+
+      # Same build-id as the packaged core: for symbolicating crash reports.
+      - name: Upload the unstripped core
+        uses: actions/upload-artifact@v4
+        with:
+          name: brimir-android-arm64-unstripped
+          path: build-android-arm64-v8a/lib/brimir_libretro_android.so
+          if-no-files-found: error
+
   release:
-    needs: [build-windows, build-linux-x64, build-linux-arm64, build-macos-arm64]
+    needs: [build-windows, build-linux-x64, build-linux-arm64, build-macos-arm64, build-android-arm64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Android release text guard
+        run: bash tools/android/check_release_text.sh tools/android/ANDROID-INSTALL.txt "$GITHUB_REF"
 
       - name: Download Windows x64 artifact
         uses: actions/download-artifact@v4
@@ -175,12 +251,21 @@ jobs:
           name: brimir-macos-arm64
           path: macos-arm64
 
+      - name: Download Android ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: brimir-android-arm64
+          path: android-arm64
+
+      # The Android zip is the one package.sh made (tools/android/package.sh), only renamed.
       - name: Package releases
         run: |
           cd windows-x64 && zip -r ../brimir-${{ github.ref_name }}-windows-x64.zip . && cd ..
           cd linux-x64 && tar czf ../brimir-${{ github.ref_name }}-linux-x64.tar.gz . && cd ..
           cd linux-arm64 && tar czf ../brimir-${{ github.ref_name }}-linux-arm64.tar.gz . && cd ..
           cd macos-arm64 && tar czf ../brimir-${{ github.ref_name }}-macos-arm64.tar.gz . && cd ..
+          cp android-arm64/brimir-android-arm64.zip brimir-${{ github.ref_name }}-android-arm64.zip
+          unzip -l brimir-${{ github.ref_name }}-android-arm64.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -190,6 +275,7 @@ jobs:
             brimir-${{ github.ref_name }}-linux-x64.tar.gz
             brimir-${{ github.ref_name }}-linux-arm64.tar.gz
             brimir-${{ github.ref_name }}-macos-arm64.tar.gz
+            brimir-${{ github.ref_name }}-android-arm64.zip
           body: |
             Brimir is a Sega Saturn emulation core for libretro, built on Ymir's cycle-accurate hardware layer.
 

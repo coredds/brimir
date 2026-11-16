@@ -84,9 +84,46 @@ bash tools/android/test_check_elf.sh   # tests the checker itself
 
 It uses `llvm-readelf` and `llvm-nm` of the pinned NDK, found as `build.sh` finds it (`ndk_env.sh`).
 `test_check_elf.sh` builds tiny shared objects with the NDK clang that each break one check (4 KB alignment, a
-`libc++_shared.so` dependency, an extra exported symbol, a wrong file name, the wrong machine) and expects each to fail
-for that reason only; it also checks the Linux x64 core in `build-wsl` as `arm64-v8a` (skipped when missing) and expects
-the built Android cores to pass.
+`libc++_shared.so` dependency, an extra exported symbol, a missing one (`retro_reset`), a wrong file name, the wrong
+machine) and expects each to fail for that reason only; it also checks a Linux x64 core as `arm64-v8a` (`HOST_CORE`,
+default `build-wsl/lib/brimir_libretro.so`) and expects the built Android cores to pass (`ARM64_CORE`, required;
+`X86_64_CORE`). Unset, `HOST_CORE` and `X86_64_CORE` are skipped when their default file is missing; set to a path, a
+missing file fails; `skip:<reason>` skips with that reason (CI sets them all).
+
+## Package
+
+```bash
+bash tools/android/package.sh build-android-arm64-v8a/lib/brimir_libretro_android.so brimir-android-arm64.zip
+bash tools/android/test_package.sh   # tests the packager with stand-in files
+```
+
+`package.sh <core.so> <out.zip>` writes a plain zip (no folder) with `brimir_libretro_android.so`,
+`brimir_libretro.info` (from `resources/info`) and `ANDROID-INSTALL.txt`. The core in the zip is the input after the
+NDK's `llvm-strip --strip-unneeded` (about 57 MB -> 6 MB): the dynamic symbols and the build-id stay, the symbol table
+and debug info go. The unstripped input is not changed; keep it for symbolicating crash reports (same build-id). Run
+`check_elf.sh` on the stripped core too (unzip it; CI does).
+
+`check_release_text.sh <install text> <git ref>` is the release guard: it fails (exit 1) when the ref is a tag
+(`refs/tags/...`) and the text still says "in testing" (the A56 line; see "Before the first Android release" in
+`TEST-GUIDE.md`); any other ref passes, so dry runs work. `test_check_release_text.sh` tests it with the two texts in
+`testdata/`.
+
+## CI and release
+
+- `.github/workflows/ci.yml`, job `build-android` (every push): the release guard, `build.sh arm64-v8a`, a Linux x64
+  core (host compiler, for the `HOST_CORE` case), `check_elf.sh` on the unstripped and the stripped core,
+  `test_check_elf.sh`, `test_package.sh`, `test_check_release_text.sh`; uploads `brimir-android-arm64` (the zip) and
+  `brimir-android-arm64-unstripped` (the unstripped core, for crash symbolication).
+- Job `android-emulator-tests`: `build.sh x86_64 --tests`, `check_elf.sh` on the x86_64 core, then
+  `emulator_tests.sh build-android-x86_64/bin/brimir_tests "~[gpu]"` on an API 34 `google_apis` x86_64 emulator
+  (reactivecircus/android-emulator-runner, KVM). No BIOS, so the BIOS cases skip. No case is excluded. It does not
+  gate releases (yet).
+- `.github/workflows/release.yml`, job `build-android-arm64`: the same steps as `build-android` but without the host core
+  (`HOST_CORE=skip:...`); the release job (tags only) runs the release guard again and publishes the zip as
+  `brimir-<tag>-android-arm64.zip`. A run started by hand on a branch (dry run) builds and uploads the same artifacts;
+  its `brimir-android-arm64` artifact is the test build for the phone.
+- The NDK comes from the runner's SDK (`$ANDROID_HOME/ndk/<pin>`, installed with `sdkmanager` when missing); the build
+  logs print the NDK path and version (`Android NDK: ...`).
 
 The Android build compiles every target with hidden visibility and links the core with `-Wl,--exclude-libs,ALL` and the
 version script `src/libretro/android_exports.map` (`retro_*` only; libc++ marks some of its typeinfo default, which hidden
@@ -215,6 +252,7 @@ with the RetroArch nightly:
   has the x64 JIT).
 - `brimir_tests "~[gpu]"` passes on both images as the shell user (one case skips on every platform by design). One
   intermittent failure was seen on the Android 14 image: "Sprite layer and compose fast paths match with the threaded
-  VDP2 and deinterlace renderers" (2 of 40 repeats; 0 of 40 on Windows); see the task 5 report.
+  VDP2 and deinterlace renderers" (2 of 40 repeats; 0 of 40 on Windows). It was a race in the threaded VDP renderer
+  (TVMD read from the VDP2 thread's copy), fixed since (`src/core/BRIMIR_FORK.md`; 0 of 200 on a 2-vCPU emulator).
 
 Not covered by the emulator: API 26 devices, arm64 code (the A56 test covers it), real-device GPU drivers.

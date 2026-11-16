@@ -203,6 +203,140 @@ jobs:
           export VULKAN_SDK="$RUNNER_TEMP/vulkansdk/${VULKAN_SDK_VERSION}/x86_64"
           cmake -DBRIMIR_SHADERS_CHECK=ON -P tools/shaders/build_shaders.cmake
 
+  # The Android core for arm64-v8a (the shipped ABI), built, checked and packaged as release.yml does
+  # (tools/android/README.md). The NDK is the pinned one (tools/android/ndk-version.txt) from the runner's SDK: the
+  # runner's ANDROID_NDK_HOME is another version, so build.sh notes that and uses $ANDROID_HOME/ndk/<pin>.
+  build-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build zip unzip file
+
+      - name: Release text guard
+        run: bash tools/android/check_release_text.sh tools/android/ANDROID-INSTALL.txt "$GITHUB_REF"
+
+      - name: Pinned Android NDK
+        run: |
+          pin=$(tr -d '[:space:]' < tools/android/ndk-version.txt)
+          echo "pin $pin; ANDROID_HOME=$ANDROID_HOME; ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-unset}"
+          ls "$ANDROID_HOME/ndk" || true
+          if [ ! -f "$ANDROID_HOME/ndk/$pin/source.properties" ]; then
+            echo "NDK $pin is not on the runner: installing it"
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$pin" > /dev/null
+          fi
+          grep Pkg.Revision "$ANDROID_HOME/ndk/$pin/source.properties"
+
+      - name: Build the arm64-v8a core
+        run: bash tools/android/build.sh arm64-v8a
+
+      # Only for test_check_elf.sh: a real Linux x64 core must fail the arm64-v8a checks.
+      - name: Build a Linux x64 core
+        run: |
+          cmake -B build-host -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DBRIMIR_BUILD_TESTS=OFF
+          cmake --build build-host --target brimir_libretro --parallel $(nproc)
+
+      - name: Check the core
+        run: bash tools/android/check_elf.sh build-android-arm64-v8a/lib/brimir_libretro_android.so arm64-v8a
+
+      - name: Package
+        run: |
+          mkdir -p dist/stripped
+          bash tools/android/package.sh build-android-arm64-v8a/lib/brimir_libretro_android.so \
+            dist/brimir-android-arm64.zip
+          unzip -l dist/brimir-android-arm64.zip
+          unzip -q dist/brimir-android-arm64.zip brimir_libretro_android.so -d dist/stripped
+          file build-android-arm64-v8a/lib/brimir_libretro_android.so dist/stripped/brimir_libretro_android.so
+          sha256sum build-android-arm64-v8a/lib/brimir_libretro_android.so dist/stripped/brimir_libretro_android.so \
+            dist/brimir-android-arm64.zip
+
+      - name: Check the packaged (stripped) core
+        run: bash tools/android/check_elf.sh dist/stripped/brimir_libretro_android.so arm64-v8a
+
+      - name: Test the Android scripts
+        env:
+          HOST_CORE: build-host/lib/brimir_libretro.so
+          X86_64_CORE: "skip:the x86_64 core is built and checked in android-emulator-tests"
+        run: |
+          bash tools/android/test_check_elf.sh
+          bash tools/android/test_package.sh
+          bash tools/android/test_check_release_text.sh
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: brimir-android-arm64
+          path: dist/brimir-android-arm64.zip
+          if-no-files-found: error
+
+      # Same build-id as the packaged core: for symbolicating crash reports.
+      - name: Upload the unstripped core
+        uses: actions/upload-artifact@v4
+        with:
+          name: brimir-android-arm64-unstripped
+          path: build-android-arm64-v8a/lib/brimir_libretro_android.so
+          if-no-files-found: error
+
+  # brimir_tests on an x86_64 Android emulator (API 34, google_apis), no BIOS (the BIOS cases skip), no GPU cases
+  # (~[gpu]); tools/android/emulator_tests.sh copies the binary and tests/fixtures to /data/local/tmp/brimir. Not a
+  # dependency of the release.
+  android-emulator-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Pinned Android NDK
+        run: |
+          pin=$(tr -d '[:space:]' < tools/android/ndk-version.txt)
+          echo "pin $pin; ANDROID_HOME=$ANDROID_HOME; ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-unset}"
+          ls "$ANDROID_HOME/ndk" || true
+          if [ ! -f "$ANDROID_HOME/ndk/$pin/source.properties" ]; then
+            echo "NDK $pin is not on the runner: installing it"
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$pin" > /dev/null
+          fi
+          grep Pkg.Revision "$ANDROID_HOME/ndk/$pin/source.properties"
+
+      - name: Build the x86_64 core and tests
+        run: bash tools/android/build.sh x86_64 --tests
+
+      - name: Check the x86_64 core
+        run: bash tools/android/check_elf.sh build-android-x86_64/lib/brimir_libretro_android.so x86_64
+
+      # As documented by reactivecircus/android-emulator-runner: hardware acceleration for the emulator.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Unit tests on the Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          cores: 4
+          ram-size: 4096M
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: bash tools/android/emulator_tests.sh build-android-x86_64/bin/brimir_tests "~[gpu]"
+
   build-macos-arm64:
     # macos-14 is retired on 2026-11-02 (deprecated since 2026-07-06, with brownouts that
     # leave jobs queued or failing). Builds keep targeting macOS 14 as before.
