@@ -16,7 +16,15 @@ ndk_version() {
 ndk_find() {
     local here sdk pin_ndk found
     here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    NDK_VERSION=$(tr -d '[:space:]' < "$here/ndk-version.txt")
+    # Callers use `ndk_find || exit 1`, which turns off set -e in here: every failure is checked explicitly.
+    NDK_VERSION=""
+    if [ -r "$here/ndk-version.txt" ]; then
+        NDK_VERSION=$(tr -d '[:space:]' < "$here/ndk-version.txt") || NDK_VERSION=""
+    fi
+    if [ -z "$NDK_VERSION" ]; then
+        echo "error: no pinned NDK version: $here/ndk-version.txt is missing, unreadable or empty" >&2
+        return 1
+    fi
     sdk=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
     pin_ndk=${sdk:+$sdk/ndk/$NDK_VERSION}
 
@@ -54,6 +62,10 @@ ndk_find() {
         else
             echo "  neither ANDROID_SDK_ROOT nor ANDROID_HOME is set" >&2
         fi
+        return 1
+    fi
+    if [ -z "$(ndk_version "$NDK")" ] && [ "${BRIMIR_ALLOW_NDK_MISMATCH:-0}" != 1 ]; then
+        echo "error: the version of the NDK at $NDK is unknown (no Pkg.Revision in source.properties)" >&2
         return 1
     fi
 }

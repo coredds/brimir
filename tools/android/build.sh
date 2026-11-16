@@ -39,7 +39,8 @@ if [ ! -f "$TOOLCHAIN" ]; then
          "see tools/android/README.md" >&2
     exit 1
 fi
-echo "Android NDK: $NDK ($NDK_SOURCE), version $(ndk_version "$NDK")"
+NDK_FOUND=$(ndk_version "$NDK")
+echo "Android NDK: $NDK ($NDK_SOURCE), version ${NDK_FOUND:-unknown}"
 
 BUILD_DIR="build-android-$ABI"
 CONFIG_ARGS=(

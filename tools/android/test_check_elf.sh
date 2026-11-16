@@ -3,18 +3,20 @@
 # and runs the checker on them and on the real cores.
 #
 # usage: tools/android/test_check_elf.sh
-# env:   as build.sh; HOST_CORE (default build-wsl/lib/brimir_libretro.so, a Linux x64 core: skipped when missing)
-#        ARM64_CORE (default build-android-arm64-v8a/lib/brimir_libretro_android.so, required)
-#        X86_64_CORE (default build-android-x86_64/lib/brimir_libretro_android.so, skipped when missing)
+# env:   as build.sh; HOST_CORE (a Linux x64 core), ARM64_CORE (required), X86_64_CORE:
+#          unset: the default path (build-wsl/lib/brimir_libretro.so, build-android-arm64-v8a/lib/...,
+#                 build-android-x86_64/lib/brimir_libretro_android.so); HOST_CORE and X86_64_CORE are skipped when
+#                 their default file is missing
+#          a path: that file, a missing one is a failure (CI sets every one, so nothing is skipped by accident)
+#          "skip:<reason>": skipped with that reason (not for ARM64_CORE)
 # Exit 0 when every case gives the expected result.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 CHECK=tools/android/check_elf.sh
-HOST_CORE=${HOST_CORE:-build-wsl/lib/brimir_libretro.so}
 ARM64_CORE=${ARM64_CORE:-build-android-arm64-v8a/lib/brimir_libretro_android.so}
-X86_64_CORE=${X86_64_CORE:-build-android-x86_64/lib/brimir_libretro_android.so}
+case "$ARM64_CORE" in skip:*) echo "error: ARM64_CORE cannot be skipped" >&2; exit 2 ;; esac
 
 # shellcheck source=tools/android/ndk_env.sh
 . tools/android/ndk_env.sh
@@ -33,6 +35,12 @@ trap 'rm -rf "$TMP"' EXIT
     done < tools/android/libretro_exports.txt
 } > "$TMP/api.c"
 echo '__attribute__((visibility("default"))) void brimir_extra_symbol(void) {}' > "$TMP/extra.c"
+# missing.c: the libretro API without retro_reset
+grep -v ' retro_reset(void)' "$TMP/api.c" > "$TMP/missing.c"
+if cmp -s "$TMP/api.c" "$TMP/missing.c"; then
+    echo "error: retro_reset is not in libretro_exports.txt; pick another function for the missing-export case" >&2
+    exit 1
+fi
 {
     echo '#include <stdio.h>'
     echo '#include <string>'
@@ -56,6 +64,7 @@ so good "$A64" clang "$TMP/api.c" -Wl,-z,max-page-size=16384
 so align4k "$A64" clang "$TMP/api.c" -Wl,-z,max-page-size=4096
 so cxxshared "$A64" clang++ -x c++ "$TMP/api.cpp" -Wl,-z,max-page-size=16384 -nostdlib++ -lc++_shared
 so extra "$A64" clang "$TMP/api.c" "$TMP/extra.c" -Wl,-z,max-page-size=16384
+so missing "$A64" clang "$TMP/missing.c" -Wl,-z,max-page-size=16384
 so x64 "$X64" clang "$TMP/api.c" -Wl,-z,max-page-size=16384
 mkdir -p "$TMP/badname"
 cp "$TMP/good/brimir_libretro_android.so" "$TMP/badname/brimir_libretro.so"
@@ -91,20 +100,30 @@ expect "control: tiny arm64 object, all checks met" "$TMP/good/brimir_libretro_a
 expect "4 KB-aligned object" "$TMP/align4k/brimir_libretro_android.so" arm64-v8a alignment only
 expect "object needing libc++_shared.so" "$TMP/cxxshared/brimir_libretro_android.so" arm64-v8a DT_NEEDED only
 expect "object exporting an extra symbol" "$TMP/extra/brimir_libretro_android.so" arm64-v8a exports only
+expect "object missing retro_reset" "$TMP/missing/brimir_libretro_android.so" arm64-v8a "exports.*missing: retro_reset" only
 expect "object with the wrong file name" "$TMP/badname/brimir_libretro.so" arm64-v8a name only
 expect "x86_64 object checked as arm64-v8a" "$TMP/x64/brimir_libretro_android.so" arm64-v8a machine only
 expect "x86_64 object checked as x86_64" "$TMP/x64/brimir_libretro_android.so" x86_64 ok
-if [ -f "$HOST_CORE" ]; then
-    expect "host Linux x64 core ($HOST_CORE) checked as arm64-v8a" "$HOST_CORE" arm64-v8a machine
-else
-    echo "SKIP host Linux x64 core: $HOST_CORE not found"
-fi
+# optional <var> <default> <name> <abi> <ok|reason>: the case for the core in $<var> (see env above)
+optional() {
+    local var=$1 default=$2 name=$3 abi=$4 want=$5 file
+    if [ -z "${!var+set}" ]; then
+        file=$default
+        if [ ! -f "$file" ]; then
+            echo "SKIP $name: $var not set and $file not found"
+            return
+        fi
+    else
+        file=${!var}
+        case "$file" in
+            skip:*) echo "SKIP $name: $var=$file"; return ;;
+        esac
+    fi
+    expect "$name ($file)" "$file" "$abi" "$want"
+}
+optional HOST_CORE build-wsl/lib/brimir_libretro.so "host Linux x64 core checked as arm64-v8a" arm64-v8a machine
 expect "real arm64 core ($ARM64_CORE)" "$ARM64_CORE" arm64-v8a ok
-if [ -f "$X86_64_CORE" ]; then
-    expect "real x86_64 core ($X86_64_CORE)" "$X86_64_CORE" x86_64 ok
-else
-    echo "SKIP real x86_64 core: $X86_64_CORE not found"
-fi
+optional X86_64_CORE build-android-x86_64/lib/brimir_libretro_android.so "real x86_64 core" x86_64 ok
 
 echo "test_check_elf: $PASS passed, $FAILS failed"
 [ "$FAILS" = 0 ]

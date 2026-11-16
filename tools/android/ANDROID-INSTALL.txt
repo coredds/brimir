@@ -77,7 +77,13 @@ vulkan, core option "Renderer (restart
 required)" = Vulkan, and a Vulkan 1.2 GPU.
 Otherwise Brimir uses Software and logs
 the reason ("Device report:" line in
-RetroArch's log). Details: TEST-GUIDE.md.
+RetroArch's log).
+With Vulkan and run-ahead "Use Second
+Instance", RetroArch's message "Failed to
+create second instance. Run-Ahead will now
+use only one instance." is expected.
+Details (test guide):
+https://github.com/coredds/brimir/blob/master/tools/android/TEST-GUIDE.md
 
 TESTED ON
   - x86_64 Android emulator (Android 14 and 15)

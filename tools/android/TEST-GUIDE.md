@@ -210,9 +210,9 @@ The core's messages are in this file, **not** in Android's logcat **[emulator]**
 absent from logcat in every emulator run). So the file is the thing to collect.
 
 **If no log file appears** (empty `logs` folder, or no such folder): do not lose time on it. Instead (a) run the game
-and take **screenshots** of any message RetroArch shows on the screen; (b) take a screenshot of the Core Options screen and of the title bar; (c) use the PC route with adb
-(step 19), which can also look for the log file under `/storage/emulated/0/RetroArch` and the app's own folder; and (d)
-write the exact text of what you see into the report. Say in the report that no log file was produced, and with which
+and take **screenshots** of any message RetroArch shows on the screen; (b) take a screenshot of the Core Options
+screen and of the title bar; (c) use the PC route with adb (step 19), which can also look for the log file under
+`/storage/emulated/0/RetroArch` and the app's own folder; and (d) write the exact text of what you see into the report. Say in the report that no log file was produced, and with which
 RetroArch (package and version).
 
 Tip: after each run below, copy the log file under a new name (for example `log-software.txt`), because later runs
