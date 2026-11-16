@@ -1,0 +1,5 @@
+TESTED ON
+  - x86_64 Android emulator (Android 14 and 15)
+  - Samsung Galaxy A56: result still in
+    testing, nothing to report yet
+NOT tested: Mali and Adreno phones.

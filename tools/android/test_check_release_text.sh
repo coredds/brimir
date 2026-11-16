@@ -1,6 +1,7 @@
 #!/bin/bash
-# Tests check_release_text.sh (tools/android/README.md) with two install texts in tools/android/testdata: one still
-# "in testing" (in other letter case, to show the match ignores case), one with a final result (and the word
+# Tests check_release_text.sh (tools/android/README.md) with install texts in tools/android/testdata: one still
+# "in testing" (in other letter case, to show the match ignores case), variants with "in" and "testing" on two lines
+# or with two spaces between them (also with CRLF line ends, made here), and one with a final result (and the word
 # "Testing" alone, which must not trip the guard).
 #
 # usage: tools/android/test_check_release_text.sh
@@ -12,6 +13,15 @@ cd "$ROOT"
 CHECK=tools/android/check_release_text.sh
 IN_TESTING=tools/android/testdata/install-in-testing.txt
 TESTED=tools/android/testdata/install-tested.txt
+WRAPPED=tools/android/testdata/install-in-testing-wrapped.txt
+SPACES=tools/android/testdata/install-in-testing-spaces.txt
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+CRLF=$TMP/crlf.txt
+CRLF_OK=$TMP/crlf-ok.txt
+sed 's/$/\r/' "$WRAPPED" > "$CRLF"
+sed 's/$/\r/' "$TESTED" > "$CRLF_OK"
 
 PASS=0
 FAILS=0
@@ -33,6 +43,11 @@ expect() {
 expect "'in testing', tag build" 1 "$IN_TESTING" refs/tags/v0.9.0
 expect "'in testing', dry run on a branch" 0 "$IN_TESTING" refs/heads/feature/android-build
 expect "'in testing', dry run on master" 0 "$IN_TESTING" refs/heads/master
+expect "'in' and 'testing' on two lines, tag build" 1 "$WRAPPED" refs/tags/v0.9.0
+expect "'in  testing' with two spaces, tag build" 1 "$SPACES" refs/tags/v0.9.0
+expect "wrapped, dry run" 0 "$WRAPPED" refs/heads/master
+expect "CRLF line ends, wrapped, tag build" 1 "$CRLF" refs/tags/v0.9.0
+expect "CRLF line ends, final result, tag build" 0 "$CRLF_OK" refs/tags/v0.9.0
 expect "final result, tag build" 0 "$TESTED" refs/tags/v0.9.0
 expect "final result, branch" 0 "$TESTED" refs/heads/master
 expect "missing file" 2 tools/android/testdata/none.txt refs/tags/v0.9.0

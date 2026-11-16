@@ -18,7 +18,12 @@ if [ ! -f "$TEXT" ]; then
     exit 2
 fi
 
-lines=$(grep -niF 'in testing' "$TEXT" || true)
+# Line ends become spaces first, so "in" at the end of one line and "testing" at the start of the next still match.
+if tr '\r\n' '  ' < "$TEXT" | grep -qiwE 'in[[:space:]]+testing'; then
+    lines=$(grep -niE 'testing' "$TEXT" || true)
+else
+    lines=
+fi
 if [ -z "$lines" ]; then
     echo "check_release_text: ok ($TEXT has no 'in testing'; ref $REF)"
     exit 0
