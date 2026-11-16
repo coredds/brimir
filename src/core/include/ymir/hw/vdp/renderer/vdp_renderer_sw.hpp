@@ -350,6 +350,14 @@ private:
                 uint32 address;
                 uint32 value;
             } write;
+
+            // Brimir: CPU framebuffer writes carry whether they also go to the alternate field (deinterlace and an
+            // interlaced TVMD when the write was issued); upstream used `write` and decided on the render thread.
+            struct {
+                uint32 address;
+                uint16 value;
+                bool altMirror;
+            } fbWrite;
         };
 
         static VDP1RenderEvent Reset(bool hard) {
@@ -395,20 +403,21 @@ private:
             util::unreachable();
         }
 
-        static VDP1RenderEvent FBRAMWriteByte(uint32 address, uint8 value) {
-            return {Type::FBRAMWriteByte, {.write = {.address = address, .value = value}}};
+        // Brimir: altMirror (see fbWrite)
+        static VDP1RenderEvent FBRAMWriteByte(uint32 address, uint8 value, bool altMirror) {
+            return {Type::FBRAMWriteByte, {.fbWrite = {.address = address, .value = value, .altMirror = altMirror}}};
         }
 
-        static VDP1RenderEvent FBRAMWriteWord(uint32 address, uint16 value) {
-            return {Type::FBRAMWriteWord, {.write = {.address = address, .value = value}}};
+        static VDP1RenderEvent FBRAMWriteWord(uint32 address, uint16 value, bool altMirror) {
+            return {Type::FBRAMWriteWord, {.fbWrite = {.address = address, .value = value, .altMirror = altMirror}}};
         }
 
         template <mem_primitive_16 T>
-        static VDP1RenderEvent FBRAMWrite(uint32 address, T value) {
+        static VDP1RenderEvent FBRAMWrite(uint32 address, T value, bool altMirror) {
             if constexpr (std::is_same_v<T, uint8>) {
-                return FBRAMWriteByte(address, value);
+                return FBRAMWriteByte(address, value, altMirror);
             } else if constexpr (std::is_same_v<T, uint16>) {
-                return FBRAMWriteWord(address, value);
+                return FBRAMWriteWord(address, value, altMirror);
             }
             util::unreachable();
         }

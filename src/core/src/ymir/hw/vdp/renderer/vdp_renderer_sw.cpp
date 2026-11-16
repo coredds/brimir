@@ -455,10 +455,13 @@ void SoftwareVDPRenderer::VDP1WriteFB(uint32 address, uint16 value) {
 template <mem_primitive_16 T>
 FORCE_INLINE void SoftwareVDPRenderer::VDP1WriteFBImpl(uint32 address, T value) {
     BRIMIR_VDP1_PROBE_COUNT(fbWrites); // Brimir: probe
+    // Brimir: decided here, on the emulator thread, with TVMD as the write is issued, also for the VDP1 render thread
+    // (upstream decided there, reading m_state.regs2 while the emulator thread may already have changed it)
+    const bool altMirror = m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced();
     if (m_threadedVDP1Rendering) {
-        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::FBRAMWrite<T>(address, value));
+        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::FBRAMWrite<T>(address, value, altMirror));
     } else {
-        if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
+        if (altMirror) {
             util::WriteBE<T>(&m_altFBRAM[m_state.fbIndex.draw][address & 0x3FFFF], value);
         }
     }
@@ -551,8 +554,10 @@ void SoftwareVDPRenderer::VDP1EraseFramebuffer(uint64 cycles) {
     }
     // Brimir: the erase uses TVMD and the vertical resolution as they are now on the emulator thread, which is what the
     // unthreaded renderer reads. Upstream read VDP2GetRegs() (the VDP2 render thread's copy while threaded) and m_VRes
-    // in VDP1DoEraseFramebuffer, possibly later on the VDP1 render thread. m_VRes is safe to read here: with threaded
-    // VDP2 only the VDP2 render thread writes it, for events queued before the one it has just signalled.
+    // in VDP1DoEraseFramebuffer, possibly later on the VDP1 render thread. m_VRes is current here: with threaded VDP2
+    // the VDP2 render thread writes it (VDP2UpdateResolution) only for events queued before the one it has just
+    // signalled, and the emulator thread writes it in Reset and in the unthreaded VDP2SetResolution. Reset's write while
+    // the VDP2 render thread may also be writing it is a separate upstream race, not changed here.
     const RegTVMD tvmd = m_state.regs2.TVMD;
     const uint32 vres = m_VRes;
     if (m_threadedVDP1Rendering) {
@@ -794,20 +799,25 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
             case EvtType::FBRAMWriteByte: {
                 // Also write back to the main state, since an earlier SwapBuffers/EndDraw copy processed after the CPU
                 // write may have overwritten it there.
+                // Brimir: event.fbWrite (upstream event.write), mirrored as decided at issue (VDP1WriteFBImpl)
                 const auto fbIndex = m_state.fbIndex.draw;
-                rctx.vdp1.mem.FBRAM[fbIndex][event.write.address] = event.write.value;
-                m_state.mem1.FBRAM[fbIndex][event.write.address] = event.write.value;
-                if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
-                    m_altFBRAM[fbIndex][event.write.address] = event.write.value;
+                const auto &write = event.fbWrite;
+                const uint8 value = static_cast<uint8>(write.value);
+                rctx.vdp1.mem.FBRAM[fbIndex][write.address] = value;
+                m_state.mem1.FBRAM[fbIndex][write.address] = value;
+                if (write.altMirror) {
+                    m_altFBRAM[fbIndex][write.address] = value;
                 }
                 break;
             }
             case EvtType::FBRAMWriteWord: {
+                // Brimir: as FBRAMWriteByte
                 const auto fbIndex = m_state.fbIndex.draw;
-                util::WriteBE<uint16>(&rctx.vdp1.mem.FBRAM[fbIndex][event.write.address], event.write.value);
-                util::WriteBE<uint16>(&m_state.mem1.FBRAM[fbIndex][event.write.address], event.write.value);
-                if (m_enhancements.deinterlace && m_state.regs2.TVMD.IsInterlaced()) {
-                    util::WriteBE<uint16>(&m_altFBRAM[fbIndex][event.write.address], event.write.value);
+                const auto &write = event.fbWrite;
+                util::WriteBE<uint16>(&rctx.vdp1.mem.FBRAM[fbIndex][write.address], write.value);
+                util::WriteBE<uint16>(&m_state.mem1.FBRAM[fbIndex][write.address], write.value);
+                if (write.altMirror) {
+                    util::WriteBE<uint16>(&m_altFBRAM[fbIndex][write.address], write.value);
                 }
                 break;
             }

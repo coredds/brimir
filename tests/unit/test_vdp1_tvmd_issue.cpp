@@ -1,4 +1,4 @@
-// VDP1 drawing and erases use the VDP2 screen mode (TVMD: double density, horizontal
+// VDP1 drawing, erases and CPU framebuffer writes use the VDP2 screen mode (TVMD: double density, horizontal
 // resolution; for the erase also the vertical resolution) as the emulator thread had it when it issued them, which is
 // what the unthreaded renderer reads. Upstream read the VDP2 render thread's register copy (threaded VDP2) or the
 // emulator thread's registers at processing time (threaded VDP1), so the result depended on the threads' timing
@@ -6,8 +6,9 @@
 //
 // The threaded-VDP2 cases are deterministic: TVMD is changed in VDPState directly, not through the renderer, so the
 // VDP2 render thread's copy keeps the old mode for good, and a renderer that reads that copy always draws differently.
-// The threaded-VDP1 command and erase cases with unthreaded VDP2 change TVMD right after issuing the command: they
-// catch a renderer that reads it at processing time only when the render thread is slower.
+// The CPU framebuffer write case is deterministic too: the writes wait in the emulator thread's pending batch until the
+// sync, after TVMD has changed. The threaded-VDP1 command and erase cases with unthreaded VDP2 change TVMD right after
+// issuing the command: they catch a renderer that reads it at processing time only when the render thread is slower.
 
 #include "catch_amalgamated.hpp"
 
@@ -26,6 +27,7 @@ using namespace ymir;
 constexpr uint16 kTVMDProgressive = 0x8000;    // DISP, non-interlaced, 320 wide
 constexpr uint16 kTVMDDoubleDensity = 0x80C0;  // DISP, double-density interlace, 320 wide
 constexpr uint16 kTVMDDoubleDensityHi = 0x80C1; // ... 352 wide (HRESOn bit 0: erase width limit 428)
+constexpr uint16 kTVMDSingleDensity = 0x8080;  // DISP, single-density interlace
 constexpr uint16 kFBCR_DIE = 1u << 3;
 constexpr uint32 kFBRowBytes = 512 * sizeof(uint16);
 
@@ -215,5 +217,39 @@ TEST_CASE("VDP1 erases use the screen mode and resolution the emulator thread ha
             CHECK(FirstDifference(got.main, expected.main) == -1);
             CHECK(FirstDifference(got.alt, expected.alt) == -1);
         }
+    }
+}
+
+TEST_CASE("Threaded VDP1 CPU framebuffer writes mirror with the screen mode at issue time",
+          "[vdp][vdp1][threaded][tvmd][brimir]") {
+    // With the deinterlace enhancement an interlaced mode also writes CPU framebuffer stores into the alternate field.
+    // The stores wait in the emulator thread's batch until the sync, after the mode has changed.
+    const uint16 before = GENERATE(kTVMDSingleDensity, kTVMDDoubleDensity, kTVMDProgressive);
+    const uint16 after = before == kTVMDProgressive ? kTVMDDoubleDensity : kTVMDProgressive;
+    auto run = [&](bool threaded) {
+        Rig rig{before};
+        rig.Start({.threadedVDP1 = threaded, .threadedVDP2 = false});
+        auto write = [&](auto address, auto value) {
+            using T = decltype(value);
+            rig.state->VDP1WriteFB<T>(address, value, [&](uint32 a, T v) { rig.renderer->VDP1WriteFB(a, v); });
+        };
+        write(uint32{0x100}, uint16{0x5A5A});
+        write(uint32{0x203}, uint8{0xC3});
+        rig.SetTVMD(after);
+        write(uint32{0x300}, uint16{0x0F0F}); // issued in the new mode
+        return Take(rig, rig.state->fbIndex.draw);
+    };
+    const auto expected = run(false);
+    const bool mirrored = before != kTVMDProgressive;
+    REQUIRE(util::ReadBE<uint16>(&expected.main[0x100]) == 0x5A5A);
+    REQUIRE(util::ReadBE<uint16>(&expected.alt[0x100]) == (mirrored ? 0x5A5A : 0x0000));
+    REQUIRE(expected.alt[0x203] == (mirrored ? 0xC3 : 0x00));
+    REQUIRE(util::ReadBE<uint16>(&expected.alt[0x300]) == (mirrored ? 0x0000 : 0x0F0F));
+    CAPTURE(before);
+    for (int i = 0; i < 10; ++i) {
+        CAPTURE(i);
+        const auto got = run(true);
+        CHECK(FirstDifference(got.main, expected.main) == -1);
+        CHECK(FirstDifference(got.alt, expected.alt) == -1);
     }
 }
