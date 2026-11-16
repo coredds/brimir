@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <set>
@@ -48,6 +49,10 @@ struct HostConfig {
     // RETRO_MEMORY_SAVE_RAM after retro_load_game and written back from it before retro_unload_game. Empty: a fresh
     // temporary save directory and no .srm handling.
     std::string saveDir;
+    // --autosave-every N: with --save-dir, after every Nth frame (counting warmup frames from 0) the host writes the .srm
+    // from the SAVE_RAM pointer it kept after retro_load_game when the buffer changed, as RetroArch's autosave thread
+    // does (save.c autosave_thread; every 10 s by default on Windows and Android). 0: off
+    int autosaveEvery = 0;
     std::string dumpDir;   // empty: no PPM dump (handled by the CLI layer)
     std::vector<std::pair<std::string, std::string>> options; // --option key=value overrides
     int warmup = 120;
@@ -254,6 +259,9 @@ public:
     // Runs one frame. Frames the core displays go to `sink` while it is non-null.
     bool RunFrame(FrameSink* sink);
 
+    // --autosave-every: RetroArch's autosave of the kept SAVE_RAM pointer (writes the .srm if the buffer changed).
+    void Autosave(int frame);
+
     // A video driver reinit: context_destroy, a new device through the negotiation interface, context_reset.
     bool ResetContext();
 
@@ -405,7 +413,11 @@ private:
 
     std::string m_systemDir;
     std::string m_saveDir;
-    std::string m_srmPath; // --save-dir: the frontend's .srm (empty: no .srm handling)
+    std::filesystem::path m_srmPath; // --save-dir: the frontend's .srm (empty: no .srm handling)
+    const uint8_t* m_autosaveData = nullptr; // --autosave-every: the SAVE_RAM pointer kept after retro_load_game
+    std::vector<uint8_t> m_autosaveCopy;      // ... and the autosave's copy of the buffer
+    uint64_t m_autosaveWrites = 0;
+    bool WriteSrm(const uint8_t* data, size_t size);
     std::map<std::string, std::string> m_defaults;  // from SET_CORE_OPTIONS_V2
     std::map<std::string, std::string> m_overrides; // --option, --set-option-at
     bool m_optionsUpdated = false;                  // GET_VARIABLE_UPDATE reports true once

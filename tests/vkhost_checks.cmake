@@ -293,6 +293,34 @@ if(EXISTS "${srm_dir}/Brimir.srm")
 endif()
 message(STATUS "save_ram_without_content: no save RAM exposed, no Brimir.srm written")
 
+# save_ram_with_content: a content session still exposes its formatted 32 KiB save RAM and the frontend saves it as
+# <content name>.srm. The content is a generated audio CD: one second of raw CD audio (75 sectors of 2352 bytes, no NUL
+# byte needed) behind a CUE sheet, which LoadGame accepts as a disc.
+set(disc_dir "${state_dir}/disc")
+file(MAKE_DIRECTORY "${disc_dir}")
+string(REPEAT "A" 176400 audio_track)
+file(WRITE "${disc_dir}/track.bin" "${audio_track}")
+file(WRITE "${disc_dir}/test disc.cue" "FILE \"track.bin\" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n")
+set(content_srm_dir "${state_dir}/srm_content")
+file(MAKE_DIRECTORY "${content_srm_dir}")
+run_vkhost(save_ram_with_content --game "${disc_dir}/test disc.cue" --save-dir "${content_srm_dir}" --autosave-every 100)
+if(NOT save_ram_with_content_code EQUAL 0)
+    fail(save_ram_with_content "exit ${save_ram_with_content_code}")
+endif()
+require_log(save_ram_with_content "vkhost: srm: save RAM after retro_load_game: 32768 bytes, formatted")
+require_log(save_ram_with_content "vkhost: srm: no [^\r\n]*test disc\\.srm")
+require_log(save_ram_with_content "vkhost: srm: saved [^\r\n]*test disc\\.srm \\(32768 bytes, formatted")
+set(content_srm "${content_srm_dir}/test disc.srm")
+if(NOT EXISTS "${content_srm}")
+    fail(save_ram_with_content "test disc.srm was not written")
+endif()
+file(SIZE "${content_srm}" content_srm_size)
+file(READ "${content_srm}" content_srm_header LIMIT 16)
+if(NOT content_srm_size EQUAL 32768 OR NOT content_srm_header STREQUAL "BackUpRam Format")
+    fail(save_ram_with_content "test disc.srm: ${content_srm_size} bytes, header '${content_srm_header}'")
+endif()
+message(STATUS "save_ram_with_content: formatted 32 KiB save RAM exposed, test disc.srm saved formatted")
+
 # cheat_pins_ram: Action Replay codes through retro_cheat_set (vkhost --cheat) write work RAM before every frame, read
 # back at Saturn addresses (--dump-ram-at, Saturn byte order). On bytes the BIOS menu does not use: a 16-bit High RAM
 # write, a conditional that sees the earlier cheat's write (true) and one that does not match (false), a Low RAM

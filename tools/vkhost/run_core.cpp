@@ -86,6 +86,12 @@ private:
     fs::path m_path;
 };
 
+// A path as the UTF-8 string a libretro core expects (GET_SAVE_DIRECTORY)
+std::string Utf8(const fs::path& path) {
+    const std::u8string text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+
 } // namespace
 
 RunReport RunCore(const HostConfig& config, FrameSink& sink) {
@@ -103,7 +109,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     if (config.saveDir.empty()) {
         fs::create_directories(saveDir);
     } else {
-        saveDir = config.saveDir;
+        saveDir = fs::path(std::u8string(config.saveDir.begin(), config.saveDir.end())); // UTF-8, as the core reads it
         std::error_code ec;
         if (!fs::is_directory(saveDir, ec)) {
             throw std::runtime_error("--save-dir is not an existing directory: " + config.saveDir);
@@ -148,7 +154,7 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     }
 
     LibretroHost host;
-    if (!host.Load(effective, systemDir.string(), saveDir.string())) {
+    if (!host.Load(effective, systemDir.string(), Utf8(saveDir))) {
         throw std::runtime_error("loading the core failed");
     }
 
@@ -172,10 +178,13 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     uint64_t secondaryDeclines = 0;
     fs::path secondaryCopy;
     HostConfig second;
-    // RetroArch gives the second instance the same save directory
+    // RetroArch gives the second instance the same save directory. Order difference: vkhost unloads the second
+    // instance (whose UnloadGame writes <game>.srm too) before the main instance's frontend .srm save; RetroArch saves
+    // first (RARCH_CTL_MAIN_DEINIT: CMD_EVENT_SAVE_FILES) and destroys the second instance inside the main instance's
+    // retro_unload_game (runahead_unload_hook). The main instance's unload still writes last.
     const fs::path secondSaveDir = config.saveDir.empty() ? scratch.Path() / "save2" : saveDir;
     const auto loadSecondary = [&] {
-        secondaryLoaded = secondary.Load(second, systemDir.string(), secondSaveDir.string());
+        secondaryLoaded = secondary.Load(second, systemDir.string(), Utf8(secondSaveDir));
         if (secondaryLoaded) {
             return;
         }
@@ -288,6 +297,9 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
             }
         }
         host.RunFrame(i >= config.warmup ? &timedSink : nullptr);
+        if (config.autosaveEvery > 0 && (i + 1) % config.autosaveEvery == 0) {
+            host.Autosave(i);
+        }
         if (config.rollback) {
             if (!host.Unserialize(state)) {
                 stateProblems.push_back("--rollback: retro_unserialize failed after frame " + std::to_string(i));

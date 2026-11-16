@@ -85,6 +85,9 @@ void PrintUsage(std::FILE* out) {
         "                the .srm as RetroArch does: <content name, or the core's name without content>.srm is\n"
         "                copied into RETRO_MEMORY_SAVE_RAM after retro_load_game and written back from it before\n"
         "                retro_unload_game ('vkhost: srm:' lines say what the core exposed and what was saved)\n"
+        "  --autosave-every N  with --save-dir: after every Nth frame (counting warmup frames from 0) write the .srm\n"
+        "                from the save RAM pointer kept after retro_load_game if the buffer changed, as RetroArch's\n"
+        "                autosave thread does ('vkhost: srm: autosave after frame F wrote ...')\n"
         "  --frames      recorded frames (default 300)\n"
         "  --warmup      frames run before recording (default 120)\n"
         "  --option      core option override, for example --option brimir_overscan=1 (repeatable);\n"
@@ -516,6 +519,11 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.config.systemDir = value;
         } else if (opt == "--save-dir") {
             args.config.saveDir = value;
+        } else if (opt == "--autosave-every") {
+            if (!ParseInt(value, args.config.autosaveEvery) || args.config.autosaveEvery == 0) {
+                std::fprintf(stderr, "--autosave-every needs a frame count (1 or more): %s\n", value);
+                return ParseResult::Error;
+            }
         } else if (opt == "--dump-dir") {
             args.config.dumpDir = value;
         } else if (opt == "--frames") {

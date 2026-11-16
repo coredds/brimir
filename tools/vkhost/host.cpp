@@ -184,6 +184,26 @@ bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& out) {
     return true;
 }
 
+// The .srm paths: the strings the core gets (GET_SAVE_DIRECTORY, the content path, library_name) are UTF-8 for a
+// libretro core, so they are read as UTF-8 here too (not in the Windows ANSI code page) and the files opened by path.
+std::filesystem::path PathFromUtf8(const std::string& text) {
+    return std::filesystem::path(std::u8string(text.begin(), text.end()));
+}
+
+std::string PathToUtf8(const std::filesystem::path& path) {
+    const std::u8string text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+
+bool ReadWholeFile(const std::filesystem::path& path, std::vector<uint8_t>& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
+}
+
 // A Saturn backup RAM image (data bytes): formatted ones start with "BackUpRam Format"; all zero is unformatted too.
 const char* DescribeBackupRam(const uint8_t* data, size_t size) {
     static constexpr char kHeader[] = "BackUpRam Format";
@@ -191,6 +211,10 @@ const char* DescribeBackupRam(const uint8_t* data, size_t size) {
         return "formatted";
     }
     return std::all_of(data, data + size, [](uint8_t b) { return b == 0; }) ? "all zero (unformatted)" : "unformatted";
+}
+
+size_t NonZeroBytes(const uint8_t* data, size_t size) {
+    return static_cast<size_t>(std::count_if(data, data + size, [](uint8_t b) { return b != 0; }));
 }
 
 } // namespace
@@ -405,25 +429,37 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     // --save-dir: RetroArch's .srm load (event_init_content: content_init, then event_load_save_files), into the
     // memory retro_get_memory_data returns now. RetroArch does not do this for the run-ahead second instance.
     m_srmPath.clear();
+    m_autosaveData = nullptr;
+    m_autosaveCopy.clear();
+    m_autosaveWrites = 0;
     if (!config.saveDir.empty() && !config.secondInstance) {
-        const std::string name = hasGame ? std::filesystem::path(config.gamePath).stem().string()
-                                         : std::string(info.library_name != nullptr ? info.library_name : "core");
-        m_srmPath = (std::filesystem::path(config.saveDir) / (name + ".srm")).string();
+        const std::filesystem::path name =
+            hasGame ? PathFromUtf8(config.gamePath).stem()
+                    : PathFromUtf8(info.library_name != nullptr ? info.library_name : "core");
+        m_srmPath = PathFromUtf8(config.saveDir) / name;
+        m_srmPath += u8".srm";
+        const std::string shown = PathToUtf8(m_srmPath);
         size_t size = 0;
         uint8_t* data = MemoryData(RETRO_MEMORY_SAVE_RAM, size);
         if (data == nullptr || size == 0) {
             std::fprintf(stderr, "vkhost: srm: the core exposes no save RAM after retro_load_game: %s not loaded\n",
-                         m_srmPath.c_str());
+                         shown.c_str());
         } else {
             std::fprintf(stderr, "vkhost: srm: save RAM after retro_load_game: %zu bytes, %s\n", size,
                          DescribeBackupRam(data, size));
+            // --autosave-every: RetroArch's autosave_init (before the .srm load, runloop.c event_init_content) keeps
+            // this pointer and a copy of the buffer (save.c autosave_new)
+            if (config.autosaveEvery > 0) {
+                m_autosaveData = data;
+                m_autosaveCopy.assign(data, data + size);
+            }
             std::vector<uint8_t> file;
             if (ReadWholeFile(m_srmPath, file) && !file.empty()) {
                 std::memcpy(data, file.data(), std::min(file.size(), size)); // a longer file is truncated
-                std::fprintf(stderr, "vkhost: srm: loaded %s (%zu bytes, %s)\n", m_srmPath.c_str(), file.size(),
+                std::fprintf(stderr, "vkhost: srm: loaded %s (%zu bytes, %s)\n", shown.c_str(), file.size(),
                              DescribeBackupRam(file.data(), file.size()));
             } else {
-                std::fprintf(stderr, "vkhost: srm: no %s\n", m_srmPath.c_str());
+                std::fprintf(stderr, "vkhost: srm: no %s\n", shown.c_str());
             }
         }
     }
@@ -489,24 +525,54 @@ bool LibretroHost::ResetContext() {
     return StartContext();
 }
 
+bool LibretroHost::WriteSrm(const uint8_t* data, size_t size) {
+    std::ofstream out(m_srmPath, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+    if (!out) {
+        Problem("--save-dir: cannot write " + PathToUtf8(m_srmPath));
+        return false;
+    }
+    return true;
+}
+
+void LibretroHost::Autosave(int frame) {
+    // RetroArch's autosave thread (save.c autosave_thread): compare the kept pointer with its copy, write on change.
+    // It never calls retro_get_memory_data again.
+    if (m_autosaveData == nullptr) {
+        return;
+    }
+    const size_t size = m_autosaveCopy.size();
+    if (std::memcmp(m_autosaveCopy.data(), m_autosaveData, size) == 0) {
+        return;
+    }
+    std::memcpy(m_autosaveCopy.data(), m_autosaveData, size);
+    if (WriteSrm(m_autosaveCopy.data(), size)) {
+        ++m_autosaveWrites;
+        std::fprintf(stderr, "vkhost: srm: autosave after frame %d wrote %s (%s, %zu non-zero bytes)\n", frame,
+                     PathToUtf8(m_srmPath).c_str(), DescribeBackupRam(m_autosaveCopy.data(), size),
+                     NonZeroBytes(m_autosaveCopy.data(), size));
+    }
+}
+
 void LibretroHost::Unload() {
     if (m_api) {
         if (m_contentLoaded && !m_srmPath.empty()) {
             // RetroArch saves the .srm before it deinitialises the core and the video driver (RARCH_CTL_MAIN_DEINIT:
             // CMD_EVENT_SAVE_FILES, then CMD_EVENT_CORE_DEINIT)
+            // (after autosave_deinit, which ends the autosave thread)
+            if (m_autosaveData != nullptr) {
+                std::fprintf(stderr, "vkhost: srm: %llu autosave writes\n",
+                             static_cast<unsigned long long>(m_autosaveWrites));
+            }
+            m_autosaveData = nullptr;
+            const std::string shown = PathToUtf8(m_srmPath);
             size_t size = 0;
             const uint8_t* data = MemoryData(RETRO_MEMORY_SAVE_RAM, size);
             if (data == nullptr || size == 0) {
-                std::fprintf(stderr, "vkhost: srm: the core exposes no save RAM: %s not saved\n", m_srmPath.c_str());
-            } else {
-                std::ofstream out(m_srmPath, std::ios::binary | std::ios::trunc);
-                out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
-                if (out) {
-                    std::fprintf(stderr, "vkhost: srm: saved %s (%zu bytes, %s)\n", m_srmPath.c_str(), size,
-                                 DescribeBackupRam(data, size));
-                } else {
-                    Problem("--save-dir: cannot write " + m_srmPath);
-                }
+                std::fprintf(stderr, "vkhost: srm: the core exposes no save RAM: %s not saved\n", shown.c_str());
+            } else if (WriteSrm(data, size)) {
+                std::fprintf(stderr, "vkhost: srm: saved %s (%zu bytes, %s, %zu non-zero bytes)\n", shown.c_str(), size,
+                             DescribeBackupRam(data, size), NonZeroBytes(data, size));
             }
             m_srmPath.clear();
         }
