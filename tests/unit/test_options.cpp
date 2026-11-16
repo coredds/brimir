@@ -473,18 +473,73 @@ TEST_CASE("Core options include the internal resolution option (Vulkan builds)",
     CHECK(std::strcmp(found->category_key, "video") == 0);
     REQUIRE(found->default_value != nullptr);
     CHECK(std::strcmp(found->default_value, "1") == 0);
+#if defined(__ANDROID__)
+    // Android: 1x only (higher values hang the GPU of some phones), said in the text
+    const char* const values[] = {"1"};
+    const char* const labels[] = {"1x (Native)"};
+    constexpr int count = 1;
+    REQUIRE(found->info != nullptr);
+    CHECK(std::strstr(found->info, "above 1x are not available on Android yet") != nullptr);
+    CHECK(std::strstr(found->info, "freeze some phone GPUs") != nullptr);
+#else
     const char* const values[] = {"1", "2", "3", "4"};
     const char* const labels[] = {"1x (Native)", "2x", "3x", "4x"};
-    for (int i = 0; i < 4; ++i) {
+    constexpr int count = 4;
+    REQUIRE(found->info != nullptr);
+    CHECK(std::strstr(found->info, "Android") == nullptr);
+#endif
+    for (int i = 0; i < count; ++i) {
         INFO("value " << i);
         REQUIRE(found->values[i].value != nullptr);
         REQUIRE(found->values[i].label != nullptr);
         CHECK(std::strcmp(found->values[i].value, values[i]) == 0);
         CHECK(std::strcmp(found->values[i].label, labels[i]) == 0);
     }
-    CHECK(found->values[4].value == nullptr);
+    CHECK(found->values[count].value == nullptr);
 }
 
+#endif
+
+TEST_CASE("The internal resolution that applies is capped at 1x on Android", "[options][libretro]") {
+    unsigned requested = 0;
+    // Android: any value above 1x (an old option file, an override, a netplay host's value) applies as 1x
+    CHECK(brimir_internal_resolution_scale("1", true, &requested) == 1);
+    CHECK(requested == 1);
+    CHECK(brimir_internal_resolution_scale("2", true, &requested) == 1);
+    CHECK(requested == 2);
+    CHECK(brimir_internal_resolution_scale("3", true, &requested) == 1);
+    CHECK(requested == 3);
+    CHECK(brimir_internal_resolution_scale("4", true, &requested) == 1);
+    CHECK(requested == 4);
+    CHECK(brimir_internal_resolution_scale("9", true, &requested) == 1);
+    CHECK(requested == 4);
+    CHECK(brimir_internal_resolution_scale("junk", true, &requested) == 1);
+    CHECK(requested == 1);
+    CHECK(brimir_internal_resolution_scale(nullptr, true) == 1);
+    // Elsewhere: the value, 1-4 (an unknown or out of range value clamps as before)
+    CHECK(brimir_internal_resolution_scale("1", false, &requested) == 1);
+    CHECK(brimir_internal_resolution_scale("2", false, &requested) == 2);
+    CHECK(requested == 2);
+    CHECK(brimir_internal_resolution_scale("3", false) == 3);
+    CHECK(brimir_internal_resolution_scale("4", false) == 4);
+    CHECK(brimir_internal_resolution_scale("9", false) == 4);
+    CHECK(brimir_internal_resolution_scale("0", false) == 1);
+    CHECK(brimir_internal_resolution_scale("junk", false) == 1);
+    CHECK(brimir_internal_resolution_scale(nullptr, false) == 1);
+    // This build: what the core passes
+    CHECK(brimir_internal_resolution_scale("2", kBrimirAndroid) == (kBrimirAndroid ? 1u : 2u));
+}
+
+TEST_CASE("The internal resolution cap log line says what was capped and why", "[options][libretro]") {
+    const std::string note = brimir_internal_resolution_cap_note(2);
+    CHECK(note.find("2x") != std::string::npos);
+    CHECK(note.find("not available on Android") != std::string::npos);
+    CHECK(note.find("freeze some phone GPUs") != std::string::npos);
+    CHECK(note.find("using 1x") != std::string::npos);
+    CHECK(brimir_internal_resolution_cap_note(4).find("4x") != std::string::npos);
+}
+
+#ifdef BRIMIR_VULKAN
 TEST_CASE("Core options include the VDP1 upscaling option (Vulkan builds)", "[options][libretro]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);

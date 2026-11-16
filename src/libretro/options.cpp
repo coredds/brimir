@@ -4,6 +4,7 @@
 
 #include "options.hpp"
 #include <brimir/core_wrapper.hpp>
+#include <cstdlib>
 #include <cstring>
 
 // Core option definitions using libretro API v2
@@ -83,14 +84,20 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "Renders at a multiple of the Saturn resolution: backgrounds (VDP2) always, rotating and zoomed ones getting "
         "sharper, and polygons and sprites (VDP1) when VDP1 Upscaling is on. Only used with Renderer = Vulkan on the "
         "GPU renderer; ignored by the software renderer and the copy-only output. Applies immediately. 3x and 4x of "
-        "high-resolution modes exceed 1080p.",
+        "high-resolution modes exceed 1080p."
+#if defined(__ANDROID__)
+        " Internal resolutions above 1x are not available on Android yet (they can freeze some phone GPUs)."
+#endif
+        ,
         nullptr,
         "video",
         {
             { "1", "1x (Native)" },
+#if !defined(__ANDROID__)
             { "2", "2x" },
             { "3", "3x" },
             { "4", "4x" },
+#endif
             { nullptr, nullptr }
         },
         "1"
@@ -583,6 +590,19 @@ bool brimir_update_deinterlace(BrimirDeinterlaceOptions& cache, const char* dein
     return force || changed;
 }
 
+unsigned brimir_internal_resolution_scale(const char* value, bool android, unsigned* requested) {
+    const int n = value ? std::atoi(value) : 1;
+    const unsigned asked = n < 1 ? 1u : (n > 4 ? 4u : static_cast<unsigned>(n));
+    if (requested) {
+        *requested = asked;
+    }
+    return android ? 1u : asked;
+}
+
+std::string brimir_internal_resolution_cap_note(unsigned requested) {
+    return "Internal resolution " + std::to_string(requested) +
+           "x is not available on Android (it can freeze some phone GPUs); using 1x";
+}
 brimir::CartridgeChoice brimir_cartridge_choice(const char* value) {
     using brimir::CartridgeChoice;
     static const struct {

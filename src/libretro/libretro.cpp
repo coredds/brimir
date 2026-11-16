@@ -130,6 +130,8 @@ static constexpr unsigned kVulkanMaxSize = 704 * 4;
 static unsigned g_presentedScale = 0;
 // brimir_internal_resolution above 1 without the Vulkan VDP2 renderer has no effect: said once per content.
 static bool g_internalResolutionNoopLogged = false;
+// brimir_internal_resolution above 1 on Android is capped to 1x: said once per content.
+static bool g_internalResolutionCapLogged = false;
 // retro_load_game is applying the options before it knows whether Vulkan is requested.
 static bool g_loadingContent = false;
 // GPU work outside the frame submits (VDP1 on the GPU's sync submits) is allowed inside retro_run and the context
@@ -214,6 +216,7 @@ static void reset_frame_state(void) {
 #ifdef BRIMIR_VULKAN
     g_presentedScale = 0;
     g_internalResolutionNoopLogged = false;
+    g_internalResolutionCapLogged = false;
 #endif
 }
 
@@ -348,9 +351,16 @@ static const void* frame_with_crosshairs(const void* fb, unsigned width, unsigne
 }
 
 #ifdef BRIMIR_VULKAN
+// The internal resolution that applies: the option's value, at most 1x on Android (an old option file, a core-option
+// override or a netplay host's value above 1x is capped, said once per content).
 static unsigned requested_internal_resolution(void) {
-    const int n = atoi(g_options.internal_resolution.c_str());
-    return n < 1 ? 1u : (n > 4 ? 4u : static_cast<unsigned>(n));
+    unsigned asked = 1;
+    const unsigned n = brimir_internal_resolution_scale(g_options.internal_resolution.c_str(), kBrimirAndroid, &asked);
+    if (n < asked && !g_internalResolutionCapLogged) {
+        g_internalResolutionCapLogged = true;
+        brimir_log(RETRO_LOG_WARN, "%s", brimir_internal_resolution_cap_note(asked).c_str());
+    }
+    return n;
 }
 
 static void note_internal_resolution(void);

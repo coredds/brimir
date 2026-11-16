@@ -37,3 +37,18 @@ bool brimir_deinterlace_effective(const char* deinterlacing, const char* mode);
 // not on which option changed first.
 bool brimir_update_deinterlace(BrimirDeinterlaceOptions& cache, const char* deinterlacing, const char* mode,
                                bool force, bool& effective);
+
+// Whether this is an Android build: internal resolution above 1x is not offered there (it hangs the GPU of some
+// phones, e.g. Samsung Xclipse), whatever the option file or a core-option override says.
+#if defined(__ANDROID__)
+inline constexpr bool kBrimirAndroid = true;
+#else
+inline constexpr bool kBrimirAndroid = false;
+#endif
+
+// The internal resolution (1-4) a brimir_internal_resolution value asks for (1 for nullptr or an unknown value), and
+// the one that applies: with `android` the highest is 1x. `requested` (optional) receives the 1-4 value asked for.
+unsigned brimir_internal_resolution_scale(const char* value, bool android, unsigned* requested = nullptr);
+
+// The one-line log text for a cap: the requested value and why it was lowered to 1x.
+std::string brimir_internal_resolution_cap_note(unsigned requested);
