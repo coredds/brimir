@@ -64,6 +64,8 @@ ndk_find() {
         fi
         return 1
     fi
+    # Defence in depth, not reachable today: the two branches that need the pinned version have read it from
+    # source.properties, and the mismatch branch is exempt from this check. It guards a future branch that sets NDK.
     if [ -z "$(ndk_version "$NDK")" ] && [ "${BRIMIR_ALLOW_NDK_MISMATCH:-0}" != 1 ]; then
         echo "error: the version of the NDK at $NDK is unknown (no Pkg.Revision in source.properties)" >&2
         return 1
