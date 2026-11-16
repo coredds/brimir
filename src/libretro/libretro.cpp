@@ -1260,6 +1260,12 @@ static void log_backup_ram_save_error(void) {
     }
 }
 
+static void log_backup_ram_notice(void) {
+    if (const std::string notice = g_core->TakeBackupRAMNotice(); !notice.empty()) {
+        brimir_log(RETRO_LOG_WARN, "Backup RAM: %s", notice.c_str());
+    }
+}
+
 static void flush_cartridge_save(void) {
     const bool afterLoad = std::exchange(g_stateLoadedBeforeRun, false);
     int av = RETRO_AV_ENABLE_VIDEO | RETRO_AV_ENABLE_AUDIO;
@@ -1364,6 +1370,7 @@ RETRO_API void retro_run(void) {
         apply_cheats();
     }
     g_core->RunFrame();
+    log_backup_ram_notice();
     {
         brimir::ScopedTimer timer(g_core->GetProfiler(), "RamView_Publish");
         publish_ram_view();
@@ -1876,6 +1883,7 @@ RETRO_API void retro_unload_game(void) {
                        static_cast<unsigned long long>(g_core->GetReusedStateLoads()));
             g_core->UnloadGame();
             log_cartridge_save_error();
+            log_backup_ram_notice();
             log_backup_ram_save_error();
             g_cartridgeFlushFrames = 0;
             g_stateLoadedBeforeRun = false;

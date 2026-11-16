@@ -2882,6 +2882,7 @@ TEST_CASE("backup RAM: an all-zero .srm is replaced by a formatted image at the 
     REQUIRE(buffer != nullptr);
     std::memcpy(buffer, zero.data(), zero.size()); // RetroArch's content_load_ram_file
     s.core.RunFrame();
+    CHECK(s.core.TakeBackupRAMNotice().find("all-zero backup RAM image") != std::string::npos);
     CHECK(EmulatedBackupRAMFormatted(s.core));
     CHECK(s.core.GetSRAMData() == buffer); // the pointer RetroArch's autosave thread keeps stays valid
     CHECK(IsFormattedBackupRAM(buffer, zero.size()));
@@ -2912,11 +2913,33 @@ TEST_CASE("backup RAM: a .srm with saves, or unformatted but not all zero, is us
     std::ofstream(srm, std::ios::binary).write(reinterpret_cast<const char*>(image.data()), image.size());
     REQUIRE(s.Load());
     s.core.RunFrame();
+    CHECK(s.core.TakeBackupRAMNotice().empty());
     const bool emulatedUnchanged = s.core.GetSaturn()->mem.GetInternalBackupRAM().ReadAll() == image;
     CHECK(emulatedUnchanged);
     s.core.UnloadGame();
     const bool fileUnchanged = ReadAllBytes(srm) == image;
     CHECK(fileUnchanged);
+}
+
+TEST_CASE("backup RAM: in-game saves reach the pointer the frontend kept, during play", "[core][sram][regression]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // RetroArch's autosave thread writes the .srm from the pointer retro_get_memory_data returned at content load and
+    // asks again only at Close Content: an app killed on Android lost every save made since the load.
+    CartSession s("brimir_sram_autosave", CartridgeChoice::None);
+    REQUIRE(s.Load());
+    const auto* kept = static_cast<const uint8_t*>(s.core.GetSRAMData());
+    REQUIRE(kept != nullptr);
+    s.core.RunFrame();
+    REQUIRE(kept[0x1000] == 0x00);
+    s.core.GetSaturn()->mem.GetInternalBackupRAM().WriteByte(0x1000 * 2, 0x5A); // the game saves (data byte 0x1000)
+    for (uint32_t i = 0; i < CoreWrapper::kSRAMSyncInterval; ++i) {
+        s.core.RunFrame(); // no GetSRAMData call
+    }
+    CHECK(kept[0x1000] == 0x5A);
+    CHECK(s.core.GetSRAMData() == kept);
+    s.core.UnloadGame();
 }
 
 TEST_CASE("backup RAM: a session without content after a game never writes the game's .srm", "[core][sram][regression]") {

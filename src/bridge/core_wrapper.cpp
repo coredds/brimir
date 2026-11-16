@@ -607,7 +607,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                     std::vector<uint8_t> fileData(srmSize);
                     srmFile.read(reinterpret_cast<char*>(fileData.data()), srmSize);
                     if (srmFile) {
-                        m_sramData = std::move(fileData);
+                        m_sramData.assign(fileData.begin(), fileData.end()); // in place, as ReadSRAMFromYmir
                         m_sramDataFromFrontend = true;
                     }
                 }
@@ -1189,7 +1189,6 @@ void* CoreWrapper::GetSRAMData() {
     // the frontend's .srm buffer at that point, and RefreshSRAMFromEmulator()
     // would overwrite it with the empty/formatted backup RAM contents.
     if (m_gameLoaded && m_sramInitialized && !m_sramFirstLoad) {
-        constexpr uint32_t kSRAMSyncInterval = 300;
 
         if (m_sramCacheDirty || m_framesSinceLastSRAMSync >= kSRAMSyncInterval) {
             ReadSRAMFromYmir();
@@ -1259,10 +1258,12 @@ void CoreWrapper::WriteSRAMToYmir() {
     auto& bup = m_saturn->mem.GetInternalBackupRAM();
     // An all-zero image is unformatted backup RAM and holds no save (a .srm written by earlier versions from a session
     // without content, for example): copied down, the game would ask for every record to be deleted, and the file
-    // would be saved back unformatted every session. Ymir's image (formatted by LoadGame) is kept and the frontend's
-    // buffer takes it, so the .srm is saved formatted. Any other image is used as it is.
+    // would be saved back unformatted every session. Ymir's image is kept and the frontend's buffer takes it, so the
+    // .srm is saved formatted: at the first frame (and the UnloadGame safety net) that is the image LoadGame formatted,
+    // for SetSRAMData during play the running game's backup RAM. Any other image is used as it is.
     if (std::all_of(m_sramData.begin(), m_sramData.end(), [](uint8_t b) { return b == 0; })) {
         ReadSRAMFromYmir();
+        m_backupRAMNotice = "all-zero backup RAM image (unformatted, holds no save) replaced with a formatted one";
         return;
     }
     const uint32_t size = bup.Size();
@@ -1381,6 +1382,15 @@ void CoreWrapper::RunFrame() {
 
         // Track frames for SRAM sync optimization
         m_framesSinceLastSRAMSync++;
+        // The frontend may only read the buffer through a pointer it kept: RetroArch's autosave thread writes the .srm
+        // from the pointer retro_get_memory_data returned at content load (every 10 s by default on Windows and
+        // Android) and calls retro_get_memory_data again only at Close Content. Refresh it in place during play, so
+        // in-game saves reach the file without a Close Content (an app killed on Android). Reads Ymir only.
+        if (m_gameLoaded && m_sramInitialized && !m_sramFirstLoad && m_framesSinceLastSRAMSync >= kSRAMSyncInterval) {
+            ReadSRAMFromYmir();
+            m_sramCacheDirty = false;
+            m_framesSinceLastSRAMSync = 0;
+        }
     } catch (const std::exception& e) {
         // Store exception message for debugging
         m_lastError = std::string("RunFrame exception: ") + e.what();

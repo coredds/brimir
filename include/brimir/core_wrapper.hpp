@@ -387,6 +387,9 @@ public:
     static constexpr const char* kUltramanROMFileName = "mpr-19367-mx.ic1";
     /// @brief Size of the backup memory cartridge and of its <game>.bcr file (4 Mbit of data bytes)
     static constexpr size_t kBackupCartSize = 512 * 1024;
+    /// @brief During play the save RAM buffer (GetSRAMData) is refreshed from the emulated backup RAM at least every
+    /// this many frames, so a frontend's periodic save of the pointer it kept (RetroArch's autosave) sees in-game saves.
+    static constexpr uint32_t kSRAMSyncInterval = 300;
 
     /// @brief Choose the cartridge. Applies at the next LoadGame (the cartridge is inserted before the BIOS boots).
     void SetCartridgeOverride(CartridgeChoice choice) { m_cartridgeChoice = choice; }
@@ -414,6 +417,10 @@ public:
     /// not write (UnloadGame) the internal backup RAM's <game>.srm, or an empty string. The frontend's own save of
     /// the backup RAM (RETRO_MEMORY_SAVE_RAM) is separate.
     std::string TakeBackupRAMSaveError() { return std::exchange(m_backupRAMSaveError, std::string{}); }
+
+    /// @brief Takes a note that an all-zero (unformatted) backup RAM image from the .srm or the frontend was replaced
+    /// with a formatted one, or an empty string.
+    std::string TakeBackupRAMNotice() { return std::exchange(m_backupRAMNotice, std::string{}); }
 
     /// @brief Writes data into a backup memory cartridge (data byte i at bus address 2i + 1), only the bytes that
     /// differ; data must be the cartridge's size. Used by LoadState (public for the cost measurement test).
@@ -707,6 +714,7 @@ private:
     std::vector<uint8_t> m_cartridgeFailed; // the contents a periodic save failed to write (not retried until changed)
     std::string m_cartridgeSaveError;
     std::string m_backupRAMSaveError; // TakeBackupRAMSaveError
+    std::string m_backupRAMNotice;    // TakeBackupRAMNotice
 
     // Accuracy options (SetSH2CacheEmulation, SetCDBlockLLE, SetSCSPStepGranularity)
     bool m_sh2CacheRequested = false;
@@ -728,7 +736,9 @@ private:
     void LoadCartridgeRAM();
 
     /// @brief Copy the cached m_sramData buffer into Ymir's internal backup RAM. An all-zero buffer (unformatted, so
-    /// it holds no save) is not copied: the buffer takes Ymir's formatted image instead.
+    /// it holds no save) is not copied: the buffer takes Ymir's current image instead (and a notice is kept for
+    /// TakeBackupRAMNotice). At the first frame and at the UnloadGame safety net that is the image LoadGame formatted;
+    /// for SetSRAMData during play it is the running game's backup RAM, saves made this session included.
     void WriteSRAMToYmir();
 
     /// @brief Copy Ymir's internal backup RAM into m_sramData, in place once it has its size (the frontend may keep
