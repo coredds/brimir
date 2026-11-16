@@ -549,13 +549,20 @@ void SoftwareVDPRenderer::VDP1EraseFramebuffer(uint64 cycles) {
         m_vdp2RenderingContext.eraseFramebufferReadySignal.Wait();
         m_vdp2RenderingContext.eraseFramebufferReadySignal.Reset();
     }
+    // Brimir: the erase uses TVMD and the vertical resolution as they are now on the emulator thread, which is what the
+    // unthreaded renderer reads. Upstream read VDP2GetRegs() (the VDP2 render thread's copy while threaded) and m_VRes
+    // in VDP1DoEraseFramebuffer, possibly later on the VDP1 render thread. m_VRes is safe to read here: with threaded
+    // VDP2 only the VDP2 render thread writes it, for events queued before the one it has just signalled.
+    const RegTVMD tvmd = m_state.regs2.TVMD;
+    const uint32 vres = m_VRes;
     if (m_threadedVDP1Rendering) {
-        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::EraseFramebuffer(cycles));
+        m_vdp1RenderingContext.EnqueueEvent(
+            VDP1RenderEvent::EraseFramebuffer(cycles, tvmd.u16, static_cast<uint16>(vres)));
     } else {
         if (cycles == 0) {
-            VDP1DoEraseFramebuffer<false>();
+            VDP1DoEraseFramebuffer<false>(tvmd, vres);
         } else {
-            VDP1DoEraseFramebuffer<true>(cycles);
+            VDP1DoEraseFramebuffer<true>(tvmd, vres, cycles);
         }
     }
 }
@@ -596,9 +603,11 @@ void SoftwareVDPRenderer::VDP1ExecuteCommand(uint32 cmdAddress, VDP1Command::Con
     if (static_cast<uint16>(control.command) <= 0x7) {
         BRIMIR_VDP1_PROBE_DRAWN();
     }
+    // Brimir: the command draws with TVMD as it is now on the emulator thread (see m_VDP1TVMD)
     if (m_threadedVDP1Rendering) {
-        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::Command(cmdAddress, control));
+        m_vdp1RenderingContext.EnqueueEvent(VDP1RenderEvent::Command(cmdAddress, control, m_state.regs2.TVMD.u16));
     } else {
+        m_VDP1TVMD = m_state.regs2.TVMD;
         (this->*m_fnVDP1HandleCommand)(cmdAddress, control);
     }
 }
@@ -750,10 +759,11 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                 break;
 
             case EvtType::EraseFramebuffer: {
+                const RegTVMD tvmd{.u16 = event.erase.tvmd}; // Brimir: see VDP1EraseFramebuffer
                 if (event.erase.cycles == 0) {
-                    VDP1DoEraseFramebuffer<false>();
+                    VDP1DoEraseFramebuffer<false>(tvmd, event.erase.vres);
                 } else {
-                    VDP1DoEraseFramebuffer<true>(event.erase.cycles);
+                    VDP1DoEraseFramebuffer<true>(tvmd, event.erase.vres, event.erase.cycles);
                 }
                 const auto fbIndex = m_state.fbIndex.display;
                 m_state.mem1.FBRAM[fbIndex] = rctx.vdp1.mem.FBRAM[fbIndex];
@@ -772,7 +782,10 @@ void SoftwareVDPRenderer::VDP1RenderThread() {
                 m_state.mem1.FBRAM[fbIndex] = rctx.vdp1.mem.FBRAM[fbIndex];
                 break;
             }
-            case EvtType::Command: (this->*m_fnVDP1HandleCommand)(event.command.address, event.command.control); break;
+            case EvtType::Command:
+                m_VDP1TVMD.u16 = event.command.tvmd; // Brimir: see VDP1ExecuteCommand
+                (this->*m_fnVDP1HandleCommand)(event.command.address, event.command.control);
+                break;
 
             case EvtType::VRAMWriteByte: rctx.vdp1.mem.VRAM[event.write.address] = event.write.value; break;
             case EvtType::VRAMWriteWord:
@@ -1072,9 +1085,9 @@ FORCE_INLINE SpriteFB &SoftwareVDPRenderer::VDP1GetRendererFBRAM(bool altFB, uin
 }
 
 template <bool countCycles>
-FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
+FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(RegTVMD tvmd, uint32 vres, uint64 cycles) {
     const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
+    // Brimir: TVMD and the vertical resolution come from the caller (VDP1EraseFramebuffer)
     auto &ctx = m_state.state1;
     const uint8 fbIndex = m_state.fbIndex.display;
 
@@ -1090,14 +1103,14 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1DoEraseFramebuffer(uint64 cycles) {
 
     const uint32 fbOffsetShift = regs1.tvmr.eraseOffsetShift;
 
-    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+    const bool doubleDensity = tvmd.LSMDn == InterlaceMode::DoubleDensity; // Brimir: tvmd
 
     // Vertical scale is doubled in double-interlace mode
     const uint32 scaleV = doubleDensity ? 1 : 0;
 
     // Constrain erase area to certain limits based on current resolution
-    const uint32 maxH = (regs2.TVMD.HRESOn & 1) ? 428 : 400;
-    const uint32 maxV = m_VRes >> scaleV;
+    const uint32 maxH = (tvmd.HRESOn & 1) ? 428 : 400; // Brimir: tvmd
+    const uint32 maxV = vres >> scaleV;                 // Brimir: vres
 
     const uint32 x1 = std::min<uint32>(regs1.eraseX1Latch, maxH);
     const uint32 x3 = std::min<uint32>(regs1.eraseX3Latch, maxH);
@@ -1652,8 +1665,8 @@ FORCE_INLINE void SoftwareVDPRenderer::VDP1PlotTexturedQuad(uint32 cmdAddress, V
                                           (m_state.state1.sysClipV << m_VDP1doubleV) | m_VDP1doubleV};
 
     const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+    // Brimir: TVMD as issued (m_VDP1TVMD); upstream read VDP2GetRegs().TVMD
+    const bool doubleDensity = m_VDP1TVMD.LSMDn == InterlaceMode::DoubleDensity;
 
     // Interpolate linearly over edges A-D and B-C
     for (; quad.CanStep(); quad.Step()) {
@@ -1938,8 +1951,8 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolygon(uint32 cmdAddress) {
                                           (m_state.state1.sysClipV << m_VDP1doubleV) | m_VDP1doubleV};
 
     const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+    // Brimir: TVMD as issued (m_VDP1TVMD); upstream read VDP2GetRegs().TVMD
+    const bool doubleDensity = m_VDP1TVMD.LSMDn == InterlaceMode::DoubleDensity;
 
     // Interpolate linearly over edges A-D and B-C
     for (; quad.CanStep(); quad.Step()) {
@@ -2015,8 +2028,8 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawPolylines(uint32 cmdAddress) {
                                    (uint8)gouraudD.r, (uint8)gouraudD.g, (uint8)gouraudD.b);
 
     const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+    // Brimir: TVMD as issued (m_VDP1TVMD); upstream read VDP2GetRegs().TVMD
+    const bool doubleDensity = m_VDP1TVMD.LSMDn == InterlaceMode::DoubleDensity;
 
     if (mode.gouraudEnable) {
         lineParams.gouraudLeft = gouraudA;
@@ -2074,8 +2087,8 @@ void SoftwareVDPRenderer::VDP1Cmd_DrawLine(uint32 cmdAddress) {
     };
 
     const VDP1Regs &regs1 = VDP1GetRegs();
-    const VDP2Regs &regs2 = VDP2GetRegs();
-    const bool doubleDensity = regs2.TVMD.LSMDn == InterlaceMode::DoubleDensity;
+    // Brimir: TVMD as issued (m_VDP1TVMD); upstream read VDP2GetRegs().TVMD
+    const bool doubleDensity = m_VDP1TVMD.LSMDn == InterlaceMode::DoubleDensity;
 
     if (mode.gouraudEnable) {
         const Color555 colorA{.u16 = VDP1ReadRendererVRAM<uint16>(gouraudTable + 0u)};

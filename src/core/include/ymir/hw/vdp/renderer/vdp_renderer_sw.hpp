@@ -24,8 +24,10 @@
 
 #include <blockingconcurrentqueue.h>
 
+#include <algorithm> // Brimir: std::min in VDP1RenderEvent::EraseFramebuffer
 #include <array>
 #include <atomic>
+#include <limits> // Brimir: std::numeric_limits in VDP1RenderEvent::EraseFramebuffer
 #include <span>
 #include <thread>
 #include <type_traits>
@@ -326,8 +328,12 @@ private:
                 bool hard;
             } reset;
 
-            struct {
-                uint64 cycles;
+            // Brimir: the erase and the command carry the VDP2 state they read as the emulator thread had it when they
+            // were issued (TVMD; the erase also the vertical resolution). Upstream: `uint64 cycles` and no other field.
+            struct alignas(8) { // alignas: upstream's uint64 member gave the event its 8-byte alignment
+                uint32 cycles; // saturated; an erase writes fewer than 2^18 pixels, so no budget beyond that matters
+                uint16 tvmd;
+                uint16 vres;
             } erase;
 
             struct {
@@ -337,6 +343,7 @@ private:
             struct {
                 uint32 address;
                 VDP1Command::Control control;
+                uint16 tvmd; // Brimir
             } command;
 
             struct {
@@ -349,8 +356,9 @@ private:
             return {Type::Reset, {.reset = {.hard = hard}}};
         }
 
-        static VDP1RenderEvent EraseFramebuffer(uint64 cycles) {
-            return {Type::EraseFramebuffer, {.erase = {.cycles = cycles}}};
+        static VDP1RenderEvent EraseFramebuffer(uint64 cycles, uint16 tvmd, uint16 vres) { // Brimir: tvmd, vres
+            const uint32 cycles32 = static_cast<uint32>(std::min<uint64>(cycles, std::numeric_limits<uint32>::max()));
+            return {Type::EraseFramebuffer, {.erase = {.cycles = cycles32, .tvmd = tvmd, .vres = vres}}};
         }
 
         static VDP1RenderEvent SwapBuffers() {
@@ -365,8 +373,8 @@ private:
             return {Type::EndDraw};
         }
 
-        static VDP1RenderEvent Command(uint32 address, VDP1Command::Control control) {
-            return {Type::Command, {.command = {.address = address, .control = control}}};
+        static VDP1RenderEvent Command(uint32 address, VDP1Command::Control control, uint16 tvmd) { // Brimir: tvmd
+            return {Type::Command, {.command = {.address = address, .control = control, .tvmd = tvmd}}};
         }
 
         static VDP1RenderEvent VRAMWriteByte(uint32 address, uint8 value) {
@@ -421,6 +429,8 @@ private:
             return {Type::Shutdown};
         }
     };
+    // Brimir: the fields above keep upstream's event size and alignment (the batch and queue layout are unchanged)
+    static_assert(sizeof(VDP1RenderEvent) == 16 && alignof(VDP1RenderEvent) == 8);
 
     mutable struct VDP1RenderContext {
         moodycamel::BlockingConcurrentQueue<VDP1RenderEvent, ConcQueueTraits> eventQueue;
@@ -758,6 +768,10 @@ private:
     // Brimir: initialised and cleared by Reset. Upstream leaves it undefined until the first VDP1BeginFrame, but save
     // states (and the GPU renderer, which copies it) read it before then.
     uint16 m_VDP1doubleV = 0;
+    // Brimir: TVMD as the emulator thread had it when the command being drawn was issued; set before every command
+    // (VDP1ExecuteCommand or the VDP1 render thread's Command event). Upstream read VDP2GetRegs().TVMD in the command,
+    // the VDP2 render thread's copy while threaded.
+    RegTVMD m_VDP1TVMD{.u16 = 0};
     bool m_VDP1QuadTermination = true; // Brimir: SetVDP1QuadTerminationForTesting
     // Brimir: GetVDP1QuadTerminationsForTesting; not atomic, valid only with unthreaded VDP1 rendering
     uint64 m_VDP1QuadTerminations = 0;
@@ -813,8 +827,10 @@ private:
     SpriteFB &VDP1GetRendererFBRAM(bool altFB, uint8 fbIndex);
 
     // Erases the current VDP1 display framebuffer.
+    // Brimir: tvmd and vres are TVMD and the vertical resolution as the emulator thread had them when the erase was
+    // issued; upstream read VDP2GetRegs().TVMD and m_VRes in the erase.
     template <bool countCycles>
-    void VDP1DoEraseFramebuffer(uint64 cycles = ~0ull);
+    void VDP1DoEraseFramebuffer(RegTVMD tvmd, uint32 vres, uint64 cycles = ~0ull);
 
 #define TPL_TRAITS template <bool deinterlace, bool transparentMeshes>
 #define TPL_LINE_TRAITS template <bool antiAlias, bool deinterlace, bool transparentMeshes>
