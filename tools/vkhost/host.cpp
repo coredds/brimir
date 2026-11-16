@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -181,6 +182,15 @@ bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& out) {
     }
     out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     return true;
+}
+
+// A Saturn backup RAM image (data bytes): formatted ones start with "BackUpRam Format"; all zero is unformatted too.
+const char* DescribeBackupRam(const uint8_t* data, size_t size) {
+    static constexpr char kHeader[] = "BackUpRam Format";
+    if (size >= 16 && std::memcmp(data, kHeader, 16) == 0) {
+        return "formatted";
+    }
+    return std::all_of(data, data + size, [](uint8_t b) { return b == 0; }) ? "all zero (unformatted)" : "unformatted";
 }
 
 } // namespace
@@ -392,6 +402,32 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     }
     m_contentLoaded = true;
 
+    // --save-dir: RetroArch's .srm load (event_init_content: content_init, then event_load_save_files), into the
+    // memory retro_get_memory_data returns now. RetroArch does not do this for the run-ahead second instance.
+    m_srmPath.clear();
+    if (!config.saveDir.empty() && !config.secondInstance) {
+        const std::string name = hasGame ? std::filesystem::path(config.gamePath).stem().string()
+                                         : std::string(info.library_name != nullptr ? info.library_name : "core");
+        m_srmPath = (std::filesystem::path(config.saveDir) / (name + ".srm")).string();
+        size_t size = 0;
+        uint8_t* data = MemoryData(RETRO_MEMORY_SAVE_RAM, size);
+        if (data == nullptr || size == 0) {
+            std::fprintf(stderr, "vkhost: srm: the core exposes no save RAM after retro_load_game: %s not loaded\n",
+                         m_srmPath.c_str());
+        } else {
+            std::fprintf(stderr, "vkhost: srm: save RAM after retro_load_game: %zu bytes, %s\n", size,
+                         DescribeBackupRam(data, size));
+            std::vector<uint8_t> file;
+            if (ReadWholeFile(m_srmPath, file) && !file.empty()) {
+                std::memcpy(data, file.data(), std::min(file.size(), size)); // a longer file is truncated
+                std::fprintf(stderr, "vkhost: srm: loaded %s (%zu bytes, %s)\n", m_srmPath.c_str(), file.size(),
+                             DescribeBackupRam(file.data(), file.size()));
+            } else {
+                std::fprintf(stderr, "vkhost: srm: no %s\n", m_srmPath.c_str());
+            }
+        }
+    }
+
     m_api->get_system_av_info(&m_avInfo);
     m_geometry = m_avInfo.geometry;
     if (m_pixelFormat != RETRO_PIXEL_FORMAT_XRGB8888) {
@@ -455,6 +491,25 @@ bool LibretroHost::ResetContext() {
 
 void LibretroHost::Unload() {
     if (m_api) {
+        if (m_contentLoaded && !m_srmPath.empty()) {
+            // RetroArch saves the .srm before it deinitialises the core and the video driver (RARCH_CTL_MAIN_DEINIT:
+            // CMD_EVENT_SAVE_FILES, then CMD_EVENT_CORE_DEINIT)
+            size_t size = 0;
+            const uint8_t* data = MemoryData(RETRO_MEMORY_SAVE_RAM, size);
+            if (data == nullptr || size == 0) {
+                std::fprintf(stderr, "vkhost: srm: the core exposes no save RAM: %s not saved\n", m_srmPath.c_str());
+            } else {
+                std::ofstream out(m_srmPath, std::ios::binary | std::ios::trunc);
+                out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+                if (out) {
+                    std::fprintf(stderr, "vkhost: srm: saved %s (%zu bytes, %s)\n", m_srmPath.c_str(), size,
+                                 DescribeBackupRam(data, size));
+                } else {
+                    Problem("--save-dir: cannot write " + m_srmPath);
+                }
+            }
+            m_srmPath.clear();
+        }
         // RetroArch's order: context_destroy, retro_unload_game, then the video driver frees the device
         // (destroy_device, vkDestroyDevice). On Close Content RetroArch frees the device only after it has unloaded
         // the core, so the provider refuses a core that sets destroy_device.

@@ -288,6 +288,7 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--bios <file>` | BIOS image. It is copied into the system directory under its own file name (the core searches that directory) and selected with the `brimir_bios` option, so other BIOS files in the directory are ignored |
 | `--game <file>` | content (`cue`, `chd`, `ccd`, `mds`, `iso`, `m3u`). Omit it to run the BIOS menu on its own |
 | `--system-dir <dir>` | system directory; default is a fresh temporary one. As for `brimir_bench`, a game needs a configured `brimir_saturn_rtc_<jp\|us_eu>.smpc` in it, and the BIOS is copied into it, so use a scratch copy. One of `--bios` and `--system-dir` is required |
+| `--save-dir <dir>` | an existing save directory (`GET_SAVE_DIRECTORY`) in which the host also handles the `.srm` as RetroArch 1.22.2 does (`save.c`): `<content name, or the core's library_name without content>.srm` is copied into `RETRO_MEMORY_SAVE_RAM` right after `retro_load_game` and written back from it before the core is unloaded (not for the `--runahead` second instance, which gets the same directory). `vkhost: srm:` lines say what the core exposed after `retro_load_game` (`formatted`, `all zero (unformatted)`, `unformatted`, or no save RAM), what was loaded and what was saved (vkhost check `save_ram_without_content`). The core reads and writes its own files there too, so use a scratch directory |
 | `--frames N` | recorded frames (default 300) |
 | `--warmup N` | frames run before recording (default 120, the same as `brimir_bench`) |
 | `--option key=value` | core option override (repeatable). Every other option answers with the default the core declares through `SET_CORE_OPTIONS_V2` |
@@ -343,7 +344,7 @@ build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --o
 | `--fail-output-images-runs A B` | with `--vulkan` (not `--compare`): the output images fail only in runs A .. B-1 (counting warmup frames from 0): those above the `--fail-output-images-above` limit, or all of them without one (the core's retry backoff and scale restore) |
 | `--defer-image-read N` | with `--vulkan` (not with `--grow-mask`): read each `set_image` image N (1-2) displayed frames later, from the handles copied at `video_refresh` as RetroArch's threaded video path keeps them (the latest legal read: before the core's next `wait_sync_index` for that sync index on the 3-slot ring). The core destroying such an image or its view before the read (wrapped `vkDestroyImage` / `vkDestroyImageView`) fails the run; reads still pending are done before a reinit, a sync-mask change and at the end. Dupes repeat the frame before them, in order |
 
-The save directory is always a fresh temporary directory that is removed on exit. Core log messages go to stderr,
+Without `--save-dir` the save directory is a fresh temporary directory that is removed on exit. Core log messages go to stderr,
 prefixed `[core <level>]` (`[core#2 ...]` for the run-ahead instance); the Ymir library's own log lines go to stdout,
 so filter hash output for lines that start with `frame `. Exit codes: 0 success, 1 usage error, 2 load or setup
 failure, 3 a check failed (the `vkhost: FAILED:` lines say which), 4 `--vulkan` without a usable Vulkan device.

@@ -96,10 +96,19 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
         throw std::runtime_error("--reset-at, --reset-in-run and --reset-in-present need --vulkan");
     }
 
-    // Saves always go to a fresh directory, so earlier runs never affect the result (as in brimir_bench).
+    // Saves go to a fresh directory, so earlier runs never affect the result (as in brimir_bench), unless --save-dir
+    // names one.
     ScratchDir scratch;
-    const fs::path saveDir = scratch.Path() / "save";
-    fs::create_directories(saveDir);
+    fs::path saveDir = scratch.Path() / "save";
+    if (config.saveDir.empty()) {
+        fs::create_directories(saveDir);
+    } else {
+        saveDir = config.saveDir;
+        std::error_code ec;
+        if (!fs::is_directory(saveDir, ec)) {
+            throw std::runtime_error("--save-dir is not an existing directory: " + config.saveDir);
+        }
+    }
 
     fs::path systemDir;
     if (config.systemDir.empty()) {
@@ -163,7 +172,8 @@ RunReport RunCore(const HostConfig& config, FrameSink& sink) {
     uint64_t secondaryDeclines = 0;
     fs::path secondaryCopy;
     HostConfig second;
-    const fs::path secondSaveDir = scratch.Path() / "save2";
+    // RetroArch gives the second instance the same save directory
+    const fs::path secondSaveDir = config.saveDir.empty() ? scratch.Path() / "save2" : saveDir;
     const auto loadSecondary = [&] {
         secondaryLoaded = secondary.Load(second, systemDir.string(), secondSaveDir.string());
         if (secondaryLoaded) {

@@ -81,7 +81,10 @@ void PrintUsage(std::FILE* out) {
         "                RTC mode (virtual) a missing brimir_saturn_rtc_<jp|us_eu>.smpc is created configured\n"
         "                (no BIOS setup screen; clock from the host time); brimir_rtc_mode=host needs a\n"
         "                configured one, see brimir_bench. The BIOS is copied into it, so use a scratch copy.\n"
-        "                The save directory is always a fresh temporary one.\n"
+        "  --save-dir    an existing save directory (default: a fresh temporary one) where the host also handles\n"
+        "                the .srm as RetroArch does: <content name, or the core's name without content>.srm is\n"
+        "                copied into RETRO_MEMORY_SAVE_RAM after retro_load_game and written back from it before\n"
+        "                retro_unload_game ('vkhost: srm:' lines say what the core exposed and what was saved)\n"
         "  --frames      recorded frames (default 300)\n"
         "  --warmup      frames run before recording (default 120)\n"
         "  --option      core option override, for example --option brimir_overscan=1 (repeatable);\n"
@@ -511,6 +514,8 @@ ParseResult ParseArgs(int argc, char** argv, CliArgs& args) {
             args.config.gamePath = value;
         } else if (opt == "--system-dir") {
             args.config.systemDir = value;
+        } else if (opt == "--save-dir") {
+            args.config.saveDir = value;
         } else if (opt == "--dump-dir") {
             args.config.dumpDir = value;
         } else if (opt == "--frames") {

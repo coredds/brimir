@@ -43,6 +43,11 @@ struct HostConfig {
     std::string biosPath;  // copied into the system directory under its own file name
     std::string gamePath;  // empty: no content (the BIOS runs on its own)
     std::string systemDir; // empty: a fresh temporary directory
+    // --save-dir: an existing save directory (GET_SAVE_DIRECTORY) in which the host also handles the .srm as RetroArch
+    // 1.22.2 does (save.c): <content name, or the core's library_name without content>.srm is copied into
+    // RETRO_MEMORY_SAVE_RAM after retro_load_game and written back from it before retro_unload_game. Empty: a fresh
+    // temporary save directory and no .srm handling.
+    std::string saveDir;
     std::string dumpDir;   // empty: no PPM dump (handled by the CLI layer)
     std::vector<std::pair<std::string, std::string>> options; // --option key=value overrides
     int warmup = 120;
@@ -400,6 +405,7 @@ private:
 
     std::string m_systemDir;
     std::string m_saveDir;
+    std::string m_srmPath; // --save-dir: the frontend's .srm (empty: no .srm handling)
     std::map<std::string, std::string> m_defaults;  // from SET_CORE_OPTIONS_V2
     std::map<std::string, std::string> m_overrides; // --option, --set-option-at
     bool m_optionsUpdated = false;                  // GET_VARIABLE_UPDATE reports true once
