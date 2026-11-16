@@ -29,6 +29,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 using namespace brimir;
 
@@ -3618,6 +3621,79 @@ TEST_CASE("android-paths: no save directory and an unusable temp directory do no
     REQUIRE_NOTHROW(core->UnloadGame());
     std::error_code ec;
     CHECK_FALSE(std::filesystem::exists(missing, ec));
+}
+
+// What an Android app meets with no save directory: temp_directory_path() gives an existing folder it cannot write
+// (/data/local/tmp). Only meaningful for a user the permission bits bind (not root): run it as the shell user or an app
+// uid on a device (tools/android/emulator_tests.sh RUN_AS).
+TEST_CASE("android-paths: no save directory and a temp directory that exists but is not writable do not stop loading",
+          "[core][android-paths]") {
+#ifdef _WIN32
+    SKIP("POSIX permission bits");
+#else
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    if (geteuid() == 0) {
+        SKIP("running as root: the permission bits do not bind");
+    }
+    AndroidPathContent content(u8"brimir_android_readonly_tmp", u8"audio.cue", u8"track.wav");
+    const auto readOnly = content.root / "readonly_tmp";
+    std::filesystem::create_directories(readOnly);
+    std::filesystem::permissions(readOnly, std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec |
+                                               std::filesystem::perms::group_read | std::filesystem::perms::group_exec |
+                                               std::filesystem::perms::others_read | std::filesystem::perms::others_exec);
+    // Writable again for the content folder's cleanup, whatever the outcome
+    struct RestoreWrite {
+        std::filesystem::path dir;
+        ~RestoreWrite() {
+            std::error_code ec;
+            std::filesystem::permissions(dir, std::filesystem::perms::owner_all, std::filesystem::perm_options::add, ec);
+        }
+    } restore{readOnly};
+    {
+        const auto probe = readOnly / "probe";
+        std::ofstream(probe).put('x');
+        std::error_code ec;
+        if (std::filesystem::exists(probe, ec)) {
+            SKIP("the read-only folder is writable for this user");
+        }
+    }
+
+    const auto core = StartAndroidPathCore();
+    bool backupCart = false;
+    SECTION("internal backup RAM only") {}
+    SECTION("with a backup memory cartridge") {
+        core->SetCartridgeOverride(CartridgeChoice::Backup);
+        backupCart = true;
+    }
+    ScopedTempDir tempDir(readOnly);
+    {
+        std::error_code ec;
+        const auto temp = std::filesystem::temp_directory_path(ec);
+        REQUIRE_FALSE(ec); // the precondition: the temp directory exists (and is not writable), as on Android
+        REQUIRE(temp == readOnly);
+    }
+    bool loaded = false;
+    REQUIRE_NOTHROW(loaded = core->LoadGame(Utf8(content.cue).c_str(), nullptr, Utf8(content.system).c_str()));
+    INFO(core->GetLastError());
+    REQUIRE(loaded);
+    if (backupCart) {
+        CHECK(core->GetSaturn()->GetCartridge().GetType() == ymir::cart::CartType::BackupMemory);
+    }
+    RunFrames(*core, 60);
+    REQUIRE_NOTHROW(core->UnloadGame());
+    // Nothing was written, and the failed writes are reported (the frontend logs them)
+    CHECK(std::filesystem::is_empty(readOnly));
+    const std::string srmError = core->TakeBackupRAMSaveError();
+    INFO(srmError);
+    CHECK(srmError.find("could not write") != std::string::npos);
+    if (backupCart) {
+        const std::string cartError = core->TakeCartridgeSaveError();
+        INFO(cartError);
+        CHECK_FALSE(cartError.empty());
+    }
+#endif
 }
 
 TEST_CASE("android-paths: a content path with spaces and non-ASCII characters loads", "[core][android-paths]") {
