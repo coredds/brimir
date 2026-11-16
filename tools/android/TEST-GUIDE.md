@@ -44,20 +44,23 @@ The test build is not a release. It is a file ("artifact") attached to a run of 
 (https://github.com/coredds/brimir) > **Actions** > the newest run of the release workflow, started by hand.
 
 Scroll to the bottom of the run page, to **Artifacts**. You should **see** `brimir-android-arm64`. Tap it to
-download. GitHub asks you to log in first. **[not tested]** (the workflow has not run yet when this was written).
+download. GitHub asks you to log in first. The dry run exists (run 43828670633); the person testing with you sends
+you the link to that run. **[not tested]** on a phone.
 
 ### 2. Unpack it
 
-You get `brimir-android-arm64.zip`. Inside are three files: `brimir_libretro_android.so`, `brimir_libretro.info`
-and `ANDROID-INSTALL.txt`. On some browsers the download is a zip inside a zip. If you only see another `.zip`,
-unpack that one too. **[not tested]**
+What you download from the Actions page is always a zip inside a zip: GitHub wraps every artifact in a zip, and the
+artifact is itself `brimir-android-arm64.zip`. So you get `brimir-android-arm64.zip` (the outer one), which holds
+another `brimir-android-arm64.zip` (the inner one). Unpack both: the inner zip holds the three files
+`brimir_libretro_android.so`, `brimir_libretro.info` and `ANDROID-INSTALL.txt`.
 
 - **Phone only**: on the phone's browser, open the Actions page (if the Artifacts list does not show, choose
   "Desktop site" in the browser menu). Download the zip. Open the **My Files** app > Downloads, tap the zip, tap
-  **Extract**. You should **see** the three files in a new folder inside Download. The folder is probably called
-  like the zip, `brimir-android-arm64` (if there was a zip inside the zip, the folder has the inner zip's name). Note
-  the folder name: you open it in step 6. If you prefer, move `brimir_libretro_android.so` into Download itself.
-  **[not tested]**
+  **Extract**. You should **see** a new folder `brimir-android-arm64` inside Download, holding the inner
+  `brimir-android-arm64.zip`. Open that folder, tap the inner zip, tap **Extract** again. You should **see** a second
+  folder `brimir-android-arm64` inside the first one, with the three files. So the core is probably at
+  `Download/brimir-android-arm64/brimir-android-arm64/brimir_libretro_android.so`; note the real folder names, you open
+  them in step 6. If you prefer, move `brimir_libretro_android.so` into Download itself. **[not tested]**
 - **PC route**: download and unzip on the PC. Copy the files later (step 5): the core goes to Download itself.
 
 Do not rename `brimir_libretro_android.so`. If your browser added something like ` (1)` to the name, rename it back.
@@ -150,8 +153,8 @@ Phone only: it is already there, in the folder from step 2 (for example `Downloa
 2. Tap **Parent Directory** twice. The title now shows `/storage/emulated/0/`.
 3. Open **Download**. If you pushed the file (PC route) or moved it there, you should **see**
    `brimir_libretro_android.so` in the list. If you extracted the zip on the phone (step 2), open the extracted folder
-   first (for example `brimir-android-arm64`; a folder inside a folder is just another tap, **[not tested]**). In the
-   emulator test the file lay directly in Download.
+   first, and the folder inside it (probably `brimir-android-arm64` twice: the outer zip's folder, then the inner
+   zip's folder; **[not tested]**). In the emulator test the file lay directly in Download.
 4. Tap `brimir_libretro_android.so`. RetroArch copies it and returns to the Main Menu.
 
 On the emulator RetroArch copied the file unchanged to its own cores folder. It needs no root and no special
@@ -212,8 +215,8 @@ absent from logcat in every emulator run). So the file is the thing to collect.
 **If no log file appears** (empty `logs` folder, or no such folder): do not lose time on it. Instead (a) run the game
 and take **screenshots** of any message RetroArch shows on the screen; (b) take a screenshot of the Core Options
 screen and of the title bar; (c) use the PC route with adb (step 19), which can also look for the log file under
-`/storage/emulated/0/RetroArch` and the app's own folder; and (d) write the exact text of what you see into the report. Say in the report that no log file was produced, and with which
-RetroArch (package and version).
+`/storage/emulated/0/RetroArch` and the app's own folder; and (d) write the exact text of what you see into the
+report. Say in the report that no log file was produced, and with which RetroArch (package and version).
 
 Tip: after each run below, copy the log file under a new name (for example `log-software.txt`), because later runs
 may be added to the same file. Whichever way it works, the line `Device report:` appears once per game load.
