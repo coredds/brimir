@@ -625,7 +625,7 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         // already provided data (e.g. an .srm loaded before retro_load_game), keep
         // that buffer authoritative and copy it into Ymir before the first frame.
         if (m_sramData.empty()) {
-            m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
+            ReadSRAMFromYmir();
         }
         m_sramInitialized = true;
         
@@ -1041,7 +1041,7 @@ void CoreWrapper::UnloadGame() {
         if (m_sramFirstLoad) {
             WriteSRAMToYmir();
         }
-        m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
+        ReadSRAMFromYmir();
     }
 
     // Persist the canonical SRAM buffer to the .srm file. The frontend also
@@ -1064,6 +1064,8 @@ void CoreWrapper::UnloadGame() {
             m_backupRAMSaveError = "could not write the backup RAM file";
         }
     }
+    // The file belongs to this game: a later session without content in this instance must not write it
+    m_srmPath.clear();
 
     // Eject disc
     m_saturn->EjectDisc();
@@ -1173,12 +1175,12 @@ void* CoreWrapper::GetSRAMData() {
         return nullptr;
     }
 
-    // Initialize buffer on first call (for RetroArch to load .srm into).
-    // This does not count as frontend-provided data; LoadGame will reload
-    // from Ymir's freshly formatted backup RAM if no .srm was supplied.
+    // Before any game is loaded (a session without content, or a frontend asking before retro_load_game) the buffer
+    // is Ymir's formatted backup RAM, never zeros: a frontend saves this buffer as the .srm, and an all-zero image is
+    // unformatted backup RAM (games then ask for every record to be deleted). The frontend may still load its .srm
+    // into it; this does not count as frontend-provided data (LoadGame starts from a fresh formatted image).
     if (m_sramData.empty()) {
-        m_sramData.resize(GetSRAMSize());
-        // DON'T read from Ymir yet - let RetroArch load .srm first!
+        ReadSRAMFromYmir();
         return m_sramData.data();
     }
 
@@ -1190,7 +1192,7 @@ void* CoreWrapper::GetSRAMData() {
         constexpr uint32_t kSRAMSyncInterval = 300;
 
         if (m_sramCacheDirty || m_framesSinceLastSRAMSync >= kSRAMSyncInterval) {
-            m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
+            ReadSRAMFromYmir();
             m_sramCacheDirty = false;
             m_framesSinceLastSRAMSync = 0;
         }
@@ -1249,12 +1251,20 @@ bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
     return true;
 }
 
-void CoreWrapper::WriteSRAMToYmir() const {
+void CoreWrapper::WriteSRAMToYmir() {
     if (!m_initialized || !m_saturn || m_sramData.empty()) {
         return;
     }
 
     auto& bup = m_saturn->mem.GetInternalBackupRAM();
+    // An all-zero image is unformatted backup RAM and holds no save (a .srm written by earlier versions from a session
+    // without content, for example): copied down, the game would ask for every record to be deleted, and the file
+    // would be saved back unformatted every session. Ymir's image (formatted by LoadGame) is kept and the frontend's
+    // buffer takes it, so the .srm is saved formatted. Any other image is used as it is.
+    if (std::all_of(m_sramData.begin(), m_sramData.end(), [](uint8_t b) { return b == 0; })) {
+        ReadSRAMFromYmir();
+        return;
+    }
     const uint32_t size = bup.Size();
     for (uint32_t i = 0; i < size && i < m_sramData.size(); ++i) {
         bup.WriteByte(i * 2, m_sramData[i]);
@@ -1268,9 +1278,17 @@ void CoreWrapper::RefreshSRAMFromEmulator() {
     
     // Force read from Ymir's internal backup RAM into our buffer
     // This overwrites whatever RetroArch loaded from .srm
-    m_sramData = m_saturn->mem.GetInternalBackupRAM().ReadAll();
+    ReadSRAMFromYmir();
     m_sramCacheDirty = false;
     m_framesSinceLastSRAMSync = 0;
+}
+
+void CoreWrapper::ReadSRAMFromYmir() {
+    const std::vector<uint8_t> image = m_saturn->mem.GetInternalBackupRAM().ReadAll();
+    if (m_sramData.size() != image.size()) {
+        m_sramData.resize(image.size());
+    }
+    std::copy(image.begin(), image.end(), m_sramData.begin());
 }
 
 void* CoreWrapper::GetSystemRAMData() {
@@ -1292,7 +1310,7 @@ void* CoreWrapper::GetSRAMRawPointer() {
         return nullptr;
     }
     if (m_sramData.empty()) {
-        m_sramData.resize(GetSRAMSize());
+        ReadSRAMFromYmir(); // formatted, as in GetSRAMData
     }
     return m_sramData.data();
 }

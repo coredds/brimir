@@ -72,6 +72,13 @@ static struct retro_memory_descriptor g_memdesc[] = {
 };
 static const unsigned g_memdesc_count = sizeof(g_memdesc) / sizeof(g_memdesc[0]);
 
+// A session without content (retro_load_game(NULL): the BIOS on its own) exposes no save RAM, so the frontend neither
+// loads nor writes a .srm for it (RetroArch would name it after the core, Brimir.srm). Nothing in such a session uses
+// one: the core copies the .srm into the emulated backup RAM only for a game, and the BIOS keeps its settings
+// (language, clock) in the SMPC file (brimir_saturn_rtc_*.smpc). The BIOS's data management screen works on a formatted
+// in-memory backup RAM that is not saved. Set by every retro_load_game.
+static bool g_noContentSession = false;
+
 // Whether the frontend supports RETRO_DEVICE_ID_JOYPAD_MASK (single-call input read)
 static bool g_input_bitmask_supported = false;
 
@@ -1598,6 +1605,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     const bool no_content = game == nullptr;
 
     std::lock_guard<std::recursive_mutex> lock(g_coreMutex);
+    g_noContentSession = no_content;
 
     if (!g_core) {
         brimir_log(RETRO_LOG_ERROR, "Core not initialized");
@@ -2006,7 +2014,7 @@ RETRO_API void* retro_get_memory_data(unsigned id) {
     
     switch (id) {
         case RETRO_MEMORY_SAVE_RAM:
-            return g_core->GetSRAMData();
+            return g_noContentSession ? nullptr : g_core->GetSRAMData();
         case RETRO_MEMORY_SYSTEM_RAM:
             return g_ramView.Data();
         default:
@@ -2022,7 +2030,7 @@ RETRO_API size_t retro_get_memory_size(unsigned id) {
     
     switch (id) {
         case RETRO_MEMORY_SAVE_RAM:
-            return g_core->GetSRAMSize();
+            return g_noContentSession ? 0 : g_core->GetSRAMSize();
         case RETRO_MEMORY_SYSTEM_RAM:
             return brimir::RamView::kSize;
         default:

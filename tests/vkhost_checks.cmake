@@ -277,6 +277,22 @@ foreach(line IN ITEMS "view frame 99 offset 0x1fff00: 00 00 00 00" "view frame 3
 endforeach()
 message(STATUS "ram_view: 2 MiB view, memory map into it, achievements declared, frontend writes reach work RAM")
 
+# save_ram_without_content: a session without content (RetroArch: Load Core, Start Core) exposes no save RAM, so the
+# frontend neither loads nor writes <core name>.srm (--save-dir models RetroArch's .srm handling). The Galaxy A56 got a
+# Brimir.srm of 32 KiB of zeros (unformatted backup RAM) from such a session. No Vulkan needed.
+set(srm_dir "${state_dir}/srm")
+file(MAKE_DIRECTORY "${srm_dir}")
+run_vkhost(save_ram_without_content --save-dir "${srm_dir}")
+if(NOT save_ram_without_content_code EQUAL 0)
+    fail(save_ram_without_content "exit ${save_ram_without_content_code}")
+endif()
+require_log(save_ram_without_content "vkhost: srm: the core exposes no save RAM after retro_load_game: [^\r\n]*Brimir\\.srm not loaded")
+require_log(save_ram_without_content "vkhost: srm: the core exposes no save RAM: [^\r\n]*Brimir\\.srm not saved")
+if(EXISTS "${srm_dir}/Brimir.srm")
+    fail(save_ram_without_content "Brimir.srm was written")
+endif()
+message(STATUS "save_ram_without_content: no save RAM exposed, no Brimir.srm written")
+
 # cheat_pins_ram: Action Replay codes through retro_cheat_set (vkhost --cheat) write work RAM before every frame, read
 # back at Saturn addresses (--dump-ram-at, Saturn byte order). On bytes the BIOS menu does not use: a 16-bit High RAM
 # write, a conditional that sees the earlier cheat's write (true) and one that does not match (false), a Low RAM

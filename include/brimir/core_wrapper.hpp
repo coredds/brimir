@@ -727,8 +727,13 @@ private:
     bool SaveCartridgeRAM(bool force);
     void LoadCartridgeRAM();
 
-    /// @brief Copy the cached m_sramData buffer into Ymir's internal backup RAM.
-    void WriteSRAMToYmir() const;
+    /// @brief Copy the cached m_sramData buffer into Ymir's internal backup RAM. An all-zero buffer (unformatted, so
+    /// it holds no save) is not copied: the buffer takes Ymir's formatted image instead.
+    void WriteSRAMToYmir();
+
+    /// @brief Copy Ymir's internal backup RAM into m_sramData, in place once it has its size (the frontend may keep
+    /// the pointer GetSRAMData returned, as RetroArch's autosave thread does).
+    void ReadSRAMFromYmir();
 
     /// @brief Returns the region-qualified SMPC persistent data file path.
     std::filesystem::path GetPersistentSMPCDataPath() const;

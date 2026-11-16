@@ -2806,6 +2806,142 @@ TEST_CASE("cartridge: a failed cartridge save is reported and the data kept", "[
     CHECK(s.core.TakeCartridgeSaveError().find("audio.bcr.tmp") != std::string::npos);
     std::filesystem::remove(bcr);
 }
+
+// ============================================================
+// Internal backup RAM as the frontend sees it (RETRO_MEMORY_SAVE_RAM, the .srm)
+// ============================================================
+
+namespace {
+
+constexpr size_t kBackupRAMSize = 32 * 1024;
+
+bool IsFormattedBackupRAM(const uint8_t* data, size_t size) {
+    return size >= 16 && std::memcmp(data, "BackUpRam Format", 16) == 0;
+}
+
+// The emulated internal backup RAM's contents (BackupMemory::IsHeaderValid is only updated when an image is loaded or
+// formatted, not by writes).
+bool EmulatedBackupRAMFormatted(CoreWrapper& core) {
+    const auto data = core.GetSaturn()->mem.GetInternalBackupRAM().ReadAll();
+    return IsFormattedBackupRAM(data.data(), data.size());
+}
+
+std::vector<uint8_t> FrontendSRAM(CoreWrapper& core) {
+    const auto* data = static_cast<const uint8_t*>(core.GetSRAMData());
+    REQUIRE(data != nullptr);
+    return std::vector<uint8_t>(data, data + core.GetSRAMSize());
+}
+
+} // namespace
+
+TEST_CASE("backup RAM: the frontend never gets an unformatted buffer before a game is loaded", "[core][sram][regression]") {
+    // Galaxy A56: a session without content (RetroArch: Load Core, Start Core) left Brimir.srm with 32 KiB of zeros,
+    // the buffer GetSRAMData returned before any game was loaded.
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    const auto sram = FrontendSRAM(core);
+    REQUIRE(sram.size() == kBackupRAMSize);
+    CHECK(IsFormattedBackupRAM(sram.data(), sram.size()));
+    const bool sameAsEmulated = sram == core.GetSaturn()->mem.GetInternalBackupRAM().ReadAll();
+    CHECK(sameAsEmulated);
+}
+
+TEST_CASE("backup RAM: the frontend's buffer in a session without content never reaches the emulated backup RAM",
+          "[core][sram]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadIPLFromFile(UsBiosFixture().string().c_str()));
+    auto* buffer = static_cast<uint8_t*>(core.GetSRAMData());
+    REQUIRE(buffer != nullptr);
+    std::memset(buffer, 0, core.GetSRAMSize()); // a frontend loading an all-zero <core>.srm into it
+    for (int i = 0; i < 3; ++i) {
+        core.RunFrame();
+    }
+    CHECK(EmulatedBackupRAMFormatted(core));
+}
+
+TEST_CASE("backup RAM: an all-zero .srm is replaced by a formatted image at the first frame", "[core][sram][regression]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // An all-zero image is unformatted (the game asks for its records to be deleted) and holds no save; earlier
+    // versions wrote such files. Whether the core reads it (LoadGame) or the frontend copies it into the buffer after
+    // retro_load_game (RetroArch), the game gets a formatted backup RAM and the file is saved formatted.
+    CartSession s("brimir_sram_zero", CartridgeChoice::None);
+    const auto srm = s.content.saves / "audio.srm";
+    const std::vector<uint8_t> zero(kBackupRAMSize, 0);
+    SECTION("read by the core") {
+        std::ofstream(srm, std::ios::binary).write(reinterpret_cast<const char*>(zero.data()), zero.size());
+    }
+    SECTION("copied into the buffer by the frontend") {}
+    REQUIRE(s.Load());
+    auto* buffer = static_cast<uint8_t*>(s.core.GetSRAMData());
+    REQUIRE(buffer != nullptr);
+    std::memcpy(buffer, zero.data(), zero.size()); // RetroArch's content_load_ram_file
+    s.core.RunFrame();
+    CHECK(EmulatedBackupRAMFormatted(s.core));
+    CHECK(s.core.GetSRAMData() == buffer); // the pointer RetroArch's autosave thread keeps stays valid
+    CHECK(IsFormattedBackupRAM(buffer, zero.size()));
+    s.core.UnloadGame();
+    const auto file = ReadAllBytes(srm);
+    REQUIRE(file.size() == kBackupRAMSize);
+    CHECK(IsFormattedBackupRAM(file.data(), file.size()));
+}
+
+TEST_CASE("backup RAM: a .srm with saves, or unformatted but not all zero, is used and saved unchanged", "[core][sram]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CartSession s("brimir_sram_kept", CartridgeChoice::None);
+    const auto srm = s.content.saves / "audio.srm";
+    std::vector<uint8_t> image;
+    SECTION("formatted, with data") {
+        image = s.core.GetSaturn()->mem.GetInternalBackupRAM().ReadAll();
+        REQUIRE(IsFormattedBackupRAM(image.data(), image.size()));
+        image[0x1000] = 0x5A;
+        image[kBackupRAMSize - 1] = 0xA5;
+    }
+    SECTION("not formatted, not all zero") {
+        image.assign(kBackupRAMSize, 0);
+        image[0x1000] = 0x5A;
+    }
+    REQUIRE(image.size() == kBackupRAMSize);
+    std::ofstream(srm, std::ios::binary).write(reinterpret_cast<const char*>(image.data()), image.size());
+    REQUIRE(s.Load());
+    s.core.RunFrame();
+    const bool emulatedUnchanged = s.core.GetSaturn()->mem.GetInternalBackupRAM().ReadAll() == image;
+    CHECK(emulatedUnchanged);
+    s.core.UnloadGame();
+    const bool fileUnchanged = ReadAllBytes(srm) == image;
+    CHECK(fileUnchanged);
+}
+
+TEST_CASE("backup RAM: a session without content after a game never writes the game's .srm", "[core][sram][regression]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    CartSession s("brimir_sram_contentless_after_game", CartridgeChoice::None);
+    const auto srm = s.content.saves / "audio.srm";
+    REQUIRE(s.Load());
+    s.core.RunFrame();
+    s.core.UnloadGame();
+    const auto saved = ReadAllBytes(srm);
+    REQUIRE(saved.size() == kBackupRAMSize);
+    REQUIRE(IsFormattedBackupRAM(saved.data(), saved.size()));
+
+    // The same core instance runs without content (a frontend that does not deinitialise the core between sessions);
+    // its frontend copies an all-zero <core>.srm into the buffer.
+    auto* buffer = static_cast<uint8_t*>(s.core.GetSRAMData());
+    REQUIRE(buffer != nullptr);
+    std::memset(buffer, 0, s.core.GetSRAMSize());
+    s.core.RunFrame();
+    s.core.UnloadGame();
+    const bool fileUnchanged = ReadAllBytes(srm) == saved;
+    CHECK(fileUnchanged);
+}
 // ============================================================
 // Accuracy options
 // ============================================================
