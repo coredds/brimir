@@ -1,7 +1,14 @@
 # Android build
 
 The libretro core for RetroArch for Android, built with the Android NDK from the repository's CMake project. Run the
-scripts here in bash on Linux (WSL or CI).
+scripts here in bash on Linux (WSL or CI). They run on **Linux x86-64 hosts only**: `ndk_env.sh` (`ndk_llvm_bin`) uses
+the NDK's `toolchains/llvm/prebuilt/linux-x86_64`, and `check_elf.sh` / `test_check_elf.sh` use the LLVM tools from
+there. macOS and Linux arm64 hosts are not supported.
+
+Two text files in this folder are for people, not for the scripts:
+
+- `ANDROID-INSTALL.txt`: the short install text for users of the download (packaged with the core).
+- `TEST-GUIDE.md`: the step-by-step test of a build on the developer's Galaxy A56, ending in the report template.
 
 - `arm64-v8a`: the shipped ABI (`build-android-arm64-v8a/lib/brimir_libretro_android.so`).
 - `x86_64`: built only for testing on the Android emulator, never released.

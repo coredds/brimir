@@ -1,0 +1,105 @@
+BRIMIR FOR ANDROID
+Sega Saturn core for RetroArch
+
+WHAT IS IN THIS DOWNLOAD
+  brimir_libretro_android.so
+      The core (64-bit ARM).
+  brimir_libretro.info
+      Optional. Core name and BIOS list.
+  ANDROID-INSTALL.txt
+      This text.
+
+Brimir is a core, not an app. You need
+RetroArch. No BIOS and no game is included.
+
+1. GET RETROARCH (64-bit, 1.22.2 or newer)
+  - The "RetroArch (AArch64)" APK from
+    libretro.com:
+    https://buildbot.libretro.com/stable/1.22.2/android/RetroArch_aarch64.apk
+  - or RetroArch from the Play Store (not
+    tested with Brimir).
+If RetroArch closes right after you open it,
+your phone may use 16 KB memory pages.
+RetroArch 1.22.2 cannot start there. Install
+the nightly build instead (nightly page):
+https://buildbot.libretro.com/nightly/android/
+
+2. COPY THE CORE TO THE PHONE
+Put brimir_libretro_android.so in the phone's
+Download folder. Keep the file name.
+
+3. INSTALL IT IN RETROARCH
+Main Menu > Load Core >
+Install or Restore a Core.
+RetroArch opens its "downloads" folder. Tap
+"Parent Directory" twice. You are in
+/storage/emulated/0. Open "Download". Tap
+brimir_libretro_android.so.
+RetroArch copies it and goes back to the
+Main Menu.
+Then: Load Core > brimir_libretro_android.so
+Now "Start Core" runs the Saturn BIOS menu.
+
+4. BIOS (needed)
+Copy a Saturn BIOS into RetroArch's System
+folder (Settings > Directory > System/BIOS,
+usually /storage/emulated/0/RetroArch/system).
+Any one of these works:
+  mpr-17933.bin
+  Sega Saturn BIOS v1.01 (JAP).bin
+  Sega Saturn BIOS (EUR).bin
+The .info file lists more names.
+With one Japan BIOS and one US/EU BIOS,
+Brimir picks the one that fits the disc.
+
+5. GAMES
+.chd, .cue (keep its .bin files next to it),
+.ccd, .mds, .iso, .m3u.
+Put them in any folder RetroArch can open,
+for example /storage/emulated/0/RetroArch/roms
+or Download.
+Main Menu > Load Content > pick the game.
+
+THE .INFO FILE (OPTIONAL)
+Without it everything works. The core is
+listed as "brimir_libretro_android.so".
+With it RetroArch says "Sega - Saturn
+(Brimir)" and, under Core Information, which
+BIOS files it found.
+To use it:
+  a. Copy brimir_libretro.info to a folder,
+     for example
+     /storage/emulated/0/RetroArch/info
+  b. Settings > Directory > Core Info >
+     choose that folder.
+WARNING: RetroArch then reads info files
+ONLY from that folder. The info files of all
+your other cores are no longer found, unless
+you copy them there too. If you use other
+cores, skip the .info file.
+
+VULKAN RENDERER (OPTIONAL)
+The default renderer is Software. It runs on
+every phone. Vulkan needs all of these:
+  - RetroArch video driver = vulkan
+    (Settings > Drivers > Video, then restart
+    RetroArch)
+  - core option "Renderer (restart required)"
+    = Vulkan (Quick Menu > Core Options),
+    then close the game and load it again
+  - a GPU with Vulkan 1.2 or newer
+If one is missing, Brimir draws with the
+software renderer and writes the reason in
+RetroArch's log ("Device report:" line).
+Run-ahead with "Use Second Instance" and
+Vulkan: RetroArch shows "Failed to create
+second instance. Run-Ahead will now use only
+one instance." once per game. That is
+expected, not a fault.
+
+TESTED ON
+  - Samsung Galaxy A56 (Xclipse 540 GPU)
+  - the x86_64 Android emulator
+NOT tested: phones with Mali or Adreno GPUs.
+Reports are welcome:
+https://github.com/coredds/brimir
