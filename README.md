@@ -118,9 +118,9 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
   - SIMD software rendering: baseline SSE2 on x64, NEON on ARM64, optional AVX2 on compatible x64 CPUs
   - Threaded VDP1 and VDP2 rendering for optimal performance
   - Full resolution output (no overscan cropping by VDP)
-- **Vulkan Renderer** (optional, 64-bit desktop builds): VDP1 and VDP2 on the GPU, identical to the software
-  renderer at native resolution, with an internal resolution of 2x-4x for sharper 3D (see
-  [Vulkan renderer](#vulkan-renderer))
+- **Vulkan Renderer** (optional, 64-bit desktop and Android builds): VDP1 and VDP2 on the GPU, identical to the
+  software renderer at native resolution, with an internal resolution of 2x-4x for sharper 3D on desktop (1x only on
+  Android for now) (see [Vulkan renderer](#vulkan-renderer))
 - **Deinterlacing**: Multiple modes for interlaced video
   - Bob (smooth 60 FPS, no scanlines)
   - Weave (CRT-style scanlines)
@@ -132,7 +132,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 
 ### Integration
 - Libretro API v2 with live-updatable core options
-- Compatible with RetroArch and other libretro frontends
+- Compatible with RetroArch and other libretro frontends; also on Android (arm64), see [Android](#android)
 - XRGB8888 pixel format output
 - Work RAM exposed in Beetle Saturn's layout (`RETRO_MEMORY_SYSTEM_RAM` and memory map) for RetroAchievements, RetroArch cheat search and memory viewer
 - Action Replay cheats (`retro_cheat_set`) for the Saturn cheat files in RetroArch's database
@@ -147,7 +147,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 
 The 2026-11 performance round (v0.8.0) made the software renderer and the SH-2 interpreter faster without changing any output. Frames, audio and save states are byte-identical to 0.7.2. On the development PC (Ryzen 7 5700G, Release + LTO, MSVC on Windows; GCC and Clang builds moved in the same direction when measured during the round but were not re-measured at the end), the median frame time over 9 test windows is 20-64 % shorter with threaded VDP and 29-61 % shorter without it. With threaded VDP, Virtua Fighter 2 dropped from 18.4 to 6.7 ms and Fighters Megamix from 17.6 to 6.9 ms. Single-instance run-ahead frames are 23-39 % shorter. Details per area are in `CHANGELOG.md`. The harness used to prove and measure each change is in `tools/perf/`.
 
-ARM devices have not been measured. Scaled from the PC profile (a Cortex-A77-class prime core at about 0.6x the PC's single-thread speed), the software renderer would now keep every test window under the 16.7 ms frame budget on a Snapdragon 865-class device, where 0.7.2 was estimated at 11-35 ms. The SH-2 interpreter (aarch64 has no native JIT) and the deinterlacer in interlaced games are the limits there.
+ARM devices have not been measured with this harness. Scaled from the PC profile (a Cortex-A77-class prime core at about 0.6x the PC's single-thread speed), the software renderer was estimated to keep every test window under the 16.7 ms frame budget on a Snapdragon 865-class device. That did not hold on the one phone tried: on a Samsung Galaxy A56 (Exynos 1580) the software renderer was too slow to play, while the Vulkan renderer at 1x performed very well (no frame times were taken; see [Android](#android)). The SH-2 interpreter (aarch64 has no native JIT) and the deinterlacer in interlaced games are the limits for the software renderer there.
 
 ## Known Limitations
 
@@ -313,9 +313,10 @@ sample points; rotated or distorted sprites (for example in Astal) may differ at
 ### Turning it on (RetroArch)
 
 1. Settings > Drivers > Video: `vulkan`. Restart RetroArch.
-2. Quick Menu > Core Options > Video > Renderer: `Vulkan`. It applies when content is loaded, so close and load the
-   content again.
-3. Quick Menu > Core Options > Video > Internal Resolution: `2x`, `3x` or `4x`. It applies at once.
+2. Quick Menu > Core Options > Video > Renderer: `Vulkan`. It applies when content is loaded, so close the content
+   (Quick Menu > Close Content) and load it again.
+3. Quick Menu > Core Options > Video > Internal Resolution: `2x`, `3x` or `4x`. It applies at once. (Not on Android,
+   which offers 1x only for now.)
 
 With any other video driver the core uses the software renderer; it never asks RetroArch to switch drivers.
 
@@ -324,7 +325,7 @@ With any other video driver the core uses the software renderer; it never asks R
 | Option | Values | Notes |
 |---|---|---|
 | Renderer (restart required) | Software (default), Vulkan | Applies on content load |
-| Internal Resolution (Vulkan) | 1x (Native, default), 2x, 3x, 4x | Live. 3x and 4x of the high-resolution modes are above 1080p |
+| Internal Resolution (Vulkan) | 1x (Native, default), 2x, 3x, 4x | Live. 3x and 4x of the high-resolution modes are above 1080p. Android: 1x only (see [Android](#android)) |
 | VDP1 Upscaling (Vulkan) | Enabled (default), Disabled | Live. Disabled keeps polygons and sprites at native resolution (backgrounds still upscale); use it if a game shows gaps, seams or misplaced lines at 2x-4x |
 
 ### GPU memory (the core's device memory, measured)
@@ -351,6 +352,11 @@ A live change of the internal resolution needs about 20-40 MiB more for a moment
 - A lost GPU device: the software renderer continues from the last state the GPU handed back; a few frames of VDP1
   drawing may be redrawn by the game.
 
+### Android (Vulkan)
+
+The Vulkan renderer is part of the Android core and, at 1x, performed very well on the one phone tried (see
+[Android](#android)). Internal resolution above 1x is not available there yet.
+
 ### macOS
 
 RetroArch's Vulkan driver runs on Metal through MoltenVK, and the renderer is built for it (compute shaders only,
@@ -368,6 +374,9 @@ Vulkan 1.2 baseline). Release builds include it, but it has not been tried on a 
   is not affected.
 - Burning Rangers at 4x: its slowest 1% of frames take 10-11 ms of VDP1 GPU time on the test GPU (a Radeon RX 9060
   XT), close to the 12 ms target, and up to 18 ms at worst; a slower GPU may drop frames there. Use 2x or 3x then.
+- Android: no internal resolution above 1x. 2x froze a Samsung Galaxy A56 (a GPU job of the VDP1 upscaling on its
+  Xclipse 540 never finished, and Android restarted); the option lists only 1x on Android and an older 2x-4x setting
+  is used as 1x. Why it hangs, and whether a fix or a per-GPU limit is right, is being investigated.
 - Run-ahead renders every hidden frame at the internal resolution too, so it multiplies the GPU cost.
 - Run-ahead's "Use Second Instance" is not available while this renderer is in use (a second copy of the core cannot
   get the Vulkan context): RetroArch shows "Failed to create second instance. Run-Ahead will now use only one
@@ -379,9 +388,46 @@ Vulkan 1.2 baseline). Release builds include it, but it has not been tried on a 
 Developer notes: [src/gpu/shaders/vdp2/README.md](src/gpu/shaders/vdp2/README.md) (the GPU passes) and
 [tools/README.md](tools/README.md) (`brimir_vkhost`, the compare and fault-injection tool).
 
+## Android
+
+Brimir runs on 64-bit Android (arm64, Android 8.0 and newer) as a core for RetroArch. It is a core, not an app: you
+need RetroArch, a Saturn BIOS and your own games.
+
+**Where to get it.** The release page has `brimir-<tag>-android-arm64.zip` with `brimir_libretro_android.so`,
+`brimir_libretro.info` and `ANDROID-INSTALL.txt` (and a symbols zip for crash reports, not for installing).
+
+**Install, in short** (the full steps, with both RetroArch builds' folders, are in
+[tools/android/ANDROID-INSTALL.txt](tools/android/ANDROID-INSTALL.txt) and the longer
+[tools/android/TEST-GUIDE.md](tools/android/TEST-GUIDE.md)):
+
+1. Install RetroArch 1.22.2 or newer (64-bit): the Play Store build or the libretro site's APK. They keep their files
+   in different folders: `/storage/emulated/0/RetroArch` for the APK, `/storage/emulated/0/Android/media/com.retroarch/RetroArch`
+   for the Play Store build.
+2. Main Menu > Load Core > Install or Restore a Core, and pick `brimir_libretro_android.so` from the folder RetroArch
+   shows.
+3. Put a Saturn BIOS in that RetroArch's `system` folder and your games in a folder RetroArch can browse (for example
+   a `roms` folder inside the RetroArch folder). Check the file sizes after copying big games to the phone:
+   incomplete copies happened over USB and Phone Link.
+4. **The `.info` file is needed.** RetroArch hides the games, or says no core is available for `.chd`, without it. Copy
+   `brimir_libretro.info` to a folder and set Settings > Directory > Core Info to it (restart RetroArch). Trade-off:
+   that folder replaces RetroArch's own info files for every core. If the games still do not show, turn off Settings >
+   User Interface > File Browser > Filter Unknown Extensions. Getting Brimir's `.info` into libretro's own core info
+   files is planned, so that this step goes away.
+5. For the Vulkan renderer set the video driver to `vulkan`, restart RetroArch, set Renderer to Vulkan, then close the
+   content and load the game again (the renderer applies on load).
+
+**Tested on** a Samsung Galaxy A56 (Exynos 1580, Xclipse 540 GPU, Android 17): the BIOS menu and games run. The
+Vulkan renderer at 1x performs very well in the games tried (no frame times measured yet); the **software renderer
+is too slow on this phone**, so use Vulkan on phones with a Vulkan 1.2 GPU. Also tested on the x86_64 Android
+emulator (Android 14 and 15). **Not tested: Mali and Adreno phones** (reports are welcome, with the log's `Device
+report:` line).
+
+**Limits.** No internal resolution above 1x on Android yet (see [Vulkan renderer](#vulkan-renderer)). Close Content or
+Quit before leaving RetroArch: swiping it away saves only what RetroArch's periodic autosave already wrote (an in-game
+save is on disk within about 10-15 s of play). The SH-2 JIT is not available on Android.
 ## Build Requirements
 
-- Release targets: Windows x64, Linux x64/ARM64, and macOS ARM64
+- Release targets: Windows x64, Linux x64/ARM64, macOS ARM64 and Android arm64 (built with the Android NDK; see `tools/android/README.md`)
 - C++20 compiler: release CI uses MSVC 2022+, GCC 14, or Apple Clang on macOS 15 (macOS builds target macOS 14 and later)
 - CMake 3.28+
 
@@ -412,7 +458,7 @@ On Windows, run the commands from a *Developer PowerShell for VS 2022* (or any s
 
 ### Vulkan renderer
 
-`-DBRIMIR_VULKAN=ON` (the default on 64-bit Windows x64, Linux x64/arm64 and macOS arm64) builds the Vulkan renderer, its core options and the `brimir_vkhost` tool ([tools/README.md](tools/README.md)). `-DBRIMIR_VULKAN=OFF` builds the core as on `master` (no option, no GPU code). The core never links the Vulkan loader (volk loads it at runtime) and a normal build needs neither the Vulkan SDK nor a shader compiler: the SPIR-V and the reflected buffer layouts (`*.layout.h`) are committed in `src/gpu/shaders/generated/`. After editing a shader in `src/gpu/shaders/`, regenerate them with DXC, `spirv-val` and `spirv-cross` on the path (Vulkan SDK):
+`-DBRIMIR_VULKAN=ON` (the default on 64-bit Windows x64, Linux x64/arm64, macOS arm64 and Android arm64) builds the Vulkan renderer, its core options and the `brimir_vkhost` tool ([tools/README.md](tools/README.md)). `-DBRIMIR_VULKAN=OFF` builds the core as on `master` (no option, no GPU code). The core never links the Vulkan loader (volk loads it at runtime) and a normal build needs neither the Vulkan SDK nor a shader compiler: the SPIR-V and the reflected buffer layouts (`*.layout.h`) are committed in `src/gpu/shaders/generated/`. After editing a shader in `src/gpu/shaders/`, regenerate them with DXC, `spirv-val` and `spirv-cross` on the path (Vulkan SDK):
 
 ```bash
 cmake -P tools/shaders/build_shaders.cmake
@@ -475,8 +521,8 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | System | SH-2 JIT (Experimental) | On/Off (default Off; for testing) |
 | System | SH-2 JIT Compile Thread (Experimental) | Auto/Off (default Auto; only used while the JIT is on, on x86-64 with at least 4 CPU threads) |
 | System | Performance Profiling | On/Off |
-| Video | Renderer (restart required) | Software, Vulkan (64-bit desktop builds; see [Vulkan renderer](#vulkan-renderer)) |
-| Video | Internal Resolution (Vulkan) | 1x (Native), 2x, 3x, 4x |
+| Video | Renderer (restart required) | Software, Vulkan (64-bit desktop and Android builds; see [Vulkan renderer](#vulkan-renderer)) |
+| Video | Internal Resolution (Vulkan) | 1x (Native), 2x, 3x, 4x (Android: 1x only) |
 | Video | VDP1 Upscaling (Vulkan) | Enabled/Disabled |
 | Video | Deinterlacing | On/Off |
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
@@ -513,7 +559,7 @@ brimir/
   resources/info/  Libretro core info file
   vendor/          Vendored dependencies
   tests/           Catch2 unit and regression tests
-  tools/           Development utilities (brimir_bench headless frame benchmark)
+  tools/           Development utilities (brimir_bench headless frame benchmark; tools/android for the Android build)
   cmake/           CMake helper modules
 ```
 

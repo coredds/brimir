@@ -1,24 +1,26 @@
 # Testing Brimir on the Samsung Galaxy A56
 
-A step-by-step guide for the first test of the Android core on real hardware. You do not need to know Android
-tools. Allow about one hour. At the end you fill in the report in [step 22](#22-the-report).
+A step-by-step guide for testing the Android core on a real phone. You do not need to know Android tools. Allow
+about one hour. At the end you fill in the report in [step 22](#22-the-report).
 
-The result of this test decides whether the first Android release goes out. So write down everything odd, also
-small things.
+The first test was done on the developer's Samsung Galaxy A56 on 16 November 2026. This guide now holds what that
+test verified and corrected. It is also the guide for the next phones: Mali and Adreno phones have not been tried, so
+write down everything odd, also small things.
 
 ## How to read this guide
 
-Each step says what you do and what you should **see**. Two tags mark how sure we are:
+Each step says what you do and what you should **see**. Three tags mark how sure we are:
 
+- **[A56]**: this was done on the Galaxy A56 (Exynos 1580, Xclipse 540 GPU, Android 17, RetroArch 1.22.2) and
+  worked as written, or the text was corrected to what the phone showed.
 - **[emulator]**: this was run in the Android emulator on a PC (an x86_64 virtual phone, Android 14 and 15) and
-  worked as written. The A56 is a different machine, so please confirm it.
+  worked as written. Your phone is a different machine, so please confirm it.
 - **[not tested]**: nobody has run this step. It is normal RetroArch or Android behaviour, but menu words can differ
   a little. If something looks different, write down what you see.
 
-What the emulator did **not** prove: the arm64 build itself running (the emulator runs an x86_64 build of the same
-source), real phone GPU drivers, Android 8 to 13 (the build supports Android 8.0 / API 26 and newer, but the emulator
-could not run API 26; the oldest it ran was Android 14), and game play through RetroArch's menu (the emulator runs
-checked the Saturn BIOS menu in RetroArch and a game only in a test tool).
+What is still **not** proved: Mali and Adreno GPUs (the A56 has an Xclipse GPU), Android 8 to 16 on a phone (the
+build supports Android 8.0 / API 26 and newer, but the emulator could not run API 26; the oldest it ran was Android
+14; the A56 runs Android 17), and phones with 16 KB memory pages (see step 4).
 
 There are two routes. Most steps are the same.
 
@@ -70,68 +72,81 @@ RetroArch matches the core to the info file by this name.
 
 ### 3. Install the right RetroArch
 
-Install the **64-bit ARM ("AArch64") RetroArch 1.22.2** from the libretro site:
-https://buildbot.libretro.com/stable/1.22.2/android/RetroArch_aarch64.apk
+Install **RetroArch 1.22.2 or newer, 64-bit**. Two builds ran Brimir on the A56 **[A56]**:
 
-The Play Store RetroArch also works in principle, but it was not tested with Brimir. Prefer the APK.
+- **The Play Store RetroArch** (1.22.2, 2026-10-30).
+- **The libretro site's universal APK**, `RetroArch.apk` (package `com.retroarch`, 1.22.2):
+  https://buildbot.libretro.com/stable/1.22.2/android/RetroArch.apk
+
+The two keep their files in **different folders** (step 5 and 9 use them), and both need the `.info` file (step 8).
+Pick one. The "AArch64" APK (`RetroArch_aarch64.apk`) was not run on the phone, only checked in the emulator and by
+its manifest, so use one of the two above.
 
 - Open the downloaded APK on the phone. Android asks you to allow installs from this source (browser or My Files):
-  allow it.
+  allow it. The Play Store needs nothing.
 - **Samsung tip [not tested]**: if the install is blocked, Samsung's **Auto Blocker** (Settings > Security and
   privacy > Auto Blocker) may be on. Turn it off for the install, then on again.
-- PC route: `adb install RetroArch_aarch64.apk`. **[emulator]** for `adb install` with the universal APK
-  (`RetroArch.apk`); the aarch64 APK was checked only by reading its manifest, it was not installed in the emulator.
+- PC route: `adb install RetroArch.apk`. **[emulator]** for `adb install` with the universal APK. If the phone also
+  has a Work profile (the A56 has one), use `adb install --user 0 ...` so that it goes to the main user
+  **[not tested]**.
 
-**How to tell which RetroArch you have.** There are two packages:
+**How to tell which RetroArch you have.** Settings > Apps > RetroArch. Both builds are named **RetroArch** with the
+package `com.retroarch`, so **only one of them can be installed**: to change, uninstall the first. Uninstalling also
+removes that RetroArch's own files; on the A56 the saves of the Play Store build were deleted with it. So copy your
+`saves` folder away first. The "AArch64" APK has its own package, `com.retroarch.aarch64`, and its own folders. Write
+which build you used in the report.
 
-| Where from | App name on the phone | Package name |
-|---|---|---|
-| `RetroArch_aarch64.apk` | **RetroArch (AArch64)** | `com.retroarch.aarch64` |
-| `RetroArch.apk` (universal) and the Play Store | **RetroArch** | `com.retroarch` |
+| Build | RetroArch folder on the phone **[A56]** |
+|---|---|
+| libretro site APK | `/storage/emulated/0/RetroArch/` with `system`, `saves`, `logs`, ... |
+| Play Store | `/storage/emulated/0/Android/media/com.retroarch/RetroArch/` with `downloads`, `system`, `logs`, ... |
 
-(App names and package names come from the APK files themselves; the Play Store app was not checked.) You find the
-name under Settings > Apps. Use **one** of them only. Both use the same `RetroArch` folder in the phone's storage, so
-two installs get confusing. Write which one you used in the report.
+The Play Store build asks for no storage permission and works in its own folder. The APK is built for an older Android
+(`targetSdk` 28): on Android 17 it does not offer "Allow management of all files", but it still reads and writes
+`/storage/emulated/0/RetroArch` **[A56]**. These are Android storage limits, not faults of Brimir.
 
 ### 4. Start RetroArch
 
-Open it. If it asks for permission to access files or photos/media, **allow** it. RetroArch needs this to find its
-folders (without it the folder names in its log are garbage) **[emulator]**.
+Open it. If it asks for permission to access files or photos/media, **allow** it; the Play Store build asks for none
+**[A56]** (see step 3 for the APK on Android 17). RetroArch needs its folder to be reachable (without it the folder
+names in its log are garbage) **[emulator]**.
 
 You should **see** RetroArch's menu: a dark-grey list (Main Menu) with a bar of icons at the bottom: back, home,
 list, gear (Settings) and a play button (Quick Menu). **[emulator]** (this is the "MaterialUI" menu of the phone
-build). After the first start a `RetroArch` folder exists in the phone's internal storage
-(`/storage/emulated/0/RetroArch`) **[emulator]**.
+build). After the first start the RetroArch folder of your build exists (the table in step 3) **[A56]**.
 
-**If RetroArch closes by itself right after it opens**, your A56 may use 16 KB memory pages (newer Android on newer
+**If RetroArch closes by itself right after it opens**, your phone may use 16 KB memory pages (newer Android on newer
 phones). What was tested **[emulator]**: on an Android 15 image with 16 KB pages, the **universal** RetroArch 1.22.2
 (`RetroArch.apk`, package `com.retroarch`) crashes at start, before Brimir is involved, and the **universal nightly**
-build (`RetroArch.apk` from the nightly page, package `com.retroarch`) runs. The aarch64 1.22.2 APK was not run on a
-16 KB system; it probably behaves the same. **[not tested]** Fix: install the nightly `RetroArch.apk` from
-https://buildbot.libretro.com/nightly/android/ and carry on. Whether an aarch64 file sits on that page too was not
-checked. **Do not keep both packages**: uninstall "RetroArch (AArch64)" before you install the nightly `RetroArch`,
-and do not mix settings or cores between them. The core itself is built for 16 KB pages and ran on the 16 KB emulator.
+build (`RetroArch.apk` from the nightly page, package `com.retroarch`) runs. **[not tested]** on a phone. Fix: install
+the nightly `RetroArch.apk` from https://buildbot.libretro.com/nightly/android/ and carry on (uninstall the other
+RetroArch first, and back up its saves). The core itself is built for 16 KB pages and ran on the 16 KB emulator.
 
-To check the page size with a PC: `adb shell getconf PAGE_SIZE` prints `4096` or `16384` **[emulator]**. Without a
-PC the page size is not shown in Settings that we know of; 4 KB is likely on the A56 (Android 15 Samsung phones)
-**[not tested]**. If RetroArch starts, you can ignore all this. Write the number in the report if you have it.
+To check the page size with a PC: `adb shell getconf PAGE_SIZE` prints `4096` or `16384`. The A56 prints `4096`
+**[A56]**, and RetroArch 1.22.2 starts there. Without a PC the page size is not shown in Settings that we know of. If
+RetroArch starts, you can ignore all this. Write the number in the report if you have it.
 
 ## Part C: BIOS and game
 
 ### 5. Put the BIOS and the game on the phone
 
-RetroArch looks for the BIOS in its **System** folder. On the emulator it was `/storage/emulated/0/RetroArch/system`
-**[emulator]**. Confirm it on your phone in the menu:
+RetroArch looks for the BIOS in its **System** folder: `system` inside the RetroArch folder of your build (table in
+step 3) **[A56]**: `/storage/emulated/0/RetroArch/system` for the APK,
+`/storage/emulated/0/Android/media/com.retroarch/RetroArch/system` for the Play Store build. Confirm it on your phone
+in the menu:
 
 1. In RetroArch: gear icon (Settings) > **Directory** > **System/BIOS**. You should **see** the folder path. Note it
    and use that folder, whatever it is.
 2. Copy the BIOS file into that folder. The names Brimir knows: `mpr-17933.bin` (US/EU), `Sega Saturn BIOS v1.01
    (JAP).bin`, `Sega Saturn BIOS (EUR).bin` (and a few more, listed in `brimir_libretro.info`). One BIOS is enough.
-   With one Japan and one US/EU BIOS, Brimir picks the one that fits the disc.
-3. Copy the game(s) into a folder RetroArch can browse. For example create `RetroArch/roms` (or use Download). For
-   a `.cue` file keep its `.bin` files next to it.
+   With one Japan and one US/EU BIOS, Brimir picks the one that fits the disc **[A56]** (a Japanese disc got the
+   Japanese BIOS).
+3. Copy the game(s) into a folder RetroArch can browse. For example create a `roms` folder **inside the RetroArch
+   folder of your build** (the Play Store build sees only its own folder, or what its file picker offers). For a
+   `.cue` file keep its `.bin` files next to it.
 
-- **Phone only**: use **My Files** > Internal storage > `RetroArch` > `system`. Move or copy the files there.
+- **Phone only**: use **My Files** and the RetroArch folder of your build. Move or copy the files there. Whether
+  My Files can open the Play Store build's `Android/media` folder was not checked **[not tested]**.
 - **PC route**: connect the phone with the USB cable. Pull down the notification shade, tap the USB notification and
   choose **File transfer**; the phone appears in the PC's file explorer. Or with adb:
   ```
@@ -140,25 +155,42 @@ RetroArch looks for the BIOS in its **System** folder. On the emulator it was `/
   ```
   (`adb push` into `/storage/emulated/0/Download` **[emulator]**.)
 
-The core file must be in the phone's **Download** folder, or in a folder inside it, before the next part.
-Phone only: it is already there, in the folder from step 2 (for example `Download/brimir-android-arm64`). PC route: the
-`adb push` above, or the file transfer, puts it in Download itself.
+**Check the file sizes after you copy big files** **[A56]**. On the A56, `adb push` of large files stalled with
+"device offline", and games copied over Windows' Phone Link were **incomplete on the phone** (8 MB and 23 MB
+although the PC showed the full size). Compare the size on the phone (My Files > long-press the file > Details)
+with the size on the PC, or the checksum. The BIOS and the core are small and copied fine. An incomplete game file
+gives a game that does not start or breaks later. If a copy is wrong, copy it again (another cable or route, USB
+"File transfer" mode) and check again.
+
+The core file must be in a folder you can open in the next part, the one RetroArch shows in "Install or Restore a
+Core". With the **Play Store build** that is its own `downloads` folder: put the core in
+`/storage/emulated/0/Android/media/com.retroarch/RetroArch/downloads` **[A56]**. With the **APK** it is the Download
+folder (step 6). Phone only (APK): the core is already there, in the folder from step 2 (for example
+`Download/brimir-android-arm64`). PC route (APK): the `adb push` above, or the file transfer, puts it in Download
+itself.
 
 ## Part D: install the core
 
-### 6. Install the core in RetroArch **[emulator]**
+### 6. Install the core in RetroArch **[A56]** **[emulator]**
+
+This is the route that worked on the A56 (Load Core > Install or Restore a Core, from the folder RetroArch shows)
+and on the emulator.
 
 1. Main Menu > **Load Core** > **Install or Restore a Core**. You should **see** a file list with the title
-   `Install or Restore a Core /storage/emulated/0/RetroArch/downloads` and only "Parent Directory" and "No Items".
-2. Tap **Parent Directory** twice. The title now shows `/storage/emulated/0/`.
-3. Open **Download**. If you pushed the file (PC route) or moved it there, you should **see**
+   `Install or Restore a Core` and the folder RetroArch opens: `/storage/emulated/0/RetroArch/downloads` with the
+   APK (only "Parent Directory" and "No Items" on the emulator), the `downloads` folder of the Play Store build's
+   RetroArch folder with the Play Store build.
+2. **Play Store build**: if the core is in that `downloads` folder (step 5), you should **see** it: go to step 4.
+   **APK**: tap **Parent Directory** twice. The title now shows `/storage/emulated/0/`.
+3. **APK**: open **Download**. If you pushed the file (PC route) or moved it there, you should **see**
    `brimir_libretro_android.so` in the list. If you extracted the zip on the phone (step 2), open the extracted folder
    first, and the folder inside it (probably `brimir-android-arm64` twice: the outer zip's folder, then the inner
    zip's folder; **[not tested]**). In the emulator test the file lay directly in Download.
 4. Tap `brimir_libretro_android.so`. RetroArch copies it and returns to the Main Menu.
 
 On the emulator RetroArch copied the file unchanged to its own cores folder. It needs no root and no special
-permission. If you used the Play Store RetroArch, this step may look different **[not tested]**.
+permission. On the A56 the core file copied to the phone was checked against the checksum of the download (SHA-256
+`FE3D0F8F...` for the test build) **[A56]**.
 
 ### 7. Load the core
 
@@ -168,26 +200,36 @@ and its version) and the list has **Start Core** and **Load Content** **[emulato
 
 If the core is not in the list: the file name changed (see step 2), or it is the wrong file.
 
-### 8. Optional: the info file
+### 8. The info file (needed to load games) **[A56]**
 
-The `.info` file makes RetroArch show the name "Sega - Saturn (Brimir)" and a list of BIOS files with
-Present/Missing. That list is a handy BIOS check. It works without root, but it has a **trade-off**:
+RetroArch learns which core can open a game from the core's `.info` file. **Without it, on the A56, RetroArch hid the
+games or said that no core is available for `.chd` files** (Play Store build; the APK build needed it too). The
+`.info` file also makes RetroArch show the name "Sega - Saturn (Brimir)" and a list of BIOS files with
+Present/Missing, a handy BIOS check. It works without root, but it has a **trade-off**:
 
 RetroArch has its own info files for all its cores. If you point the **Core Info** folder to your own folder, RetroArch
 reads info files **only** from that folder. Its own ones (292 of them in the emulator test) are then not seen
 **[emulator]**. On a phone you only use to test Brimir this does not matter. If you use other cores in this RetroArch,
-skip this step. (To get the other info files back there: Online Updater > "Update Core Info Files" may download them
-into the chosen folder; **[not tested]**. Setting the folder back to the default also works.)
+copy their info files into the same folder, or set the folder back to the default when you use them. (Online Updater >
+"Update Core Info Files" may download them into the chosen folder; **[not tested]**.)
 
-1. Copy `brimir_libretro.info` to `/storage/emulated/0/RetroArch/info` (create the folder).
-2. Settings > **Directory** > **Core Info** > choose that folder. **[emulator]** (the setting was written to the
-   configuration file there; the menu wording is from RetroArch 1.22.)
-3. Quit RetroArch fully and open it again **[not tested]**.
-4. Main Menu > **Load Core**. You should **see** "Sega - Saturn (Brimir)", "License: GPLv3". Load it, then
+An official fix is planned: Brimir's `.info` is to be added to libretro's own set of core info files, so that RetroArch
+ships it and "Update Core Info Files" installs it. Until then, use these steps.
+
+1. Copy `brimir_libretro.info` into an `info` folder inside the RetroArch folder of your build (create it): for the
+   APK `/storage/emulated/0/RetroArch/info`, for the Play Store build
+   `/storage/emulated/0/Android/media/com.retroarch/RetroArch/info` **[A56]**.
+2. Settings > **Directory** > **Core Info** > choose that folder. **[A56]** (the setting is `libretro_info_path`; the
+   menu wording is from RetroArch 1.22.)
+3. Quit RetroArch fully and open it again **[A56]**.
+4. If the games are still not listed in Load Content: Settings > **User Interface** > **File Browser** > **Filter
+   Unknown Extensions**: OFF (the setting is `menu_navigation_browser_filter_supported_extensions_enable`). On the
+   A56 the filter was off **and** the `.info` was in place when the games showed and ran; we do not know if either
+   alone is enough. The menu words come from RetroArch 1.22.2's source; the phone's setting was changed in the
+   configuration file, so the menu path is **[not tested]**.
+5. Main Menu > **Load Core**. You should **see** "Sega - Saturn (Brimir)", "License: GPLv3". Load it, then
    Main Menu > **Information** > **Core Information**. It shows version, extensions, and the firmware (BIOS) list
    with "Present, Optional: ..." next to your BIOS and "Missing, Optional" next to the others **[emulator]**.
-
-The notes in that info file still say "Optional Vulkan renderer (64-bit desktop builds)". Ignore that for now.
 
 ## Part E: turn on the log
 
@@ -200,14 +242,20 @@ The Brimir core writes its messages into RetroArch's log. You need the log file 
    **[emulator]**. A "Core Logging Level" can stay at its default: the `Device report:` line is an info message and
    the default level shows it. (The emulator runs set the level to 0, "Debug". That is optional and makes the log
    longer.)
-2. Settings > **Directory** > **Logs**: **always** set this folder yourself to
-   `/storage/emulated/0/RetroArch/logs` (create it if the picker needs it), even if it already shows a folder. Then
-   you know the path whichever RetroArch you installed. (The AArch64 package keeps its own files under
-   `Android/data/com.retroarch.aarch64/...`; Samsung's My Files may not open that folder.) **[not tested]**
+2. Settings > **Directory** > **Logs**: look at the folder it shows and write it down. It should be the `logs` folder
+   inside the RetroArch folder of your build: `/storage/emulated/0/RetroArch/logs` for the APK **[A56]**,
+   `/storage/emulated/0/Android/media/com.retroarch/RetroArch/logs` for the Play Store build **[A56]**. If it shows
+   something else, set it to the `logs` folder of your build. (Do not point the Play Store build to
+   `/storage/emulated/0/RetroArch/logs`: it has no permission there **[not tested]**. The AArch64 package keeps its
+   own files under `Android/data/com.retroarch.aarch64/...`; Samsung's My Files may not open that folder.
+   **[not tested]**)
 3. Quit RetroArch fully (Main Menu > **Quit RetroArch**) and open it again, so the log starts clean **[not tested]**.
-   Then check: Main Menu > **Load Core** and back out once. Open My Files > Internal storage > `RetroArch` > `logs`.
-   You should **see** a log file (probably `retroarch.log`, or with a date in its name if you switch on "Timestamp
-   Log Files"). **[not tested]**
+   Then check: Main Menu > **Load Core** and back out once. Open the `logs` folder with My Files. You should **see** a
+   log file (probably `retroarch.log`, or with a date in its name if you switch on "Timestamp Log Files").
+   **[not tested]**
+
+**RetroArch starts a new log file every time it is launched** **[A56]**: the log of a session is gone after the next
+start (one crash log was lost like this). Copy the log before you open RetroArch again.
 
 The core's messages are in this file, **not** in Android's logcat **[emulator]** (the `Device report:` line was
 absent from logcat in every emulator run). So the file is the thing to collect.
@@ -227,8 +275,8 @@ Brimir's default is the Software renderer. It does not need a GPU. This is the b
 
 ### 10. Check the video driver and the renderer
 
-- Settings > **Drivers** > **Video**: write down the value. The emulator default was `gl` **[emulator]**.
-  Leave it.
+- Settings > **Drivers** > **Video**: write down the value. The default was `gl` on the A56 **[A56]** and on the emulator
+  **[emulator]**. Leave it for this run.
 - Load Brimir if it is not loaded yet (the title bar shows `Brimir`; if it does not, Main Menu > **Load Core** >
   `brimir_libretro_android.so`, or "Sega - Saturn (Brimir)"). Once a core is loaded, the Main Menu has no "Load Core"
   entry; use **Unload Core** first to change it **[emulator]**.
@@ -237,26 +285,44 @@ Brimir's default is the Software renderer. It does not need a GPU. This is the b
   **Renderer (restart required)** = **Software** **[not tested]** (the option exists in the core; its place in the
   menu was not clicked through).
 
-### 11. Run the BIOS menu **[emulator]**
+### 11. Run the BIOS menu **[A56]** **[emulator]**
 
 Main Menu > **Start Core**. You should **see** the Saturn BIOS screen. On a first start it is the language choice
-screen. A moving picture, not black, and no crash. The core ran well over 600 frames in 20 seconds on the emulator.
+screen. A moving picture, not black, and no crash. The BIOS menu ran on the A56 **[A56]**, and the core ran well over
+600 frames in 20 seconds on the emulator.
 
 If the picture stays black or RetroArch closes: write down what you did and go to step 21.
 
 ### 12. Run a game
 
 Main Menu > **Load Content** > browse to your game (`.chd` or `.cue`) > select it. If RetroArch asks which core,
-choose Brimir. You should **see** the Sega Saturn logo and then the game. **[not tested]** (in the emulator only the
-BIOS menu ran through RetroArch; games ran only in a test tool with identical frames to the Windows build).
+choose Brimir. You should **see** the Sega Saturn logo and then the game. **[A56]** Radiant Silvergun (Japan) ran
+(`Game loaded successfully` in the log, the Japanese BIOS chosen for the Japanese disc), and the other games tried
+were listed and ran once the info file was in place (step 8). If the game is not listed, or RetroArch says no core
+is available for `.chd`, go back to step 8. (In the emulator only the BIOS menu ran through RetroArch; games ran
+only in a test tool with identical frames to the Windows build.)
 
 Play for two or three minutes, with a scene that moves a lot. Is the picture right? Is the sound clean? Does it stutter?
 RetroArch's touch buttons appear on the screen; the A56 can also take a Bluetooth gamepad **[not tested]**.
 
+**Saves.** The Saturn's save memory is the file `<game>.srm` in the `saves` folder (a cartridge save is `.bcr`).
+Android can close RetroArch at any time, and RetroArch 1.22.2 does not write the save when you only leave the app
+(its source saves on a normal quit, not when the app goes to the background):
+- Use **Quick Menu > Close Content** (or Quit RetroArch) before you leave RetroArch.
+- Swiping RetroArch away, or Android closing it for memory, keeps only what RetroArch's periodic autosave already
+  wrote (Settings > **Saving** > **SaveRAM Autosave Interval**, 10 seconds by default on Android; the name is from
+  RetroArch 1.22.2's source). Brimir copies in-game saves to that autosave about once a second while the game runs.
+- After an in-game save keep playing 10 to 15 seconds before you switch to another app: the game is paused in the
+  background, so a save made just before may still be waiting.
+
+Earlier Brimir versions wrote in-game saves only when the content was closed, and a session without a game could write
+an empty `Brimir.srm`; both are fixed in this build. These save rules come from RetroArch's source and Brimir's tests;
+no app kill was tried on the phone **[not tested]**.
+
 ### 13. Read the device report
 
 Brimir logs one line each time a game (or the BIOS menu) loads. Quit RetroArch (so the log file is complete), open
-the log file (My Files > Internal storage > RetroArch > logs, the folder from step 9; open it with a text viewer, or
+the log file (My Files, the `logs` folder from step 9; open it with a text viewer, or
 share it to yourself) and search for
 `Device report`. Format:
 
@@ -264,8 +330,8 @@ share it to yourself) and search for
 [Brimir] Device report: renderer software; GPU "none"; Vulkan API none (renderer needs 1.2); host threads 4; fallback "none"
 ```
 
-That is the line from the emulator with the Software renderer and the `gl` driver **[emulator]**. On the A56 expect
-`renderer software`, and `host threads` = a number (the emulator had 4). The GPU part may still say `"none"` while
+That is the line from the emulator with the Software renderer and the `gl` driver **[emulator]**. The A56 with the
+`gl` driver gave `renderer software`, `GPU "none"` and `host threads 8` **[A56]**: the GPU part says `"none"` while
 RetroArch uses its `gl` driver. Copy the whole line into the report.
 
 ### 14. Read the frame rate **[not tested]**
@@ -278,7 +344,8 @@ A Saturn game runs at about 60 frames per second (59.94; 50 for European PAL gam
 2. Start the game again. A small number (frames per second) appears in a screen corner.
 
 Write down for each game: the number while playing a calm scene and while playing a heavy scene. "60" is full speed.
-A lower number than 59 means the phone cannot keep up.
+A lower number than 59 means the phone cannot keep up. On the A56 the software renderer performed poorly and the
+Vulkan renderer (step 15 to 17) very well **[A56]**; no frame rate numbers were taken yet.
 
 Optional, a second measure from the log: Quick Menu > Core Options > **Performance Profiling** = ON (it is in the
 System group **[not tested]**). Brimir then writes a table into the log every 300 frames
@@ -290,14 +357,15 @@ noisy.
 
 The Vulkan renderer draws on the GPU. It needs three things (all or it falls back to software, with a reason in the
 log): RetroArch's video driver set to `vulkan`, the core option Renderer = Vulkan, and a GPU with Vulkan 1.2.
-The A56 is believed to have an Exynos 1580 with an **Xclipse 540** GPU (AMD RDNA-based, not Mali or Adreno). That is
-what we expect; please **confirm it in the report**.
+The A56 has an Exynos 1580 (s5e8855) with an **Xclipse 540** GPU (AMD RDNA-based, not Mali or Adreno); its Vulkan
+instance version is 1.4 and its OpenGL ES runs on Vulkan 1.3 (ANGLE) **[A56]**. On another phone, write down what
+you have in the report.
 
-### 15. Set RetroArch's video driver to vulkan **[not tested]**
+### 15. Set RetroArch's video driver to vulkan **[A56]**
 
 Settings > **Drivers** > **Video** > choose **vulkan**. RetroArch tells you to restart. Quit RetroArch fully and
-open it again. In the emulator RetroArch's Vulkan driver ran when set in its configuration file; the menu switch
-itself was not clicked there.
+open it again. On the A56 the Vulkan renderer ran with this driver **[A56]**; in the emulator RetroArch's Vulkan
+driver ran when set in its configuration file. The menu switch itself was not clicked in either.
 
 If RetroArch crashes or shows nothing with `vulkan`, put the driver back to `gl` and write it into the report: that
 is a finding on its own (it is RetroArch's driver, before Brimir is involved).
@@ -305,10 +373,11 @@ is a finding on its own (it is RetroArch's driver, before Brimir is involved).
 ### 16. Set the core option
 
 With Brimir loaded (step 7), open **Quick Menu** > **Core Options** > **Renderer (restart required)** >
-**Vulkan**. **[not tested]** (the option and values `Software` / `Vulkan` are in the core).
+**Vulkan**. **[A56]** (the option and values `Software` / `Vulkan` are in the core).
 
-"Restart required" means the new value is read when a game is loaded. So close the content (Quick Menu > **Close
-Content**) and load the BIOS menu or the game again.
+"Restart required" means the new value is read when a game is loaded. **After you switch the renderer, close the
+content (Quick Menu > Close Content) and load the BIOS menu or the game again**: the renderer applies on load, and
+a game that is already running keeps the old one **[A56]**.
 
 ### 17. Run and read the report again
 
@@ -321,15 +390,22 @@ Open the log and find the new `Device report:` line. Expect one of two results:
   [Brimir] Device report: renderer vulkan; GPU "AMD Radeon RX 9060 XT"; Vulkan API 1.3.0 (renderer needs 1.2); host threads 4; fallback "none"
   ```
   On the A56 the GPU name should be an Xclipse name and the Vulkan API 1.2 or newer. If the name is something else,
-  say so in the report.
+  say so in the report. (On the A56 Vulkan gave very good performance **[A56]**, but nobody has read its `Device
+  report:` line from the log yet: **[not tested]**. Please copy it into your report.)
 - **It fell back to software**: the line says `renderer software` and the `fallback "..."` part says why (for example
   the Vulkan version is below 1.2, or the video driver is not vulkan). The picture must **still show** (software
   frames), never a black screen. A black screen with a fallback is a bug: report it. **[not tested]** on hardware
   (the fallback path was tested with a fake old Vulkan version on a PC, not on a phone).
 
-With Vulkan, one more core option works at once: **Internal Resolution (Vulkan)** (1x native, 2x, 3x, 4x) and
-**VDP1 Upscaling (Vulkan)**. Optional: try 2x and note whether the picture is sharper and whether the frame rate
-drops. **[not tested]**
+**Internal resolution above 1x is not available on Android yet.** On the Android build the option **Internal
+Resolution (Vulkan)** lists only "1x (Native)", and an older setting of 2x or more runs at 1x with one log line
+(`Internal resolution 2x is not available on Android (it can freeze some phone GPUs); using 1x`). Why: on the A56,
+2x froze the phone **[A56]**: RetroArch stopped answering, the phone's display composer aborted on its watchdog
+and Android restarted. The same freeze happened with Brimir's test tool alone, without RetroArch, at 2x from the
+start of a game (Sega Rally's attract demo): a GPU job of the VDP1 upscaling never finished on the Xclipse 540. It is
+not that the work is too heavy (heavier frames finished), and it is not caused by switching the option while playing.
+Whether the fault is in Brimir's shader or in the phone's GPU driver is still open; it is being investigated.
+**VDP1 Upscaling (Vulkan)** does nothing at 1x.
 
 Read the frame rate for each game again (step 14) and write it down.
 
@@ -376,17 +452,30 @@ Then pull the logs:
 adb pull /storage/emulated/0/RetroArch/logs ./a56-logs
 ```
 
-`adb pull` was not run in the emulator (`adb push` was). The `logs` path is the one you set in step 9. If the folder
-is empty, look for the file: `adb shell find /storage/emulated/0 -name "*.log"` (it may be under
+`adb pull` was not run in the emulator (`adb push` was); on the A56 the log was read over adb **[A56]**. The `logs`
+path is the one you set or saw in step 9: for the Play Store build it is
+`/storage/emulated/0/Android/media/com.retroarch/RetroArch/logs` **[not tested]** with adb. If the folder is empty,
+look for the file: `adb shell find /storage/emulated/0 -name "*.log"` (it may be under
 `/storage/emulated/0/Android/data/com.retroarch.aarch64/files` or `.../com.retroarch/files`; adb may refuse that
 folder on newer Android). **[not tested]** Do not rely on `adb logcat`: the core's lines are not in it
 **[emulator]**.
 
-Also useful with adb: `adb shell getconf PAGE_SIZE` **[emulator]**.
+Also useful with adb: `adb shell getconf PAGE_SIZE` **[A56]**.
+
+**Problems with adb on the A56 [A56]:**
+- **The connection dropped after a while** (`adb devices` showed the phone as `offline`, or not at all). Samsung's
+  **Auto Blocker** can cut USB debugging after about 30 minutes: Settings > Security and privacy > **Auto Blocker**
+  (the part that blocks commands over the USB cable, "Block commands by USB cable"): switch it off for the test, then
+  on again. Also switch on Settings > **Developer options** > **Stay awake** so the phone does not lock while it is
+  connected, and plug the cable in again if the phone asks "Allow USB debugging?". The Auto Blocker cause is the
+  developer's observation; the menu words were not checked on the phone **[not tested]**.
+- **Large files stall.** `adb push` of a big game stopped with "device offline" part way. Copy big files with the
+  phone's own file manager or in USB "File transfer" mode, and check the size afterwards (step 5). Small files (the
+  core, the BIOS, the info file) went over fine.
 
 ### 20. Turn off what you switched on
 
-Optionally set Performance Profiling back to OFF, run-ahead OFF, and USB debugging off.
+Optionally set Performance Profiling back to OFF, run-ahead OFF, and USB debugging off (and Auto Blocker back on).
 
 ### 21. If something goes wrong
 
@@ -394,6 +483,10 @@ Optionally set Performance Profiling back to OFF, run-ahead OFF, and USB debuggi
 |---|---|
 | RetroArch closes right at the start | See step 4 (nightly build for 16 KB pages). Write the RetroArch version. |
 | The core is not in the Load Core list | File name changed, or you did not tap it in step 6. |
+| Load Content does not list your games, or RetroArch says no core is available for `.chd` | The info file (step 8): Core Info folder set and RetroArch restarted; the file browser's "Filter Unknown Extensions" off. Also check that the game is in a folder RetroArch can open (step 5). |
+| A game does not start, or breaks part way, and was copied over USB or Phone Link | Compare the size with the PC (step 5): incomplete copies happened. Copy it again. |
+| The game says the save memory is not initialised or unformatted | Should not happen with this build (an empty save file is repaired when the game starts). If it does, copy the log and the `saves` folder's `.srm` file names and sizes. |
+| The phone froze or restarted with the Vulkan renderer | Write what you did and the time. Do not look for 2x: the Android build has no internal resolution above 1x. |
 | Black screen with the BIOS menu or a game | Note whether software or Vulkan. Copy the log. |
 | No log file in `RetroArch/logs` | See "If no log file appears" in step 9. |
 | No picture or no boot, and the log talks about a missing BIOS | The BIOS is not in the System folder from step 5. With the info file (step 8), Core Information shows "Missing". |
@@ -413,11 +506,12 @@ Device model (Settings > About phone):
 Android version / One UI version:
 SoC and GPU (expected: Exynos 1580 / Xclipse 540; write what you see):
 Memory page size (4096 or 16384, or "not checked"):
-RetroArch: package (RetroArch or RetroArch (AArch64)), version, which APK:
+RetroArch: Play Store or APK, package (com.retroarch or com.retroarch.aarch64), version:
 Test build: GitHub run / commit:
 Brimir version that ran (title bar in the Main Menu, the Load Core list, or the log line
   "Brimir x.y.z initializing..."):
-Info file used (step 8): yes / no
+Info file used (step 8): yes / no; Core Info folder:
+Filter Unknown Extensions (File Browser) turned off: yes / no
 
 Core installed through "Install or Restore a Core": worked / did not work (what happened):
 BIOS file(s) used:
@@ -437,7 +531,7 @@ VULKAN RENDERER (step 15-17)
   Picture right (not black): yes / no
   Game 1 name: frame rate calm / heavy:      picture and sound:
   Game 2 name: frame rate calm / heavy:      picture and sound:
-  Internal Resolution 2x tried: yes / no, result:
+  (Internal resolution is 1x only on Android: nothing to report.)
 
 RUN-AHEAD, second instance (step 18, optional)
   Software: ok / problem:
@@ -445,22 +539,18 @@ RUN-AHEAD, second instance (step 18, optional)
 
 Anything wrong or strange (with the step number):
 
-Log file(s) attached (from /storage/emulated/0/RetroArch/logs): yes / no
+Log file(s) attached (from the logs folder of step 9): yes / no
   If no log file was produced: what you did instead (screenshots, exact text):
 ```
 
-## Before the first Android release
+## Before the first Android release (and for later hardware results)
 
-The test build ships `ANDROID-INSTALL.txt` with this block, which says only what is true before the report:
+`ANDROID-INSTALL.txt` ships in the download with a "TESTED ON" block. The A56 report is in: the block now says what
+the test showed (Galaxy A56, Exynos 1580 / Xclipse 540, Android 17: BIOS menu and games run; Vulkan at 1x very good,
+software too slow; the x86_64 emulator; Mali and Adreno **not** tested).
 
-```
-TESTED ON
-  - x86_64 Android emulator (Android 14 and 15)
-  - Samsung Galaxy A56: in testing, no result yet
-NOT tested: Mali and Adreno phones.
-```
-
-**Release rule.** Before the release tag, the controller edits that block to the real A56 result, for example
-`Galaxy A56 (<GPU>, Android <N>): works, Vulkan ran` or `...: works, Vulkan fell back to software (<reason>)`, using
-the GPU name and Android version from this report. Nothing is claimed that the report does not show. The release job
-refuses a tag build while the text still says "in testing". A dry run (no tag) is allowed to say it.
+**The rule stays for future hardware results.** The block claims only what a report shows. A phone that is still
+waiting for its result is listed with the words "in testing" and no result; the release job
+(`tools/android/check_release_text.sh`) refuses a tag build while the install text says that, and a dry run (no tag)
+is allowed to say it. When a new report arrives, the controller replaces the line with the real result (device, GPU,
+Android version, what ran) before the release tag.
