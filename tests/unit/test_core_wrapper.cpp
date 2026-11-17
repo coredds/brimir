@@ -2942,6 +2942,29 @@ TEST_CASE("backup RAM: in-game saves reach the pointer the frontend kept, during
     s.core.UnloadGame();
 }
 
+TEST_CASE("backup RAM: the frontend's read at close gets the current image, not one up to a refresh interval old",
+          "[core][sram][regression]") {
+    if (!std::filesystem::exists(UsBiosFixture())) {
+        SKIP("US BIOS fixture missing");
+    }
+    // RetroArch asks for the pointer again at Close Content (CMD_EVENT_SAVE_FILES) and writes what it points to; the
+    // periodic refresh in RunFrame resets its counter, so the last refresh can be almost a full interval old.
+    CartSession s("brimir_sram_close_read", CartridgeChoice::None);
+    REQUIRE(s.Load());
+    const auto* kept = static_cast<const uint8_t*>(s.core.GetSRAMData());
+    REQUIRE(kept != nullptr);
+    s.core.RunFrame();
+    s.core.GetSaturn()->mem.GetInternalBackupRAM().WriteByte(0x1000 * 2, 0x5A); // the game saves
+    for (uint32_t i = 0; i < 5; ++i) {
+        s.core.RunFrame();
+    }
+    REQUIRE(5 < CoreWrapper::kSRAMSyncInterval);
+    const auto* atClose = static_cast<const uint8_t*>(s.core.GetSRAMData());
+    CHECK(atClose == kept);
+    CHECK(atClose[0x1000] == 0x5A);
+    s.core.UnloadGame();
+}
+
 TEST_CASE("backup RAM: a session without content after a game never writes the game's .srm", "[core][sram][regression]") {
     if (!std::filesystem::exists(UsBiosFixture())) {
         SKIP("US BIOS fixture missing");

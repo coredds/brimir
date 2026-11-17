@@ -1184,17 +1184,15 @@ void* CoreWrapper::GetSRAMData() {
         return m_sramData.data();
     }
 
-    // Refresh SRAM from Ymir periodically so RetroArch can save the latest
-    // state. Do NOT refresh before the first RunFrame: m_sramData is still
-    // the frontend's .srm buffer at that point, and RefreshSRAMFromEmulator()
-    // would overwrite it with the empty/formatted backup RAM contents.
+    // Refresh SRAM from Ymir on every call so RetroArch saves the current image: its close-time save asks again and
+    // writes what this returns, and RunFrame's periodic refresh (which resets the counter) can be up to a full
+    // interval old by then. The refresh is in place, so the pointer stays valid. Do NOT refresh before the first
+    // RunFrame: m_sramData is still the frontend's .srm buffer at that point, and a refresh would overwrite it with
+    // the empty/formatted backup RAM contents.
     if (m_gameLoaded && m_sramInitialized && !m_sramFirstLoad) {
-
-        if (m_sramCacheDirty || m_framesSinceLastSRAMSync >= kSRAMSyncInterval) {
-            ReadSRAMFromYmir();
-            m_sramCacheDirty = false;
-            m_framesSinceLastSRAMSync = 0;
-        }
+        ReadSRAMFromYmir();
+        m_sramCacheDirty = false;
+        m_framesSinceLastSRAMSync = 0;
     }
 
     return m_sramData.data();
