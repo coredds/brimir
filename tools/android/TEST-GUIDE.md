@@ -148,7 +148,8 @@ in the menu:
 - **Phone only**: use **My Files** and the RetroArch folder of your build. Move or copy the files there. Whether
   My Files can open the Play Store build's `Android/media` folder was not checked **[not tested]**.
 - **PC route**: connect the phone with the USB cable. Pull down the notification shade, tap the USB notification and
-  choose **File transfer**; the phone appears in the PC's file explorer. Or with adb:
+  choose **File transfer**; the phone appears in the PC's file explorer **[not tested]** (the A56 files went over
+  Windows' Phone Link). Or with adb:
   ```
   adb push mpr-17933.bin /storage/emulated/0/RetroArch/system/
   adb push brimir_libretro_android.so /storage/emulated/0/Download/
@@ -157,10 +158,11 @@ in the menu:
 
 **Check the file sizes after you copy big files** **[A56]**. On the A56, `adb push` of large files stalled with
 "device offline", and games copied over Windows' Phone Link were **incomplete on the phone** (8 MB and 23 MB
-although the PC showed the full size). Compare the size on the phone (My Files > long-press the file > Details)
-with the size on the PC, or the checksum. The BIOS and the core are small and copied fine. An incomplete game file
-gives a game that does not start or breaks later. If a copy is wrong, copy it again (another cable or route, USB
-"File transfer" mode) and check again.
+although the PC showed the full size). Compare the size on the phone with the size on the PC, or the checksum
+(My Files > long-press the file > Details shows the size **[not tested]**). The core and the BIOS were checked after
+copying and were complete; the games that were complete ran. An incomplete game file can give a game that does not
+start or breaks later. If a copy is wrong, copy it again (another cable or route, for example USB "File transfer"
+mode **[not tested]**) and check again.
 
 The core file must be in a folder you can open in the next part, the one RetroArch shows in "Install or Restore a
 Core". With the **Play Store build** that is its own `downloads` folder: put the core in
@@ -202,8 +204,9 @@ If the core is not in the list: the file name changed (see step 2), or it is the
 
 ### 8. The info file (needed to load games) **[A56]**
 
-RetroArch learns which core can open a game from the core's `.info` file. **Without it, on the A56, RetroArch hid the
-games or said that no core is available for `.chd` files** (Play Store build; the APK build needed it too). The
+RetroArch learns which core can open a game from the core's `.info` file. **Without the `.info` file and the file
+browser change below, on the A56, RetroArch hid the games or said that no core is available for `.chd` files**
+(Play Store build; the APK build needed both too). **Do both steps (the Core Info folder and the filter).** The
 `.info` file also makes RetroArch show the name "Sega - Saturn (Brimir)" and a list of BIOS files with
 Present/Missing, a handy BIOS check. It works without root, but it has a **trade-off**:
 
@@ -219,14 +222,16 @@ ships it and "Update Core Info Files" installs it. Until then, use these steps.
 1. Copy `brimir_libretro.info` into an `info` folder inside the RetroArch folder of your build (create it): for the
    APK `/storage/emulated/0/RetroArch/info`, for the Play Store build
    `/storage/emulated/0/Android/media/com.retroarch/RetroArch/info` **[A56]**.
-2. Settings > **Directory** > **Core Info** > choose that folder. **[A56]** (the setting is `libretro_info_path`; the
-   menu wording is from RetroArch 1.22.)
-3. Quit RetroArch fully and open it again **[A56]**.
-4. If the games are still not listed in Load Content: Settings > **User Interface** > **File Browser** > **Filter
-   Unknown Extensions**: OFF (the setting is `menu_navigation_browser_filter_supported_extensions_enable`). On the
-   A56 the filter was off **and** the `.info` was in place when the games showed and ran; we do not know if either
-   alone is enough. The menu words come from RetroArch 1.22.2's source; the phone's setting was changed in the
-   configuration file, so the menu path is **[not tested]**.
+2. Settings > **Directory** > **Core Info** > choose that folder. **[A56 via config file]**: on the A56 the setting
+   (`libretro_info_path`) was written in RetroArch's configuration file, not through the menu; the menu wording is
+   from RetroArch 1.22 and was not clicked on the phone **[not tested]**.
+3. Quit RetroArch fully and open it again **[not tested]**.
+4. **Also turn the file browser's filter OFF**: Settings > **User Interface** > **File Browser** > **Filter Unknown
+   Extensions** (the setting is `menu_navigation_browser_filter_supported_extensions_enable`). On the A56 both the
+   Core Info folder and the filter change were set together when the games showed and ran, and in the Play Store
+   build the filter had to be off; we do not know if either alone is enough. That filter was changed in the
+   configuration file; the label and menu path come from RetroArch 1.22.2's source and were not checked on a phone
+   **[A56 via config file]** **[not tested]** (menu).
 5. Main Menu > **Load Core**. You should **see** "Sega - Saturn (Brimir)", "License: GPLv3". Load it, then
    Main Menu > **Information** > **Core Information**. It shows version, extensions, and the firmware (BIOS) list
    with "Present, Optional: ..." next to your BIOS and "Missing, Optional" next to the others **[emulator]**.
@@ -275,8 +280,8 @@ Brimir's default is the Software renderer. It does not need a GPU. This is the b
 
 ### 10. Check the video driver and the renderer
 
-- Settings > **Drivers** > **Video**: write down the value. The default was `gl` on the A56 **[A56]** and on the emulator
-  **[emulator]**. Leave it for this run.
+- Settings > **Drivers** > **Video**: write down the value. The A56 runs with the `gl` video driver were done with `gl` **[A56]**, and `gl` was the default
+  on the emulator **[emulator]**. Leave it for this run.
 - Load Brimir if it is not loaded yet (the title bar shows `Brimir`; if it does not, Main Menu > **Load Core** >
   `brimir_libretro_android.so`, or "Sega - Saturn (Brimir)"). Once a core is loaded, the Main Menu has no "Load Core"
   entry; use **Unload Core** first to change it **[emulator]**.
@@ -345,7 +350,8 @@ A Saturn game runs at about 60 frames per second (59.94; 50 for European PAL gam
 
 Write down for each game: the number while playing a calm scene and while playing a heavy scene. "60" is full speed.
 A lower number than 59 means the phone cannot keep up. On the A56 the software renderer performed poorly and the
-Vulkan renderer (step 15 to 17) very well **[A56]**; no frame rate numbers were taken yet.
+Vulkan renderer (step 15 to 17) ran at full speed at 1x (the developer's observation) **[A56]**; no frame rate numbers
+were recorded.
 
 Optional, a second measure from the log: Quick Menu > Core Options > **Performance Profiling** = ON (it is in the
 System group **[not tested]**). Brimir then writes a table into the log every 300 frames
@@ -361,11 +367,12 @@ The A56 has an Exynos 1580 (s5e8855) with an **Xclipse 540** GPU (AMD RDNA-based
 instance version is 1.4 and its OpenGL ES runs on Vulkan 1.3 (ANGLE) **[A56]**. On another phone, write down what
 you have in the report.
 
-### 15. Set RetroArch's video driver to vulkan **[A56]**
+### 15. Set RetroArch's video driver to vulkan **[not tested]** (menu)
 
 Settings > **Drivers** > **Video** > choose **vulkan**. RetroArch tells you to restart. Quit RetroArch fully and
-open it again. On the A56 the Vulkan renderer ran with this driver **[A56]**; in the emulator RetroArch's Vulkan
-driver ran when set in its configuration file. The menu switch itself was not clicked in either.
+open it again. The Vulkan renderer ran at full speed at 1x on the A56 (the developer's observation) **[A56]**, but how its video driver was
+switched was not recorded, and in the emulator RetroArch's Vulkan driver ran when set in its configuration file: the
+menu switch itself was not clicked in either test.
 
 If RetroArch crashes or shows nothing with `vulkan`, put the driver back to `gl` and write it into the report: that
 is a finding on its own (it is RetroArch's driver, before Brimir is involved).
@@ -390,7 +397,7 @@ Open the log and find the new `Device report:` line. Expect one of two results:
   [Brimir] Device report: renderer vulkan; GPU "AMD Radeon RX 9060 XT"; Vulkan API 1.3.0 (renderer needs 1.2); host threads 4; fallback "none"
   ```
   On the A56 the GPU name should be an Xclipse name and the Vulkan API 1.2 or newer. If the name is something else,
-  say so in the report. (On the A56 Vulkan gave very good performance **[A56]**, but nobody has read its `Device
+  say so in the report. (On the A56 Vulkan ran at full speed at 1x, the developer's observation **[A56]**, but nobody has read its `Device
   report:` line from the log yet: **[not tested]**. Please copy it into your report.)
 - **It fell back to software**: the line says `renderer software` and the `fallback "..."` part says why (for example
   the Vulkan version is below 1.2, or the video driver is not vulkan). The picture must **still show** (software
@@ -470,8 +477,7 @@ Also useful with adb: `adb shell getconf PAGE_SIZE` **[A56]**.
   connected, and plug the cable in again if the phone asks "Allow USB debugging?". The Auto Blocker cause is the
   developer's observation; the menu words were not checked on the phone **[not tested]**.
 - **Large files stall.** `adb push` of a big game stopped with "device offline" part way. Copy big files with the
-  phone's own file manager or in USB "File transfer" mode, and check the size afterwards (step 5). Small files (the
-  core, the BIOS, the info file) went over fine.
+  phone's own file manager (or USB "File transfer" mode **[not tested]**), and check the size afterwards (step 5).
 
 ### 20. Turn off what you switched on
 
@@ -546,8 +552,10 @@ Log file(s) attached (from the logs folder of step 9): yes / no
 ## Before the first Android release (and for later hardware results)
 
 `ANDROID-INSTALL.txt` ships in the download with a "TESTED ON" block. The A56 report is in: the block now says what
-the test showed (Galaxy A56, Exynos 1580 / Xclipse 540, Android 17: BIOS menu and games run; Vulkan at 1x very good,
-software too slow; the x86_64 emulator; Mali and Adreno **not** tested).
+the test showed (Galaxy A56, Exynos 1580 / Xclipse 540, Android 17: BIOS menu and games run; Vulkan renderer full
+speed at 1x (the developer's observation), software renderer poor performance; the x86_64 emulator). It also names what was **not** tested:
+Mali and Adreno phones, phones with 16 KB memory pages, app kill or swipe-away (the saves advice comes from
+RetroArch's source and Brimir's tests), and that the A56's Vulkan `Device report:` line was not read.
 
 **The rule stays for future hardware results.** The block claims only what a report shows. A phone that is still
 waiting for its result is listed with the words "in testing" and no result; the release job

@@ -147,7 +147,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 
 The 2026-11 performance round (v0.8.0) made the software renderer and the SH-2 interpreter faster without changing any output. Frames, audio and save states are byte-identical to 0.7.2. On the development PC (Ryzen 7 5700G, Release + LTO, MSVC on Windows; GCC and Clang builds moved in the same direction when measured during the round but were not re-measured at the end), the median frame time over 9 test windows is 20-64 % shorter with threaded VDP and 29-61 % shorter without it. With threaded VDP, Virtua Fighter 2 dropped from 18.4 to 6.7 ms and Fighters Megamix from 17.6 to 6.9 ms. Single-instance run-ahead frames are 23-39 % shorter. Details per area are in `CHANGELOG.md`. The harness used to prove and measure each change is in `tools/perf/`.
 
-ARM devices have not been measured with this harness. Scaled from the PC profile (a Cortex-A77-class prime core at about 0.6x the PC's single-thread speed), the software renderer was estimated to keep every test window under the 16.7 ms frame budget on a Snapdragon 865-class device. That did not hold on the one phone tried: on a Samsung Galaxy A56 (Exynos 1580) the software renderer was too slow to play, while the Vulkan renderer at 1x performed very well (no frame times were taken; see [Android](#android)). The SH-2 interpreter (aarch64 has no native JIT) and the deinterlacer in interlaced games are the limits for the software renderer there.
+ARM devices have not been measured with this harness. Scaled from the PC profile (a Cortex-A77-class prime core at about 0.6x the PC's single-thread speed), the software renderer was estimated to keep every test window under the 16.7 ms frame budget on a Snapdragon 865-class device. That did not hold on the one phone tried: on a Samsung Galaxy A56 (Exynos 1580) the software renderer had poor performance, while the Vulkan renderer ran at full speed at 1x (the developer's observation; no frame times were taken; see [Android](#android)). The SH-2 interpreter (aarch64 has no native JIT) and the deinterlacer in interlaced games are the limits for the software renderer there.
 
 ## Known Limitations
 
@@ -354,7 +354,7 @@ A live change of the internal resolution needs about 20-40 MiB more for a moment
 
 ### Android (Vulkan)
 
-The Vulkan renderer is part of the Android core and, at 1x, performed very well on the one phone tried (see
+The Vulkan renderer is part of the Android core and ran at full speed at 1x on the one phone tried (the developer's observation; see
 [Android](#android)). Internal resolution above 1x is not available there yet.
 
 ### macOS
@@ -408,23 +408,27 @@ need RetroArch, a Saturn BIOS and your own games.
 3. Put a Saturn BIOS in that RetroArch's `system` folder and your games in a folder RetroArch can browse (for example
    a `roms` folder inside the RetroArch folder). Check the file sizes after copying big games to the phone:
    incomplete copies happened over USB and Phone Link.
-4. **The `.info` file is needed.** RetroArch hides the games, or says no core is available for `.chd`, without it. Copy
-   `brimir_libretro.info` to a folder and set Settings > Directory > Core Info to it (restart RetroArch). Trade-off:
-   that folder replaces RetroArch's own info files for every core. If the games still do not show, turn off Settings >
-   User Interface > File Browser > Filter Unknown Extensions. Getting Brimir's `.info` into libretro's own core info
-   files is planned, so that this step goes away.
+4. **The `.info` file and the file filter are needed.** On the A56 RetroArch hid the games, or said no core was
+   available for `.chd`, until both were set. Copy `brimir_libretro.info` to a folder and set Settings > Directory >
+   Core Info to it (restart RetroArch), **and** turn the file browser's filter off (Settings > User Interface > File
+   Browser > Filter Unknown Extensions; config key `menu_navigation_browser_filter_supported_extensions_enable`; the
+   menu label is from RetroArch's source and was not checked on a phone). Trade-off: the Core Info folder replaces
+   RetroArch's own info files for every core. Getting Brimir's `.info` into libretro's own core info files is
+   planned, so that this step goes away.
 5. For the Vulkan renderer set the video driver to `vulkan`, restart RetroArch, set Renderer to Vulkan, then close the
    content and load the game again (the renderer applies on load).
 
 **Tested on** a Samsung Galaxy A56 (Exynos 1580, Xclipse 540 GPU, Android 17): the BIOS menu and games run. The
-Vulkan renderer at 1x performs very well in the games tried (no frame times measured yet); the **software renderer
-is too slow on this phone**, so use Vulkan on phones with a Vulkan 1.2 GPU. Also tested on the x86_64 Android
-emulator (Android 14 and 15). **Not tested: Mali and Adreno phones** (reports are welcome, with the log's `Device
-report:` line).
+Vulkan renderer ran at full speed at 1x in the games tried (the developer's observation; no frame times recorded); the
+**software renderer had poor performance on this phone**, so use Vulkan on phones with a Vulkan 1.2 GPU. Also tested
+on the x86_64 Android emulator (Android 14 and 15). **Not tested: Mali and Adreno phones, phones with 16 KB memory
+pages, and app kill or swipe-away** (the saves advice below comes from RetroArch's source and Brimir's tests); the
+A56's Vulkan `Device report:` log line was not read. Reports are welcome, with that line from the log.
 
 **Limits.** No internal resolution above 1x on Android yet (see [Vulkan renderer](#vulkan-renderer)). Close Content or
 Quit before leaving RetroArch: swiping it away saves only what RetroArch's periodic autosave already wrote (an in-game
 save is on disk within about 10-15 s of play). The SH-2 JIT is not available on Android.
+
 ## Build Requirements
 
 - Release targets: Windows x64, Linux x64/ARM64, macOS ARM64 and Android arm64 (built with the Android NDK; see `tools/android/README.md`)

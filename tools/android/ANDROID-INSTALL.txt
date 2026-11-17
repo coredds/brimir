@@ -1,107 +1,87 @@
 BRIMIR FOR ANDROID
 Sega Saturn core for RetroArch
 
-In this download:
-  brimir_libretro_android.so  the core
-  brimir_libretro.info        needed (step 3)
-  ANDROID-INSTALL.txt         this text
-Brimir is a core, not an app. You need
-RetroArch, a Saturn BIOS and your games.
-None of them is included.
+Brimir is a core, not an app: you need
+RetroArch, a Saturn BIOS and your games
+(none included). Also in this download:
+brimir_libretro.info (needed, step 3).
 
 1. GET RETROARCH (64-bit, 1.22.2 or newer)
-Install ONE of these:
-  - libretro site APK (RetroArch.apk):
-    https://buildbot.libretro.com/stable/1.22.2/android/RetroArch.apk
-    Folder: /storage/emulated/0/RetroArch
-    (system, saves, logs, ...)
-  - Play Store RetroArch (1.22.2). Folder:
-    /storage/emulated/0/Android/media/
-    com.retroarch/RetroArch
-    (downloads, system, logs, ...)
-Use the system folder of the one you
-installed. If RetroArch closes right after
-you open it (phones with 16 KB memory
-pages; the A56 has 4 KB), see the guide.
+Install ONE: the libretro site APK
+https://buildbot.libretro.com/stable/1.22.2/android/RetroArch.apk
+or the Play Store RetroArch (folders: step 4).
+Closes at start (16 KB memory pages; the A56
+has 4 KB)? See the guide.
 
 2. INSTALL THE CORE
 Copy brimir_libretro_android.so to a folder
 RetroArch can show. Keep the name. Then:
-Main Menu > Load Core > Install or Restore
-a Core, open the folder RetroArch shows
-(APK: Parent Directory twice, then
-Download), tap the file. Then Load Core >
-brimir_libretro_android.so. "Start Core"
-runs the Saturn BIOS menu.
+Main Menu > Load Core > Install or Restore a
+Core, open the folder RetroArch shows (APK:
+Parent Directory twice, then Download), tap
+the file. Then Load Core > brimir_libretro_
+android.so. "Start Core" runs the BIOS menu.
 
-3. THE .INFO FILE (needed)
-RetroArch finds the games a core can open
-from its .info file. Without it the games
-are hidden or RetroArch says no core is
-available for .chd.
-Copy brimir_libretro.info to a folder (for
-example RetroArch/info), then Settings >
-Directory > Core Info > that folder, and
-restart RetroArch.
-Trade-off: that folder replaces RetroArch's
-own info files for every core.
-Games still not listed? Settings > User
-Interface > File Browser > Filter Unknown
-Extensions: OFF.
+3. THE .INFO FILE AND THE FILE FILTER
+Without both, RetroArch hid the games or
+said no core is available for .chd. Do both:
+  - Copy brimir_libretro.info to a folder,
+    set Settings > Directory > Core Info to
+    it, restart RetroArch.
+  - Turn the file browser filter OFF:
+    Settings > User Interface > File Browser
+    > Filter Unknown Extensions (label from
+    RetroArch's source, not checked on a
+    phone; config key menu_navigation_browser_
+    filter_supported_extensions_enable).
+Trade-off: the Core Info folder replaces
+RetroArch's own info files for every core.
 An official fix (Brimir's .info in
 libretro's core info files) is planned.
 
-4. BIOS AND GAMES
-BIOS (one is enough) into the system folder
-of your RetroArch (step 1):
-  mpr-17933.bin
-  Sega Saturn BIOS v1.01 (JAP).bin
-  Sega Saturn BIOS (EUR).bin
-With one Japan and one US/EU BIOS, Brimir
-picks the one that fits the disc.
-Games: .chd, .cue (with its .bin files),
-.ccd, .mds, .iso, .m3u in a folder RetroArch
-can browse, e.g. a "roms" folder inside the
-RetroArch folder. Load Content > the game.
-After copying big games to the phone, check
-the file sizes: incomplete copies happened
-over USB and Phone Link.
+4. FOLDERS, BIOS AND GAMES
+RetroArch's folder: APK
+/storage/emulated/0/RetroArch, Play Store
+/storage/emulated/0/Android/media/
+com.retroarch/RetroArch
+BIOS (one is enough) into its "system"
+folder: mpr-17933.bin, Sega Saturn BIOS
+v1.01 (JAP).bin or Sega Saturn BIOS
+(EUR).bin. Games: a folder RetroArch can
+browse, e.g. "roms" inside that folder.
+Then Load Content > the game.
 
 SAVES
-Use Close Content (or Quit) before you leave
+Close Content (or Quit) before you leave
 RetroArch. Swiping it away, or Android
 closing it, keeps only what RetroArch's
-periodic autosave already wrote. After an
-in-game save keep playing 10-15 seconds
-before you switch apps.
+autosave already wrote. After an in-game
+save keep playing 10-15 s before you
+switch apps.
 
 RENDERER
-Default: Software. It is too slow on the
-A56. Vulkan: Settings > Drivers > Video =
+Default: Software (poor performance on the
+A56). Vulkan: Settings > Drivers > Video =
 vulkan, restart RetroArch, core option
 Renderer = Vulkan, then CLOSE CONTENT AND
-LOAD THE GAME AGAIN (it applies on load).
-Needs a Vulkan 1.2 GPU, else Brimir uses
-Software and logs why ("Device report:" in
-RetroArch's log).
-Internal resolution above 1x is not
-available on Android yet (it froze a
-Galaxy A56's GPU; under investigation).
-With Vulkan and run-ahead "Use Second
-Instance", RetroArch's message "Failed to
-create second instance. Run-Ahead will now
-use only one instance." is expected.
-Details (test guide):
+LOAD THE GAME AGAIN (applies on load).
+Needs a Vulkan 1.2 GPU, else Software. No
+internal resolution above 1x on Android yet
+(it froze an A56). Guide:
 https://github.com/coredds/brimir/blob/master/tools/android/TEST-GUIDE.md
 
 TESTED ON
   - Samsung Galaxy A56 (Exynos 1580,
     Xclipse 540 GPU, Android 17): BIOS menu
-    and games run. Vulkan renderer at 1x:
-    very good performance in the games
-    tried. Software renderer: too slow on
-    this phone.
+    and games run. Vulkan renderer: full
+    speed at 1x (developer's observation) in
+    the games tried. Software renderer: poor
+    performance.
   - x86_64 Android emulator (Android 14, 15)
-NOT tested: Mali and Adreno phones.
-Reports are welcome:
+NOT tested: Mali and Adreno phones; phones
+with 16 KB memory pages; app kill or
+swipe-away (the saves advice comes from
+RetroArch's source and Brimir's tests). The
+A56's Vulkan "Device report" log line was
+not read. Reports are welcome:
 https://github.com/coredds/brimir
