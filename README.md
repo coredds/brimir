@@ -375,8 +375,8 @@ Vulkan 1.2 baseline). Release builds include it, but it has not been tried on a 
 - Burning Rangers at 4x: its slowest 1% of frames take 10-11 ms of VDP1 GPU time on the test GPU (a Radeon RX 9060
   XT), close to the 12 ms target, and up to 18 ms at worst; a slower GPU may drop frames there. Use 2x or 3x then.
 - Android: no internal resolution above 1x. 2x froze a Samsung Galaxy A56 (a GPU job of the VDP1 upscaling on its
-  Xclipse 540 never finished, and Android restarted); the option lists only 1x on Android and an older 2x-4x setting
-  is used as 1x. Why it hangs, and whether a fix or a per-GPU limit is right, is being investigated.
+  Xclipse 540 never finished, and Android restarted); the option lists only 1x on Android, RetroArch itself resets
+  an older 2x-4x setting to 1x, and the core's own cap only applies to other frontends and hand-edited options. Why it hangs, and whether a fix or a per-GPU limit is right, is being investigated.
 - Run-ahead renders every hidden frame at the internal resolution too, so it multiplies the GPU cost.
 - Run-ahead's "Use Second Instance" is not available while this renderer is in use (a second copy of the core cannot
   get the Vulkan context): RetroArch shows "Failed to create second instance. Run-Ahead will now use only one
@@ -407,7 +407,7 @@ need RetroArch, a Saturn BIOS and your own games.
    shows.
 3. Put a Saturn BIOS in that RetroArch's `system` folder and your games in a folder RetroArch can browse (for example
    a `roms` folder inside the RetroArch folder). Check the file sizes after copying big games to the phone:
-   incomplete copies happened over USB and Phone Link.
+   incomplete copies happened over Phone Link, and large adb transfers stalled.
 4. **The `.info` file and the file filter are needed.** On the A56 RetroArch hid the games, or said no core was
    available for `.chd`, until both were set. Copy `brimir_libretro.info` to a folder and set Settings > Directory >
    Core Info to it (restart RetroArch), **and** turn the file browser's filter off (Settings > User Interface > File
@@ -421,7 +421,7 @@ need RetroArch, a Saturn BIOS and your own games.
 **Tested on** a Samsung Galaxy A56 (Exynos 1580, Xclipse 540 GPU, Android 17): the BIOS menu and games run. The
 Vulkan renderer ran at full speed at 1x in the games tried (the developer's observation; no frame times recorded); the
 **software renderer had poor performance on this phone**, so use Vulkan on phones with a Vulkan 1.2 GPU. Also tested
-on the x86_64 Android emulator (Android 14 and 15). **Not tested: Mali and Adreno phones, phones with 16 KB memory
+on the x86_64 Android emulator (Android 14 and 15). **Not tested: Android 8-13, Mali and Adreno phones, phones with 16 KB memory
 pages, and app kill or swipe-away** (the saves advice below comes from RetroArch's source and Brimir's tests); the
 A56's Vulkan `Device report:` log line was not read. Reports are welcome, with that line from the log.
 

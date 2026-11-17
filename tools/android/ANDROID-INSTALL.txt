@@ -78,10 +78,10 @@ TESTED ON
     the games tried. Software renderer: poor
     performance.
   - x86_64 Android emulator (Android 14, 15)
-NOT tested: Mali and Adreno phones; phones
-with 16 KB memory pages; app kill or
-swipe-away (the saves advice comes from
-RetroArch's source and Brimir's tests). The
-A56's Vulkan "Device report" log line was
-not read. Reports are welcome:
+NOT tested: Android 8-13; Mali and Adreno
+phones; phones with 16 KB memory pages; app
+kill or swipe-away (the saves advice comes
+from RetroArch's source and Brimir's
+tests). The A56's Vulkan "Device report"
+log line was not read. Reports are welcome:
 https://github.com/coredds/brimir

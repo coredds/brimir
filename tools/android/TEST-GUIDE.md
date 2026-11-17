@@ -206,7 +206,8 @@ If the core is not in the list: the file name changed (see step 2), or it is the
 
 RetroArch learns which core can open a game from the core's `.info` file. **Without the `.info` file and the file
 browser change below, on the A56, RetroArch hid the games or said that no core is available for `.chd` files**
-(Play Store build; the APK build needed both too). **Do both steps (the Core Info folder and the filter).** The
+(Play Store build; the APK build had both set). **Do both steps (the Core Info folder and the filter); they were
+set together on the A56, and whether either alone is enough is unknown.** The
 `.info` file also makes RetroArch show the name "Sega - Saturn (Brimir)" and a list of BIOS files with
 Present/Missing, a handy BIOS check. It works without root, but it has a **trade-off**:
 
@@ -405,12 +406,15 @@ Open the log and find the new `Device report:` line. Expect one of two results:
   (the fallback path was tested with a fake old Vulkan version on a PC, not on a phone).
 
 **Internal resolution above 1x is not available on Android yet.** On the Android build the option **Internal
-Resolution (Vulkan)** lists only "1x (Native)", and an older setting of 2x or more runs at 1x with one log line
-(`Internal resolution 2x is not available on Android (it can freeze some phone GPUs); using 1x`). Why: on the A56,
+Resolution (Vulkan)** lists only "1x (Native)", and RetroArch itself resets an older setting of 2x or more to 1x (it
+is not in the option list on Android). The core's own cap, with one log line
+(`Internal resolution 2x is not available on Android (it can freeze some phone GPUs); using 1x`), only applies to
+frontends that still pass such a value and to hand-edited options. Why: on the A56,
 2x froze the phone **[A56]**: RetroArch stopped answering, the phone's display composer aborted on its watchdog
 and Android restarted. The same freeze happened with Brimir's test tool alone, without RetroArch, at 2x from the
 start of a game (Sega Rally's attract demo): a GPU job of the VDP1 upscaling never finished on the Xclipse 540. It is
-not that the work is too heavy (heavier frames finished), and it is not caused by switching the option while playing.
+not that the work is too heavy (heavier frames finished), and it also happens without switching the option while
+playing.
 Whether the fault is in Brimir's shader or in the phone's GPU driver is still open; it is being investigated.
 **VDP1 Upscaling (Vulkan)** does nothing at 1x.
 
