@@ -8,12 +8,18 @@ Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accur
 
 **Current Status**: Active development. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed and the relevant fixes are taken, with Brimir-specific fixes and optimizations on top.
 
-## What's New in v0.8.1
+## What's New in v0.9.0
 
-- **Run-ahead "Use Second Instance" with the Vulkan renderer** - this gave sound but a black picture. RetroArch now falls back to run-ahead on one instance, with the picture (it says "Failed to create second instance. Run-Ahead will now use only one instance." once per content load). The software renderer keeps the second instance. See [Save states](#save-states-run-ahead-rewind-and-netplay).
-- No other change: frames, audio and save states are identical to 0.8.0.
+- **Android (arm64)** - a core for RetroArch on 64-bit Android, tested on a Samsung Galaxy A56: the Vulkan renderer ran at full speed at 1x; internal resolution above 1x is not available on Android yet; Mali and Adreno phones are untested. See [Android](#android).
+- **Saves** - in-game saves now reach RetroArch's periodic autosave during play (before, an app kill or crash lost the session's saves), and blank Saturn save memory (`Brimir.srm`, all-zero save files) is no longer written or used.
+- **Threaded rendering** - VDP1 drawing no longer depends on thread timing for the interlace mode (brief sprite glitches around interlace mode switches on slow or busy machines). Unthreaded output is unchanged.
+- **Robustness** - odd file paths and failed disc swaps can no longer crash RetroArch; a `Device report:` line in the log tells which renderer ran and why. Details in `CHANGELOG.md`.
 
 ## Previous Highlights
+
+### v0.8.1
+
+- **Run-ahead "Use Second Instance" with the Vulkan renderer** - this gave sound but a black picture. RetroArch now falls back to run-ahead on one instance, with the picture (it says "Failed to create second instance. Run-Ahead will now use only one instance." once per content load). The software renderer keeps the second instance. See [Save states](#save-states-run-ahead-rewind-and-netplay).
 
 ### v0.8.0
 

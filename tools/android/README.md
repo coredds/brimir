@@ -170,7 +170,7 @@ RetroArch, Load Core > Install or Restore a Core (it opens `/storage/emulated/0/
 folder under the same name, `brimir_libretro_android.so`, and returns to the main menu. Load Core then lists it:
 
 - without `brimir_libretro.info` as `brimir_libretro_android.so` ("License: N/A"); the core loads, the title bar shows
-  `Brimir (0.8.1)` (from the core itself), Start Core runs the BIOS menu (`Performance Profile (300 frames)` in the log
+  `Brimir (0.8.1)` at the time of the test (the version of the core you install, from the core itself), Start Core runs the BIOS menu (`Performance Profile (300 frames)` in the log
   with the BIOS in `/storage/emulated/0/RetroArch/system/` and `brimir_profiling` enabled in
   `RetroArch/config/Brimir/Brimir.opt`), and run-ahead with the second instance behaves as with the root install (both
   copies loaded, no `Failed to create second instance`);

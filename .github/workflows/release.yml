@@ -292,11 +292,21 @@ jobs:
 
             ### ${{ github.ref_name }}
 
-            **Fixed** - run-ahead with "Use Second Instance" and the Vulkan renderer gave sound but a black picture: RetroArch shows the second instance's frames, and a second copy of the core cannot get the Vulkan context the first one holds. The second copy now declines to load, and RetroArch runs run-ahead on one instance, with the picture. It shows "Failed to create second instance. Run-Ahead will now use only one instance." once per content load. This applies with `brimir_renderer` = `vulkan` on RetroArch's `vulkan` video driver; the software renderer keeps the second instance.
+            **Android (arm64), new** - `brimir-${{ github.ref_name }}-android-arm64.zip` holds the core, its `.info` file and `ANDROID-INSTALL.txt` (install route, folders for the libretro-site APK and the Play Store RetroArch). Install it in RetroArch with Load Core > Install or Restore a Core. RetroArch only offers Brimir for games when it has the core's `.info` file: point Settings > Directory > Core Info at a folder holding `brimir_libretro.info` (that folder then replaces RetroArch's own info files) and turn off the file browser's extension filter; an official fix is planned.
+            - Tested on a Samsung Galaxy A56 (Exynos 1580, Xclipse 540 GPU, Android 17): the BIOS menu and games run; the Vulkan renderer ran at full speed at 1x (the developer's observation), the software renderer had poor performance. Also tested on the x86_64 Android emulator (Android 14 and 15).
+            - Not tested: Android 8-13, Mali and Adreno phones, phones with 16 KB memory pages (RetroArch 1.22.2 itself does not start there; its nightly does), app kill. Reports are welcome.
+            - Internal resolution above 1x is not available on Android yet: 2x froze the Galaxy A56 (a GPU job of the VDP1 upscaling never finished); under investigation.
+            - After switching the renderer to Vulkan, close the game and load it again. Before leaving RetroArch on Android, use Close Content or Quit.
 
-            **No other change** - frames, audio and save states are identical to 0.8.0 (checked per frame on 9 windows with and without threaded VDP, and through the libretro core with the software and Vulkan renderers, including run-ahead).
+            **Fixed (all platforms)**
+            - Threaded VDP1 drawing, erase and CPU framebuffer writes used the interlace mode from the wrong moment (brief sprite glitches around interlace mode switches, mostly on slow or busy machines). Unthreaded output is unchanged.
+            - In-game saves now reach RetroArch's periodic autosave during play; before, only Close Content or a normal quit wrote them, and an app kill or crash lost the session's saves.
+            - A session without a game no longer saves blank Saturn save memory (`Brimir.srm`), and an all-zero game save is replaced with a formatted one (games reported unformatted memory).
+            - Odd file paths (unusable temp or save folder, `content://`) and failed disc swaps can no longer crash RetroArch. A `Device report:` line in the log names the renderer, GPU, Vulkan version and any fallback reason.
 
-            **Run-ahead tip** - each run-ahead frame costs a whole emulated frame plus a state save and load; 1 frame is the practical setting in demanding games.
+            **Changed (Windows)** - with non-ASCII characters in the save folder's path, cartridge saves (`.bcr`, `.cart`) now go to the real folder; earlier versions wrote them to a folder with a garbled name next to it. Move them over.
+
+            Frames, audio and save states of unthreaded runs are identical to 0.8.1 (checked per frame on 9 windows); the unstripped Android core for crash reports is `brimir-${{ github.ref_name }}-android-arm64-symbols.zip`.
 
             **Known Limitations**
             - Vulkan at 4x: Daytona USA CE's SEGA logo and attract-mode restart stutter; rotated or distorted sprites (e.g. Astal) may differ from 1x at their edges; magnified textures stay blocky. Not tested on real Macs (MoltenVK). CD Block low-level emulation is tested on six contents only.
