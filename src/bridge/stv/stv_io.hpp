@@ -1,6 +1,9 @@
 // Brimir - ST-V I/O board emulation (IOGA chip at 0x00400000-0x0040007F)
 // Copyright (C) 2026 coredds
-// Licensed under GPL-3.0
+// Licensed under GPL-3.0 (the combined work)
+//
+// STVIOBoard::SerialEEPROM is derived from MAME's eeprom_serial_93cxx_device (src/devices/machine/eepromser.cpp,
+// eeprom.cpp; BSD-3-Clause, copyright Aaron Giles). The licence notice is in stv_io.cpp.
 
 #pragma once
 

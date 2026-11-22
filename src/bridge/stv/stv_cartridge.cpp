@@ -1,6 +1,11 @@
 // Brimir - ST-V cartridge implementation
 // Copyright (C) 2026 coredds
 // Licensed under GPL-3.0
+//
+// The 315-5881 register handlers (ReadProtectionRegister, WriteProtectionRegister) are derived from
+// stv_state::common_prot_r and common_prot_w in MAME's src/mame/sega/stv.cpp (MAME 0.289; LGPL-2.1-or-later, copyright
+// David Haywood, Angelo Salese, Olivier Galibert, Mariusz Wojcieszek, R. Belmont), used here under the GPL-3.0 as that
+// licence permits.
 
 #include "stv_cartridge.hpp"
 
