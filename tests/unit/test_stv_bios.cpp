@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -179,7 +180,7 @@ TEST_CASE("stv bios: older file names are accepted", "[stv]") {
     }
 }
 
-TEST_CASE("stv bios: within a region the first MAME version present wins", "[stv]") {
+TEST_CASE("stv bios: within a region the verified dumps come first, in MAME's order", "[stv]") {
     TempDir dir("brimir_stv_bios_version_order");
     dir.WriteBios("epr-19730.ic8");
     dir.WriteBios("epr-20091.ic8");
@@ -188,6 +189,120 @@ TEST_CASE("stv bios: within a region the first MAME version present wins", "[stv
     const auto choice = SelectSTVBios(dir.path, Game("bakubaku"), "auto", error);
     REQUIRE(choice.has_value());
     CHECK(choice->path.filename() == "epr-20091.ic8"); // MAME lists epr-20091 before epr-19730 and epr-17951a
+}
+
+TEST_CASE("stv bios: a verified dump is chosen over an unverified one of the same region", "[stv]") {
+    struct Case {
+        const char *game;
+        const char *unverified;
+        const char *verified;
+    };
+    for (const Case &c : {Case{"bakubaku", "epr-23603.ic8", "mp17951a.s"},   // MAME's default Japan BIOS
+                          Case{"bakubaku", "epr-17740.ic8", "epr19730.ic8"}, // MAME's jp5
+                          Case{"bakubaku", "epr-17740a.ic8", "epr-17951a.ic8"},
+                          Case{"diehard", "epr-17741a.ic8", "mp17952a.s"},
+                          Case{"rsgun", "epr-23603.ic8", "20091.bin"}}) {
+        INFO(c.game << ": " << c.unverified << " and " << c.verified);
+        TempDir dir("brimir_stv_bios_verified_first");
+        dir.WriteBios(c.unverified);
+        dir.WriteBios(c.verified);
+        std::string error;
+        const auto choice = SelectSTVBios(dir.path, Game(c.game), "auto", error);
+        REQUIRE(choice.has_value());
+        CHECK(choice->path.filename() == c.verified);
+    }
+
+    // Taiwan (colmns97 is JET; without a Japan or Europe BIOS the Taiwan one is used)
+    TempDir dir("brimir_stv_bios_verified_first_tw");
+    dir.WriteBios("epr-19854.ic8");
+    dir.WriteBios("epr-17742a.ic8");
+    dir.WriteBios("mp17953a.ic8");
+    std::string error;
+    const auto taiwan = SelectSTVBios(dir.path, Game("colmns97"), "auto", error);
+    REQUIRE(taiwan.has_value());
+    CHECK(taiwan->region == Region::Taiwan);
+    CHECK(taiwan->path.filename() == "mp17953a.ic8");
+}
+
+TEST_CASE("stv bios: an unverified dump alone is still used", "[stv]") {
+    for (const char *name : {"epr-23603.ic8", "epr-17740a.ic8", "epr-17740.ic8"}) {
+        INFO(name);
+        TempDir dir("brimir_stv_bios_unverified_alone");
+        dir.WriteBios(name);
+        std::string error;
+        const auto choice = SelectSTVBios(dir.path, Game("bakubaku"), "auto", error);
+        REQUIRE(choice.has_value());
+        CHECK(choice->path.filename() == name);
+    }
+}
+
+// path::string() throws on Windows for a character outside the ANSI code page: one such file in the system folder made
+// every ST-V load fail
+TEST_CASE("stv bios: a file with a non-ASCII name in the folder does not break the selection", "[stv]") {
+    TempDir dir("brimir_stv_bios_unicode_bystander");
+    dir.WriteBios("epr-20091.ic8");
+    {
+        std::ofstream out(dir.path / std::filesystem::path(u8"\u65e5\u672c.txt"), std::ios::binary);
+        out << "notes";
+    }
+    {
+        std::ofstream out(dir.path / std::filesystem::path(u8"\u30bb\u30fc\u30d6 \u00fc.bin"), std::ios::binary);
+        out << "x";
+    }
+    std::string error;
+    std::optional<BiosChoice> choice;
+    REQUIRE_NOTHROW(choice = SelectSTVBios(dir.path, Game("bakubaku"), "auto", error));
+    INFO(error);
+    REQUIRE(choice.has_value());
+    CHECK(choice->path.filename() == "epr-20091.ic8");
+}
+
+TEST_CASE("stv bios: messages naming a non-ASCII path do not throw", "[stv]") {
+    const std::filesystem::path folderName(u8"\u30b7\u30b9\u30c6\u30e0");
+    TempDir root("brimir_stv_bios_unicode_paths");
+    const std::filesystem::path folder = root.path / folderName;
+    std::filesystem::create_directories(folder);
+    const std::u8string folderText = folderName.u8string();
+    const std::string folderUtf8(folderText.begin(), folderText.end());
+
+    // No BIOS: the error names the folder, in UTF-8
+    std::string error;
+    std::optional<BiosChoice> choice;
+    REQUIRE_NOTHROW(choice = SelectSTVBios(folder, Game("bakubaku"), "auto", error));
+    CHECK_FALSE(choice.has_value());
+    CHECK(error.find(folderUtf8) != std::string::npos);
+
+    // A wrong-size, a missing and a folder-in-place-of-file BIOS
+    const auto small = folder / std::filesystem::path(u8"\u5c0f.bin");
+    {
+        std::ofstream out(small, std::ios::binary);
+        out << "short";
+    }
+    std::array<uint8_t, 512 * 1024> image{};
+    error.clear();
+    bool loaded = true;
+    REQUIRE_NOTHROW(loaded = LoadSTVBiosImage(small, image, error));
+    CHECK_FALSE(loaded);
+    const std::u8string smallText = small.filename().u8string();
+    CHECK(error.find(std::string(smallText.begin(), smallText.end())) != std::string::npos);
+
+    error.clear();
+    REQUIRE_NOTHROW(loaded = LoadSTVBiosImage(folder / std::filesystem::path(u8"\u7121.bin"), image, error));
+    CHECK_FALSE(loaded);
+    CHECK(error.find(folderUtf8) != std::string::npos);
+
+    // A wrong-region BIOS in a non-ASCII folder is reported as found but unused
+    TempDir dir("brimir_stv_bios_unicode_unused");
+    const auto usFolder = dir.path / folderName;
+    std::filesystem::create_directories(usFolder);
+    {
+        std::ofstream out(usFolder / "epr-17952a.ic8", std::ios::binary);
+        out << std::string(512 * 1024, '\0');
+    }
+    error.clear();
+    REQUIRE_NOTHROW(choice = SelectSTVBios(usFolder, Game("bakubaku"), "auto", error));
+    CHECK_FALSE(choice.has_value());
+    CHECK(error.find("Found, but") != std::string::npos);
 }
 
 TEST_CASE("stv bios: file names match without regard to case", "[stv]") {
