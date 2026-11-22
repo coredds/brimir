@@ -2,8 +2,10 @@
 // Copyright (C) 2026 coredds
 // Licensed under GPL-3.0
 //
-// Reuses Ymir's CartType::ROM since ST-V games are read-only ROM cartridges.
-// The Saturn SCU treats this as a standard ROM cart on the A-Bus CS0/CS1.
+// The game's ROM board in the Saturn's cartridge slot: the cartridge image on the A-Bus (CS0 from 0x02000000; CS1 from
+// 0x04000000 shows image offsets 0x02000000-0x02FFFFFF, every 16 MiB), and on Radiant Silvergun the 315-5881 registers
+// at 0x04FFFFF0. It owns the cartridge space (BaseCartridge::OwnsCartridgeSpace) and reports CartType::ROM. The IOGA is
+// not here: it is on the main bus (STVIOBoard).
 
 #pragma once
 
@@ -15,7 +17,6 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <span>
 #include <vector>
 
@@ -38,9 +39,6 @@ public:
         uint8 reserved[3];
         std::array<uint32, 4> abus; // the four long registers at 0x4FFFFF0 (MAME's m_a_bus)
     };
-
-    using IOGAReadFn  = std::function<uint8(uint32)>;
-    using IOGAWriteFn = std::function<void(uint32, uint8)>;
 
     STVGameROMCartridge()
         : BaseCartridge(0xFFu, CartType::ROM) {
@@ -66,8 +64,6 @@ public:
     void LoadROM(std::span<const uint8> data);
     void ConfigureProtection(ProtectionMode mode, uint32 key);
 
-    void SetIOGADispatch(IOGAReadFn readFn, IOGAWriteFn writeFn);
-
     void SaveProtectionState(ProtectionState &state) const;
     // Whether LoadProtectionState would take the state
     bool ValidateProtectionState(const ProtectionState &state) const;
@@ -75,8 +71,6 @@ public:
     bool LoadProtectionState(const ProtectionState &state);
 
     size_t GetROMSize() const { return m_romSize; }
-
-    uint8 PeekROMByte(uint32 address) const;
 
 protected:
     // The 315-5881 registers at 0x4FFFFF0-0x4FFFFFF as MAME's stv_state::common_prot_r/common_prot_w decode them:
@@ -89,14 +83,10 @@ protected:
     std::vector<uint8> m_rom;
 
     ProtectionMode m_protectionMode    = ProtectionMode::None;
-    uint32         m_protectionKey     = 0;
     bool           m_protectionEnabled = false;
     std::array<uint32, 4> m_abus{}; // MAME stv_state::m_a_bus; m_abus[0] bit 16 is the chip enable (m_abus_protenable)
 
     mutable STV3155881 m_crypt3155881;
-
-    IOGAReadFn  m_iogaRead  = nullptr;
-    IOGAWriteFn m_iogaWrite = nullptr;
 };
 
 } // namespace ymir::cart

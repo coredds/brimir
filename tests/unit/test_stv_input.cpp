@@ -44,7 +44,6 @@ uint8_t ReadPortF(STVIOBoard &io) { return io.ReadIOGAByte(0x40000A); }
 STVIOBoard MakeBoard() {
     STVIOBoard io;
     io.Reset(true);
-    io.SetSTVMode(true);
     return io;
 }
 

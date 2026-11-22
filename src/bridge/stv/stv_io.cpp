@@ -109,30 +109,10 @@ T STVIOBoard::ReadIOGA(uint32 address) {
         return val;
     }
 
-    if (!m_stvModeActive) {
-        if constexpr (std::is_same_v<T, uint16>) {
-            if (m_iplROM) {
-                uint32 off = address & 0x7FFFF;
-                return static_cast<uint16>((static_cast<uint16>(m_iplROM[off]) << 8) | m_iplROM[off ^ 1]);
-            }
-            return 0xFFFFu;
-        } else {
-            return m_iplROM ? m_iplROM[address & 0x7FFFF] : 0xFFu;
-        }
-    }
-
-    // Only handle IOGA register range 0x0400000-0x040007F
-    // Outside this range, fall back to IPL ROM for BIOS code execution
+    // The bus maps whole 64 KiB pages: the rest of the IOGA's page is unmapped in MAME's stv_mem, which reads the address
+    // space's unmap value, 0 (as the Saturn's bus does there)
     if (address < 0x0400000 || address > 0x040007F) {
-        if constexpr (std::is_same_v<T, uint16>) {
-            if (m_iplROM) {
-                uint32 off = address & 0x7FFFF;
-                return static_cast<uint16>((static_cast<uint16>(m_iplROM[off]) << 8) | m_iplROM[off ^ 1]);
-            }
-            return 0xFFFFu;
-        } else {
-            return m_iplROM ? m_iplROM[address & 0x7FFFF] : 0xFFu;
-        }
+        return 0;
     }
 
     const uint8 iogaAddr = static_cast<uint8>((address >> 1) & 0x3F);
@@ -167,9 +147,7 @@ void STVIOBoard::WriteIOGA(uint32 address, T value) {
         return;
     }
 
-    if (!m_stvModeActive) return;
-
-    // Only handle IOGA register range
+    // The rest of the page is unmapped (see ReadIOGA)
     if (address < 0x0400000 || address > 0x040007F) return;
 
     const uint8 iogaAddr = static_cast<uint8>((address >> 1) & 0x3F);
@@ -201,10 +179,6 @@ void STVIOBoard::SetCoin2(bool pressed) {
 
 void STVIOBoard::SetService(bool pressed) { m_service = pressed; }
 void STVIOBoard::SetTest(bool pressed)   { m_test = pressed; }
-
-void STVIOBoard::SetStart(uint8 player, bool pressed) {
-    if (player < 2) m_playerStart[player] = pressed;
-}
 
 void STVIOBoard::SetPlayerInput(uint8 player, const STVInputFrame &input) {
     if (player >= 2) return;
@@ -480,7 +454,7 @@ void STVIOBoard::SaveState(STVIOBoardState &state) const {
     std::copy(m_dataOut.begin(), m_dataOut.end(), state.dataOut);
     std::copy(m_dataIn.begin(), m_dataIn.end(), state.dataIn);
     state.dataDir = m_dataDir;
-    state.stvModeActive = m_stvModeActive ? 1 : 0;
+    state.stvModeActive = 1;
     state.service = m_service ? 1 : 0;
     state.test = m_test ? 1 : 0;
 
@@ -538,7 +512,6 @@ bool STVIOBoard::LoadState(const STVIOBoardState &state) {
     std::copy(std::begin(state.dataOut), std::end(state.dataOut), m_dataOut.begin());
     std::copy(std::begin(state.dataIn), std::end(state.dataIn), m_dataIn.begin());
     m_dataDir = state.dataDir;
-    m_stvModeActive = state.stvModeActive != 0;
     m_service = state.service != 0;
     m_test = state.test != 0;
 

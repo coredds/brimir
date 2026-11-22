@@ -50,18 +50,12 @@ void STVGameROMCartridge::LoadROM(std::span<const uint8> data) {
 
 void STVGameROMCartridge::ConfigureProtection(ProtectionMode mode, uint32 key) {
     m_protectionMode = mode;
-    m_protectionKey = key;
     m_protectionEnabled = false;
     m_abus = {};
 
     m_crypt3155881.Reset();
     m_crypt3155881.SetKey(key);
     m_crypt3155881.SetEnabled(false);
-}
-
-void STVGameROMCartridge::SetIOGADispatch(IOGAReadFn readFn, IOGAWriteFn writeFn) {
-    m_iogaRead  = std::move(readFn);
-    m_iogaWrite = std::move(writeFn);
 }
 
 void STVGameROMCartridge::SaveProtectionState(ProtectionState &state) const {
@@ -102,13 +96,6 @@ static inline size_t CartOffset(uint32 address, size_t romSize) {
 
     if (romOff >= kCartROMSize) return (size_t)-1;
     return romOff & (romSize - 1);
-}
-
-static constexpr uint32 kIOGABase    = kCartCS1Base;
-static constexpr uint32 kIOGAEnd     = kCartCS1Base | 0x7Fu;
-
-static inline bool IsIOGA(uint32 address) {
-    return address >= kIOGABase && address <= kIOGAEnd;
 }
 
 // MAME's install_common_protection(): the handlers cover 0x4FFFFF0-0x4FFFFFF only.
@@ -165,9 +152,6 @@ void STVGameROMCartridge::WriteProtectionRegister(unsigned index, uint32 data, u
 }
 
 uint8 STVGameROMCartridge::ReadByte(uint32 address) const {
-    if (IsIOGA(address) && m_iogaRead) {
-        return m_iogaRead(address);
-    }
     if (m_romSize == 0) return 0xFFu;
     if (m_protectionMode == ProtectionMode::Chip3155881 && IsProtectionRegisters(address)) {
         return static_cast<uint8>(ReadProtectionRegister(ProtectionRegisterIndex(address), false) >>
@@ -179,10 +163,6 @@ uint8 STVGameROMCartridge::ReadByte(uint32 address) const {
 }
 
 uint16 STVGameROMCartridge::ReadWord(uint32 address) const {
-    if (IsIOGA(address) && m_iogaRead) {
-        const uint8 data = m_iogaRead(address & ~1u);
-        return static_cast<uint16>(0xFF00u | data);
-    }
     if (m_romSize == 0) return 0xFFFFu;
 
     if (m_protectionMode == ProtectionMode::Chip3155881 && IsProtectionRegisters(address)) {
@@ -212,11 +192,6 @@ void STVGameROMCartridge::WriteByte(uint32 address, uint8 value) {
         const unsigned shift = 24u - 8u * (address & 3u);
         WriteProtectionRegister(ProtectionRegisterIndex(address), static_cast<uint32>(value) << shift,
                                 0xFFu << shift);
-        return;
-    }
-
-    if (IsIOGA(address) && m_iogaWrite) {
-        m_iogaWrite(address, value);
     }
 }
 
@@ -225,11 +200,6 @@ void STVGameROMCartridge::WriteWord(uint32 address, uint16 value) {
         const unsigned shift = 16u - 16u * ((address >> 1) & 1u);
         WriteProtectionRegister(ProtectionRegisterIndex(address), static_cast<uint32>(value) << shift,
                                 0xFFFFu << shift);
-        return;
-    }
-
-    if (IsIOGA(address) && m_iogaWrite) {
-        m_iogaWrite(address & ~1u, static_cast<uint8>(value));
     }
 }
 
@@ -243,9 +213,6 @@ void STVGameROMCartridge::WriteLong(uint32 address, uint32 value) {
 }
 
 uint8 STVGameROMCartridge::PeekByte(uint32 address) const {
-    if (IsIOGA(address) && m_iogaRead) {
-        return m_iogaRead(address);
-    }
     if (m_romSize == 0) return 0xFFu;
     if (m_protectionMode == ProtectionMode::Chip3155881 && IsProtectionRegisters(address)) {
         return static_cast<uint8>(ReadProtectionRegister(ProtectionRegisterIndex(address), true) >>
@@ -294,12 +261,6 @@ void STVGameROMCartridge::PokeWord(uint32 address, uint16 value) {
 void STVGameROMCartridge::PokeLong(uint32 address, uint32 value) {
     PokeWord(address + 0u, static_cast<uint16>(value >> 16u));
     PokeWord(address + 2u, static_cast<uint16>(value >> 0u));
-}
-
-// PeekROMByte uses raw buffer offsets (called by our init code, not the bus)
-uint8 STVGameROMCartridge::PeekROMByte(uint32 address) const {
-    if (m_romSize == 0) return 0xFFu;
-    return m_rom[address & (m_romSize - 1)];
 }
 
 } // namespace ymir::cart

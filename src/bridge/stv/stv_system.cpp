@@ -69,8 +69,6 @@ bool STVSystem::Attach(ymir::Saturn &saturn, const GameInfo &game, std::array<ui
                                 game.chip == Chip::Crypt315_5881 ? game.cryptKey : 0);
 
     m_io.Reset(true);
-    m_io.SetIPLPointer(saturn.mem.IPL.data());
-    m_io.SetSTVMode(true);
     // A new cabinet's 93C46 is blank, as MAME's: none of the eight supported sets has an "eeprom" region in its
     // ROM_START, so eeprom_base_device::nvram_default leaves every cell 0xFFFF and the BIOS writes its own defaults on
     // the first boot (the "SEGA" header, the settings, a CRC and the mirror). The persistent copy (the .srm) replaces

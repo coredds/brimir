@@ -31,7 +31,7 @@ struct STVIOBoardState {
     uint8 dataIn[8];
     uint8 eepromData[128];    // cell contents of the 93C46, as the game has written them
     uint8 dataDir;
-    uint8 stvModeActive;
+    uint8 stvModeActive;      // always 1 when saved (the board answers only while an ST-V game runs); kept for the layout
     uint8 playerStart[2];
     uint8 coinHeld[2];
     uint8 service;
@@ -50,16 +50,13 @@ public:
     STVIOBoard() = default;
 
     void Reset(bool hard);
+    // The IOGA's 64 KiB page of the main bus: the registers at 0x00400000-0x0040007F, the rest of the page unmapped
     void MapMemory(ymir::sys::SH2Bus &bus);
-    void SetIPLPointer(const uint8 *iplROM) { m_iplROM = iplROM; }
-    void SetSTVMode(bool active) { m_stvModeActive = active; }
 
     void SetCoin1(bool pressed);
     void SetCoin2(bool pressed);
     void SetService(bool pressed);
     void SetTest(bool pressed);
-
-    void SetStart(uint8 player, bool pressed);
 
     // A player's controls for the frame (player 0 or 1). Player 1's frame also sets the service and test switches,
     // which the cabinet has once; player 2's coin is coin 2. Held coins count once (SetCoin1/SetCoin2).
@@ -106,9 +103,6 @@ private:
 
     template <typename T, bool poke>
     void WriteIOGA(uint32 address, T value);
-
-    bool m_stvModeActive = false;
-    const uint8 *m_iplROM = nullptr;
 
     uint8 m_dataDir = 0xFF;
     std::array<uint8, 8> m_dataOut{};
