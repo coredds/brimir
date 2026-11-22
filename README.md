@@ -1,6 +1,6 @@
 # Brimir
 
-A Sega Saturn and Sega ST-V emulation core for libretro, built on the [Ymir](https://github.com/StrikerX3/ymir) emulator by StrikerX3. It runs in RetroArch on Windows, Linux, macOS and Android.
+A Sega Saturn and Sega ST-V emulation core for libretro, built on the [Ymir](https://github.com/StrikerX3/ymir) emulator by StrikerX3. It builds for Windows, Linux, macOS and Android (macOS is untested on real hardware).
 
 ## Overview
 
@@ -111,7 +111,7 @@ with the controllers).
   the rest of the session (reload the content to get your own back). A settings change made in a frame that run-ahead
   or netplay later rolls back, or that rewind goes back past, still reaches the RTC file (it takes the BIOS settings
   screen during netplay or rewind).
-- **Compatibility**: states from earlier versions load, except the v0.6.x states of Dezaemon 2 and Sega Ages: Galaxy
+- **Compatibility**: states from earlier Brimir releases load (states from very old development builds do not), except the v0.6.x states of Dezaemon 2 and Sega Ages: Galaxy
   Force II (they now get a backup memory cartridge under Cartridge = Auto; set Cartridge to None and reload the content
   to load them).
 - **Netplay**: both machines need the same BIOS and content, and should also use:

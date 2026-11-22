@@ -52,9 +52,6 @@ Ymir exposes `saturn.VDP.SetLayerEnabled(Layer, bool)` and `saturn.VDP.vdp2Debug
 
 Ship a JSON cheat database with the core. Auto-apply per-game Action Replay codes on load. Community-contributable. (Today the cheat files of RetroArch's database are used.)
 
-### Controllers still open
-**Layer**: Upstream (Ymir) | Six-axis and dual Mission Stick, Twin-Stick and Stunner are not offered.
-
 ### Cheat search of our own
 **Layer**: Bridge | RetroArch's cheat search is used today.
 
@@ -116,6 +113,16 @@ Hook into `IVDPRenderer::VDP1WriteVRAM()` and `VDP1WriteFB()` to dump/intercept 
 **Layer**: Upstream | **Target**: Post-HW-Renderer
 
 Saturn VDP1 draws affine-textured quads without perspective correction. Needs interception of VDP1 draw commands inside the renderer.
+
+### More Controller Types
+**Layer**: Upstream (Ymir)
+
+Six-axis and dual Mission Stick, Twin-Stick and Stunner are not offered.
+
+### 24. Host-Independent RTC Time Zone
+**Layer**: Bridge + Ymir determinism
+
+Netplay peers must use the same time zone: the save state holds the clock, but the date the game shows goes through each computer's local time. Open: make that independent of the host.
 
 ### 25. More ST-V Arcade Games
 **Layer**: Bridge + small hooks in the core | **Target**: Post-1.0

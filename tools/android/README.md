@@ -237,4 +237,4 @@ bash tools/android/emulator_tests.sh build-android-x86_64/bin/brimir_tests "~[gp
   what an app may do; needs `adb root`); `TEST_ENV="TMPDIR="` unsets TMPDIR (libc++'s Android default is
   `/data/local/tmp`, writable for the shell user, not for apps). Everything it created is removed on exit.
 
-Not covered by the emulator: API 26 devices, arm64 code (the A56 test covers it), real-device GPU drivers.
+What the emulator tests do not cover: API 26 devices, arm64 code (the A56 test covers it), real-device GPU drivers.

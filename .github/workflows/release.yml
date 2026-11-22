@@ -298,7 +298,7 @@ jobs:
 
             The core's `.info` file now lists the ST-V database next to the Saturn one (display name "Sega - Saturn/ST-V (Brimir)").
 
-            Saturn games run as in 0.9.0 (their save states are byte-identical). The unstripped Android core for crash reports is `brimir-${{ github.ref_name }}-android-arm64-symbols.zip`.
+            Saturn emulation and save states are unchanged from 0.9.0, except that archived discs no longer load. The unstripped Android core for crash reports is `brimir-${{ github.ref_name }}-android-arm64-symbols.zip`.
 
             **Known Limitations**
             - ST-V: only the eight games above. Known differences from MAME (attract-mode timing off by some frames, the SMPC's battery settings not saved) are in `src/bridge/stv/STATUS.md`; rewind and netplay were not tested with ST-V games.
