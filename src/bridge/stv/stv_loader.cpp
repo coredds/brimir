@@ -127,8 +127,9 @@ bool BuildCartImage(ZipReader &zip, std::span<const RomEntry> roms, std::vector<
         const ResolvedEntry &r = resolved[i];
 
         if (!loaded || std::string(loaded) != r.file) {
-            if (!zip.ReadEntry(r.file, data)) {
-                error = std::string("cannot read ") + r.file;
+            std::string reason;
+            if (!zip.ReadEntry(r.file, data, reason)) {
+                error = std::string("cannot read ") + r.file + ": " + reason;
                 return false;
             }
             loaded = r.file;

@@ -108,9 +108,8 @@ struct Session {
             }
             test::TestZipEntry entry;
             entry.name = rom.file;
-            entry.data.assign(rom.size, 0);
+            entry.data = test::DataWithCrc32(rom.size, rom.crc32);
             entry.deflate = true;
-            entry.crcOverride = rom.crc32;
             entries.push_back(std::move(entry));
         }
         zip = dir.path / "bakubaku.zip";

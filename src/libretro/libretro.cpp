@@ -1841,6 +1841,14 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             const std::string& error = g_core->GetLastError();
             brimir_log(RETRO_LOG_ERROR, "Failed to load game: %s",
                 error.empty() ? "(no error message)" : error.c_str());
+            // A zip (an ST-V set, or a zip the core refuses) fails for a reason the player can fix: a missing BIOS or
+            // ROM file, a damaged archive. Say it on screen, not only in the log.
+            if (zip_content && environ_cb) {
+                static std::string text;
+                text = "Brimir: " + (error.empty() ? std::string("the zip could not be loaded") : error);
+                retro_message message{text.c_str(), 600};
+                environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+            }
             log_backup_ram_save_error();
             return false;
         }

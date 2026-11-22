@@ -238,19 +238,48 @@ TEST_CASE("ST-V detect: files that are not zips", "[stv]") {
         brimir::test::WriteTestZip(dir.path / "bakubaku.rom", GameEntries(Game("bakubaku")));
         CHECK(brimir::stv::DetectSTVContent(dir.path / "bakubaku.rom").kind == DetectKind::NotZip);
     }
+}
+
+// A .zip the reader cannot parse is still zip content: it is reported as such (LoadGame refuses it with a message),
+// never handed to the Saturn disc loader or the Saturn BIOS selection
+TEST_CASE("ST-V detect: a .zip that cannot be read is unreadable, not a disc", "[stv]") {
+    TempDir dir("brimir_stv_detect_unreadable");
+
     SECTION("a .zip that is not a zip") {
         WriteBytes(dir.path / "bakubaku.zip", std::vector<uint8_t>(500, 'x'));
-        CHECK(brimir::stv::DetectSTVContent(dir.path / "bakubaku.zip").kind == DetectKind::NotZip);
+        CHECK(brimir::stv::DetectSTVContent(dir.path / "bakubaku.zip").kind == DetectKind::Unreadable);
     }
     SECTION("a missing file") {
-        CHECK(brimir::stv::DetectSTVContent(dir.path / "bakubaku.zip").kind == DetectKind::NotZip);
+        CHECK(brimir::stv::DetectSTVContent(dir.path / "bakubaku.zip").kind == DetectKind::Unreadable);
     }
     SECTION("a zip cut short") {
         auto bytes = brimir::test::BuildTestZip({Text("a.bin"), Text("b.bin")});
         bytes.resize(bytes.size() - 30);
         WriteBytes(dir.path / "cut.zip", bytes);
-        CHECK(brimir::stv::DetectSTVContent(dir.path / "cut.zip").kind == DetectKind::NotZip);
+        CHECK(brimir::stv::DetectSTVContent(dir.path / "cut.zip").kind == DetectKind::Unreadable);
     }
+    SECTION("a zip64 archive") {
+        auto bytes = brimir::test::BuildTestZip(GameEntries(Game("bakubaku")));
+        for (size_t i = 0; i < 4; ++i) bytes[bytes.size() - 6 + i] = 0xFF; // the end record's directory offset
+        WriteBytes(dir.path / "bakubaku.zip", bytes);
+        CHECK(brimir::stv::DetectSTVContent(dir.path / "bakubaku.zip").kind == DetectKind::Unreadable);
+    }
+}
+
+// path::string() throws on Windows for characters outside the ANSI code page; the detection must not depend on it
+TEST_CASE("ST-V detect: a zip with a non-ASCII name is detected", "[stv]") {
+    TempDir dir("brimir_stv_detect_unicode");
+    const auto known = dir.path / std::filesystem::path(u8"\u30d0\u30af\u30d0\u30af \u00e9.zip");
+    brimir::test::WriteTestZip(known, GameEntries(Game("bakubaku")));
+    const auto result = brimir::stv::DetectSTVContent(known);
+    CHECK(result.kind == DetectKind::Known);
+    REQUIRE(result.game != nullptr);
+    CHECK(std::string(result.game->shortName) == "bakubaku");
+
+    // Named after nothing and holding nothing: still a zip, not a disc
+    const auto other = dir.path / std::filesystem::path(u8"\u3070\u304f.zip");
+    brimir::test::WriteTestZip(other, {Text("readme.txt")});
+    CHECK(brimir::stv::DetectSTVContent(other).kind == DetectKind::NotSTV);
 }
 
 TEST_CASE("ST-V game database: every game is well formed", "[stv]") {

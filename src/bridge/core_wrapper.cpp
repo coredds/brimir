@@ -286,13 +286,13 @@ std::string WriteFileReplacing(const std::filesystem::path& path, const std::vec
     {
         std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
         if (!out) {
-            return "could not create " + tmpPath.string() + "; " + path.filename().string() + " was not updated";
+            return "could not create " + PathToUtf8(tmpPath) + "; " + PathToUtf8(path.filename()) + " was not updated";
         }
         out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
         out.close();
         if (!out) {
             std::filesystem::remove(tmpPath, ec);
-            return "could not write " + tmpPath.string() + " (disk full?); " + path.filename().string() +
+            return "could not write " + PathToUtf8(tmpPath) + " (disk full?); " + PathToUtf8(path.filename()) +
                    " was not updated";
         }
     }
@@ -303,7 +303,7 @@ std::string WriteFileReplacing(const std::filesystem::path& path, const std::vec
         std::filesystem::rename(tmpPath, path, ec);
     }
     if (ec) {
-        return "could not replace " + path.string() + " (" + ec.message() + "); the data is in " + tmpPath.string();
+        return "could not replace " + PathToUtf8(path) + " (" + ec.message() + "); the data is in " + PathToUtf8(tmpPath);
     }
     return {};
 }
@@ -757,7 +757,18 @@ stv::DetectResult CoreWrapper::DetectContent(const char* path) {
     try {
         return stv::DetectSTVContent(PathFromUtf8(path));
     } catch (...) {
-        return {};
+        // A .zip the core cannot even look at is still zip content (LoadGame reports it), never a Saturn disc
+        std::string_view text(path);
+        stv::DetectResult result;
+        if (text.size() >= 4) {
+            std::string ext(text.substr(text.size() - 4));
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".zip") {
+                result.kind = stv::DetectKind::Unreadable;
+            }
+        }
+        return result;
     }
 }
 
@@ -775,6 +786,10 @@ stv::STVIOBoard* CoreWrapper::STVIOBoardOrNull() {
 
 bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::filesystem::path& gamePath,
                                  const char* save_directory, const char* system_directory) {
+    if (detected.kind == stv::DetectKind::Unreadable) {
+        m_lastError = PathToUtf8(gamePath.filename()) + " is not a readable zip archive (damaged, truncated or zip64)";
+        return false;
+    }
     if (detected.kind == stv::DetectKind::NotSTV) {
         m_lastError = "Zip files are only supported for ST-V games; unzip Saturn discs or convert them to CHD";
         return false;
@@ -1318,8 +1333,9 @@ void CoreWrapper::UnloadGame() {
     m_savedStateBytes.clear();
     m_savedStateBytes.shrink_to_fit();
     
-    // Don't clear SRAM buffer - RetroArch needs to save it!
-    // m_sramData will persist until next game load
+    // A Saturn game's SRAM buffer is kept until the next load (a frontend may still read it through
+    // RETRO_MEMORY_SAVE_RAM). An ST-V game's was written to its .srm above and is cleared by ReturnToSaturn below: the
+    // board's backup RAM and EEPROM image are not a Saturn save.
     m_sramInitialized = false;
     m_framesSinceLastSRAMSync = 0;
     m_sramFirstLoad = true;  // Reset for next game load
@@ -3026,8 +3042,10 @@ bool CoreWrapper::GetDiscLabel(unsigned index, char* s, size_t len) const {
     return true;
 }
 
+// An ST-V game has no disc drive to control: eject, insert and the image list are refused while one runs (inserting a
+// disc would load it as a Saturn disc and change the area code under the board).
 bool CoreWrapper::SetEjectState(bool ejected) {
-    if (!m_initialized || !m_saturn || !m_gameLoaded) {
+    if (!m_initialized || !m_saturn || !m_gameLoaded || IsSTVLoaded()) {
         return false;
     }
     if (ejected) {
@@ -3046,7 +3064,7 @@ bool CoreWrapper::GetEjectState() const {
 }
 
 bool CoreWrapper::SetDiscIndex(unsigned index) {
-    if (!m_initialized || !m_saturn) {
+    if (!m_initialized || !m_saturn || IsSTVLoaded()) {
         return false;
     }
     // Eject is equivalent to "remove disc" from drive
@@ -3097,12 +3115,15 @@ bool CoreWrapper::SetDiscIndex(unsigned index) {
 }
 
 bool CoreWrapper::AddDiscIndex() {
+    if (IsSTVLoaded()) {
+        return false;
+    }
     m_discList.emplace_back();
     return true;
 }
 
 bool CoreWrapper::ReplaceDiscIndex(unsigned index, const char* path) {
-    if (index >= m_discList.size()) {
+    if (IsSTVLoaded() || index >= m_discList.size()) {
         return false;
     }
     if (!path || path[0] == '\0') {

@@ -4,6 +4,7 @@
 
 #include "stv_detect.hpp"
 
+#include "stv_path.hpp"
 #include "stv_zip.hpp"
 
 #include <algorithm>
@@ -49,13 +50,16 @@ Match MatchGame(const GameInfo &game, const ZipReader &zip) {
 DetectResult DetectSTVContent(const std::filesystem::path &path) {
     DetectResult result;
 
-    if (Lower(path.extension().string()) != ".zip") return result;
+    if (Lower(PathToUtf8(path.extension())) != ".zip") return result;
     const ZipReader zip(path);
-    if (!zip.IsOpen()) return result;
+    if (!zip.IsOpen()) {
+        result.kind = DetectKind::Unreadable;
+        return result;
+    }
 
     result.kind = DetectKind::NotSTV;
 
-    const std::string stem = Lower(path.stem().string());
+    const std::string stem = Lower(PathToUtf8(path.stem()));
     const GameInfo *named = nullptr;      // the game the zip is named after
     const GameInfo *closest = nullptr;    // the game with the most files present
     Match namedMatch, closestMatch;

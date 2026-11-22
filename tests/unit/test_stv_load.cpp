@@ -60,8 +60,8 @@ const stv::GameInfo &Game(const char *name) {
     return *game;
 }
 
-// One zero-filled zip entry per distinct file of the game, sized as the database says, with the database CRC-32 in the
-// archive (the loader trusts the archive's CRC, as the detection does).
+// One zip entry per distinct file of the game, sized as the database says: zero bytes ending in four that give the
+// database CRC-32 (the detection compares the archive's CRC-32 with the database, the loader the data with the archive).
 std::vector<test::TestZipEntry> SetEntries(const stv::GameInfo &game, size_t keep = ~size_t{0}) {
     std::vector<test::TestZipEntry> entries;
     std::set<std::string> seen;
@@ -71,9 +71,8 @@ std::vector<test::TestZipEntry> SetEntries(const stv::GameInfo &game, size_t kee
         }
         test::TestZipEntry entry;
         entry.name = rom.file;
-        entry.data.assign(rom.size, 0);
+        entry.data = test::DataWithCrc32(rom.size, rom.crc32);
         entry.deflate = true;
-        entry.crcOverride = rom.crc32;
         entries.push_back(std::move(entry));
     }
     return entries;
@@ -193,22 +192,120 @@ TEST_CASE("stv load: a Saturn disc path never reaches the ST-V code", "[stv]") {
     CHECK(CoreWrapper::DetectContent(Str(cuePath).c_str()).kind == stv::DetectKind::NotZip);
     CHECK(CoreWrapper::DetectContent(nullptr).kind == stv::DetectKind::NotZip);
 
-    // Not even a file named like an ST-V set: a .zip that is no zip is left to the disc loader
-    const auto fakeZip = dir.path / "bakubaku.zip";
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    CHECK_FALSE(core.LoadGame(Str(cuePath).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
+    CHECK_FALSE(core.IsSTVLoaded());
+    CHECK(core.GetLastError().find("ST-V") == std::string::npos);
+    CHECK(core.GetLastError().find("zip") == std::string::npos);
+    CHECK_FALSE(core.GetSaturn()->SMPC.IsSTVMode());
+}
+
+// A .zip the reader cannot parse is zip content (the libretro layer skips the Saturn BIOS step for it) and LoadGame
+// refuses it saying so, rather than asking for a Saturn BIOS or trying it as a disc
+TEST_CASE("stv load: a .zip that cannot be read fails as an unreadable archive", "[stv]") {
+    TempDir dir("brimir_stv_load_unreadable");
+    std::vector<std::filesystem::path> paths;
+
+    const auto notZip = dir.path / "bakubaku.zip";
     {
-        std::ofstream out(fakeZip, std::ios::binary);
+        std::ofstream out(notZip, std::ios::binary);
         out << "not a zip";
     }
-    CHECK(CoreWrapper::DetectContent(Str(fakeZip).c_str()).kind == stv::DetectKind::NotZip);
+    paths.push_back(notZip);
+
+    auto bytes = test::BuildTestZip(SetEntries(Game("bakubaku")));
+    const auto truncated = dir.path / "truncated.zip";
+    {
+        std::ofstream out(truncated, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size() / 2));
+    }
+    paths.push_back(truncated);
+
+    for (size_t i = 0; i < 4; ++i) bytes[bytes.size() - 6 + i] = 0xFF; // a zip64 directory offset in the end record
+    const auto zip64 = dir.path / "zip64.zip";
+    {
+        std::ofstream out(zip64, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    paths.push_back(zip64);
+
+    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    for (const auto &path : paths) {
+        INFO(Str(path));
+        CHECK(CoreWrapper::DetectContent(Str(path).c_str()).kind == stv::DetectKind::Unreadable);
+        CHECK_FALSE(core.LoadGame(Str(path).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
+        CHECK(core.GetLastError() ==
+              Str(path.filename()) + " is not a readable zip archive (damaged, truncated or zip64)");
+        CHECK_FALSE(core.IsSTVLoaded());
+        CHECK_FALSE(core.IsGameLoaded());
+        CHECK_FALSE(core.GetSaturn()->SMPC.IsSTVMode());
+    }
+}
+
+TEST_CASE("stv load: a ROM file whose data does not match its CRC-32 fails naming the file", "[stv]") {
+    TempDir dir("brimir_stv_load_crc");
+    const stv::GameInfo &game = Game("bakubaku");
+    auto entries = SetEntries(game);
+    // The archive still states the database CRC-32 (so the set is detected), but the data is not that file's
+    test::TestZipEntry &bad = entries.back();
+    for (const auto &rom : game.roms) {
+        if (bad.name == rom.file) {
+            bad.crcOverride = rom.crc32;
+        }
+    }
+    REQUIRE(bad.crcOverride.has_value());
+    bad.data.back() ^= 0x01;
+    const auto zipPath = dir.path / "bakubaku.zip";
+    test::WriteTestZip(zipPath, entries);
+    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+
+    REQUIRE(CoreWrapper::DetectContent(Str(zipPath).c_str()).kind == stv::DetectKind::Known);
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    CHECK_FALSE(core.LoadGame(Str(zipPath).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
+    const std::string &error = core.GetLastError();
+    CHECK(error.find(bad.name) != std::string::npos);
+    CHECK(error.find("CRC-32") != std::string::npos);
+    CHECK_FALSE(core.IsSTVLoaded());
+    CHECK_FALSE(core.GetSaturn()->SMPC.IsSTVMode());
+}
+
+// path::string() throws on Windows for a character outside the ANSI code page: such a zip name was swallowed as "not a
+// zip" and the player asked for a Saturn BIOS
+TEST_CASE("stv load: a set with a non-ASCII file name and folder loads", "[stv]") {
+    TempDir root("brimir_stv_load_unicode");
+    const auto dir = root.path / std::filesystem::path(u8"\u30b2\u30fc\u30e0 \u00e9");
+    std::filesystem::create_directories(dir);
+    const auto zipPath = dir / std::filesystem::path(u8"\u30d0\u30af\u30d0\u30af.zip");
+    test::WriteTestZip(zipPath, SetEntries(Game("bakubaku")));
+    {
+        // A bystander the BIOS listing has to step over
+        std::ofstream out(dir / std::filesystem::path(u8"\u65e5\u672c.txt"));
+        out << "notes";
+    }
+    const auto utf8 = [](const std::filesystem::path &path) {
+        const std::u8string text = path.u8string();
+        return std::string(text.begin(), text.end());
+    };
+
+    CHECK(CoreWrapper::DetectContent(utf8(zipPath).c_str()).kind == stv::DetectKind::Known);
 
     CoreWrapper core;
     REQUIRE(core.Initialize());
-    for (const auto &path : {cuePath, fakeZip}) {
-        CHECK_FALSE(core.LoadGame(Str(path).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
-        CHECK_FALSE(core.IsSTVLoaded());
-        CHECK(core.GetLastError().find("ST-V") == std::string::npos);
-        CHECK_FALSE(core.GetSaturn()->SMPC.IsSTVMode());
-    }
+    // No BIOS yet: the message names the folder, in UTF-8
+    CHECK_FALSE(core.LoadGame(utf8(zipPath).c_str(), utf8(dir).c_str(), utf8(dir).c_str()));
+    CHECK(core.GetLastError().find(utf8(dir)) != std::string::npos);
+
+    WriteFile(dir / "epr-20091.ic8", stv::kSTVBiosSize);
+    REQUIRE(core.LoadGame(utf8(zipPath).c_str(), utf8(dir).c_str(), utf8(dir).c_str()));
+    CHECK(core.IsSTVLoaded());
+    CHECK(std::string(core.GetSTVGame()->shortName) == "bakubaku");
+    core.UnloadGame();
+    // The save RAM file is named after the zip
+    CHECK(std::filesystem::exists(dir / std::filesystem::path(u8"\u30d0\u30af\u30d0\u30af.srm")));
 }
 
 TEST_CASE("stv load: a set without a BIOS for its regions fails before the system changes", "[stv]") {
@@ -277,6 +374,30 @@ TEST_CASE("stv load: LoadGame builds the board and UnloadGame takes it down agai
     CHECK(core.IsSTVLoaded());
 }
 
+// MAME's stv_mem maps the IOGA at 0x00400000 and nothing else in its 64 KiB page: the rest reads the address space's
+// unmap value (0) and ignores writes. (An earlier version answered there with BIOS bytes.)
+TEST_CASE("stv load: the IOGA page outside the registers is unmapped", "[stv]") {
+    Board board;
+    board.bios.fill(0x5A);
+    REQUIRE(board.Attach());
+    ymir::sys::SH2Bus &bus = board.saturn.mainBus;
+
+    CHECK(bus.Read<uint8_t>(0x0040'0004) == 0xFF); // port C, idle
+    for (const uint32_t address : {0x0040'0080u, 0x0040'0100u, 0x0040'8000u, 0x0040'FFFCu}) {
+        INFO(std::hex << address);
+        CHECK(bus.Read<uint8_t>(address) == 0);
+        CHECK(bus.Read<uint8_t>(address + 1) == 0);
+        CHECK(bus.Read<uint16_t>(address) == 0);
+        CHECK(bus.Read<uint32_t>(address) == 0);
+        CHECK(bus.Peek<uint16_t>(address) == 0);
+        bus.Write<uint8_t>(address + 1, 0x12);
+        bus.Write<uint16_t>(address, 0x3456);
+        CHECK(bus.Read<uint16_t>(address) == 0);
+    }
+    // The writes above did not reach the registers (port D's output latch, the direction register)
+    CHECK(bus.Read<uint8_t>(0x0040'0010) == 0xFF);
+}
+
 // RetroArch checks the initial disc after every load (disk_control_verify_initial_index): get_image_path for the current
 // index must succeed, or it logs "Failed to set initial disc index" and shows an error notification.
 TEST_CASE("stv load: an ST-V game reports image 0 with an empty path to the disk control interface", "[stv]") {
@@ -296,6 +417,28 @@ TEST_CASE("stv load: an ST-V game reports image 0 with an empty path to the disk
     CHECK(path[0] == '\0');
     CHECK_FALSE(core.GetDiscPath(1, path, sizeof(path)));
     CHECK_FALSE(core.GetDiscPath(0, path, 0));
+
+    // The disc controls are refused: a disc inserted here would be loaded as a Saturn disc under the board
+    ymir::Saturn &saturn = *core.GetSaturn();
+    const uint8_t area = saturn.SMPC.GetAreaCode();
+    const auto cuePath = dir.path / "disc.cue";
+    {
+        std::ofstream out(cuePath);
+        out << "FILE \"disc.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n";
+    }
+    const bool trayOpen = core.GetEjectState();
+    CHECK_FALSE(core.SetEjectState(!trayOpen));
+    CHECK(core.GetEjectState() == trayOpen);
+    CHECK_FALSE(core.AddDiscIndex());
+    CHECK_FALSE(core.ReplaceDiscIndex(0, Str(cuePath).c_str()));
+    CHECK_FALSE(core.SetDiscIndex(0));
+    CHECK_FALSE(core.SetDiscIndex(5)); // "no disc"
+    CHECK(core.GetEjectState() == trayOpen);
+    CHECK(core.GetNumDiscs() == 0);
+    CHECK(core.IsSTVLoaded());
+    CHECK(saturn.SMPC.GetAreaCode() == area);
+    CHECK(core.GetDiscPath(0, path, sizeof(path)));
+    CHECK(path[0] == '\0');
 
     // Saturn again: no content, no disc path
     core.UnloadGame();

@@ -255,6 +255,45 @@ TEST_CASE("ST-V zip: EntryCRC returns the stored CRC-32", "[stv]") {
     CHECK_FALSE(zip.EntryCRC("missing.bin").has_value());
 }
 
+TEST_CASE("ST-V zip: an entry whose data does not match its CRC-32 does not read", "[stv]") {
+    TempDir dir("brimir_stv_zip_crc_check");
+    const auto zipPath = dir.path / "crc.zip";
+    const auto a = Pattern(100, 1);
+    const auto b = Pattern(5000, 2);
+    brimir::test::WriteTestZip(zipPath, {
+        {"good.bin", a, true, std::nullopt},
+        {"stored.bin", a, false, 0xDEADBEEFu},
+        {"deflated.bin", b, true, Crc(b) ^ 1u},
+        {"empty.bin", {}, true, 0x12345678u},
+    });
+
+    brimir::stv::ZipReader zip(zipPath);
+    REQUIRE(zip.IsOpen());
+    std::vector<uint8_t> out;
+    std::string error;
+    for (const char *name : {"stored.bin", "deflated.bin", "empty.bin"}) {
+        INFO(name);
+        out.assign(3, 0xAA);
+        CHECK_FALSE(zip.ReadEntry(name, out, error));
+        CHECK(out.empty());
+        CHECK(error.find("CRC-32") != std::string::npos);
+        CHECK_FALSE(zip.ReadEntry(name, out));
+    }
+    REQUIRE(zip.ReadEntry("good.bin", out, error));
+    CHECK(error.empty());
+    CHECK(out == a);
+}
+
+TEST_CASE("ST-V zip: the test helper's data has the CRC-32 asked for", "[stv]") {
+    for (const uint32_t crc : {0u, 0xFFFFFFFFu, 0xDEADBEEFu, 0x59ED40F4u}) {
+        for (const size_t size : {size_t{4}, size_t{5}, size_t{1000}}) {
+            const auto data = brimir::test::DataWithCrc32(size, crc);
+            CHECK(data.size() == size);
+            CHECK(Crc(data) == crc);
+        }
+    }
+}
+
 TEST_CASE("ST-V zip: a zip64 archive is refused cleanly", "[stv]") {
     TempDir dir("brimir_stv_zip_zip64");
     const auto zipPath = dir.path / "z64.zip";

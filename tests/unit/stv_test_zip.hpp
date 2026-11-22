@@ -6,6 +6,7 @@
 
 #include <zlib.h>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -55,7 +56,51 @@ inline std::vector<uint8_t> RawDeflate(const std::vector<uint8_t> &in) {
     return out;
 }
 
+inline const std::array<uint32_t, 256> &CrcTable() {
+    static const std::array<uint32_t, 256> table = [] {
+        std::array<uint32_t, 256> t{};
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? (c >> 1) ^ 0xEDB88320u : c >> 1;
+            t[i] = c;
+        }
+        return t;
+    }();
+    return table;
+}
+
 } // namespace detail
+
+// size zero bytes, except the last four, which are chosen so that the CRC-32 of the whole is crc: stands in for a ROM
+// file of the database (its size and CRC-32) where the loader checks the data against the archive's CRC-32.
+// After the last four bytes the CRC register is T[i3] ^ T[i2] >> 8 ^ T[i1] >> 16 ^ T[i0] >> 24, whatever came before;
+// the top byte of each table entry is unique, so the indices follow from the wanted register one at a time.
+inline std::vector<uint8_t> DataWithCrc32(size_t size, uint32_t crc) {
+    if (size < 4) throw std::runtime_error("DataWithCrc32 needs at least four bytes");
+    const auto &table = detail::CrcTable();
+    uint8_t index[4];
+    uint32_t reg = crc ^ 0xFFFFFFFFu;
+    for (int i = 3; i >= 0; --i) {
+        uint32_t found = 256;
+        for (uint32_t j = 0; j < 256; ++j) {
+            if ((table[j] >> 24) == (reg >> 24)) {
+                found = j;
+                break;
+            }
+        }
+        index[i] = static_cast<uint8_t>(found);
+        reg = (reg ^ table[found]) << 8;
+    }
+
+    std::vector<uint8_t> data(size, 0);
+    uint32_t state = 0xFFFFFFFFu;
+    for (size_t n = 0; n < size - 4; ++n) state = (state >> 8) ^ table[state & 0xFF]; // zero bytes
+    for (int i = 0; i < 4; ++i) {
+        data[size - 4 + i] = static_cast<uint8_t>((state ^ index[i]) & 0xFF);
+        state = (state >> 8) ^ table[index[i]];
+    }
+    return data;
+}
 
 // Serializes a ZIP archive: local headers with data, then the central directory and end record.
 // comment is the archive comment after the end record.

@@ -15,7 +15,8 @@
 namespace brimir::stv {
 
 enum class DetectKind {
-    NotZip,     // not a .zip file, or not a readable zip
+    NotZip,     // not a .zip file
+    Unreadable, // a .zip file the reader cannot parse (damaged, truncated, zip64, not a zip at all) or cannot open
     NotSTV,     // a zip that is not (a part of) a supported ST-V set
     Incomplete, // a supported set with files missing or failing their CRC-32; game and missing are set
     Known,      // every ROM of one supported game is present; game is set

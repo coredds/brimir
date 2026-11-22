@@ -166,73 +166,82 @@ bool ZipReader::HasEntry(const std::string &name) const {
 }
 
 bool ZipReader::ReadEntry(const std::string &name, std::vector<uint8> &out) {
+    std::string error;
+    return ReadEntry(name, out, error);
+}
+
+bool ZipReader::ReadEntry(const std::string &name, std::vector<uint8> &out, std::string &error) {
     out.clear();
+    error.clear();
+    const auto fail = [&](const char *reason) {
+        out.clear();
+        error = reason;
+        return false;
+    };
+
     auto it = m_entries.find(LookupKey(name));
-    if (it == m_entries.end()) return false;
+    if (it == m_entries.end()) return fail("not in the archive");
 
     const auto &entry = it->second;
-    if (entry.compressionMethod != 0 && entry.compressionMethod != 8) return false;
-    if (entry.flags & kFlagEncrypted) return false;
-    if (entry.uncompressedSize > kMaxEntrySize) return false;
+    if (entry.compressionMethod != 0 && entry.compressionMethod != 8) {
+        return fail("compressed with a method other than store or deflate");
+    }
+    if (entry.flags & kFlagEncrypted) return fail("encrypted");
+    if (entry.uncompressedSize > kMaxEntrySize) return fail("larger than 256 MiB");
 
     // The central directory gives the sizes; the local header is only read to skip its name and extra fields
     // (which may differ from the central ones) and reach the data.
     uint8 local[kLocalHeaderSize];
     if (static_cast<std::streamoff>(entry.localHeaderOffset) + static_cast<std::streamoff>(kLocalHeaderSize) > m_fileSize) {
-        return false;
+        return fail("its local header is past the end of the archive");
     }
     m_file.clear();
     m_file.seekg(entry.localHeaderOffset);
     m_file.read(reinterpret_cast<char *>(local), kLocalHeaderSize);
     if (m_file.gcount() != static_cast<std::streamsize>(kLocalHeaderSize) || ReadU32LE(local) != kLocalFileHeaderSig) {
-        return false;
+        return fail("its local header is damaged");
     }
     const std::streamoff dataOffset = static_cast<std::streamoff>(entry.localHeaderOffset) + kLocalHeaderSize +
                                       ReadU16LE(local + 26) + ReadU16LE(local + 28);
 
     // An entry whose data runs past the end of the file is cut off
     if (dataOffset + static_cast<std::streamoff>(entry.compressedSize) > m_fileSize) {
-        return false;
+        return fail("its data runs past the end of the archive (truncated)");
     }
 
     m_file.seekg(dataOffset);
 
     if (entry.compressionMethod == 0) {
-        if (entry.compressedSize != entry.uncompressedSize) return false;
+        if (entry.compressedSize != entry.uncompressedSize) return fail("its stored sizes disagree");
         out.resize(entry.compressedSize);
         m_file.read(reinterpret_cast<char *>(out.data()), entry.compressedSize);
-        if (m_file.gcount() != static_cast<std::streamsize>(entry.compressedSize)) {
-            out.clear();
-            return false;
+        if (m_file.gcount() != static_cast<std::streamsize>(entry.compressedSize)) return fail("its data cannot be read");
+    } else {
+        std::vector<uint8> compressed(entry.compressedSize);
+        m_file.read(reinterpret_cast<char *>(compressed.data()), entry.compressedSize);
+        if (m_file.gcount() != static_cast<std::streamsize>(entry.compressedSize)) return fail("its data cannot be read");
+
+        if (entry.uncompressedSize != 0) {
+            out.resize(entry.uncompressedSize);
+
+            z_stream strm = {};
+            strm.next_in = compressed.data();
+            strm.avail_in = entry.compressedSize;
+            strm.next_out = out.data();
+            strm.avail_out = entry.uncompressedSize;
+
+            if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) return fail("zlib could not start");
+            const int ret = inflate(&strm, Z_FINISH);
+            const uLong produced = strm.total_out;
+            inflateEnd(&strm);
+            if (ret != Z_STREAM_END || produced != entry.uncompressedSize) return fail("its compressed data is damaged");
         }
-        return true;
     }
 
-    std::vector<uint8> compressed(entry.compressedSize);
-    m_file.read(reinterpret_cast<char *>(compressed.data()), entry.compressedSize);
-    if (m_file.gcount() != static_cast<std::streamsize>(entry.compressedSize)) return false;
-
-    if (entry.uncompressedSize == 0) return true;
-
-    out.resize(entry.uncompressedSize);
-
-    z_stream strm = {};
-    strm.next_in = compressed.data();
-    strm.avail_in = entry.compressedSize;
-    strm.next_out = out.data();
-    strm.avail_out = entry.uncompressedSize;
-
-    if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) {
-        out.clear();
-        return false;
-    }
-    const int ret = inflate(&strm, Z_FINISH);
-    const uLong produced = strm.total_out;
-    inflateEnd(&strm);
-    if (ret != Z_STREAM_END || produced != entry.uncompressedSize) {
-        out.clear();
-        return false;
-    }
+    // The data must be what the archive says it is: a damaged entry can still decompress to the right size
+    const uint32_t crc =
+        static_cast<uint32_t>(crc32(0, out.empty() ? Z_NULL : out.data(), static_cast<uInt>(out.size())));
+    if (crc != entry.crc32) return fail("its data does not match its CRC-32 (the archive is damaged)");
     return true;
 }
 
