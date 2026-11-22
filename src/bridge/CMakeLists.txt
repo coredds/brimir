@@ -9,6 +9,7 @@ add_library(brimir_bridge OBJECT
     ram_view.cpp
     savestate_codec.cpp
     stv/stv_315_5881.cpp
+    stv/stv_bios.cpp
     stv/stv_cartridge.cpp
     stv/stv_detect.cpp
     stv/stv_game_db.cpp
