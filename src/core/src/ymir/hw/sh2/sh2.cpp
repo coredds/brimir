@@ -2328,6 +2328,12 @@ FORCE_INLINE uint64 SH2::InterpretNext() { // Brimir: forced into the Advance lo
             if (INTC.ICR.VECMD) {
                 m_cbAcknowledgeExternalInterrupt();
             }
+            if (m_irlHoldLine) [[unlikely]] {
+                // Brimir: ST-V, the line drops once the interrupt is taken (MAME's HOLD_LINE, see SetIRLHoldLine)
+                INTC.SetLevel(InterruptSource::IRL, 0);
+                INTC.SetVector(InterruptSource::IRL, 0);
+                LowerInterrupt(InterruptSource::IRL);
+            }
             break;
         case InterruptSource::NMI:
             INTC.NMI = false;

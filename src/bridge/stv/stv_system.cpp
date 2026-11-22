@@ -103,6 +103,11 @@ bool STVSystem::Attach(ymir::Saturn &saturn, const GameInfo &game, std::array<ui
             m_saturn->SCSP.SetCPUEnabled((data & 0x10) == 0);
         });
 
+    // MAME's ST-V driver pulses the slave SH-2's HBlank-IN and VBlank-IN interrupts (HOLD_LINE in
+    // saturn_state::saturn_slave_scanline): taken once each. Held as levels, Die Hard Arcade's slave re-entered its handlers
+    // thousands of times a frame, fell behind the master's job queue and the attract mode stopped at the FBI screen.
+    saturn.slaveSH2.SetIRLHoldLine(true);
+
     saturn.Reset(true);
     saturn.SMPC.SetAreaCode(areaCode);
     ResyncTime();
@@ -117,6 +122,7 @@ void STVSystem::Detach() {
 
     saturn.SMPC.SetSTVPDRHandlers({}, {}, {}, {});
     saturn.SMPC.SetSTVMode(false);
+    saturn.slaveSH2.SetIRLHoldLine(false);
     saturn.RemoveCartridge();
     RestoreSaturnIOGAPage(saturn.mainBus);
     saturn.SMPC.SetAreaCode(m_prevAreaCode);

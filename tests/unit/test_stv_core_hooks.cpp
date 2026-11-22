@@ -691,6 +691,39 @@ TEST_CASE("stv hooks: SNDON and SNDOFF drive the 68K on a Saturn but not in ST-V
     CHECK_FALSE(m68kEnabled(*saturn));
 }
 
+TEST_CASE("stv hooks: a hold-line IRL is taken once, a Saturn IRL until it is lowered", "[stv][sh2]") {
+    // The slave runs `bra $` in high work RAM with every interrupt level open; its level-2 handler (vector 0x41)
+    // counts in R14 and returns. The IRL is raised once and never lowered.
+    constexpr uint32 kVBR = 0x0600'0000;
+    constexpr uint32 kLoop = 0x0600'4000;
+    constexpr uint32 kHandler = 0x0600'5000;
+    const auto run = [&](bool holdLine) {
+        auto saturn = std::make_unique<Saturn>();
+        saturn->mainBus.Write<uint16>(kLoop + 0, 0xAFFE);     // bra $
+        saturn->mainBus.Write<uint16>(kLoop + 2, 0x0009);     // nop
+        saturn->mainBus.Write<uint16>(kLoop + 0x100, 0xAFFE); // the master's loop
+        saturn->mainBus.Write<uint16>(kLoop + 0x102, 0x0009);
+        saturn->mainBus.Write<uint16>(kHandler + 0, 0x7E01); // add #1, r14
+        saturn->mainBus.Write<uint16>(kHandler + 2, 0x002B); // rte
+        saturn->mainBus.Write<uint16>(kHandler + 4, 0x0009); // nop
+        saturn->mainBus.Write<uint32>(kVBR + 0x41 * 4, kHandler);
+        saturn->masterSH2.GetProbe().PC() = kLoop + 0x100;
+        saturn->slaveSH2Enabled = true;
+        auto &slave = saturn->slaveSH2.GetProbe();
+        slave.PC() = kLoop;
+        slave.VBR() = kVBR;
+        slave.SR().ILevel = 0;
+        slave.R(14) = 0;
+        saturn->slaveSH2.SetIRLHoldLine(holdLine);
+        saturn->slaveSH2.CbExtIntr(2, 0x41);
+        RunFor(*saturn, 400);
+        return slave.R(14);
+    };
+
+    CHECK(run(true) == 1);
+    CHECK(run(false) > 5);
+}
+
 TEST_CASE("stv hooks: a clock change keeps the sound RAM in ST-V mode and clears it on a Saturn", "[stv][smpc]") {
     // The ST-V BIOS leaves the coin inputs at sound RAM 0x4F1 for the game across its CKCHG320 (bakubaku reads them
     // at 0x060024B0); MAME's clock change resets the SCSP device but leaves the sound RAM alone.

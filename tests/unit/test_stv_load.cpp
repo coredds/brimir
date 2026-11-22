@@ -407,6 +407,8 @@ TEST_CASE("stv load: detaching restores the Saturn's bus page, SMPC and cartridg
     ymir::Saturn &saturn = board.saturn;
     REQUIRE(saturn.SMPC.IsSTVMode());
     REQUIRE(saturn.SMPC.GetAreaCode() == 0xC);
+    CHECK(saturn.slaveSH2.IsIRLHoldLine());
+    CHECK_FALSE(saturn.masterSH2.IsIRLHoldLine());
     // the board's session changed the settings
     ymir::smpc::PersistentSMPCData during;
     saturn.SMPC.SavePersistentData(during);
@@ -414,6 +416,7 @@ TEST_CASE("stv load: detaching restores the Saturn's bus page, SMPC and cartridg
     board.system.Detach();
     CHECK_FALSE(board.system.IsAttached());
     CHECK_FALSE(saturn.SMPC.IsSTVMode());
+    CHECK_FALSE(saturn.slaveSH2.IsIRLHoldLine());
     CHECK(saturn.SMPC.GetAreaCode() == 0x4);
     ymir::smpc::PersistentSMPCData after;
     saturn.SMPC.SavePersistentData(after);
@@ -613,6 +616,7 @@ TEST_CASE("stv load: a Saturn session after ST-V content starts as a fresh core 
     reused.UnloadGame();
     CHECK_FALSE(reused.IsSTVLoaded());
     CHECK_FALSE(reused.GetSaturn()->SMPC.IsSTVMode());
+    CHECK_FALSE(reused.GetSaturn()->slaveSH2.IsIRLHoldLine());
     startSaturn(reused);
 
     CoreWrapper fresh;

@@ -393,6 +393,17 @@ public:
 
     // --- Misc
 
+    // Brimir: ST-V. With hold-line IRL the external interrupt line drops when the CPU takes the interrupt, as MAME's
+    // HOLD_LINE does; otherwise (Saturn, upstream) the level stays until the device lowers it. MAME's ST-V driver gives
+    // the slave SH-2 its HBlank-IN and VBlank-IN interrupts this way (saturn_state::saturn_slave_scanline). Not part of
+    // any save state and not touched by Reset: the bridge sets it on the slave while an ST-V game is loaded.
+    void SetIRLHoldLine(bool holdLine) {
+        m_irlHoldLine = holdLine;
+    }
+    bool IsIRLHoldLine() const {
+        return m_irlHoldLine;
+    }
+
     // Suspends (disables) the CPU in debug mode.
     void SetCPUSuspended(bool suspend) {
         m_debugSuspend = suspend;
@@ -1160,6 +1171,7 @@ private:
     std::map<uint32, debug::WatchpointFlags> m_watchpointSet;
 
     bool m_debugSuspend = false; // Disables CPU while in debug mode
+    bool m_irlHoldLine = false;  // Brimir: ST-V, see SetIRLHoldLine
 
     bool CheckBreakpoint();
     bool CheckWatchpoints(const DecodedMemAccesses &mem);
