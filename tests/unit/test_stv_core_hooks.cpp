@@ -611,15 +611,18 @@ TEST_CASE("stv hooks: ST-V mode without handlers keeps the Saturn ports", "[stv]
     CHECK(saturn->mainBus.Read<uint8>(kPDR2) == 0x7C);
 }
 
-TEST_CASE("stv hooks: INTBACK OREG0 bit 7 is set in ST-V mode whatever STE says", "[stv][smpc]") {
+TEST_CASE("stv hooks: INTBACK OREG0 bit 7 follows SETSMEM in ST-V mode as on a Saturn", "[stv][smpc]") {
+    // MAME's smpc_hle_device::resolve_intback: OREG0 bit 7 = SMEM[4] bit 7, 0 on a first boot, 0xFF after SETSMEM
     auto saturn = std::make_unique<Saturn>();
     CHECK(IntbackOREG0(*saturn) == 0x40); // STE false: the Saturn asks for the setup screen
 
     saturn->SMPC.SetSTVMode(true);
+    CHECK(IntbackOREG0(*saturn) == 0x40);
+    Command(*saturn, {0x01, 0x02, 0x03, 0x04}, 0x17); // SETSMEM
     CHECK(IntbackOREG0(*saturn) == 0xC0);
 
     saturn->SMPC.SetSTVMode(false);
-    CHECK(IntbackOREG0(*saturn) == 0x40);
+    CHECK(IntbackOREG0(*saturn) == 0xC0);
 }
 
 TEST_CASE("stv hooks: ST-V mode survives a reset and is not part of any save state", "[stv][smpc]") {

@@ -900,8 +900,7 @@ void SMPC::WriteINTBACKStatusReport() {
     SR.P1MDn = 0b11;              // unused, but hardware returns 11
     SR.P2MDn = 0b11;              // unused, but hardware returns 11
 
-    // Brimir: in ST-V mode the status report always says the settings are valid (OREG0 bit 7)
-    OREG[0] = ((m_STE || m_stvMode) << 7) | (m_resetDisable << 6);
+    OREG[0] = (m_STE << 7) | (m_resetDisable << 6);
 
     if (m_rtc.IsVirtualMode()) {
         m_rtc.UpdateSysClock(m_scheduler.CurrentCount());
