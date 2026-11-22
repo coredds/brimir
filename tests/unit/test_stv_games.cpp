@@ -118,23 +118,25 @@ public:
     uint64_t VideoHash() { return test::VideoHash(m_core); }
 
     // True when every pixel has the same colour (the black frames between scenes, in the attract mode and in the game)
-    bool VideoUniform() {
+    bool VideoUniform() { return VideoBackgroundShare() == 1.0; }
+
+    // The share of the pixels that have the colour of the top-left one (1.0 when the frame is uniform)
+    double VideoBackgroundShare() {
         const auto *pixels = static_cast<const uint32_t *>(m_core.GetFramebuffer());
         const unsigned width = m_core.GetFramebufferWidth();
         const unsigned height = m_core.GetFramebufferHeight();
         const unsigned pitch = m_core.GetFramebufferPitch() / 4;
         if (pixels == nullptr || width == 0 || height == 0) {
-            return true;
+            return 1.0;
         }
         const uint32_t first = pixels[0] & 0xFFFFFF;
+        size_t same = 0;
         for (unsigned y = 0; y < height; y++) {
             for (unsigned x = 0; x < width; x++) {
-                if ((pixels[static_cast<size_t>(y) * pitch + x] & 0xFFFFFF) != first) {
-                    return false;
-                }
+                same += (pixels[static_cast<size_t>(y) * pitch + x] & 0xFFFFFF) == first ? 1 : 0;
             }
         }
-        return true;
+        return static_cast<double>(same) / (static_cast<double>(width) * height);
     }
 
     void Save(const char *name) {
@@ -686,6 +688,126 @@ TEST_CASE("stv: cotton2 boots, takes coin and start, and plays for a minute", "[
 
     // A minute of play: both players fly about firing, now and then a magic or a bomb. Shooters are short-lived: a
     // credit is kept in hand and both players press Start every 400 frames, so whoever is shot down continues.
+    const std::vector<uint16_t> script = {
+        kRight | kButton1, kButton1, kUp | kButton1,    kButton1, kDown | kButton1, 0,
+        kLeft | kButton1,  kButton2, kUp,               kButton1, kDown | kButton1, kButton3,
+        kRight,            kButton1, kUp | kButton1,    0,        kDown | kButton1, kButton1,
+        kLeft | kButton1,  kButton2, kRight | kButton1, kButton1, kUp,              kDown | kButton1};
+    session.ResetAudioPeak();
+    std::set<uint64_t> play;
+    int coins = 0;
+    bool coining = false;
+    const int playEnd = session.Frame() + 3600;
+    session.RunTo(playEnd, [&] {
+        const int frame = session.Frame();
+        uint16_t p1 = ScriptedInput(frame, 0, script);
+        uint16_t p2 = ScriptedInput(frame, 1, script);
+        if (frame % 400 == 0 && session.Credits() == 0) {
+            coining = true;
+            ++coins;
+        } else if (frame % 400 == 5) {
+            coining = false;
+        }
+        if (coining) {
+            p1 = kCoin;
+        } else if (frame % 400 >= 20 && frame % 400 < 25) {
+            p1 = kStart;
+            p2 = kStart;
+        }
+        session.Press(0, p1);
+        session.Press(1, p2);
+        notAttract();
+        play.insert(session.VideoHash());
+        if (frame == 4500) {
+            session.Save("brimir_frame4500_play.png");
+        } else if (frame == 6000) {
+            session.Save("brimir_frame6000_play.png");
+        }
+    });
+    session.Save("brimir_frame7600_play.png");
+    CHECK(attractLike == 0);
+    INFO("coins for continues: " << coins);
+    INFO("distinct play frames: " << play.size());
+    CHECK(play.size() >= 30);
+    INFO("audio peak over the minute: " << session.AudioPeak());
+    CHECK(session.AudioPeak() > 16);
+    CHECK(session.Core().GetLastError().empty());
+}
+
+TEST_CASE("stv: grdforce boots, takes coin and start, and plays for a minute", "[.stv-rom]") {
+    GameSession session("grdforce");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // The BIOS checks the board and shows the warning, then from about frame 1200 the title (the tank under the
+    // GUARDIAN FORCE logo) with CREDIT 0, then from about frame 1900 the PRACTICE-STAGE demo. No phantom credits.
+    // The demo and the game both open on the same PRACTICE-STAGE card (text on black), so the frames that are mostly
+    // one colour are left out.
+    const auto mostlyBlack = [&] { return session.VideoBackgroundShare() > 0.9; };
+    session.RunTo(1300);
+    int creditFrames = 0;
+    std::set<uint64_t> attract;
+    session.RunTo(2400, [&] {
+        creditFrames += session.Credits() != 0 ? 1 : 0;
+        if (!mostlyBlack()) {
+            attract.insert(session.VideoHash());
+        }
+        if (session.Frame() == 1600) {
+            session.Save("brimir_frame1600_title.png");
+        } else if (session.Frame() == 2300) {
+            session.Save("brimir_frame2300_attract.png");
+        }
+    });
+    CHECK(creditFrames == 0);
+    INFO("distinct attract frames: " << attract.size());
+    CHECK(attract.size() >= 30);
+
+    // One coin, held for 5 frames, is one credit
+    session.RunTo(2450);
+    session.Tap(0, kCoin);
+    session.RunTo(2500);
+    CHECK(session.Credits() == 1);
+    session.Save("brimir_frame2500_credit1.png");
+
+    // Start takes the credit and the practice stage begins; Button 1 now and then fires. No frame looks like the
+    // attract mode any more.
+    session.RunTo(2550);
+    session.Tap(0, kStart);
+    int attractLike = 0;
+    const auto notAttract = [&] {
+        attractLike += !mostlyBlack() && attract.count(session.VideoHash()) != 0 ? 1 : 0;
+    };
+    session.RunTo(3300, [&] {
+        notAttract();
+        const int frame = session.Frame();
+        session.Press(0, frame >= 2650 && frame % 60 < 5 ? kButton1 : 0);
+        if (frame == 2800) {
+            session.Save("brimir_frame2800_practice_stage.png");
+        } else if (frame == 3200) {
+            session.Save("brimir_frame3200_play_1p.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // Player 2 joins with a coin of its own
+    session.Tap(1, kCoin);
+    session.RunTo(3330, notAttract);
+    CHECK(session.Credits() == 1);
+    session.Tap(1, kStart);
+    session.RunTo(4000, [&] {
+        notAttract();
+        const int frame = session.Frame();
+        const uint16_t press = frame >= 3400 && frame < 3800 && frame % 60 < 5 ? kButton1 : 0;
+        session.Press(0, press);
+        session.Press(1, press);
+    });
+    CHECK(session.Credits() == 0);
+
+    // A minute of play: both tanks drive about firing, now and then a special weapon. As in cotton2 a credit is kept in
+    // hand and both players press Start every 400 frames, so whoever is shot down continues.
     const std::vector<uint16_t> script = {
         kRight | kButton1, kButton1, kUp | kButton1,    kButton1, kDown | kButton1, 0,
         kLeft | kButton1,  kButton2, kUp,               kButton1, kDown | kButton1, kButton3,
