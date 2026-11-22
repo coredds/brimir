@@ -29,6 +29,26 @@ Saturn BIOS core option's region (`jp_*`, `us_*`, `eu_*`) when the game has that
 BIOS in the system folder fails to load with a message that names the accepted file names. The accepted names are MAME's
 `stvbios` set and the older MAME names of the same dumps (`stv_bios.cpp`).
 
+Within a region the core tries the verified dumps first, then the accepted but unverified ones in MAME's order (Ruling
+R23). "BIOS used by default" in the table above is therefore the file the core picks from the development PC's folder,
+not MAME's default: MAME's default Japan BIOS is its newest dump, `epr-23603.ic8` (`-bios jp`), which was not available
+and was never run here; MAME was run with `-bios jp1` (`epr-20091.ic8`) to match.
+
+- Verified (on the development PC, CRC-32 equal to MAME's): Japan `epr-20091.ic8` (= `20091.bin`), `epr-19730.ic8`
+  (= `epr19730.ic8`), `epr-17951a.ic8` (= `mp17951a.s`); USA `epr-17952a.ic8` (= `mp17952a.s`); Europe `epr-17954a.ic8`
+  (= `mp17954a.s`); Taiwan `epr-17953a.ic8` (= `mp17953a.ic8`). The games were run with `epr-20091.ic8`, Die Hard Arcade
+  with `epr-17952a.ic8`; the others were only identified.
+- Accepted, not verified (no dump to run): `epr-23603.ic8`, `epr-17740a.ic8`, `epr-17740.ic8` (MAME's `jp5`),
+  `epr-17741a.ic8`, `epr-19854.ic8`, `epr-17742a.ic8`. Current MAME master fills the cartridge gaps with 0xFF and says
+  `jp5` needs that, while this core fills them with 0x00 as MAME 0.289 does (see "Cartridge gaps" below), so `epr-17740`
+  may not work.
+
+A `.zip` the reader cannot parse (damaged, truncated, zip64) is refused as unreadable rather than tried as a Saturn disc,
+and every ROM file's data is checked against the CRC-32 in the archive when the cartridge image is built. Load failures of
+zip content are shown on screen through `RETRO_ENVIRONMENT_SET_MESSAGE` as well as logged. The disk control interface
+refuses eject, insert and image changes while an ST-V game runs (image 0 answers with an empty path). File names are
+handled as UTF-8, so non-ASCII zip names and folders work on Windows.
+
 Controls follow MAME's input ports: directions, buttons 1-3 on every game, buttons 4-6 on Golden Axe: The Duel, and
 button 4 on Radiant Silvergun (MAME gives it the plain `stv` ports; the game itself reads only buttons 1-3, as its input
 test shows). Coin, Start per player; Service and Test on port 1 only.
@@ -53,8 +73,11 @@ test shows). Coin, Start per player; Service and Test on port 1 only.
   SCU's HBlank-OUT lower cancels an HBlank-IN interrupt the slave has not taken yet (MAME's `HOLD_LINE` keeps it
   pending). Details in `src/core/BRIMIR_FORK.md` (the `SetIRLHoldLine` row). No game shows an effect.
 - **Boot length.** Brimir's BIOS check ends about 30 frames before MAME's (about frame 1130-1165 against 1191).
-- **Cartridge gaps** are filled with 0x00, as MAME 0.289 (`ROMREGION_ERASE00`); later MAME versions went back to 0xFF for
-  some sets. No game here reads a gap.
+- **Cartridge gaps** are filled with 0x00, as MAME 0.289 (`ROMREGION_ERASE00`); current MAME master fills them with 0xFF
+  and notes that the `jp5` BIOS (`epr-17740.ic8`) needs it. No game here reads a gap with the verified BIOS dumps.
+- **The IOGA's page.** Only the IOGA registers answer in the 64 KiB page at 0x00400000; the rest of the page reads 0 and
+  ignores writes, as MAME's unmapped space. (The registers themselves are decoded over 0x00400000-0x0040007F; MAME maps
+  0x00400000-0x0040003F.)
 
 Not supported: ST-V games outside the eight above (the game database holds the ROM file lists of these eight only).
 

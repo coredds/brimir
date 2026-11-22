@@ -320,20 +320,23 @@ supported:
 recognised by its name and its file list (the extension alone is never enough), and `.bin`/`.rom` files are never taken
 as ST-V. Use MAME's non-merged sets, or the split sets with the parent's files in the same zip; a set with files missing
 (a clone without its parent's files, say) is refused with a message that names the set and the missing files. File names
-inside the zip may be in any case or inside a folder.
+inside the zip may be in any case or inside a folder. A zip that cannot be read (damaged, truncated, or zip64) and a ROM
+file whose data does not match its CRC-32 are refused with a message as well; RetroArch shows these messages on screen.
 
 **BIOS.** Put the ST-V BIOS files in RetroArch's `system/` folder (not the Saturn BIOS: an ST-V game needs none). The
 core takes the one for the game's regions: Japan first, then USA, then Europe, or the region of the BIOS Selection option
 when the game has it (so Die Hard Arcade, which has no Japan version, uses the USA BIOS). MAME's file names, with the
 older MAME names of the same dumps also accepted. This is the complete list the core looks for, in the order it tries
-them (file names are matched without regard to case):
+them (file names are matched without regard to case). Within a region the verified dumps come first (dumps whose CRC-32
+was checked against MAME's; the eight games were run with `epr-20091.ic8`, and Die Hard Arcade with `epr-17952a.ic8`),
+then the dumps that are accepted but were never run with this core, so a verified one wins when both are there:
 
-| Region | File names |
-|---|---|
-| Japan | `epr-23603.ic8`, `epr-20091.ic8`, `20091.bin`, `epr-19730.ic8`, `epr19730.ic8`, `epr-17951a.ic8`, `mp17951a.s`, `epr-17740a.ic8`, `epr-17740.ic8` |
-| USA | `epr-17952a.ic8`, `mp17952a.s`, `epr-17741a.ic8` |
-| Europe | `epr-17954a.ic8`, `mp17954a.s` |
-| Taiwan/Asia | `epr-19854.ic8`, `epr-17953a.ic8`, `mp17953a.ic8`, `epr-17742a.ic8` |
+| Region | Verified | Accepted, not verified |
+|---|---|---|
+| Japan | `epr-20091.ic8`, `20091.bin`, `epr-19730.ic8`, `epr19730.ic8`, `epr-17951a.ic8`, `mp17951a.s` | `epr-23603.ic8`, `epr-17740a.ic8`, `epr-17740.ic8` |
+| USA | `epr-17952a.ic8`, `mp17952a.s` | `epr-17741a.ic8` |
+| Europe | `epr-17954a.ic8`, `mp17954a.s` | |
+| Taiwan/Asia | `epr-17953a.ic8`, `mp17953a.ic8` | `epr-19854.ic8`, `epr-17742a.ic8` |
 
 The BIOS files are 512 KiB. If no BIOS for any of the game's regions is there, loading fails and the message lists the
 file names it accepts. BIOS files and ROM sets are copyrighted: they are never part of Brimir.
@@ -675,6 +678,8 @@ Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license a
 ## Credits
 
 Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The hardware layer under `src/core/` is synced from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. The SH-2 files are a Brimir-maintained fork of Ymir's SH-2 with hooks for the SH-2 JIT, plus a read-only page-table accessor for the JIT in `ymir/sys/bus.hpp`; see `src/core/BRIMIR_FORK.md`. Apart from these, Brimir uses the hardware layer unmodified and wraps it in a libretro core, adding performance optimizations and frontend integration. Both projects are licensed under GPL.
+
+The ST-V support follows **[MAME](https://www.mamedev.org/)**, and some of its code is derived from MAME's: the 315-5881 decryption and decompression chip (`src/bridge/stv/stv_315_5881.cpp`/`.hpp`, from `src/mame/sega/315-5881_crypt.cpp`; BSD-3-Clause, copyright Andreas Naive, Olivier Galibert, David Haywood), the 93C46 serial EEPROM (`src/bridge/stv/stv_io.cpp`, from `src/devices/machine/eepromser.cpp`; BSD-3-Clause, copyright Aaron Giles) and the protection register handlers (`src/bridge/stv/stv_cartridge.cpp`, from `src/mame/sega/stv.cpp`; LGPL-2.1-or-later, copyright David Haywood, Angelo Salese, Olivier Galibert, Mariusz Wojcieszek, R. Belmont). The BSD-3-Clause notices are kept in those files' headers. The game database (`stv_game_db.cpp`) transcribes the ROM lists and keys of MAME's `stv.cpp`.
 
 ## Contributing
 
