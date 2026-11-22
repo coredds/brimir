@@ -855,7 +855,7 @@ bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::f
         assert(ok && "a 256 Kbit image always matches the internal backup RAM size");
     }
 
-    const uint8_t areaCode = stv::AreaCodeForBiosRegion(choice->region);
+    const uint8_t areaCode = stv::kSTVAreaCode; // MAME's, not derived from the BIOS region (see stv_system.hpp)
     m_stv = std::make_unique<stv::STVSystem>();
     if (!m_stv->Attach(*m_saturn, game, *bios, cart, areaCode, error)) {
         m_stv.reset();
@@ -873,7 +873,7 @@ bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::f
                              std::to_string(m_stv->Cartridge()->GetROMSize() / (1024 * 1024)) + " MiB)";
     m_stvDescription = std::string("ST-V game ") + game.shortName + " (" + game.title + "), BIOS " +
                        PathToUtf8(choice->path.filename()) + " (" + choice->reason + "), SMPC area code " +
-                       std::to_string(areaCode);
+                       std::to_string(areaCode) + " (as MAME sets it for ST-V, whatever the BIOS region)";
     m_gameLoaded = true;
     return true;
 }

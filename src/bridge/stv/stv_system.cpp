@@ -40,20 +40,6 @@ constexpr uint32_t kGameSettingsOffset = 0xF48;
 
 } // namespace
 
-uint8_t AreaCodeForBiosRegion(Region region) {
-    switch (region) {
-    case Region::Japan: return 0x1;
-    case Region::USA: return 0x4;
-    case Region::Europe: return 0xC;
-    case Region::Taiwan:
-    case Region::Asia: return 0x2;
-    case Region::Korea: return 0x6;
-    case Region::Brazil:
-    case Region::LatinAmerica: return 0x5; // no ST-V BIOS of these regions is ever chosen
-    }
-    return 0x1;
-}
-
 STVSystem::~STVSystem() {
     Detach();
 }

@@ -272,22 +272,32 @@ TEST_CASE("stv load: LoadGame builds the board and UnloadGame takes it down agai
     CHECK(core.IsSTVLoaded());
 }
 
-TEST_CASE("stv load: area codes follow the BIOS region", "[stv]") {
-    CHECK(stv::AreaCodeForBiosRegion(stv::Region::Japan) == 0x1);
-    CHECK(stv::AreaCodeForBiosRegion(stv::Region::USA) == 0x4);
-    CHECK(stv::AreaCodeForBiosRegion(stv::Region::Europe) == 0xC);
-    CHECK(stv::AreaCodeForBiosRegion(stv::Region::Taiwan) == 0x2);
-    CHECK(stv::AreaCodeForBiosRegion(stv::Region::Korea) == 0x6);
+TEST_CASE("stv load: the SMPC area code is MAME's 1 whatever the BIOS region", "[stv]") {
+    // MAME stv_state::stv: set_region_code(1) for every set (init_stv_us's 4 is for the CD games only)
+    CHECK(stv::kSTVAreaCode == 1);
 
-    TempDir dir("brimir_stv_load_usbios");
-    const auto zipPath = dir.path / "diehard.zip";
-    test::WriteTestZip(zipPath, SetEntries(Game("diehard"))); // UET: no Japan BIOS in the folder
-    WriteFile(dir.path / "epr-17952a.ic8", stv::kSTVBiosSize);
-    CoreWrapper core;
-    REQUIRE(core.Initialize());
-    REQUIRE(core.LoadGame(Str(zipPath).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
-    CHECK(core.GetSaturn()->SMPC.GetAreaCode() == 0x4);
-    CHECK(core.GetSTVLoadDescription().find("area code 4") != std::string::npos);
+    struct Case {
+        const char *game;
+        const char *bios;
+        const char *region;
+    };
+    for (const Case &c : {Case{"bakubaku", "epr-20091.ic8", "Japan"}, Case{"diehard", "epr-17952a.ic8", "USA"},
+                          Case{"diehard", "epr-17954a.ic8", "Europe"}}) {
+        INFO(c.game << " on the " << c.region << " BIOS");
+        TempDir dir("brimir_stv_load_area");
+        const auto zipPath = dir.path / (std::string(c.game) + ".zip");
+        test::WriteTestZip(zipPath, SetEntries(Game(c.game)));
+        WriteFile(dir.path / c.bios, stv::kSTVBiosSize); // the only BIOS in the folder
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        core.GetSaturn()->SMPC.SetAreaCode(0x4); // what a Saturn session left
+        REQUIRE(core.LoadGame(Str(zipPath).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
+        CHECK(core.GetSaturn()->SMPC.GetAreaCode() == 1);
+        CHECK(core.GetSTVLoadDescription().find(c.bios) != std::string::npos);
+        CHECK(core.GetSTVLoadDescription().find("area code 1 (as MAME sets it") != std::string::npos);
+        core.UnloadGame();
+        CHECK(core.GetSaturn()->SMPC.GetAreaCode() == 0x4); // restored
+    }
 }
 
 TEST_CASE("stv load: an EEPROM write issued through the SMPC PDR pins completes in emulated time", "[stv]") {

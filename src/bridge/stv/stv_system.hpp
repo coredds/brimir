@@ -29,10 +29,10 @@ namespace brimir::stv {
 
 inline constexpr size_t kSTVBiosSize = 512 * 1024;
 
-// The SMPC area code of the board for a BIOS region (the board's region jumpers, which match its BIOS): the codes the
-// Saturn uses for the same regions. MAME fixes the code at 1 (Japan) for the supported sets whatever the BIOS
-// (stv_state::stv); a US-region init (init_stv_us, CD games only) uses 4.
-uint8_t AreaCodeForBiosRegion(Region region);
+// The SMPC area code of the ST-V board, whatever BIOS region is chosen. It follows MAME: src/mame/sega/stv.cpp,
+// stv_state::stv (machine config) calls m_smpc_hle->set_region_code(1) ("1 - Japan, configured via jumpers"), and only
+// init_stv_us (the CD games, e.g. sfish2) overrides it with 4. All eight supported sets use init_stv or a wrapper of it.
+inline constexpr uint8_t kSTVAreaCode = 1;
 
 class STVSystem {
 public:
