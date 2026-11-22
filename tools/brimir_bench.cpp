@@ -17,8 +17,9 @@
 
 #include <stv/stv_cartridge.hpp>
 #include <stv/stv_game_db.hpp>
-#include <stv/stv_state.hpp>
 #endif
+
+#include <stv/stv_state.hpp>
 
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
