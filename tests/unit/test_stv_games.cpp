@@ -37,6 +37,7 @@ constexpr uint16_t kCoin = Pad(RETRO_DEVICE_ID_JOYPAD_SELECT);
 constexpr uint16_t kStart = Pad(RETRO_DEVICE_ID_JOYPAD_START);
 constexpr uint16_t kButton1 = Pad(RETRO_DEVICE_ID_JOYPAD_B);
 constexpr uint16_t kButton2 = Pad(RETRO_DEVICE_ID_JOYPAD_A);
+constexpr uint16_t kButton3 = Pad(RETRO_DEVICE_ID_JOYPAD_Y);
 constexpr uint16_t kLeft = Pad(RETRO_DEVICE_ID_JOYPAD_LEFT);
 constexpr uint16_t kRight = Pad(RETRO_DEVICE_ID_JOYPAD_RIGHT);
 constexpr uint16_t kDown = Pad(RETRO_DEVICE_ID_JOYPAD_DOWN);
@@ -335,6 +336,91 @@ TEST_CASE("stv: puyosun boots, takes coin and start, and plays for a minute", "[
         }
     });
     session.Save("brimir_frame9400_play.png");
+    CHECK(attractLike == 0);
+    INFO("distinct play frames: " << play.size());
+    CHECK(play.size() >= 30);
+    INFO("audio peak over the minute: " << session.AudioPeak());
+    CHECK(session.AudioPeak() > 16);
+    CHECK(session.Core().GetLastError().empty());
+}
+
+TEST_CASE("stv: diehard boots on the USA BIOS, takes coin and start, and plays for a minute", "[.stv-rom]") {
+    GameSession session("diehard");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // Die Hard Arcade has no Japan region: with every BIOS in the folder the load picks the USA one and says so
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("BIOS epr-17952a.ic8 (USA BIOS") != std::string::npos);
+    CHECK(session.Core().GetSTVLoadDescription().find("SMPC area code 1") != std::string::npos);
+
+    // The patents and the FBI screen until about frame 850, then the intro over the city at night with INSERT
+    // COIN(S) / CREDIT 0. No phantom credits.
+    session.RunTo(900);
+    int creditFrames = 0;
+    std::set<uint64_t> attract;
+    session.RunTo(1800, [&] {
+        creditFrames += session.Credits() != 0 ? 1 : 0;
+        if (!session.VideoUniform()) {
+            attract.insert(session.VideoHash());
+        }
+        if (session.Frame() == 1600) {
+            session.Save("brimir_frame1600_attract.png");
+        }
+    });
+    CHECK(creditFrames == 0);
+    INFO("distinct attract frames: " << attract.size());
+    CHECK(attract.size() >= 30);
+
+    // One coin, held for 5 frames, is one credit
+    session.RunTo(1850);
+    session.Tap(0, kCoin);
+    session.RunTo(1900);
+    CHECK(session.Credits() == 1);
+    session.Save("brimir_frame1900_credit1.png");
+
+    // Start takes the credit and starts the game's intro (the helicopter lands on the roof): no frame looks like the
+    // attract mode any more
+    session.RunTo(1950);
+    session.Tap(0, kStart);
+    int attractLike = 0;
+    const auto notAttract = [&] {
+        attractLike += !session.VideoUniform() && attract.count(session.VideoHash()) != 0 ? 1 : 0;
+    };
+    session.RunTo(2050, notAttract);
+    CHECK(session.Credits() == 0);
+
+    // Player 2 joins with a coin of its own
+    session.RunTo(2600, notAttract);
+    session.Save("brimir_frame2600_intro.png");
+    session.Tap(1, kCoin);
+    session.RunTo(2630, notAttract);
+    CHECK(session.Credits() == 1);
+    session.Tap(1, kStart);
+    session.RunTo(2700, notAttract);
+    CHECK(session.Credits() == 0);
+
+    // A minute of play: both players walk, punch, kick and jump
+    const std::vector<uint16_t> script = {kRight, kButton1, kRight, kButton2, kRight, 0,        kButton1, kButton1,
+                                          kLeft,  kButton3, kUp,    kButton1, kDown,  kButton2, kRight,   kRight,
+                                          0,      kButton2, kRight, kButton3, kLeft,  kButton1, kUp,      kDown};
+    session.RunTo(3000, notAttract);
+    session.ResetAudioPeak();
+    std::set<uint64_t> play;
+    const int playEnd = session.Frame() + 3600;
+    session.RunTo(playEnd, [&] {
+        const int frame = session.Frame();
+        session.Press(0, ScriptedInput(frame, 0, script));
+        session.Press(1, ScriptedInput(frame, 1, script));
+        notAttract();
+        play.insert(session.VideoHash());
+        if (frame == 3600) {
+            session.Save("brimir_frame3600_play.png");
+        } else if (frame == 5000) {
+            session.Save("brimir_frame5000_play.png");
+        }
+    });
+    session.Save("brimir_frame6600_play.png");
     CHECK(attractLike == 0);
     INFO("distinct play frames: " << play.size());
     CHECK(play.size() >= 30);
