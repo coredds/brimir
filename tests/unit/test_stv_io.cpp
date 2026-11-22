@@ -171,6 +171,64 @@ TEST_CASE("ST-V EEPROM: WRITE while locked leaves the cell unchanged", "[stv]") 
     CHECK(bus.ReadWord(5) == 0xBEEF);
 }
 
+TEST_CASE("ST-V EEPROM: GetEEPROM shows what the game wrote", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+
+    const std::array<uint8_t, 128> before = board.GetEEPROM();
+    CHECK(before[0] == 'S');
+    CHECK(before[1] == 'E');
+
+    bus.EnableWrites();
+    bus.WriteWord(10, 0xBEEF);
+
+    const std::array<uint8_t, 128> &after = board.GetEEPROM();
+    CHECK(after[20] == 0xBE); // cell 10, high byte first
+    CHECK(after[21] == 0xEF);
+    for (size_t i = 0; i < after.size(); ++i) {
+        if (i != 20 && i != 21) {
+            INFO("byte " << i);
+            CHECK(after[i] == before[i]);
+        }
+    }
+}
+
+TEST_CASE("ST-V EEPROM: LoadEEPROM makes a saved image the cells", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+    bus.EnableWrites();
+    bus.WriteWord(3, 0x1111);
+
+    std::array<uint8_t, 128> image{};
+    for (size_t i = 0; i < image.size(); ++i) {
+        image[i] = static_cast<uint8_t>(i * 5 + 3);
+    }
+    board.LoadEEPROM(image);
+
+    CHECK(board.GetEEPROM() == image);
+    for (unsigned cell = 0; cell < 64; ++cell) {
+        INFO("cell " << cell);
+        CHECK(bus.ReadWord(cell) == static_cast<uint16_t>((image[cell * 2] << 8) | image[cell * 2 + 1]));
+    }
+
+    // Nothing is re-derived from the header, and the chip is back in its write-locked reset state
+    bus.WriteWord(3, 0x2222);
+    CHECK(board.GetEEPROM() == image);
+    bus.EnableWrites();
+    bus.WriteWord(3, 0x2222);
+    CHECK(board.GetEEPROM()[6] == 0x22);
+    CHECK(board.GetEEPROM()[7] == 0x22);
+
+    // What GetEEPROM returns loads back into another board
+    STVIOBoard other;
+    other.Reset(true);
+    other.LoadEEPROM(board.GetEEPROM());
+    EepromBus otherBus(other);
+    CHECK(otherBus.ReadWord(3) == 0x2222);
+    CHECK(other.GetEEPROM() == board.GetEEPROM());
+}
 TEST_CASE("ST-V EEPROM: a locked chip does not erase either", "[stv]") {
     STVIOBoard board;
     InitBoard(board);
@@ -423,15 +481,22 @@ TEST_CASE("ST-V 315-5881: SaveState and LoadState continue a compressed stream",
 }
 
 TEST_CASE("ST-V 315-5881: damaged compressed data does not run past the line buffers", "[stv]") {
-    // Noise decodes to arbitrary block headers and runs that overshoot the line: the reads must terminate and stay
-    // inside the chip's buffers (a stack or sanitizer fault otherwise).
+    // Noise decodes to arbitrary block headers (compressed and not, odd widths) and runs that overshoot the line. The
+    // reads must terminate and the buffer positions must stay inside the buffers they index.
     const auto rom = NoiseROM(1u << 20);
     for (uint32_t key = 1; key <= 64; ++key) {
         ymir::cart::STV3155881 chip;
         ConfigureChip(chip, rom, key * 0x01010101u);
-        ReadWords(chip, 3000);
+        for (unsigned word = 0; word < 3000; ++word) {
+            ymir::cart::STV3155881::State state{};
+            chip.SaveState(state);
+            if (state.bufferPos > 2 || state.lineBufferSize > 512 || state.lineBufferPos > 512) {
+                FAIL("key " << key << " word " << word << ": bufferPos " << state.bufferPos << " lineBufferPos "
+                            << state.lineBufferPos << " lineBufferSize " << state.lineBufferSize);
+            }
+            chip.ReadDecryptedWord();
+        }
     }
-    SUCCEED();
 }
 TEST_CASE("ST-V cartridge: protection state continues the RSG counter", "[stv]") {
     const auto rom = NoiseROM(1u << 16);

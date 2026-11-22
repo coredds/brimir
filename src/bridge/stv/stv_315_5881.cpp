@@ -485,12 +485,13 @@ uint16_t STV3155881::ReadDecryptedWord() {
         CryptoStart();
     }
 
+    // The next block's header decides how it is read; a block that is not compressed must not go through LineFill.
+    if ((m_decHeader & kFlagCompressed) != 0 && m_lineBufferPos >= m_lineBufferSize && m_doneCompression) {
+        CryptoStart();
+    }
+
     if ((m_decHeader & kFlagCompressed) != 0) {
         if (m_lineBufferPos >= m_lineBufferSize) {
-            if (m_doneCompression) {
-                CryptoStart();
-            }
-
             LineFill();
         }
 

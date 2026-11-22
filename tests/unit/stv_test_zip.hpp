@@ -21,6 +21,7 @@ struct TestZipEntry {
     std::vector<uint8_t> data; // uncompressed bytes
     bool deflate = false;      // false = stored (method 0), true = raw deflate (method 8)
     std::optional<uint32_t> crcOverride; // written as the CRC-32 field instead of the computed one
+    bool dataDescriptor = false; // bit 3: the local header has zero CRC/sizes, a descriptor follows the data
 };
 
 namespace detail {
@@ -57,7 +58,8 @@ inline std::vector<uint8_t> RawDeflate(const std::vector<uint8_t> &in) {
 } // namespace detail
 
 // Serializes a ZIP archive: local headers with data, then the central directory and end record.
-inline std::vector<uint8_t> BuildTestZip(const std::vector<TestZipEntry> &entries) {
+// comment is the archive comment after the end record.
+inline std::vector<uint8_t> BuildTestZip(const std::vector<TestZipEntry> &entries, const std::string &comment = {}) {
     std::vector<uint8_t> out;
     std::vector<uint8_t> central;
 
@@ -69,24 +71,32 @@ inline std::vector<uint8_t> BuildTestZip(const std::vector<TestZipEntry> &entrie
         const uint32_t localOffset = static_cast<uint32_t>(out.size());
         const uint16_t nameLen = static_cast<uint16_t>(entry.name.size());
 
+        const uint16_t flags = entry.dataDescriptor ? 0x0008 : 0;
+
         detail::PutU32(out, 0x04034b50);
         detail::PutU16(out, 20);     // version needed
-        detail::PutU16(out, 0);      // flags
+        detail::PutU16(out, flags);
         detail::PutU16(out, method);
         detail::PutU16(out, 0);      // mod time
         detail::PutU16(out, 0x21);   // mod date (1980-01-01)
-        detail::PutU32(out, crc);
-        detail::PutU32(out, static_cast<uint32_t>(payload.size()));
-        detail::PutU32(out, static_cast<uint32_t>(entry.data.size()));
+        detail::PutU32(out, entry.dataDescriptor ? 0 : crc);
+        detail::PutU32(out, entry.dataDescriptor ? 0 : static_cast<uint32_t>(payload.size()));
+        detail::PutU32(out, entry.dataDescriptor ? 0 : static_cast<uint32_t>(entry.data.size()));
         detail::PutU16(out, nameLen);
         detail::PutU16(out, 0);      // extra length
         out.insert(out.end(), entry.name.begin(), entry.name.end());
         out.insert(out.end(), payload.begin(), payload.end());
+        if (entry.dataDescriptor) {
+            detail::PutU32(out, 0x08074b50);
+            detail::PutU32(out, crc);
+            detail::PutU32(out, static_cast<uint32_t>(payload.size()));
+            detail::PutU32(out, static_cast<uint32_t>(entry.data.size()));
+        }
 
         detail::PutU32(central, 0x02014b50);
         detail::PutU16(central, 20); // version made by
         detail::PutU16(central, 20); // version needed
-        detail::PutU16(central, 0);  // flags
+        detail::PutU16(central, flags);
         detail::PutU16(central, method);
         detail::PutU16(central, 0);
         detail::PutU16(central, 0x21);
@@ -113,12 +123,14 @@ inline std::vector<uint8_t> BuildTestZip(const std::vector<TestZipEntry> &entrie
     detail::PutU16(out, static_cast<uint16_t>(entries.size()));
     detail::PutU32(out, static_cast<uint32_t>(central.size()));
     detail::PutU32(out, centralOffset);
-    detail::PutU16(out, 0);
+    detail::PutU16(out, static_cast<uint16_t>(comment.size()));
+    out.insert(out.end(), comment.begin(), comment.end());
     return out;
 }
 
-inline void WriteTestZip(const std::filesystem::path &path, const std::vector<TestZipEntry> &entries) {
-    const std::vector<uint8_t> bytes = BuildTestZip(entries);
+inline void WriteTestZip(const std::filesystem::path &path, const std::vector<TestZipEntry> &entries,
+                         const std::string &comment = {}) {
+    const std::vector<uint8_t> bytes = BuildTestZip(entries, comment);
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     file.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!file) {

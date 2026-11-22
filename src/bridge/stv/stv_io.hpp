@@ -23,8 +23,7 @@ struct STVIOBoardState {
     uint16 playerButtons[2];
     uint8 dataOut[8];
     uint8 dataIn[8];
-    uint8 eeprom[128];        // image set by InitEEPROM
-    uint8 eepromData[128];    // live cell contents of the 93C46
+    uint8 eepromData[128];    // cell contents of the 93C46, as the game has written them
     uint8 dataDir;
     uint8 stvModeActive;
     uint8 playerStart[2];
@@ -59,10 +58,15 @@ public:
 
     void UpdateInputs();
 
-    std::array<uint8, 128> &GetEEPROM() { return m_eeprom; }
-    const std::array<uint8, 128> &GetEEPROM() const { return m_eeprom; }
+    // The 93C46's cells as they are now, including what the game has written through the serial protocol. Words are
+    // big-endian: cell n is bytes 2n (high) and 2n+1 (low).
+    const std::array<uint8, 128> &GetEEPROM() const { return m_serialEEPROM.data; }
 
+    // Builds a fresh image from the ROM header and the game settings and makes it the cells.
     void InitEEPROM(const uint8 *romHeader, const uint8 *gameSettings, uint8 cabType);
+    // Makes a saved image (as returned by GetEEPROM) the cells; nothing is derived from the header. The chip goes back
+    // to its reset state (write-locked, idle).
+    void LoadEEPROM(const std::array<uint8, 128> &cells);
 
     uint8 ReadIOGAByte(uint32 address) {
         return ReadIOGA<uint8, false>(address);
@@ -105,8 +109,6 @@ private:
     bool   m_playerStart[2] = {};
     bool   m_service = false;
     bool   m_test = false;
-
-    std::array<uint8, 128> m_eeprom{};
 
     // 93C46 16-bit serial EEPROM state machine driven by SMPC PDR1/PDR2.
     struct SerialEEPROM {
