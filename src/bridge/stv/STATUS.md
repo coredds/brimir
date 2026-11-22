@@ -64,9 +64,46 @@ Not supported: ST-V games outside the eight above (the game database holds the R
   `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The EEPROM starts blank (0xFF), as MAME's
   (none of these sets has a default image); the BIOS sets it up on first boot.
 - Save states carry an ST-V block (cabinet I/O and EEPROM state, protection chip state, scheduler count) after the
-  Saturn payload, so run-ahead, rewind and netplay work. The block is not versioned for compatibility yet: the format is
-  unreleased. A state from another game or another BIOS is refused.
+  Saturn payload. It is meant to make run-ahead, rewind and netplay exact; run-ahead and save/load were checked in
+  RetroArch on Baku Baku Animal, rewind and netplay were not (see "Frontend and platform checks"). The block is not
+  versioned for compatibility yet: the format is unreleased. A state from another game or another BIOS is refused.
 - Saturn save states are byte-identical to master's.
+
+## Frontend and platform checks
+
+Run by Task 13b with RetroArch 1.22.2 (a scratch copy, never the developer's install) and the Android emulator; the
+tests above load through `CoreWrapper` and cannot see frontend behaviour.
+
+Verified:
+- All eight games reach their attract mode in RetroArch on Windows, with the software and the Vulkan renderer (16 runs,
+  clean exits, the BIOS chosen as in the table above).
+- Coin, Start and play through RetroArch's own input path (its network RetroPad), on Baku Baku Animal with both renderers:
+  coin gives a credit, Start and B start the game.
+- Baku Baku Animal: save state and load state (the credit count goes back), run-ahead in all three modes (single instance;
+  second instance with the software renderer; second instance with the Vulkan renderer, where the core declines the second
+  copy and RetroArch falls back to one instance), and `bakubaku.srm` of 32,896 bytes kept across restarts (credits and
+  bookkeeping counters continue).
+- Android: the arm64 and x86_64 cores pass the ELF checks (`check_elf`); Baku Baku Animal reaches its attract mode in the
+  x86_64 emulator (Android 14) with the software and the Vulkan renderer, about 105 MB PSS; the `[stv]` tests pass in the
+  emulator.
+- Two defects found there and fixed: RetroArch could not load an ST-V zip at all (it tried to extract it; the core now sets
+  `block_extract`), and every load raised a disc-index error notification (the disk control now answers image 0 with an
+  empty path).
+
+**Consequence of `block_extract` (Ruling R22):** RetroArch no longer unpacks any archive for this core, so a Saturn disc
+image inside a `.7z` or `.zip` no longer loads (a zip was refused by the core already, and `.7z` was unpacked by
+RetroArch before). libretro has no per-extension setting for it. Disc images in archives are unsupported: use CHD or
+extract them. README and CHANGELOG say so.
+
+Not verified, left for the developer's manual test:
+- Rewind and netplay with an ST-V game (the state block is in the state and the stream is deterministic, but neither was
+  run).
+- A physical Android phone (the arm64 core passed the ELF checks only) and Android's 16 KB page images.
+- Save states and run-ahead on the other seven games, and `.srm` persistence on them.
+- Sound and gamepad feel on a real pad; Golden Axe: The Duel's six buttons and two players through RetroArch (the six
+  buttons are proven in the game's own input test through `CoreWrapper`); Radiant Silvergun and Die Hard Arcade by hand.
+- RetroArch's frame-related network commands are ignored with single-instance run-ahead (a RetroArch limitation seen
+  with Saturn and NES content too), so save states under single-instance run-ahead were not exercised through RetroArch.
 
 ## Running the tests
 

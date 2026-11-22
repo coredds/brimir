@@ -423,14 +423,16 @@ void CheckInputTest(GameSession &session, const std::vector<uint16_t> &buttons, 
     CHECK(pressed.size() == buttons.size() * 2);
 }
 
-// A quick case: the BIOS's check and the attract mode without phantom credits, and one coin is one credit.
-// `coinFrame` is where the game's attract mode has been showing for a while.
-void QuickBoot(const char *set, int coinFrame) {
+// A quick case: the load picks `bios` (a file name in the load description), the BIOS's check and the attract mode run
+// without phantom credits, and one coin is one credit. `coinFrame` is where the game's attract mode has been showing for
+// a while.
+void QuickBoot(const char *set, const char *bios, int coinFrame) {
     GameSession session(set);
     if (!session.Load()) {
         SKIP(session.Skipped());
     }
     INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find(std::string("BIOS ") + bios) != std::string::npos);
     session.RunTo(1300);
     int creditFrames = 0;
     std::set<uint64_t> shown;
@@ -453,35 +455,35 @@ void QuickBoot(const char *set, int coinFrame) {
 } // namespace
 
 TEST_CASE("stv: bakubaku boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][bakubaku]") {
-    QuickBoot("bakubaku", 1500);
+    QuickBoot("bakubaku", "epr-20091.ic8", 1500);
 }
 
 TEST_CASE("stv: colmns97 boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][colmns97]") {
-    QuickBoot("colmns97", 1800);
+    QuickBoot("colmns97", "epr-20091.ic8", 1800);
 }
 
 TEST_CASE("stv: puyosun boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][puyosun]") {
-    QuickBoot("puyosun", 1800);
+    QuickBoot("puyosun", "epr-20091.ic8", 1800);
 }
 
 TEST_CASE("stv: diehard boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][diehard]") {
-    QuickBoot("diehard", 1850);
+    QuickBoot("diehard", "epr-17952a.ic8", 1850);
 }
 
 TEST_CASE("stv: gaxeduel boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][gaxeduel]") {
-    QuickBoot("gaxeduel", 2450);
+    QuickBoot("gaxeduel", "epr-20091.ic8", 2450);
 }
 
 TEST_CASE("stv: cotton2 boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][cotton2]") {
-    QuickBoot("cotton2", 2450);
+    QuickBoot("cotton2", "epr-20091.ic8", 2450);
 }
 
 TEST_CASE("stv: grdforce boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][grdforce]") {
-    QuickBoot("grdforce", 2450);
+    QuickBoot("grdforce", "epr-20091.ic8", 2450);
 }
 
 TEST_CASE("stv: rsgun boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][rsgun]") {
-    QuickBoot("rsgun", 2450);
+    QuickBoot("rsgun", "epr-20091.ic8", 2450);
 }
 
 TEST_CASE("stv: colmns97 boots, takes coin and start, and plays for a minute", "[.stv-rom][colmns97]") {

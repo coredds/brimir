@@ -160,7 +160,7 @@ ARM devices have not been measured with this harness. Scaled from the PC profile
 
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2* on slower CPUs (much less since the 2026-11 performance round, see "Performance"). When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **ST-V** - Only the eight games listed under [ST-V arcade games](#st-v-arcade-games). Attract-mode timing and a few transitions differ from MAME by some frames (Die Hard Arcade's intro by about 340), and the SMPC's battery settings are not saved; `src/bridge/stv/STATUS.md` has the list.
-- **Zipped Saturn discs** - Not supported any more: a `.zip` is read as an ST-V ROM set only. Unzip the disc image or convert it to CHD.
+- **Archived Saturn discs** - Not supported any more: a `.zip` is read as an ST-V ROM set only, and RetroArch no longer unpacks any archive (`.zip`, `.7z`) for the core. Extract the disc image or convert it to CHD.
 - **Controllers** - Ports 1 and 2 only (Ymir emulates no multitap). The six-axis Mission Stick, dual Mission Sticks, Twin-Stick and Stunner are not offered.
 - **CD Block LLE** — Low-level CD Block emulation is a work in progress in Ymir. With the real ROMs (`cdb106.bin` v1.06, `cdb105.bin` v1.05) the BIOS menu, Sega Rally Championship, Virtua Fighter 2, Burning Rangers, Guardian Heroes and Panzer Dragoon II Zwei boot to their intros and attract modes and run exactly with run-ahead and from a state on another instance; boots take about 0.2-2.5 s longer (11-152 frames) than with the high-level CD Block. Other games are untested.
 - **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter. The x64 backend's SH-2 time is between about 5% and 28% below the interpreter's across six games, and its native compiles run on an extra thread where the CPU has at least 4 threads (core option "SH-2 JIT Compile Thread (Experimental)"); the IR interpreter backend is about 3x slower than the interpreter (see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)). It can still stutter while a game loads a lot of new code: Burning Rangers over a long session has SH-2 time about 5% below the interpreter's, but 358 of 33,600 frames take over 16.7 ms (the interpreter: none; the worst 48 ms), and with threaded VDP, the default, the average frame of Sega Rally, Street Fighter Zero 3 and that session is 2-6% longer than the interpreter's. It uses up to 128 MB of native code per SH-2 CPU, allocated on demand. It is not used while SH-2 cache emulation is active. It stays an experimental, opt-in option for testing; the current state and the next steps are in [design/sh2-jit.md](design/sh2-jit.md) ("Where to pick up").
@@ -325,14 +325,15 @@ inside the zip may be in any case or inside a folder.
 **BIOS.** Put the ST-V BIOS files in RetroArch's `system/` folder (not the Saturn BIOS: an ST-V game needs none). The
 core takes the one for the game's regions: Japan first, then USA, then Europe, or the region of the BIOS Selection option
 when the game has it (so Die Hard Arcade, which has no Japan version, uses the USA BIOS). MAME's file names, with the
-older MAME names of the same dumps also accepted:
+older MAME names of the same dumps also accepted. This is the complete list the core looks for, in the order it tries
+them (file names are matched without regard to case):
 
 | Region | File names |
 |---|---|
-| Japan | `epr-20091.ic8` (also `epr-23603.ic8`, `epr-19730.ic8`, `epr-17951a.ic8`, `epr-17740a.ic8`, `20091.bin`, `epr19730.ic8`, `mp17951a.s`) |
-| USA | `epr-17952a.ic8` (also `mp17952a.s`) |
-| Europe | `epr-17954a.ic8` (also `mp17954a.s`) |
-| Taiwan/Asia | `epr-19854.ic8`, `epr-17953a.ic8` (also `mp17953a.ic8`) |
+| Japan | `epr-23603.ic8`, `epr-20091.ic8`, `20091.bin`, `epr-19730.ic8`, `epr19730.ic8`, `epr-17951a.ic8`, `mp17951a.s`, `epr-17740a.ic8`, `epr-17740.ic8` |
+| USA | `epr-17952a.ic8`, `mp17952a.s`, `epr-17741a.ic8` |
+| Europe | `epr-17954a.ic8`, `mp17954a.s` |
+| Taiwan/Asia | `epr-19854.ic8`, `epr-17953a.ic8`, `mp17953a.ic8`, `epr-17742a.ic8` |
 
 The BIOS files are 512 KiB. If no BIOS for any of the game's regions is there, loading fails and the message lists the
 file names it accepts. BIOS files and ROM sets are copyrighted: they are never part of Brimir.
@@ -354,13 +355,17 @@ A coin is needed before Start: press Select once for one credit. The Test switch
 the cursor, Test selects), which also has the game's own input test.
 
 **Saves.** The cabinet's settings (the EEPROM) and the backup RAM with the high scores are saved to `<set>.srm` in the
-save folder (32,896 bytes). A `.srm` of another size, such as a Saturn one, is not used. Save states, run-ahead, rewind
-and netplay work as for Saturn games. The core's own state for these games is not compatible between versions yet.
+save folder (32,896 bytes). A `.srm` of another size, such as a Saturn one, is not used. Save states and run-ahead (all
+three modes: single instance, second instance with the software renderer, and second instance with the Vulkan renderer,
+where RetroArch falls back to one instance) were tried in RetroArch on Windows with Baku Baku Animal; the other seven
+games were not tried with them, and rewind and netplay were not tested for ST-V at all. The core's own state for these
+games is not compatible between versions yet.
 
 **Zipped Saturn discs are no longer supported.** The core now takes a `.zip` as it is (it is listed in the core's
 supported extensions) and reads it only as an ST-V ROM set; a zip that is not one is refused with a message. Unzip the
-disc image and load its `.cue`, or convert it to CHD. RetroArch does not unpack archives for this core (it reads the ST-V
-zip itself), so a disc image inside a `.7z` must be unpacked first too.
+disc image and load its `.cue`, or convert it to CHD. The core also tells RetroArch not to unpack archives (it has to read
+the ST-V zip itself), and RetroArch cannot ask for that per file type. So **a Saturn disc image inside a `.7z` (or any
+archive) no longer loads either**: extract it first, or use CHD.
 
 How each game was checked against MAME, and the known differences, are in `src/bridge/stv/STATUS.md`.
 
