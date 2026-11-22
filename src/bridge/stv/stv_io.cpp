@@ -298,11 +298,12 @@ void STVIOBoard::SerialEEPROM::Reset() {
     clk = false;
     di = false;
     locked = true;
-    doOutputHigh = true;
+    writeAll = false;
     commandAccum = 0;
     shiftReg = 0;
     bits = 0;
     address = 0;
+    busyNs = 0;
 }
 
 uint16_t STVIOBoard::SerialEEPROM::ReadWord(unsigned addr) const {
@@ -316,37 +317,51 @@ void STVIOBoard::SerialEEPROM::WriteWord(unsigned addr, uint16_t value) {
     data[addr * 2 + 1] = static_cast<uint8_t>(value);
 }
 
+void STVIOBoard::SerialEEPROM::AdvanceTime(uint64_t nanoseconds) {
+    busyNs = (nanoseconds >= busyNs) ? 0 : busyNs - nanoseconds;
+}
+
+// eeprom_serial_93cxx_device::do_read: while waiting for the start bit DO is the ready/busy line, while reading it is
+// the shift register's top bit (a 0 right after the command: the dummy bit), otherwise the pulled-up high impedance.
+bool STVIOBoard::SerialEEPROM::GetDO() const {
+    if (state == State::WaitStart) return Ready();
+    if (state == State::Reading) return (shiftReg & 0x80000000u) != 0;
+    return true;
+}
+
+// eeprom_serial_base_device::base_cs_write and handle_event: CS rising leaves reset, CS falling returns to it from any
+// state.
 void STVIOBoard::SerialEEPROM::SetCS(bool value) {
     if (cs == value) return;
     cs = value;
     if (cs) {
-        state = State::WaitStart;
-        doOutputHigh = true;
+        if (state == State::Reset) state = State::WaitStart;
     } else {
         state = State::Reset;
-        doOutputHigh = true;
     }
 }
 
+// base_clk_write: only the rising edge does anything in this configuration (output on the falling edge is for the
+// S-29x90 parts).
 void STVIOBoard::SerialEEPROM::SetCLK(bool value) {
     if (clk == value) return;
     clk = value;
-    if (!clk) return;
-    // Rising edge.
-    Step();
+    if (clk) ClockRising();
 }
 
 void STVIOBoard::SerialEEPROM::SetDI(bool value) {
     di = value;
 }
 
-void STVIOBoard::SerialEEPROM::Step() {
+// eeprom_serial_base_device::handle_event on a rising CLK, per state. The MAME condition that a start bit must come
+// later in time than the CS rising edge is covered by STVIOBoard::WritePDR1 applying CLK before CS.
+void STVIOBoard::SerialEEPROM::ClockRising() {
     switch (state) {
     case State::Reset:
         break;
 
     case State::WaitStart:
-        if (di) {
+        if (di && Ready()) {
             commandAccum = 0;
             bits = 0;
             state = State::Command;
@@ -361,84 +376,119 @@ void STVIOBoard::SerialEEPROM::Step() {
         break;
 
     case State::Reading: {
+        // Streaming is off (eeprom_serial_streaming::DISABLE): only the first bit loads the cell, the clocks after its
+        // 16 bits shift whatever is left in the register, then ones.
         const unsigned bitIndex = bits++;
-        if (bitIndex % kDataBits == 0) {
-            const unsigned readAddr = (address + bitIndex / kDataBits) & (kCells - 1);
-            shiftReg = static_cast<uint32_t>(ReadWord(readAddr)) << (32 - kDataBits);
+        if (bitIndex == 0) {
+            shiftReg = static_cast<uint32_t>(ReadWord(address)) << (32 - kDataBits);
         } else {
             shiftReg = (shiftReg << 1) | 1u;
         }
-        doOutputHigh = (shiftReg & 0x80000000u) != 0;
         break;
     }
 
     case State::Writing:
         shiftReg = (shiftReg << 1) | (di ? 1u : 0u);
         if (++bits == kDataBits) {
-            if (locked) {
-                state = State::Reset;
-            } else {
-                WriteWord(address, static_cast<uint16_t>(shiftReg));
-                state = State::Completion;
-            }
-            doOutputHigh = true;
+            ExecuteWriteCommand();
         }
         break;
 
     case State::Completion:
-        // Wait for CS fall; output stays high (ready).
         break;
     }
 }
 
+// eeprom_serial_base_device::execute_command with eeprom_serial_93cxx_device::parse_command_and_address.
 void STVIOBoard::SerialEEPROM::ExecuteCommand() {
     address = commandAccum & (kCells - 1);
     const unsigned opcode = commandAccum >> kAddressBits;
+    bits = 0;
 
+    enum class Command { Invalid, Read, Write, Erase, Lock, Unlock, WriteAll, EraseAll };
+    Command command = Command::Invalid;
     switch (opcode) {
-    case 0: {
-        const unsigned subcmd = address >> (kAddressBits - 2);
+    case 0:
+        switch (address >> (kAddressBits - 2)) {
+        case 0: command = Command::Lock; break;
+        case 1: command = Command::WriteAll; break;
+        case 2: command = Command::EraseAll; break;
+        case 3: command = Command::Unlock; break;
+        }
         address = 0;
-        switch (subcmd) {
-        case 0: // WRDS / lock
-            locked = true;
-            state = State::Reset;
-            break;
-        case 1: // WRAL
-            bits = 0;
-            shiftReg = 0;
-            state = locked ? State::Reset : State::Writing;
-            break;
-        case 2: // ERAL
-            if (!locked) {
-                for (unsigned i = 0; i < kCells; ++i) WriteWord(i, 0xFFFFu);
-            }
-            state = State::Completion;
-            break;
-        case 3: // WREN / unlock
-            locked = false;
+        break;
+    case 1: command = Command::Write; break;
+    case 2: command = Command::Read; break;
+    case 3: command = Command::Erase; break;
+    }
+
+    switch (command) {
+    case Command::Read:
+        shiftReg = 0; // the dummy 0 bit before the first clock
+        state = State::Reading;
+        break;
+
+    case Command::Write:
+    case Command::WriteAll:
+        shiftReg = 0;
+        writeAll = command == Command::WriteAll;
+        state = State::Writing;
+        break;
+
+    case Command::Erase:
+        if (locked) {
             state = State::Reset;
             break;
         }
-        break;
-    }
-    case 1: // WRITE
-        bits = 0;
-        shiftReg = 0;
-        state = locked ? State::Reset : State::Writing;
-        break;
-    case 2: // READ
-        bits = 0;
-        shiftReg = 0;
-        state = State::Reading;
-        break;
-    case 3: // ERASE
-        if (!locked) WriteWord(address, 0xFFFFu);
+        WriteWord(address, 0xFFFFu);
+        busyNs = kEraseNs;
         state = State::Completion;
+        break;
+
+    case Command::Lock:
+        locked = true;
+        state = State::Reset;
+        break;
+
+    case Command::Unlock:
+        locked = false;
+        state = State::Reset;
+        break;
+
+    case Command::EraseAll:
+        if (locked) {
+            state = State::Reset;
+            break;
+        }
+        for (unsigned i = 0; i < kCells; ++i) WriteWord(i, 0xFFFFu);
+        busyNs = kEraseAllNs;
+        state = State::Completion;
+        break;
+
+    case Command::Invalid:
+        // MAME throws here; every 8-bit command decodes, so it cannot happen.
+        state = State::Reset;
         break;
     }
 }
 
+// eeprom_serial_base_device::execute_write_command: WRITE replaces the cell, WRAL ANDs the data into every cell
+// (eeprom_base_device::write_all assumes an ERAL came first). Both are refused while locked.
+void STVIOBoard::SerialEEPROM::ExecuteWriteCommand() {
+    if (locked) {
+        state = State::Reset;
+        return;
+    }
+    const uint16_t value = static_cast<uint16_t>(shiftReg);
+    if (writeAll) {
+        for (unsigned i = 0; i < kCells; ++i) WriteWord(i, static_cast<uint16_t>(ReadWord(i) & value));
+        busyNs = kWriteAllNs;
+    } else {
+        WriteWord(address, value);
+        busyNs = kWriteNs;
+    }
+    state = State::Completion;
+}
 void STVIOBoard::SaveState(STVIOBoardState &state) const {
     state = {};
     for (unsigned i = 0; i < 2; i++) {
@@ -466,7 +516,8 @@ void STVIOBoard::SaveState(STVIOBoardState &state) const {
     state.eepromCLK = ee.clk ? 1 : 0;
     state.eepromDI = ee.di ? 1 : 0;
     state.eepromLocked = ee.locked ? 1 : 0;
-    state.eepromDOHigh = ee.doOutputHigh ? 1 : 0;
+    state.eepromWriteAll = ee.writeAll ? 1 : 0;
+    state.eepromBusyNs = ee.busyNs;
 }
 
 bool STVIOBoard::LoadState(const STVIOBoardState &state) {
@@ -480,12 +531,13 @@ bool STVIOBoard::LoadState(const STVIOBoardState &state) {
     if (state.eepromState == static_cast<uint8>(EEState::Writing) && state.eepromBits >= SerialEEPROM::kDataBits) {
         return false;
     }
+    if (state.eepromBusyNs > SerialEEPROM::kWriteAllNs) return false;
     for (unsigned i = 0; i < 2; i++) {
         if (state.coinActiveCounter[i] < 0 || state.coinActiveCounter[i] > kCoinPulseFrames) return false;
         if (state.playerStart[i] > 1 || state.coinHeld[i] > 1) return false;
     }
     if (state.stvModeActive > 1 || state.service > 1 || state.test > 1 || state.eepromCS > 1 || state.eepromCLK > 1 ||
-        state.eepromDI > 1 || state.eepromLocked > 1 || state.eepromDOHigh > 1) {
+        state.eepromDI > 1 || state.eepromLocked > 1 || state.eepromWriteAll > 1) {
         return false;
     }
 
@@ -514,7 +566,8 @@ bool STVIOBoard::LoadState(const STVIOBoardState &state) {
     ee.clk = state.eepromCLK != 0;
     ee.di = state.eepromDI != 0;
     ee.locked = state.eepromLocked != 0;
-    ee.doOutputHigh = state.eepromDOHigh != 0;
+    ee.writeAll = state.eepromWriteAll != 0;
+    ee.busyNs = state.eepromBusyNs;
     return true;
 }
 
@@ -525,14 +578,20 @@ uint8 STVIOBoard::ReadPDR1() const {
 
 void STVIOBoard::WritePDR1(uint8 data) {
     // PDR1 bit 2 = CS, bit 3 = CLK, bit 4 = DI, bits 0-1 = game select.
-    m_serialEEPROM.SetCS((data & 0x04) != 0);
-    m_serialEEPROM.SetDI((data & 0x10) != 0);
+    // stv_state::pdr1_output_w applies CLK, then DI, then CS. So a clock edge in the same write as a DI change samples
+    // the old DI, and one in the same write as a CS rise is seen by the chip while it is still in reset.
     m_serialEEPROM.SetCLK((data & 0x08) != 0);
+    m_serialEEPROM.SetDI((data & 0x10) != 0);
+    m_serialEEPROM.SetCS((data & 0x04) != 0);
 }
 
 uint8 STVIOBoard::ReadPDR2() const {
     // MAME returns (input port & ~0x19) | 0x18 | do_read; with inputs idle this is 0xfe | do.
     return static_cast<uint8>(0xfe | (m_serialEEPROM.GetDO() ? 1u : 0u));
+}
+
+void STVIOBoard::AdvanceTime(uint64_t nanoseconds) {
+    m_serialEEPROM.AdvanceTime(nanoseconds);
 }
 
 void STVIOBoard::WritePDR2(uint8 data) {

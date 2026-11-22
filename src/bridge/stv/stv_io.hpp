@@ -15,6 +15,7 @@ namespace brimir::stv {
 // Everything the I/O board and its 93C46 hold, for ST-V save states. No padding: every byte is a member.
 struct STVIOBoardState {
     int64_t coinActiveCounter[2];
+    uint64_t eepromBusyNs;    // time left in the 93C46's internal write/erase cycle
     uint32 coinPending[2];
     uint32 eepromCommandAccum;
     uint32 eepromShiftReg;
@@ -35,7 +36,7 @@ struct STVIOBoardState {
     uint8 eepromCLK;
     uint8 eepromDI;
     uint8 eepromLocked;
-    uint8 eepromDOHigh;
+    uint8 eepromWriteAll;     // the pending write command is WRAL, not WRITE
     uint8 reserved[6];
 };
 
@@ -82,6 +83,11 @@ public:
     uint8 ReadPDR2() const;
     void WritePDR2(uint8 data);
 
+    // Time passing for the 93C46's internal write/erase cycles. While one runs, DO reads low once the chip is selected
+    // and a new command is refused. Call it with the emulated time since the last call (any granularity; the cycles
+    // last 1 to 8 ms). Without it a write never completes.
+    void AdvanceTime(uint64_t nanoseconds);
+
     void SaveState(STVIOBoardState &state) const;
     // Returns false and leaves the board untouched when the state holds values the board cannot be in.
     bool LoadState(const STVIOBoardState &state);
@@ -110,15 +116,16 @@ private:
     bool   m_service = false;
     bool   m_test = false;
 
-    // 93C46 16-bit serial EEPROM state machine driven by SMPC PDR1/PDR2.
+    // 93C46 16-bit serial EEPROM driven by SMPC PDR1/PDR2. Follows MAME's eeprom_serial_93cxx_device
+    // (src/devices/machine/eepromser.cpp, eeprom.cpp) in its 16-bit, 64-cell, non-streaming configuration.
     struct SerialEEPROM {
-        enum class State {
-            Reset,
-            WaitStart,
-            Command,
-            Reading,
-            Writing,
-            Completion
+        enum class State : uint8 {
+            Reset,      // STATE_IN_RESET
+            WaitStart,  // STATE_WAIT_FOR_START_BIT
+            Command,    // STATE_WAIT_FOR_COMMAND
+            Reading,    // STATE_READING_DATA
+            Writing,    // STATE_WAIT_FOR_DATA
+            Completion  // STATE_WAIT_FOR_COMPLETION
         };
 
         State state = State::Reset;
@@ -126,31 +133,41 @@ private:
         bool clk = false;
         bool di = false;
         bool locked = true;
-        bool doOutputHigh = true; // high-impedance DO pulled up
+        bool writeAll = false; // the command waiting for data is WRAL
         uint32_t commandAccum = 0;
         uint32_t shiftReg = 0;
         unsigned bits = 0;
         unsigned address = 0;
+        uint64_t busyNs = 0;
         std::array<uint8, 128> data{};
 
         static constexpr unsigned kAddressBits = 6;
         static constexpr unsigned kDataBits = 16;
         static constexpr unsigned kCells = 1u << kAddressBits;
 
+        // Operation times from eeprom_base_device's constructor
+        static constexpr uint64_t kWriteNs = 1'750'000;
+        static constexpr uint64_t kWriteAllNs = 8'000'000;
+        static constexpr uint64_t kEraseNs = 1'000'000;
+        static constexpr uint64_t kEraseAllNs = 8'000'000;
+
         void Load(const std::array<uint8, 128> &src);
         void Reset();
         void SetCS(bool value);
         void SetCLK(bool value);
         void SetDI(bool value);
-        bool GetDO() const { return doOutputHigh; }
+        void AdvanceTime(uint64_t nanoseconds);
+        bool Ready() const { return busyNs == 0; }
+        // DO as seen through PDR2 (eeprom_serial_93cxx_device::do_read)
+        bool GetDO() const;
 
     private:
-        void Step();
+        void ClockRising();
         void ExecuteCommand();
+        void ExecuteWriteCommand();
         uint16_t ReadWord(unsigned addr) const;
         void WriteWord(unsigned addr, uint16_t value);
     };
-
     SerialEEPROM m_serialEEPROM;
 };
 

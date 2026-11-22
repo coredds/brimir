@@ -91,12 +91,41 @@ struct EepromBus {
         Deselect();
     }
 
-    void WriteWord(unsigned address, uint16_t value) {
+    // Software polls the ready line after an operation; here the chip is simply given the time its cycle needs.
+    void WaitReady() { board.AdvanceTime(10'000'000); }
+
+    void WriteWord(unsigned address, uint16_t value, bool wait = true) {
         Select();
         Command(1, address);
         Bits(value, 16);
         Deselect();
+        if (wait) WaitReady();
     }
+
+    void EraseWord(unsigned address, bool wait = true) {
+        Select();
+        Command(3, address);
+        Deselect();
+        if (wait) WaitReady();
+    }
+
+    void EraseAll(bool wait = true) {
+        Select();
+        Command(0, 0x20); // ERAL: 00 10xxxx
+        Deselect();
+        if (wait) WaitReady();
+    }
+
+    // WRAL: 00 01xxxx, then the 16 data bits
+    void WriteAll(uint16_t value, bool wait = true) {
+        Select();
+        Command(0, 0x10);
+        Bits(value, 16);
+        Deselect();
+        if (wait) WaitReady();
+    }
+
+    bool DO() const { return (board.ReadPDR2() & 1) != 0; }
 };
 
 uint16_t ImageWord(const STVIOBoard &board, unsigned cell) {
@@ -235,15 +264,11 @@ TEST_CASE("ST-V EEPROM: a locked chip does not erase either", "[stv]") {
     EepromBus bus(board);
 
     const uint16_t original = bus.ReadWord(7);
-    bus.Select();
-    bus.Command(3, 7); // ERASE
-    bus.Deselect();
+    bus.EraseWord(7);
     CHECK(bus.ReadWord(7) == original);
 
     bus.EnableWrites();
-    bus.Select();
-    bus.Command(3, 7);
-    bus.Deselect();
+    bus.EraseWord(7);
     CHECK(bus.ReadWord(7) == 0xFFFF);
 }
 
@@ -286,6 +311,175 @@ TEST_CASE("ST-V I/O: coin 2 asserts only the coin 2 input", "[stv]") {
     CHECK((ReadPortC(board) & 0x03) == 0x01); // bit 1 low, bit 0 high
 }
 
+TEST_CASE("ST-V EEPROM: READ puts a dummy 0 on DO before the first data bit", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    std::array<uint8_t, 128> allOnes;
+    allOnes.fill(0xFF);
+    board.LoadEEPROM(allOnes);
+    EepromBus bus(board);
+
+    bus.Select();
+    bus.Bits(1, 1); // start bit
+    bus.Bits(2, 2); // READ
+    bus.Bits(0, 5);
+    CHECK(bus.DO());      // still the pulled-up line while the address is clocked in
+    bus.Bits(0, 1);       // last address bit: the command runs
+    CHECK_FALSE(bus.DO()); // dummy 0
+    CHECK(bus.Clock(false)); // first data bit of 0xFFFF
+    CHECK(bus.ReadBits(15) == 0x7FFF);
+
+    // A cell whose first bit is 0 (0x5345): the dummy and the first bit are both low, the second bit is 1
+    bus.Deselect();
+    InitBoard(board);
+    bus.Select();
+    bus.Command(2, 0);
+    CHECK_FALSE(bus.DO());
+    CHECK_FALSE(bus.Clock(false));
+    CHECK(bus.Clock(false));
+}
+
+TEST_CASE("ST-V EEPROM: reading past the word does not stream into the next cell", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+
+    // MAME's 93C46 here has streaming disabled: after the 16 data bits come 16 zeros (the register shifting out),
+    // then ones. Cell 1 is never presented in the same read.
+    bus.Select();
+    bus.Command(2, 0);
+    CHECK(bus.ReadBits(16) == 0x5345);
+    CHECK(bus.ReadBits(16) == 0x0000);
+    CHECK(bus.ReadBits(16) == 0xFFFF);
+    CHECK(bus.ReadBits(16) == 0xFFFF);
+    bus.Deselect();
+    CHECK(bus.ReadWord(1) == 0x4741);
+}
+
+TEST_CASE("ST-V EEPROM: WRAL writes every cell when enabled", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+
+    // Locked: the data is clocked in, then refused
+    const std::array<uint8_t, 128> original = board.GetEEPROM();
+    bus.WriteAll(0x0000);
+    CHECK(board.GetEEPROM() == original);
+
+    bus.EnableWrites();
+    bus.EraseAll();
+    for (unsigned cell = 0; cell < 64; ++cell) {
+        REQUIRE(bus.ReadWord(cell) == 0xFFFF);
+    }
+    bus.WriteAll(0x1234);
+    for (unsigned cell = 0; cell < 64; ++cell) {
+        INFO("cell " << cell);
+        CHECK(bus.ReadWord(cell) == 0x1234);
+    }
+
+    // WRAL ANDs into what is there (MAME's write_all; an ERAL is meant to come first)
+    bus.WriteAll(0xF0F0);
+    for (unsigned cell = 0; cell < 64; ++cell) {
+        INFO("cell " << cell);
+        CHECK(bus.ReadWord(cell) == 0x1030);
+    }
+}
+
+TEST_CASE("ST-V EEPROM: ERAL erases every cell when enabled and not when locked", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+
+    const std::array<uint8_t, 128> original = board.GetEEPROM();
+    bus.EraseAll();
+    CHECK(board.GetEEPROM() == original);
+
+    bus.EnableWrites();
+    bus.EraseAll();
+    for (uint8_t byte : board.GetEEPROM()) {
+        CHECK(byte == 0xFF);
+    }
+}
+
+TEST_CASE("ST-V EEPROM: ready/busy shows on DO while selected after a write", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+    bus.EnableWrites();
+
+    struct Op {
+        const char *name;
+        uint64_t nanoseconds;
+    };
+    const Op ops[] = {{"WRITE", 1'750'000}, {"ERASE", 1'000'000}, {"WRAL", 8'000'000}, {"ERAL", 8'000'000}};
+    for (const Op &op : ops) {
+        INFO(op.name);
+        bus.WaitReady();
+        if (op.name == std::string("WRITE")) bus.WriteWord(2, 0x1111, false);
+        if (op.name == std::string("ERASE")) bus.EraseWord(2, false);
+        if (op.name == std::string("WRAL")) bus.WriteAll(0xFFFF, false);
+        if (op.name == std::string("ERAL")) bus.EraseAll(false);
+
+        bus.Select();
+        CHECK_FALSE(bus.DO()); // busy: DO low waiting for the start bit
+        board.AdvanceTime(op.nanoseconds - 1);
+        CHECK_FALSE(bus.DO());
+        board.AdvanceTime(1);
+        CHECK(bus.DO()); // ready
+        bus.Deselect();
+    }
+}
+
+TEST_CASE("ST-V EEPROM: DO is high at the end of a write and a busy chip refuses commands", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+    bus.EnableWrites();
+
+    // Still selected after the last data bit: the chip waits for completion with DO pulled up, busy or not
+    bus.Select();
+    bus.Command(1, 6);
+    bus.Bits(0xABCD, 16);
+    CHECK(bus.DO());
+    bus.Deselect();
+
+    // Selected again while the cycle runs: DO is the busy line, and the start bit of a READ is ignored
+    bus.Select();
+    CHECK_FALSE(bus.DO());
+    bus.Command(2, 6);
+    CHECK_FALSE(bus.DO());
+    CHECK(bus.ReadBits(16) == 0x0000);
+    bus.Deselect();
+
+    bus.WaitReady();
+    CHECK(bus.ReadWord(6) == 0xABCD);
+}
+
+TEST_CASE("ST-V EEPROM: one PDR1 write that raises CS and CLK does not clock a start bit", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+
+    // MAME's pdr1_output_w applies CLK, then DI, then CS: the clock edge arrives while the chip is still in reset
+    board.WritePDR1(0);
+    board.WritePDR1(static_cast<uint8_t>(kCS | kCLK | kDI));
+    // A normal READ now has to work from its own start bit
+    bus.Command(2, 0);
+    CHECK(bus.ReadBits(16) == 0x5345);
+}
+
+TEST_CASE("ST-V EEPROM: a rising CLK in the same PDR1 write as a DI change samples the old DI", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+
+    bus.Select(); // CS high, DI low, CLK low
+    board.WritePDR1(static_cast<uint8_t>(kCS | kDI | kCLK)); // DI 0 -> 1 with the clock edge: the edge sees 0
+    board.WritePDR1(static_cast<uint8_t>(kCS | kDI));        // CLK low again, DI stays 1
+    // No start bit was taken, so a command from its own start bit works
+    bus.Command(2, 0);
+    CHECK(bus.ReadBits(16) == 0x5345);
+}
 TEST_CASE("ST-V EEPROM: SaveState and LoadState mid-READ continue the same bit sequence", "[stv]") {
     STVIOBoard board;
     InitBoard(board);
@@ -299,9 +493,9 @@ TEST_CASE("ST-V EEPROM: SaveState and LoadState mid-READ continue the same bit s
     board.SaveState(state);
 
     const uint16_t expectedRest = bus.ReadBits(11);
-    const uint16_t expectedNext = bus.ReadBits(16); // the chip streams into the next cell
+    const uint16_t expectedNext = bus.ReadBits(16); // past the word: zeros, as MAME's non-streaming 93C46 does
     CHECK(static_cast<uint16_t>((firstBits << 11) | expectedRest) == 0x5345);
-    CHECK(expectedNext == 0x4741);
+    CHECK(expectedNext == 0x0000);
 
     // A different board, with different EEPROM contents, takes over mid-READ.
     STVIOBoard other;
@@ -325,6 +519,47 @@ TEST_CASE("ST-V EEPROM: SaveState and LoadState mid-READ continue the same bit s
     }
 }
 
+TEST_CASE("ST-V EEPROM: SaveState carries a running write cycle and a pending WRAL", "[stv]") {
+    STVIOBoard board;
+    InitBoard(board);
+    EepromBus bus(board);
+    bus.EnableWrites();
+    bus.WriteWord(1, 0x4242, false);
+    board.AdvanceTime(500'000);
+
+    STVIOBoardState state{};
+    board.SaveState(state);
+
+    STVIOBoard other;
+    InitBoard(other);
+    REQUIRE(other.LoadState(state));
+    EepromBus otherBus(other);
+    otherBus.Select();
+    CHECK_FALSE(otherBus.DO());
+    other.AdvanceTime(1'249'999);
+    CHECK_FALSE(otherBus.DO());
+    other.AdvanceTime(1);
+    CHECK(otherBus.DO());
+    otherBus.Deselect();
+
+    // A WRAL waiting for its data bits finishes as a WRAL on the restored board
+    bus.WaitReady();
+    bus.EraseAll();
+    bus.Select();
+    bus.Command(0, 0x10);
+    bus.Bits(0xAA, 8);
+    board.SaveState(state);
+    STVIOBoard third;
+    InitBoard(third);
+    REQUIRE(third.LoadState(state));
+    EepromBus thirdBus(third);
+    thirdBus.Bits(0xAA, 8);
+    thirdBus.Deselect();
+    for (size_t i = 0; i < 128; ++i) {
+        INFO("byte " << i);
+        CHECK(third.GetEEPROM()[i] == 0xAA);
+    }
+}
 TEST_CASE("ST-V EEPROM: SaveState carries the write lock and written cells", "[stv]") {
     STVIOBoard board;
     InitBoard(board);
