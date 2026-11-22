@@ -758,7 +758,7 @@ struct RomSession {
 
 } // namespace
 
-TEST_CASE("stv state: bakubaku continues identically after a state load", "[.stv-rom]") {
+TEST_CASE("stv state: bakubaku continues identically after a state load", "[.stv-rom][bakubaku]") {
     const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
     const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
     if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip")) {
@@ -816,7 +816,7 @@ TEST_CASE("stv state: bakubaku continues identically after a state load", "[.stv
     }
 }
 
-TEST_CASE("stv state: a coin held across a state load is one credit in bakubaku", "[.stv-rom]") {
+TEST_CASE("stv state: a coin held across a state load is one credit in bakubaku", "[.stv-rom][bakubaku]") {
     const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
     const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
     if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip")) {

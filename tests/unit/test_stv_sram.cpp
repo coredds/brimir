@@ -478,7 +478,7 @@ constexpr std::array<uint8_t, 128> kMameFirstBootEEPROM = {
 
 } // namespace
 
-TEST_CASE("stv sram: bakubaku's BIOS initialises the blank EEPROM as it does in MAME", "[.stv-rom]") {
+TEST_CASE("stv sram: bakubaku's BIOS initialises the blank EEPROM as it does in MAME", "[.stv-rom][bakubaku]") {
     const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
     const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
     if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip")) {
@@ -515,7 +515,7 @@ TEST_CASE("stv sram: bakubaku's BIOS initialises the blank EEPROM as it does in 
     CHECK(core.GetLastError().empty());
 }
 
-TEST_CASE("stv sram: bakubaku's EEPROM and backup RAM survive a restart", "[.stv-rom]") {
+TEST_CASE("stv sram: bakubaku's EEPROM and backup RAM survive a restart", "[.stv-rom][bakubaku]") {
     const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
     const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
     if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip")) {

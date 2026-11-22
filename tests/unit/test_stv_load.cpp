@@ -557,7 +557,7 @@ std::vector<uint64_t> RunHashed(CoreWrapper &core, int frames) {
 
 } // namespace
 
-TEST_CASE("stv load: bakubaku loads from the real ROM set and runs", "[.stv-rom]") {
+TEST_CASE("stv load: bakubaku loads from the real ROM set and runs", "[.stv-rom][bakubaku]") {
     const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
     const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
     if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip")) {
@@ -583,7 +583,7 @@ TEST_CASE("stv load: bakubaku loads from the real ROM set and runs", "[.stv-rom]
     CHECK(core.IsSTVLoaded());
 }
 
-TEST_CASE("stv load: a Saturn session after ST-V content starts as a fresh core does", "[.stv-rom]") {
+TEST_CASE("stv load: a Saturn session after ST-V content starts as a fresh core does", "[.stv-rom][bakubaku]") {
     const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
     const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
     if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip") ||
@@ -641,7 +641,7 @@ TEST_CASE("stv load: a Saturn session after ST-V content starts as a fresh core 
     CHECK(reused.GetLastError().empty());
 }
 
-TEST_CASE("stv: bakubaku reaches attract and accepts coin and start", "[.stv-rom]") {
+TEST_CASE("stv: bakubaku reaches attract and accepts coin and start", "[.stv-rom][bakubaku]") {
     const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
     const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
     if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip")) {

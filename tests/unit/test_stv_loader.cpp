@@ -175,7 +175,7 @@ TEST_CASE("stv loader: the GameInfo overload names the set in errors", "[stv]") 
     CHECK(error.find("b.bin") != std::string::npos);
 }
 
-TEST_CASE("stv loader: real sets build and carry the Sega header", "[.stv-rom]") {
+TEST_CASE("stv loader: real sets build and carry the Sega header", "[.stv-rom][all-games]") {
     const char *romDir = std::getenv("BRIMIR_STV_ROM_DIR");
     if (!romDir || !std::filesystem::is_directory(romDir)) {
         SKIP("BRIMIR_STV_ROM_DIR is not set");

@@ -232,7 +232,7 @@ TEST_CASE("stv bios: image loader rejects a wrong-size or missing file", "[stv]"
     CHECK_FALSE(error.empty());
 }
 
-TEST_CASE("stv bios: the real BIOS folder serves a Japan and a USA game", "[.stv-rom]") {
+TEST_CASE("stv bios: the real BIOS folder serves a Japan and a USA game", "[.stv-rom][bakubaku][diehard]") {
     const char *env = std::getenv("BRIMIR_STV_BIOS_DIR");
     if (!env || !std::filesystem::is_directory(env)) SKIP("BRIMIR_STV_BIOS_DIR is not set to a folder");
     const std::filesystem::path dir = env;

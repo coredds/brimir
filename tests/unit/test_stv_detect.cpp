@@ -319,7 +319,7 @@ TEST_CASE("ST-V game database: the eight games' details", "[stv]") {
     CHECK(puyo.roms[2].offset == 0x200000);
 }
 
-TEST_CASE("ST-V detect: the developer's zips are recognized", "[.stv-rom]") {
+TEST_CASE("ST-V detect: the developer's zips are recognized", "[.stv-rom][all-games]") {
     const char *romDir = std::getenv("BRIMIR_STV_ROM_DIR");
     if (romDir == nullptr || *romDir == '\0') SKIP("BRIMIR_STV_ROM_DIR is not set");
 

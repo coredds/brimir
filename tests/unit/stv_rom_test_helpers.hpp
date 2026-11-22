@@ -1,5 +1,5 @@
 // Brimir - Test helpers for the ST-V cases that run real ROM sets: the local folders from the environment, a scratch
-// system directory with the BIOS files, frame hashing, PNG screenshots and a session that drives a game frame by frame
+// system directory with the BIOS files, frame hashing and PNG screenshots
 // Copyright (C) 2026 coredds
 // Licensed under GPL-3.0
 
@@ -7,13 +7,13 @@
 
 #include <brimir/core_wrapper.hpp>
 
-#include <stv/stv_input.hpp>
 #include <stv/stv_system.hpp>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -57,12 +57,20 @@ inline void CopyBiosFiles(const std::filesystem::path &from, const std::filesyst
     }
 }
 
-// FNV-1a over the frame's size and pixels only (the audio changes every frame even on a still screen)
+// A hash of the frame's size and pixels only (the audio changes every frame even on a still screen). It runs in 64-bit
+// words, as every case hashes every frame; the values are only compared within one run.
 inline uint64_t VideoHash(CoreWrapper &core) {
     uint64_t hash = 0xcbf29ce484222325ull;
     const auto mix = [&](const void *data, size_t size) {
         const auto *bytes = static_cast<const uint8_t *>(data);
-        for (size_t i = 0; i < size; i++) {
+        size_t i = 0;
+        for (; i + sizeof(uint64_t) <= size; i += sizeof(uint64_t)) {
+            uint64_t word;
+            std::memcpy(&word, bytes + i, sizeof(word));
+            hash = (hash ^ word) * 0x9E3779B97F4A7C15ull;
+            hash ^= hash >> 32;
+        }
+        for (; i < size; i++) {
             hash = (hash ^ bytes[i]) * 0x100000001b3ull;
         }
     };
