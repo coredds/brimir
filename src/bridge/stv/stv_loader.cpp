@@ -45,10 +45,11 @@ void AppendName(std::string &list, const std::string &name) {
 
 // Byte placement, derived from MAME (src/mame/sega/stv.cpp, src/emu/romload.cpp, src/emu/romentry.h):
 //
-// 1. The cartridge is declared ROM_REGION32_BE( 0x3000000, "cart", ROMREGION_ERASEFF ) in every ROM_START (stv.cpp, e.g.
-//    bakubaku at line 2207), and the machine copies it into the "abus" region of the same kind, which is mapped with
-//    map(0x02000000, 0x04ffffff).rom().mirror(0x20000000).region("abus", 0) (stv.cpp:1073, copy at stv.cpp:1143).
-//    ROMREGION_ERASEFF fills the gaps with 0xFF.
+// 1. The cartridge is declared ROM_REGION32_BE( 0x3000000, "cart", ROMREGION_ERASE00 ) in the ROM_START of every
+//    supported set (stv.cpp, e.g. bakubaku; only nameclub and nclubv2 use ROMREGION_ERASEFF), and the machine copies it
+//    into the "abus" region, which is mapped with map(0x02000000, 0x04ffffff).rom().mirror(0x20000000).region("abus", 0)
+//    (stv_mem; the copy is stv_select_game). ROMREGION_ERASE00 fills the gaps with 0x00: MAME 0.289's SH-2 reads
+//    0x00530045 at 0x02000000 in bakubaku.
 // 2. A ROM_LOAD macro writes the file into the region bytes in file order, at region offset + n * (groupsize + skip)
 //    (romload.cpp read_rom_data, lines 812-929; macros in romentry.h):
 //      ROM_LOAD16_BYTE       = ROM_SKIP(1): file byte i goes to offset + 2 * i. No odd/even compensation exists, so
@@ -67,7 +68,7 @@ void AppendName(std::string &list, const std::string &name) {
 //    "IC13 roms are loaded on ODD bytes only", stv.cpp:66.)
 //
 // Example: bakubaku's IC13 file "fpr17969.13" starts "SEGA ST-V(TITAN)". ROM_LOAD16_BYTE at offset 1 puts S,E,G,A at
-// 0x02000001, 3, 5, 7 (0xFF on the even addresses), and the ROM_RELOAD_PLAIN copies put "SEGA ST-V(TITAN)" at 0x02200000
+// 0x02000001, 3, 5, 7 (0x00 on the even addresses), and the ROM_RELOAD_PLAIN copies put "SEGA ST-V(TITAN)" at 0x02200000
 // and 0x02300000 as a plain byte string.
 bool BuildCartImage(ZipReader &zip, std::span<const RomEntry> roms, std::vector<uint8_t> &image, std::string &error) {
     image.clear();
@@ -117,7 +118,7 @@ bool BuildCartImage(ZipReader &zip, std::span<const RomEntry> roms, std::vector<
         return false;
     }
 
-    image.assign(std::min(NextPow2(mappedEnd), kMaxImageSize), 0xFF);
+    image.assign(std::min(NextPow2(mappedEnd), kMaxImageSize), 0x00);
 
     std::vector<uint8_t> data;
     const char *loaded = nullptr;
