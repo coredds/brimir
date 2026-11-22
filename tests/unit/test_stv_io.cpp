@@ -747,30 +747,3 @@ TEST_CASE("ST-V 315-5881: damaged compressed data does not run past the line buf
         }
     }
 }
-TEST_CASE("ST-V cartridge: protection state continues the RSG counter", "[stv]") {
-    const auto rom = NoiseROM(1u << 16);
-    constexpr uint32_t kCS1 = 0x04000000;
-
-    ymir::cart::STVGameROMCartridge cart;
-    cart.LoadROM(rom);
-    cart.ConfigureProtection(ymir::cart::STVGameROMCartridge::ProtectionMode::RSG, 0);
-    cart.WriteByte(kCS1 + 1, 1); // arms the counter
-    for (int i = 0; i < 7; ++i) {
-        cart.ReadWord(kCS1 + 0xC);
-    }
-
-    ymir::cart::STVGameROMCartridge::ProtectionState state{};
-    cart.SaveProtectionState(state);
-    std::vector<uint16_t> expected;
-    for (int i = 0; i < 20; ++i) {
-        expected.push_back(cart.ReadWord(kCS1 + 0xC));
-    }
-
-    ymir::cart::STVGameROMCartridge other;
-    other.LoadROM(rom);
-    other.ConfigureProtection(ymir::cart::STVGameROMCartridge::ProtectionMode::RSG, 0);
-    REQUIRE(other.LoadProtectionState(state));
-    for (int i = 0; i < 20; ++i) {
-        CHECK(other.ReadWord(kCS1 + 0xC) == expected[i]);
-    }
-}

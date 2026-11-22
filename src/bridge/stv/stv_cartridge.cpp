@@ -49,9 +49,6 @@ void STVGameROMCartridge::ConfigureProtection(ProtectionMode mode, uint32 key) {
     m_protectionEnabled = false;
     m_abus = {};
 
-    m_rsgThingy = false;
-    m_rsgCounter = 0;
-
     m_crypt3155881.Reset();
     m_crypt3155881.SetKey(key);
     m_crypt3155881.SetEnabled(false);
@@ -65,14 +62,14 @@ void STVGameROMCartridge::SetIOGADispatch(IOGAReadFn readFn, IOGAWriteFn writeFn
 void STVGameROMCartridge::SaveProtectionState(ProtectionState &state) const {
     state = {};
     m_crypt3155881.SaveState(state.crypt);
-    state.rsgThingy = m_rsgThingy ? 1 : 0;
-    state.rsgCounter = m_rsgCounter;
     state.protectionEnabled = m_protectionEnabled ? 1 : 0;
     state.abus = m_abus;
 }
 
 bool STVGameROMCartridge::ValidateProtectionState(const ProtectionState &state) const {
-    if (state.rsgThingy > 1 || state.protectionEnabled > 1) return false;
+    if (state.protectionEnabled > 1 || state.reserved[0] != 0 || state.reserved[1] != 0 || state.reserved[2] != 0) {
+        return false;
+    }
     if ((state.protectionEnabled != 0) != (((state.abus[0] >> 16) & 1u) != 0)) return false;
     return m_crypt3155881.ValidateState(state.crypt);
 }
@@ -80,8 +77,6 @@ bool STVGameROMCartridge::ValidateProtectionState(const ProtectionState &state) 
 bool STVGameROMCartridge::LoadProtectionState(const ProtectionState &state) {
     if (!ValidateProtectionState(state)) return false;
     if (!m_crypt3155881.LoadState(state.crypt)) return false;
-    m_rsgThingy = state.rsgThingy != 0;
-    m_rsgCounter = state.rsgCounter;
     m_protectionEnabled = state.protectionEnabled != 0;
     m_abus = state.abus;
     return true;
@@ -106,10 +101,6 @@ static inline size_t CartOffset(uint32 address, size_t romSize) {
 
 static constexpr uint32 kIOGABase    = kCartCS1Base;
 static constexpr uint32 kIOGAEnd     = kCartCS1Base | 0x7Fu;
-
-static inline bool IsCS1Window(uint32 address) {
-    return address >= kCartCS1Base && address < kCartCS2Base;
-}
 
 static inline bool IsIOGA(uint32 address) {
     return address >= kIOGABase && address <= kIOGAEnd;
@@ -189,24 +180,9 @@ uint16 STVGameROMCartridge::ReadWord(uint32 address) const {
     }
     if (m_romSize == 0) return 0xFFFFu;
 
-    const uint32 reg = address & 0xFu;
-
     if (m_protectionMode == ProtectionMode::Chip3155881 && IsProtectionRegisters(address)) {
         return static_cast<uint16>(ReadProtectionRegister(ProtectionRegisterIndex(address), false) >>
                                    (16u - 16u * ((address >> 1) & 1u)));
-    }
-
-    if (IsCS1Window(address)) {
-        if (m_protectionMode == ProtectionMode::RSG && m_rsgThingy && (reg == 0xCu || reg == 0xEu)) {
-            uint8 lo = (uint8)((((m_rsgCounter & 0x7F) << 1) + 1) & (0xF0 >> ((m_rsgCounter & 0x80) >> 5)));
-            uint8 hi = (uint8)((((m_rsgCounter & 0x7F) << 1) + 0) & (0xF0 >> ((m_rsgCounter & 0x80) >> 5)));
-            uint16 val = (uint16)((hi << 8) | lo);
-            m_rsgCounter++;
-            return val;
-        }
-
-        // 315-5881 decrypted output is exposed on 32-bit CS1 reads at command 0xC.
-        // Word reads return normal ROM data.
     }
 
     size_t idx = CartOffset(address, m_romSize);
@@ -227,16 +203,6 @@ uint32 STVGameROMCartridge::ReadLong(uint32 address) const {
 }
 
 void STVGameROMCartridge::WriteByte(uint32 address, uint8 value) {
-    const uint32 reg = address & 0xFu;
-
-    if (m_protectionMode == ProtectionMode::RSG) {
-        if (IsCS1Window(address) && (reg == 0x0u || reg == 0x1u)) {
-            m_rsgThingy = value & 0x1;
-            m_rsgCounter = 0;
-            return;
-        }
-    }
-
     if (m_protectionMode == ProtectionMode::Chip3155881 && IsProtectionRegisters(address)) {
         const unsigned shift = 24u - 8u * (address & 3u);
         WriteProtectionRegister(ProtectionRegisterIndex(address), static_cast<uint32>(value) << shift,
@@ -250,16 +216,6 @@ void STVGameROMCartridge::WriteByte(uint32 address, uint8 value) {
 }
 
 void STVGameROMCartridge::WriteWord(uint32 address, uint16 value) {
-    const uint32 reg = address & 0xFu;
-
-    if (m_protectionMode == ProtectionMode::RSG) {
-        if (IsCS1Window(address) && (reg == 0x0u || reg == 0x1u)) {
-            m_rsgThingy = value & 0x1;
-            m_rsgCounter = 0;
-            return;
-        }
-    }
-
     if (m_protectionMode == ProtectionMode::Chip3155881 && IsProtectionRegisters(address)) {
         const unsigned shift = 16u - 16u * ((address >> 1) & 1u);
         WriteProtectionRegister(ProtectionRegisterIndex(address), static_cast<uint32>(value) << shift,

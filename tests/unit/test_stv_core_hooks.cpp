@@ -464,6 +464,10 @@ TEST_CASE("stv hooks: 315-5881 registers decode as MAME's common_prot_w and comm
         mismatch.abus[0] = 0;
         CHECK_FALSE(cart->LoadProtectionState(mismatch));
 
+        cart::STVGameROMCartridge::ProtectionState reserved = state;
+        reserved.reserved[2] = 1;
+        CHECK_FALSE(cart->LoadProtectionState(reserved));
+
         cart::STVGameROMCartridge *other = nullptr;
         auto otherSaturn = ChipSaturn(rom, other);
         REQUIRE(other->LoadProtectionState(state));

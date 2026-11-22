@@ -27,7 +27,6 @@ class STVGameROMCartridge final : public BaseCartridge {
 public:
     enum class ProtectionMode : uint8 {
         None = 0,
-        RSG,
         Chip3155881,
     };
 
@@ -35,10 +34,8 @@ public:
     // No padding: every byte is a member.
     struct ProtectionState {
         STV3155881::State crypt;
-        uint8 rsgThingy;
-        uint8 rsgCounter;
         uint8 protectionEnabled;
-        uint8 reserved;
+        uint8 reserved[3];
         std::array<uint32, 4> abus; // the four long registers at 0x4FFFFF0 (MAME's m_a_bus)
     };
 
@@ -90,9 +87,6 @@ protected:
 
     size_t m_romSize = 0;
     std::vector<uint8> m_rom;
-
-    mutable bool  m_rsgThingy  = false;
-    mutable uint8 m_rsgCounter = 0;
 
     ProtectionMode m_protectionMode    = ProtectionMode::None;
     uint32         m_protectionKey     = 0;
