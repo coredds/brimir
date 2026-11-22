@@ -853,3 +853,246 @@ TEST_CASE("stv: grdforce boots, takes coin and start, and plays for a minute", "
     CHECK(session.AudioPeak() > 16);
     CHECK(session.Core().GetLastError().empty());
 }
+
+TEST_CASE("stv: rsgun's 315-5881 decrypts the game's boot check as in MAME", "[.stv-rom]") {
+    GameSession session("rsgun");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // The game's only use of the chip (MAME 0.289, watchpoints on 0x4FFFFF0-0x4FFFFFF through 90 s of boot, attract
+    // and play): at the end of the BIOS check the code at 0x0600697C disables the chip, sets the ROM address 0x00100800
+    // (words) and the subkey 0x7777, enables it and reads 128 longs at 0x4FFFFFC. MAME's values: 64 longs of the bytes
+    // 0x00, 0x10, ... 0xF0, four each, then the bytes 0x00-0x0F over and over (a compressed block).
+    auto &bus = session.Core().GetSaturn()->mainBus;
+    bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
+    bus.Write<uint16_t>(0x04FF'FFF8, 0x0800);
+    bus.Write<uint16_t>(0x04FF'FFFA, 0x0010);
+    bus.Write<uint16_t>(0x04FF'FFFC, 0x7777);
+    bus.Write<uint8_t>(0x04FF'FFF1, 0x01);
+    int mismatches = 0;
+    for (uint32_t i = 0; i < 128; i++) {
+        const uint32_t expected =
+            i < 64 ? (i / 4) * 0x10u * 0x0101'0101u : ((i % 4) * 4u) * 0x0101'0101u + 0x0001'0203u;
+        const uint32_t value = bus.Read<uint32_t>(0x04FF'FFFC);
+        if (value != expected) {
+            UNSCOPED_INFO("long " << i << ": " << std::hex << value << " expected " << expected << std::dec);
+            ++mismatches;
+        }
+    }
+    bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
+    CHECK(mismatches == 0);
+}
+
+TEST_CASE("stv: rsgun boots, takes coin and start, and plays for a minute", "[.stv-rom]") {
+    GameSession session("rsgun");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // The BIOS checks the board, then from about frame 1450 the title (RADIANT SILVERGUN, INSERT COIN(S), CREDIT 0),
+    // then from about frame 2150 the story told over still pictures. No phantom credits. Text cards on black are left
+    // out.
+    const auto mostlyBlack = [&] { return session.VideoBackgroundShare() > 0.9; };
+    session.RunTo(1300);
+    int creditFrames = 0;
+    std::set<uint64_t> attract;
+    session.RunTo(2400, [&] {
+        creditFrames += session.Credits() != 0 ? 1 : 0;
+        if (!mostlyBlack()) {
+            attract.insert(session.VideoHash());
+        }
+        if (session.Frame() == 1600) {
+            session.Save("brimir_frame1600_title.png");
+        } else if (session.Frame() == 2300) {
+            session.Save("brimir_frame2300_attract.png");
+        }
+    });
+    CHECK(creditFrames == 0);
+    INFO("distinct attract frames: " << attract.size());
+    CHECK(attract.size() >= 30);
+
+    // One coin, held for 5 frames, is one credit
+    session.RunTo(2450);
+    session.Tap(0, kCoin);
+    session.RunTo(2500);
+    CHECK(session.Credits() == 1);
+    session.Save("brimir_frame2500_credit1.png");
+
+    // Start takes the credit and the title fades out, through the same frames as the attract mode's own fade (the
+    // title with CREDIT 0, so those 40 frames are not checked). Then the TRIAL RIDE MODE (the weapons shown one by one)
+    // begins, then the first stage; Button 1 now and then fires. No frame looks like the attract mode any more.
+    session.RunTo(2550);
+    session.Tap(0, kStart);
+    session.RunTo(2600);
+    int attractLike = 0;
+    const auto notAttract = [&] {
+        attractLike += !mostlyBlack() && attract.count(session.VideoHash()) != 0 ? 1 : 0;
+    };
+    session.RunTo(3300, [&] {
+        notAttract();
+        const int frame = session.Frame();
+        session.Press(0, frame >= 2650 && frame % 60 < 5 ? kButton1 : 0);
+        if (frame == 2800) {
+            session.Save("brimir_frame2800_trial_ride.png");
+        } else if (frame == 3200) {
+            session.Save("brimir_frame3200_play_1p.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // Player 2 joins with a coin of its own
+    session.Tap(1, kCoin);
+    session.RunTo(3330, notAttract);
+    CHECK(session.Credits() == 1);
+    session.Tap(1, kStart);
+    session.RunTo(4000, [&] {
+        notAttract();
+        const int frame = session.Frame();
+        const uint16_t press = frame >= 3400 && frame < 3800 && frame % 60 < 5 ? kButton1 : 0;
+        session.Press(0, press);
+        session.Press(1, press);
+    });
+    CHECK(session.Credits() == 0);
+
+    // A minute of play: both ships fly about firing all seven weapons (A, B, C and the A+B, B+C, A+C and A+B+C
+    // combinations). As in cotton2 a credit is kept in hand and both players press Start every 400 frames, so whoever
+    // is shot down continues.
+    const uint16_t ab = kButton1 | kButton2;
+    const uint16_t bc = kButton2 | kButton3;
+    const uint16_t ac = kButton1 | kButton3;
+    const uint16_t abc = kButton1 | kButton2 | kButton3;
+    const std::vector<uint16_t> script = {
+        kRight | kButton1, kButton1, kUp | kButton2, kButton2, kDown | kButton3, 0,
+        kLeft | ab,        ab,       kUp | bc,       bc,       kDown | ac,       ac,
+        kRight | kButton1, abc,      kUp | kButton1, 0,        kDown | kButton2, kButton3,
+        kLeft | kButton1,  kButton2, kRight | ab,    bc,       kUp,              kDown | ac};
+    session.ResetAudioPeak();
+    std::set<uint64_t> play;
+    int coins = 0;
+    bool coining = false;
+    const int playEnd = session.Frame() + 3600;
+    session.RunTo(playEnd, [&] {
+        const int frame = session.Frame();
+        uint16_t p1 = ScriptedInput(frame, 0, script);
+        uint16_t p2 = ScriptedInput(frame, 1, script);
+        if (frame % 400 == 0 && session.Credits() == 0) {
+            coining = true;
+            ++coins;
+        } else if (frame % 400 == 5) {
+            coining = false;
+        }
+        if (coining) {
+            p1 = kCoin;
+        } else if (frame % 400 >= 20 && frame % 400 < 25) {
+            p1 = kStart;
+            p2 = kStart;
+        }
+        session.Press(0, p1);
+        session.Press(1, p2);
+        notAttract();
+        play.insert(session.VideoHash());
+        if (frame == 4500) {
+            session.Save("brimir_frame4500_play.png");
+        } else if (frame == 6000) {
+            session.Save("brimir_frame6000_play.png");
+        }
+    });
+    session.Save("brimir_frame7600_play.png");
+    CHECK(attractLike == 0);
+    INFO("coins for continues: " << coins);
+    INFO("distinct play frames: " << play.size());
+    CHECK(play.size() >= 30);
+    INFO("audio peak over the minute: " << session.AudioPeak());
+    CHECK(session.AudioPeak() > 16);
+    CHECK(session.Core().GetLastError().empty());
+}
+
+TEST_CASE("stv: rsgun sees the three buttons of both players in its input test", "[.stv-rom]") {
+    GameSession session("rsgun");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // As in gaxeduel: the Test switch opens the ST-V TEST MENU, nine Service steps reach EACH GAME TEST, Test opens the
+    // game's TEST MENU, one Service step and Test open its INPUT TEST.
+    session.RunTo(1800);
+    session.Tap(0, kTest);
+    for (int i = 0; i < 9; i++) {
+        session.RunTo(2000 + i * 60);
+        session.Tap(0, kService);
+    }
+    session.RunTo(2600);
+    session.Tap(0, kTest);
+    session.RunTo(2800);
+    session.Tap(0, kService);
+    session.RunTo(2850);
+    session.Tap(0, kTest);
+
+    // INPUT TEST lists UP, DOWN, RIGHT, LEFT and SW 1-3 for 1P and 2P, each OFF until pressed. Each of the three buttons
+    // of either player turns one entry ON: six different screens, all different from the idle one, which comes back on
+    // release. The entry that changes is in the player's column (1P left of 60% of the width, 2P right of it), one row
+    // lower for each button. The game reads no fourth button (MAME's plain ST-V ports give it one): Button 4 changes
+    // nothing.
+    session.RunTo(2990);
+    session.Save("brimir_frame2990_input_test.png");
+    const uint64_t idle = session.VideoHash();
+    const unsigned width = session.Core().GetFramebufferWidth();
+    const unsigned height = session.Core().GetFramebufferHeight();
+    const unsigned pitch = session.Core().GetFramebufferPitch() / 4;
+    const auto pixels = [&] {
+        const auto *fb = static_cast<const uint32_t *>(session.Core().GetFramebuffer());
+        return std::vector<uint32_t>(fb, fb + static_cast<size_t>(height) * pitch);
+    };
+    const std::vector<uint32_t> idlePixels = pixels();
+    // The middle of the pixels that differ from the idle screen
+    const auto changedCentre = [&](unsigned &cx, unsigned &cy) {
+        const std::vector<uint32_t> now = pixels();
+        uint64_t sx = 0, sy = 0, n = 0;
+        for (unsigned y = 0; y < height; y++) {
+            for (unsigned x = 0; x < width; x++) {
+                const size_t i = static_cast<size_t>(y) * pitch + x;
+                if ((now[i] & 0xFFFFFF) != (idlePixels[i] & 0xFFFFFF)) {
+                    sx += x;
+                    sy += y;
+                    n++;
+                }
+            }
+        }
+        cx = n != 0 ? static_cast<unsigned>(sx / n) : 0;
+        cy = n != 0 ? static_cast<unsigned>(sy / n) : 0;
+    };
+    const uint16_t buttons[3] = {kButton1, kButton2, kButton3};
+    std::set<uint64_t> pressed;
+    for (unsigned player = 0; player < 2; player++) {
+        unsigned lastRow = 0;
+        for (unsigned b = 0; b < 3; b++) {
+            INFO("player " << player + 1 << " SW " << b + 1);
+            session.RunTo(3000 + static_cast<int>(player * 4 + b) * 60);
+            session.Press(player, buttons[b]);
+            session.RunTo(session.Frame() + 20);
+            const uint64_t hash = session.VideoHash();
+            CHECK(hash != idle);
+            pressed.insert(hash);
+            unsigned cx = 0, cy = 0;
+            changedCentre(cx, cy);
+            INFO("changed pixels centred at " << cx << "," << cy);
+            CHECK((player == 0 ? cx < width * 6 / 10 : cx > width * 6 / 10));
+            CHECK(cy > lastRow);
+            lastRow = cy;
+            session.Save(("brimir_input_test_p" + std::to_string(player + 1) + "_sw" + std::to_string(b + 1) + ".png")
+                             .c_str());
+            session.RunTo(session.Frame() + 10);
+            session.Press(player, 0);
+            session.RunTo(session.Frame() + 20);
+            CHECK(session.VideoHash() == idle);
+        }
+        INFO("player " << player + 1 << " Button 4");
+        session.RunTo(3000 + static_cast<int>(player * 4 + 3) * 60);
+        session.Press(player, kButton4);
+        session.RunTo(session.Frame() + 20);
+        CHECK(session.VideoHash() == idle);
+        session.Press(player, 0);
+    }
+    CHECK(pressed.size() == 6);
+}
