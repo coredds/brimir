@@ -2997,6 +2997,12 @@ size_t CoreWrapper::GetCurrentDiscIndex() const {
 }
 
 bool CoreWrapper::GetDiscPath(unsigned index, char* s, size_t len) const {
+    // An ST-V game has no disc: image 0 answers with an empty path, so the frontend's check of the initial disc
+    // (RetroArch: get_image_path of the current index after the load) does not report an error.
+    if (IsSTVLoaded() && index == 0 && s && len > 0) {
+        s[0] = '\0';
+        return true;
+    }
     if (index >= m_discList.size() || !s || len == 0) {
         return false;
     }

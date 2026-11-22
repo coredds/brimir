@@ -277,6 +277,31 @@ TEST_CASE("stv load: LoadGame builds the board and UnloadGame takes it down agai
     CHECK(core.IsSTVLoaded());
 }
 
+// RetroArch checks the initial disc after every load (disk_control_verify_initial_index): get_image_path for the current
+// index must succeed, or it logs "Failed to set initial disc index" and shows an error notification.
+TEST_CASE("stv load: an ST-V game reports image 0 with an empty path to the disk control interface", "[stv]") {
+    TempDir dir("brimir_stv_load_diskctl");
+    const auto zipPath = dir.path / "bakubaku.zip";
+    test::WriteTestZip(zipPath, SetEntries(Game("bakubaku")));
+    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadGame(Str(zipPath).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
+    CHECK(core.GetNumDiscs() == 0);
+    CHECK(core.GetCurrentDiscIndex() == 0);
+    char path[64];
+    std::memset(path, 'x', sizeof(path));
+    CHECK(core.GetDiscPath(0, path, sizeof(path)));
+    CHECK(path[0] == '\0');
+    CHECK_FALSE(core.GetDiscPath(1, path, sizeof(path)));
+    CHECK_FALSE(core.GetDiscPath(0, path, 0));
+
+    // Saturn again: no content, no disc path
+    core.UnloadGame();
+    CHECK_FALSE(core.GetDiscPath(0, path, sizeof(path)));
+}
+
 TEST_CASE("stv load: SetSTVInput reaches the I/O ports once per emulated frame", "[stv]") {
     TempDir dir("brimir_stv_load_input");
     const auto zipPath = dir.path / "bakubaku.zip";
