@@ -19,6 +19,7 @@
 
 #include <stv/stv_cartridge.hpp>
 #include <stv/stv_game_db.hpp>
+#include <stv/stv_io.hpp>
 #include <stv/stv_system.hpp>
 
 #include <algorithm>
@@ -548,7 +549,7 @@ TEST_CASE("stv load: bakubaku loads from the real ROM set and runs", "[.stv-rom]
     CHECK(std::string(core.GetSTVGame()->shortName) == "bakubaku");
     CHECK(core.GetSaturn()->SMPC.IsSTVMode());
 
-    // Stuck in the BIOS loop (Task 8 gets it further), but running without an exception
+    // Still in the BIOS's check (about 1130 frames), running without an exception
     for (int i = 0; i < 600; i++) {
         core.RunFrame();
     }
@@ -611,4 +612,214 @@ TEST_CASE("stv load: a Saturn session after ST-V content starts as a fresh core 
     INFO("first frame that differs: " << firstDifference);
     CHECK(firstDifference == a.size());
     CHECK(reused.GetLastError().empty());
+}
+
+namespace {
+
+// FNV-1a over the frame's size and pixels only (the audio changes every frame even on a still screen)
+uint64_t VideoHash(CoreWrapper &core) {
+    uint64_t hash = 0xcbf29ce484222325ull;
+    const auto mix = [&](const void *data, size_t size) {
+        const auto *bytes = static_cast<const uint8_t *>(data);
+        for (size_t i = 0; i < size; i++) {
+            hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+        }
+    };
+    const unsigned width = core.GetFramebufferWidth();
+    const unsigned height = core.GetFramebufferHeight();
+    const unsigned pitch = core.GetFramebufferPitch();
+    mix(&width, sizeof(width));
+    mix(&height, sizeof(height));
+    const auto *pixels = static_cast<const uint8_t *>(core.GetFramebuffer());
+    for (unsigned y = 0; pixels != nullptr && y < height; y++) {
+        mix(pixels + static_cast<size_t>(y) * pitch, static_cast<size_t>(width) * 4);
+    }
+    return hash;
+}
+
+uint32_t Crc32(const uint8_t *data, size_t size, uint32_t crc = 0) {
+    crc = ~crc;
+    for (size_t i = 0; i < size; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+// The frame (XRGB8888) as an RGB PNG with stored (uncompressed) deflate blocks, for a human to compare with MAME
+void WritePng(CoreWrapper &core, const std::filesystem::path &path) {
+    const unsigned width = core.GetFramebufferWidth();
+    const unsigned height = core.GetFramebufferHeight();
+    const unsigned pitch = core.GetFramebufferPitch();
+    const auto *pixels = static_cast<const uint8_t *>(core.GetFramebuffer());
+    if (pixels == nullptr || width == 0 || height == 0) {
+        return;
+    }
+    std::vector<uint8_t> raw;
+    raw.reserve(static_cast<size_t>(height) * (width * 3 + 1));
+    for (unsigned y = 0; y < height; y++) {
+        raw.push_back(0); // filter: none
+        const uint8_t *row = pixels + static_cast<size_t>(y) * pitch;
+        for (unsigned x = 0; x < width; x++) {
+            raw.push_back(row[x * 4 + 2]);
+            raw.push_back(row[x * 4 + 1]);
+            raw.push_back(row[x * 4 + 0]);
+        }
+    }
+    std::vector<uint8_t> zlib = {0x78, 0x01};
+    for (size_t pos = 0; pos < raw.size() || pos == 0;) {
+        const size_t len = std::min<size_t>(raw.size() - pos, 0xFFFF);
+        const bool last = pos + len == raw.size();
+        zlib.push_back(last ? 1 : 0);
+        zlib.push_back(static_cast<uint8_t>(len));
+        zlib.push_back(static_cast<uint8_t>(len >> 8));
+        zlib.push_back(static_cast<uint8_t>(~len));
+        zlib.push_back(static_cast<uint8_t>(~len >> 8));
+        zlib.insert(zlib.end(), raw.begin() + static_cast<std::ptrdiff_t>(pos),
+                    raw.begin() + static_cast<std::ptrdiff_t>(pos + len));
+        pos += len;
+        if (last) {
+            break;
+        }
+    }
+    uint32_t a = 1, b = 0;
+    for (const uint8_t byte : raw) {
+        a = (a + byte) % 65521;
+        b = (b + a) % 65521;
+    }
+    const uint32_t adler = (b << 16) | a;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        zlib.push_back(static_cast<uint8_t>(adler >> shift));
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    const auto be32 = [&](uint32_t v) {
+        const uint8_t bytes[4] = {static_cast<uint8_t>(v >> 24), static_cast<uint8_t>(v >> 16),
+                                  static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v)};
+        out.write(reinterpret_cast<const char *>(bytes), 4);
+    };
+    const auto chunk = [&](const char *type, const std::vector<uint8_t> &data) {
+        be32(static_cast<uint32_t>(data.size()));
+        out.write(type, 4);
+        out.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
+        uint32_t crc = Crc32(reinterpret_cast<const uint8_t *>(type), 4);
+        crc = Crc32(data.data(), data.size(), crc);
+        be32(crc);
+    };
+    static constexpr uint8_t kSignature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    out.write(reinterpret_cast<const char *>(kSignature), sizeof(kSignature));
+    std::vector<uint8_t> ihdr;
+    for (const uint32_t v : {width, height}) {
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            ihdr.push_back(static_cast<uint8_t>(v >> shift));
+        }
+    }
+    ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0}); // 8-bit RGB
+    chunk("IHDR", ihdr);
+    chunk("IDAT", zlib);
+    chunk("IEND", {});
+}
+
+} // namespace
+
+TEST_CASE("stv: bakubaku reaches attract and accepts coin and start", "[.stv-rom]") {
+    const auto biosDir = EnvDir("BRIMIR_STV_BIOS_DIR");
+    const auto romDir = EnvDir("BRIMIR_STV_ROM_DIR");
+    if (biosDir.empty() || romDir.empty() || !std::filesystem::exists(romDir / "bakubaku.zip")) {
+        SKIP("BRIMIR_STV_BIOS_DIR and BRIMIR_STV_ROM_DIR with bakubaku.zip are needed");
+    }
+    // Optional: where to write the screenshots (attract, title with a credit, game) for comparison with MAME's
+    const auto screensDir = EnvDir("BRIMIR_STV_SCREENS_DIR");
+    TempDir scratch("brimir_stv_bakubaku_attract");
+    CopyBiosFiles(biosDir, scratch.path);
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(core.LoadGame(Str(romDir / "bakubaku.zip").c_str(), Str(scratch.path).c_str(),
+                          Str(scratch.path).c_str()));
+    REQUIRE(core.IsSTVLoaded());
+    core.SetThreadedVDP1(false);
+    core.SetThreadedVDP2(false);
+    stv::STVIOBoard *io = core.GetSTVIOBoardForTesting();
+    REQUIRE(io != nullptr);
+    ymir::Saturn &saturn = *core.GetSaturn();
+
+    // The credit count in the BIOS's work RAM (the coin handler at 0x06001BAE adds to it). MAME: 0 in the attract mode,
+    // 1 after one coin, 0 again once Start took it.
+    constexpr uint32_t kCredits = 0x0600'0740;
+    const auto credits = [&] { return saturn.mainBus.Peek<uint8_t>(kCredits); };
+
+    // The I/O board's inputs are latched once per frame (CoreWrapper does not drive them yet: Task 9)
+    int frame = 0;
+    const auto runFrame = [&] {
+        io->UpdateInputs();
+        core.RunFrame();
+        ++frame;
+    };
+    const auto save = [&](const char *name) {
+        if (!screensDir.empty()) {
+            WritePng(core, screensDir / name);
+        }
+    };
+
+    // The BIOS checks the board for about 1130 frames, then starts the game (MAME about 26 frames later: it waits for
+    // a CD block that its cartridge ST-V does not map). No phantom credits once the game runs.
+    while (frame < 1200) {
+        runFrame();
+    }
+    int creditFrames = 0;
+    std::set<uint64_t> attract;
+    while (frame < 1500) {
+        runFrame();
+        creditFrames += credits() != 0 ? 1 : 0;
+        if (frame >= 1250) {
+            attract.insert(VideoHash(core));
+        }
+    }
+    save("brimir_frame1500_attract.png");
+    CHECK(creditFrames == 0);
+    CHECK(credits() == 0);
+    INFO("distinct attract frames: " << attract.size());
+    CHECK(attract.size() >= 30);
+
+    // One coin, held for 5 frames, is one credit
+    io->SetCoin1(true);
+    while (frame < 1505) {
+        runFrame();
+    }
+    io->SetCoin1(false);
+    while (frame < 1560) {
+        runFrame();
+    }
+    save("brimir_frame1560_credit1.png");
+    CHECK(credits() == 1);
+
+    // Start takes the credit and leads into the game: no frame looks like the attract mode any more
+    while (frame < 1600) {
+        runFrame();
+    }
+    io->SetStart(0, true);
+    while (frame < 1605) {
+        runFrame();
+    }
+    io->SetStart(0, false);
+    int attractLike = 0;
+    std::set<uint64_t> game;
+    while (frame < 2205) {
+        runFrame();
+        const uint64_t hash = VideoHash(core);
+        attractLike += attract.count(hash) != 0 ? 1 : 0;
+        game.insert(hash);
+        if (frame == 1700) {
+            save("brimir_frame1700_game.png");
+        } else if (frame == 1900) {
+            save("brimir_frame1900_game.png");
+        }
+    }
+    CHECK(attractLike == 0);
+    CHECK(game.size() >= 30);
+    CHECK(credits() == 0);
+    CHECK(core.GetLastError().empty());
 }
