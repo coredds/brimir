@@ -12,6 +12,12 @@
 
 #include "frame_hash.hpp"
 #include "stream_hash.hpp"
+#ifdef BRIMIR_BENCH_TRACE
+#include "bench_trace.hpp"
+
+#include <stv/stv_cartridge.hpp>
+#include <stv/stv_game_db.hpp>
+#endif
 
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
@@ -60,6 +66,12 @@ struct Args {
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
     bool framesGiven = false; // --frames/--warmup given explicitly (rejected with --lockstep)
     bool warmupGiven = false;
+#ifdef BRIMIR_BENCH_TRACE
+    std::string traceMsh2;  // --trace-msh2 <file>
+    std::string traceIo;    // --trace-io <file>
+    int traceMsh2First = 0; // --trace-msh2-frames A-B: the instruction trace covers frames A..B
+    int traceMsh2Last = -1; // -1: to the end
+#endif
 };
 
 enum class ParseResult { Ok, Help, Error };
@@ -134,6 +146,17 @@ void PrintUsage(std::FILE* out) {
         "                (which always does this). Also runs the process on UTC (with or without --state), so\n"
         "                the RTC timestamp and the date the guest reads do not depend on the host's time zone:\n"
         "                runs on different hosts and architectures produce the same states.\n"
+#ifdef BRIMIR_BENCH_TRACE
+        "  --trace-msh2 <file>\n"
+        "                write '<frame> <PC hex8>' per master SH-2 instruction (warmup and measured frames,\n"
+        "                or --dump-at's). Interpreter only. Builds with BRIMIR_TRACE or BRIMIR_BUILD_TESTS.\n"
+        "  --trace-msh2-frames A-B\n"
+        "                limit --trace-msh2 to frames A..B (from 0; the trace is ~2 MB per frame)\n"
+        "  --trace-io <file>\n"
+        "                write '<frame> <PC hex8> <R|W><8|16|32> <addr hex8> <value hex>' per master SH-2 (or\n"
+        "                SH-2 DMA) access to SMPC, SCU registers, IOGA, 0x05000000-0x058FFFFF (A-bus CS2, CD\n"
+        "                block) and the cartridge beyond the game's ROM data (tools/bench_trace.hpp)\n"
+#endif
         "  --help, -h    show this help\n"
         "\n"
         "Backup RAM (.srm) and cartridge RAM (.cart) go to a fresh temp directory that is\n"
@@ -253,6 +276,21 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
                 std::fprintf(stderr, "Invalid --warmup value: %s\n", value);
                 return ParseResult::Error;
             }
+#ifdef BRIMIR_BENCH_TRACE
+        } else if (opt == "--trace-msh2") {
+            args.traceMsh2 = value;
+        } else if (opt == "--trace-io") {
+            args.traceIo = value;
+        } else if (opt == "--trace-msh2-frames") {
+            const std::string range = value;
+            const size_t dash = range.find('-');
+            if (dash == std::string::npos || !ParseInt(range.substr(0, dash).c_str(), args.traceMsh2First) ||
+                !ParseInt(range.substr(dash + 1).c_str(), args.traceMsh2Last) ||
+                args.traceMsh2Last < args.traceMsh2First) {
+                std::fprintf(stderr, "Invalid --trace-msh2-frames value: %s (expected A-B, A <= B)\n", value);
+                return ParseResult::Error;
+            }
+#endif
         } else {
             std::fprintf(stderr, "Unknown option: %s\n", opt.c_str());
             return ParseResult::Error;
@@ -303,6 +341,17 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
         std::fprintf(stderr, "--jit-sync-compile needs --sh2-jit or --lockstep\n");
         return ParseResult::Error;
     }
+#ifdef BRIMIR_BENCH_TRACE
+    const bool tracing = !args.traceMsh2.empty() || !args.traceIo.empty();
+    if (tracing && (args.sh2Jit || args.lockstep >= 0)) {
+        std::fprintf(stderr, "--trace-msh2 and --trace-io cannot be combined with --sh2-jit or --lockstep\n");
+        return ParseResult::Error;
+    }
+    if (args.traceMsh2Last >= 0 && args.traceMsh2.empty()) {
+        std::fprintf(stderr, "--trace-msh2-frames needs --trace-msh2\n");
+        return ParseResult::Error;
+    }
+#endif
     return ParseResult::Ok;
 }
 
@@ -576,6 +625,104 @@ CompileCounters ReadCompileCounters(const brimir::CoreWrapper& core) {
     return c;
 }
 
+#ifdef BRIMIR_BENCH_TRACE
+// --trace-msh2 / --trace-io: a tracer on the master SH-2 in debug tracing mode, writing to the two files.
+class TraceSession {
+public:
+    ~TraceSession() { Close(); }
+
+    // Returns false (message printed) when a file cannot be opened.
+    bool Open(brimir::CoreWrapper& core, const Args& args) {
+        if (args.traceMsh2.empty() && args.traceIo.empty()) {
+            return true;
+        }
+        ymir::Saturn* saturn = core.GetSaturn();
+        if (saturn == nullptr) {
+            std::fprintf(stderr, "Tracing needs a loaded core\n");
+            return false;
+        }
+        const auto open = [](const std::string& path, std::FILE*& file) {
+            if (path.empty()) {
+                return true;
+            }
+            file = std::fopen(path.c_str(), "wb");
+            if (file == nullptr) {
+                std::fprintf(stderr, "Cannot open %s for writing\n", path.c_str());
+                return false;
+            }
+            std::setvbuf(file, nullptr, _IOFBF, 1 << 20);
+            return true;
+        };
+        if (!open(args.traceMsh2, m_pcFile) || !open(args.traceIo, m_ioFile)) {
+            return false;
+        }
+        // Cartridge accesses beyond the game's ROM data (MAME's load layout: the image is rounded up to a power of
+        // two, MAME's region is not) are traced; no ST-V game: the whole cartridge area
+        uint32_t cartROMEnd = 0x0200'0000u;
+        uint32_t imageEnd = 0x0200'0000u;
+        if (const brimir::stv::GameInfo* game = core.GetSTVGame()) {
+            uint32_t dataEnd = 0;
+            for (const brimir::stv::RomEntry& rom : game->roms) {
+                const uint32_t span = rom.load == brimir::stv::Load::Byte16 ? rom.size * 2 : rom.size;
+                dataEnd = std::max(dataEnd, (rom.offset & ~1u) + span);
+            }
+            cartROMEnd += dataEnd;
+        }
+        if (auto* cart = dynamic_cast<ymir::cart::STVGameROMCartridge*>(&saturn->SCU.GetCartridge())) {
+            imageEnd += static_cast<uint32_t>(cart->GetROMSize());
+        }
+        std::printf("trace        : cartridge ROM data ends at 0x%08X, image at 0x%08X (I/O trace covers "
+                    "0x%08X-0x04FFFFFF)\n",
+                    cartROMEnd, imageEnd, cartROMEnd);
+        m_first = args.traceMsh2First;
+        m_last = args.traceMsh2Last;
+        m_tracer = std::make_unique<brimir_tools::SH2TraceWriter>(saturn->masterSH2, m_pcFile, m_ioFile, cartROMEnd);
+        m_saturn = saturn;
+        saturn->EnableDebugTracing(true);
+        saturn->masterSH2.UseTracer(m_tracer.get());
+        return true;
+    }
+
+    void BeginFrame(int frame) {
+        if (m_tracer) {
+            m_tracer->SetFrame(frame);
+            m_tracer->SetPCTraceEnabled(frame >= m_first && (m_last < 0 || frame <= m_last));
+        }
+    }
+
+    void Close() {
+        if (m_tracer) {
+            m_tracer->Flush();
+            m_saturn->masterSH2.UseTracer(nullptr);
+            m_saturn->EnableDebugTracing(false);
+            std::printf("trace        : %llu I/O lines\n", static_cast<unsigned long long>(m_tracer->IOLines()));
+            m_tracer.reset();
+        }
+        for (std::FILE** file : {&m_pcFile, &m_ioFile}) {
+            if (*file != nullptr) {
+                std::fclose(*file);
+                *file = nullptr;
+            }
+        }
+    }
+
+private:
+    ymir::Saturn* m_saturn = nullptr;
+    std::unique_ptr<brimir_tools::SH2TraceWriter> m_tracer;
+    std::FILE* m_pcFile = nullptr;
+    std::FILE* m_ioFile = nullptr;
+    int m_first = 0;
+    int m_last = -1;
+};
+#else
+class TraceSession {
+public:
+    bool Open(brimir::CoreWrapper&, const Args&) { return true; }
+    void BeginFrame(int) {}
+    void Close() {}
+};
+#endif
+
 int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir) {
     if (args.lockstep > 0) {
         brimir::CoreWrapper jitCore;
@@ -662,11 +809,21 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         std::fprintf(stderr, "Failed to fix the RTC date\n");
         return 2;
     }
+    TraceSession trace; // destroyed before core
+    if (!trace.Open(core, args)) {
+        return 2;
+    }
+    int framesRun = 0;
+    const auto runFrame = [&] {
+        trace.BeginFrame(framesRun++);
+        core.RunFrame();
+    };
 
     if (args.dumpAt >= 0) {
         for (int i = 0; i < args.dumpAt; ++i) {
-            core.RunFrame();
+            runFrame();
         }
+        trace.Close();
         std::vector<uint8_t> data(core.GetStateSize());
         if (!core.SaveState(data.data(), data.size())) {
             std::fprintf(stderr, "SaveState failed\n");
@@ -683,7 +840,7 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     }
 
     for (int i = 0; i < args.warmup; ++i) {
-        core.RunFrame();
+        runFrame();
     }
 
     core.SetProfilingEnabled(true);
@@ -729,7 +886,7 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     CompileCounters before = windowStart;
     for (int i = 0; i < args.frames; ++i) {
         const auto start = std::chrono::steady_clock::now();
-        core.RunFrame();
+        runFrame();
         const auto end = std::chrono::steady_clock::now();
         frameMs.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         if (args.hash) {
@@ -779,6 +936,7 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
             }
         }
     }
+    trace.Close();
 
     for (size_t i = 0; i < frameHashes.size(); ++i) {
         std::printf("frame %zu %ux%u %016llx\n", i, frameHashes[i].w, frameHashes[i].h,

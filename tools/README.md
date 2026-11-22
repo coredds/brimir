@@ -270,6 +270,21 @@ Used by the performance harness (`tools/perf/`, `prove.ps1`) to prove a change l
 The lines are printed after the `frame` lines, outside the timed region; none of the three can be combined with
 `--lockstep` or `--dump-at` (`--fixed-rtc` only not with `--lockstep`).
 
+### Instruction and I/O traces (test and diagnostic builds)
+
+Built only with `-DBRIMIR_BUILD_TESTS=ON` or `-DBRIMIR_TRACE=ON` (`tools/bench_trace.hpp`); release builds do not have
+these options. They run the interpreter in the core's debug tracing mode (slower) and cannot be combined with
+`--sh2-jit` or `--lockstep`. Frames count from 0 over the warmup and measured frames (or `--dump-at`'s).
+
+- `--trace-msh2 <file>`: one line per master SH-2 instruction, `<frame> <PC hex8>`. About 2 MB per frame (0.1 GB per emulated second):
+  `--trace-msh2-frames A-B` limits it to frames A..B.
+- `--trace-io <file>`: one line per master SH-2 access (or SH-2 DMA transfer unit) to the SMPC (`0x00100000-7F`), the
+  IOGA (`0x00400000-7F`), the cartridge beyond the game's ROM data (up to `0x04FFFFFF`, the 315-5881 registers
+  included), `0x05000000-0x058FFFFF` (A-bus CS2, CD block) and the SCU registers (`0x05FE0000-CF`):
+  `<frame> <PC hex8> <R|W><8|16|32> <addr hex8> <value hex>`. The address is physical (cache-through mirror folded).
+
+The fields match what MAME's debugger prints from watchpoint actions, so an ST-V boot can be compared with MAME's.
+
 ## brimir_vkhost - headless libretro host
 
 A frontend without a window: it loads the built `brimir_libretro` library dynamically (LoadLibrary/dlopen), as

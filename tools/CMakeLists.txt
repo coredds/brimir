@@ -5,6 +5,10 @@ add_executable(brimir_bench brimir_bench.cpp)
 target_link_libraries(brimir_bench PRIVATE brimir_bridge brimir::brimir-core)
 
 target_compile_features(brimir_bench PRIVATE cxx_std_20)
+# Instruction and I/O traces (tools/bench_trace.hpp): test and diagnostic builds only
+if(BRIMIR_TRACE OR BRIMIR_BUILD_TESTS)
+    target_compile_definitions(brimir_bench PRIVATE BRIMIR_BENCH_TRACE)
+endif()
 
 # Field-level diff of the VDP renderer section of two save states, with the allowlist of fields the renderers may save
 # differently (tools/state_diff.cpp; used by tests/vkhost_checks.cmake).

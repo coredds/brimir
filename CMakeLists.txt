@@ -20,6 +20,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Options
 option(BRIMIR_BUILD_TESTS "Build tests" OFF)
+option(BRIMIR_TRACE "brimir_bench --trace-msh2/--trace-io (diagnostic builds only; also on with BRIMIR_BUILD_TESTS)" OFF)
 option(BRIMIR_STATIC_LINK "Static linking" OFF)
 option(BRIMIR_LTO "Enable Link-Time Optimization" OFF)
 option(Brimir_AVX2 "Enable AVX2 instructions" OFF)
