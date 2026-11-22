@@ -17,6 +17,7 @@
 
 #include <stv/stv_cartridge.hpp>
 #include <stv/stv_game_db.hpp>
+#include <stv/stv_state.hpp>
 #endif
 
 #include <ymir/savestate/savestate.hpp>
@@ -778,11 +779,13 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                 // be checked against the loaded state's memory before they run.
                 auto state = std::make_unique<ymir::savestate::SaveState>();
                 refCore.GetSaturn()->SaveState(*state);
+                brimir::stv::STVStateBlock stvBlock; // an ST-V game's cabinet: saved and loaded with the state
+                const bool isSTV = refCore.CaptureSTVState(stvBlock);
                 if (!runFrames(std::min(reload / 2, args.lockstep - done))) {
                     return 3;
                 }
                 if (done < args.lockstep) {
-                    if (!brimir::LoadLockstepState(jitCore, refCore, *state)) {
+                    if (!brimir::LoadLockstepState(jitCore, refCore, *state, isSTV ? &stvBlock : nullptr)) {
                         std::fprintf(stderr, "Failed to load the lockstep state\n");
                         return 2;
                     }

@@ -72,6 +72,8 @@ public:
     void SetIOGADispatch(IOGAReadFn readFn, IOGAWriteFn writeFn);
 
     void SaveProtectionState(ProtectionState &state) const;
+    // Whether LoadProtectionState would take the state
+    bool ValidateProtectionState(const ProtectionState &state) const;
     // Returns false and leaves the cartridge untouched when the state holds values the chip cannot be in.
     bool LoadProtectionState(const ProtectionState &state);
 

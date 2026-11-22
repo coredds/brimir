@@ -467,7 +467,7 @@ void STVIOBoard::SaveState(STVIOBoardState &state) const {
     state.eepromBusyNs = ee.busyNs;
 }
 
-bool STVIOBoard::LoadState(const STVIOBoardState &state) {
+bool STVIOBoard::ValidateState(const STVIOBoardState &state) const {
     using EEState = SerialEEPROM::State;
 
     if (state.eepromState > static_cast<uint8>(EEState::Completion)) return false;
@@ -488,6 +488,13 @@ bool STVIOBoard::LoadState(const STVIOBoardState &state) {
         state.eepromDI > 1 || state.eepromLocked > 1 || state.eepromWriteAll > 1) {
         return false;
     }
+    return true;
+}
+
+bool STVIOBoard::LoadState(const STVIOBoardState &state) {
+    using EEState = SerialEEPROM::State;
+
+    if (!ValidateState(state)) return false;
 
     for (unsigned i = 0; i < 2; i++) {
         m_coinActiveCounter[i] = state.coinActiveCounter[i];

@@ -92,6 +92,8 @@ public:
     void AdvanceTime(uint64_t nanoseconds);
 
     void SaveState(STVIOBoardState &state) const;
+    // Whether LoadState would take the state
+    bool ValidateState(const STVIOBoardState &state) const;
     // Returns false and leaves the board untouched when the state holds values the board cannot be in.
     bool LoadState(const STVIOBoardState &state);
 

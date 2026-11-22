@@ -10,6 +10,8 @@
 #include <ymir/sys/backup_ram.hpp>
 #include <ymir/sys/saturn.hpp>
 
+#include <stv/stv_state.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -598,10 +600,22 @@ void SyncBackupMemory(const ymir::bup::IBackupMemory &src, ymir::bup::IBackupMem
 
 } // namespace
 
-bool LoadLockstepState(CoreWrapper &a, CoreWrapper &b, const ymir::savestate::SaveState &state) {
+bool LoadLockstepState(CoreWrapper &a, CoreWrapper &b, const ymir::savestate::SaveState &state,
+                       const stv::STVStateBlock *stvBlock) {
     ymir::Saturn *sa = a.GetSaturn();
     ymir::Saturn *sb = b.GetSaturn();
     if (sa == nullptr || sb == nullptr) {
+        return false;
+    }
+    const bool anySTV = a.IsSTVLoaded() || b.IsSTVLoaded();
+    if (anySTV && state.scu.cartType == ymir::savestate::SCUSaveState::CartType::ROM) {
+        // The ST-V cartridge is a ROM cartridge with no image in the state, and SCU::LoadState would replace it with a
+        // plain ROM cartridge read from that (empty) image: load the state as for no cartridge, as CoreWrapper does.
+        auto noCart = std::make_unique<ymir::savestate::SaveState>(state);
+        noCart->scu.cartType = ymir::savestate::SCUSaveState::CartType::None;
+        return LoadLockstepState(a, b, *noCart, stvBlock);
+    }
+    if (stvBlock != nullptr && !(a.RestoreSTVState(*stvBlock) && b.RestoreSTVState(*stvBlock))) {
         return false;
     }
     // skipROMChecks: both cores run the same IPL/CD block ROM by construction.
@@ -617,7 +631,9 @@ bool SyncLockstepCores(CoreWrapper &src, CoreWrapper &dst) {
     auto state = std::make_unique<ymir::savestate::SaveState>();
     ClearSaveState(*state);
     ss->SaveState(*state);
-    if (!LoadLockstepState(src, dst, *state)) {
+    stv::STVStateBlock block;
+    const bool isSTV = src.CaptureSTVState(block);
+    if (!LoadLockstepState(src, dst, *state, isSTV ? &block : nullptr)) {
         return false;
     }
 
@@ -698,6 +714,25 @@ std::string CompareCores(CoreWrapper &a, CoreWrapper &b) {
     }
     if (std::string diff = DiffSaturnState(*sa, *sb); !diff.empty()) {
         return diff;
+    }
+    {
+        stv::STVStateBlock blockA;
+        stv::STVStateBlock blockB;
+        if (a.CaptureSTVState(blockA) && b.CaptureSTVState(blockB)) {
+            std::vector<uint8_t> bytesA;
+            std::vector<uint8_t> bytesB;
+            stv::EncodeSTVState(blockA, bytesA);
+            stv::EncodeSTVState(blockB, bytesB);
+            if (bytesA != bytesB) {
+                size_t at = 0;
+                while (at < bytesA.size() && bytesA[at] == bytesB[at]) {
+                    ++at;
+                }
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "ST-V state differs (byte offset %zu)", at);
+                return buf;
+            }
+        }
     }
 
     const unsigned w = a.GetFramebufferWidth();

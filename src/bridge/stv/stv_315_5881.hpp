@@ -40,6 +40,8 @@ public:
     };
 
     void SaveState(State &state) const;
+    // Whether LoadState would take the state
+    bool ValidateState(const State &state) const;
     // Returns false and leaves the chip untouched when the state holds values the chip cannot be in.
     bool LoadState(const State &state);
 

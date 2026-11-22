@@ -8,6 +8,8 @@
 
 #include <ymir/sys/saturn.hpp>
 
+#include <bit>
+#include <cassert>
 #include <utility>
 
 namespace brimir::stv {
@@ -134,6 +136,41 @@ void STVSystem::Detach() {
 void STVSystem::ResyncTime() {
     m_lastCount = m_saturn != nullptr ? m_saturn->GetSchedulerCount() : 0;
     m_nsRemainder = 0.0;
+}
+
+void STVSystem::SaveState(STVStateBlock &block) const {
+    block = {};
+    if (m_saturn == nullptr) {
+        return;
+    }
+    block.gameHash = STVGameHash(m_game->shortName);
+    m_io.SaveState(block.io);
+    m_cart->SaveProtectionState(block.protection);
+    block.schedulerCount = m_lastCount;
+    block.nsRemainderBits = std::bit_cast<uint64_t>(m_nsRemainder);
+}
+
+bool STVSystem::ValidateState(const STVStateBlock &block) const {
+    if (m_saturn == nullptr || block.gameHash != STVGameHash(m_game->shortName)) {
+        return false;
+    }
+    const double remainder = std::bit_cast<double>(block.nsRemainderBits);
+    if (!(remainder >= 0.0 && remainder < 1.0)) {
+        return false;
+    }
+    return m_io.ValidateState(block.io) && m_cart->ValidateProtectionState(block.protection);
+}
+
+bool STVSystem::LoadState(const STVStateBlock &block) {
+    if (!ValidateState(block)) {
+        return false;
+    }
+    [[maybe_unused]] const bool io = m_io.LoadState(block.io);
+    [[maybe_unused]] const bool protection = m_cart->LoadProtectionState(block.protection);
+    assert(io && protection && "ValidateState accepted the block");
+    m_lastCount = block.schedulerCount;
+    m_nsRemainder = std::bit_cast<double>(block.nsRemainderBits);
+    return true;
 }
 
 void STVSystem::AdvanceIOTime() {

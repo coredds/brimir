@@ -14,6 +14,10 @@ struct SaveState;
 
 namespace brimir {
 
+namespace stv {
+struct STVStateBlock;
+}
+
 enum class SH2DiffScope {
     Cpu,               // CPU, pipeline and register-programmed on-chip state
     CpuAndPeripherals, // also timers (FRT, WDT), DMAC and the pending interrupt, which advance with time
@@ -72,14 +76,20 @@ bool SyncLockstepCores(CoreWrapper &src, CoreWrapper &dst);
 // images are outside the save state and are left as they are: lockstep keeps them identical. A JIT
 // core keeps its compiled blocks across the load; they are checked against memory before they run.
 // Returns false if either core is not initialized or a LoadState fails.
-bool LoadLockstepState(CoreWrapper &a, CoreWrapper &b, const ymir::savestate::SaveState &state);
+//
+// ST-V cores: stvBlock is the cabinet's part of the state (CoreWrapper::CaptureSTVState, taken together with the
+// Saturn state); both cores load it. Without it only the Saturn state is loaded. The cartridge slot keeps the ST-V
+// cartridge either way (a ROM cartridge in a state is the content's own, see CoreWrapper::LoadState).
+bool LoadLockstepState(CoreWrapper &a, CoreWrapper &b, const ymir::savestate::SaveState &state,
+                       const stv::STVStateBlock *stvBlock = nullptr);
 
 // Compares the emulated state of two cores after the same frames, in this order: both SH-2s (CPU
 // and on-chip peripherals, field by field), the slave SH-2 enable flag, low and high work RAM, the
 // 32 KiB internal backup RAM, the cartridge type and, for a backup memory cartridge, its contents
 // (read through the Saturn object, without touching CoreWrapper's SRAM sync state), the save state
 // of every other subsystem (scheduler, system, SCU, SMPC, VDP, SCSP, the CD block -- HLE or
-// SH-1/YGR/CD drive/DRAM when LLE -- and the spillover counters), and the last output frame.
+// SH-1/YGR/CD drive/DRAM when LLE -- and the spillover counters), the ST-V cabinet's block of two ST-V cores
+// ("ST-V state differs (byte offset N)"), and the last output frame.
 // Returns "" if identical, otherwise the first difference ("a" is the first core) in one of two
 // formats: "<field> differs: a=0x.. b=0x.." for named fields (SH-2 registers, "WRAMLow[0xNNNNN]",
 // "internal backup RAM[0xNNNN]", "cartridge backup RAM[0xNNNN]", "cdblockLLE", the spillover and

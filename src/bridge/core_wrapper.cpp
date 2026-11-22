@@ -31,6 +31,7 @@
 #include <stv/stv_bios.hpp>
 #include <stv/stv_cartridge.hpp>
 #include <stv/stv_loader.hpp>
+#include <stv/stv_state.hpp>
 #include <stv/stv_system.hpp>
 #include <stv/stv_zip.hpp>
 
@@ -838,6 +839,7 @@ bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::f
     m_sramCacheDirty = true;
     m_sramFirstLoad = true;
     m_stvSrmRejected = false;
+    m_stateScratchIsSaved = false; // a state of the content before is not this one's
     m_hasCartridge = false;
     m_cartridgePath.clear();
     m_cartridgeSaved.clear();
@@ -891,6 +893,7 @@ void CoreWrapper::ReturnToSaturn() {
     m_stvDescription.clear();
     m_cartridgeDescription = "none";
     m_iplLoaded = false;
+    m_stateScratchIsSaved = false; // the ST-V session's last state is not a Saturn one
 
     if (m_saturn) {
         // A Saturn as it was built: no BIOS, empty work RAM, formatted backup RAM, the CPUs at their reset vector. The
@@ -1899,7 +1902,10 @@ size_t CoreWrapper::GetStateSize() const {
     // Header (16 bytes: magic, version, payload size, compressed size) + LZ4 bound of the largest
     // payload this session can produce. Stable while a game is loaded (the cartridge is chosen at
     // load), but larger for games with a RAM cartridge than without.
-    const size_t maxPayload = MaxEncodedSaveStateSize(CartDataSize(*m_saturn));
+    size_t maxPayload = MaxEncodedSaveStateSize(CartDataSize(*m_saturn));
+    if (m_stv) {
+        maxPayload += stv::STVStateTailSize(); // the cabinet's block and the trailer (stv_state.hpp)
+    }
     return static_cast<size_t>(LZ4_compressBound(static_cast<int>(maxPayload))) + 16;
 }
 
@@ -1958,6 +1964,11 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         if (!EncodeSaveState(state, m_statePayload)) {
             return false;
         }
+        if (m_stv) {
+            stv::STVStateBlock block;
+            m_stv->SaveState(block);
+            stv::EncodeSTVState(block, m_statePayload);
+        }
 
         // Write 16-byte header: magic + version + payload size + placeholder compressed size
         const uint32_t magic = kNewStateMagic;
@@ -1999,6 +2010,18 @@ bool CoreWrapper::SaveState(void* data, size_t size) {
         (void)e;
         return false;
     }
+}
+
+bool CoreWrapper::CaptureSTVState(stv::STVStateBlock& block) const {
+    if (!m_stv) {
+        return false;
+    }
+    m_stv->SaveState(block);
+    return true;
+}
+
+bool CoreWrapper::RestoreSTVState(const stv::STVStateBlock& block) {
+    return m_stv && m_stv->LoadState(block);
 }
 
 // The core's CDBlock::ValidateState() does not range-check the read FIFO cursors, so a crafted state
@@ -2043,7 +2066,19 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             if (version < kOldestLoadableSaveStateVersion || version > kSaveStateVersion) {
                 return false;
             }
-            if (payloadSize > MaxEncodedSaveStateSize(kMaxSaveStateCartDataSize)) {
+            // An ST-V state (current format only) carries the cabinet's block after the Saturn payload. The session
+            // decides what to expect, never the bytes.
+            const bool stvSession = m_stv != nullptr;
+            const size_t stvTail = stvSession ? stv::STVStateTailSize() : 0;
+            if (payloadSize > MaxEncodedSaveStateSize(kMaxSaveStateCartDataSize) + stvTail) {
+                return false;
+            }
+            if (stvSession && version != kSaveStateVersion) {
+                m_lastStateError = "ST-V states are saved in the current state format only";
+                return false;
+            }
+            if (stvSession && payloadSize < stvTail) {
+                m_lastStateError = "the state is not an ST-V state (saved by a Saturn session?)";
                 return false;
             }
             if (compressedSize > size - 16 || compressedSize > static_cast<uint32_t>(INT32_MAX)) {
@@ -2057,8 +2092,32 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                                std::memcmp(in, m_savedStateBytes.data(), m_savedStateBytes.size()) == 0;
             m_stateScratchIsSaved = false;
             auto& state = Scratch(m_stateScratch);
+            // An ST-V session reads the cabinet's block off the end of the payload first: the Saturn part is only
+            // decoded for a state that is this game's
+            stv::STVStateBlock stvBlock;
+            const auto checkSTVBlock = [&]() {
+                const std::span<const uint8_t> tail = std::span<const uint8_t>(m_statePayload).last(stvTail);
+                if (!stv::DecodeSTVState(tail, stvBlock)) {
+                    m_lastStateError = "the state is not an ST-V state (saved by a Saturn session?)";
+                    return false;
+                }
+                if (stvBlock.gameHash != stv::STVGameHash(m_stv->Game()->shortName)) {
+                    m_lastStateError = "the state is of another ST-V game than " + std::string(m_stv->Game()->shortName);
+                    return false;
+                }
+                if (!m_stv->ValidateState(stvBlock)) {
+                    m_lastStateError = "the state's ST-V cabinet data is not valid";
+                    return false;
+                }
+                return true;
+            };
             if (reuse) {
                 ++m_reusedStateLoads;
+                // m_statePayload still holds the payload the saved bytes decompress to (only SaveState and the
+                // decoding below write it)
+                if (stvSession && (m_statePayload.size() != payloadSize || !checkSTVBlock())) {
+                    return false;
+                }
 #ifndef NDEBUG
                 {
                     // Debug builds: the reused scratch is what the bytes decode to (both encode to the same payload)
@@ -2070,11 +2129,14 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                     auto decoded = std::make_unique<ymir::savestate::SaveState>();
                     std::vector<uint8_t> decodedPayload;
                     std::vector<uint8_t> scratchPayload;
+                    const std::span<const uint8_t> saturnPart = std::span<const uint8_t>(payload).first(payloadSize - stvTail);
                     const bool same = result == static_cast<int>(payloadSize) &&
-                                      DecodeSaveState(payload, *decoded, version) &&
+                                      payload == m_statePayload && DecodeSaveState(saturnPart, *decoded, version) &&
                                       EncodeSaveState(*decoded, decodedPayload) &&
                                       EncodeSaveState(state, scratchPayload) && decodedPayload == scratchPayload &&
-                                      scratchPayload == payload;
+                                      std::equal(scratchPayload.begin(), scratchPayload.end(), payload.begin(),
+                                                 payload.begin() + static_cast<std::ptrdiff_t>(saturnPart.size())) &&
+                                      scratchPayload.size() == saturnPart.size();
                     assert(same && "the reused state is what the saved bytes decode to");
                     (void)same;
                 }
@@ -2093,12 +2155,21 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 if (result != static_cast<int>(payloadSize)) {
                     return false;
                 }
+                if (stvSession && !checkSTVBlock()) {
+                    return false;
+                }
                 // DecodeSaveState writes or clears every member for any version, so the scratch state needs no reset.
-                if (!DecodeSaveState(m_statePayload, state, version)) {
+                // A Saturn session decodes the whole payload, so an ST-V state's bytes after the Saturn part fail it.
+                const std::span<const uint8_t> saturnPart = std::span<const uint8_t>(m_statePayload).first(payloadSize - stvTail);
+                if (!DecodeSaveState(saturnPart, state, version)) {
+                    if (!stvSession && stv::HasSTVTrailer(m_statePayload)) {
+                        m_lastStateError = "the state is an ST-V state and this session is not running an ST-V game";
+                    }
                     return false;
                 }
             }
             if (version == 4) {
+
                 UpgradeVersion4SaveState(state);
             }
             if (!HasValidCDBlockCursors(state)) {
@@ -2126,10 +2197,15 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 m_lastStateError = "the state's backup cartridge differs in size from the inserted one";
                 return false;
             }
+            if (stvSession && state.system.iplRomHash != m_saturn->GetIPLHash()) {
+                // The BIOS is not in the state and the CPUs run its code: another ST-V BIOS (region) cannot continue it
+                m_lastStateError = "the state was saved with another ST-V BIOS than the loaded one";
+                return false;
+            }
             if (state.scu.cartType == CartType::ROM) {
                 // The inserted ROM stays (it is the content's dump; version 8 states hold none, and SCU::LoadState
-                // would read a version 7 state's 2 MiB image through a 4 MiB span): SCU::LoadState leaves the slot
-                // alone for no cartridge.
+                // would read a version 7 state's 2 MiB image through a 4 MiB span, and replace the ST-V cartridge with
+                // a plain ROM one): SCU::LoadState leaves the slot alone for no cartridge.
                 state.scu.cartType = CartType::None;
             }
             // A state of the other CD Block mode switches the system to it (Saturn::LoadState). A low-level state needs
@@ -2165,6 +2241,12 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             if (!m_saturn->LoadState(state, true)) {
                 return false;
             }
+            if (stvSession) {
+                // Validated above, so it cannot fail now; the time base (the scheduler count the load restored) and the
+                // I/O board's EEPROM timing continue as saved
+                [[maybe_unused]] const bool loaded = m_stv->LoadState(stvBlock);
+                assert(loaded && "the ST-V block was validated");
+            }
             m_cdblockLLEActive = state.cdblockLLE;
             for (unsigned i = 0; i < 2; ++i) {
                 const auto& port = state.brimir.peripherals.ports[i];
@@ -2194,6 +2276,17 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 // and the frontend's SRAM buffer is refreshed from it.
                 m_sramFirstLoad = false;
                 m_sramCacheDirty = true;
+            }
+            if (stvSession) {
+                // The backup RAM and the EEPROM cells are the state's now (the .srm not yet copied down at the first
+                // frame must not replace them): the frontend's buffer, which keeps its address, takes both
+                m_sramFirstLoad = false;
+                m_stvSrmRejected = false;
+                if (m_sramInitialized) {
+                    ReadSRAMFromYmir();
+                    m_sramCacheDirty = false;
+                    m_framesSinceLastSRAMSync = 0;
+                }
             }
             if (state.brimir.valid && state.brimir.settings.valid) {
                 // Not emulation state: this session keeps its own settings (the next frames may run differently from

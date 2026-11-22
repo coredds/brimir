@@ -71,9 +71,14 @@ void STVGameROMCartridge::SaveProtectionState(ProtectionState &state) const {
     state.abus = m_abus;
 }
 
-bool STVGameROMCartridge::LoadProtectionState(const ProtectionState &state) {
+bool STVGameROMCartridge::ValidateProtectionState(const ProtectionState &state) const {
     if (state.rsgThingy > 1 || state.protectionEnabled > 1) return false;
     if ((state.protectionEnabled != 0) != (((state.abus[0] >> 16) & 1u) != 0)) return false;
+    return m_crypt3155881.ValidateState(state.crypt);
+}
+
+bool STVGameROMCartridge::LoadProtectionState(const ProtectionState &state) {
+    if (!ValidateProtectionState(state)) return false;
     if (!m_crypt3155881.LoadState(state.crypt)) return false;
     m_rsgThingy = state.rsgThingy != 0;
     m_rsgCounter = state.rsgCounter;

@@ -16,6 +16,7 @@ add_library(brimir_bridge OBJECT
     stv/stv_input.cpp
     stv/stv_io.cpp
     stv/stv_loader.cpp
+    stv/stv_state.cpp
     stv/stv_system.cpp
     stv/stv_zip.cpp
 )

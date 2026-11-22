@@ -410,6 +410,10 @@ void SCU::SaveState(savestate::SCUSaveState &state) const {
     }
     case cart::CartType::ROM: //
     {
+        if (m_cartSlot.GetCartridge().OwnsCartridgeSpace()) { // Brimir: the ST-V cartridge is not a ROMCartridge
+            state.cartType = savestate::SCUSaveState::CartType::ROM;
+            break; // no image: the ROM is the content's dump (the bridge keeps it)
+        }
         const cart::ROMCartridge *cart = m_cartSlot.GetCartridge().As<cart::CartType::ROM>();
         assert(cart != nullptr);
         static constexpr size_t size = cart::kROMCartSize;

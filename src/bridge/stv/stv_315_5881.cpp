@@ -273,12 +273,17 @@ void STV3155881::SaveState(State &state) const {
     state.doneCompression = m_doneCompression ? 1 : 0;
 }
 
-bool STV3155881::LoadState(const State &state) {
+bool STV3155881::ValidateState(const State &state) const {
     // These index the chip's buffers and shift by the bit counters.
     if (state.bufferPos > m_buffer.size()) return false;
     if (state.lineBufferSize > kLineSize || state.lineBufferPos > kLineSize) return false;
     if (state.bufferBit < 0 || state.bufferBit > 7 || state.bufferBit2 < 0 || state.bufferBit2 > 15) return false;
     if (state.enabled > 1 || state.ready > 1 || state.doneCompression > 1) return false;
+    return true;
+}
+
+bool STV3155881::LoadState(const State &state) {
+    if (!ValidateState(state)) return false;
 
     m_key = state.key;
     m_subKey = state.subKey;

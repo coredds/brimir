@@ -10,6 +10,7 @@
 
 #include "stv_game_db.hpp"
 #include "stv_io.hpp"
+#include "stv_state.hpp"
 
 #include <ymir/hw/smpc/smpc_defs.hpp>
 
@@ -66,6 +67,13 @@ public:
 
     // Emulated time starts counting from now (after a save state load or a hard reset moved the scheduler).
     void ResyncTime();
+
+    // The part of an ST-V save state that is not the Saturn's (stv_state.hpp): the game, the I/O board, the protection
+    // chip and the time base. ValidateState is whether LoadState would take the block (it is for this game, and the
+    // board and the chip can be in the states it holds); LoadState changes nothing when it returns false.
+    void SaveState(STVStateBlock &block) const;
+    bool ValidateState(const STVStateBlock &block) const;
+    bool LoadState(const STVStateBlock &block);
 
 private:
     // Advances the I/O board by the emulated time since the last call (the 93C46's write cycles).

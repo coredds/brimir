@@ -58,6 +58,7 @@ class VulkanVDPRenderer;
 namespace brimir::stv {
 class STVIOBoard;
 class STVSystem;
+struct STVStateBlock;
 } // namespace brimir::stv
 
 namespace brimir::jit {
@@ -357,6 +358,14 @@ public:
     /// @param size Size of the buffer
     /// @return true if successful
     bool LoadState(const void* data, size_t size);
+
+    /// @brief ST-V: the cabinet's part of a save state (I/O board, protection chip, time base; the Saturn payload is
+    /// separate). False when no ST-V game is loaded.
+    bool CaptureSTVState(stv::STVStateBlock& block) const;
+
+    /// @brief ST-V: restores a block CaptureSTVState returned (of this game). False, with nothing changed, when no ST-V
+    /// game is loaded or the block does not fit this session.
+    bool RestoreSTVState(const stv::STVStateBlock& block);
 
     /// @brief How many LoadState() calls took the decoded state of the last SaveState() instead of decompressing and
     /// decoding the buffer (it held exactly the bytes that SaveState() wrote, as in run-ahead)
