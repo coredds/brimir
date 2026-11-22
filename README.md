@@ -1,114 +1,33 @@
 # Brimir
 
-A Sega Saturn emulation core for libretro, built on the [Ymir](https://github.com/StrikerX3/ymir) emulator by StrikerX3.
+A Sega Saturn and Sega ST-V emulation core for libretro, built on the [Ymir](https://github.com/StrikerX3/ymir) emulator by StrikerX3. It runs in RetroArch on Windows, Linux, macOS and Android.
 
 ## Overview
 
-Brimir is a libretro core for Sega Saturn emulation, wrapping Ymir's cycle-accurate hardware layer. It provides accurate emulation with optimized software rendering and full VDP1/VDP2 support.
+Brimir is a libretro core that wraps Ymir's cycle-accurate hardware layer. It provides accurate Saturn emulation with optimized software rendering, an optional Vulkan renderer and full VDP1/VDP2 support, and it also runs eight ST-V arcade games.
 
-**Current Status**: Active development. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed and the relevant fixes are taken, with Brimir-specific fixes and optimizations on top.
+## What's New in 0.10.0
 
-## What's New in v0.9.0
+- **ST-V arcade support** - eight Sega ST-V games run from their MAME ROM sets: Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force and Radiant Silvergun. See [ST-V arcade games](#st-v-arcade-games).
+- **Archived Saturn discs no longer load** - a `.zip` is now read only as an ST-V ROM set, and RetroArch no longer unpacks `.zip` or `.7z` files for the core. Extract the disc image and load its `.cue`, or convert it to CHD.
+- **Core info file** - `brimir_libretro.info` now lists the ST-V database next to the Saturn one.
 
-- **Android (arm64)** - a core for RetroArch on 64-bit Android, tested on a Samsung Galaxy A56: the Vulkan renderer ran at full speed at 1x; internal resolution above 1x is not available on Android yet; Mali and Adreno phones are untested. See [Android](#android).
-- **Saves** - in-game saves now reach RetroArch's periodic autosave during play (before, an app kill or crash lost the session's saves), and blank Saturn save memory (`Brimir.srm`, all-zero save files) is no longer written or used.
-- **Threaded rendering** - VDP1 drawing no longer depends on thread timing for the interlace mode (brief sprite glitches around interlace mode switches on slow or busy machines). Unthreaded output is unchanged.
-- **Robustness** - odd file paths and failed disc swaps can no longer crash RetroArch; a `Device report:` line in the log tells which renderer ran and why. Details in `CHANGELOG.md`.
-
-## Previous Highlights
-
-### v0.8.1
-
-- **Run-ahead "Use Second Instance" with the Vulkan renderer** - this gave sound but a black picture. RetroArch now falls back to run-ahead on one instance, with the picture (it says "Failed to create second instance. Run-Ahead will now use only one instance." once per content load). The software renderer keeps the second instance. See [Save states](#save-states-run-ahead-rewind-and-netplay).
-
-### v0.8.0
-
-- **Much faster software rendering and SH-2 emulation** - the median frame time is 20-64 % shorter with threaded VDP (the default) and 29-61 % shorter without it, on every test window (for example Virtua Fighter 2 18.4 -> 6.7 ms, Fighters Megamix 17.6 -> 6.9 ms). The Vulkan renderer at 1x is 7-9 % faster and single-instance run-ahead 23-39 % cheaper. See [Performance](#performance).
-- **No output change** - frames, audio, save states and cycle counts are byte-identical to 0.7.2, and states from 0.7.2 and older load as before.
-
-### v0.7.2
-
-- **Upstream Ymir sync** - every upstream Ymir core change up to `ff935379` (2026-11-07) reviewed: 533 commits, 4 fixes taken, 92 already in Brimir (including every game fix Ymir names in that period), Brimir's own version kept for 2, the rest skipped (mostly Ymir's GPU renderers and host CD drive support). Details in `src/core/UPSTREAM_SYNC_2026-11.md`.
-- **CD Block LLE** - resuming a paused CD audio track now continues where it was paused instead of restarting from the track's pregap.
-
-### v0.7.1
-
-- **BIOS Auto picks the disc's region** - a Japan/Asia-only disc boots with a Japanese BIOS, any other disc with a US/EU one (falling back to any BIOS present), and region autodetection runs a multi-region disc in the BIOS's region. See [Installation](#installation).
-- **BIOS settings in save states** - a state carries the BIOS language and settings and applies them for the session; your saved settings never change from a loaded state. See [Save states](#save-states-run-ahead-rewind-and-netplay).
-- **Controller options** - Analog Stick Deadzone and Trigger Deadzone (15 % by default; 0 % = 0.7.0's mapping) and Mouse Sensitivity (100 % by default); the Shuttle Mouse moves as in Beetle Saturn. See [Controllers](#controllers).
-- **CD Block LLE validated with the real ROMs** - `cdb106.bin` and `cdb105.bin` boot the tested games, and run-ahead, rewind and netplay are exact with them in the tested games (a save-state fix). See [Accuracy options](#accuracy-options).
-- **Upgrading from 0.7.0** - states saved by 0.7.0 for non-Japanese discs were made with the Japanese BIOS (0.7.0's Auto); they load with the US/EU BIOS now, but if one misbehaves, set BIOS Selection to the Japanese BIOS to continue it. In-game saves (`.srm`) are unaffected. In Host RTC mode the new `_us_eu` settings file means the BIOS setup screen appears once.
-
-### v0.7.0
-
-- **Run-ahead and netplay** - save states now continue exactly like the uninterrupted run, so RetroArch allows run-ahead and netplay, and rewind is exact. The Saturn clock runs on emulated time by default (new RTC Mode option), and a first boot no longer stops at the BIOS clock setup screen. See [Save states, run-ahead, rewind and netplay](#save-states-run-ahead-rewind-and-netplay).
-- **Cheats and RetroAchievements** - the Saturn cheat files of RetroArch's database work (Action Replay codes), and work RAM is laid out as in Beetle Saturn, so achievement sets and cheat searches made with Beetle work too. See [Cheats](#cheats) and [RetroAchievements](#retroachievements).
-- **Every Saturn controller** - 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse and Virtua Gun (with an on-screen crosshair) on both ports. See [Controllers](#controllers).
-- **Cartridges** - The King of Fighters '95 and Ultraman with their ROM cartridge dumps, a backup memory cartridge saved in Beetle Saturn's `.bcr` layout, and a Cartridge option. See [Cartridges](#cartridges).
-- **Accuracy options** - SH-2 cache emulation, low-level CD Block emulation (needs the CD Block ROM) and SCSP step granularity. See [Accuracy options](#accuracy-options).
-- **Save-state fixes** - the state format is now version 11; states from v0.6.x and earlier versions down to version 4 still load (except Dezaemon 2 and Galaxy Force II states, see [Save states](#save-states-run-ahead-rewind-and-netplay)). Full list in [CHANGELOG.md](CHANGELOG.md).
-
-### v0.6.1
-
-- **Crash fix** - RetroArch no longer crashes on Quick Menu > Close Content when the core uses the Vulkan renderer. Hotfix on top of v0.6.0 with no other changes; save states and saves are unaffected.
-
-### v0.6.0
-
-- **Vulkan renderer (optional)** - set Renderer to Vulkan (applies on content load; needs RetroArch's Vulkan video driver and a Vulkan 1.2 GPU) to draw VDP1 and VDP2 with compute shaders on the GPU. At native resolution every frame and save state is identical to the software renderer, and states load in either renderer. See [Vulkan renderer](#vulkan-renderer).
-- **Internal resolution up to 4x** - Internal Resolution (live) renders backgrounds, and with VDP1 Upscaling (on by default, live) polygons and sprites, at 2x-4x: sharper 3D edges, rotated floors and distant textures. Framebuffer memory, save states, run-ahead, rewind and netplay behave exactly as at 1x.
-- **Software renderer fixes** - checking the GPU renderer against software frame by frame found and fixed several software-renderer bugs: threaded VDP2 save states and resets, VDP1 line freezes and lost lines, uninitialised VDP state, 16-colour background save states (save-state format version 5; older states convert on load), transparent meshes, mosaic line colour, colour gradation and rotated hi-res sprites.
-- **Also** - the Deinterlacing option works on its own, CHD memory use is capped, backup RAM no longer depends on a temp file, upstream Ymir CD block, SMPC, SCU, VDP and SCSP fixes, and an experimental SH-2 JIT (off by default). Full list in [CHANGELOG.md](CHANGELOG.md).
-
-### v0.5.5
-
-- **Crash fix** - RetroArch on Windows no longer exits on Quick Menu > Close Content ([#7](https://github.com/coredds/brimir/issues/7)). Hotfix on top of v0.5.4 with no other changes; save states and saves are unaffected.
-
-### v0.5.4
-
-- **Compatibility fixes** - SMPC now ignores SSHON while the slave SH-2 is running, fixing Guardian Heroes level transitions and letting Gekitotsu Koushien, Madden NFL 97 (Europe), Ten Pin Alley, UEFA Euro 96 - England, and No-appointment Gals Olympos go in-game. VDP1 no longer clears COPR at frame start (fixes Alone in the Dark - One-Eyed Jack's Revenge lockups). SH-2 cache workarounds added for Hissatsu! and No-appointment Gals Olympos.
-- **Threaded VDP1 rendering** - CPU framebuffer writes are no longer lost when the render thread publishes its framebuffer, fixing the Waialae no Kiseki - Extra 36 Holes title screen with the default threaded VDP1 option.
-- **VDP2 correctness** - mid-frame back screen/line color and display-disable changes take effect, EXTEN reads latch HCNT, and rotation backgrounds no longer overrun line buffers when the resolution changes mid-frame.
-- **Save states** - VCNT is now restored correctly, which matters for rewind and run-ahead. Save-state layout is unchanged.
-- **Regression coverage** - 83 active tests with 647,796 assertions pass on Windows x64 and Linux x64.
-
-### v0.5.3
-
-- **Compatibility fixes** - Dragon Force II SH-2 cache workaround; corrected HLE CD seek track numbering, playback-reset ordering, and pregap-relative sub-Q timing.
-- **Rendering correctness** - fixed ARM64 per-pixel blend ratios and SSE2/NEON color-gradation selection.
-- **Host-side optimizations** - enabled baseline SSE2 on Windows x64, stopped profiling collection when disabled, corrected LTO compilation/link targeting, and resample mono MP3/OGG audio before stereo expansion.
-- **Regression coverage** - 71 active tests with 647,107 assertions pass on Windows x64, Linux x64, and ARM64 under QEMU, with LTO enabled and disabled. Save-state layout and CPU requirements are unchanged.
-
-Synthetic Windows sprite-rendering tests measured approximately 5-8% lower median render time with SSE2 and identical frame hashes. LTO showed no clear additional gain in those scenes. These are not game-FPS claims; native macOS ARM64 and real-game performance validation remain outstanding.
-
-### v0.5.2
-
-- **Ymir hardware-layer backports** - VDP2 color-gradation fix (Astal fog effect), BIN/CUE loader sanity checks for malformed sheets, and a devlog crash fix when switching VDP renderers.
-
-### v0.5.1
-
-- **Multi-file CUE / compressed audio support** — the BIN/CUE loader now handles multiple `FILE` entries and decodes `MP3`/`OGG` audio tracks to 44.1 kHz stereo PCM, with hardening against empty/invalid audio files.
-
-### v0.5.0
-
-- **Ymir hardware-layer backports** — VDP2 EXTEN save-state fix, SCU 8-bit DSP writes, VDP1 MSB/force-align fixes, Virtua Gun graduation, SMPC callback cleanup, CDBlock HLE unimplemented-command status, and MSVC `FORCE_INLINE_EX` hints.
-- **Interlaced-mode performance** — vectorized the final VDP2 alpha-opaquing pass and skip resetting the unused alt-field fetcher bank when deinterlacing is disabled.
-- **Deployment fix** — `deploy-retroarch.ps1` now correctly finds `brimir_libretro.info` under `resources\info\`.
+The history of every release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
 ### Emulation
-- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation, based on the upstream Ymir hardware-layer sync of 2026-11-07 (`ff935379`)
-- Accurate SH-2 dual-CPU emulation with WB/EX stall timing, 32-bit instruction fetch, and inlined opcode decode
-- Full VDP1 sprite engine and VDP2 scroll plane graphics with COPR register fix
+- **Ymir Hardware Layer**: Cycle-accurate Saturn emulation
+- Accurate SH-2 dual-CPU emulation with WB/EX stall timing
+- Full VDP1 sprite engine and VDP2 scroll plane graphics
 - SCSP (Saturn Custom Sound Processor) audio with configurable interpolation and volume control
 - M68000 sound CPU emulation
 - SCU DSP and DMA emulation
 - CHD and ISO disc format support via libchdr
 - Eight Sega ST-V arcade games from MAME ROM sets (see [ST-V arcade games](#st-v-arcade-games))
 - Save states (LZ4-compressed) and backup RAM persistence
-- Versioned save states (states from incompatible builds are rejected)
 - SRAM managed as a single source of truth for libretro `.srm` files
-- Per-region persistent SMPC/RTC data with automatic migration from the legacy filename
+- Per-region persistent SMPC/RTC data
 - Auto-detection of console region from disc; real NTSC/PAL timing reported to the frontend
 - Configurable CD read speed (2x-32x/Max)
 - SH-2 CPU overclocking (100%-300%)
@@ -121,7 +40,7 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
   folder; without it the CD Block stays high-level) and SCSP step granularity
 
 ### Rendering
-- **Software Renderer**: Ymir's proven software renderer with pixel-perfect accuracy
+- **Software Renderer**: Ymir's software renderer with pixel-perfect accuracy
   - SIMD software rendering: baseline SSE2 on x64, NEON on ARM64, optional AVX2 on compatible x64 CPUs
   - Threaded VDP1 and VDP2 rendering for optimal performance
   - Full resolution output (no overscan cropping by VDP)
@@ -146,24 +65,23 @@ Synthetic Windows sprite-rendering tests measured approximately 5-8% lower media
 - Deterministic save states (`savestate_features = "deterministic"`): run-ahead, rewind and netplay
 - Control Pad, 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse and Virtua Gun on ports 1 and 2
 - Real NTSC/PAL region reporting with dynamic AV timing updates
-- Save state versioning for forward compatibility
 - Performance profiling option (gated via core option)
 - Full controller remapping support
 
 ## Performance
 
-The 2026-11 performance round (v0.8.0) made the software renderer and the SH-2 interpreter faster without changing any output. Frames, audio and save states are byte-identical to 0.7.2. On the development PC (Ryzen 7 5700G, Release + LTO, MSVC on Windows; GCC and Clang builds moved in the same direction when measured during the round but were not re-measured at the end), the median frame time over 9 test windows is 20-64 % shorter with threaded VDP and 29-61 % shorter without it. With threaded VDP, Virtua Fighter 2 dropped from 18.4 to 6.7 ms and Fighters Megamix from 17.6 to 6.9 ms. Single-instance run-ahead frames are 23-39 % shorter. Details per area are in `CHANGELOG.md`. The harness used to prove and measure each change is in `tools/perf/`.
+The software renderer with threaded VDP (the default) runs the tested Saturn games well inside the 16.7 ms NTSC frame budget on a desktop CPU: on a Ryzen 7 5700G (Release + LTO, MSVC) Virtua Fighter 2 and Fighters Megamix take about 7 ms per frame. Single-instance run-ahead costs one extra emulated frame plus a state save and load per run-ahead frame, so one frame is the practical setting in demanding games. The harness used to measure performance is in `tools/perf/`.
 
-ARM devices have not been measured with this harness. Scaled from the PC profile (a Cortex-A77-class prime core at about 0.6x the PC's single-thread speed), the software renderer was estimated to keep every test window under the 16.7 ms frame budget on a Snapdragon 865-class device. That did not hold on the one phone tried: on a Samsung Galaxy A56 (Exynos 1580) the software renderer had poor performance, while the Vulkan renderer ran at full speed at 1x (the developer's observation; no frame times were taken; see [Android](#android)). The SH-2 interpreter (aarch64 has no native JIT) and the deinterlacer in interlaced games are the limits for the software renderer there.
+On Android the Vulkan renderer ran at full speed at 1x on the one phone tried, a Samsung Galaxy A56 (Exynos 1580), while the software renderer had poor performance there (the developer's observation; no frame times were taken; see [Android](#android)). Use the Vulkan renderer on phones with a Vulkan 1.2 GPU. The SH-2 interpreter (aarch64 has no native JIT) and the deinterlacer in interlaced games are the limits for the software renderer on ARM.
 
 ## Known Limitations
 
-- **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2* on slower CPUs (much less since the 2026-11 performance round, see "Performance"). When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
+- **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2* on slower CPUs. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
 - **ST-V** - Only the eight games listed under [ST-V arcade games](#st-v-arcade-games). Attract-mode timing and a few transitions differ from MAME by some frames (Die Hard Arcade's intro by about 340), and the SMPC's battery settings are not saved; `src/bridge/stv/STATUS.md` has the list.
-- **Archived Saturn discs** - Not supported any more: a `.zip` is read as an ST-V ROM set only, and RetroArch no longer unpacks any archive (`.zip`, `.7z`) for the core. Extract the disc image or convert it to CHD.
+- **Archived Saturn discs** - Not supported: a `.zip` is read as an ST-V ROM set only, and RetroArch does not unpack any archive (`.zip`, `.7z`) for the core. Extract the disc image or convert it to CHD.
 - **Controllers** - Ports 1 and 2 only (Ymir emulates no multitap). The six-axis Mission Stick, dual Mission Sticks, Twin-Stick and Stunner are not offered.
 - **CD Block LLE** — Low-level CD Block emulation is a work in progress in Ymir. With the real ROMs (`cdb106.bin` v1.06, `cdb105.bin` v1.05) the BIOS menu, Sega Rally Championship, Virtua Fighter 2, Burning Rangers, Guardian Heroes and Panzer Dragoon II Zwei boot to their intros and attract modes and run exactly with run-ahead and from a state on another instance; boots take about 0.2-2.5 s longer (11-152 frames) than with the high-level CD Block. Other games are untested.
-- **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It compiles every SH-2 instruction except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes, which stay on Ymir's interpreter, and is validated against the interpreter in lockstep (BIOS plus six games, up to 36000 frames each, identical; see [design/sh2-validation.md](design/sh2-validation.md)). On x86-64 builds it generates native x86-64 code (via asmjit); other builds run the compiled blocks through an IR interpreter. Both are validated against the interpreter. The x64 backend's SH-2 time is between about 5% and 28% below the interpreter's across six games, and its native compiles run on an extra thread where the CPU has at least 4 threads (core option "SH-2 JIT Compile Thread (Experimental)"); the IR interpreter backend is about 3x slower than the interpreter (see [design/sh2-x64-performance.md](design/sh2-x64-performance.md)). It can still stutter while a game loads a lot of new code: Burning Rangers over a long session has SH-2 time about 5% below the interpreter's, but 358 of 33,600 frames take over 16.7 ms (the interpreter: none; the worst 48 ms), and with threaded VDP, the default, the average frame of Sega Rally, Street Fighter Zero 3 and that session is 2-6% longer than the interpreter's. It uses up to 128 MB of native code per SH-2 CPU, allocated on demand. It is not used while SH-2 cache emulation is active. It stays an experimental, opt-in option for testing; the current state and the next steps are in [design/sh2-jit.md](design/sh2-jit.md) ("Where to pick up").
+- **SH-2 JIT** — Experimental and off by default (core option "SH-2 JIT (Experimental)", key `brimir_sh2_jit`). It is validated against the interpreter in lockstep, runs natively on x86-64 only (other builds use a slower IR interpreter) and is not used while SH-2 cache emulation is active. It can stutter while a game loads a lot of new code and with threaded VDP can be slightly slower than the interpreter on some games; see [design/sh2-jit.md](design/sh2-jit.md) for the details and the next steps.
 
 ## Save states, run-ahead, rewind and netplay
 
@@ -177,27 +95,25 @@ with the controllers).
 - **Run-ahead "Use Second Instance" works with the software renderer only.** When the Vulkan renderer is in use
   (`brimir_renderer` = `vulkan` on RetroArch's `vulkan` video driver), RetroArch shows "Failed to create second
   instance. Run-Ahead will now use only one instance." (once per content load) and runs run-ahead on one instance,
-  which is exact too. Otherwise the core runs the software renderer and the second instance works. (Before v0.8.1 the
-  Vulkan case gave sound but a black picture.) Single-instance run-ahead works with both renderers.
+  which is exact too. Otherwise the core runs the software renderer and the second instance works.
+  Single-instance run-ahead works with both renderers.
 - **RTC Mode** (System, applies when content is loaded): `Virtual` (default) runs the Saturn's clock on emulated time,
   so states replay the same date. It starts at your computer's local time and continues from the clock saved in the
-  per-region RTC file in the system folder. A first boot with no RTC file no longer shows the BIOS language and clock
-  setup screen (English, default settings). `Host` is the previous behaviour: the clock follows the computer's.
-  In Virtual mode the clock is part of the state: loading a state or rewinding moves it back to the state's time, and
-  the clock continues (and is saved to the RTC file) from there. States from v0.6.x, which ran on the computer's clock,
-  keep the current clock instead.
+  per-region RTC file in the system folder. A first boot with no RTC file skips the BIOS language and clock setup
+  screen (English, default settings). `Host` makes the clock follow the computer's. In Virtual mode the clock is part of
+  the state: loading a state or rewinding moves it back to the state's time, and the clock continues (and is saved to
+  the RTC file) from there.
 - **Backup RAM is in save states** (the internal one and a backup memory cartridge), as in Beetle Saturn: loading a
   state also rolls back in-game saves made after it was saved.
 - **BIOS settings are in save states** (the language and the other settings the BIOS keeps): loading a state applies
   the state's settings for the session only. The settings saved in the RTC file change only when the BIOS or a game
-  writes them (the BIOS settings screen), never from a loaded state. States from before version 12 keep the session's.
-  A hard reset keeps a loaded state's settings for the rest of the session (reload the content to get your own back).
-  A settings change made in a frame that run-ahead or netplay later rolls back, or that rewind goes back past, still
-  reaches the RTC file (as in v0.7.0; it takes the BIOS settings screen during netplay or rewind).
-- **Save-state format**: version 12. States from older versions (version 4 on, which includes the v0.6.x states) still
-  load. States are larger than before (about 800 KiB more before compression). One exception: Dezaemon 2 and Sega
-  Ages: Galaxy Force II now get a backup memory cartridge under Cartridge = Auto, so their v0.6.x states (saved without
-  one) are refused; set Cartridge to None and reload the content to load them.
+  writes them (the BIOS settings screen), never from a loaded state. A hard reset keeps a loaded state's settings for
+  the rest of the session (reload the content to get your own back). A settings change made in a frame that run-ahead
+  or netplay later rolls back, or that rewind goes back past, still reaches the RTC file (it takes the BIOS settings
+  screen during netplay or rewind).
+- **Compatibility**: states from earlier versions load, except the v0.6.x states of Dezaemon 2 and Sega Ages: Galaxy
+  Force II (they now get a backup memory cartridge under Cartridge = Auto; set Cartridge to None and reload the content
+  to load them).
 - **Netplay**: both machines need the same BIOS and content, and should also use:
   - the same core options, in particular SH-2 Cache Emulation and SCSP Step Granularity, which are not emulation state:
     a state saved with other values loads, keeps the local settings and logs a warning (once per content);
@@ -242,7 +158,7 @@ Quick Menu > Controls > Port 1/2 Controls > Device Type:
 
 | Device | Notes |
 |---|---|
-| Control Pad (default) | The same mapping as earlier versions; "RetroPad w/ Analog" in a v0.6.x configuration is the Control Pad |
+| Control Pad (default) | The standard Saturn pad |
 | 3D Control Pad | Analog stick and triggers; Select switches between analog and digital mode (analog at power-on) |
 | Arcade Racer | Steering wheel on the left stick |
 | Mission Stick | Stick on the left stick, throttle on the right stick |
@@ -273,8 +189,7 @@ Analog Stick Deadzone and Trigger Deadzone (Input, apply at once; 15% by default
 reported): the stick of the 3D Control Pad, Arcade Racer and Mission Stick reads centred within that share of its
 range (a round deadzone), and the 3D Control Pad's analog L/R read released within that share of their travel; beyond
 it the rest is stretched to the full range, so there is no jump at the edge. They add to the frontend's own deadzone.
-The Mission Stick throttle has none. The 15% defaults (Beetle Saturn's) change these devices' output compared with
-0.7.0; 0% restores 0.7.0's mapping exactly, and the Control Pad is unaffected. Mouse Sensitivity (Input, applies at
+The Mission Stick throttle has none; the Control Pad is unaffected. Mouse Sensitivity (Input, applies at
 once) scales the Shuttle Mouse's movement; as in Beetle Saturn, a read beyond the mouse's range reports the limit
 with the overflow bit and drops the rest. For netplay, peers need the same input options (deadzones, mouse
 sensitivity): they change what the game reads.
@@ -284,7 +199,7 @@ sensitivity): they change what the game reads.
 The Cartridge option (System, applies when content is loaded) picks what is in the cartridge slot. `Auto` (default)
 inserts what the game needs, from Ymir's game database:
 
-- **RAM expansion** (1, 4 or 6 MB) for the games that use it, as before; saved to `<game>.cart` in the save folder.
+- **RAM expansion** (1, 4 or 6 MB) for the games that use it; saved to `<game>.cart` in the save folder.
 - **ROM cartridges**: The King of Fighters '95 needs `mpr-18811-mx.ic1` and Ultraman: Hikari no Kyojin Densetsu
   `mpr-19367-mx.ic1` (2 MiB dumps) in the system folder (the names Beetle Saturn and Kronos use). A missing dump, one of
   the wrong size, or the other game's dump is reported on screen and in the log, and the game starts without the
@@ -364,17 +279,16 @@ where RetroArch falls back to one instance) were tried in RetroArch on Windows w
 games were not tried with them, and rewind and netplay were not tested for ST-V at all. The core's own state for these
 games is not compatible between versions yet.
 
-**Zipped Saturn discs are no longer supported.** The core now takes a `.zip` as it is (it is listed in the core's
-supported extensions) and reads it only as an ST-V ROM set; a zip that is not one is refused with a message. Unzip the
-disc image and load its `.cue`, or convert it to CHD. The core also tells RetroArch not to unpack archives (it has to read
-the ST-V zip itself), and RetroArch cannot ask for that per file type. So **a Saturn disc image inside a `.7z` (or any
-archive) no longer loads either**: extract it first, or use CHD.
+**Archived Saturn discs.** A `.zip` is read only as an ST-V ROM set (a zip that is not one is refused with a message),
+and the core tells RetroArch not to unpack archives (it has to read the ST-V zip itself), which RetroArch cannot ask for
+per file type. So a Saturn disc image inside a `.zip` or `.7z` does not load: extract it and load its `.cue`, or convert
+it to CHD.
 
 How each game was checked against MAME, and the known differences, are in `src/bridge/stv/STATUS.md`.
 
 ## Accuracy options
 
-Ymir's accuracy features, off by default (the defaults emulate exactly as before):
+Ymir's accuracy features, off by default:
 
 | Option | Values | Notes |
 |---|---|---|
@@ -509,7 +423,8 @@ A56's Vulkan `Device report:` log line was not read. Reports are welcome, with t
 
 **Limits.** No internal resolution above 1x on Android yet (see [Vulkan renderer](#vulkan-renderer)). Close Content or
 Quit before leaving RetroArch: swiping it away saves only what RetroArch's periodic autosave already wrote (an in-game
-save is on disk within about 10-15 s of play). The SH-2 JIT is not available on Android.
+save is on disk within about 10-15 s of play). The SH-2 JIT is not available on Android. ST-V games were tried on the
+x86_64 emulator only (Baku Baku Animal), not on a phone.
 
 ## Build Requirements
 

@@ -1,179 +1,93 @@
 # Brimir Roadmap
 
-**Status**: Active — every upstream Ymir core change up to `ff935379` (2026-11-07) reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
-**Last Updated**: 2026-11-07 — v0.7.0 libretro feature round: Action Replay cheats, RetroAchievements (Beetle layout), deterministic save states (run-ahead, netplay), all controller types, ROM and backup cartridges, accuracy options; v0.6.0 added the Vulkan renderer
+**Status**: Active — version 0.10.0. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
+**Last Updated**: 2026-11-22 — v0.10.0 added ST-V arcade support (eight games)
 
-Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes).
+Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes). The release history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Guiding Principle
 
 **Ymir hardware layer stays verbatim upstream, except the SH-2.** The Ymir source tree under `src/core/` is a direct copy of upstream with one exception: the SH-2 CPU (`src/core/include/ymir/hw/sh2/*`, `src/core/src/ymir/hw/sh2/*`) is Brimir-owned so the SH-2 JIT can hook into it. Changes and hand-ported upstream fixes are logged in [`src/core/BRIMIR_FORK.md`](src/core/BRIMIR_FORK.md). All other Brimir features must be implemented in the Bridge layer (`src/bridge/`), the Libretro layer (`src/libretro/`), or proposed upstream to Ymir.
 
-Feature categories below are tagged:
+Open items below are tagged:
 - **Bridge** — Implementable purely in Brimir's bridge/libretro code, zero Ymir changes
 - **Hybrid** — Mostly Bridge, needs minor Ymir config additions (propose upstream)
 - **Upstream** — Requires substantial Ymir hardware-layer changes (propose upstream or long-term fork)
 
 ---
 
-## Tier 1 — Essential / High-Impact (Pure Bridge)
+## Done
 
-These are the biggest wins with the lowest implementation cost. All leverage Ymir's existing public API.
+- **Cheats** — Action Replay codes from RetroArch's Saturn `.cht` database, applied once per frame (deterministic under run-ahead and netplay); RetroArch's cheat search works through the Beetle-layout RAM view
+- **All controller types** — Control Pad, 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse and Virtua Gun with crosshair, plus deadzone and mouse sensitivity options (not done: six-axis/dual Mission Stick, Twin-Stick, Stunner)
+- **System RAM exposure and memory descriptors** — work RAM in Beetle Saturn's layout
+- **RetroAchievements** — Saturn sets made with Beetle read the same bytes (unlocks still to be confirmed with an RA account)
+- **Save state compression** — LZ4-compressed, versioned states
+- **Rewind and run-ahead** — deterministic save states (`savestate_features = "deterministic"`), virtual RTC by default
+- **Netplay** — RetroArch netplay on the deterministic states (peers need the same BIOS, core options, cheats and CPU architecture)
+- **Screen rotation (TATE)** and **overscan crop**
+- **Audio volume** and **CD read speed up to 32x/Max**
+- **CPU overclocking** — 100%–300% SH-2 clock
+- **Contentless mode** (BIOS menu) and **M3U-less disc swapping**
+- **Cartridges** — RAM cartridge saves, the 4 Mbit backup memory cartridge (`<game>.bcr`, Beetle's layout), the King of Fighters '95 and Ultraman ROM cartridges
+- **Vulkan renderer** — Brimir's own compute renderer, identical to software at 1x, internal resolution up to 4x with VDP1 upscaling
+- **SH-2 JIT, experimental** — opt-in x86-64 native backend and IR-interpreter backend (see item 20 below for what is open)
+- **Accuracy options** — SH-2 cache emulation, CD Block low-level emulation, SCSP step granularity
+- **Android (arm64) core** — tested on a Galaxy A56 (Vulkan at 1x)
+- **ST-V arcade support** — eight games from MAME ROM sets: Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force and Radiant Silvergun (with its 315-5881 protection chip), checked against MAME 0.289 (board emulation in `src/bridge/stv/`)
 
-### 1. Cheat System  ✅
-**Layer**: Bridge | **Effort**: ~500 LOC | **Target**: v0.5.0 | **Status**: Done in v0.7.0 — Pro Action Replay codes from RetroArch's Saturn `.cht` database (`src/bridge/cheat_engine.cpp`; every code of the 192 files parses), applied once per frame before emulation (deterministic under run-ahead and netplay); RetroArch-handled cheats and cheat search through the Beetle-layout RAM view; `.info` `cheats = "true"`. Not done: a cheat search of our own (RetroArch's is used)
+---
 
-Ymir exposes `saturn.mainBus.Poke<T>(addr, val)` for side-effect-free memory writes, plus public memory arrays (`WRAMLow`, `WRAMHigh`). Action Replay / GameShark / RAM watch / cheat search engine all possible.
-
-- New file: `src/bridge/cheat_manager.cpp`
-- Wires `retro_cheat_set` / `retro_cheat_reset` (done in v0.7.0)
-- Supports: RAM watch, hex search, cheat file import (.cht/.json)
-- Flip `.info`: `cheats = "true"` once codes are actually applied
-
-### 2. All Controller Types  ✅
-**Layer**: Bridge | **Effort**: ~350 LOC | **Target**: v0.5.0 | **Status**: Done in v0.7.0 — libretro device types per port (Control Pad, 3D Control Pad, Arcade Racer, Mission Stick, Shuttle Mouse, Virtua Gun with crosshair, None), Beetle-like mapping, peripheral handshake state in save states. Open: six-axis/dual Mission Stick, Twin-Stick, Stunner, deadzone and mouse sensitivity options
-
-Ymir already supports all Saturn peripherals — Brimir just hardcodes `ConnectControlPad()` today. Expose everything:
-
-| Peripheral | Ymir Method | Games |
-|---|---|---|
-| 3D Control Pad | `ConnectAnalogPad()` | NiGHTS, Burning Rangers, Panzer Dragoon Zwei |
-| Arcade Racer | `ConnectArcadeRacer()` | Sega Rally, Daytona USA, Manx TT |
-| Mission Stick | `ConnectMissionStick()` | After Burner, Space Harrier, Sky Target |
-| Virtua Gun | `ConnectVirtuaGun()` | Virtua Cop 1&2, House of the Dead |
-| Shuttle Mouse | `ConnectShuttleMouse()` | Shining Force III (map), Policenauts |
-
-- Core option: "Controller Type" per port
-- Input descriptors for 3D Pad analog axes, wheel, stick, gun coordinates
-- Note: Virtua Gun gated by `Ymir_FF_VIRTUA_GUN` — verify build flag
-
-### 3. System RAM Exposure + Memory Descriptors  ✅
-**Layer**: Bridge | **Effort**: ~30 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
-
-Ymir's `saturn.mem.WRAMLow` and `saturn.mem.WRAMHigh` are public `std::array<uint8_t, 1MiB>` fields. Currently `retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM)` returns nullptr.
-
-- Return WRAM pointers in `retro_get_memory_data`
-- Flip `.info`: `memory_descriptors = "true"`
-
-### 4. RetroAchievements  ✅
-**Layer**: Bridge | **Effort**: ~200 LOC | **Target**: v0.5.0 | **Status**: Done in v0.7.0 — `SET_SUPPORT_ACHIEVEMENTS`, 2 MiB work RAM view in Beetle Saturn's layout (Low then High, 16-bit words byte-swapped) so existing Saturn sets read the same bytes. Unlocks still to be confirmed with an RA account
-
-Once system RAM is exposed (#3), RA integration is mostly configuration:
-- Call `RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS`
-- Expose memory regions for RA to peek
-- Rich presence: expose game state (disc ID, region) via RA memory
-
-### 5. Save State Compression  ✅
-**Layer**: Bridge | **Effort**: ~50 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
-
-Brimir controls serialization — currently raw `memcpy` of `sizeof(SaveState)`. Wrap with LZ4 (already vendored) before passing to libretro.
-
-- 3-5x size reduction
-- Enables viable rewind + runahead throughput
-- Version header for forward-compatibility
-
-### 6. Rewind & Runahead  ✅
-**Layer**: Bridge + RetroArch | **Effort**: ~20 LOC | **Target**: v0.4.1 | **Status**: Done in v0.7.0 — save states continue exactly like the uninterrupted run (upstream save-state gaps fixed, logged in `src/core/BRIMIR_FORK.md`; virtual RTC by default), `.info` `savestate_features = "deterministic"`
-
-Once save states are fast and compressed (#5), these are RetroArch frontend features. Brimir just needs to ensure states serialize/deserialize quickly enough.
-
-- Rewind: Already works if state size is reasonable
-- Runahead: May need a "secondary instance" optimization (skip audio/video rendering)
-
-### 7. Screen Rotation (TATE)  ✅
-**Layer**: Bridge | **Effort**: ~100 LOC | **Target**: v0.5.0 | **Status**: Done (2026-06-07)
-
-Post-process the framebuffer in `OnFrameComplete()` before `video_cb`:
-- 90° / 270° rotation for TATE shmups
-- Core option: `brimir_rotation` (None, 90, 180, 270)
-- Games: Battle Garegga, Dodonpachi, Radiant Silvergun, Layer Section
+## Open: Tier 1 — Bridge
 
 ### 8. VDP Layer Toggling & Debug Overlay
-**Layer**: Bridge | **Effort**: ~150 LOC | **Target**: v0.5.0
+**Layer**: Bridge | **Effort**: ~150 LOC
 
 Ymir exposes `saturn.VDP.SetLayerEnabled(Layer, bool)` and `saturn.VDP.vdp2DebugRenderOptions` (public field with extensive debug visualization). Expose as core options:
 - Per-layer toggle (VDP1 sprites, each VDP2 BG layer)
 - Debug overlay modes (layer coloring, priority stacks, color calc, shadow, windows, rotation params)
 
 ### 9. Internal Cheat Database
-**Layer**: Bridge | **Effort**: ~200 LOC | **Target**: v0.5.5
+**Layer**: Bridge | **Effort**: ~200 LOC
 
-Ship a JSON cheat database with the core. Auto-apply per-game Action Replay codes on load. Community-contributable.
+Ship a JSON cheat database with the core. Auto-apply per-game Action Replay codes on load. Community-contributable. (Today the cheat files of RetroArch's database are used.)
 
-### 10. Contentless Mode (BIOS Menu)  ✅
-**Layer**: Bridge | **Effort**: ~10 LOC + testing | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
+### Controllers still open
+**Layer**: Upstream (Ymir) | Six-axis and dual Mission Stick, Twin-Stick and Stunner are not offered.
 
-Flip `.info`: `supports_no_game = "true"`. Ymir's `Saturn()` boots to BIOS menu when a real IPL is loaded without a disc. Gives access to the Saturn CD player, memory manager, and settings.
-
-### 11. M3U-Less Disc Swapping  ✅
-**Layer**: Bridge | **Effort**: ~50 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
-
-Ymir exposes `EjectDisc()`, `LoadDisc(media::Disc&&)`, tray control. Extend disk control interface to allow direct disc path loading without M3U playlist pre-creation.
+### Cheat search of our own
+**Layer**: Bridge | RetroArch's cheat search is used today.
 
 ---
 
-## Tier 2 — Significant Enhancements (Hybrid)
+## Open: Tier 2 — Hybrid
 
 These need small additions to Ymir's `Configuration` struct but the heavy lifting is in Brimir. Propose these upstream to Ymir first; if accepted, implement in Brimir.
 
-### 12. CPU Overclocking  ✅
-**Layer**: Hybrid | **Effort**: ~50 LOC Bridge (Ymir side done) | **Target**: v0.4.3 | **Status**: Done (2026-06-17)
-
-Core option `brimir_sh2_overclock` (100%–300%) wired to Ymir's `sh2OverclockFactor` with GCD clock ratio correction. Fixes Saturn slowdown in Panzer Dragoon Saga, Burning Rangers, Sonic R.
-
 ### 13. Frameskip
-**Layer**: Hybrid | **Effort**: ~50 LOC Brimir + Ymir config field | **Target**: v0.5.0
+**Layer**: Hybrid | **Effort**: ~50 LOC Brimir + Ymir config field
 
 Add `configuration.video.frameskip` to Ymir (partially exists in underlying VDP). Core option: 0–3 or Auto. Skips VDP rendering for N frames while continuing CPU emulation.
 
-### 14. Overscan Crop  ✅
-**Layer**: Bridge (no Ymir changes needed after all) | **Effort**: ~40 LOC | **Target**: v0.5.0 | **Status**: Done (2026-06-07)
-
-Post-process crop in `OnFrameComplete()` — trim N pixels from each edge before `video_cb`. Core options for horizontal and vertical overscan.
-
-### 15. CD Read Speed Beyond 16x  ✅
-**Layer**: Bridge | **Effort**: ~10 LOC | **Target**: v0.4.1 | **Status**: Done (2026-06-04)
-
-Ymir accepts values 2–200. Brimir's options only expose 2x–16x. Add 24x, 32x, Max/Instant options.
-
-### 16. Audio Volume  ✅
-**Layer**: Bridge | **Effort**: ~30 LOC | **Target**: v0.5.0 | **Status**: Done (2026-06-07)
-
-Scale samples in `OnAudioSample()` before buffering. No Ymir changes needed. Core option: 0–200% volume.
-
 ### 17. Region Patching (PAL→NTSC)
-**Layer**: Hybrid | **Effort**: ~50 LOC Brimir + Ymir config | **Target**: v0.5.0
+**Layer**: Hybrid | **Effort**: ~50 LOC Brimir + Ymir config
 
 Propose `configuration.system.forceVideoStandard` upstream. Core option: "Force NTSC" for PAL games to fix 50Hz slowdown/borders.
 
-### 18. Cartridge RAM Persistence  ✅
-**Layer**: Bridge | **Effort**: ~100 LOC | **Target**: v0.5.0 | **Status**: Done — RAM cartridges in `<game>.cart`; v0.7.0 adds the 4 Mbit backup memory cartridge (`<game>.bcr`, Beetle's layout), the KoF95/Ultraman ROM cartridges from dumps, periodic saves and the `brimir_cartridge` option
-
-Cartridge save/load is wired in `CoreWrapper::LoadGame()`/`UnloadGame()` (RAM cartridges written at unload; the backup cartridge also periodically while it changes).
-
 ---
 
-## Tier 3 — Major Engineering (Propose Upstream)
+## Open: Tier 3 — Major Engineering (Propose Upstream)
 
 These require substantial Ymir hardware-layer changes. Propose to Ymir upstream; if accepted, Ymir gains the feature and Brimir inherits it. If rejected, evaluate long-term fork viability.
-
-### 19. Hardware Renderer + Internal Resolution Scaling  ✅
-**Layer**: Upstream (new `IVDPRenderer` implementation) | **Target**: Post-JIT | **Status**: Done in v0.6.0 — Brimir's own Vulkan compute renderer (`src/gpu/`, an external `IVDPRenderer`), identical to software at 1x, internal resolution up to 4x with VDP1 upscaling (see README, "Vulkan renderer"). The notes below are the original plan
-
-Ymir had a Vulkan renderer in v0.2.x, removed in v0.3.0. Needs re-implementation as `VulkanVDPRenderer` / `OpenGLVDPRenderer` / `D3DVDPRenderer` implementing `IVDPRenderer` interface.
-
-Upstream Ymir now has an experimental compute-only Direct3D 12 renderer, which is the current reference design for a Vulkan port (evaluated 2026-09-24). Adopting it requires a full hardware-layer re-sync and must fit libretro's hardware-render constraints; revisit once it matures upstream.
-
-Brimir would expose: renderer selection, 2x–8x internal resolution, texture filtering, upscaling filters.
 
 ### 20. JIT Compiler (SH-2)
 **Layer**: Upstream/Bridge (depends on architecture) | **Target**: 2026–2027
 
 This is the single biggest performance feature — enables full-speed Saturn on low-end hardware, runahead, and rewind.
 
-**Status (2026-10-23)**: Experimental, opt-in core option: "SH-2 JIT (Experimental)", `brimir_sh2_jit`, off by default. That is the intended state for now. The design is [design/sh2-jit.md](design/sh2-jit.md): portable IR, an x86-64 native backend (asmjit) and an IR-interpreter backend elsewhere, and interpreter-identical results at every instruction boundary. The SH-2 is forked in place, the one exception to the verbatim-upstream rule, logged in `src/core/BRIMIR_FORK.md`.
+**Status**: Experimental, opt-in core option: "SH-2 JIT (Experimental)", `brimir_sh2_jit`, off by default. That is the intended state for now. The design is [design/sh2-jit.md](design/sh2-jit.md): portable IR, an x86-64 native backend (asmjit) and an IR-interpreter backend elsewhere, and interpreter-identical results at every instruction boundary. The SH-2 is forked in place, the one exception to the verbatim-upstream rule, logged in `src/core/BRIMIR_FORK.md`.
 
-Done (milestones 1, 2A-2E):
+Working today:
 - full instruction coverage except `TRAPA`, `RTE`, `SLEEP` and illegal opcodes;
 - an x64 backend with block chaining, a register cache and tiered compiles;
 - long-session code reuse and per-block release, and no flush on state loads (run-ahead and rewind keep their code);
@@ -186,7 +100,7 @@ Not default-on yet:
 - a long Burning Rangers session still stutters while it loads a lot of new code (358 of 33,600 frames over 16.7 ms; the interpreter has none);
 - with threaded VDP (the default), the average frame is 2-6% longer than the interpreter's on some games, mostly time the emulation thread spends waiting for the VDP2 render thread.
 
-Next steps, including moving block decoding off the emulation thread and milestone 3 (ARM64 backend), are listed in [design/sh2-jit.md](design/sh2-jit.md), "Where to pick up". The 2025 scaffolding was removed on 2026-09-30 and remains in git history (last present in commit `36c4c27`).
+Next steps, including moving block decoding off the emulation thread and milestone 3 (ARM64 backend), are listed in [design/sh2-jit.md](design/sh2-jit.md), "Where to pick up".
 
 ### 21. Widescreen Hacks
 **Layer**: Upstream | **Target**: Post-JIT
@@ -203,19 +117,14 @@ Hook into `IVDPRenderer::VDP1WriteVRAM()` and `VDP1WriteFB()` to dump/intercept 
 
 Saturn VDP1 draws affine-textured quads without perspective correction. Needs interception of VDP1 draw commands inside the renderer.
 
-### 24. Netplay / Rollback  ✅
-**Layer**: Bridge + Ymir determinism | **Target**: Post-JIT | **Status**: Done in v0.7.0 — RetroArch netplay works on deterministic save states (#6). Peers need the same BIOS, BIOS language/settings and core options (SH-2 cache, SCSP granularity; a mismatch is logged on load), the same cheats and the same CPU architecture. Open: BIOS settings (SMEM) in states, a host-independent RTC time zone
+### 25. More ST-V Arcade Games
+**Layer**: Bridge + small hooks in the core | **Target**: Post-1.0
 
-Requires perfect determinism across dual SH-2s, SCSP timers, CD block timing. Needs Ymir deterministic mode + RetroArch netplay integration.
-
-### 25. ST-V Arcade Support  🚧
-**Layer**: Bridge + small hooks in the core | **Target**: Post-1.0 | **Status**: Implemented on `feature/stv-support-v2` (not yet merged or released). Eight games boot and play from MAME ROM sets: Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force and Radiant Silvergun (the one with the 315-5881 chip), checked against MAME 0.289. Tested on Windows x64 (hidden `[.stv-rom]` tests with the local ROMs) and in RetroArch 1.22.2 (all eight games, both renderers; state, run-ahead and saves on Baku Baku Animal) and the Android x86_64 emulator (Baku Baku Animal); open: rewind, netplay, a physical Android device (see `src/bridge/stv/STATUS.md`). Archived Saturn discs stop working (a `.zip` is read as an ST-V ROM set only and RetroArch no longer unpacks any archive, `.7z` included). Known differences from MAME (attract pacing, SMEM not saved, the 315-5881 uncompressed path unchecked) are in `src/bridge/stv/STATUS.md`. Open: more ST-V games (each needs its ROM list and a check against MAME), the old branch `feature/stv-support` stays as reference.
-
-ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. It needs cartridge decryption (315-5881), IOGA dispatch, and SMPC arcade-mode handling on top of the existing `Saturn` class; the board emulation is in `src/bridge/stv/`, with the hooks in `src/core/` listed in `src/core/BRIMIR_FORK.md`. Big differentiator - no RetroArch core does ST-V well.
+Eight games are done (see "Done"). Open: more games from MAME's ST-V database (each needs its ROM list and a check against MAME), other protection chips beyond the 315-5881, rewind and netplay checks with ST-V games, the other seven games with save states and run-ahead, a physical Android device, and the known differences from MAME (attract-mode pacing, SMPC battery settings not saved, the 315-5881 uncompressed path unchecked; see `src/bridge/stv/STATUS.md`). The old branch `feature/stv-support` stays as reference. Big differentiator - no RetroArch core does ST-V well.
 
 ---
 
-## Tier 4 — Niche / Long-Term
+## Open: Tier 4 — Niche / Long-Term
 
 | Feature | Layer | Notes |
 |---|---|---|
@@ -225,60 +134,30 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. It ne
 | Gaussian audio interpolation | Upstream | 3rd interpolation mode in SCSP. Linear is "hardware accurate" per Ymir |
 | Saturn Keyboard | Upstream | New `PeripheralType` + report struct |
 | Link cable / Taisen cable | Upstream | New hardware bridging two Saturn instances |
-| Light gun sub-frame input | Bridge | The Virtua Gun is exposed (#2, v0.7.0); sub-frame polling in `RunFrame()` is open |
+| Light gun sub-frame input | Bridge | The Virtua Gun is exposed; sub-frame polling in `RunFrame()` is open |
 
 ---
 
-## Timeline (Proposed)
+## Toward v1.0.0
 
-| Version | Features |
-|---|---|
-| **v0.4.1** ✅ | System RAM exposure, memory descriptors, save state compression, contentless mode, M3U-less disc swap, CD speed 24x+ |
-| **v0.4.2** ✅ | SH2 decode optimization + DIV1 microoptimization (4 files synced verbatim from Ymir HEAD), rewind/runahead viability |
-| **v0.5.0** ✅ | Cheat system, all controller types, ~~screen rotation~~, layer toggling, ~~overscan crop~~, ~~audio volume~~, cartridge RAM persistence, frameskip, region patching, RetroAchievements (cheats, controllers and RetroAchievements shipped in v0.7.0) |
-| **v0.5.1** ✅ | Multi-file CUE / compressed audio support, media loader tests |
-| **v0.5.2** ✅ | Ymir hardware-layer backports: VDP2 color gradation, BIN/CUE loader sanity checks, VDP renderer switch crash fix |
-| **v0.5.3** ✅ | Hardware fixes (Dragon Force II, HLE CD seek/sub-Q, ARM64/SSE2 blending), SSE2 on Windows x64, profiler and LTO fixes |
-| **v0.5.4** ✅ | Ymir hardware-layer backports: SMPC SSHON, VDP1 COPR, threaded VDP1 FBRAM write-back, VDP2 mid-frame changes, VCNT save-state restore |
-| **v0.5.5** ✅ | Hotfix: no crash on Quick Menu > Close Content on Windows (#7) |
-| ~~**v0.5.6**~~ | Not released (v0.6.0 followed v0.5.5). Cheats came in v0.7.0 from RetroArch's database instead of an internal one |
-| **v0.6.0** ✅ | Vulkan renderer (VDP1/VDP2 on the GPU, internal resolution up to 4x), software renderer fixes, SH-2 JIT (experimental) |
-| **v0.9.0** ✅ | Android (arm64) core, tested on a Galaxy A56 (Vulkan at 1x); save fixes (autosave during play, no blank save memory); threaded VDP1 interlace-mode race fixed |
-| **v0.8.1** ✅ | Fix: black screen with run-ahead "Use Second Instance" and the Vulkan renderer (falls back to one instance) |
-| **v0.8.0** ✅ | Performance round: software renderer and SH-2 interpreter 20-64 % faster per frame, output byte-identical to 0.7.2 |
-| **v0.7.2** ✅ | Selective upstream Ymir sync to `ff935379` (533 commits reviewed, 4 fixes taken) |
-| **v0.7.1** ✅ | BIOS Auto by disc region (and region autodetect following the BIOS), BIOS settings in save states, Beetle-like mouse, deadzone and sensitivity options, CD Block LLE validated with real ROMs |
-| **v0.7.0** ✅ | Libretro features: Action Replay cheats, RetroAchievements, deterministic save states (run-ahead, netplay), RTC mode, all controller types, ROM/backup cartridges, accuracy options |
-| **v0.9.0+** | JIT compiler (Phase 2), VDP2 debug overlay exposure |
-| **v1.0.0** | JIT stable, 85%+ compatibility, RetroArch core inclusion |
+JIT stable, 85%+ compatibility, RetroArch core inclusion (which also removes the Android Core Info workaround: Brimir's `.info` in libretro's core info files).
 
 ---
 
 ## Comparison Against Mature Cores
 
-| Feature | Brimir (current) | Flycast | Beetle PSX | DuckStation | PCSX2 | Target Brimir |
+| Feature | Brimir | Flycast | Beetle PSX | DuckStation | PCSX2 | Status |
 |---|---|---|---|---|---|---|
-| JIT/Dynarec | SH-2, experimental (x86-64 native, opt-in) | SH-4 | MIPS | MIPS | EE/VU | v0.8.0+ |
-| Hardware renderer | Vulkan (compute, 1x-4x; v0.6.0) | Vulkan/OGL | Vulkan/OGL | Vulkan/OGL/D3D | Vulkan/OGL/D3D | Done |
-| Cheats | Action Replay, RetroArch database (v0.7.0) | Yes | Yes | Yes | Yes | Done |
-| RetroAchievements | Yes, Beetle layout (v0.7.0) | Yes | Yes | No | Yes | Done |
-| 3D analog controller | 3D Control Pad, Arcade Racer, Mission Stick (v0.7.0) | Yes | DualShock | DualShock | DS2 | Done |
-| Rewind | Yes, deterministic (v0.7.0) | Yes | Yes | Yes | Yes | Done |
-| Runahead | Yes, deterministic (v0.7.0) | Yes | Yes | Yes | Yes | Done |
-| Light gun | Virtua Gun with crosshair (v0.7.0) | Yes | GunCon | No | Yes | Done |
-| Widescreen hacks | No | Yes | Yes | Yes | Yes | Post-JIT |
-| HD textures | No | Yes | Mods | Yes | Yes | Post-HW |
-| TATE rotation | Yes | Yes | Via RA | No | No | v0.5.0 |
-| Netplay | RetroArch netplay (v0.7.0) | Rollback | Yes | No | No | Done |
-| ST-V arcade | Yes, 8 games (unreleased) | No | N/A | N/A | N/A | Post-1.0 |
-
----
-
-## Archival Notes
-
-This roadmap replaces the previous Phase 1–4 plan (Phase 1: Ymir sync, Phase 2: JIT, Phase 3: macOS/ARM64, Phase 4: GPU acceleration). The old plan was hardware-centric and didn't account for the constraint that Ymir must stay verbatim upstream. This new roadmap:
-
-- Respects the Ymir verbatim-upstream constraint
-- Prioritizes features by user impact and implementation feasibility
-- Clearly tags each feature by where it must be implemented (Bridge / Hybrid / Upstream)
-- Is informed by a gap analysis against 7 mature RetroArch cores
+| JIT/Dynarec | SH-2, experimental (x86-64 native, opt-in) | SH-4 | MIPS | MIPS | EE/VU | Open |
+| Hardware renderer | Vulkan (compute, 1x-4x) | Vulkan/OGL | Vulkan/OGL | Vulkan/OGL/D3D | Vulkan/OGL/D3D | Done |
+| Cheats | Action Replay, RetroArch database | Yes | Yes | Yes | Yes | Done |
+| RetroAchievements | Yes, Beetle layout | Yes | Yes | No | Yes | Done |
+| 3D analog controller | 3D Control Pad, Arcade Racer, Mission Stick | Yes | DualShock | DualShock | DS2 | Done |
+| Rewind | Yes, deterministic | Yes | Yes | Yes | Yes | Done |
+| Runahead | Yes, deterministic | Yes | Yes | Yes | Yes | Done |
+| Light gun | Virtua Gun with crosshair | Yes | GunCon | No | Yes | Done |
+| Widescreen hacks | No | Yes | Yes | Yes | Yes | Open |
+| HD textures | No | Yes | Mods | Yes | Yes | Open |
+| TATE rotation | Yes | Yes | Via RA | No | No | Done |
+| Netplay | RetroArch netplay | Rollback | Yes | No | No | Done |
+| ST-V arcade | Yes, 8 games | No | N/A | N/A | N/A | Done (more games open) |

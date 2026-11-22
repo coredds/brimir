@@ -153,7 +153,7 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Launch RetroArch from: $retroarchBase\retroarch.exe" -ForegroundColor White
 Write-Host "  2. Go to 'Load Core'" -ForegroundColor White
-Write-Host "  3. Select 'Sega - Saturn (Brimir)'" -ForegroundColor White
+Write-Host "  3. Select 'Sega - Saturn/ST-V (Brimir)'" -ForegroundColor White
 Write-Host "  4. Load a Saturn game (.cue, .chd) and enjoy!" -ForegroundColor White
 Write-Host ""
 Write-Host "Recommended test games:" -ForegroundColor Cyan

@@ -170,12 +170,12 @@ RetroArch, Load Core > Install or Restore a Core (it opens `/storage/emulated/0/
 folder under the same name, `brimir_libretro_android.so`, and returns to the main menu. Load Core then lists it:
 
 - without `brimir_libretro.info` as `brimir_libretro_android.so` ("License: N/A"); the core loads, the title bar shows
-  `Brimir (0.8.1)` at the time of the test (the version of the core you install, from the core itself), Start Core runs the BIOS menu (`Performance Profile (300 frames)` in the log
+  `Brimir (<version>)` (the version of the core you install, from the core itself), Start Core runs the BIOS menu (`Performance Profile (300 frames)` in the log
   with the BIOS in `/storage/emulated/0/RetroArch/system/` and `brimir_profiling` enabled in
   `RetroArch/config/Brimir/Brimir.opt`), and run-ahead with the second instance behaves as with the root install (both
   copies loaded, no `Failed to create second instance`);
 - with a user-writable Core Info folder (`libretro_info_path` set to `/storage/emulated/0/RetroArch/info`, holding
-  `brimir_libretro.info`) as "Sega - Saturn (Brimir)", "License: GPLv3"; Information > Core Information shows the
+  `brimir_libretro.info`) as "Sega - Saturn/ST-V (Brimir)", "License: GPLv3"; Information > Core Information shows the
   info file's metadata and the firmware list with present/missing status. That folder replaces the bundled one (other
   cores' info files are then not found unless copied there too). The app's own info folder
   `/data/user/0/<package>/info/` needs root.
@@ -236,23 +236,5 @@ bash tools/android/emulator_tests.sh build-android-x86_64/bin/brimir_tests "~[gp
   (otherwise the BIOS cases skip). `RUN_AS=shell` (default), `root`, a uid or an app package (e.g. `com.retroarch`:
   what an app may do; needs `adb root`); `TEST_ENV="TMPDIR="` unsets TMPDIR (libc++'s Android default is
   `/data/local/tmp`, writable for the shell user, not for apps). Everything it created is removed on exit.
-
-### What was proven (2026-11-15, emulator 36.1.9, x86_64 core from this branch)
-
-On Android 14 (`google_apis`, 4 KB pages) with RetroArch 1.22.2, and on Android 15 `google_apis_ps16k` (16 KB pages)
-with the RetroArch nightly:
-
-- RetroArch loads the core and runs the BIOS menu (first-boot language screen) for well over 300 frames, software and
-  Vulkan renderer (`Device report: renderer vulkan; GPU "AMD Radeon RX 9060 XT"; Vulkan API 1.3.0`).
-- Run-ahead with the second instance: with the software renderer both copies of the core are loaded in one process and
-  run; with the Vulkan renderer the second copy declines and RetroArch falls back to run-ahead on one instance while
-  frames keep advancing.
-- `brimir_bench` on the emulator and the Windows x64 build give identical frame and audio hashes for 300 frames of the
-  BIOS menu and of a game window from a save state, with the interpreter and with the SH-2 JIT (the x86_64 build
-  has the x64 JIT).
-- `brimir_tests "~[gpu]"` passes on both images as the shell user (one case skips on every platform by design). One
-  intermittent failure was seen on the Android 14 image: "Sprite layer and compose fast paths match with the threaded
-  VDP2 and deinterlace renderers" (2 of 40 repeats; 0 of 40 on Windows). It was a race in the threaded VDP renderer
-  (TVMD read from the VDP2 thread's copy), fixed since (`src/core/BRIMIR_FORK.md`; 0 of 200 on a 2-vCPU emulator).
 
 Not covered by the emulator: API 26 devices, arm64 code (the A56 test covers it), real-device GPU drivers.

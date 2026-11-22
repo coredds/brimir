@@ -197,7 +197,7 @@ permission. On the A56 the core file copied to the phone was checked against the
 ### 7. Load the core
 
 Main Menu > **Load Core**. You should **see** `brimir_libretro_android.so` in the list (with "License: N/A") **[emulator]**.
-Tap it. Back at the Main Menu the title bar now reads `1.22.2 - Brimir (0.9.0)` (the RetroArch version, then Brimir
+Tap it. Back at the Main Menu the title bar now reads `1.22.2 - Brimir (0.10.0)` (the RetroArch version, then Brimir
 and its version) and the list has **Start Core** and **Load Content** **[emulator]**.
 
 If the core is not in the list: the file name changed (see step 2), or it is the wrong file.
@@ -208,7 +208,7 @@ RetroArch learns which core can open a game from the core's `.info` file. **With
 browser change below, on the A56, RetroArch hid the games or said that no core is available for `.chd` files**
 (Play Store build; the APK build had both set). **Do both steps (the Core Info folder and the filter); they were
 set together on the A56, and whether either alone is enough is unknown.** The
-`.info` file also makes RetroArch show the name "Sega - Saturn (Brimir)" and a list of BIOS files with
+`.info` file also makes RetroArch show the name "Sega - Saturn/ST-V (Brimir)" and a list of BIOS files with
 Present/Missing, a handy BIOS check. It works without root, but it has a **trade-off**:
 
 RetroArch has its own info files for all its cores. If you point the **Core Info** folder to your own folder, RetroArch
@@ -233,7 +233,7 @@ ships it and "Update Core Info Files" installs it. Until then, use these steps.
    build the filter had to be off; we do not know if either alone is enough. That filter was changed in the
    configuration file; the label and menu path come from RetroArch 1.22.2's source and were not checked on a phone
    **[A56 via config file]** **[not tested]** (menu).
-5. Main Menu > **Load Core**. You should **see** "Sega - Saturn (Brimir)", "License: GPLv3". Load it, then
+5. Main Menu > **Load Core**. You should **see** "Sega - Saturn/ST-V (Brimir)", "License: GPLv3". Load it, then
    Main Menu > **Information** > **Core Information**. It shows version, extensions, and the firmware (BIOS) list
    with "Present, Optional: ..." next to your BIOS and "Missing, Optional" next to the others **[emulator]**.
 
@@ -284,7 +284,7 @@ Brimir's default is the Software renderer. It does not need a GPU. This is the b
 - Settings > **Drivers** > **Video**: write down the value. The A56 runs with the `gl` video driver were done with `gl` **[A56]**, and `gl` was the default
   on the emulator **[emulator]**. Leave it for this run.
 - Load Brimir if it is not loaded yet (the title bar shows `Brimir`; if it does not, Main Menu > **Load Core** >
-  `brimir_libretro_android.so`, or "Sega - Saturn (Brimir)"). Once a core is loaded, the Main Menu has no "Load Core"
+  `brimir_libretro_android.so`, or "Sega - Saturn/ST-V (Brimir)"). Once a core is loaded, the Main Menu has no "Load Core"
   entry; use **Unload Core** first to change it **[emulator]**.
   Then open the core options: **Quick Menu** (play icon at the bottom right) > **Core Options** (called just
   **Options** in some versions) **[not tested]**. In the **Video** group you should **see**
