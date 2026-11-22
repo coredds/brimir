@@ -301,6 +301,13 @@ bool STV3155881::ValidateState(const State &state) const {
     if (state.lineBufferSize > kLineSize || state.lineBufferPos > kLineSize) return false;
     if (state.bufferBit < 0 || state.bufferBit > 7 || state.bufferBit2 < 0 || state.bufferBit2 > 15) return false;
     if (state.enabled > 1 || state.ready > 1 || state.doneCompression > 1) return false;
+    // The read paths take two bytes at the position. The chip only ever leaves an uncompressed block's position on a
+    // word (EncFill and the reads move it by two from 0, CryptoStart puts it at the end), and the line position on a
+    // word or, after CryptoStart, at the line size (odd for an odd block width). An odd bit position in the buffer is
+    // the compressed path's (GetCompressedBit masks it).
+    const bool compressed = (state.decHeader & kFlagCompressed) != 0;
+    if (state.ready != 0 && !compressed && (state.bufferPos & 1u) != 0) return false;
+    if ((state.lineBufferPos & 1u) != 0 && state.lineBufferPos != state.lineBufferSize) return false;
     return true;
 }
 
@@ -517,15 +524,18 @@ uint16_t STV3155881::ReadDecryptedWord() {
         CryptoStart();
     }
 
+    // The positions are checked so that both bytes read are inside the buffer whatever state was loaded; for the
+    // positions the chip reaches itself these are MAME's conditions (line position at or past the line size, buffer
+    // position at its end).
     if ((m_decHeader & kFlagCompressed) != 0) {
-        if (m_lineBufferPos >= m_lineBufferSize) {
+        if (m_lineBufferPos >= m_lineBufferSize || m_lineBufferPos + 2 > m_lineBuffer.size()) {
             LineFill();
         }
 
         base = m_lineBuffer.data() + m_lineBufferPos;
         m_lineBufferPos += 2;
     } else {
-        if (m_bufferPos == m_buffer.size()) {
+        if (m_bufferPos + 2 > m_buffer.size()) {
             EncFill();
         }
 

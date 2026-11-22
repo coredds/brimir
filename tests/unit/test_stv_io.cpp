@@ -155,7 +155,7 @@ void InitBoard(STVIOBoard &board) {
     board.LoadEEPROM(MakeImage(kHeader, kSettings));
 }
 
-// Port C (coin, start, test, service) as read through the IOGA, with STV mode on and all pins inputs.
+// Port C (coin, start, test, service) as read through the IOGA, with all pins inputs.
 uint8_t ReadPortC(STVIOBoard &board) {
     return board.ReadIOGAByte(0x400004);
 }
@@ -289,7 +289,6 @@ TEST_CASE("ST-V EEPROM: a locked chip does not erase either", "[stv]") {
 TEST_CASE("ST-V I/O: a coin held for 10 frames counts one coin", "[stv]") {
     STVIOBoard board;
     board.Reset(true);
-    board.SetSTVMode(true);
 
     // Coin 1 is PORT-C bit 0, active low.
     auto countCoins = [&](unsigned heldFrames, unsigned totalFrames) {
@@ -318,7 +317,6 @@ TEST_CASE("ST-V I/O: a coin held for 10 frames counts one coin", "[stv]") {
 TEST_CASE("ST-V I/O: coin 2 asserts only the coin 2 input", "[stv]") {
     STVIOBoard board;
     board.Reset(true);
-    board.SetSTVMode(true);
 
     board.SetCoin2(true);
     board.UpdateInputs();
@@ -596,7 +594,6 @@ TEST_CASE("ST-V EEPROM: SaveState carries the write lock and written cells", "[s
 TEST_CASE("ST-V I/O: SaveState keeps the coin pulse and the pins", "[stv]") {
     STVIOBoard board;
     board.Reset(true);
-    board.SetSTVMode(true);
     board.WriteIOGAByte(0x400010, 0xF7); // data direction: port 3 is an output, the rest inputs
     board.SetCoin1(true);
     board.UpdateInputs();
@@ -729,6 +726,66 @@ TEST_CASE("ST-V 315-5881: SaveState and LoadState continue a compressed stream",
     CheckChipStateContinues(0x02020202, true);
 }
 
+// States travel between machines (netplay), so a state is checked before it is taken: the read paths take two bytes at
+// the buffer position (uncompressed) or the line position (compressed).
+TEST_CASE("ST-V 315-5881: LoadState rejects positions that would read outside the buffers", "[stv]") {
+    using State = ymir::cart::STV3155881::State;
+    const auto rom = NoiseROM(1u << 20);
+
+    ymir::cart::STV3155881 chip;
+    ConfigureChip(chip, rom, 0x01010101);
+    ReadWords(chip, 37);
+    State plain{};
+    chip.SaveState(plain);
+    REQUIRE(plain.ready == 1);
+    REQUIRE((plain.decHeader & 0x20000) == 0);
+    REQUIRE(chip.ValidateState(plain));
+
+    ConfigureChip(chip, rom, 0x02020202);
+    ReadWords(chip, 37);
+    State packed{};
+    chip.SaveState(packed);
+    REQUIRE(packed.ready == 1);
+    REQUIRE((packed.decHeader & 0x20000) != 0);
+    REQUIRE(chip.ValidateState(packed));
+
+    // Uncompressed and running: the buffer position is on a word
+    State bad = plain;
+    bad.bufferPos = 1;
+    CHECK_FALSE(chip.ValidateState(bad));
+    CHECK_FALSE(chip.LoadState(bad));
+    bad.bufferPos = 3;
+    CHECK_FALSE(chip.LoadState(bad));
+    // Not started (the next read runs CryptoStart, which sets the position) or compressed (a bit position): accepted
+    bad.bufferPos = 1;
+    bad.ready = 0;
+    CHECK(chip.ValidateState(bad));
+    bad = packed;
+    bad.bufferPos = 1;
+    CHECK(chip.ValidateState(bad));
+
+    // The line position is on a word, or at the line size
+    bad = packed;
+    bad.lineBufferSize = 512;
+    bad.lineBufferPos = 511;
+    CHECK_FALSE(chip.ValidateState(bad));
+    CHECK_FALSE(chip.LoadState(bad));
+    bad.lineBufferPos = 3;
+    CHECK_FALSE(chip.LoadState(bad));
+    bad.lineBufferSize = 277;
+    bad.lineBufferPos = 277; // CryptoStart's position for an odd block width
+    CHECK(chip.ValidateState(bad));
+    bad.lineBufferPos = 278; // two past the last word read of that line
+    CHECK(chip.ValidateState(bad));
+    bad.lineBufferPos = 514;
+    CHECK_FALSE(chip.ValidateState(bad));
+
+    // The refused loads left the chip as it was
+    State before{};
+    chip.SaveState(before);
+    CHECK(std::memcmp(&before, &packed, sizeof before) == 0);
+}
+
 TEST_CASE("ST-V 315-5881: damaged compressed data does not run past the line buffers", "[stv]") {
     // Noise decodes to arbitrary block headers (compressed and not, odd widths) and runs that overshoot the line. The
     // reads must terminate and the buffer positions must stay inside the buffers they index.
@@ -739,9 +796,12 @@ TEST_CASE("ST-V 315-5881: damaged compressed data does not run past the line buf
         for (unsigned word = 0; word < 3000; ++word) {
             ymir::cart::STV3155881::State state{};
             chip.SaveState(state);
-            if (state.bufferPos > 2 || state.lineBufferSize > 512 || state.lineBufferPos > 512) {
+            // Every state the chip reaches itself is one LoadState takes
+            if (state.bufferPos > 2 || state.lineBufferSize > 512 || state.lineBufferPos > 512 ||
+                !chip.ValidateState(state)) {
                 FAIL("key " << key << " word " << word << ": bufferPos " << state.bufferPos << " lineBufferPos "
-                            << state.lineBufferPos << " lineBufferSize " << state.lineBufferSize);
+                            << state.lineBufferPos << " lineBufferSize " << state.lineBufferSize << " ready "
+                            << int(state.ready) << " header " << std::hex << state.decHeader);
             }
             chip.ReadDecryptedWord();
         }
