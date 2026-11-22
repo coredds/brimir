@@ -284,6 +284,34 @@ TEST_CASE("ST-V zip: a zip64 archive is refused cleanly", "[stv]") {
     std::vector<uint8_t> out;
     CHECK_FALSE(zip.ReadEntry("a.bin", out));
 }
+TEST_CASE("ST-V zip: a malformed central directory is not open", "[stv]") {
+    TempDir dir("brimir_stv_zip_bad_central");
+    const auto zipPath = dir.path / "bad.zip";
+    auto bytes = brimir::test::BuildTestZip({
+        {"first.bin", Pattern(100, 1), false, std::nullopt},
+        {"second.bin", Pattern(100, 2), false, std::nullopt},
+    });
+
+    SECTION("the second central header has a bad signature") {
+        PatchCentralU32(bytes, "second.bin", 0, 0xDEADBEEFu);
+    }
+    SECTION("the second central header's name runs past the directory") {
+        PatchCentralU32(bytes, "second.bin", 28, 0xFFFFFFFFu);
+    }
+    SECTION("the end record counts more entries than the directory holds") {
+        const size_t count = bytes.size() - 22 + 8; // entries on this disk, then total entries
+        bytes[count] = bytes[count + 2] = 3;
+    }
+    WriteBytes(zipPath, bytes);
+
+    brimir::stv::ZipReader zip(zipPath);
+    CHECK_FALSE(zip.IsOpen());
+    CHECK_FALSE(zip.HasEntry("first.bin"));
+    CHECK(zip.EntryNames().empty());
+    CHECK_FALSE(zip.EntryCRC("first.bin").has_value());
+    std::vector<uint8_t> out;
+    CHECK_FALSE(zip.ReadEntry("first.bin", out));
+}
 TEST_CASE("ST-V zip: files that are not zips have no entries", "[stv]") {
     TempDir dir("brimir_stv_zip_notzip");
 

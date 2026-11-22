@@ -132,6 +132,7 @@ add_executable(brimir_tests
     # ST-V: zip reader (stored/deflated entries, case-insensitive base names), I/O board, 93C46 EEPROM, protection state
     unit/test_stv_zip.cpp
     unit/test_stv_io.cpp
+    unit/test_stv_detect.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE

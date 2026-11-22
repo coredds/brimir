@@ -10,6 +10,8 @@ add_library(brimir_bridge OBJECT
     savestate_codec.cpp
     stv/stv_315_5881.cpp
     stv/stv_cartridge.cpp
+    stv/stv_detect.cpp
+    stv/stv_game_db.cpp
     stv/stv_io.cpp
     stv/stv_zip.cpp
 )

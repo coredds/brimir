@@ -105,6 +105,7 @@ bool ZipReader::ScanEntries() {
     }
 
     size_t pos = 0;
+    unsigned parsed = 0;
     for (unsigned i = 0; i < entryCount; i++) {
         if (pos + kCentralHeaderSize > directory.size()) break;
         const uint8 *h = directory.data() + pos;
@@ -131,6 +132,7 @@ bool ZipReader::ScanEntries() {
 
         const std::string filename(reinterpret_cast<const char *>(h + kCentralHeaderSize), nameLength);
         pos += kCentralHeaderSize + nameLength + extraLength + commentLength;
+        parsed++;
 
         // Directory entries have no base name
         const std::string baseName = BaseName(filename);
@@ -141,6 +143,13 @@ bool ZipReader::ScanEntries() {
             m_names.push_back(baseName);
         }
         m_entries[key] = entry;
+    }
+
+    // A malformed or short central header ends the loop early: the entry list would be partial
+    if (parsed != entryCount) {
+        m_entries.clear();
+        m_names.clear();
+        return false;
     }
 
     m_valid = true;
