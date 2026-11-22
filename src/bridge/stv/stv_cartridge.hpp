@@ -13,6 +13,7 @@
 
 #include "stv_315_5881.hpp"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -38,6 +39,7 @@ public:
         uint8 rsgCounter;
         uint8 protectionEnabled;
         uint8 reserved;
+        std::array<uint32, 4> abus; // the four long registers at 0x4FFFFF0 (MAME's m_a_bus)
     };
 
     using IOGAReadFn  = std::function<uint8(uint32)>;
@@ -45,7 +47,7 @@ public:
 
     STVGameROMCartridge()
         : BaseCartridge(0xFFu, CartType::ROM) {
-        SetHandlesLongAccess(true);
+        SetOwnsCartridgeSpace(true);
     }
 
     uint8  ReadByte(uint32 address) const override;
@@ -78,6 +80,12 @@ public:
     uint8 PeekROMByte(uint32 address) const;
 
 protected:
+    // The 315-5881 registers at 0x4FFFFF0-0x4FFFFFF as MAME's stv_state::common_prot_r/common_prot_w decode them:
+    // long registers, byte and word accesses select a lane of the long.
+    uint32 ReadProtectionRegister(unsigned index, bool peek) const;
+    void WriteProtectionRegister(unsigned index, uint32 data, uint32 mask);
+    uint32 ROMLongAt(uint32 address) const;
+
     size_t m_romSize = 0;
     std::vector<uint8> m_rom;
 
@@ -87,6 +95,7 @@ protected:
     ProtectionMode m_protectionMode    = ProtectionMode::None;
     uint32         m_protectionKey     = 0;
     bool           m_protectionEnabled = false;
+    std::array<uint32, 4> m_abus{}; // MAME stv_state::m_a_bus; m_abus[0] bit 16 is the chip enable (m_abus_protenable)
 
     mutable STV3155881 m_crypt3155881;
 

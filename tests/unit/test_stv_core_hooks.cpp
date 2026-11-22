@@ -8,6 +8,7 @@
 #include <ymir/savestate/savestate.hpp>
 #include <ymir/sys/saturn.hpp>
 
+#include <stv/stv_315_5881.hpp>
 #include <stv/stv_cartridge.hpp>
 
 #include <array>
@@ -70,7 +71,7 @@ class CountingCartridge final : public cart::BaseCartridge {
 public:
     explicit CountingCartridge(bool handlesLong)
         : BaseCartridge(0xFFu, cart::CartType::ROM) {
-        SetHandlesLongAccess(handlesLong);
+        SetOwnsCartridgeSpace(handlesLong);
     }
 
     mutable int readLongs = 0;
@@ -158,10 +159,12 @@ TEST_CASE("stv hooks: a cartridge that handles long accesses gets one ReadLong p
     CHECK(cart->pokeLongs == 1);
     CHECK(cart->pokeWords == 0);
 
-    // 16-bit reads are unchanged, including the ID at the end of the space
+    // 16-bit reads are unchanged, and the cartridge owns the end of the space: no cartridge ID there
     CHECK(saturn->mainBus.Read<uint16>(kCartBase + 0x1230) == CountingCartridge::WordAt(kCartBase + 0x1230));
     CHECK(cart->readLongs == 2);
-    CHECK(saturn->mainBus.Read<uint16>(0x4FF'FFFE) == 0xFFFFu);
+    CHECK(saturn->mainBus.Read<uint16>(0x4FF'FFFE) == CountingCartridge::WordAt(0x4FF'FFFE));
+    CHECK(saturn->mainBus.Read<uint8>(0x4FF'FFFF) == static_cast<uint8>(CountingCartridge::WordAt(0x4FF'FFFE)));
+    CHECK(saturn->mainBus.Read<uint8>(0x4FF'FFFE) == static_cast<uint8>(CountingCartridge::WordAt(0x4FF'FFFE) >> 8));
 }
 
 TEST_CASE("stv hooks: a cartridge that does not handle long accesses sees the upstream two-word split", "[stv]") {
@@ -178,6 +181,11 @@ TEST_CASE("stv hooks: a cartridge that does not handle long accesses sees the up
     CHECK(last == ((static_cast<uint32>(CountingCartridge::WordAt(kCartLastLong)) << 16u) | 0xFFFFu));
     CHECK(cart->readWords == 1);
     CHECK(cart->readLongs == 0);
+
+    // 16- and 8-bit reads of the last word are the cartridge ID, as upstream
+    CHECK(saturn->mainBus.Read<uint16>(0x4FF'FFFE) == 0xFFFFu);
+    CHECK(saturn->mainBus.Read<uint8>(0x4FF'FFFE) == 0xFFu);
+    CHECK(saturn->mainBus.Read<uint8>(0x4FF'FFFF) == 0xFFu);
 
     saturn->mainBus.Write<uint32>(kCartBase + 0x40, 0x11223344u);
     CHECK(cart->writeWords == 2);
@@ -229,7 +237,7 @@ TEST_CASE("stv hooks: the default long accesses are two word accesses, high word
         }
     } cart;
 
-    CHECK_FALSE(cart.HandlesLongAccess());
+    CHECK_FALSE(cart.OwnsCartridgeSpace());
 
     CHECK(cart.ReadLong(0x300'0010) == TwoWords(0x300'0010));
     CHECK(cart.order == std::vector<uint32>{0x300'0010, 0x300'0012});
@@ -249,7 +257,7 @@ TEST_CASE("stv hooks: the default long accesses are two word accesses, high word
 
 TEST_CASE("stv hooks: the ST-V cartridge handles long accesses", "[stv]") {
     cart::STVGameROMCartridge cart;
-    CHECK(cart.HandlesLongAccess());
+    CHECK(cart.OwnsCartridgeSpace());
 
     // through the SCU: 32-bit reads see the ROM everywhere, also in the last long of the cartridge space
     std::vector<uint8> rom(0x10000);
@@ -269,6 +277,202 @@ TEST_CASE("stv hooks: the ST-V cartridge handles long accesses", "[stv]") {
     CHECK(saturn->mainBus.Peek<uint32>(kCartLastLong) == longAt(0xFFFC));
 }
 
+namespace {
+
+constexpr uint32 kProt = 0x4FF'FFF0; // the 315-5881 registers, MAME's install_common_protection()
+constexpr uint32 kProtKey = 0x01010101;
+constexpr uint16 kProtLow = 0x0100;
+constexpr uint16 kProtHigh = 0x0000;
+constexpr uint16 kProtSubKey = 0x00AB;
+
+std::vector<uint8> ProtROM() {
+    std::vector<uint8> rom(1u << 20);
+    uint32 x = 0x12345678;
+    for (auto &b : rom) {
+        x = x * 1664525u + 1013904223u;
+        b = static_cast<uint8>(x >> 24);
+    }
+    return rom;
+}
+
+// The chip as MAME's handlers set it up, read without the cartridge: the words a game gets in order
+struct ReferenceChip {
+    cart::STV3155881 chip;
+
+    explicit ReferenceChip(const std::vector<uint8> &rom) {
+        chip.SetROM(rom);
+        chip.Reset();
+        chip.SetKey(kProtKey);
+        chip.SetEnabled(true);
+        chip.SetLowAddress(kProtLow);
+        chip.SetHighAddress(kProtHigh);
+        chip.SetSubKey(kProtSubKey);
+    }
+
+    // common_prot_r: two decryptions, each byte swapped, the first in the high half
+    uint32 NextLong() {
+        const uint16 first = chip.ReadDecryptedWord();
+        const uint16 second = chip.ReadDecryptedWord();
+        const auto swap = [](uint16 w) { return static_cast<uint16>((w >> 8) | (w << 8)); };
+        return (uint32{swap(first)} << 16) | swap(second);
+    }
+};
+
+std::unique_ptr<Saturn> ChipSaturn(const std::vector<uint8> &rom, cart::STVGameROMCartridge *&cart) {
+    auto saturn = std::make_unique<Saturn>();
+    cart = saturn->InsertCartridge<cart::STVGameROMCartridge>();
+    cart->LoadROM(rom);
+    cart->ConfigureProtection(cart::STVGameROMCartridge::ProtectionMode::Chip3155881, kProtKey);
+    return saturn;
+}
+
+void ProgramChipWithLongs(Saturn &saturn) {
+    saturn.mainBus.Write<uint32>(kProt + 0x0, 0x0001'0000);
+    saturn.mainBus.Write<uint32>(kProt + 0x8, (uint32{kProtLow} << 16) | kProtHigh);
+    saturn.mainBus.Write<uint32>(kProt + 0xC, uint32{kProtSubKey} << 16);
+}
+
+} // namespace
+
+TEST_CASE("stv hooks: 315-5881 registers decode as MAME's common_prot_w and common_prot_r do", "[stv]") {
+    const auto rom = ProtROM();
+    cart::STVGameROMCartridge *cart = nullptr;
+
+    SECTION("long writes enable and program the chip; long reads return the decrypted words in MAME's order") {
+        auto saturn = ChipSaturn(rom, cart);
+        ProgramChipWithLongs(*saturn);
+        ReferenceChip reference(rom);
+        for (int i = 0; i < 40; ++i) {
+            CHECK(saturn->mainBus.Read<uint32>(kProt + 0xC) == reference.NextLong());
+        }
+    }
+
+    SECTION("word writes decode as lanes of the long registers") {
+        auto saturn = ChipSaturn(rom, cart);
+        // bit 16 of register 0 is bit 0 of its high word
+        saturn->mainBus.Write<uint16>(kProt + 0x2, 0x0001);
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0x0) == 0x0000'0001); // stored, but not the enable
+        saturn->mainBus.Write<uint16>(kProt + 0x0, 0x0001);
+        saturn->mainBus.Write<uint16>(kProt + 0x8, kProtLow);
+        saturn->mainBus.Write<uint16>(kProt + 0xA, kProtHigh);
+        saturn->mainBus.Write<uint16>(kProt + 0xC, kProtSubKey);
+        ReferenceChip reference(rom);
+        for (int i = 0; i < 10; ++i) {
+            CHECK(saturn->mainBus.Read<uint32>(kProt + 0xC) == reference.NextLong());
+        }
+    }
+
+    SECTION("byte writes decode as lanes of the long registers") {
+        auto saturn = ChipSaturn(rom, cart);
+        saturn->mainBus.Write<uint8>(kProt + 0x1, 0x01); // bits 16-23 of register 0
+        // each byte write sets the whole address half it touches from its own lane (the other lane is 0 in the access's
+        // data), so the last byte written decides: low = byte at +8 << 8 | byte at +9
+        saturn->mainBus.Write<uint8>(kProt + 0x9, 0x00);
+        saturn->mainBus.Write<uint8>(kProt + 0x8, 0x01);
+        saturn->mainBus.Write<uint8>(kProt + 0xB, 0x00);
+        saturn->mainBus.Write<uint8>(kProt + 0xA, 0x00);
+        saturn->mainBus.Write<uint8>(kProt + 0xC, 0x00);
+        saturn->mainBus.Write<uint8>(kProt + 0xD, kProtSubKey);
+        ReferenceChip reference(rom);
+        for (int i = 0; i < 10; ++i) {
+            CHECK(saturn->mainBus.Read<uint32>(kProt + 0xC) == reference.NextLong());
+        }
+    }
+
+    SECTION("the subkey is the high half of register 3, whichever half is written") {
+        auto saturn = ChipSaturn(rom, cart);
+        saturn->mainBus.Write<uint32>(kProt + 0x0, 0x0001'0000);
+        saturn->mainBus.Write<uint32>(kProt + 0x8, (uint32{kProtLow} << 16) | kProtHigh);
+        saturn->mainBus.Write<uint32>(kProt + 0xC, (uint32{kProtSubKey} << 16) | 0x1234);
+        saturn->mainBus.Write<uint16>(kProt + 0xE, 0x5678); // restarts the stream with the same subkey
+        ReferenceChip reference(rom);
+        for (int i = 0; i < 10; ++i) {
+            CHECK(saturn->mainBus.Read<uint32>(kProt + 0xC) == reference.NextLong());
+        }
+    }
+
+    SECTION("word and byte reads of the data register take a lane of a whole two-word decryption") {
+        auto saturn = ChipSaturn(rom, cart);
+        ProgramChipWithLongs(*saturn);
+        ReferenceChip reference(rom);
+        const uint32 first = reference.NextLong();
+        const uint32 second = reference.NextLong();
+        const uint32 third = reference.NextLong();
+        const uint32 fourth = reference.NextLong();
+        CHECK(saturn->mainBus.Read<uint16>(kProt + 0xC) == (first >> 16));
+        CHECK(saturn->mainBus.Read<uint16>(kProt + 0xE) == (second & 0xFFFF));
+        CHECK(saturn->mainBus.Read<uint8>(kProt + 0xD) == ((third >> 16) & 0xFF));
+        CHECK(saturn->mainBus.Read<uint8>(kProt + 0xF) == (fourth & 0xFF));
+    }
+
+    SECTION("other registers read back what was written; peeks do not run the chip") {
+        auto saturn = ChipSaturn(rom, cart);
+        ProgramChipWithLongs(*saturn);
+        saturn->mainBus.Write<uint32>(kProt + 0x4, 0x1234'5678);
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0x4) == 0x1234'5678);
+        CHECK(saturn->mainBus.Read<uint16>(kProt + 0x4) == 0x1234);
+        CHECK(saturn->mainBus.Read<uint8>(kProt + 0x7) == 0x78);
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0x8) == ((uint32{kProtLow} << 16) | kProtHigh));
+
+        const uint32 peeked = saturn->mainBus.Peek<uint32>(kProt + 0xC);
+        CHECK(peeked == (uint32{kProtSubKey} << 16));
+        ReferenceChip reference(rom);
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0xC) == reference.NextLong()); // the peek did not consume
+    }
+
+    SECTION("while the chip is disabled the registers read back what was written, else the ROM") {
+        auto saturn = ChipSaturn(rom, cart);
+        const auto romLong = [&](size_t offset) {
+            return (uint32{rom[offset]} << 24) | (uint32{rom[offset + 1]} << 16) | (uint32{rom[offset + 2]} << 8) |
+                   uint32{rom[offset + 3]};
+        };
+        // the ROM view is the end of the 16 MiB bank, mirrored into the 1 MiB test ROM
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0x4) == romLong(0xFFFF4));
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0xC) == romLong(0xFFFFC));
+        CHECK(saturn->mainBus.Read<uint16>(0x4FF'FFFE) == (romLong(0xFFFFC) & 0xFFFF));
+        saturn->mainBus.Write<uint32>(kProt + 0x4, 0xCAFE'F00D);
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0x4) == 0xCAFE'F00D);
+        saturn->mainBus.Write<uint32>(kProt + 0x0, 0x0001'0000);
+        saturn->mainBus.Write<uint32>(kProt + 0x0, 0x0000'0000); // disabled again, nonzero registers still win
+        saturn->mainBus.Write<uint32>(kProt + 0x4, 0x0000'0000);
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0x4) == romLong(0xFFFF4));
+    }
+
+    SECTION("a cartridge without the chip does not intercept the registers") {
+        auto saturn = std::make_unique<Saturn>();
+        auto *plain = saturn->InsertCartridge<cart::STVGameROMCartridge>();
+        plain->LoadROM(rom);
+        saturn->mainBus.Write<uint32>(kProt + 0x4, 0x1234'5678);
+        CHECK(saturn->mainBus.Read<uint32>(kProt + 0x4) != 0x1234'5678);
+    }
+
+    SECTION("the registers are part of the protection state") {
+        auto saturn = ChipSaturn(rom, cart);
+        ProgramChipWithLongs(*saturn);
+        saturn->mainBus.Write<uint32>(kProt + 0x4, 0x1234'5678);
+        ReferenceChip reference(rom);
+        for (int i = 0; i < 5; ++i) {
+            REQUIRE(saturn->mainBus.Read<uint32>(kProt + 0xC) == reference.NextLong());
+        }
+
+        cart::STVGameROMCartridge::ProtectionState state{};
+        cart->SaveProtectionState(state);
+        CHECK(state.abus[1] == 0x1234'5678);
+        CHECK(state.protectionEnabled == 1);
+
+        cart::STVGameROMCartridge::ProtectionState mismatch = state;
+        mismatch.abus[0] = 0;
+        CHECK_FALSE(cart->LoadProtectionState(mismatch));
+
+        cart::STVGameROMCartridge *other = nullptr;
+        auto otherSaturn = ChipSaturn(rom, other);
+        REQUIRE(other->LoadProtectionState(state));
+        CHECK(otherSaturn->mainBus.Read<uint32>(kProt + 0x4) == 0x1234'5678);
+        for (int i = 0; i < 10; ++i) {
+            CHECK(otherSaturn->mainBus.Read<uint32>(kProt + 0xC) == reference.NextLong());
+        }
+    }
+}
 TEST_CASE("stv hooks: Saturn PDR1, PDR2 and INTBACK are what they were before the hooks", "[stv][smpc]") {
     // Captured from the unmodified code: pads on both ports, TH/TR walked through the handshake positions
     struct Step {
@@ -320,9 +524,8 @@ TEST_CASE("stv hooks: Saturn PDR1, PDR2 and INTBACK are what they were before th
     }
 }
 
-TEST_CASE("stv hooks: ST-V mode routes PDR1 and PDR2 to the handlers", "[stv][smpc]") {
+TEST_CASE("stv hooks: ST-V mode routes PDR1 and PDR2 to the handlers as MAME does", "[stv][smpc]") {
     auto saturn = std::make_unique<Saturn>();
-    SetUpPads(*saturn);
 
     std::vector<uint8> pdr1Writes;
     std::vector<uint8> pdr2Writes;
@@ -335,52 +538,69 @@ TEST_CASE("stv hooks: ST-V mode routes PDR1 and PDR2 to the handlers", "[stv][sm
     saturn->SMPC.SetSTVMode(true);
     CHECK(saturn->SMPC.IsSTVMode());
 
-    saturn->mainBus.Write<uint8>(kPDR1, 0x1C);
+    // smpc_hle_device::pdr1_w: the handler gets the written value masked by DDR (bit 7 never)
+    saturn->mainBus.Write<uint8>(kDDR1, 0x1C);
+    saturn->mainBus.Write<uint8>(kDDR2, 0x10);
+    saturn->mainBus.Write<uint8>(kPDR1, 0xFF);
     REQUIRE(pdr1Writes.size() == 1);
     CHECK(pdr1Writes[0] == 0x1C);
     CHECK(pdr2Writes.empty());
-    saturn->mainBus.Write<uint8>(kPDR2, 0x10);
+    saturn->mainBus.Write<uint8>(kPDR2, 0xFF);
     REQUIRE(pdr2Writes.size() == 1);
     CHECK(pdr2Writes[0] == 0x10);
+    saturn->mainBus.Write<uint8>(kPDR1, 0x93);
+    REQUIRE(pdr1Writes.size() == 2);
+    CHECK(pdr1Writes[1] == 0x10);
 
-    // the reads come from the handlers, with bit 7 from the bus (the last byte the SMPC saw written)
-    CHECK(saturn->mainBus.Read<uint8>(kPDR1) == pdr1Value);
+    // smpc_hle_device::pdr1_r: (handler() & ~DDR) | readback, the readback being the written output pins plus bit 7
+    CHECK(saturn->mainBus.Read<uint8>(kPDR1) == ((0x2B & ~0x1C) | 0x10 | 0x80));
     CHECK(pdr1Reads == 1);
-    pdr2Value = 0x7F;
-    CHECK(saturn->mainBus.Read<uint8>(kPDR2) == 0x7F);
+    CHECK(saturn->mainBus.Read<uint8>(kPDR2) == ((0x35 & ~0x10) | 0x10 | 0x80));
     CHECK(pdr2Reads == 1);
-    saturn->mainBus.Write<uint8>(kIREG0, 0xFF); // an SMPC write that leaves bit 7 on the bus
-    CHECK(saturn->mainBus.Read<uint8>(kPDR1) == (0x80 | pdr1Value));
-    CHECK(saturn->mainBus.Read<uint8>(kPDR2) == 0xFF);
-    saturn->mainBus.Write<uint8>(kIREG0, 0x00);
 
-    // a handler's bit 7 is not passed through
-    pdr2Value = 0xFF;
-    CHECK(saturn->mainBus.Read<uint8>(kPDR2) == 0x7F);
+    // the handler's input bits pass (bit 7 included), its bits on output pins do not
+    saturn->mainBus.Write<uint8>(kPDR1, 0x00);
+    pdr1Value = 0xFF;
+    CHECK(saturn->mainBus.Read<uint8>(kPDR1) == 0xE3);
+
+    // the readback is taken at the write: a later DDR change does not alter it, but masks the handler's bits
+    saturn->mainBus.Write<uint8>(kPDR1, 0xFF);
+    pdr1Value = 0xFF;
+    saturn->mainBus.Write<uint8>(kDDR1, 0x7F);
+    CHECK(saturn->mainBus.Read<uint8>(kPDR1) == (0x80 | 0x1C));
+    // DDR bit 7 is not a pin
+    saturn->mainBus.Write<uint8>(kDDR1, 0xFF);
+    saturn->mainBus.Write<uint8>(kPDR1, 0xFF);
+    CHECK(pdr1Writes.back() == 0x7F);
+    pdr1Value = 0x00;
+    CHECK(saturn->mainBus.Read<uint8>(kPDR1) == 0xFF);
 
     // a read does not write the pins again
-    CHECK(pdr1Writes.size() == 1);
-    CHECK(pdr2Writes.size() == 1);
+    const size_t writes1 = pdr1Writes.size();
+    const size_t writes2 = pdr2Writes.size();
+    saturn->mainBus.Read<uint8>(kPDR1);
+    saturn->mainBus.Read<uint8>(kPDR2);
+    CHECK(pdr1Writes.size() == writes1);
+    CHECK(pdr2Writes.size() == writes2);
 
-    // peeks and pokes have no side effects: they see the last written value
+    // peeks and pokes have no side effects: they see the readback
     const int readsBefore = pdr1Reads + pdr2Reads;
-    CHECK(saturn->mainBus.Peek<uint8>(kPDR1) == 0x1C);
-    CHECK(saturn->mainBus.Peek<uint8>(kPDR2) == 0x10);
+    CHECK(saturn->mainBus.Peek<uint8>(kPDR2) == (0x10 | 0x80));
     saturn->mainBus.Poke<uint8>(kPDR1, 0x04);
     CHECK(saturn->mainBus.Peek<uint8>(kPDR1) == 0x04);
     CHECK(pdr1Reads + pdr2Reads == readsBefore);
-    CHECK(pdr1Writes.size() == 1);
+    CHECK(pdr1Writes.size() == writes1);
 
     // turning ST-V mode off restores the Saturn port behaviour (the pad answers, the handlers are left alone)
     saturn->SMPC.SetSTVMode(false);
+    SetUpPads(*saturn);
     saturn->mainBus.Write<uint8>(kPDR1, 0x60);
     saturn->mainBus.Write<uint8>(kPDR2, 0x60);
     CHECK(saturn->mainBus.Read<uint8>(kPDR1) == 0x7C);
     CHECK(saturn->mainBus.Read<uint8>(kPDR2) == 0x7C);
-    CHECK(pdr1Writes.size() == 1);
+    CHECK(pdr1Writes.size() == writes1);
     CHECK(pdr1Reads + pdr2Reads == readsBefore);
 }
-
 TEST_CASE("stv hooks: ST-V mode without handlers keeps the Saturn ports", "[stv][smpc]") {
     auto saturn = std::make_unique<Saturn>();
     SetUpPads(*saturn);

@@ -508,8 +508,9 @@ FORCE_INLINE uint8 SMPC::ReadPDR1() const {
     if constexpr (peek) {
         return PDR1;
     } else if (m_stvMode && m_stvPDR1Read) [[unlikely]] {
-        // Brimir: ST-V mode, the handler answers
-        return (m_stvPDR1Read() & 0x7F) | (m_busValue & 0x80);
+        // Brimir: ST-V mode, composed as MAME's smpc_hle_device::pdr1_r: the handler answers the input pins, the
+        // output pins read back what was written (PDR1 holds that readback in ST-V mode, see WritePDR1)
+        return static_cast<uint8>((m_stvPDR1Read() & ~(DDR1 & 0x7F)) | PDR1);
     } else {
         const_cast<SMPC *>(this)->WritePDR1<false>(PDR1);
         return (PDR1 & 0x7F) | (m_busValue & 0x80);
@@ -521,8 +522,8 @@ FORCE_INLINE uint8 SMPC::ReadPDR2() const {
     if constexpr (peek) {
         return PDR2;
     } else if (m_stvMode && m_stvPDR2Read) [[unlikely]] {
-        // Brimir: ST-V mode, the handler answers
-        return (m_stvPDR2Read() & 0x7F) | (m_busValue & 0x80);
+        // Brimir: ST-V mode, composed as MAME's smpc_hle_device::pdr2_r (see ReadPDR1)
+        return static_cast<uint8>((m_stvPDR2Read() & ~(DDR2 & 0x7F)) | PDR2);
     } else {
         const_cast<SMPC *>(this)->WritePDR2<false>(PDR2);
         return (PDR2 & 0x7F) | (m_busValue & 0x80);
@@ -621,9 +622,11 @@ FORCE_INLINE void SMPC::WritePDR1(uint8 value) {
     if constexpr (poke) {
         PDR1 = value;
     } else if (m_stvMode && m_stvPDR1Write) [[unlikely]] {
-        // Brimir: ST-V mode, the pins go to the handler
-        m_stvPDR1Write(value);
-        PDR1 = value;
+        // Brimir: ST-V mode, as MAME's smpc_hle_device::pdr1_w: the handler gets the output pins (DDR set, bit 7
+        // never), and the register keeps them (plus bit 7) as the readback
+        const uint8 pins = value & DDR1 & 0x7F;
+        m_stvPDR1Write(pins);
+        PDR1 = pins | (value & 0x80);
     } else {
         m_port1.UpdateInputs();
         if (m_extLatchEnable1 && !bit::test<6>(PDR1 | DDR1)) {
@@ -642,9 +645,10 @@ FORCE_INLINE void SMPC::WritePDR2(uint8 value) {
     if constexpr (poke) {
         PDR2 = value;
     } else if (m_stvMode && m_stvPDR2Write) [[unlikely]] {
-        // Brimir: ST-V mode, the pins go to the handler
-        m_stvPDR2Write(value);
-        PDR2 = value;
+        // Brimir: ST-V mode, as MAME's smpc_hle_device::pdr2_w (see WritePDR1)
+        const uint8 pins = value & DDR2 & 0x7F;
+        m_stvPDR2Write(pins);
+        PDR2 = pins | (value & 0x80);
     } else {
         m_port2.UpdateInputs();
         if (m_extLatchEnable2 && !bit::test<6>(PDR2 | DDR2)) {

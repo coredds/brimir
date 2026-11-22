@@ -76,8 +76,9 @@ public:
         return m_stvMode;
     }
 
-    // Brimir: the handlers ST-V mode routes PDR1 and PDR2 to. A read returns the handler's low 7 bits (bit 7 comes from
-    // the bus as on a Saturn); with a handler missing the Saturn port code runs.
+    // Brimir: the handlers ST-V mode routes PDR1 and PDR2 to, with MAME's DDR handling (smpc_hle_device::pdr1_r/pdr1_w):
+    // a write passes the handler the bits the DDR makes outputs (bit 7 excluded), a read returns the handler's value for
+    // the input pins and the written value for the output pins. With a handler missing the Saturn port code runs.
     void SetSTVPDRHandlers(STVPDRReadFn pdr1Read, STVPDRWriteFn pdr1Write, STVPDRReadFn pdr2Read,
                            STVPDRWriteFn pdr2Write) {
         m_stvPDR1Read = std::move(pdr1Read);

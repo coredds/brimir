@@ -521,8 +521,8 @@ void SCU::OnTimer1Event(core::EventContext &eventContext, void *userContext) {
 template <mem_primitive T, bool peek>
 T SCU::ReadCartridge(uint32 address) {
     if constexpr (std::is_same_v<T, uint32>) {
-        // Brimir: a cartridge that handles 32-bit accesses (ST-V) gets them whole
-        if (m_cartSlot.GetCartridge().HandlesLongAccess()) [[unlikely]] {
+        // Brimir: a cartridge that owns the cartridge space (ST-V) gets 32-bit accesses whole
+        if (m_cartSlot.GetCartridge().OwnsCartridgeSpace()) [[unlikely]] {
             return m_cartSlot.ReadLong<peek>(address);
         }
         // 32-bit reads are split into two 16-bit reads
@@ -530,14 +530,14 @@ T SCU::ReadCartridge(uint32 address) {
         value |= ReadCartridge<uint16, peek>(address + 2) << 0u;
         return value;
     } else if constexpr (std::is_same_v<T, uint16>) {
-        if (address >= 0x4FF'FFFE) [[unlikely]] {
+        if (address >= 0x4FF'FFFE && !m_cartSlot.GetCartridge().OwnsCartridgeSpace()) [[unlikely]] { // Brimir: ST-V owns it
             // Return cartridge ID
             return 0xFF00 | m_cartSlot.GetID();
         } else {
             return m_cartSlot.ReadWord<peek>(address);
         }
     } else if constexpr (std::is_same_v<T, uint8>) {
-        if (address >= 0x4FF'FFFE) [[unlikely]] {
+        if (address >= 0x4FF'FFFE && !m_cartSlot.GetCartridge().OwnsCartridgeSpace()) [[unlikely]] { // Brimir: ST-V owns it
             // Return cartridge ID
             if ((address & 1) == 0) {
                 return 0xFF;
@@ -554,8 +554,8 @@ T SCU::ReadCartridge(uint32 address) {
 template <mem_primitive T, bool poke>
 void SCU::WriteCartridge(uint32 address, T value) {
     if constexpr (std::is_same_v<T, uint32>) {
-        // Brimir: a cartridge that handles 32-bit accesses (ST-V) gets them whole
-        if (m_cartSlot.GetCartridge().HandlesLongAccess()) [[unlikely]] {
+        // Brimir: a cartridge that owns the cartridge space (ST-V) gets 32-bit accesses whole
+        if (m_cartSlot.GetCartridge().OwnsCartridgeSpace()) [[unlikely]] {
             m_cartSlot.WriteLong<poke>(address, value);
             return;
         }
