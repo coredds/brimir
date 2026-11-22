@@ -209,9 +209,9 @@ Saturn VDP1 draws affine-textured quads without perspective correction. Needs in
 Requires perfect determinism across dual SH-2s, SCSP timers, CD block timing. Needs Ymir deterministic mode + RetroArch netplay integration.
 
 ### 25. ST-V Arcade Support  🚧
-**Layer**: Upstream (new system class) | **Target**: Post-1.0 | **Status**: In progress on `feature/stv-support` branch (not yet merged, not ready for release)
+**Layer**: Bridge + small hooks in the core | **Target**: Post-1.0 | **Status**: Implemented on `feature/stv-support-v2` (not yet merged or released). Eight games boot and play from MAME ROM sets: Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force and Radiant Silvergun (the one with the 315-5881 chip), checked against MAME 0.289. Tested on Windows x64 (hidden `[.stv-rom]` tests with the local ROMs); the Android and RetroArch end-to-end runs are still open. Zipped Saturn discs stop working (a `.zip` is read as an ST-V ROM set only). Known differences from MAME (attract pacing, SMEM not saved, the 315-5881 uncompressed path unchecked) are in `src/bridge/stv/STATUS.md`. Open: more ST-V games (each needs its ROM list and a check against MAME), the old branch `feature/stv-support` stays as reference.
 
-ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requires cartridge decryption (315-5881), IOGA dispatch, and dedicated SMPC arcade-mode handling on top of the existing `Saturn` class. Big differentiator — no RetroArch core does ST-V well.
+ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. It needs cartridge decryption (315-5881), IOGA dispatch, and SMPC arcade-mode handling on top of the existing `Saturn` class; the board emulation is in `src/bridge/stv/`, with the hooks in `src/core/` listed in `src/core/BRIMIR_FORK.md`. Big differentiator - no RetroArch core does ST-V well.
 
 ---
 
@@ -270,7 +270,7 @@ ST-V is separate hardware with different memory map, ROM board, JAMMA I/O. Requi
 | HD textures | No | Yes | Mods | Yes | Yes | Post-HW |
 | TATE rotation | Yes | Yes | Via RA | No | No | v0.5.0 |
 | Netplay | RetroArch netplay (v0.7.0) | Rollback | Yes | No | No | Done |
-| ST-V arcade | No | No | N/A | N/A | N/A | Post-1.0 |
+| ST-V arcade | Yes, 8 games (unreleased) | No | N/A | N/A | N/A | Post-1.0 |
 
 ---
 
