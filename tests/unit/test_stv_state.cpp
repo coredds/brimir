@@ -4,6 +4,7 @@
 
 #include "catch_amalgamated.hpp"
 
+#include "unit/stv_test_bios.hpp"
 #include "unit/stv_test_zip.hpp"
 
 #include <libretro.h>
@@ -66,7 +67,7 @@ void WriteBytes(const std::filesystem::path &path, const std::vector<uint8_t> &b
     out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 }
 
-// A zip of zero-filled files for an ST-V set, a zero BIOS (the CPU idles in zeroed ROM), a system and a save folder
+// A zip of zero-filled files for an ST-V set, an idle BIOS (stv_test_bios.hpp), a system and a save folder
 struct Session {
     TempDir dir;
     std::filesystem::path zip, saves, system;
@@ -92,7 +93,7 @@ struct Session {
         }
         zip = dir.path / (std::string(game) + ".zip");
         test::WriteTestZip(zip, entries);
-        WriteBytes(system / "epr-20091.ic8", std::vector<uint8_t>(stv::kSTVBiosSize, 0));
+        test::WriteIdleSTVBios(system / "epr-20091.ic8");
     }
 
     bool Load(CoreWrapper &core) const {
@@ -513,6 +514,24 @@ TEST_CASE("stv state: loading a state the cartridge slot keeps the ST-V cartridg
     REQUIRE(core.LoadState(state.data(), state.size()));
     CHECK(&saturn.GetCartridge() == cart);
     CHECK(saturn.GetCartridge().OwnsCartridgeSpace());
+}
+
+TEST_CASE("stv state: the synthetic session's BIOS idles the master SH-2", "[stv]") {
+    // A BIOS of zeros is not idle: opcode 0x0000 is illegal, and each exception pushes SR and PC through SP 0 into the
+    // on-chip registers at the top of the address space, which logs every write (about 1 GB of output per 600 frames)
+    Session session("brimir_stv_state_idle", "bakubaku");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(session.Load(core));
+    Quiet(core);
+    for (int i = 0; i < 3; i++) {
+        core.RunFrame();
+    }
+    auto &master = core.GetSaturn()->masterSH2.GetProbe();
+    const uint32_t pc = master.PC() & 0x07FF'FFFF;
+    CHECK(pc >= 0x100);
+    CHECK(pc < 0x104);
+    CHECK(master.R(15) == 0x0610'0000);
 }
 
 TEST_CASE("stv state: a held coin is one coin across a state load", "[stv]") {

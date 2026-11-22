@@ -6,6 +6,7 @@
 
 #include "catch_amalgamated.hpp"
 
+#include "unit/stv_test_bios.hpp"
 #include "unit/stv_test_zip.hpp"
 
 #include <brimir/core_wrapper.hpp>
@@ -88,7 +89,7 @@ std::vector<uint8_t> PatternImage() {
     return image;
 }
 
-// A bakubaku zip of zero-filled files and a zero BIOS (the CPU idles in zeroed ROM), a system and a save folder
+// A bakubaku zip of zero-filled files and an idle BIOS (stv_test_bios.hpp), a system and a save folder
 struct Session {
     TempDir dir;
     std::filesystem::path zip, saves, system;
@@ -114,7 +115,7 @@ struct Session {
         }
         zip = dir.path / "bakubaku.zip";
         test::WriteTestZip(zip, entries);
-        WriteBytes(system / "epr-20091.ic8", std::vector<uint8_t>(stv::kSTVBiosSize, 0));
+        test::WriteIdleSTVBios(system / "epr-20091.ic8");
     }
 
     bool Load(CoreWrapper &core) const {

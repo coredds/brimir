@@ -6,6 +6,7 @@
 #include "catch_amalgamated.hpp"
 
 #include "unit/stv_rom_test_helpers.hpp"
+#include "unit/stv_test_bios.hpp"
 #include "unit/stv_test_zip.hpp"
 
 #include <libretro.h>
@@ -78,12 +79,6 @@ std::vector<test::TestZipEntry> SetEntries(const stv::GameInfo &game, size_t kee
     return entries;
 }
 
-void WriteFile(const std::filesystem::path &path, size_t size, uint8_t fill = 0) {
-    std::vector<uint8_t> bytes(size, fill);
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-}
-
 std::string Str(const std::filesystem::path &path) {
     return path.string();
 }
@@ -100,12 +95,16 @@ void RunFor(ymir::Saturn &saturn, uint64_t cycles) {
     }
 }
 
-// An ST-V board around a bare Saturn: a zero BIOS and a small cartridge (the CPU idles in zeroed ROM)
+// An ST-V board around a bare Saturn: an idle BIOS (stv_test_bios.hpp) and a small cartridge
 struct Board {
     std::unique_ptr<ymir::Saturn> owner = std::make_unique<ymir::Saturn>();
     ymir::Saturn &saturn = *owner;
     stv::STVSystem system;
     std::array<uint8_t, stv::kSTVBiosSize> bios{};
+
+    Board() {
+        test::FillIdleSTVBiosImage(bios);
+    }
     std::vector<uint8_t> cart = std::vector<uint8_t>(0x1000, 0xFF);
 
     bool Attach(const char *game = "bakubaku", uint8_t areaCode = 1) {
@@ -230,7 +229,7 @@ TEST_CASE("stv load: a .zip that cannot be read fails as an unreadable archive",
     }
     paths.push_back(zip64);
 
-    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+    test::WriteIdleSTVBios(dir.path / "epr-20091.ic8");
     CoreWrapper core;
     REQUIRE(core.Initialize());
     for (const auto &path : paths) {
@@ -260,7 +259,7 @@ TEST_CASE("stv load: a ROM file whose data does not match its CRC-32 fails namin
     bad.data.back() ^= 0x01;
     const auto zipPath = dir.path / "bakubaku.zip";
     test::WriteTestZip(zipPath, entries);
-    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+    test::WriteIdleSTVBios(dir.path / "epr-20091.ic8");
 
     REQUIRE(CoreWrapper::DetectContent(Str(zipPath).c_str()).kind == stv::DetectKind::Known);
     CoreWrapper core;
@@ -299,7 +298,7 @@ TEST_CASE("stv load: a set with a non-ASCII file name and folder loads", "[stv]"
     CHECK_FALSE(core.LoadGame(utf8(zipPath).c_str(), utf8(dir).c_str(), utf8(dir).c_str()));
     CHECK(core.GetLastError().find(utf8(dir)) != std::string::npos);
 
-    WriteFile(dir / "epr-20091.ic8", stv::kSTVBiosSize);
+    test::WriteIdleSTVBios(dir / "epr-20091.ic8");
     REQUIRE(core.LoadGame(utf8(zipPath).c_str(), utf8(dir).c_str(), utf8(dir).c_str()));
     CHECK(core.IsSTVLoaded());
     CHECK(std::string(core.GetSTVGame()->shortName) == "bakubaku");
@@ -325,7 +324,7 @@ TEST_CASE("stv load: LoadGame builds the board and UnloadGame takes it down agai
     TempDir dir("brimir_stv_load_full");
     const auto zipPath = dir.path / "bakubaku.zip";
     test::WriteTestZip(zipPath, SetEntries(Game("bakubaku")));
-    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+    test::WriteIdleSTVBios(dir.path / "epr-20091.ic8");
 
     CoreWrapper core;
     REQUIRE(core.Initialize());
@@ -404,7 +403,7 @@ TEST_CASE("stv load: an ST-V game reports image 0 with an empty path to the disk
     TempDir dir("brimir_stv_load_diskctl");
     const auto zipPath = dir.path / "bakubaku.zip";
     test::WriteTestZip(zipPath, SetEntries(Game("bakubaku")));
-    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+    test::WriteIdleSTVBios(dir.path / "epr-20091.ic8");
 
     CoreWrapper core;
     REQUIRE(core.Initialize());
@@ -449,7 +448,7 @@ TEST_CASE("stv load: SetSTVInput reaches the I/O ports once per emulated frame",
     TempDir dir("brimir_stv_load_input");
     const auto zipPath = dir.path / "bakubaku.zip";
     test::WriteTestZip(zipPath, SetEntries(Game("bakubaku")));
-    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+    test::WriteIdleSTVBios(dir.path / "epr-20091.ic8");
 
     CoreWrapper core;
     REQUIRE(core.Initialize());
@@ -494,7 +493,7 @@ TEST_CASE("stv load: the SMPC area code is MAME's 1 whatever the BIOS region", "
         TempDir dir("brimir_stv_load_area");
         const auto zipPath = dir.path / (std::string(c.game) + ".zip");
         test::WriteTestZip(zipPath, SetEntries(Game(c.game)));
-        WriteFile(dir.path / c.bios, stv::kSTVBiosSize); // the only BIOS in the folder
+        test::WriteIdleSTVBios(dir.path / c.bios); // the only BIOS in the folder
         CoreWrapper core;
         REQUIRE(core.Initialize());
         core.GetSaturn()->SMPC.SetAreaCode(0x4); // what a Saturn session left
