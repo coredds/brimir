@@ -8,6 +8,10 @@ add_library(brimir_bridge OBJECT
     peripheral_input.cpp
     ram_view.cpp
     savestate_codec.cpp
+    stv/stv_315_5881.cpp
+    stv/stv_cartridge.cpp
+    stv/stv_io.cpp
+    stv/stv_zip.cpp
 )
 
 target_include_directories(brimir_bridge PUBLIC
@@ -19,6 +23,9 @@ target_compile_features(brimir_bridge PUBLIC cxx_std_20)
 # Link with Brimir core and the SH-2 JIT (PUBLIC so consumers of the object
 # library, such as tests and tools, link the JIT too)
 target_link_libraries(brimir_bridge PUBLIC brimir-jit brimir::brimir-core)
+
+# ST-V ROM sets are read from zip files (stv/stv_zip.cpp); zlibstatic is the zlib that libchdr builds.
+target_link_libraries(brimir_bridge PRIVATE zlibstatic)
 
 # CoreWrapper installs the Vulkan VDP renderer (src/gpu/vdp) in BRIMIR_VULKAN builds; brimir-gpu defines BRIMIR_VULKAN.
 if(BRIMIR_VULKAN)

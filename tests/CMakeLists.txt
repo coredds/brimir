@@ -129,6 +129,9 @@ add_executable(brimir_tests
     unit/test_vkhost_sample_points.cpp
     # brimir_bench's --audio-hash and --save-state-every hashes (tools/stream_hash.hpp, header-only)
     unit/test_bench_stream_hash.cpp
+    # ST-V: zip reader (stored/deflated entries, case-insensitive base names), I/O board, 93C46 EEPROM, protection state
+    unit/test_stv_zip.cpp
+    unit/test_stv_io.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
@@ -137,6 +140,7 @@ target_link_libraries(brimir_tests PRIVATE
     brimir-core
     brimir-vdp2-front
     brimir-vdp1-front
+    zlibstatic
 )
 if(ANDROID)
     # Catch2 writes its debug output to the Android log (__android_log_write).
@@ -171,6 +175,7 @@ endif()
 target_include_directories(brimir_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/libretro
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/bridge
 )
 
 target_compile_definitions(brimir_tests PRIVATE BRIMIR_BUILD_TESTS)
