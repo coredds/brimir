@@ -156,6 +156,11 @@ void STVIOBoard::WriteIOGA(uint32 address, T value) {
 
 }
 
+// ReadIOGAByte and WriteIOGAByte (stv_io.hpp) use the byte instances from other translation units; GCC does not emit
+// an out-of-line instance that every use in this file inlined
+template uint8 STVIOBoard::ReadIOGA<uint8, false>(uint32);
+template void STVIOBoard::WriteIOGA<uint8, false>(uint32, uint8);
+
 // A coin is counted when the button goes down; holding it does not insert more.
 void STVIOBoard::SetCoin1(bool pressed) {
     if (pressed && !m_coinHeld[0]) m_coinPending[0]++;
