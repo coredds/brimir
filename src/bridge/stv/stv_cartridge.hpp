@@ -44,19 +44,25 @@ public:
     using IOGAWriteFn = std::function<void(uint32, uint8)>;
 
     STVGameROMCartridge()
-        : BaseCartridge(0xFFu, CartType::ROM) {}
+        : BaseCartridge(0xFFu, CartType::ROM) {
+        SetHandlesLongAccess(true);
+    }
 
     uint8  ReadByte(uint32 address) const override;
     uint16 ReadWord(uint32 address) const override;
+    uint32 ReadLong(uint32 address) const override;
 
     void WriteByte(uint32 address, uint8 value) override;
     void WriteWord(uint32 address, uint16 value) override;
+    void WriteLong(uint32 address, uint32 value) override;
 
     uint8  PeekByte(uint32 address) const override;
     uint16 PeekWord(uint32 address) const override;
+    uint32 PeekLong(uint32 address) const override;
 
     void PokeByte(uint32 address, uint8 value) override;
     void PokeWord(uint32 address, uint16 value) override;
+    void PokeLong(uint32 address, uint32 value) override;
 
     void LoadROM(std::span<const uint8> data);
     void ConfigureProtection(ProtectionMode mode, uint32 key);

@@ -507,6 +507,9 @@ template <bool peek>
 FORCE_INLINE uint8 SMPC::ReadPDR1() const {
     if constexpr (peek) {
         return PDR1;
+    } else if (m_stvMode && m_stvPDR1Read) [[unlikely]] {
+        // Brimir: ST-V mode, the handler answers
+        return (m_stvPDR1Read() & 0x7F) | (m_busValue & 0x80);
     } else {
         const_cast<SMPC *>(this)->WritePDR1<false>(PDR1);
         return (PDR1 & 0x7F) | (m_busValue & 0x80);
@@ -517,6 +520,9 @@ template <bool peek>
 FORCE_INLINE uint8 SMPC::ReadPDR2() const {
     if constexpr (peek) {
         return PDR2;
+    } else if (m_stvMode && m_stvPDR2Read) [[unlikely]] {
+        // Brimir: ST-V mode, the handler answers
+        return (m_stvPDR2Read() & 0x7F) | (m_busValue & 0x80);
     } else {
         const_cast<SMPC *>(this)->WritePDR2<false>(PDR2);
         return (PDR2 & 0x7F) | (m_busValue & 0x80);
@@ -614,6 +620,10 @@ template <bool poke>
 FORCE_INLINE void SMPC::WritePDR1(uint8 value) {
     if constexpr (poke) {
         PDR1 = value;
+    } else if (m_stvMode && m_stvPDR1Write) [[unlikely]] {
+        // Brimir: ST-V mode, the pins go to the handler
+        m_stvPDR1Write(value);
+        PDR1 = value;
     } else {
         m_port1.UpdateInputs();
         if (m_extLatchEnable1 && !bit::test<6>(PDR1 | DDR1)) {
@@ -630,6 +640,10 @@ FORCE_INLINE void SMPC::WritePDR1(uint8 value) {
 template <bool poke>
 FORCE_INLINE void SMPC::WritePDR2(uint8 value) {
     if constexpr (poke) {
+        PDR2 = value;
+    } else if (m_stvMode && m_stvPDR2Write) [[unlikely]] {
+        // Brimir: ST-V mode, the pins go to the handler
+        m_stvPDR2Write(value);
         PDR2 = value;
     } else {
         m_port2.UpdateInputs();
@@ -726,7 +740,10 @@ void SMPC::SSHOFF() {
 void SMPC::SNDON() {
     devlog::debug<grp::base>("Processing SNDON");
 
-    m_smpcOps.EnableAndResetM68K();
+    // Brimir: on the ST-V board PDR2 drives the 68K's reset line, not SNDON
+    if (!m_stvMode) {
+        m_smpcOps.EnableAndResetM68K();
+    }
 
     SF = false; // done processing
 }
@@ -734,7 +751,10 @@ void SMPC::SNDON() {
 void SMPC::SNDOFF() {
     devlog::debug<grp::base>("Processing SNDOFF");
 
-    m_smpcOps.DisableM68K();
+    // Brimir: see SNDON
+    if (!m_stvMode) {
+        m_smpcOps.DisableM68K();
+    }
 
     SF = false; // done processing
 }
@@ -876,7 +896,8 @@ void SMPC::WriteINTBACKStatusReport() {
     SR.P1MDn = 0b11;              // unused, but hardware returns 11
     SR.P2MDn = 0b11;              // unused, but hardware returns 11
 
-    OREG[0] = (m_STE << 7) | (m_resetDisable << 6);
+    // Brimir: in ST-V mode the status report always says the settings are valid (OREG0 bit 7)
+    OREG[0] = ((m_STE || m_stvMode) << 7) | (m_resetDisable << 6);
 
     if (m_rtc.IsVirtualMode()) {
         m_rtc.UpdateSysClock(m_scheduler.CurrentCount());
@@ -984,8 +1005,14 @@ void SMPC::ClockChange(sys::ClockSpeed clockSpeed) {
     m_smpcOps.ClockChangeSoftReset();
     // TODO: clear VDP VRAMs?
     m_smpcOps.DisableSlaveSH2();
-    m_smpcOps.RaiseNMI();
-    m_smpcOps.SetClockSpeed(clockSpeed);
+    if (m_stvMode) [[unlikely]] {
+        // Brimir: ST-V mode, the clock changes before the NMI
+        m_smpcOps.SetClockSpeed(clockSpeed);
+        m_smpcOps.RaiseNMI();
+    } else {
+        m_smpcOps.RaiseNMI();
+        m_smpcOps.SetClockSpeed(clockSpeed);
+    }
 }
 
 // -----------------------------------------------------------------------------

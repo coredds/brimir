@@ -143,6 +143,25 @@ uint16 STVGameROMCartridge::ReadWord(uint32 address) const {
     return util::ReadBE<uint16>(&m_rom[idx & ~1u]);
 }
 
+uint32 STVGameROMCartridge::ReadLong(uint32 address) const {
+    if (m_romSize == 0) return 0xFFFFFFFFu;
+
+    if (IsCS1Window(address) && m_protectionMode == ProtectionMode::Chip3155881 && m_protectionEnabled) {
+        const uint32 reg = address & 0xFu;
+        if (reg == 0xCu) {
+            uint32 hi = m_crypt3155881.ReadDecryptedWord();
+            hi = bit::byte_swap<uint16>(static_cast<uint16>(hi));
+            uint32 lo = m_crypt3155881.ReadDecryptedWord();
+            lo = bit::byte_swap<uint16>(static_cast<uint16>(lo));
+            return (hi << 16u) | lo;
+        }
+    }
+
+    const uint32 hi = ReadWord(address + 0u);
+    const uint32 lo = ReadWord(address + 2u);
+    return (hi << 16u) | lo;
+}
+
 void STVGameROMCartridge::WriteByte(uint32 address, uint8 value) {
     const uint32 reg = address & 0xFu;
 
@@ -206,6 +225,11 @@ void STVGameROMCartridge::WriteWord(uint32 address, uint16 value) {
     }
 }
 
+void STVGameROMCartridge::WriteLong(uint32 address, uint32 value) {
+    WriteWord(address + 0u, static_cast<uint16>(value >> 16u));
+    WriteWord(address + 2u, static_cast<uint16>(value >> 0u));
+}
+
 uint8 STVGameROMCartridge::PeekByte(uint32 address) const {
     if (IsIOGA(address) && m_iogaRead) {
         return m_iogaRead(address);
@@ -223,6 +247,12 @@ uint16 STVGameROMCartridge::PeekWord(uint32 address) const {
     return util::ReadBE<uint16>(&m_rom[idx & ~1u]);
 }
 
+uint32 STVGameROMCartridge::PeekLong(uint32 address) const {
+    const uint32 hi = PeekWord(address + 0u);
+    const uint32 lo = PeekWord(address + 2u);
+    return (hi << 16u) | lo;
+}
+
 void STVGameROMCartridge::PokeByte(uint32 address, uint8 value) {
     if (m_romSize == 0) return;
     size_t idx = CartOffset(address, m_romSize);
@@ -235,6 +265,11 @@ void STVGameROMCartridge::PokeWord(uint32 address, uint16 value) {
     size_t idx = CartOffset(address, m_romSize);
     if (idx == (size_t)-1) return;
     util::WriteBE<uint16>(&m_rom[idx & ~1u], value);
+}
+
+void STVGameROMCartridge::PokeLong(uint32 address, uint32 value) {
+    PokeWord(address + 0u, static_cast<uint16>(value >> 16u));
+    PokeWord(address + 2u, static_cast<uint16>(value >> 0u));
 }
 
 // PeekROMByte uses raw buffer offsets (called by our init code, not the bus)

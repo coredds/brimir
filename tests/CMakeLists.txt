@@ -135,6 +135,7 @@ add_executable(brimir_tests
     unit/test_stv_detect.cpp
     unit/test_stv_loader.cpp
     unit/test_stv_bios.cpp
+    unit/test_stv_core_hooks.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE

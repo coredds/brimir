@@ -521,6 +521,10 @@ void SCU::OnTimer1Event(core::EventContext &eventContext, void *userContext) {
 template <mem_primitive T, bool peek>
 T SCU::ReadCartridge(uint32 address) {
     if constexpr (std::is_same_v<T, uint32>) {
+        // Brimir: a cartridge that handles 32-bit accesses (ST-V) gets them whole
+        if (m_cartSlot.GetCartridge().HandlesLongAccess()) [[unlikely]] {
+            return m_cartSlot.ReadLong<peek>(address);
+        }
         // 32-bit reads are split into two 16-bit reads
         uint32 value = ReadCartridge<uint16, peek>(address + 0) << 16u;
         value |= ReadCartridge<uint16, peek>(address + 2) << 0u;
@@ -550,6 +554,11 @@ T SCU::ReadCartridge(uint32 address) {
 template <mem_primitive T, bool poke>
 void SCU::WriteCartridge(uint32 address, T value) {
     if constexpr (std::is_same_v<T, uint32>) {
+        // Brimir: a cartridge that handles 32-bit accesses (ST-V) gets them whole
+        if (m_cartSlot.GetCartridge().HandlesLongAccess()) [[unlikely]] {
+            m_cartSlot.WriteLong<poke>(address, value);
+            return;
+        }
         // 32-bit writes are split into two 16-bit writes
         WriteCartridge<uint16, poke>(address + 0, value >> 16u);
         WriteCartridge<uint16, poke>(address + 2, value >> 0u);

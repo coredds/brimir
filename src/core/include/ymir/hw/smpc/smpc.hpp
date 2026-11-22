@@ -14,6 +14,7 @@
 #include <ymir/sys/system_internal_callbacks.hpp>
 
 #include <array>
+#include <functional> // Brimir: STVPDRReadFn, STVPDRWriteFn
 #include <vector>
 
 namespace ymir::smpc {
@@ -59,6 +60,31 @@ public:
 
     [[nodiscard]] uint8 GetAreaCode() const;
     void SetAreaCode(uint8 areaCode);
+
+    // Brimir: ST-V mode. The ST-V board has no Saturn peripherals on the SMPC ports: PDR1/PDR2 are wired to the cabinet
+    // EEPROM and the system outputs (the 68K reset line among them), and SNDON/SNDOFF do not drive the 68K. The bridge
+    // sets the mode when it loads an ST-V game and clears it on unload; Reset does not touch it and save states do not
+    // hold it.
+    using STVPDRReadFn = std::function<uint8()>;
+    using STVPDRWriteFn = std::function<void(uint8)>;
+
+    void SetSTVMode(bool stv) {
+        m_stvMode = stv;
+    }
+
+    [[nodiscard]] bool IsSTVMode() const {
+        return m_stvMode;
+    }
+
+    // Brimir: the handlers ST-V mode routes PDR1 and PDR2 to. A read returns the handler's low 7 bits (bit 7 comes from
+    // the bus as on a Saturn); with a handler missing the Saturn port code runs.
+    void SetSTVPDRHandlers(STVPDRReadFn pdr1Read, STVPDRWriteFn pdr1Write, STVPDRReadFn pdr2Read,
+                           STVPDRWriteFn pdr2Write) {
+        m_stvPDR1Read = std::move(pdr1Read);
+        m_stvPDR1Write = std::move(pdr1Write);
+        m_stvPDR2Read = std::move(pdr2Read);
+        m_stvPDR2Write = std::move(pdr2Write);
+    }
 
     peripheral::PeripheralPort &GetPeripheralPort1() {
         return m_port1;
@@ -116,6 +142,12 @@ private:
     bool m_STE; // false = forces system configuration on boot up
 
     uint64 m_brimirSETSMEMCount = 0; // Brimir: see GetSETSMEMCount
+
+    bool m_stvMode = false; // Brimir: see SetSTVMode
+    STVPDRReadFn m_stvPDR1Read;
+    STVPDRWriteFn m_stvPDR1Write;
+    STVPDRReadFn m_stvPDR2Read;
+    STVPDRWriteFn m_stvPDR2Write;
 
     bool m_resetDisable; // RESD flag, masks the Reset state
     bool m_resetState;   // State of the console's Reset button
