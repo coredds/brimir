@@ -7,6 +7,8 @@
 
 #include "unit/stv_test_zip.hpp"
 
+#include <libretro.h>
+
 #include <brimir/core_wrapper.hpp>
 #include <brimir/lockstep.hpp>
 
@@ -19,6 +21,7 @@
 
 #include <stv/stv_cartridge.hpp>
 #include <stv/stv_game_db.hpp>
+#include <stv/stv_input.hpp>
 #include <stv/stv_io.hpp>
 #include <stv/stv_system.hpp>
 
@@ -271,6 +274,40 @@ TEST_CASE("stv load: LoadGame builds the board and UnloadGame takes it down agai
     // and it loads again
     REQUIRE(core.LoadGame(Str(zipPath).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
     CHECK(core.IsSTVLoaded());
+}
+
+TEST_CASE("stv load: SetSTVInput reaches the I/O ports once per emulated frame", "[stv]") {
+    TempDir dir("brimir_stv_load_input");
+    const auto zipPath = dir.path / "bakubaku.zip";
+    test::WriteTestZip(zipPath, SetEntries(Game("bakubaku")));
+    WriteFile(dir.path / "epr-20091.ic8", stv::kSTVBiosSize);
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    // A Saturn session has no I/O board: the call is ignored
+    core.SetSTVInput(0, stv::MapSTVInput(1u << RETRO_DEVICE_ID_JOYPAD_START, stv::Controls::ThreeButtons));
+
+    REQUIRE(core.LoadGame(Str(zipPath).c_str(), Str(dir.path).c_str(), Str(dir.path).c_str()));
+    REQUIRE(core.IsSTVLoaded());
+    core.SetThreadedVDP1(false);
+    core.SetThreadedVDP2(false);
+    stv::STVIOBoard *io = core.GetSTVIOBoardForTesting();
+    REQUIRE(io != nullptr);
+    const auto portA = [&] { return io->ReadIOGAByte(0x400000); };
+    const auto portC = [&] { return io->ReadIOGAByte(0x400004); };
+
+    core.SetSTVInput(0, stv::MapSTVInput(1u << RETRO_DEVICE_ID_JOYPAD_START | 1u << RETRO_DEVICE_ID_JOYPAD_LEFT,
+                                         stv::Controls::ThreeButtons));
+    core.SetSTVInput(2, stv::MapSTVInput(0xFFFF, stv::Controls::ThreeButtons)); // no third player
+    CHECK(portC() == 0xFF); // the board latches the controls when a frame starts
+    core.RunFrame();
+    CHECK(portC() == static_cast<uint8_t>(~0x10));
+    CHECK(portA() == static_cast<uint8_t>(~0x80));
+
+    core.SetSTVInput(0, {});
+    core.RunFrame();
+    CHECK(portC() == 0xFF);
+    CHECK(portA() == 0xFF);
 }
 
 TEST_CASE("stv load: the SMPC area code is MAME's 1 whatever the BIOS region", "[stv]") {
@@ -742,8 +779,6 @@ TEST_CASE("stv: bakubaku reaches attract and accepts coin and start", "[.stv-rom
     REQUIRE(core.IsSTVLoaded());
     core.SetThreadedVDP1(false);
     core.SetThreadedVDP2(false);
-    stv::STVIOBoard *io = core.GetSTVIOBoardForTesting();
-    REQUIRE(io != nullptr);
     ymir::Saturn &saturn = *core.GetSaturn();
 
     // The credit count in the BIOS's work RAM (the coin handler at 0x06001BAE adds to it). MAME: 0 in the attract mode,
@@ -751,10 +786,12 @@ TEST_CASE("stv: bakubaku reaches attract and accepts coin and start", "[.stv-rom
     constexpr uint32_t kCredits = 0x0600'0740;
     const auto credits = [&] { return saturn.mainBus.Peek<uint8_t>(kCredits); };
 
-    // The I/O board's inputs are latched once per frame (CoreWrapper does not drive them yet: Task 9)
+    // The controls go through CoreWrapper::SetSTVInput as the libretro layer sets them; RunFrame latches them
     int frame = 0;
+    const auto press = [&](uint16_t retropadMask) {
+        core.SetSTVInput(0, stv::MapSTVInput(retropadMask, stv::Controls::ThreeButtons));
+    };
     const auto runFrame = [&] {
-        io->UpdateInputs();
         core.RunFrame();
         ++frame;
     };
@@ -785,11 +822,11 @@ TEST_CASE("stv: bakubaku reaches attract and accepts coin and start", "[.stv-rom
     CHECK(attract.size() >= 30);
 
     // One coin, held for 5 frames, is one credit
-    io->SetCoin1(true);
+    press(1u << RETRO_DEVICE_ID_JOYPAD_SELECT);
     while (frame < 1505) {
         runFrame();
     }
-    io->SetCoin1(false);
+    press(0);
     while (frame < 1560) {
         runFrame();
     }
@@ -800,11 +837,11 @@ TEST_CASE("stv: bakubaku reaches attract and accepts coin and start", "[.stv-rom
     while (frame < 1600) {
         runFrame();
     }
-    io->SetStart(0, true);
+    press(1u << RETRO_DEVICE_ID_JOYPAD_START);
     while (frame < 1605) {
         runFrame();
     }
-    io->SetStart(0, false);
+    press(0);
     int attractLike = 0;
     std::set<uint64_t> game;
     while (frame < 2205) {

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <stv/stv_detect.hpp>
+#include <stv/stv_input.hpp>
 
 #include "audio_ring_buffer.hpp"
 #include "bios_select.hpp"
@@ -261,6 +262,10 @@ public:
     /// @brief This frame's libretro input for a port (call before RunFrame): the port's edges advance
     /// (AdvancePortInput) and the report its peripheral reads during the frame is mapped (peripheral_input.hpp).
     void SetPeripheralInput(unsigned port, const InputSnapshot& input);
+
+    /// @brief ST-V sessions: a player's (0 or 1) controls for the next frame (stv_input.hpp: MapSTVInput of the RetroPad).
+    /// RunFrame hands them to the I/O board once per emulated frame. Does nothing without an ST-V game loaded.
+    void SetSTVInput(unsigned player, const stv::STVInputFrame& input);
 
     /// @brief The port's input state across frames (3D Control Pad mode, Mission Stick throttle latch, Shuttle Mouse
     /// movement built up); in states

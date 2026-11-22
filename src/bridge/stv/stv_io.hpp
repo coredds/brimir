@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "stv_input.hpp"
+
 #include <ymir/core/types.hpp>
 #include <ymir/sys/bus.hpp>
 
@@ -54,8 +56,11 @@ public:
     void SetService(bool pressed);
     void SetTest(bool pressed);
 
-    void SetButton(uint8 player, uint16 buttons);
     void SetStart(uint8 player, bool pressed);
+
+    // A player's controls for the frame (player 0 or 1). Player 1's frame also sets the service and test switches,
+    // which the cabinet has once; player 2's coin is coin 2. Held coins count once (SetCoin1/SetCoin2).
+    void SetPlayerInput(uint8 player, const STVInputFrame &input);
 
     void UpdateInputs();
 
@@ -111,6 +116,8 @@ private:
     int64_t m_coinActiveCounter[2] = {};
     bool m_coinHeld[2] = {};
 
+    // Pressed bits per player: 0-7 are the PORTA/PORTB byte (buttons 1-4, then down, up, right, left), 8-10 the player's
+    // buttons 4-6 of a six-button game (PORTF, bits 0-2 for player 1 and 4-6 for player 2)
     uint16 m_playerButtons[2] = {};
     bool   m_playerStart[2] = {};
     bool   m_service = false;

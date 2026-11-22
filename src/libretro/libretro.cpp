@@ -84,6 +84,8 @@ static bool g_input_bitmask_supported = false;
 
 // Controller ports (brimir/peripheral_input.hpp): the device type of each port (retro_set_controller_port_device), kept
 // across content and applied to the core when it exists.
+// The input descriptors set last are an ST-V game's (set_input_descriptors)
+static bool g_stvDescriptorsActive = false;
 static brimir::PeripheralKind g_portKinds[2] = {brimir::PeripheralKind::ControlPad, brimir::PeripheralKind::ControlPad};
 
 // Per-content frame state. Reset on load/unload so a new game always triggers
@@ -866,6 +868,52 @@ static const struct retro_controller_info kControllerInfo[] = {
 static void set_input_descriptors(retro_environment_t cb) {
     static std::vector<retro_input_descriptor> descriptors;
     descriptors.clear();
+
+    // An ST-V game is on the RetroPad of ports 1 and 2 (stv_input.hpp), whatever the Saturn device types say: the
+    // arcade functions replace the Saturn device descriptors. Service and test are the cabinet's, on port 1.
+    const brimir::stv::GameInfo* stvGame = g_core ? g_core->GetSTVGame() : nullptr;
+    g_stvDescriptorsActive = stvGame != nullptr;
+    if (stvGame) {
+        for (unsigned port = 0; port < 2; ++port) {
+            const auto pad = [&](unsigned id, const char* text) {
+                descriptors.push_back({ port, RETRO_DEVICE_JOYPAD, 0, id, text });
+            };
+            pad(RETRO_DEVICE_ID_JOYPAD_LEFT, "Left");
+            pad(RETRO_DEVICE_ID_JOYPAD_UP, "Up");
+            pad(RETRO_DEVICE_ID_JOYPAD_DOWN, "Down");
+            pad(RETRO_DEVICE_ID_JOYPAD_RIGHT, "Right");
+            pad(RETRO_DEVICE_ID_JOYPAD_B, "Button 1");
+            pad(RETRO_DEVICE_ID_JOYPAD_A, "Button 2");
+            pad(RETRO_DEVICE_ID_JOYPAD_Y, "Button 3");
+            switch (stvGame->controls) {
+            case brimir::stv::Controls::ThreeButtons: break;
+            case brimir::stv::Controls::SixButtons:
+                pad(RETRO_DEVICE_ID_JOYPAD_X, "Button 4");
+                pad(RETRO_DEVICE_ID_JOYPAD_L, "Button 5");
+                pad(RETRO_DEVICE_ID_JOYPAD_R, "Button 6");
+                break;
+            case brimir::stv::Controls::RadiantSilvergun:
+                pad(RETRO_DEVICE_ID_JOYPAD_X, "Button 4");
+                break;
+            }
+            pad(RETRO_DEVICE_ID_JOYPAD_START, "Start");
+            pad(RETRO_DEVICE_ID_JOYPAD_SELECT, "Coin");
+            if (port == 0) {
+                pad(RETRO_DEVICE_ID_JOYPAD_L3, "Service");
+                pad(RETRO_DEVICE_ID_JOYPAD_R3, "Test");
+            }
+            descriptors.push_back({ port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
+                                    RETRO_DEVICE_ID_ANALOG_X, "Left Stick X (as D-Pad)" });
+            descriptors.push_back({ port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
+                                    RETRO_DEVICE_ID_ANALOG_Y, "Left Stick Y (as D-Pad)" });
+        }
+        descriptors.push_back({ 0, 0, 0, 0, nullptr });
+        if (cb) {
+            cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, descriptors.data());
+        }
+        return;
+    }
+
     for (unsigned port = 0; port < 2; ++port) {
         const auto pad = [&](unsigned id, const char* text) {
             descriptors.push_back({ port, RETRO_DEVICE_JOYPAD, 0, id, text });
@@ -971,6 +1019,15 @@ static uint16_t poll_joypad(unsigned port, bool sticks) {
         }
     }
     return buttons;
+}
+
+// ST-V: this frame's controls of a port, the RetroPad (stick folded into the D-pad) as the game's controls take them.
+static brimir::stv::STVInputFrame poll_stv_port(unsigned port, brimir::stv::Controls controls) {
+    uint16_t mask = poll_joypad(port, true);
+    const int16_t x = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
+    const int16_t y = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
+    mask = brimir::stv::AddStickToDPad(mask, x, y);
+    return brimir::stv::MapSTVInput(mask, controls);
 }
 
 // This frame's input of a port, as its device type needs it.
@@ -1356,7 +1413,13 @@ RETRO_API void retro_run(void) {
     }
     
     // This frame's input of both ports, as each port's device type needs it (brimir/peripheral_input.hpp)
-    if (input_state_cb) {
+    if (input_state_cb && g_core->IsSTVLoaded()) {
+        // The cabinet's controls, not the Saturn devices (the I/O board latches them once per frame, in RunFrame)
+        const brimir::stv::Controls controls = g_core->GetSTVGame()->controls;
+        for (unsigned port = 0; port < 2; ++port) {
+            g_core->SetSTVInput(port, poll_stv_port(port, controls));
+        }
+    } else if (input_state_cb) {
         brimir::InputSnapshot inputs[2];
         for (unsigned port = 0; port < 2; ++port) {
             inputs[port] = poll_port(port, g_portKinds[port]);
@@ -1878,6 +1941,12 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     bool achievements = true;
     environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &achievements);
 
+    // The content's own descriptors: the arcade functions for an ST-V game, the ports' Saturn devices again for a Saturn
+    // game after an ST-V one in the same instance (Saturn content after Saturn content keeps what is set)
+    if (g_core->IsSTVLoaded() || g_stvDescriptorsActive) {
+        set_input_descriptors(environ_cb);
+    }
+
     return true;
 }
 
@@ -1924,6 +1993,9 @@ RETRO_API void retro_unload_game(void) {
     reset_frame_state();
     g_ramView.Clear();
     g_cheats.Reset();
+    if (g_stvDescriptorsActive) {
+        set_input_descriptors(environ_cb); // the system is a Saturn again
+    }
 #ifdef BRIMIR_VULKAN
     // The frontend destroys the context (context_destroy) before unloading; nothing GPU-side happens here.
     g_vulkanRequested = false;

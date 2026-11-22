@@ -187,23 +187,35 @@ void STVIOBoard::SetCoin2(bool pressed) {
 void STVIOBoard::SetService(bool pressed) { m_service = pressed; }
 void STVIOBoard::SetTest(bool pressed)   { m_test = pressed; }
 
-void STVIOBoard::SetButton(uint8 player, uint16 buttons) {
-    if (player < 2) m_playerButtons[player] = buttons;
-}
-
 void STVIOBoard::SetStart(uint8 player, bool pressed) {
     if (player < 2) m_playerStart[player] = pressed;
 }
 
+void STVIOBoard::SetPlayerInput(uint8 player, const STVInputFrame &input) {
+    if (player >= 2) return;
+    m_playerButtons[player] = static_cast<uint16>(input.directions | (input.buttons & 0x0F) |
+                                                  (((input.buttons >> 4) & 0x07) << 8));
+    m_playerStart[player] = input.start;
+    if (player == 0) {
+        SetCoin1(input.coin);
+        SetService(input.service);
+        SetTest(input.test);
+    } else {
+        SetCoin2(input.coin);
+    }
+}
+
+// The ports as MAME's ST-V input definition (src/mame/sega/stv.cpp, INPUT_PORTS_START( stv ), PORTA..PORTF) reads them
+// through the IOGA: active low, PORTA/PORTB at 0x400000/0x400002, PORTC at 0x400004, PORTE (players 3, 4: unused) at
+// 0x400008, PORTF at 0x40000A.
 void STVIOBoard::UpdateInputs() {
     m_dataIn.fill(0xFF);
 
     for (unsigned p = 0; p < 2; p++) {
-        uint16 tmp = m_playerButtons[p];
-        m_dataIn[p] ^= static_cast<uint8>(((tmp & 0xA0) >> 1) | ((tmp & 0x50) << 1) |
-                                          ((tmp >> 10) & 0x01) | ((tmp >> 7) & 0x06));
-        m_dataIn[0x5] ^= static_cast<uint8>(
-            (((tmp >> 2) & 0x01) | (tmp & 0x02) | ((tmp << 2) & 0x04)) << (p << 2));
+        const uint16 pressed = m_playerButtons[p];
+        m_dataIn[p] ^= static_cast<uint8>(pressed & 0xFF);
+        // stv6b: PORTF carries buttons 4-6, player 1 in bits 0-2 and player 2 in bits 4-6
+        m_dataIn[0x5] ^= static_cast<uint8>(((pressed >> 8) & 0x07) << (p << 2));
 
         if (m_playerStart[p]) {
             // PORT-C start bits match MAME/JAMMA: P1 start = bit 4, P2 start = bit 5.
@@ -535,6 +547,7 @@ bool STVIOBoard::LoadState(const STVIOBoardState &state) {
     for (unsigned i = 0; i < 2; i++) {
         if (state.coinActiveCounter[i] < 0 || state.coinActiveCounter[i] > kCoinPulseFrames) return false;
         if (state.playerStart[i] > 1 || state.coinHeld[i] > 1) return false;
+        if ((state.playerButtons[i] & 0xF800u) != 0) return false;
     }
     if (state.stvModeActive > 1 || state.service > 1 || state.test > 1 || state.eepromCS > 1 || state.eepromCLK > 1 ||
         state.eepromDI > 1 || state.eepromLocked > 1 || state.eepromWriteAll > 1) {

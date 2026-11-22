@@ -1544,6 +1544,11 @@ void CoreWrapper::RunFrame() {
     try {
         ScopedTimer timer(m_profiler, "RunFrame_Total");
 
+        // ST-V: the I/O board latches the controls of this frame (SetSTVInput) for the games' reads
+        if (m_stv) {
+            m_stv->IO().UpdateInputs();
+        }
+
         // Run one frame of emulation
         // VDP callback will update framebuffer via OnFrameComplete()
         // SCSP callback will update audio buffer via OnAudioSample()
@@ -2426,6 +2431,13 @@ ymir::peripheral::PeripheralReport CoreWrapper::MapPortReport(unsigned port, con
         break;
     }
     return report;
+}
+
+void CoreWrapper::SetSTVInput(unsigned player, const stv::STVInputFrame& input) {
+    if (!m_stv || player > 1) {
+        return;
+    }
+    m_stv->IO().SetPlayerInput(static_cast<uint8_t>(player), input);
 }
 
 void CoreWrapper::SetPeripheralInput(unsigned port, const InputSnapshot& input) {
