@@ -1208,6 +1208,9 @@ RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     info->library_name = "Brimir";
     info->library_version = BRIMIR_VERSION;
     info->need_fullpath = true;
+    // An ST-V set is a .zip the core reads itself: without this the frontend extracts archives before loading them
+    // (RetroArch would look inside for a file with one of the extensions below and fail).
+    info->block_extract = true;
     // Only formats Ymir's loader can open directly. Track data files (.bin, .img,
     // .mdf) must be loaded through their .cue/.ccd/.mds sheet.
     // Keep in sync with supported_extensions in resources/info/brimir_libretro.info.

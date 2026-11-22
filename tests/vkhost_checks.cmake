@@ -246,6 +246,9 @@ if(NOT device_report_count EQUAL 1)
 endif()
 string(REGEX MATCH "Device report: [^\r\n]*" software_device_report "${software_err}")
 message(STATUS "software: ${software_device_report}")
+# retro_get_system_info: an ST-V set is a .zip the core opens itself. Without block_extract RetroArch (need_fullpath)
+# extracts an archive before loading it and fails on an ST-V zip, which holds no file of a supported extension.
+require_log(software "vkhost: content need_fullpath 1 block_extract 1 extensions chd\\|cue\\|ccd\\|mds\\|iso\\|m3u\\|zip\n")
 
 # ram_view: RETRO_MEMORY_SYSTEM_RAM is the 2 MiB Beetle-compatible work RAM view (Low at 0, High at 0x100000; the
 # memory map's two descriptors point into it) and the core declares achievements. A frontend write into the view (as

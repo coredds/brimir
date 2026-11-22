@@ -404,6 +404,8 @@ bool LibretroHost::Load(const HostConfig& config, const std::string& systemDir, 
     m_api->get_system_info(&info);
     std::fprintf(stderr, "vkhost: core %s %s\n", info.library_name != nullptr ? info.library_name : "?",
                  info.library_version != nullptr ? info.library_version : "?");
+    std::fprintf(stderr, "vkhost: content need_fullpath %d block_extract %d extensions %s\n", info.need_fullpath ? 1 : 0,
+                 info.block_extract ? 1 : 0, info.valid_extensions != nullptr ? info.valid_extensions : "?");
 
     retro_game_info game{};
     std::vector<uint8_t> gameData;

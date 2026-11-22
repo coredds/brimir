@@ -359,7 +359,8 @@ and netplay work as for Saturn games. The core's own state for these games is no
 
 **Zipped Saturn discs are no longer supported.** The core now takes a `.zip` as it is (it is listed in the core's
 supported extensions) and reads it only as an ST-V ROM set; a zip that is not one is refused with a message. Unzip the
-disc image and load its `.cue`, or convert it to CHD.
+disc image and load its `.cue`, or convert it to CHD. RetroArch does not unpack archives for this core (it reads the ST-V
+zip itself), so a disc image inside a `.7z` must be unpacked first too.
 
 How each game was checked against MAME, and the known differences, are in `src/bridge/stv/STATUS.md`.
 
