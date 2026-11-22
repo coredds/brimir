@@ -13,6 +13,7 @@ add_library(brimir_bridge OBJECT
     stv/stv_detect.cpp
     stv/stv_game_db.cpp
     stv/stv_io.cpp
+    stv/stv_loader.cpp
     stv/stv_zip.cpp
 )
 

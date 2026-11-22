@@ -133,6 +133,7 @@ add_executable(brimir_tests
     unit/test_stv_zip.cpp
     unit/test_stv_io.cpp
     unit/test_stv_detect.cpp
+    unit/test_stv_loader.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE
