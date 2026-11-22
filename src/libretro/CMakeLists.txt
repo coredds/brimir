@@ -7,8 +7,10 @@ add_library(brimir_libretro_api OBJECT
     device_report.cpp
 )
 
+# src/bridge: include/brimir/core_wrapper.hpp includes <stv/stv_detect.hpp>
 target_include_directories(brimir_libretro_api PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../bridge
 )
 
 target_compile_features(brimir_libretro_api PUBLIC cxx_std_20)

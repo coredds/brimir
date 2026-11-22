@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <stv/stv_detect.hpp>
+
 #include "audio_ring_buffer.hpp"
 #include "bios_select.hpp"
 #include "peripheral_input.hpp"
@@ -51,6 +53,11 @@ enum class Button : uint16_t;
 namespace brimir::gpu {
 class VulkanVDPRenderer;
 } // namespace brimir::gpu
+
+namespace brimir::stv {
+class STVIOBoard;
+class STVSystem;
+} // namespace brimir::stv
 
 namespace brimir::jit {
 class CompileWorker;
@@ -128,12 +135,31 @@ public:
     /// @brief Shutdown the emulator
     void Shutdown();
 
-    /// @brief Load a game from the given path
+    /// @brief Load a game from the given path. A zip file is read as an ST-V arcade ROM set (the contents decide, see
+    /// DetectContent): the ST-V BIOS is chosen from system_directory (SetBiosPreference) and the system becomes an ST-V
+    /// board; the system is a Saturn again after UnloadGame (and at the start of every LoadGame).
     /// @param path Path to the game file
     /// @param save_directory Directory where save files (.srm, backup RAM) are stored
     /// @param system_directory Directory where system-wide files (RTC, etc.) are stored
     /// @return true if successful
     bool LoadGame(const char* path, const char* save_directory = nullptr, const char* system_directory = nullptr);
+
+    /// @brief What LoadGame would make of `path`: not a zip (a Saturn disc image, handled as always), a zip that is not
+    /// an ST-V set, an incomplete set (game and missing files named) or a complete one. Reads the zip's directory only.
+    static stv::DetectResult DetectContent(const char* path);
+
+    /// @brief The brimir_bios option value ("auto", "jp_101", "us_101", ...) the ST-V BIOS choice takes its preferred
+    /// region from (stv::SelectSTVBios). Applies at the next LoadGame of an ST-V set.
+    void SetBiosPreference(const char* preference);
+
+    /// @brief Whether an ST-V game is loaded (the system is an ST-V board)
+    bool IsSTVLoaded() const { return m_stv != nullptr; }
+
+    /// @brief The loaded ST-V game, or nullptr
+    const stv::GameInfo* GetSTVGame() const;
+
+    /// @brief What the last ST-V LoadGame set up (set, BIOS file and why, area code), for the log; empty otherwise
+    const std::string& GetSTVLoadDescription() const { return m_stvDescription; }
 
     /// @brief Get the last error message from game loading
     /// @return Last error message, or empty string if none
@@ -576,6 +602,9 @@ public:
 
     /// @brief Test seam: the product number LoadGame looks the cartridge up with (empty: the disc's own)
     void TestSetProductNumber(std::string productNumber) { m_testProductNumber = std::move(productNumber); }
+
+    /// @brief Test seam: the loaded ST-V game's I/O board (coin, Start, buttons, EEPROM), or nullptr
+    stv::STVIOBoard* GetSTVIOBoardForTesting() { return STVIOBoardOrNull(); }
 #endif
 
 private:
@@ -586,6 +615,11 @@ private:
     void OnAudioSample(int16_t left, int16_t right);
 
     std::unique_ptr<ymir::Saturn> m_saturn;
+    // The ST-V board's wiring while an ST-V game is loaded (null for Saturn: nothing of it exists then)
+    std::unique_ptr<stv::STVSystem> m_stv;
+    std::string m_stvDescription;
+    std::string m_biosPreference = "auto";
+    bool m_restartAfterIPL = false; // ST-V content ended: the next BIOS loaded gets a hard reset (ReturnToSaturn)
     bool m_initialized = false;
     bool m_gameLoaded = false;
     bool m_iplLoaded = false;
@@ -725,6 +759,16 @@ private:
     std::string m_cdblockMessage;
     std::string m_cdblockDescription = "high-level";
     uint32_t m_scspStepGranularity = 0;
+
+    /// @brief LoadGame for a zip: the error for a zip that is not a complete ST-V set, else loads the set
+    bool LoadSTVContent(const stv::DetectResult& detected, const std::filesystem::path& gamePath,
+                        const char* save_directory, const char* system_directory);
+
+    stv::STVIOBoard* STVIOBoardOrNull();
+
+    /// @brief Puts the system back to a Saturn after ST-V content: no ST-V hook, bus mapping, SMPC mode or cartridge
+    /// remains, the BIOS is unloaded and the CPUs restart (no-op for Saturn content)
+    void ReturnToSaturn();
 
     /// @brief Inserts the chosen cartridge for the loaded disc (see SetCartridgeOverride), then hard-resets
     void InsertGameCartridge(const std::filesystem::path& gamePath, const char* save_directory);

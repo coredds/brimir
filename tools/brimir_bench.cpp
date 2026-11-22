@@ -76,8 +76,9 @@ void PrintUsage(std::FILE* out) {
         "       --audio-hash, --save-state-every N <dir> and --fixed-rtc)\n"
         "       brimir_bench --help\n"
         "\n"
-        "  --bios        Saturn BIOS image (required)\n"
-        "  --game        disc image to load (omit to benchmark the BIOS menu)\n"
+        "  --bios        Saturn BIOS image (required, except for an ST-V game)\n"
+        "  --game        disc image to load (omit to benchmark the BIOS menu), or an ST-V ROM set (.zip), which\n"
+        "                takes its BIOS from --system-dir (MAME's ST-V BIOS file names, e.g. epr-20091.ic8)\n"
         "  --system-dir  directory holding brimir_saturn_rtc_<jp|us_eu>.smpc (BIOS language/clock\n"
         "                settings). The suffix follows the BIOS region, so a configured file is\n"
         "                needed for each BIOS region used. Without one the BIOS stops at its\n"
@@ -257,7 +258,10 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
             return ParseResult::Error;
         }
     }
-    if (args.bios.empty()) {
+    // An ST-V zip brings its own BIOS (from --system-dir); everything else needs a Saturn BIOS
+    const bool stvGame = !args.game.empty() &&
+                         brimir::CoreWrapper::DetectContent(args.game.c_str()).kind != brimir::stv::DetectKind::NotZip;
+    if (args.bios.empty() && !stvGame) {
         std::fprintf(stderr, "--bios is required\n");
         return ParseResult::Error;
     }
@@ -453,7 +457,7 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
         std::fprintf(stderr, "Failed to initialize the core\n");
         return 2;
     }
-    if (!core.LoadIPLFromFile(args.bios.c_str())) {
+    if (!args.bios.empty() && !core.LoadIPLFromFile(args.bios.c_str())) {
         std::fprintf(stderr, "Failed to load BIOS: %s\n", args.bios.c_str());
         return 2;
     }

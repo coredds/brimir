@@ -81,6 +81,12 @@ struct Saturn {
     /// @return the clock ratios in use
     [[nodiscard]] const sys::ClockRatios &GetClockRatios() const noexcept;
 
+    // Brimir: the scheduler's current count (master clock cycles since the last hard reset), for the bridge's ST-V I/O
+    // board, whose EEPROM write cycles run in emulated time (src/bridge/stv/stv_system.cpp)
+    [[nodiscard]] uint64 GetSchedulerCount() const noexcept {
+        return m_scheduler.CurrentCount();
+    }
+
     /// @brief Loads the specified IPL ROM image.
     /// @param[in] ipl the contents of the IPL ROM image
     void LoadIPL(std::span<uint8, sys::kIPLSize> ipl);

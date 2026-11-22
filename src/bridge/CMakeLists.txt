@@ -15,11 +15,14 @@ add_library(brimir_bridge OBJECT
     stv/stv_game_db.cpp
     stv/stv_io.cpp
     stv/stv_loader.cpp
+    stv/stv_system.cpp
     stv/stv_zip.cpp
 )
 
+# src/bridge itself: include/brimir/core_wrapper.hpp includes <stv/stv_detect.hpp>
 target_include_directories(brimir_bridge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_compile_features(brimir_bridge PUBLIC cxx_std_20)

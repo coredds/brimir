@@ -40,6 +40,11 @@ scratch copy of the system directory rather than the real RetroArch folder.
 SMPC settings). If it is omitted, the per-run temp directory is used, which is
 always unconfigured.
 
+An ST-V ROM set (MAME's zip, for example `--game "D:\ROMs\bakubaku.zip"`) needs no
+`--bios`: the core takes the ST-V BIOS for the game's regions from `--system-dir`
+(MAME's file names, for example `epr-20091.ic8`). Copy the BIOS file into a scratch
+directory and pass that; the ST-V path writes no RTC file.
+
 By default the disc image is preloaded into RAM, as with the `brimir_cd_preload`
 core option's default. For a CHD that holds the whole compressed file in memory
 (peak RSS 366–489 MB for Panzer Dragoon II Zwei and Street Fighter Zero 3 on a

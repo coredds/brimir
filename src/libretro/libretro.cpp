@@ -1154,7 +1154,7 @@ RETRO_API void retro_get_system_info(struct retro_system_info* info) {
     // Only formats Ymir's loader can open directly. Track data files (.bin, .img,
     // .mdf) must be loaded through their .cue/.ccd/.mds sheet.
     // Keep in sync with supported_extensions in resources/info/brimir_libretro.info.
-    info->valid_extensions = "chd|cue|ccd|mds|iso|m3u";
+    info->valid_extensions = "chd|cue|ccd|mds|iso|m3u|zip";
 }
 
 RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
@@ -1677,8 +1677,14 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     // Get BIOS preference from core options
     const char* bios_pref = get_option_value("brimir_bios", "auto");
 
+    // A zip is an ST-V ROM set (or an error LoadGame reports): the core picks the ST-V BIOS itself, from the system
+    // directory and the same option, so the Saturn BIOS step below is not for it
+    const bool zip_content =
+        !no_content && brimir::CoreWrapper::DetectContent(game->path).kind != brimir::stv::DetectKind::NotZip;
+    g_core->SetBiosPreference(bios_pref);
+
     // Load the BIOS: Auto chooses for each content (its region), an explicit choice once
-    if (brimir::ShouldSelectBios(bios_pref, g_core->IsIPLLoaded())) {
+    if (!zip_content && brimir::ShouldSelectBios(bios_pref, g_core->IsIPLLoaded())) {
         brimir_log(RETRO_LOG_INFO, "Loading BIOS...");
         
         // Map of BIOS option keys to filenames
@@ -1774,6 +1780,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
 
         brimir_log(RETRO_LOG_INFO, "Game loaded successfully");
+        if (g_core->IsSTVLoaded()) {
+            brimir_log(RETRO_LOG_INFO, "%s", g_core->GetSTVLoadDescription().c_str());
+        }
         log_backup_ram_save_error();
         brimir_log(RETRO_LOG_INFO, "Cartridge: %s", g_core->GetCartridgeDescription().c_str());
         if (const std::string& cartMessage = g_core->GetLastCartridgeMessage(); !cartMessage.empty()) {

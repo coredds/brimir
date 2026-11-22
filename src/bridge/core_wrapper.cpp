@@ -28,6 +28,12 @@
 
 #include <ymir/sys/backup_ram.hpp>
 
+#include <stv/stv_bios.hpp>
+#include <stv/stv_cartridge.hpp>
+#include <stv/stv_loader.hpp>
+#include <stv/stv_system.hpp>
+#include <stv/stv_zip.hpp>
+
 #ifdef BRIMIR_VULKAN
 #include <gpu/vdp/vulkan_vdp_renderer.hpp>
 #endif
@@ -451,6 +457,9 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         m_lastError = "No game path provided";
         return false;
     }
+
+    // ST-V content loaded before (without an UnloadGame in between): the system is a Saturn again first
+    ReturnToSaturn();
     
     // Re-enable threaded VDP if it was previously disabled during UnloadGame
     try {
@@ -479,6 +488,14 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
                 m_lastError += " (a URI, not a file path: the frontend must give the core a file path)";
             }
             return false;
+        }
+
+        // A zip is read as an ST-V ROM set: the contents decide, never the name or the extension
+        {
+            const stv::DetectResult detected = stv::DetectSTVContent(gamePath);
+            if (detected.kind != stv::DetectKind::NotZip) {
+                return LoadSTVContent(detected, gamePath, save_directory, system_directory);
+            }
         }
         
         // Store game path and directories for later disc swaps
@@ -730,6 +747,166 @@ bool CoreWrapper::LoadGame(const char* path, const char* save_directory, const c
         m_gameLoaded = false;
         return false;
     }
+}
+
+stv::DetectResult CoreWrapper::DetectContent(const char* path) {
+    if (!path || path[0] == '\0') {
+        return {};
+    }
+    try {
+        return stv::DetectSTVContent(PathFromUtf8(path));
+    } catch (...) {
+        return {};
+    }
+}
+
+void CoreWrapper::SetBiosPreference(const char* preference) {
+    m_biosPreference = (preference && preference[0] != '\0') ? preference : "auto";
+}
+
+const stv::GameInfo* CoreWrapper::GetSTVGame() const {
+    return m_stv ? m_stv->Game() : nullptr;
+}
+
+stv::STVIOBoard* CoreWrapper::STVIOBoardOrNull() {
+    return m_stv ? &m_stv->IO() : nullptr;
+}
+
+bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::filesystem::path& gamePath,
+                                 const char* save_directory, const char* system_directory) {
+    if (detected.kind == stv::DetectKind::NotSTV) {
+        m_lastError = "Zip files are only supported for ST-V games; unzip Saturn discs or convert them to CHD";
+        return false;
+    }
+    if (detected.kind == stv::DetectKind::Incomplete) {
+        std::string files;
+        for (const std::string& name : detected.missing) {
+            files += files.empty() ? name : ", " + name;
+        }
+        m_lastError = std::string("ST-V set ") + detected.game->shortName + " is incomplete: missing " + files;
+        return false;
+    }
+    const stv::GameInfo& game = *detected.game;
+    if (!system_directory || system_directory[0] == '\0') {
+        m_lastError = "A system directory with the ST-V BIOS is needed for " + std::string(game.shortName);
+        return false;
+    }
+
+    // Everything that can fail is read before the system changes
+    std::string error;
+    const std::optional<stv::BiosChoice> choice =
+        stv::SelectSTVBios(PathFromUtf8(system_directory), game, m_biosPreference, error);
+    if (!choice) {
+        m_lastError = error;
+        return false;
+    }
+    auto bios = std::make_unique<std::array<uint8_t, stv::kSTVBiosSize>>();
+    if (!stv::LoadSTVBiosImage(choice->path, *bios, error)) {
+        m_lastError = error;
+        return false;
+    }
+    std::vector<uint8_t> cart;
+    {
+        stv::ZipReader zip(gamePath);
+        if (!zip.IsOpen()) {
+            m_lastError = "Cannot read " + PathToUtf8(gamePath);
+            return false;
+        }
+        if (!stv::BuildCartImage(zip, game, cart, error)) {
+            m_lastError = error;
+            return false;
+        }
+    }
+
+    m_gamePath = gamePath;
+    m_saveDirectory = save_directory ? save_directory : "";
+    m_systemDirectory = system_directory;
+    ApplyLoadTimeOptions(system_directory);
+
+    // No discs, no RTC file (the board's clock is not a Saturn console setting), no .srm yet
+    m_discList.clear();
+    m_currentDiscIndex = 0;
+    m_initialDiscSet = false;
+    m_smpcBaseDir.clear();
+    m_smpcPath.clear();
+    ApplyRTCMode();
+    m_srmPath.clear();
+    m_backupRAMSaveError.clear();
+    m_sramData.clear();
+    m_sramDataFromFrontend = false;
+    m_sramInitialized = false;
+    m_sramCacheDirty = true;
+    m_sramFirstLoad = true;
+    m_hasCartridge = false;
+    m_cartridgePath.clear();
+    m_cartridgeSaved.clear();
+    m_cartridgeFailed.clear();
+    m_cartridgeMessage.clear();
+
+    // The internal backup RAM starts as it is on a new ST-V board: all zero, not formatted as a Saturn's
+    {
+        ymir::bup::BackupMemory bup;
+        bup.CreateInMemory(ymir::bup::BackupMemorySize::_256Kbit);
+        const uint32_t size = bup.Size();
+        for (uint32_t i = 0; i < size * 2; i += 2) {
+            bup.WriteByte(i, 0);
+        }
+        [[maybe_unused]] const bool ok = m_saturn->mem.SetInternalBackupRAM(std::move(bup));
+        assert(ok && "a 256 Kbit image always matches the internal backup RAM size");
+    }
+
+    const uint8_t areaCode = stv::AreaCodeForBiosRegion(choice->region);
+    m_stv = std::make_unique<stv::STVSystem>();
+    if (!m_stv->Attach(*m_saturn, game, *bios, cart, areaCode, error)) {
+        m_stv.reset();
+        m_lastError = error;
+        return false;
+    }
+    m_iplLoaded = true;
+
+    m_saturn->configuration.video.threadedVDP1 = true;
+    m_saturn->configuration.video.threadedVDP2 = true;
+    m_saturn->configuration.video.threadedDeinterlacer = true;
+    ApplyVulkanRendererThreading();
+
+    m_cartridgeDescription = std::string("ST-V ") + game.shortName + " ROM (" +
+                             std::to_string(m_stv->Cartridge()->GetROMSize() / (1024 * 1024)) + " MiB)";
+    m_stvDescription = std::string("ST-V game ") + game.shortName + " (" + game.title + "), BIOS " +
+                       PathToUtf8(choice->path.filename()) + " (" + choice->reason + "), SMPC area code " +
+                       std::to_string(areaCode);
+    m_gameLoaded = true;
+    return true;
+}
+
+void CoreWrapper::ReturnToSaturn() {
+    if (!m_stv) {
+        return;
+    }
+    m_stv->Detach();
+    m_stv.reset();
+    m_stvDescription.clear();
+    m_cartridgeDescription = "none";
+    m_iplLoaded = false;
+
+    if (m_saturn) {
+        // A Saturn as it was built: no BIOS, empty work RAM, formatted backup RAM, the CPUs at their reset vector. The
+        // owner loads the BIOS it wants (libretro: retro_load_game, bench: --bios) and the content.
+        auto blank = std::make_unique<std::array<uint8_t, stv::kSTVBiosSize>>();
+        m_saturn->LoadIPL(std::span<uint8_t, stv::kSTVBiosSize>(*blank));
+        m_saturn->mem.Reset(true);
+        ResetInternalBackupRAM(*m_saturn);
+        m_saturn->Reset(true);
+        m_restartAfterIPL = true;
+    }
+    // the ST-V session's audio the frontend has not taken
+    int16_t discarded[512];
+    while (m_audioRingBuffer.Pop(discarded, 256) != 0) {
+    }
+    // The ST-V session's backup RAM image is not a Saturn save
+    m_sramData.clear();
+    m_sramDataFromFrontend = false;
+    m_sramInitialized = false;
+    m_sramFirstLoad = true;
 }
 
 void CoreWrapper::InsertGameCartridge(const std::filesystem::path& gamePath, const char* save_directory) {
@@ -1090,6 +1267,9 @@ void CoreWrapper::UnloadGame() {
     m_sramInitialized = false;
     m_framesSinceLastSRAMSync = 0;
     m_sramFirstLoad = true;  // Reset for next game load
+
+    // ST-V content: nothing of the board stays for whatever is loaded next
+    ReturnToSaturn();
 }
 
 void CoreWrapper::SetRTCMode(RTCMode mode) {
@@ -1426,6 +1606,11 @@ bool CoreWrapper::LoadIPL(std::span<const uint8_t> data) {
         std::span<uint8_t, IPL_SIZE> mutableSpan(mutable_data, IPL_SIZE);
         m_saturn->LoadIPL(mutableSpan);
         m_iplLoaded = true;
+        if (m_restartAfterIPL) {
+            // After ST-V content the CPUs still hold the ST-V BIOS's reset state: they start from this BIOS's vectors
+            m_restartAfterIPL = false;
+            m_saturn->Reset(true);
+        }
         return true;
     } catch (const std::exception& e) {
         (void)e; // Suppress unused variable warning
