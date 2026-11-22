@@ -912,7 +912,9 @@ void Saturn::SMPCOperations::SoftResetSystem() {
 void Saturn::SMPCOperations::ClockChangeSoftReset() {
     m_saturn.VDP.Reset(false);
     m_saturn.SCU.Reset(false);
-    m_saturn.SCSP.Reset(false);
+    // Brimir: ST-V mode keeps the sound RAM, as MAME's clock change does (dot_select_w resets the SCSP device, the
+    // sound RAM is the driver's); the ST-V BIOS hands the coin inputs to the game there (sound RAM 0x4F1)
+    m_saturn.SCSP.Reset(false, !m_saturn.SMPC.IsSTVMode());
 }
 
 sys::ClockSpeed Saturn::SMPCOperations::GetClockSpeed() const {

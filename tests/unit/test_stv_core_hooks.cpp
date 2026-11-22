@@ -687,3 +687,36 @@ TEST_CASE("stv hooks: SNDON and SNDOFF drive the 68K on a Saturn but not in ST-V
     Command(*saturn, {}, kSNDOFF);
     CHECK_FALSE(m68kEnabled(*saturn));
 }
+
+TEST_CASE("stv hooks: a clock change keeps the sound RAM in ST-V mode and clears it on a Saturn", "[stv][smpc]") {
+    // The ST-V BIOS leaves the coin inputs at sound RAM 0x4F1 for the game across its CKCHG320 (bakubaku reads them
+    // at 0x060024B0); MAME's clock change resets the SCSP device but leaves the sound RAM alone.
+    constexpr uint32 kSoundRAM = 0x5A0'04F0;
+    constexpr uint8 kCKCHG352 = 0x0E;
+    constexpr uint8 kCKCHG320 = 0x0F;
+    auto clockChange = [](Saturn &saturn, uint8 command) {
+        Command(saturn, {}, command);
+        RunFor(saturn, 250000); // the core runs SYSRES/CKCHG 200000 cycles after the write
+    };
+
+    auto saturn = std::make_unique<Saturn>();
+    saturn->mainBus.Write<uint16>(kSoundRAM, 0x01FF);
+    clockChange(*saturn, kCKCHG320);
+    CHECK(saturn->mainBus.Peek<uint16>(kSoundRAM) == 0x0000);
+
+    saturn->SMPC.SetSTVMode(true);
+    saturn->mainBus.Write<uint16>(kSoundRAM, 0x01FF);
+    clockChange(*saturn, kCKCHG352);
+    CHECK(saturn->mainBus.Peek<uint16>(kSoundRAM) == 0x01FF);
+    clockChange(*saturn, kCKCHG320);
+    CHECK(saturn->mainBus.Peek<uint16>(kSoundRAM) == 0x01FF);
+
+    // a reset still clears it
+    saturn->Reset(true);
+    CHECK(saturn->mainBus.Peek<uint16>(kSoundRAM) == 0x0000);
+
+    saturn->SMPC.SetSTVMode(false);
+    saturn->mainBus.Write<uint16>(kSoundRAM, 0x01FF);
+    clockChange(*saturn, kCKCHG352);
+    CHECK(saturn->mainBus.Peek<uint16>(kSoundRAM) == 0x0000);
+}

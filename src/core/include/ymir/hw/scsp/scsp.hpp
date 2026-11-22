@@ -122,7 +122,8 @@ public:
     SCSP(core::Scheduler &scheduler, core::Configuration::Audio &config);
     ~SCSP();
 
-    void Reset(bool hard);
+    // Brimir: clearWRAM = false keeps the sound RAM (the ST-V clock change, see Saturn::SMPCOperations)
+    void Reset(bool hard, bool clearWRAM = true);
 
     void SetSendMidiOutputCallback(CBSendMidiOutputMessage callback) {
         m_cbSendMidiOutputMessage = callback;

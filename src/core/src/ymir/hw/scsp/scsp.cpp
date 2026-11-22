@@ -61,12 +61,14 @@ SCSP::~SCSP() {
     StopSCSPThread();
 }
 
-void SCSP::Reset(bool hard) {
+void SCSP::Reset(bool hard, bool clearWRAM) {
     if (m_threadedSCSP) {
         SyncSCSPThread();
     }
 
-    m_WRAM.fill(0);
+    if (clearWRAM) { // Brimir: see the header
+        m_WRAM.fill(0);
+    }
 
     m_midiInputBuffer.fill(0);
     m_midiInputReadPos = 0;
