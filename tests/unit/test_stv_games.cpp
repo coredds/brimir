@@ -111,6 +111,26 @@ public:
     int AudioPeak() const { return m_audioPeak; }
     uint64_t VideoHash() { return test::VideoHash(m_core); }
 
+    // True when every pixel has the same colour (the black frames between scenes, in the attract mode and in the game)
+    bool VideoUniform() {
+        const auto *pixels = static_cast<const uint32_t *>(m_core.GetFramebuffer());
+        const unsigned width = m_core.GetFramebufferWidth();
+        const unsigned height = m_core.GetFramebufferHeight();
+        const unsigned pitch = m_core.GetFramebufferPitch() / 4;
+        if (pixels == nullptr || width == 0 || height == 0) {
+            return true;
+        }
+        const uint32_t first = pixels[0] & 0xFFFFFF;
+        for (unsigned y = 0; y < height; y++) {
+            for (unsigned x = 0; x < width; x++) {
+                if ((pixels[static_cast<size_t>(y) * pitch + x] & 0xFFFFFF) != first) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     void Save(const char *name) {
         if (!m_screens.empty()) {
             test::WritePng(m_core, m_screens / name);
@@ -209,6 +229,112 @@ TEST_CASE("stv: colmns97 boots, takes coin and start, and plays for a minute", "
         }
     });
     session.Save("brimir_frame5900_play.png");
+    CHECK(attractLike == 0);
+    INFO("distinct play frames: " << play.size());
+    CHECK(play.size() >= 30);
+    INFO("audio peak over the minute: " << session.AudioPeak());
+    CHECK(session.AudioPeak() > 16);
+    CHECK(session.Core().GetLastError().empty());
+}
+
+TEST_CASE("stv: puyosun boots, takes coin and start, and plays for a minute", "[.stv-rom]") {
+    GameSession session("puyosun");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // The BIOS checks the board for about 1300 frames, then the intro and the demo follow. No phantom credits. The
+    // black frames between scenes are left out: the game fades through black too.
+    session.RunTo(1300);
+    int creditFrames = 0;
+    std::set<uint64_t> attract;
+    session.RunTo(1750, [&] {
+        creditFrames += session.Credits() != 0 ? 1 : 0;
+        if (!session.VideoUniform()) {
+            attract.insert(session.VideoHash());
+        }
+    });
+    session.Save("brimir_frame1750_attract.png");
+    CHECK(creditFrames == 0);
+    INFO("distinct attract frames: " << attract.size());
+    CHECK(attract.size() >= 30);
+
+    // One coin, held for 5 frames, is one credit
+    session.RunTo(1800);
+    session.Tap(0, kCoin);
+    session.RunTo(1850);
+    CHECK(session.Credits() == 1);
+    session.Save("brimir_frame1850_credit1.png");
+
+    // Start takes the credit and leads to the game select: no frame looks like the attract mode any more
+    session.RunTo(1900);
+    session.Tap(0, kStart);
+    int attractLike = 0;
+    const auto notAttract = [&] {
+        attractLike += !session.VideoUniform() && attract.count(session.VideoHash()) != 0 ? 1 : 0;
+    };
+    session.RunTo(1960, notAttract);
+    CHECK(session.Credits() == 0);
+    session.Save("brimir_frame1960_game_select.png");
+    session.Tap(0, kButton1); // one player
+
+    // Button 1 now and then picks the default course and skips the story, then a round against the computer
+    session.RunTo(4000, [&] {
+        notAttract();
+        const int frame = session.Frame();
+        if (frame >= 2200 && frame % 120 == 0) {
+            session.Press(0, kButton1);
+        } else if (frame % 120 == 5) {
+            session.Press(0, 0);
+        }
+        if (frame == 2200) {
+            session.Save("brimir_frame2200_course_select.png");
+        } else if (frame == 3700) {
+            session.Save("brimir_frame3700_play_cpu.png");
+        }
+    });
+    session.Press(0, 0);
+
+    // Player 2 breaks in with a coin of its own; both pick their character and level with Button 1
+    session.RunTo(4400, notAttract);
+    session.Tap(1, kCoin);
+    session.RunTo(4430, notAttract);
+    CHECK(session.Credits() == 1);
+    session.Tap(1, kStart);
+    session.RunTo(5800, [&] {
+        notAttract();
+        const int frame = session.Frame();
+        const uint16_t press = frame >= 4500 && frame % 120 < 5 ? kButton1 : 0;
+        session.Press(0, press);
+        session.Press(1, press);
+        if (frame == 4900) {
+            session.Save("brimir_frame4900_character_select.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // A minute of play: both players move, rotate and drop their pairs
+    const std::vector<uint16_t> script = {kLeft,  kButton1, kLeft, kLeft,  0,     kRight, kButton2, kRight,
+                                          kRight, 0,        kLeft, kRight, kUp,   kButton1, kRight, 0,
+                                          kLeft,  kLeft,    kLeft, 0,      kDown, kRight,   kRight,   kRight};
+    session.ResetAudioPeak();
+    std::set<uint64_t> play;
+    const int playEnd = session.Frame() + 3600;
+    session.RunTo(playEnd, [&] {
+        const int frame = session.Frame();
+        session.Press(0, ScriptedInput(frame, 0, script));
+        session.Press(1, ScriptedInput(frame, 1, script));
+        notAttract();
+        play.insert(session.VideoHash());
+        if (frame == 6200) {
+            session.Save("brimir_frame6200_play.png");
+        } else if (frame == 7600) {
+            session.Save("brimir_frame7600_play.png");
+        }
+    });
+    session.Save("brimir_frame9400_play.png");
     CHECK(attractLike == 0);
     INFO("distinct play frames: " << play.size());
     CHECK(play.size() >= 30);
