@@ -68,10 +68,8 @@ public:
     // big-endian: cell n is bytes 2n (high) and 2n+1 (low).
     const std::array<uint8, 128> &GetEEPROM() const { return m_serialEEPROM.data; }
 
-    // Builds a fresh image from the ROM header and the game settings and makes it the cells.
-    void InitEEPROM(const uint8 *romHeader, const uint8 *gameSettings, uint8 cabType);
-    // Makes a saved image (as returned by GetEEPROM) the cells; nothing is derived from the header. The chip goes back
-    // to its reset state (write-locked, idle).
+    // Makes an image (a saved one as returned by GetEEPROM, or a blank 0xFF one) the cells. The chip goes back to its
+    // reset state (write-locked, idle).
     void LoadEEPROM(const std::array<uint8, 128> &cells);
 
     uint8 ReadIOGAByte(uint32 address) {

@@ -136,9 +136,23 @@ uint16_t ImageWord(const STVIOBoard &board, unsigned cell) {
 constexpr std::array<uint8_t, 8> kSettings = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
 constexpr std::array<uint8_t, 2> kHeader = {0xA5, 0x5A};
 
+// A chip holding "SEGA", the header word and the settings in the cells a BIOS-written image has them in, else blank
+std::array<uint8_t, 128> MakeImage(const std::array<uint8_t, 2> &header, const std::array<uint8_t, 8> &settings) {
+    std::array<uint8_t, 128> image;
+    image.fill(0xFF);
+    image[0x00] = 'S';
+    image[0x01] = 'E';
+    image[0x02] = 'G';
+    image[0x03] = 'A';
+    image[0x1C] = header[0];
+    image[0x1D] = header[1];
+    std::copy(settings.begin(), settings.end(), image.begin() + 0x1E);
+    return image;
+}
+
 void InitBoard(STVIOBoard &board) {
     board.Reset(true);
-    board.InitEEPROM(kHeader.data(), kSettings.data(), 0x00);
+    board.LoadEEPROM(MakeImage(kHeader, kSettings));
 }
 
 // Port C (coin, start, test, service) as read through the IOGA, with STV mode on and all pins inputs.
@@ -502,7 +516,7 @@ TEST_CASE("ST-V EEPROM: SaveState and LoadState mid-READ continue the same bit s
     const std::array<uint8_t, 2> otherHeader = {0x00, 0x00};
     const std::array<uint8_t, 8> otherSettings = {};
     other.Reset(true);
-    other.InitEEPROM(otherHeader.data(), otherSettings.data(), 0x10);
+    other.LoadEEPROM(MakeImage(otherHeader, otherSettings));
     REQUIRE(other.LoadState(state));
 
     EepromBus otherBus(other);

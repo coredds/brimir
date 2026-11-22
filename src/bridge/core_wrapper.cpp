@@ -837,6 +837,7 @@ bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::f
     m_sramInitialized = false;
     m_sramCacheDirty = true;
     m_sramFirstLoad = true;
+    m_stvSrmRejected = false;
     m_hasCartridge = false;
     m_cartridgePath.clear();
     m_cartridgeSaved.clear();
@@ -863,6 +864,9 @@ bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::f
         return false;
     }
     m_iplLoaded = true;
+    // The SMPC starts cold in Attach: the virtual clock then begins at the host's time, as MAME's
+    ApplyRTCMode();
+    PrepareSTVSaveRAM(gamePath, save_directory);
 
     m_saturn->configuration.video.threadedVDP1 = true;
     m_saturn->configuration.video.threadedVDP2 = true;
@@ -906,6 +910,55 @@ void CoreWrapper::ReturnToSaturn() {
     m_sramData.clear();
     m_sramDataFromFrontend = false;
     m_sramInitialized = false;
+    m_sramFirstLoad = true;
+    m_stvSrmRejected = false;
+}
+
+void CoreWrapper::PrepareSTVSaveRAM(const std::filesystem::path& gamePath, const char* save_directory) {
+    const std::filesystem::path srmName = std::filesystem::path(gamePath.stem()) += ".srm";
+    m_srmPath.clear();
+    m_backupRAMSaveError.clear();
+    if (save_directory && save_directory[0] != '\0') {
+        m_srmPath = PathFromUtf8(save_directory) / srmName;
+    } else {
+        // As for a Saturn: with no save directory the temp directory, and no file where there is none (Android)
+        std::error_code tempError;
+        const std::filesystem::path tempDir = std::filesystem::temp_directory_path(tempError);
+        if (tempError) {
+            m_backupRAMSaveError = "no save directory and no usable temp directory (" + tempError.message() +
+                                   "): the core does not write " + PathToUtf8(srmName) + " this session";
+        } else {
+            m_srmPath = tempDir / srmName;
+        }
+    }
+
+    // The cold state first, which gives the buffer its size and the pointer the frontend will keep
+    m_sramData.clear();
+    ReadSRAMFromYmir();
+    m_stvSrmRejected = false;
+
+    // The core reads its own file as for a Saturn (a frontend that does not load it, a run outside libretro). A file of
+    // another size is not a save of this layout (an earlier build's raw 32 KiB backup RAM, a Saturn's): not used, and
+    // replaced when the game is unloaded. RetroArch loads such a file into the start of the buffer all the same;
+    // m_stvSrmRejected makes the first frame discard that.
+    std::error_code error;
+    if (!m_srmPath.empty() && std::filesystem::exists(m_srmPath, error) && !error) {
+        const uintmax_t size = std::filesystem::file_size(m_srmPath, error);
+        if (!error && size == stv::kSTVSaveRAMSize) {
+            std::ifstream file(m_srmPath, std::ios::binary);
+            std::vector<uint8_t> bytes(stv::kSTVSaveRAMSize);
+            if (file && file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
+                std::copy(bytes.begin(), bytes.end(), m_sramData.begin());
+            }
+        } else if (!error) {
+            m_stvSrmRejected = true;
+            m_backupRAMNotice = "ST-V save RAM file " + PathToUtf8(m_srmPath) + " has " + std::to_string(size) +
+                                " bytes, not " + std::to_string(stv::kSTVSaveRAMSize) +
+                                " (backup RAM and EEPROM): not used, the cabinet starts cold and the file is "
+                                "replaced when the game is unloaded";
+        }
+    }
+    m_sramInitialized = true;
     m_sramFirstLoad = true;
 }
 
@@ -1383,6 +1436,11 @@ size_t CoreWrapper::GetSRAMSize() const {
         return 0;
     }
 
+    // The ST-V save RAM is the backup RAM and the EEPROM, from the moment the game is loaded
+    if (m_stv) {
+        return stv::kSTVSaveRAMSize;
+    }
+
     // The internal backup RAM image always exists (see ResetInternalBackupRAM).
     return m_saturn->mem.GetInternalBackupRAM().Size();
 }
@@ -1413,9 +1471,15 @@ bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
         return false;
     }
     if (size != GetSRAMSize()) {
+        if (m_stv) {
+            m_backupRAMNotice = "ST-V save RAM of " + std::to_string(size) + " bytes rejected: the layout is " +
+                                std::to_string(stv::kSTVSaveRAMSize) +
+                                " bytes (backup RAM and EEPROM), the cabinet keeps its state";
+        }
         return false;
     }
 
+    m_stvSrmRejected = false;
     m_sramData.assign(data, data + size);
     m_sramDataFromFrontend = true;
 
@@ -1434,6 +1498,21 @@ void CoreWrapper::WriteSRAMToYmir() {
     }
 
     auto& bup = m_saturn->mem.GetInternalBackupRAM();
+    if (m_stv) {
+        // The board's own layout: all zero is a valid (blank) backup RAM, not an unformatted Saturn image to replace
+        if (m_stvSrmRejected || m_sramData.size() != stv::kSTVSaveRAMSize) {
+            m_stvSrmRejected = false;
+            ReadSRAMFromYmir();
+            return;
+        }
+        for (uint32_t i = 0; i < stv::kSTVBackupRAMSize; ++i) {
+            bup.WriteByte(i * 2, m_sramData[i]);
+        }
+        std::array<uint8_t, stv::kSTVEEPROMSize> cells;
+        std::copy(m_sramData.begin() + stv::kSTVBackupRAMSize, m_sramData.end(), cells.begin());
+        m_stv->IO().LoadEEPROM(cells);
+        return;
+    }
     // An all-zero image is unformatted backup RAM and holds no save (a .srm written by earlier versions from a session
     // without content, for example): copied down, the game would ask for every record to be deleted, and the file
     // would be saved back unformatted every session. Ymir's image is kept and the frontend's buffer takes it, so the
@@ -1464,10 +1543,15 @@ void CoreWrapper::RefreshSRAMFromEmulator() {
 
 void CoreWrapper::ReadSRAMFromYmir() {
     const std::vector<uint8_t> image = m_saturn->mem.GetInternalBackupRAM().ReadAll();
-    if (m_sramData.size() != image.size()) {
-        m_sramData.resize(image.size());
+    const size_t total = m_stv ? stv::kSTVSaveRAMSize : image.size();
+    if (m_sramData.size() != total) {
+        m_sramData.resize(total);
     }
     std::copy(image.begin(), image.end(), m_sramData.begin());
+    if (m_stv) {
+        const auto& cells = m_stv->IO().GetEEPROM();
+        std::copy(cells.begin(), cells.end(), m_sramData.begin() + static_cast<std::ptrdiff_t>(image.size()));
+    }
 }
 
 void* CoreWrapper::GetSystemRAMData() {

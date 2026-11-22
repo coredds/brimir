@@ -140,6 +140,7 @@ add_executable(brimir_tests
     unit/test_stv_core_hooks.cpp
     unit/test_stv_load.cpp
     unit/test_stv_input.cpp
+    unit/test_stv_sram.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE

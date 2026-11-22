@@ -13,23 +13,6 @@ namespace brimir::stv {
 
 static constexpr int64_t kCoinPulseFrames = 4;
 
-static uint16 ComputeSTVEEPROMCRC(const std::array<uint8, 128>& eeprom) {
-    uint16 crc = 0x5A81;
-    for (uint32 i = 0x0C; i <= 0x3F; i++) {
-        crc ^= static_cast<uint16>(eeprom[i]) << 8;
-        for (int bit = 0; bit < 8; bit++) {
-            if (crc & 0x8000u) {
-                crc = static_cast<uint16>((crc << 1) ^ 0x1021u);
-            } else {
-                crc = static_cast<uint16>(crc << 1);
-            }
-        }
-    }
-
-    const uint16 xorWord = static_cast<uint16>((static_cast<uint16>(eeprom[0x42]) << 8) | eeprom[0x43]);
-    return static_cast<uint16>(crc ^ xorWord);
-}
-
 void STVIOBoard::Reset(bool hard) {
     if (hard) {
         for (unsigned coin = 0; coin < 2; coin++) {
@@ -241,54 +224,6 @@ void STVIOBoard::UpdateInputs() {
     if (m_service) m_dataIn[0x2] ^= 0x08;
 
     m_dataIn[0x3] = 0x00;
-}
-
-void STVIOBoard::InitEEPROM(const uint8 *romHeader, const uint8 *gameSettings, uint8 cabType) {
-    std::array<uint8, 128> image;
-    image.fill(0xFF);
-
-    image[0x00] = 'S';
-    image[0x01] = 'E';
-    image[0x02] = 'G';
-    image[0x03] = 'A';
-
-    image[0x0C] = 0x00; image[0x0D] = 0x00;
-    image[0x0E] = 0x00; image[0x0F] = 0x01;
-    image[0x10] = 0x01; image[0x11] = 0x00;
-    image[0x12] = 0x01; image[0x13] = 0x01;
-    image[0x14] = 0x00; image[0x15] = 0x00;
-    image[0x16] = 0x00; image[0x17] = 0x00;
-    image[0x18] = 0x00; image[0x19] = 0x08;
-
-    // Determine cabinet type from ROM byte at 0xF46
-    unsigned cab_players = 2;
-    switch (cabType) {
-        case 0x01: case 0x03: cab_players = 1; break;
-        case 0x10:             cab_players = 3; break;
-        default:               cab_players = 2; break;
-    }
-
-    // Settings: matches Mednafen 0x089C base + cab_type + alone + advertise
-    uint16 settings = 0x089C | ((cab_players - 1) & 0x3) | (1U << 5) | (1U << 6);
-    image[0x1A] = static_cast<uint8>(settings >> 8);
-    image[0x1B] = static_cast<uint8>(settings);
-
-    if (romHeader) {
-        image[0x1C] = romHeader[0x00];
-        image[0x1D] = romHeader[0x01];
-    }
-    if (gameSettings) {
-        std::memcpy(&image[0x1E], gameSettings, 8);
-    }
-
-    const uint16 crc = ComputeSTVEEPROMCRC(image);
-    image[0x08] = static_cast<uint8>(crc >> 8);
-    image[0x09] = static_cast<uint8>(crc);
-
-    // Mirror block, matches cabinet EEPROM layout used by ST-V BIOS/game code.
-    std::copy(image.begin() + 0x08, image.begin() + 0x40, image.begin() + 0x44);
-
-    m_serialEEPROM.Load(image);
 }
 
 void STVIOBoard::LoadEEPROM(const std::array<uint8, 128> &cells) {

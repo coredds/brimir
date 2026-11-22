@@ -173,7 +173,8 @@ public:
     /// @return Pointer to SRAM data, or nullptr if not available
     void* GetSRAMData();
 
-    /// @brief Get size of backup RAM (SRAM)
+    /// @brief Get size of backup RAM (SRAM). In an ST-V session the save RAM is the internal backup RAM (32768 bytes)
+    /// followed by the cabinet EEPROM (128 bytes): 32896 bytes from the moment the game is loaded.
     /// @return Size in bytes
     size_t GetSRAMSize() const;
 
@@ -721,6 +722,7 @@ private:
     mutable bool m_sramCacheDirty = true;  // Track if SRAM cache needs refresh
     mutable uint32_t m_framesSinceLastSRAMSync = 0;  // Frames since last SRAM sync
     bool m_sramFirstLoad = true;  // True until first frame runs (for .srm loading)
+    bool m_stvSrmRejected = false; // ST-V: the .srm found at load was of another size; its contents are not used
     
     // Performance profiling
     Profiler m_profiler;
@@ -788,11 +790,17 @@ private:
     /// it holds no save) is not copied: the buffer takes Ymir's current image instead (and a notice is kept for
     /// TakeBackupRAMNotice). At the first frame and at the UnloadGame safety net that is the image LoadGame formatted;
     /// for SetSRAMData during play it is the running game's backup RAM, saves made this session included.
+    /// ST-V: the buffer's two parts go to the backup RAM and the EEPROM as they are (all zero is a valid backup RAM),
+    /// unless the .srm found at load was of another size: the buffer then takes the cold state.
     void WriteSRAMToYmir();
 
     /// @brief Copy Ymir's internal backup RAM into m_sramData, in place once it has its size (the frontend may keep
-    /// the pointer GetSRAMData returned, as RetroArch's autosave thread does).
+    /// the pointer GetSRAMData returned, as RetroArch's autosave thread does). ST-V: followed by the EEPROM's cells.
     void ReadSRAMFromYmir();
+
+    /// @brief ST-V LoadGame: the save RAM buffer (cold state, or the .srm of the right size), ready for the frontend to
+    /// read its size and pointer and to load its .srm into it before the first frame (m_sramFirstLoad).
+    void PrepareSTVSaveRAM(const std::filesystem::path& gamePath, const char* save_directory);
 
     /// @brief Returns the region-qualified SMPC persistent data file path.
     std::filesystem::path GetPersistentSMPCDataPath() const;

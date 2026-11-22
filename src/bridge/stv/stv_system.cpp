@@ -33,11 +33,6 @@ void RestoreSaturnIOGAPage(ymir::sys::SH2Bus &bus) {
         [](uint32_t, uint8_t, void *) {}, [](uint32_t, uint16_t, void *) {}, [](uint32_t, uint32_t, void *) {});
 }
 
-// ROM header fields the I/O board derives the factory EEPROM from (offsets in the cartridge image)
-constexpr uint32_t kHeaderOffset = 0xF40;
-constexpr uint32_t kCabinetTypeOffset = 0xF46;
-constexpr uint32_t kGameSettingsOffset = 0xF48;
-
 } // namespace
 
 STVSystem::~STVSystem() {
@@ -59,6 +54,9 @@ bool STVSystem::Attach(ymir::Saturn &saturn, const GameInfo &game, std::array<ui
     m_game = &game;
     m_prevAreaCode = saturn.SMPC.GetAreaCode();
     saturn.SMPC.SavePersistentData(m_prevSMPC);
+    // The board starts with MAME's SMPC defaults, never the console's settings (the Saturn BIOS language, its clock):
+    // MAME's smpc_hle_device keeps SMEM as NVRAM with DEFAULT_ALL_0 and runs the host's clock. Detach restores them.
+    saturn.SMPC.LoadPersistentData(ymir::smpc::PersistentSMPCData{});
 
     saturn.LoadIPL(std::span<uint8_t, kSTVBiosSize>(bios));
 
@@ -71,15 +69,13 @@ bool STVSystem::Attach(ymir::Saturn &saturn, const GameInfo &game, std::array<ui
     m_io.Reset(true);
     m_io.SetIPLPointer(saturn.mem.IPL.data());
     m_io.SetSTVMode(true);
-    uint8_t header[2];
-    uint8_t settings[8];
-    for (uint32_t i = 0; i < sizeof(header); i++) {
-        header[i] = m_cart->PeekROMByte(kHeaderOffset + i);
-    }
-    for (uint32_t i = 0; i < sizeof(settings); i++) {
-        settings[i] = m_cart->PeekROMByte(kGameSettingsOffset + i);
-    }
-    m_io.InitEEPROM(header, settings, m_cart->PeekROMByte(kCabinetTypeOffset));
+    // A new cabinet's 93C46 is blank, as MAME's: none of the eight supported sets has an "eeprom" region in its
+    // ROM_START, so eeprom_base_device::nvram_default leaves every cell 0xFFFF and the BIOS writes its own defaults on
+    // the first boot (the "SEGA" header, the settings, a CRC and the mirror). The persistent copy (the .srm) replaces
+    // this at the first frame.
+    std::array<uint8_t, kSTVEEPROMSize> blank;
+    blank.fill(0xFF);
+    m_io.LoadEEPROM(blank);
     m_io.MapMemory(saturn.mainBus);
 
     // The PDR pins carry the cabinet EEPROM and, on PDR2, the 68K's reset line (MAME stv.cpp pdr1_output_w and

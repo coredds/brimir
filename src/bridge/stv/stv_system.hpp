@@ -29,6 +29,11 @@ namespace brimir::stv {
 
 inline constexpr size_t kSTVBiosSize = 512 * 1024;
 
+// The ST-V save RAM (the libretro .srm): the internal backup RAM's data bytes, then the cabinet's 93C46 cells
+inline constexpr size_t kSTVBackupRAMSize = 32 * 1024;
+inline constexpr size_t kSTVEEPROMSize = 128;
+inline constexpr size_t kSTVSaveRAMSize = kSTVBackupRAMSize + kSTVEEPROMSize;
+
 // The SMPC area code of the ST-V board, whatever BIOS region is chosen. It follows MAME: src/mame/sega/stv.cpp,
 // stv_state::stv (machine config) calls m_smpc_hle->set_region_code(1) ("1 - Japan, configured via jumpers"), and only
 // init_stv_us (the CD games, e.g. sfish2) overrides it with 4. All eight supported sets use init_stv or a wrapper of it.
