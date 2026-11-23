@@ -31,7 +31,9 @@ jobs:
           arch: amd64
 
       - name: Configure CMake
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_BUILD_TESTS=ON
+        # The core's developer log off: ctest's capture of its output doubled the Windows test step (the Linux jobs keep
+        # it on, so test_dev_log still runs)
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_BUILD_TESTS=ON -DBrimir_ENABLE_DEVLOG=OFF
 
       - name: Build
         run: cmake --build build --target brimir_libretro brimir_tests brimir_bench brimir_vkhost --parallel
@@ -367,7 +369,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DBRIMIR_BUILD_TESTS=ON
+            -DBRIMIR_BUILD_TESTS=ON \
+            -DBrimir_ENABLE_DEVLOG=OFF
 
       - name: Build
         run: cmake --build build --target brimir_libretro brimir_tests brimir_bench brimir_vkhost --parallel $(sysctl -n hw.ncpu)
