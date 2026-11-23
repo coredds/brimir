@@ -529,8 +529,8 @@ TEST_CASE("stv state: the synthetic session's BIOS idles the master SH-2", "[stv
     }
     auto &master = core.GetSaturn()->masterSH2.GetProbe();
     const uint32_t pc = master.PC() & 0x07FF'FFFF;
-    CHECK(pc >= 0x100);
-    CHECK(pc < 0x104);
+    CHECK(pc >= test::kIdleSTVBiosLoop);
+    CHECK(pc < test::kIdleSTVBiosLoop + 4);
     CHECK(master.R(15) == 0x0610'0000);
 }
 

@@ -3,6 +3,8 @@
 
 #include "catch_amalgamated.hpp"
 
+#include "unit/stv_test_bios.hpp"
+
 #include <ymir/hw/cart/cart_base.hpp>
 #include <ymir/hw/smpc/smpc.hpp>
 #include <ymir/savestate/savestate.hpp>
@@ -737,9 +739,17 @@ TEST_CASE("stv hooks: a clock change keeps the sound RAM in ST-V mode and clears
     auto clockChange = [](Saturn &saturn, uint8 command) {
         Command(saturn, {}, command);
         RunFor(saturn, 250000); // the core runs SYSRES/CKCHG 200000 cycles after the write
+        // the clock change's NMI lands in the idle BIOS's loop, so the CPU runs no garbage (which the core logs)
+        const uint32 pc = saturn.masterSH2.GetProbe().PC() & 0x07FF'FFFF;
+        CHECK(pc >= brimir::test::kIdleSTVBiosLoop);
+        CHECK(pc < brimir::test::kIdleSTVBiosLoop + 4);
     };
 
     auto saturn = std::make_unique<Saturn>();
+    std::vector<uint8> ipl(sys::kIPLSize);
+    brimir::test::FillIdleSTVBiosImage(std::span<uint8, sys::kIPLSize>(ipl.data(), ipl.size()));
+    saturn->LoadIPL(std::span<uint8, sys::kIPLSize>(ipl.data(), ipl.size()));
+    saturn->Reset(true);
     saturn->mainBus.Write<uint16>(kSoundRAM, 0x01FF);
     clockChange(*saturn, kCKCHG320);
     CHECK(saturn->mainBus.Peek<uint16>(kSoundRAM) == 0x0000);
