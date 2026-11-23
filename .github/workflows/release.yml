@@ -304,6 +304,8 @@ jobs:
 
             Saturn emulation and save states are unchanged from 0.9.0, except that archived discs no longer load. The unstripped Android core for crash reports is `brimir-${{ github.ref_name }}-android-arm64-symbols.zip`.
 
+            Every download now includes `LICENSE` (GPL-3.0) and `THIRD_PARTY_NOTICES.txt` (the licences of the third-party code in the core).
+
             **Known Limitations**
             - ST-V: only the eight games above. Known differences from MAME (attract-mode timing off by some frames, the SMPC's battery settings not saved) are in `src/bridge/stv/STATUS.md`; rewind and netplay were not tested with ST-V games.
             - Android (arm64): install the core with Load Core > Install or Restore a Core. RetroArch only offers Brimir for games when it has the core's `.info` file: point Settings > Directory > Core Info at a folder holding `brimir_libretro.info` (that folder then replaces RetroArch's own info files) and turn off the file browser's extension filter. No internal resolution above 1x yet. Use the Vulkan renderer on phones (the software renderer was slow on the Galaxy A56); Close Content or Quit before leaving RetroArch.
