@@ -1,6 +1,7 @@
 #!/bin/bash
 # Tests package.sh (tools/android/README.md) with stand-in files: a tiny arm64 shared object built with the NDK clang
-# (with a symbol table, debug info and a build-id) as the core, and small text files as the .info and install text.
+# (with a symbol table, debug info and a build-id) as the core, and small text files as the .info, install text, LICENSE and
+# third-party notices.
 #
 # usage: tools/android/test_package.sh
 # env:   as build.sh
@@ -32,6 +33,8 @@ EOF
 CORE="$TMP/in/brimir_libretro_android.so"
 printf 'display_name = "stand-in info"\n' > "$TMP/in/stand-in.info"
 printf 'stand-in install text\n' > "$TMP/in/stand-in.txt"
+printf 'stand-in licence\n' > "$TMP/in/stand-in-license"
+printf 'stand-in notices\n' > "$TMP/in/stand-in-notices"
 printf 'not an ELF file\n' > "$TMP/in/not-elf.so"
 CORE_SHA=$(sha256sum "$CORE" | cut -d' ' -f1)
 
@@ -58,23 +61,26 @@ run() {
 build_id() { "$BIN/llvm-readelf" -n "$1" | sed -n 's/^ *Build ID: *//p'; }
 dynsyms() { "$BIN/llvm-nm" -D --defined-only -P "$1" | awk '{ print $1, $2 }' | LC_ALL=C sort; }
 names() { unzip -Z1 "$1" | LC_ALL=C sort | tr '\n' ' '; }
-WANT="ANDROID-INSTALL.txt brimir_libretro.info brimir_libretro_android.so "
+WANT="ANDROID-INSTALL.txt LICENSE THIRD_PARTY_NOTICES.txt brimir_libretro.info brimir_libretro_android.so "
 
 # 1. Stand-in inputs. A junk zip at the output path is replaced, not appended to.
 (cd "$TMP/out" && echo junk > junk.txt && zip -q stale.zip junk.txt && mv stale.zip pkg.zip)
 run out status env INFO_FILE="$TMP/in/stand-in.info" INSTALL_TEXT="$TMP/in/stand-in.txt" \
+    LICENSE_FILE="$TMP/in/stand-in-license" NOTICES_FILE="$TMP/in/stand-in-notices" \
     bash "$PACKAGE" "$CORE" "$TMP/out/pkg.zip"
 echo "    unzip -l:"
 unzip -l "$TMP/out/pkg.zip" | sed 's/^/      /'
 check "stand-ins: exit 0" "$([ "$status" = 0 ] && echo 1)"
-check "stand-ins: zip lists exactly the three files, no folder ($(names "$TMP/out/pkg.zip"))" \
+check "stand-ins: zip lists exactly the five files, no folder ($(names "$TMP/out/pkg.zip"))" \
     "$([ "$(names "$TMP/out/pkg.zip")" = "$WANT" ] && echo 1)"
 check "stand-ins: unzip -t (a plain, intact zip)" "$(unzip -tq "$TMP/out/pkg.zip" >/dev/null && echo 1)"
 mkdir -p "$TMP/x1"
 unzip -q "$TMP/out/pkg.zip" -d "$TMP/x1"
-check "stand-ins: .info and install text copied unchanged" \
+check "stand-ins: .info, install text, LICENSE and notices copied unchanged" \
     "$(cmp -s "$TMP/x1/brimir_libretro.info" "$TMP/in/stand-in.info" &&
-       cmp -s "$TMP/x1/ANDROID-INSTALL.txt" "$TMP/in/stand-in.txt" && echo 1)"
+       cmp -s "$TMP/x1/ANDROID-INSTALL.txt" "$TMP/in/stand-in.txt" &&
+       cmp -s "$TMP/x1/LICENSE" "$TMP/in/stand-in-license" &&
+       cmp -s "$TMP/x1/THIRD_PARTY_NOTICES.txt" "$TMP/in/stand-in-notices" && echo 1)"
 SO="$TMP/x1/brimir_libretro_android.so"
 check "stripped: still an AArch64 ELF" "$("$BIN/llvm-readelf" -h "$SO" | grep -q 'Machine: *AArch64' && echo 1)"
 check "stripped: input had .symtab and .debug_info, output has neither" \
@@ -89,14 +95,16 @@ check "stripped: smaller than the input ($(stat -c %s "$CORE") -> $(stat -c %s "
     "$([ "$(stat -c %s "$SO")" -lt "$(stat -c %s "$CORE")" ] && echo 1)"
 check "input core not changed" "$([ "$(sha256sum "$CORE" | cut -d' ' -f1)" = "$CORE_SHA" ] && echo 1)"
 
-# 2. Default .info and install text (the repository's).
+# 2. Default .info, install text, LICENSE and notices (the repository's).
 run out status bash "$PACKAGE" "$CORE" "$TMP/out/defaults.zip"
 mkdir -p "$TMP/x2"
 unzip -q "$TMP/out/defaults.zip" -d "$TMP/x2"
-check "defaults: exit 0, the repository's .info and ANDROID-INSTALL.txt" \
+check "defaults: exit 0, the repository's .info, ANDROID-INSTALL.txt, LICENSE and THIRD_PARTY_NOTICES.txt" \
     "$([ "$status" = 0 ] && [ "$(names "$TMP/out/defaults.zip")" = "$WANT" ] &&
        cmp -s "$TMP/x2/brimir_libretro.info" resources/info/brimir_libretro.info &&
-       cmp -s "$TMP/x2/ANDROID-INSTALL.txt" tools/android/ANDROID-INSTALL.txt && echo 1)"
+       cmp -s "$TMP/x2/ANDROID-INSTALL.txt" tools/android/ANDROID-INSTALL.txt &&
+       cmp -s "$TMP/x2/LICENSE" LICENSE &&
+       cmp -s "$TMP/x2/THIRD_PARTY_NOTICES.txt" THIRD_PARTY_NOTICES.txt && echo 1)"
 
 # 3. Failures: exit 1 with a message naming the problem, and no zip written.
 expect_fail() {
@@ -112,6 +120,10 @@ expect_fail "missing .info" "missing input $TMP/in/none.info" "$TMP/out/f2.zip" 
     env INFO_FILE="$TMP/in/none.info" bash "$PACKAGE" "$CORE" "$TMP/out/f2.zip"
 expect_fail "missing install text" "missing input $TMP/in/none.txt" "$TMP/out/f3.zip" \
     env INSTALL_TEXT="$TMP/in/none.txt" bash "$PACKAGE" "$CORE" "$TMP/out/f3.zip"
+expect_fail "missing LICENSE" "missing input $TMP/in/none-license" "$TMP/out/f6.zip" \
+    env LICENSE_FILE="$TMP/in/none-license" bash "$PACKAGE" "$CORE" "$TMP/out/f6.zip"
+expect_fail "missing third-party notices" "missing input $TMP/in/none-notices" "$TMP/out/f7.zip" \
+    env NOTICES_FILE="$TMP/in/none-notices" bash "$PACKAGE" "$CORE" "$TMP/out/f7.zip"
 expect_fail "core that is not an ELF file" "llvm-strip failed" "$TMP/out/f4.zip" \
     bash "$PACKAGE" "$TMP/in/not-elf.so" "$TMP/out/f4.zip"
 expect_fail "missing output folder" "missing output directory" "$TMP/none/f5.zip" \

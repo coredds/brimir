@@ -5,10 +5,13 @@
 # env:   as build.sh (the pinned NDK's llvm-strip is used)
 #        INFO_FILE      default resources/info/brimir_libretro.info
 #        INSTALL_TEXT   default tools/android/ANDROID-INSTALL.txt
+#        LICENSE_FILE   default LICENSE
+#        NOTICES_FILE   default THIRD_PARTY_NOTICES.txt
 #
 # Writes a plain zip (no folders) holding brimir_libretro_android.so (the core after llvm-strip --strip-unneeded: the
 # dynamic symbols and the build-id stay, the unstripped input is kept for symbolication and not changed),
-# brimir_libretro.info and ANDROID-INSTALL.txt. An existing <out.zip> is replaced.
+# brimir_libretro.info, ANDROID-INSTALL.txt, LICENSE and THIRD_PARTY_NOTICES.txt (the licence notices the binary
+# requires). An existing <out.zip> is replaced.
 set -euo pipefail
 
 usage() {
@@ -22,8 +25,10 @@ OUT=$2
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 INFO_FILE=${INFO_FILE:-$ROOT/resources/info/brimir_libretro.info}
 INSTALL_TEXT=${INSTALL_TEXT:-$ROOT/tools/android/ANDROID-INSTALL.txt}
+LICENSE_FILE=${LICENSE_FILE:-$ROOT/LICENSE}
+NOTICES_FILE=${NOTICES_FILE:-$ROOT/THIRD_PARTY_NOTICES.txt}
 
-for input in "$CORE" "$INFO_FILE" "$INSTALL_TEXT"; do
+for input in "$CORE" "$INFO_FILE" "$INSTALL_TEXT" "$LICENSE_FILE" "$NOTICES_FILE"; do
     if [ ! -f "$input" ]; then
         echo "error: missing input $input" >&2
         exit 1
@@ -55,8 +60,10 @@ if ! "$STRIP" --strip-unneeded -o "$STAGE/brimir_libretro_android.so" "$CORE"; t
 fi
 cp "$INFO_FILE" "$STAGE/brimir_libretro.info"
 cp "$INSTALL_TEXT" "$STAGE/ANDROID-INSTALL.txt"
+cp "$LICENSE_FILE" "$STAGE/LICENSE"
+cp "$NOTICES_FILE" "$STAGE/THIRD_PARTY_NOTICES.txt"
 
 rm -f "$OUT_ABS"
-(cd "$STAGE" && zip -q -X "$OUT_ABS" brimir_libretro_android.so brimir_libretro.info ANDROID-INSTALL.txt)
+(cd "$STAGE" && zip -q -X "$OUT_ABS" brimir_libretro_android.so brimir_libretro.info ANDROID-INSTALL.txt LICENSE THIRD_PARTY_NOTICES.txt)
 echo "core: $(stat -c %s "$CORE") bytes -> stripped $(stat -c %s "$STAGE/brimir_libretro_android.so") bytes"
 echo "$OUT_ABS"

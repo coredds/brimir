@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Every download carries `LICENSE` and `THIRD_PARTY_NOTICES.txt`** - the Windows, Linux, macOS and Android packages now include the GPL-3.0 text and the licence notices of the code in the core (Ymir, the MAME-derived ST-V code, fmt, libchdr with zlib/Zstandard/LZMA/dr_flac, LZ4, xxHash, dr_mp3, stb_vorbis, asmjit, volk, the Vulkan headers and others).
+
 ## [0.10.0] - 2026-11-22
 
 ### Added

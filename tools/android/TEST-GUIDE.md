@@ -53,14 +53,14 @@ you the link to that run. **[not tested]** on a phone.
 
 What you download from the Actions page is always a zip inside a zip: GitHub wraps every artifact in a zip, and the
 artifact is itself `brimir-android-arm64.zip`. So you get `brimir-android-arm64.zip` (the outer one), which holds
-another `brimir-android-arm64.zip` (the inner one). Unpack both: the inner zip holds the three files
-`brimir_libretro_android.so`, `brimir_libretro.info` and `ANDROID-INSTALL.txt`.
+another `brimir-android-arm64.zip` (the inner one). Unpack both: the inner zip holds the five files
+`brimir_libretro_android.so`, `brimir_libretro.info`, `ANDROID-INSTALL.txt`, `LICENSE` and `THIRD_PARTY_NOTICES.txt`.
 
 - **Phone only**: on the phone's browser, open the Actions page (if the Artifacts list does not show, choose
   "Desktop site" in the browser menu). Download the zip. Open the **My Files** app > Downloads, tap the zip, tap
   **Extract**. You should **see** a new folder `brimir-android-arm64` inside Download, holding the inner
   `brimir-android-arm64.zip`. Open that folder, tap the inner zip, tap **Extract** again. You should **see** a second
-  folder `brimir-android-arm64` inside the first one, with the three files. So the core is probably at
+  folder `brimir-android-arm64` inside the first one, with the five files. So the core is probably at
   `Download/brimir-android-arm64/brimir-android-arm64/brimir_libretro_android.so`; note the real folder names, you open
   them in step 6. If you prefer, move `brimir_libretro_android.so` into Download itself. **[not tested]**
 - **PC route**: download and unzip on the PC. Copy the files later (step 5): the core goes to Download itself.

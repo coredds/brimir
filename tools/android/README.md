@@ -98,7 +98,8 @@ bash tools/android/test_package.sh   # tests the packager with stand-in files
 ```
 
 `package.sh <core.so> <out.zip>` writes a plain zip (no folder) with `brimir_libretro_android.so`,
-`brimir_libretro.info` (from `resources/info`) and `ANDROID-INSTALL.txt`. The core in the zip is the input after the
+`brimir_libretro.info` (from `resources/info`), `ANDROID-INSTALL.txt`, `LICENSE` and `THIRD_PARTY_NOTICES.txt` (from the
+repository root; the licence notices the binary requires). The core in the zip is the input after the
 NDK's `llvm-strip --strip-unneeded` (about 57 MB -> 6 MB): the dynamic symbols and the build-id stay, the symbol table
 and debug info go. The unstripped input is not changed; keep it for symbolicating crash reports (same build-id). Run
 `check_elf.sh` on the stripped core too (unzip it; CI does).

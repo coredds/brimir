@@ -390,7 +390,7 @@ Brimir runs on 64-bit Android (arm64, Android 8.0 and newer) as a core for Retro
 need RetroArch, a Saturn BIOS and your own games.
 
 **Where to get it.** The release page has `brimir-<tag>-android-arm64.zip` with `brimir_libretro_android.so`,
-`brimir_libretro.info` and `ANDROID-INSTALL.txt` (and a symbols zip for crash reports, not for installing).
+`brimir_libretro.info`, `ANDROID-INSTALL.txt`, `LICENSE` and `THIRD_PARTY_NOTICES.txt` (and a symbols zip for crash reports, not for installing).
 
 **Install, in short** (the full steps, with both RetroArch builds' folders, are in
 [tools/android/ANDROID-INSTALL.txt](tools/android/ANDROID-INSTALL.txt) and the longer
@@ -588,7 +588,7 @@ Upstream test suites, benchmarks and examples are not vendored.
 
 ## License
 
-Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license as Ymir. See [LICENSE](LICENSE).
+Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license as Ymir. See [LICENSE](LICENSE). The licenses of the third-party code in Brimir (libraries, and code derived from MAME and others) are in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt); every download carries both files.
 
 ## Credits
 
