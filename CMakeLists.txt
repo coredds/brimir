@@ -125,7 +125,8 @@ set(Brimir_VERSION_PRERELEASE "")
 set(Brimir_VERSION_BUILD "")
 set(Brimir_VERSION "0.10.0")
 set(Brimir_DEV_BUILD OFF)
-set(Brimir_ENABLE_DEVLOG ON)
+# The core's developer log, printed to stdout. CI turns it off for the test jobs where ctest slows down on the output.
+option(Brimir_ENABLE_DEVLOG "Print the core's developer log to stdout" ON)
 set(Brimir_ENABLE_DEV_ASSERTIONS OFF)
 
 # Add core emulator library
