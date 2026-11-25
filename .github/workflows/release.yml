@@ -298,7 +298,7 @@ jobs:
 
             **Five more ST-V games (new)** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0 (Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force, Radiant Silvergun): thirteen in all, run from their MAME ROM sets (`.zip`). Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). Each set's own default EEPROM is used, so Shienryu starts set up for the vertical monitor.
 
-            **Screen Rotation: Auto (new default)** - vertical ST-V games (Shienryu) are turned upright by themselves and shown at 3:4; Saturn games are never rotated. **If you ran 0.10.0, your saved setting is "None": choose Auto in Quick Menu > Core Options > Video > Screen Rotation (TATE) for Shienryu**; the core shows a hint on screen when it loads a vertical game under another setting.
+            **Screen Rotation: Auto (new default)** - vertical ST-V games (Shienryu) are turned upright by themselves and shown at 3:4; Saturn games are never rotated. **If you ran 0.10.0, your saved setting is "None": choose Auto in Quick Menu > Core Options > Video Settings > Screen Rotation (TATE) for Shienryu**; the core shows a hint on screen when it loads a vertical game under another setting.
 
             **ST-V saves** - the SMPC's battery settings are saved too, so an ST-V `<set>.srm` is now 32,901 bytes (0.10.0: 32,896). 0.10.0 saves and ST-V save states still load; Saturn saves and states are unchanged.
 

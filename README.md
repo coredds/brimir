@@ -9,7 +9,7 @@ Brimir is a libretro core that wraps Ymir's cycle-accurate hardware layer. It pr
 ## What's New in 0.11.0
 
 - **Five more ST-V games** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0, thirteen in all. Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). See [ST-V arcade games](#st-v-arcade-games).
-- **Screen Rotation: Auto** - the new default turns vertical ST-V games upright (Shienryu) and never rotates Saturn games; the rotated picture is reported as 3:4. **If you ran 0.10.0, your saved setting is "None"**: choose Auto in Quick Menu > Core Options > Video > Screen Rotation (TATE), or Shienryu comes up on its side (the core shows a hint on screen when it loads a vertical game under another setting).
+- **Screen Rotation: Auto** - the new default turns vertical ST-V games upright (Shienryu) and never rotates Saturn games; the rotated picture is reported as 3:4. **If you ran 0.10.0, your saved setting is "None"**: choose Auto in Quick Menu > Core Options > Video Settings > Screen Rotation (TATE), or Shienryu comes up on its side (the core shows a hint on screen when it loads a vertical game under another setting).
 - **ST-V saves** - the SMPC's battery settings are saved too, so an ST-V `<set>.srm` is now 32,901 bytes; a 0.10.0 file (32,896 bytes) still loads. 0.10.0 ST-V save states still load.
 - **ST-V game defaults** - each set's own default EEPROM image is used (Shienryu sets up the cabinet for its vertical monitor, Steep Slope Sliders for one player).
 
@@ -245,7 +245,7 @@ one-player game: player 2's coin gives a credit, but player 2's Start does nothi
 Screen Rotation (TATE) at `Auto` (the default) the core turns it upright and reports a 3:4 picture; Saturn games and the
 other ST-V games are never rotated by Auto. `None`, `90°`, `180°` and `270°` override Auto for any content. **If you ran
 0.10.0, your saved setting is "None"** (the 0.10.0 default was "None" and RetroArch keeps what it saved): pick `Auto`
-in Quick Menu > Core Options > Video > Screen Rotation (TATE), or Shienryu comes up lying on its side (and the BIOS's
+in Quick Menu > Core Options > Video Settings > Screen Rotation (TATE), or Shienryu comes up lying on its side (and the BIOS's
 own screens with it); the core shows a one-time hint on screen when it loads a vertical game under another setting. Shienryu's default EEPROM, part of its ROM set, sets the cabinet up for the vertical monitor.
 
 **ROM sets.** Load the MAME `.zip` of the game (for example `bakubaku.zip`) through RetroArch's Load Content; the set is
@@ -329,9 +329,9 @@ sample points; rotated or distorted sprites (for example in Astal) may differ at
 ### Turning it on (RetroArch)
 
 1. Settings > Drivers > Video: `vulkan`. Restart RetroArch.
-2. Quick Menu > Core Options > Video > Renderer: `Vulkan`. It applies when content is loaded, so close the content
+2. Quick Menu > Core Options > Video Settings > Renderer: `Vulkan`. It applies when content is loaded, so close the content
    (Quick Menu > Close Content) and load it again.
-3. Quick Menu > Core Options > Video > Internal Resolution: `2x`, `3x` or `4x`. It applies at once. (Not on Android,
+3. Quick Menu > Core Options > Video Settings > Internal Resolution: `2x`, `3x` or `4x`. It applies at once. (Not on Android,
    which offers 1x only for now.)
 
 With any other video driver the core uses the software renderer; it never asks RetroArch to switch drivers.

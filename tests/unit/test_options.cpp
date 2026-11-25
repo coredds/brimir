@@ -645,7 +645,7 @@ TEST_CASE("Rotation hint: a vertical ST-V game under an explicit rotation that d
     const char* hint = brimir_rotation_hint("0", true, 270);
     REQUIRE(hint != nullptr);
     CHECK(std::strstr(hint, "set Screen Rotation to Auto") != nullptr);
-    CHECK(std::strstr(hint, "Quick Menu > Core Options > Video") != nullptr);
+    CHECK(std::strstr(hint, "Quick Menu > Core Options > Video Settings") != nullptr);
     CHECK(brimir_rotation_hint("90", true, 270) != nullptr);
     CHECK(brimir_rotation_hint("180", true, 270) != nullptr);
     CHECK(brimir_rotation_hint("90", true, 90) == nullptr);

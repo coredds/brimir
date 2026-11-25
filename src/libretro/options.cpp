@@ -617,7 +617,7 @@ const char* brimir_rotation_hint(const char* rotationOption, bool stv, int gameR
     if (chosen == gameRotation) {
         return nullptr;
     }
-    return "Vertical game: set Screen Rotation to Auto (Quick Menu > Core Options > Video) to show it upright";
+    return "Vertical game: set Screen Rotation to Auto (Quick Menu > Core Options > Video Settings) to show it upright";
 }
 brimir::CartridgeChoice brimir_cartridge_choice(const char* value) {
     using brimir::CartridgeChoice;
