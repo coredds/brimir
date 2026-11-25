@@ -20,7 +20,7 @@ compared with MAME's.
 | `colmns97` | Columns '97 | JET | 3 buttons | Japan | full case; credits within 2 frames of MAME |
 | `puyosun` | Puyo Puyo Sun | J | 3 buttons | Japan | full case; credits within 3 frames of MAME |
 | `diehard` | Die Hard Arcade | UET | 3 buttons | USA (`epr-17952a.ic8`; no Japan region) | full case; needed the slave SH-2 hold-line interrupt fix |
-| `gaxeduel` | Golden Axe: The Duel | JUETL | 6 buttons | Japan | full case; boot timing equal to MAME frame for frame; all six buttons of both players proven in the game's own input test |
+| `gaxeduel` | Golden Axe: The Duel | JUETL | 6 buttons | Japan | full case; boot timing not measured against MAME (it runs the same BIOS check as the other games, see "Boot length"); all six buttons of both players proven in the game's own input test |
 | `cotton2` | Cotton 2 | JUET | 3 buttons | Japan | full case with continues; visuals match MAME's by eye |
 | `grdforce` | Guardian Force | JUET | 3 buttons | Japan | full case with continues; credits (including continues) within a frame of MAME |
 | `rsgun` | Radiant Silvergun | JUET | 3 buttons + a 4th (see below) | Japan | full case with continues; the 315-5881 chip's 134 accesses equal to MAME's, the 128 decrypted longs checked in a test |
@@ -68,7 +68,8 @@ full case therefore checks that instead of a second player joining.
 
 DaeJeon! SanJeon SuJeon's cartridge is scrambled: every byte is stored inverted with its bits shuffled. The core undoes
 it at load with MAME's `init_sanjeon` transform (XOR 0xFF, then five bit swaps), over the whole cartridge image, gaps
-included (so the SH-2 reads the gaps as 0xFF, as in MAME). libretro-stv's COMPATIBILITY.md lists the game as a 315-5838
+included (so the SH-2 reads the gaps as 0xFF inside the 32 MiB image, as in MAME; past the image's end Brimir mirrors the
+image where MAME reads 0xFF, as it does for every set since 0.10.0). libretro-stv's COMPATIBILITY.md lists the game as a 315-5838
 game, but its own database gives it no chip and the same transform; MAME's transform alone runs the game here, to the
 same screens as MAME's, so the set needs no protection chip.
 
@@ -78,7 +79,8 @@ reference for this game is libretro-stv (Mednafen-based), which runs it: its tra
 data words is identical to Brimir's over the attract mode and the start of play (the first 766,813 accesses of a 7200
 frame run; after that the two runs' games ask for different blocks as their timing drifts apart), and the screens match
 at every compared frame (title, character select with two players, the 100-metre dash). The boot itself (to the SEGA
-logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is supported; `decathlto` (V1.000) is not.
+logo and the title fade) shows the same screens as MAME's at snapshots 50 frames apart (the SEGA logo at 1250, the title
+fading in at 1850); the offset was not measured more finely. Only `decathlt` (V1.001) is supported; `decathlto` (V1.000) is not.
 
 ## Known differences from MAME
 
@@ -123,9 +125,11 @@ logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is sup
   SCU's HBlank-OUT lower cancels an HBlank-IN interrupt the slave has not taken yet (MAME's `HOLD_LINE` keeps it
   pending). Details in `src/core/BRIMIR_FORK.md` (the `SetIRLHoldLine` row). No game shows an effect: with either
   changed alone, Die Hard Arcade's first 2350 frames are identical.
-- **Boot length.** Brimir's BIOS check ends about 30 frames before MAME's (about frame 1130-1165 against 1191), and
-  every game boots 23-30 frames ahead of MAME. Measured on Die Hard Arcade (23 frames from the FBI screen on); the
-  other games were not measured one by one, but they run the same BIOS check. Cause: the BIOS (every dump here) looks
+- **Boot length.** Brimir's BIOS check ends before MAME's. Measured on Die Hard Arcade: 23 frames ahead from the FBI
+  screen on (the slave SH-2 starts at frame 495 against 521), and on Steep Slope Sliders: its 315-5881 is first read, at
+  the end of the BIOS check, at frame 1164 against MAME's 1192 (28 frames). The other games were not measured one by
+  one (Golden Axe: The Duel and Decathlete included; Decathlete's boot matches MAME's screens at 50-frame snapshots
+  only); they run the same BIOS check, so they should boot about as far ahead, but the lead is not known for them. Cause: the BIOS (every dump here) looks
   for a CD block, polling CR1-CR4 at 0x25890018 for "\0CDBLOCK" up to 200,001 times behind a "SYSTEM CHECKING, PLEASE
   WAIT A FEW SECONDS..." screen. MAME maps nothing at A-bus CS2 (reads 0), so the poll runs out (about 32 frames with
   Die Hard Arcade); Brimir keeps the Saturn's CD block mapped in ST-V mode, it answers, and the check passes at once.

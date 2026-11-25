@@ -302,6 +302,11 @@ build\bin\brimir_vkhost.exe --bios F:\Roms\BIOS\mpr-17933.bin --system-dir %TEMP
 build\bin\brimir_vkhost.exe --bios <bios> --system-dir <dir> --game Game.chd --option brimir_overscan=1 --dump-dir frames
 ```
 
+`brimir_vkhost` assumes rotation 0 unless `--option brimir_rotation=...` is given, while the core's own default is now
+Auto (vertical ST-V games are turned upright, Saturn games never). For a vertical game such as `shienryu` (MAME's ROT270),
+pass the game's rotation (`--option brimir_rotation=270`) when using `--hash-sample`, so the sample points map to the
+frame the core outputs.
+
 | Flag | Meaning |
 | --- | --- |
 | `--core <library>` | core to load (default: `brimir_libretro.dll` next to the executable, or `brimir_libretro.so` next to it or in `../lib`) |
