@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 # Project information
 project(Brimir
-    VERSION 0.10.0
+    VERSION 0.11.0
     DESCRIPTION "Sega Saturn emulation libretro core"
     LANGUAGES CXX C
 )
@@ -119,11 +119,11 @@ include(cmake/YmirDeps.cmake)
 
 # Set Brimir core version variables
 set(Brimir_VERSION_MAJOR 0)
-set(Brimir_VERSION_MINOR 10)
+set(Brimir_VERSION_MINOR 11)
 set(Brimir_VERSION_PATCH 0)
 set(Brimir_VERSION_PRERELEASE "")
 set(Brimir_VERSION_BUILD "")
-set(Brimir_VERSION "0.10.0")
+set(Brimir_VERSION "0.11.0")
 set(Brimir_DEV_BUILD OFF)
 # The core's developer log, printed to stdout. CI turns it off for the test jobs where ctest slows down on the output.
 option(Brimir_ENABLE_DEVLOG "Print the core's developer log to stdout" ON)

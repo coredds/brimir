@@ -1,7 +1,7 @@
 # Brimir Roadmap
 
-**Status**: Active — version 0.10.0. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
-**Last Updated**: 2026-11-23 - v0.10.0 added ST-V arcade support (eight games); five more games and Screen Rotation Auto are unreleased
+**Status**: Active — version 0.11.0. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
+**Last Updated**: 2026-11-25 - v0.11.0 added five more ST-V games (thirteen in all), Screen Rotation Auto and the SMEM save; v0.10.0 added ST-V arcade support
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes). The release history is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -127,7 +127,7 @@ Netplay peers must use the same time zone: the save state holds the clock, but t
 ### 25. More ST-V Arcade Games
 **Layer**: Bridge + small hooks in the core | **Target**: Post-1.0
 
-Thirteen games are done (see "Done"; the 315-5881 and 315-5838 chips and SanJeon's scramble are in). Open: more games from MAME's ST-V database (each needs its ROM list and a check against MAME), rewind and netplay checks with ST-V games, save states and run-ahead on the games other than Baku Baku Animal (the only game tried with both in RetroArch; on Decathlete only save and load state were tried, not run-ahead), a physical Android device, the ruling on the CD block (real ST-V hardware has none; Brimir keeps the Saturn's mapped, so Die Hard Arcade boots 23 frames ahead of MAME (measured) and Steep Slope Sliders 28 at its chip's first access, the other games not measured one by one; unmapping it would lengthen each boot by 44-111 frames with Brimir's timing), and the known differences from MAME (attract-mode pacing, Steep Slope Sliders' haze, Final Fight Revenge's Chinatown health bars, the 315-5881's block-to-block switch checked on synthetic data only; see `src/bridge/stv/STATUS.md`). The old branch `feature/stv-support` stays as reference. Big differentiator - no RetroArch core does ST-V well.
+Thirteen games are done (see "Done"; the 315-5881 and 315-5838 chips and SanJeon's scramble are in). Open: more games from MAME's ST-V database (each needs its ROM list and a check against MAME), rewind and netplay checks with ST-V games, save states and run-ahead on the games other than Baku Baku Animal (the only game tried with both in RetroArch; on Decathlete only save and load state were tried, not run-ahead), a physical Android device, and the known differences from MAME (attract-mode pacing, Steep Slope Sliders' haze, Final Fight Revenge's Chinatown health bars, the 315-5881's block-to-block switch checked on synthetic data only; see `src/bridge/stv/STATUS.md`). Decided, kept as a known difference: the CD block. Real ST-V hardware has none; Brimir keeps the Saturn's mapped in ST-V mode, so the BIOS's check for it passes at once and games boot slightly earlier than on real hardware (Die Hard Arcade 23 frames ahead of MAME, measured; Steep Slope Sliders 28 at its chip's first access; the other games not measured one by one). Unmapping it was considered and not done: with Brimir's timing every boot would end 44-111 frames later than now, after MAME's, and the real wait length is unknown. The old branch `feature/stv-support` stays as reference. Big differentiator - no RetroArch core does ST-V well.
 
 ---
 

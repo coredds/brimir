@@ -6,18 +6,12 @@ A Sega Saturn and Sega ST-V emulation core for libretro, built on the [Ymir](htt
 
 Brimir is a libretro core that wraps Ymir's cycle-accurate hardware layer. It provides accurate Saturn emulation with optimized software rendering, an optional Vulkan renderer and full VDP1/VDP2 support, and it also runs thirteen ST-V arcade games.
 
-## What's New since 0.10.0 (unreleased)
+## What's New in 0.11.0
 
 - **Five more ST-V games** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0, thirteen in all. Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). See [ST-V arcade games](#st-v-arcade-games).
-- **Screen Rotation: Auto** - the new default turns vertical ST-V games upright (Shienryu) and never rotates Saturn games; the rotated picture is reported as 3:4. **If you ran 0.10.0, your saved setting is "None"**: choose Auto in Quick Menu > Core Options > Video > Screen Rotation (TATE), or Shienryu comes up on its side.
+- **Screen Rotation: Auto** - the new default turns vertical ST-V games upright (Shienryu) and never rotates Saturn games; the rotated picture is reported as 3:4. **If you ran 0.10.0, your saved setting is "None"**: choose Auto in Quick Menu > Core Options > Video > Screen Rotation (TATE), or Shienryu comes up on its side (the core shows a hint on screen when it loads a vertical game under another setting).
 - **ST-V saves** - the SMPC's battery settings are saved too, so an ST-V `<set>.srm` is now 32,901 bytes; a 0.10.0 file (32,896 bytes) still loads. 0.10.0 ST-V save states still load.
 - **ST-V game defaults** - each set's own default EEPROM image is used (Shienryu sets up the cabinet for its vertical monitor, Steep Slope Sliders for one player).
-
-## What's New in 0.10.0
-
-- **ST-V arcade support** - eight Sega ST-V games run from their MAME ROM sets: Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force and Radiant Silvergun. See [ST-V arcade games](#st-v-arcade-games).
-- **Archived Saturn discs no longer load** - a `.zip` is now read only as an ST-V ROM set, and RetroArch no longer unpacks `.zip` or `.7z` files for the core. Extract the disc image and load its `.cue`, or convert it to CHD.
-- **Core info file** - `brimir_libretro.info` now lists the ST-V database next to the Saturn one.
 
 The history of every release is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -84,7 +78,7 @@ On Android the Vulkan renderer ran at full speed at 1x on the one phone tried, a
 ## Known Limitations
 
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2* on slower CPUs. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
-- **ST-V** - Only the thirteen games listed under [ST-V arcade games](#st-v-arcade-games). Attract-mode timing differs from MAME by some frames: Die Hard Arcade boots 23 frames ahead of MAME (measured; Steep Slope Sliders 28 at its chip's first access, the other games not measured one by one), because Brimir keeps the Saturn's CD block mapped and the BIOS's check for it passes at once, while MAME's times out; some scene changes drift by a few dozen frames, DaeJeon! SanJeon SuJeon's by up to about 100. Steep Slope Sliders shows its distant scenery in a haze where MAME draws it dark, and Final Fight Revenge draws one stage's health bars solid where MAME draws them half transparent. Decathlete (which MAME does not run) was checked against libretro-stv only. `src/bridge/stv/STATUS.md` has the list.
+- **ST-V** - Only the thirteen games listed under [ST-V arcade games](#st-v-arcade-games). Attract-mode timing differs from MAME by some frames: Die Hard Arcade boots 23 frames ahead of MAME (measured; Steep Slope Sliders 28 at its chip's first access, the other games not measured one by one), because Brimir keeps the Saturn's CD block mapped (a decision, kept as a known difference) and the BIOS's check for it passes at once, while MAME's times out; some scene changes drift by a few dozen frames, DaeJeon! SanJeon SuJeon's by up to about 100. Steep Slope Sliders shows its distant scenery in a haze where MAME draws it dark, and Final Fight Revenge draws one stage's health bars solid where MAME draws them half transparent. Decathlete (which MAME does not run) was checked against libretro-stv only. `src/bridge/stv/STATUS.md` has the list.
 - **Archived Saturn discs** - Not supported: a `.zip` is read as an ST-V ROM set only, and RetroArch does not unpack any archive (`.zip`, `.7z`) for the core. Extract the disc image or convert it to CHD.
 - **Controllers** - Ports 1 and 2 only (Ymir emulates no multitap). The six-axis Mission Stick, dual Mission Sticks, Twin-Stick and Stunner are not offered.
 - **CD Block LLE** — Low-level CD Block emulation is a work in progress in Ymir. With the real ROMs (`cdb106.bin` v1.06, `cdb105.bin` v1.05) the BIOS menu, Sega Rally Championship, Virtua Fighter 2, Burning Rangers, Guardian Heroes and Panzer Dragoon II Zwei boot to their intros and attract modes and run exactly with run-ahead and from a state on another instance; boots take about 0.2-2.5 s longer (11-152 frames) than with the high-level CD Block. Other games are untested.
@@ -252,7 +246,7 @@ Screen Rotation (TATE) at `Auto` (the default) the core turns it upright and rep
 other ST-V games are never rotated by Auto. `None`, `90°`, `180°` and `270°` override Auto for any content. **If you ran
 0.10.0, your saved setting is "None"** (the 0.10.0 default was "None" and RetroArch keeps what it saved): pick `Auto`
 in Quick Menu > Core Options > Video > Screen Rotation (TATE), or Shienryu comes up lying on its side (and the BIOS's
-own screens with it). Shienryu's default EEPROM, part of its ROM set, sets the cabinet up for the vertical monitor.
+own screens with it); the core shows a one-time hint on screen when it loads a vertical game under another setting. Shienryu's default EEPROM, part of its ROM set, sets the cabinet up for the vertical monitor.
 
 **ROM sets.** Load the MAME `.zip` of the game (for example `bakubaku.zip`) through RetroArch's Load Content; the set is
 recognised by its name and its file list (the extension alone is never enough), and `.bin`/`.rom` files are never taken

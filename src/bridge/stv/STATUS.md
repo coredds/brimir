@@ -135,10 +135,12 @@ fading in at 1850); the offset was not measured more finely. Only `decathlt` (V1
   Die Hard Arcade); Brimir keeps the Saturn's CD block mapped in ST-V mode, it answers, and the check passes at once.
   Unmapping it brings the screen back, but with Brimir's bus and SH-2 timing the poll is slower and Die Hard Arcade's
   boot then ends 18 to 85 frames after MAME's (CS2 access 2 to 40 cycles; MAME runs the poll at about one cycle per
-  instruction with no bus wait), so it stays mapped: matching MAME would mean changing shared timing. A real ST-V has
-  no CD block, so unmapping would be the more faithful choice; it is left for the developer to decide (it lengthens
-  every game's boot by 44-111 frames with Brimir's timing, the real wait length being unknown, and moves every
-  `[.stv-rom]` schedule).
+  instruction with no bus wait), so it stays mapped: matching MAME would mean changing shared timing. **Decided (the
+  developer's ruling): ST-V mode keeps the Saturn's CD block mapped, and the shorter boot is a known difference from
+  MAME and from real hardware, not a bug to fix.** A real ST-V has no CD block, so unmapping was considered and not
+  done: with Brimir's timing it would lengthen every game's boot by 44-111 frames (the boots would end after MAME's, not
+  before), the real wait length is unknown, so the result would be no more certain to be right, and it would move every
+  `[.stv-rom]` schedule.
 - **Cartridge gaps** are filled with 0x00, as MAME 0.289 (`ROMREGION_ERASE00`); current MAME master fills them with 0xFF
   and notes that the `jp5` BIOS (`epr-17740.ic8`) needs it. No game here reads a gap with the verified BIOS dumps.
   (DaeJeon! SanJeon SuJeon's gaps read 0xFF: its scramble turns the 0x00 fill into 0xFF, as in MAME 0.289.)

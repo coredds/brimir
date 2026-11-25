@@ -296,18 +296,18 @@ jobs:
 
             ### ${{ github.ref_name }}
 
-            **ST-V arcade support (new)** - Brimir now runs eight Sega ST-V games from their MAME ROM sets (`.zip`): Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force and Radiant Silvergun. Put the ST-V BIOS (`epr-20091.ic8` Japan, `epr-17952a.ic8` USA, `epr-17954a.ic8` Europe, or MAME's other names) in RetroArch's system folder; no Saturn BIOS is needed. Select is the coin, L3 Service, R3 Test; saves go to `<set>.srm`. Both renderers work. Only these eight games are supported.
+            **Five more ST-V games (new)** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0 (Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force, Radiant Silvergun): thirteen in all, run from their MAME ROM sets (`.zip`). Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). Each set's own default EEPROM is used, so Shienryu starts set up for the vertical monitor.
 
-            **Changed - archived Saturn discs no longer load.** A `.zip` is now read only as an ST-V ROM set, and the core asks RetroArch not to unpack archives, so a Saturn disc image inside a `.zip` or `.7z` no longer loads. Extract it and load the `.cue`, or convert it to CHD.
+            **Screen Rotation: Auto (new default)** - vertical ST-V games (Shienryu) are turned upright by themselves and shown at 3:4; Saturn games are never rotated. **If you ran 0.10.0, your saved setting is "None": choose Auto in Quick Menu > Core Options > Video > Screen Rotation (TATE) for Shienryu**; the core shows a hint on screen when it loads a vertical game under another setting.
 
-            The core's `.info` file now lists the ST-V database next to the Saturn one (display name "Sega - Saturn/ST-V (Brimir)").
+            **ST-V saves** - the SMPC's battery settings are saved too, so an ST-V `<set>.srm` is now 32,901 bytes (0.10.0: 32,896). 0.10.0 saves and ST-V save states still load; Saturn saves and states are unchanged.
 
-            Saturn emulation and save states are unchanged from 0.9.0, except that archived discs no longer load. The unstripped Android core for crash reports is `brimir-${{ github.ref_name }}-android-arm64-symbols.zip`.
+            Put the ST-V BIOS (`epr-20091.ic8` Japan, `epr-17952a.ic8` USA, `epr-17954a.ic8` Europe, or MAME's other names) in RetroArch's system folder; no Saturn BIOS is needed. Select is the coin, L3 Service, R3 Test. A `.zip` is read only as an ST-V ROM set: a Saturn disc image inside a `.zip` or `.7z` does not load (extract it and load the `.cue`, or convert it to CHD). The unstripped Android core for crash reports is `brimir-${{ github.ref_name }}-android-arm64-symbols.zip`.
 
-            Every download now includes `LICENSE` (GPL-3.0) and `THIRD_PARTY_NOTICES.txt` (the licences of the third-party code in the core).
+            Every download includes `LICENSE` (GPL-3.0) and `THIRD_PARTY_NOTICES.txt` (the licences of the third-party code in the core).
 
             **Known Limitations**
-            - ST-V: only the eight games above. Known differences from MAME (attract-mode timing off by some frames, the SMPC's battery settings not saved) are in `src/bridge/stv/STATUS.md`; rewind and netplay were not tested with ST-V games.
+            - ST-V: only the thirteen games above. Known differences from MAME (attract-mode timing off by some frames, games booting slightly earlier because the Saturn's CD block stays mapped, a few graphics details in Steep Slope Sliders and Final Fight Revenge) are in `src/bridge/stv/STATUS.md`; rewind and netplay were not tested with ST-V games.
             - Android (arm64): install the core with Load Core > Install or Restore a Core. RetroArch only offers Brimir for games when it has the core's `.info` file: point Settings > Directory > Core Info at a folder holding `brimir_libretro.info` (that folder then replaces RetroArch's own info files) and turn off the file browser's extension filter. No internal resolution above 1x yet. Use the Vulkan renderer on phones (the software renderer was slow on the Galaxy A56); Close Content or Quit before leaving RetroArch.
             - Vulkan at 4x: Daytona USA CE's SEGA logo and attract-mode restart stutter; rotated or distorted sprites (e.g. Astal) may differ from 1x at their edges; magnified textures stay blocky. Not tested on real Macs (MoltenVK). CD Block low-level emulation is tested on six contents only.
             - Interlaced / high-res titles (e.g., *Virtua Fighter 2*) may still show audio dropouts on CPU-bound setups when deinterlacing is enabled. Use Deinterlacing Mode = `None` for the best performance in these titles.
