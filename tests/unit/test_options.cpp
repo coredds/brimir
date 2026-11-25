@@ -53,6 +53,39 @@ TEST_CASE("Core options include the RTC mode option", "[options][libretro][rtc]"
     CHECK(std::strstr(found->info, "Applies when content is loaded") != nullptr);
 }
 
+TEST_CASE("Core options: Screen Rotation is Auto by default and keeps the explicit values", "[options][libretro][stv]") {
+    const struct retro_core_options_v2* options = brimir_get_core_options_v2();
+    REQUIRE(options != nullptr);
+
+    const retro_core_option_v2_definition* found = nullptr;
+    for (int i = 0; options->definitions[i].key != nullptr; ++i) {
+        if (std::strcmp(options->definitions[i].key, "brimir_rotation") == 0) {
+            found = &options->definitions[i];
+            break;
+        }
+    }
+
+    REQUIRE(found != nullptr);
+    REQUIRE(found->default_value != nullptr);
+    CHECK(std::strcmp(found->default_value, "auto") == 0);
+    const struct {
+        const char* value;
+        const char* label;
+    } expected[] = {{"auto", "Auto"}, {"0", "None"}, {"90", "90\u00B0"}, {"180", "180\u00B0"}, {"270", "270\u00B0"}};
+    int i = 0;
+    for (const auto& e : expected) {
+        INFO("value " << i);
+        REQUIRE(found->values[i].value != nullptr);
+        CHECK(std::strcmp(found->values[i].value, e.value) == 0);
+        REQUIRE(found->values[i].label != nullptr);
+        CHECK(std::strcmp(found->values[i].label, e.label) == 0);
+        ++i;
+    }
+    CHECK(found->values[i].value == nullptr);
+    REQUIRE(found->info != nullptr);
+    CHECK(std::strstr(found->info, "Auto") != nullptr);
+}
+
 TEST_CASE("cartridge: core option values and labels", "[options][libretro][cartridge]") {
     const struct retro_core_options_v2* options = brimir_get_core_options_v2();
     REQUIRE(options != nullptr);
@@ -260,7 +293,7 @@ TEST_CASE("Core options default values match OptionCache defaults", "[options][l
         { "brimir_autodetect_region",    "enabled"  },
         { "brimir_audio_interpolation",  "linear"   },
         { "brimir_audio_volume",         "100"      },
-        { "brimir_rotation",             "0"        },
+        { "brimir_rotation",             "auto"     },
         { "brimir_overscan",             "0"        },
         { "brimir_cd_speed",             "2"        },
         { "brimir_sh2_overclock",        "100"      },

@@ -43,7 +43,7 @@ struct GameInfo {
     Controls controls;
     Chip chip;
     uint32_t cryptKey;
-    bool rotated;
+    uint16_t rotation; // degrees (0, 90, 180, 270): the libretro rotation the game needs to appear upright
     std::span<const RomEntry> roms;
 };
 

@@ -282,7 +282,7 @@ struct OptionCache {
     std::string autodetect_region = "enabled";
     BrimirDeinterlaceOptions deinterlace;
     std::string audio_volume = "100";
-    std::string rotation = "0";
+    std::string rotation = "auto";
     std::string overscan = "0";
     std::string profiling = "disabled";
     std::string cd_preload = "enabled";
@@ -411,7 +411,13 @@ static void apply_core_options(bool force) {
         }
     }
     apply("brimir_audio_volume",            g_options.audio_volume,     [](const char* v){ g_core->SetAudioVolume(atoi(v)); });
-    apply("brimir_rotation",                g_options.rotation,         [](const char* v){ g_core->SetRotation(atoi(v)); });
+    apply("brimir_rotation",                g_options.rotation,         [](const char* v){
+        if (strcmp(v, "auto") == 0) {
+            g_core->SetRotationAuto();
+        } else {
+            g_core->SetRotation(atoi(v));
+        }
+    });
     apply("brimir_overscan",                g_options.overscan,         [](const char* v){
         int overscan = atoi(v);
         g_core->SetOverscanCrop(overscan * 16, overscan * 16);

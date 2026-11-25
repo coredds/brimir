@@ -2362,7 +2362,7 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         m_rawHeight = height;
         m_rawSettings.cropH = static_cast<uint32_t>(m_overscanCropH);
         m_rawSettings.cropV = static_cast<uint32_t>(m_overscanCropV);
-        m_rawSettings.rotation = static_cast<uint32_t>(m_rotation);
+        m_rawSettings.rotation = static_cast<uint32_t>(GetEffectiveRotation());
         return;
     }
 
@@ -2477,10 +2477,11 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
         }
     }
 
-    // Step 2: TATE rotation
-    if (m_rotation != 0) {
-        uint32_t rotW = (m_rotation == 90 || m_rotation == 270) ? srcHeight : srcWidth;
-        uint32_t rotH = (m_rotation == 90 || m_rotation == 270) ? srcWidth : srcHeight;
+    // Step 2: TATE rotation (the explicit option or, under Auto, the game's)
+    const int rotation = GetEffectiveRotation();
+    if (rotation != 0) {
+        uint32_t rotW = (rotation == 90 || rotation == 270) ? srcHeight : srcWidth;
+        uint32_t rotH = (rotation == 90 || rotation == 270) ? srcWidth : srcHeight;
 
         size_t rotPixels = static_cast<size_t>(rotW) * rotH;
         std::vector<uint32_t>* rotBuf = (srcBuf == m_displayFramebuffer.data())
@@ -2491,7 +2492,7 @@ void CoreWrapper::OnFrameComplete(uint32_t* fb, uint32_t width, uint32_t height)
             rotBuf->resize(rotPixels);
         }
 
-        switch (m_rotation) {
+        switch (rotation) {
             case 90:
                 for (uint32_t y = 0; y < rotH; ++y) {
                     for (uint32_t x = 0; x < rotW; ++x) {
@@ -2588,7 +2589,7 @@ GunScreen CoreWrapper::GetGunScreen() const {
     }
     screen.cropH = static_cast<uint32_t>(m_overscanCropH);
     screen.cropV = static_cast<uint32_t>(m_overscanCropV);
-    screen.rotation = static_cast<uint32_t>(m_rotation);
+    screen.rotation = static_cast<uint32_t>(GetEffectiveRotation());
     return screen;
 }
 
@@ -2791,7 +2792,7 @@ gpu::VulkanVDPRenderer* CoreWrapper::InstallVulkanRenderer() {
         m_deviceFrame.height = height;
         m_deviceFrame.settings.cropH = static_cast<uint32_t>(m_overscanCropH);
         m_deviceFrame.settings.cropV = static_cast<uint32_t>(m_overscanCropV);
-        m_deviceFrame.settings.rotation = static_cast<uint32_t>(m_rotation);
+        m_deviceFrame.settings.rotation = static_cast<uint32_t>(GetEffectiveRotation());
     };
     ApplyVulkanRendererThreading();
     return m_vulkanRenderer;
@@ -2993,6 +2994,22 @@ void CoreWrapper::SetRotation(int degrees) {
         degrees = 0;
     }
     m_rotation = degrees;
+    m_rotationAuto = false;
+}
+
+void CoreWrapper::SetRotationAuto() {
+    m_rotationAuto = true;
+}
+
+int CoreWrapper::GetEffectiveRotation() const {
+    if (!m_rotationAuto) {
+        return m_rotation;
+    }
+    const stv::GameInfo* game = GetSTVGame();
+    if (game == nullptr) {
+        return 0;
+    }
+    return m_testSTVRotation >= 0 ? m_testSTVRotation : static_cast<int>(game->rotation);
 }
 
 void CoreWrapper::SetOverscanCrop(int horizontal, int vertical) {

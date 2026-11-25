@@ -106,14 +106,14 @@ constexpr RomEntry kRsgunRoms[] = {
 };
 
 constexpr GameInfo kGames[] = {
-    {"bakubaku", "Baku Baku Animal", kJapan, Controls::ThreeButtons, Chip::None, 0, false, kBakubakuRoms},
-    {"colmns97", "Columns '97", kJET, Controls::ThreeButtons, Chip::None, 0, false, kColmns97Roms},
-    {"puyosun", "Puyo Puyo Sun", kJapan, Controls::ThreeButtons, Chip::None, 0, false, kPuyosunRoms},
-    {"diehard", "Die Hard Arcade", kUET, Controls::ThreeButtons, Chip::None, 0, false, kDiehardRoms},
-    {"gaxeduel", "Golden Axe: The Duel", kJUETL, Controls::SixButtons, Chip::None, 0, false, kGaxeduelRoms},
-    {"cotton2", "Cotton 2", kJUET, Controls::ThreeButtons, Chip::None, 0, false, kCotton2Roms},
-    {"grdforce", "Guardian Force", kJUET, Controls::ThreeButtons, Chip::None, 0, false, kGrdforceRoms},
-    {"rsgun", "Radiant Silvergun", kJUET, Controls::RadiantSilvergun, Chip::Crypt315_5881, 0x05272d01, false,
+    {"bakubaku", "Baku Baku Animal", kJapan, Controls::ThreeButtons, Chip::None, 0, 0, kBakubakuRoms},
+    {"colmns97", "Columns '97", kJET, Controls::ThreeButtons, Chip::None, 0, 0, kColmns97Roms},
+    {"puyosun", "Puyo Puyo Sun", kJapan, Controls::ThreeButtons, Chip::None, 0, 0, kPuyosunRoms},
+    {"diehard", "Die Hard Arcade", kUET, Controls::ThreeButtons, Chip::None, 0, 0, kDiehardRoms},
+    {"gaxeduel", "Golden Axe: The Duel", kJUETL, Controls::SixButtons, Chip::None, 0, 0, kGaxeduelRoms},
+    {"cotton2", "Cotton 2", kJUET, Controls::ThreeButtons, Chip::None, 0, 0, kCotton2Roms},
+    {"grdforce", "Guardian Force", kJUET, Controls::ThreeButtons, Chip::None, 0, 0, kGrdforceRoms},
+    {"rsgun", "Radiant Silvergun", kJUET, Controls::RadiantSilvergun, Chip::Crypt315_5881, 0x05272d01, 0,
      kRsgunRoms},
 };
 

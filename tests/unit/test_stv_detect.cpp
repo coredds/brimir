@@ -324,7 +324,7 @@ TEST_CASE("ST-V game database: the eight games' details", "[stv]") {
         CHECK(Game(name).chip == Chip::None);
         CHECK(Game(name).controls == Controls::ThreeButtons);
     }
-    for (const auto &game : brimir::stv::AllGames()) CHECK_FALSE(game.rotated);
+    for (const auto &game : brimir::stv::AllGames()) CHECK(game.rotation == 0);
 
     const auto regionsOf = [](const char *name) {
         return std::vector<Region>(Game(name).regions.begin(), Game(name).regions.end());

@@ -343,18 +343,20 @@ static struct retro_core_option_v2_definition option_defs[] = {
         "brimir_rotation",
         "Screen Rotation (TATE)",
         nullptr,
-        "Rotate the screen for vertical (TATE) arcade games. "
+        "Rotate the screen for vertical (TATE) arcade games. Auto follows the game: vertical ST-V games "
+        "are turned upright and Saturn games are never rotated. The other values override it for any game: "
         "90° and 270° are for vertical shooters like Battle Garegga, Dodonpachi, Radiant Silvergun.",
         nullptr,
         "video",
         {
+            { "auto", "Auto" },
             { "0", "None" },
             { "90", "90\u00B0" },
             { "180", "180\u00B0" },
             { "270", "270\u00B0" },
             { nullptr, nullptr }
         },
-        "0"
+        "auto"
     },
     {
         "brimir_overscan",

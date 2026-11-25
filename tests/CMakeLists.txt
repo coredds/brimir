@@ -143,6 +143,7 @@ add_executable(brimir_tests
     unit/test_stv_sram.cpp
     unit/test_stv_state.cpp
     unit/test_stv_games.cpp
+    unit/test_stv_rotation.cpp
 )
 
 target_link_libraries(brimir_tests PRIVATE

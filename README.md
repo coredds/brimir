@@ -54,7 +54,7 @@ The history of every release is in [CHANGELOG.md](CHANGELOG.md).
   - Current (legacy dual-field)
 - **Post-Processing**:
   - Configurable overscan cropping (horizontal and vertical)
-  - Screen rotation (TATE) for vertical games
+  - Screen rotation (TATE) for vertical games: Auto follows the game (vertical ST-V games are turned upright, Saturn games are not rotated), or a fixed 90°, 180° or 270°
 
 ### Integration
 - Libretro API v2 with live-updatable core options
@@ -531,7 +531,7 @@ The deployment helper uses its own `build` directory, not `build-release`. For t
 | Video | Deinterlacing Mode | Bob, Weave, Blend, Current, None |
 | Video | Threaded VDP1 Rendering | On/Off |
 | Video | Threaded VDP2 Rendering | On/Off |
-| Video | Screen Rotation (TATE) | None, 90°, 180°, 270° |
+| Video | Screen Rotation (TATE) | Auto (default), None, 90°, 180°, 270°; Auto turns vertical ST-V games upright and never rotates Saturn games, the others override it for any game |
 | Video | Overscan Crop | None, Small (~16px), Medium (~32px), Large (~48px) |
 | Audio | Audio Interpolation | Linear, Nearest |
 | Audio | Audio Volume | 0%, 25%, 50%, 75%, 100%, 125%, 150%, 175%, 200% |
