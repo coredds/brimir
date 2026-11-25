@@ -172,9 +172,34 @@ stv::STVStateBlock PatternBlock() {
     for (size_t i = 0; i < sizeof(block.protection); i++) {
         protection[i] = static_cast<uint8_t>(i * 11 + 3);
     }
+    auto *comp = reinterpret_cast<uint8_t *>(&block.comp5838);
+    for (size_t i = 0; i < sizeof(block.comp5838); i++) {
+        comp[i] = static_cast<uint8_t>(i * 7 + 5);
+    }
     block.schedulerCount = 0x0123456789ABCDEFull;
     block.nsRemainderBits = 0x3FE0000000000000ull; // 0.5
     return block;
+}
+
+// A block as Brimir 0.10.0 wrote it (version 1, stv_state.cpp at v0.10.0): magic, version, game hash, I/O board,
+// protection, scheduler count, remainder, flags, then the trailer (block size, 'S','T','V','1')
+std::vector<uint8_t> EncodedVersion1(const stv::STVStateBlock &block) {
+    std::vector<uint8_t> out;
+    const auto put = [&](const auto &value) {
+        const auto *bytes = reinterpret_cast<const uint8_t *>(&value);
+        out.insert(out.end(), bytes, bytes + sizeof value);
+    };
+    put(stv::kSTVStateMagic);
+    put(uint32_t{1});
+    put(block.gameHash);
+    put(block.io);
+    put(block.protection);
+    put(block.schedulerCount);
+    put(block.nsRemainderBits);
+    put(block.flags);
+    put(static_cast<uint32_t>(out.size()));
+    out.insert(out.end(), std::begin(stv::kSTVTrailerMagic), std::end(stv::kSTVTrailerMagic));
+    return out;
 }
 
 uint8_t PortC(CoreWrapper &core) {
@@ -199,6 +224,7 @@ TEST_CASE("stv state: the block round trips through its encoding", "[stv]") {
     CHECK(back.gameHash == block.gameHash);
     CHECK(std::memcmp(&back.io, &block.io, sizeof block.io) == 0);
     CHECK(std::memcmp(&back.protection, &block.protection, sizeof block.protection) == 0);
+    CHECK(std::memcmp(&back.comp5838, &block.comp5838, sizeof block.comp5838) == 0);
     CHECK(back.schedulerCount == block.schedulerCount);
     CHECK(back.nsRemainderBits == block.nsRemainderBits);
     CHECK(back.flags == 0);
@@ -232,7 +258,8 @@ TEST_CASE("stv state: a block with a wrong magic, version, size or trailer is re
     };
 
     CHECK_FALSE(refused([](auto &b) { b[0] ^= 1; }));                       // magic
-    CHECK_FALSE(refused([](auto &b) { b[4] = 2; }));                        // version
+    CHECK_FALSE(refused([](auto &b) { b[4] = 3; }));                        // version
+    CHECK_FALSE(refused([](auto &b) { b[4] = 1; }));                        // version 1 with version 2's size
     CHECK_FALSE(refused([](auto &b) { b[4] = 0; }));
     CHECK_FALSE(refused([](auto &b) { b.pop_back(); }));                    // size
     CHECK_FALSE(refused([](auto &b) { b.push_back(0); }));
@@ -244,6 +271,55 @@ TEST_CASE("stv state: a block with a wrong magic, version, size or trailer is re
     CHECK_FALSE(refused([](auto &b) { b[b.size() - 5] = 1; }));
     CHECK_FALSE(refused([](auto &b) { b[stv::STVStateBlockSize() - 4] = 1; })); // an unknown flag
     CHECK(refused([](auto &) {}));
+}
+
+TEST_CASE("stv state: a version 1 block (Brimir 0.10.0) decodes with the 315-5838 at its reset value", "[stv]") {
+    stv::STVStateBlock block = PatternBlock();
+    const std::vector<uint8_t> v1 = EncodedVersion1(block);
+    REQUIRE(v1.size() == stv::STVStateTailSize(1));
+    CHECK(stv::STVStateTailSize(1) < stv::STVStateTailSize());
+    CHECK(stv::STVStateTailSize(2) == stv::STVStateTailSize());
+    CHECK(stv::STVStateTailSize(3) == 0);
+
+    std::vector<uint8_t> payload = {9, 8, 7};
+    payload.insert(payload.end(), v1.begin(), v1.end());
+    CHECK(stv::HasSTVTrailer(payload));
+    CHECK(stv::STVStateTailSizeIn(payload) == v1.size());
+
+    stv::STVStateBlock back = PatternBlock(); // the 5838 part holds a pattern: the decoding must reset it
+    REQUIRE(stv::DecodeSTVState(v1, back));
+    CHECK(back.version == 1);
+    CHECK(back.gameHash == block.gameHash);
+    CHECK(std::memcmp(&back.io, &block.io, sizeof block.io) == 0);
+    CHECK(std::memcmp(&back.protection, &block.protection, sizeof block.protection) == 0);
+    const ymir::cart::STV3155838::State reset{};
+    CHECK(std::memcmp(&back.comp5838, &reset, sizeof reset) == 0);
+    CHECK(back.schedulerCount == block.schedulerCount);
+    CHECK(back.nsRemainderBits == block.nsRemainderBits);
+
+    // the next save is a version 2 block
+    const std::vector<uint8_t> again = Encoded(back);
+    CHECK(again.size() == stv::STVStateTailSize());
+    stv::STVStateBlock v2;
+    REQUIRE(stv::DecodeSTVState(again, v2));
+    CHECK(v2.version == stv::kSTVStateVersion);
+
+    // a version 1 block with damage is still refused
+    std::vector<uint8_t> bad = v1;
+    bad[4] = 2; // version 2 with version 1's size
+    CHECK_FALSE(stv::DecodeSTVState(bad, back));
+    bad = v1;
+    bad[v1.size() - 12] = 1; // an unknown flag
+    CHECK_FALSE(stv::DecodeSTVState(bad, back));
+}
+
+TEST_CASE("stv state: a block of an unknown version is refused with a message naming it", "[stv]") {
+    std::vector<uint8_t> bytes = Encoded(PatternBlock());
+    bytes[4] = 3;
+    stv::STVStateBlock out;
+    std::string why;
+    CHECK_FALSE(stv::DecodeSTVState(bytes, out, &why));
+    CHECK(why.find("version 3") != std::string::npos);
 }
 
 TEST_CASE("stv state: a state is tied to its game by the hash of the short name", "[stv]") {
@@ -484,8 +560,65 @@ TEST_CASE("stv state: a damaged ST-V state is refused and changes nothing", "[st
         std::memcpy(p.data() + at, &bits, 8);
     }));
 
+    CHECK(refused([&](auto &p) {
+        // a 315-5838 state that is not the reset value, for a cartridge without the chip
+        const size_t at = blockAt + stv::STVStateBlockSize() - 4 - sizeof(ymir::cart::STV3155838::State) +
+                          offsetof(ymir::cart::STV3155838::State, active);
+        p[at] = 1;
+    }));
+
     // the undamaged state still loads
     REQUIRE(core.LoadState(state.data(), state.size()));
+}
+
+TEST_CASE("stv state: a Brimir 0.10.0 state (block version 1) loads for a plain and a 315-5881 game", "[stv]") {
+    for (const char *game : {"bakubaku", "rsgun"}) {
+        INFO(game);
+        Session session(game == std::string("rsgun") ? "brimir_stv_state_v1_rsgun" : "brimir_stv_state_v1_plain",
+                        game);
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(session.Load(core));
+        Quiet(core);
+        core.SetSTVInput(0, stv::MapSTVInput(kSelect, stv::Controls::ThreeButtons));
+        for (int i = 0; i < 4; i++) {
+            core.RunFrame();
+        }
+        const stv::STVStateBlock saved = Capture(core);
+        const uint64_t count = core.GetSaturn()->GetSchedulerCount();
+        const std::vector<uint8_t> payload = Payload(Save(core));
+
+        // the same payload with the block as 0.10.0 wrote it
+        std::vector<uint8_t> old(payload.begin(), payload.end() - static_cast<std::ptrdiff_t>(stv::STVStateTailSize()));
+        const std::vector<uint8_t> v1 = EncodedVersion1(saved);
+        old.insert(old.end(), v1.begin(), v1.end());
+        const std::vector<uint8_t> state = Frame(old);
+
+        core.SetSTVInput(0, {});
+        for (int i = 0; i < 3; i++) {
+            core.RunFrame();
+        }
+        REQUIRE(core.LoadState(state.data(), state.size()));
+        CHECK(core.GetLastStateError().empty());
+        CHECK(Encoded(Capture(core)) == Encoded(saved));
+        CHECK(core.GetSaturn()->GetSchedulerCount() == count);
+
+        // and in a fresh core
+        CoreWrapper fresh;
+        REQUIRE(fresh.Initialize());
+        REQUIRE(session.Load(fresh));
+        Quiet(fresh);
+        fresh.RunFrame();
+        REQUIRE(fresh.LoadState(state.data(), state.size()));
+        CHECK(Encoded(Capture(fresh)) == Encoded(saved));
+
+        // a block of a version this core does not know is refused, naming it
+        std::vector<uint8_t> future = payload;
+        future[future.size() - stv::STVStateTailSize() + 4] = 3;
+        const std::vector<uint8_t> futureState = Frame(future);
+        CHECK_FALSE(fresh.LoadState(futureState.data(), futureState.size()));
+        CHECK(fresh.GetLastStateError().find("version 3") != std::string::npos);
+    }
 }
 
 TEST_CASE("stv state: loading a state the cartridge slot keeps the ST-V cartridge", "[stv]") {

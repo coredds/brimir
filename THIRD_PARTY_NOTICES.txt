@@ -14,41 +14,42 @@ they cover.
 Which components are in which download
 --------------------------------------
   All downloads (Windows x64, Linux x64, Linux arm64, macOS arm64, Android
-  arm64): sections 1 to 19, except where the section says otherwise.
-  x86-64 builds only (Windows x64, Linux x64): asmjit (section 20).
+  arm64): sections 1 to 20, except where the section says otherwise.
+  x86-64 builds only (Windows x64, Linux x64): asmjit (section 21).
   Builds with the Vulkan renderer (all of the downloads above): volk, the
-  Khronos Vulkan headers and libretro_vulkan.h (sections 21 to 23).
+  Khronos Vulkan headers and libretro_vulkan.h (sections 22 to 24).
   Android only: the C++ runtime statically linked into the core (section
-  24).
+  25).
 
 Index
 -----
   Code carried over into Brimir's own source files
     1. Ymir
     2. MAME - 315-5881 cartridge decryption/decompression chip
-    3. MAME - serial EEPROM (eeprom_serial_93cxx_device)
-    4. MAME - ST-V driver (src/mame/sega/stv.cpp, MAME 0.289)
-    5. cppcoro (lightweight_manual_reset_event)
-    6. Mednafen and Yabause (data adapted in Ymir)
-    7. ares (Motorola 68000 NBCD instruction, adapted in Ymir)
+    3. MAME - 315-5838 cartridge compression/encryption chip
+    4. MAME - serial EEPROM (eeprom_serial_93cxx_device)
+    5. MAME - ST-V driver (src/mame/sega/stv.cpp, MAME 0.289)
+    6. cppcoro (lightweight_manual_reset_event)
+    7. Mednafen and Yabause (data adapted in Ymir)
+    8. ares (Motorola 68000 NBCD instruction, adapted in Ymir)
   Libraries compiled into the core
-    8. fmt
-    9. mio
-   10. concurrentqueue (moodycamel::ConcurrentQueue, BlockingConcurrentQueue)
-   11. xxHash
-   12. LZ4
-   13. libchdr
-   14. dr_flac (dr_libs)
-   15. zlib
-   16. Zstandard
-   17. LZMA SDK
-   18. dr_mp3 (dr_libs) and the minimp3 decoder inside it
-   19. stb_vorbis (stb)
-   20. asmjit
-   21. volk
-   22. Khronos Vulkan-Headers
-   23. libretro.h and libretro_vulkan.h
-   24. LLVM libc++, libc++abi and libunwind (Android NDK)
+    9. fmt
+   10. mio
+   11. concurrentqueue (moodycamel::ConcurrentQueue, BlockingConcurrentQueue)
+   12. xxHash
+   13. LZ4
+   14. libchdr
+   15. dr_flac (dr_libs)
+   16. zlib
+   17. Zstandard
+   18. LZMA SDK
+   19. dr_mp3 (dr_libs) and the minimp3 decoder inside it
+   20. stb_vorbis (stb)
+   21. asmjit
+   22. volk
+   23. Khronos Vulkan-Headers
+   24. libretro.h and libretro_vulkan.h
+   25. LLVM libc++, libc++abi and libunwind (Android NDK)
 
 ==============================================================================
 1. Ymir
@@ -62,7 +63,7 @@ software renderer, the disc loaders and the save states) is Ymir's, copied from
 upstream, with the changes listed in src/core/BRIMIR_FORK.md. The VDP1/VDP2 GPU
 renderer front halves and shaders in src/gpu are ported from Ymir's Direct3D 12
 and Vulkan renderers. Ymir is licensed under the GPL-3.0, the same licence as Brimir.
-Its 68000 code includes an adaptation of the ares emulator (section 7).
+Its 68000 code includes an adaptation of the ares emulator (section 8).
 
 Copyright (C) StrikerX3 and the Ymir contributors.
 
@@ -101,7 +102,37 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWIS
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-3. MAME - serial EEPROM (eeprom_serial_93cxx_device)
+3. MAME - 315-5838 cartridge compression/encryption chip
+==============================================================================
+URL:      https://github.com/mamedev/mame (src/mame/sega/315-5838_317-0229_comp.cpp, MAME 0.289)
+Licence:  BSD-3-Clause
+Used in:  all downloads (src/bridge/stv/stv_315_5838.cpp and .hpp, ST-V games with the chip)
+
+The cipher, the table uploads and the decompression are a translation of MAME's code.
+
+------------------------------------------------------------------------------
+Copyright (c) David Haywood, Samuel Neves, Peter Wilhelmsen, Morten Shearman Kirkegaard
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+   disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
+   following disclaimer in the documentation and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote
+   products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+==============================================================================
+4. MAME - serial EEPROM (eeprom_serial_93cxx_device)
 ==============================================================================
 URL:      https://github.com/mamedev/mame (src/devices/machine/eepromser.cpp, eeprom.cpp, MAME 0.289)
 Licence:  BSD-3-Clause
@@ -131,7 +162,7 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWIS
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-4. MAME - ST-V driver (src/mame/sega/stv.cpp, MAME 0.289)
+5. MAME - ST-V driver (src/mame/sega/stv.cpp, MAME 0.289)
 ==============================================================================
 URL:      https://github.com/mamedev/mame
 Licence:  LGPL-2.1-or-later, used by Brimir under the GPL-3.0
@@ -139,7 +170,8 @@ Used in:  all downloads (src/bridge/stv/stv_cartridge.cpp, stv_io.cpp, stv_game_
 
 What it covers: the protection register handlers of stv_cartridge.cpp
 (ReadProtectionRegister, WriteProtectionRegister) are derived from stv_state::
-common_prot_r and common_prot_w; the input port layout of stv_io.cpp follows the
+common_prot_r and common_prot_w, and its 315-5838 connection (IsComp5838Read,
+WriteComp5838) from decathlt_prot_r, decathlt_prot_srcaddr_w and init_decathlt; the input port layout of stv_io.cpp follows the
 driver; the game list (stv_game_db.cpp) and the BIOS file list (stv_bios.cpp) are
 transcribed from its ROM definitions (names, sizes, CRC-32 values, keys).
 
@@ -158,7 +190,7 @@ The ST-V BIOS and game ROMs themselves are not part of Brimir and are not
 distributed with it.
 
 ==============================================================================
-5. cppcoro (lightweight_manual_reset_event)
+6. cppcoro (lightweight_manual_reset_event)
 ==============================================================================
 URL:      https://github.com/lewissbaker/cppcoro
 Licence:  MIT
@@ -186,7 +218,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-6. Mednafen and Yabause (data adapted in Ymir)
+7. Mednafen and Yabause (data adapted in Ymir)
 ==============================================================================
 URL:      https://mednafen.github.io/ and https://yabause.org/
 Licence:  GPL-2.0-or-later (both)
@@ -201,7 +233,7 @@ later version; Brimir uses that material under the GPL-3.0 (the file LICENSE nex
 to this one).
 
 ==============================================================================
-7. ares (Motorola 68000 NBCD instruction, adapted in Ymir)
+8. ares (Motorola 68000 NBCD instruction, adapted in Ymir)
 ==============================================================================
 URL:      https://github.com/ares-emulator/ares
 Licence:  ISC
@@ -225,7 +257,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-8. fmt 12.1.0
+9. fmt 12.1.0
 ==============================================================================
 URL:      https://github.com/fmtlib/fmt
 Licence:  MIT (with an optional exception for embedded object code)
@@ -261,7 +293,7 @@ source code, you may redistribute such embedded portions in such object form
 without including the above copyright and permission notices.
 
 ==============================================================================
-9. mio
+10. mio
 ==============================================================================
 URL:      https://github.com/vimpunk/mio
 Licence:  MIT
@@ -291,7 +323,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-10. concurrentqueue (moodycamel::ConcurrentQueue, BlockingConcurrentQueue)
+11. concurrentqueue (moodycamel::ConcurrentQueue, BlockingConcurrentQueue)
 ==============================================================================
 URL:      https://github.com/cameron314/concurrentqueue
 Licence:  Simplified BSD, or Boost Software License 1.0 (dual licence); zlib for the semaphore
@@ -387,7 +419,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 ==============================================================================
-11. xxHash 0.8.3
+12. xxHash 0.8.3
 ==============================================================================
 URL:      https://github.com/Cyan4973/xxHash
 Licence:  BSD-2-Clause (the library)
@@ -422,7 +454,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-12. LZ4 1.10.0
+13. LZ4 1.10.0
 ==============================================================================
 URL:      https://github.com/lz4/lz4
 Licence:  BSD-2-Clause (the library)
@@ -455,14 +487,14 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-13. libchdr 0.2
+14. libchdr 0.2
 ==============================================================================
 URL:      https://github.com/rtissera/libchdr
 Licence:  BSD-3-Clause
 Used in:  all downloads (CHD disc images)
 
-libchdr is built with its bundled zlib (section 15), Zstandard (section 16) and
-LZMA SDK (section 17), and dr_flac (section 14). Its CHD, bitstream, CD-ROM, FLAC
+libchdr is built with its bundled zlib (section 16), Zstandard (section 17) and
+LZMA SDK (section 18), and dr_flac (section 15). Its CHD, bitstream, CD-ROM, FLAC
 wrapper and Huffman code (libchdr_chd.c, libchdr_bitstream.c, libchdr_cdrom.c,
 libchdr_flac.c, libchdr_huffman.c and the matching headers) comes from MAME and carries
 Aaron Giles's copyright and the BSD-3-Clause licence below, as well as Romain Tisserand's
@@ -529,7 +561,7 @@ IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-14. dr_flac (dr_libs) 0.12.42
+15. dr_flac (dr_libs) 0.12.42
 ==============================================================================
 URL:      https://github.com/mackron/dr_libs
 Licence:  Public domain (Unlicense) or MIT-0, at your choice
@@ -587,7 +619,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-15. zlib 1.3.1
+16. zlib 1.3.1
 ==============================================================================
 URL:      https://zlib.net/
 Licence:  zlib
@@ -618,14 +650,14 @@ Copyright notice:
   jloup@gzip.org          madler@alumni.caltech.edu
 
 ==============================================================================
-16. Zstandard 1.5.6
+17. Zstandard 1.5.6
 ==============================================================================
 URL:      https://github.com/facebook/zstd
 Licence:  BSD-3-Clause (offered by the authors under BSD or GPLv2; Brimir uses the BSD licence)
 Used in:  all downloads (CHD decoding)
 
 The library sources also include threading code, Copyright (c) 2016 Tino Reichardt, and
-xxHash code, Copyright (c) Yann Collet - Meta Platforms, Inc. (see section 11); both
+xxHash code, Copyright (c) Yann Collet - Meta Platforms, Inc. (see section 12); both
 are offered under the same BSD licence.
 
 ------------------------------------------------------------------------------
@@ -661,7 +693,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-17. LZMA SDK 24.05
+18. LZMA SDK 24.05
 ==============================================================================
 URL:      https://www.7-zip.org/sdk.html
 Licence:  Public domain
@@ -673,7 +705,7 @@ LZMA SDK is placed in the public domain.
 Anyone is free to copy, modify, publish, use, compile, sell, or distribute the original LZMA SDK code, either in source code form or as a compiled binary, for any purpose, commercial or non-commercial, and by any means.
 
 ==============================================================================
-18. dr_mp3 (dr_libs) and the minimp3 decoder inside it v0.7.4
+19. dr_mp3 (dr_libs) and the minimp3 decoder inside it v0.7.4
 ==============================================================================
 URL:      https://github.com/mackron/dr_libs and https://github.com/lieff/minimp3
 Licence:  Public domain (Unlicense) or MIT-0, at your choice; minimp3 is CC0 (public domain)
@@ -739,7 +771,7 @@ This software is distributed without any warranty.
 See <http://creativecommons.org/publicdomain/zero/1.0/>.
 
 ==============================================================================
-19. stb_vorbis (stb) v1.22
+20. stb_vorbis (stb) v1.22
 ==============================================================================
 URL:      https://github.com/nothings/stb
 Licence:  MIT or public domain (Unlicense), at your choice
@@ -787,7 +819,7 @@ ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-20. asmjit 1.23.0
+21. asmjit 1.23.0
 ==============================================================================
 URL:      https://github.com/asmjit/asmjit
 Licence:  zlib
@@ -813,7 +845,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 ==============================================================================
-21. volk vulkan-sdk-1.4.363.0
+22. volk vulkan-sdk-1.4.363.0
 ==============================================================================
 URL:      https://github.com/zeux/volk
 Licence:  MIT
@@ -841,7 +873,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-22. Khronos Vulkan-Headers v1.4.363
+23. Khronos Vulkan-Headers v1.4.363
 ==============================================================================
 URL:      https://github.com/KhronosGroup/Vulkan-Headers
 Licence:  Apache-2.0 (the headers are offered as "Apache-2.0 OR MIT"; Brimir uses Apache-2.0)
@@ -1055,7 +1087,7 @@ There is no NOTICE file in the upstream repository. The Apache-2.0 text follows.
    limitations under the License.
 
 ==============================================================================
-23. libretro.h and libretro_vulkan.h
+24. libretro.h and libretro_vulkan.h
 ==============================================================================
 URL:      https://github.com/libretro/libretro-common
 Licence:  MIT
@@ -1082,7 +1114,7 @@ WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-24. LLVM libc++, libc++abi and libunwind (Android NDK)
+25. LLVM libc++, libc++abi and libunwind (Android NDK)
 ==============================================================================
 URL:      https://libcxx.llvm.org/
 Licence:  Apache-2.0 with LLVM Exceptions
@@ -1093,6 +1125,6 @@ libc++, libc++abi and libunwind are linked statically into the Android core by t
 Copyright (c) the LLVM Project contributors.
 
 Licensed under the Apache License, v2.0 with LLVM Exceptions. The Apache-2.0 text
-is in section 22; the LLVM exception, at https://llvm.org/LICENSE.txt, allows
+is in section 23; the LLVM exception, at https://llvm.org/LICENSE.txt, allows
 embedded portions to be redistributed in object form without the Apache-2.0
 attribution conditions 4(a), 4(b) and 4(d); this notice is given anyway.

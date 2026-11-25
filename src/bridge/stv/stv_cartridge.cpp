@@ -5,11 +5,14 @@
 // The 315-5881 register handlers (ReadProtectionRegister, WriteProtectionRegister) are derived from
 // stv_state::common_prot_r and common_prot_w in MAME's src/mame/sega/stv.cpp (MAME 0.289; LGPL-2.1-or-later, copyright
 // David Haywood, Angelo Salese, Olivier Galibert, Mariusz Wojcieszek, R. Belmont), used here under the GPL-3.0 as that
-// licence permits.
+// licence permits. The 315-5838 connection (IsComp5838Read, WriteComp5838 and their callers) is derived in the same way
+// from that file's stv_state::decathlt_prot_r, decathlt_prot_srcaddr_w and init_decathlt; where it departs from them
+// it follows libretro-stv, the core that runs Decathlete (MAME marks it not working), each time with a comment.
 
 #include "stv_cartridge.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 
 namespace ymir::cart {
@@ -46,6 +49,7 @@ void STVGameROMCartridge::LoadROM(std::span<const uint8> data) {
     m_romSize = allocSize;
     m_crypt3155881.SetROM(std::span<const uint8>(m_rom.data(), m_romSize));
     m_crypt3155881.Reset();
+    m_comp3155838.SetROM(std::span<const uint8>(m_rom.data(), m_romSize));
 }
 
 void STVGameROMCartridge::ConfigureProtection(ProtectionMode mode, uint32 key) {
@@ -56,6 +60,31 @@ void STVGameROMCartridge::ConfigureProtection(ProtectionMode mode, uint32 key) {
     m_crypt3155881.Reset();
     m_crypt3155881.SetKey(key);
     m_crypt3155881.SetEnabled(false);
+
+    [[maybe_unused]] const bool cleared = m_comp3155838.LoadState(STV3155838::State{});
+    assert(cleared);
+}
+
+void STVGameROMCartridge::Reset(bool /*hard*/) {
+    if (m_protectionMode == ProtectionMode::Comp3155838) {
+        m_comp3155838.Reset();
+    }
+}
+
+void STVGameROMCartridge::SaveComp5838State(STV3155838::State &state) const {
+    m_comp3155838.SaveState(state);
+}
+
+bool STVGameROMCartridge::ValidateComp5838State(const STV3155838::State &state) const {
+    if (m_protectionMode != ProtectionMode::Comp3155838) {
+        const STV3155838::State reset{};
+        return std::memcmp(&state, &reset, sizeof reset) == 0;
+    }
+    return m_comp3155838.ValidateState(state);
+}
+
+bool STVGameROMCartridge::LoadComp5838State(const STV3155838::State &state) {
+    return ValidateComp5838State(state) && m_comp3155838.LoadState(state);
 }
 
 void STVGameROMCartridge::SaveProtectionState(ProtectionState &state) const {
@@ -105,6 +134,39 @@ static inline bool IsProtectionRegisters(uint32 address) {
 
 static inline unsigned ProtectionRegisterIndex(uint32 address) {
     return (address >> 2) & 3u;
+}
+
+// init_decathlt: the write handler covers 0x2000000-0x37FFFFF, the read handler the long at 0x7FFFF8 of the three 8 MiB
+// windows (0x27FFFF8, 0x2FFFFF8, 0x37FFFF8)
+static constexpr uint32 kComp5838Start = 0x02000000u;
+static constexpr uint32 kComp5838End   = 0x03800000u;
+
+bool STVGameROMCartridge::IsComp5838Read(uint32 address) const {
+    // libretro-stv departs from MAME here: its reads reach the chip only after a source address was written (its
+    // `active` flag; MAME's own comment asks for "a way to indicate if device is enabled and fall through to cartridge
+    // data if not"). Before that these addresses read the ROM.
+    return m_protectionMode == ProtectionMode::Comp3155838 && m_comp3155838.IsActive() && address >= kComp5838Start &&
+           address < kComp5838End && ((address - kComp5838Start) & 0x7FFFFCu) == 0x7FFFF8u;
+}
+
+// decathlt_prot_srcaddr_w: offset 0x7FFFF0 of a window is the source address, 0x7FFFF4 the table registers (high half
+// the upload mode, low half a table word). The bank is the window's: (offset & 0x1800000) >> 23.
+void STVGameROMCartridge::WriteComp5838(uint32 address, uint32 data, uint32 mask) {
+    if (address < kComp5838Start || address >= kComp5838End) {
+        return;
+    }
+    const uint32 offset = address - kComp5838Start;
+    if ((offset & 0x7FFFFCu) == 0x7FFFF0u) {
+        // MAME sets the bank on every write to the cartridge space; libretro-stv only when the source address is
+        // written, so a write elsewhere during a transfer does not move it (Decathlete uploads its tables through
+        // bank 0's window and bank 2's, and writes its source addresses through bank 2's)
+        m_comp3155838.SetBank(static_cast<uint8_t>((offset & 0x1800000u) >> 23));
+        m_comp3155838.SetSourceAddress(data, mask);
+    } else if ((offset & 0x7FFFFCu) == 0x7FFFF4u) {
+        // a long write reaches the chip as two word writes, high half first (the A-Bus is 16 bits wide; libretro-stv
+        // likewise): MAME's write_prot_data would stop on a long's mask. Byte writes are dropped (MAME: fatalerror).
+        m_comp3155838.WriteData(data, mask);
+    }
 }
 
 uint32 STVGameROMCartridge::ROMLongAt(uint32 address) const {
@@ -157,6 +219,11 @@ uint8 STVGameROMCartridge::ReadByte(uint32 address) const {
         return static_cast<uint8>(ReadProtectionRegister(ProtectionRegisterIndex(address), false) >>
                                   (24u - 8u * (address & 3u)));
     }
+    if (IsComp5838Read(address)) {
+        // decathlt_prot_r: a byte read's lane is in one half of the long, which takes one data word
+        const uint16 data = m_comp3155838.ReadData();
+        return static_cast<uint8>((address & 1u) ? data : data >> 8u);
+    }
     size_t idx = CartOffset(address, m_romSize);
     if (idx == (size_t)-1) return 0xFFu;
     return m_rom[idx];
@@ -168,6 +235,10 @@ uint16 STVGameROMCartridge::ReadWord(uint32 address) const {
     if (m_protectionMode == ProtectionMode::Chip3155881 && IsProtectionRegisters(address)) {
         return static_cast<uint16>(ReadProtectionRegister(ProtectionRegisterIndex(address), false) >>
                                    (16u - 16u * ((address >> 1) & 1u)));
+    }
+    if (IsComp5838Read(address)) {
+        // decathlt_prot_r: one data word per half of the long read (a long read is two word reads here)
+        return m_comp3155838.ReadData();
     }
 
     size_t idx = CartOffset(address, m_romSize);
@@ -192,6 +263,9 @@ void STVGameROMCartridge::WriteByte(uint32 address, uint8 value) {
         const unsigned shift = 24u - 8u * (address & 3u);
         WriteProtectionRegister(ProtectionRegisterIndex(address), static_cast<uint32>(value) << shift,
                                 0xFFu << shift);
+    } else if (m_protectionMode == ProtectionMode::Comp3155838) {
+        const unsigned shift = 24u - 8u * (address & 3u);
+        WriteComp5838(address, static_cast<uint32>(value) << shift, 0xFFu << shift);
     }
 }
 
@@ -200,6 +274,9 @@ void STVGameROMCartridge::WriteWord(uint32 address, uint16 value) {
         const unsigned shift = 16u - 16u * ((address >> 1) & 1u);
         WriteProtectionRegister(ProtectionRegisterIndex(address), static_cast<uint32>(value) << shift,
                                 0xFFFFu << shift);
+    } else if (m_protectionMode == ProtectionMode::Comp3155838) {
+        const unsigned shift = 16u - 16u * ((address >> 1) & 1u);
+        WriteComp5838(address, static_cast<uint32>(value) << shift, 0xFFFFu << shift);
     }
 }
 

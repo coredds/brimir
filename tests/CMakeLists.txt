@@ -142,6 +142,7 @@ add_executable(brimir_tests
     unit/test_stv_input.cpp
     unit/test_stv_sram.cpp
     unit/test_stv_state.cpp
+    unit/test_stv_5838.cpp
     unit/test_stv_games.cpp
     unit/test_stv_rotation.cpp
 )

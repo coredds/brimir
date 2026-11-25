@@ -2084,17 +2084,19 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
                 return false;
             }
             // An ST-V state (current format only) carries the cabinet's block after the Saturn payload. The session
-            // decides what to expect, never the bytes.
+            // decides what to expect, never the bytes. The block's size is its version's (stv_state.hpp): read from
+            // the trailer once the payload is decompressed.
             const bool stvSession = m_stv != nullptr;
-            const size_t stvTail = stvSession ? stv::STVStateTailSize() : 0;
-            if (payloadSize > MaxEncodedSaveStateSize(kMaxSaveStateCartDataSize) + stvTail) {
+            size_t stvTail = 0;
+            if (payloadSize > MaxEncodedSaveStateSize(kMaxSaveStateCartDataSize) +
+                                  (stvSession ? stv::STVStateTailSize() : 0)) {
                 return false;
             }
             if (stvSession && version != kSaveStateVersion) {
                 m_lastStateError = "ST-V states are saved in the current state format only";
                 return false;
             }
-            if (stvSession && payloadSize < stvTail) {
+            if (stvSession && payloadSize < stv::STVStateTailSize(stv::kSTVStateOldestVersion)) {
                 m_lastStateError = "the state is not an ST-V state (saved by a Saturn session?)";
                 return false;
             }
@@ -2113,9 +2115,15 @@ bool CoreWrapper::LoadState(const void* data, size_t size) {
             // decoded for a state that is this game's
             stv::STVStateBlock stvBlock;
             const auto checkSTVBlock = [&]() {
-                const std::span<const uint8_t> tail = std::span<const uint8_t>(m_statePayload).last(stvTail);
-                if (!stv::DecodeSTVState(tail, stvBlock)) {
+                stvTail = stv::STVStateTailSizeIn(m_statePayload);
+                if (stvTail == 0) {
                     m_lastStateError = "the state is not an ST-V state (saved by a Saturn session?)";
+                    return false;
+                }
+                const std::span<const uint8_t> tail = std::span<const uint8_t>(m_statePayload).last(stvTail);
+                std::string why;
+                if (!stv::DecodeSTVState(tail, stvBlock, &why)) {
+                    m_lastStateError = why;
                     return false;
                 }
                 if (stvBlock.gameHash != stv::STVGameHash(m_stv->Game()->shortName)) {
