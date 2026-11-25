@@ -4,8 +4,9 @@
 //
 // The game's ROM board in the Saturn's cartridge slot: the cartridge image on the A-Bus (CS0 from 0x02000000; CS1 from
 // 0x04000000 shows image offsets 0x02000000-0x02FFFFFF, every 16 MiB), and on Radiant Silvergun the 315-5881 registers
-// at 0x04FFFFF0. It owns the cartridge space (BaseCartridge::OwnsCartridgeSpace) and reports CartType::ROM. The IOGA is
-// not here: it is on the main bus (STVIOBoard).
+// at 0x04FFFFF0, on Decathlete the 315-5838 registers at the end of each 8 MiB window of CS0. It owns the cartridge
+// space (BaseCartridge::OwnsCartridgeSpace) and reports CartType::ROM. The IOGA is not here: it is on the main bus
+// (STVIOBoard).
 
 #pragma once
 
@@ -13,6 +14,7 @@
 #include <ymir/util/data_ops.hpp>
 #include <ymir/util/size_ops.hpp>
 
+#include "stv_315_5838.hpp"
 #include "stv_315_5881.hpp"
 
 #include <array>
@@ -29,6 +31,7 @@ public:
     enum class ProtectionMode : uint8 {
         None = 0,
         Chip3155881,
+        Comp3155838,
     };
 
     // The protection hardware's runtime state, for ST-V save states (the ROM and the configuration are not part of it).
@@ -44,6 +47,9 @@ public:
         : BaseCartridge(0xFFu, CartType::ROM) {
         SetOwnsCartridgeSpace(true);
     }
+
+    // A reset stops the 315-5838 (MAME's device_reset); nothing else on the board changes
+    void Reset(bool hard) override;
 
     uint8  ReadByte(uint32 address) const override;
     uint16 ReadWord(uint32 address) const override;
@@ -70,6 +76,12 @@ public:
     // Returns false and leaves the cartridge untouched when the state holds values the chip cannot be in.
     bool LoadProtectionState(const ProtectionState &state);
 
+    // The 315-5838's state (ST-V state block version 2). A cartridge without the chip has it at its reset value
+    // (STV3155838::State{}) and takes no other.
+    void SaveComp5838State(STV3155838::State &state) const;
+    bool ValidateComp5838State(const STV3155838::State &state) const;
+    bool LoadComp5838State(const STV3155838::State &state);
+
     size_t GetROMSize() const { return m_romSize; }
 
 protected:
@@ -79,6 +91,10 @@ protected:
     void WriteProtectionRegister(unsigned index, uint32 data, uint32 mask);
     uint32 ROMLongAt(uint32 address) const;
 
+    // The 315-5838 as MAME's stv_state::decathlt_prot_r and decathlt_prot_srcaddr_w connect it (stv_cartridge.cpp)
+    bool IsComp5838Read(uint32 address) const;
+    void WriteComp5838(uint32 address, uint32 data, uint32 mask);
+
     size_t m_romSize = 0;
     std::vector<uint8> m_rom;
 
@@ -87,6 +103,7 @@ protected:
     std::array<uint32, 4> m_abus{}; // MAME stv_state::m_a_bus; m_abus[0] bit 16 is the chip enable (m_abus_protenable)
 
     mutable STV3155881 m_crypt3155881;
+    mutable STV3155838 m_comp3155838;
 };
 
 } // namespace ymir::cart

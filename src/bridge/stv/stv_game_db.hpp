@@ -17,7 +17,8 @@ enum class Region : uint8_t { Japan, USA, Europe, Taiwan, Asia, Korea, Brazil, L
 
 enum class Controls : uint8_t { ThreeButtons, SixButtons, RadiantSilvergun };
 
-enum class Chip : uint8_t { None, Crypt315_5881 };
+// Crypt315_5881: MAME's install_common_protection (cryptKey is the game's key); Comp315_5838: init_decathlt
+enum class Chip : uint8_t { None, Crypt315_5881, Comp315_5838 };
 
 // A fixed transform of every cartridge byte, applied once to the built image (MAME's driver init):
 //   SanJeon  init_sanjeon: each byte XOR 0xFF, then a sequence of bit swaps

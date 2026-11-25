@@ -310,7 +310,7 @@ TEST_CASE("ST-V detect: a zip with a non-ASCII name is detected", "[stv]") {
 
 TEST_CASE("ST-V game database: every game is well formed", "[stv]") {
     const auto games = brimir::stv::AllGames();
-    REQUIRE(games.size() == 12);
+    REQUIRE(games.size() == 13);
 
     std::set<std::string> names;
     for (const GameInfo &game : games) {
@@ -402,6 +402,28 @@ TEST_CASE("ST-V game database: the games' details", "[stv]") {
     CHECK(sanjeon.roms[1].offset == 0x400000);
     CHECK(sanjeon.roms[11].offset == 0x1800000);
     CHECK(sanjeon.roms[11].size == 0x400000);
+
+    // Decathlete V1.001: init_decathlt (the 315-5838), inputs stv, no eeprom region, "(JUET 960709 V1.001)"
+    const GameInfo &dec = Game("decathlt");
+    CHECK(dec.chip == Chip::Comp315_5838);
+    CHECK(dec.cryptKey == 0);
+    CHECK(dec.controls == Controls::ThreeButtons);
+    CHECK(dec.eeprom.file == nullptr);
+    CHECK(regionsOf("decathlt") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
+    CHECK(DistinctFiles(dec) == 6);
+    REQUIRE(dec.roms.size() == 8);
+    CHECK(dec.roms[0].load == Load::Byte16);
+    CHECK(dec.roms[0].offset == 0x1);
+    CHECK(dec.roms[0].crc32 == 0xac59c186);
+    CHECK(dec.roms[2].load == Load::Plain);
+    CHECK(dec.roms[2].offset == 0x300000);
+    CHECK(dec.roms[7].offset == 0x1400000);
+    CHECK(brimir::stv::FindGame("decathlto") == nullptr);
+    // Only decathlt carries the 315-5838
+    for (const auto &game : brimir::stv::AllGames()) {
+        INFO(game.shortName);
+        CHECK((game.chip == Chip::Comp315_5838) == (std::string(game.shortName) == "decathlt"));
+    }
 
     // Steep Slope Sliders: the program ROM loaded as ROM_LOAD16_BYTE, ROM_RELOAD, then plain twice; five data files
     const GameInfo &sss = Game("sss");

@@ -8,6 +8,7 @@ add_library(brimir_bridge OBJECT
     peripheral_input.cpp
     ram_view.cpp
     savestate_codec.cpp
+    stv/stv_315_5838.cpp
     stv/stv_315_5881.cpp
     stv/stv_bios.cpp
     stv/stv_cartridge.cpp

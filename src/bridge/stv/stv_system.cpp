@@ -73,8 +73,13 @@ bool STVSystem::Attach(ymir::Saturn &saturn, const GameInfo &game, std::array<ui
     using ProtectionMode = ymir::cart::STVGameROMCartridge::ProtectionMode;
     m_cart = saturn.InsertCartridge<ymir::cart::STVGameROMCartridge>();
     m_cart->LoadROM(cart);
-    m_cart->ConfigureProtection(game.chip == Chip::Crypt315_5881 ? ProtectionMode::Chip3155881 : ProtectionMode::None,
-                                game.chip == Chip::Crypt315_5881 ? game.cryptKey : 0);
+    ProtectionMode protection = ProtectionMode::None;
+    if (game.chip == Chip::Crypt315_5881) {
+        protection = ProtectionMode::Chip3155881;
+    } else if (game.chip == Chip::Comp315_5838) {
+        protection = ProtectionMode::Comp3155838;
+    }
+    m_cart->ConfigureProtection(protection, game.chip == Chip::Crypt315_5881 ? game.cryptKey : 0);
 
     m_io.Reset(true);
     // A new cabinet's 93C46 is as MAME's eeprom_base_device::nvram_default makes it: the set's "eeprom" region when
@@ -159,6 +164,7 @@ void STVSystem::SaveState(STVStateBlock &block) const {
     block.gameHash = STVGameHash(m_game->shortName);
     m_io.SaveState(block.io);
     m_cart->SaveProtectionState(block.protection);
+    m_cart->SaveComp5838State(block.comp5838);
     block.schedulerCount = m_lastCount;
     block.nsRemainderBits = std::bit_cast<uint64_t>(m_nsRemainder);
 }
@@ -171,7 +177,8 @@ bool STVSystem::ValidateState(const STVStateBlock &block) const {
     if (!(remainder >= 0.0 && remainder < 1.0)) {
         return false;
     }
-    return m_io.ValidateState(block.io) && m_cart->ValidateProtectionState(block.protection);
+    return m_io.ValidateState(block.io) && m_cart->ValidateProtectionState(block.protection) &&
+           m_cart->ValidateComp5838State(block.comp5838);
 }
 
 bool STVSystem::LoadState(const STVStateBlock &block) {
@@ -180,7 +187,8 @@ bool STVSystem::LoadState(const STVStateBlock &block) {
     }
     [[maybe_unused]] const bool io = m_io.LoadState(block.io);
     [[maybe_unused]] const bool protection = m_cart->LoadProtectionState(block.protection);
-    assert(io && protection && "ValidateState accepted the block");
+    [[maybe_unused]] const bool comp5838 = m_cart->LoadComp5838State(block.comp5838);
+    assert(io && protection && comp5838 && "ValidateState accepted the block");
     m_lastCount = block.schedulerCount;
     m_nsRemainder = std::bit_cast<double>(block.nsRemainderBits);
     return true;
