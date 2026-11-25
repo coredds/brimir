@@ -81,9 +81,11 @@ logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is sup
 
 ## Known differences from MAME
 
-- **Die Hard Arcade, attract pacing.** The intro shows one more caption than MAME and the title comes about 340 frames
-  later. In-game timing after Start lines up with MAME's. The cause was not investigated (the captions may follow the
-  voice playback, so SCSP timing is a suspect).
+- **Die Hard Arcade, attract timing.** The attract mode runs 23 frames ahead of MAME's from the FBI screen to the
+  logos (FBI screen 505 against 528, title close-up 1835 against 1858, white flash 2315 against 2338), frame for frame
+  otherwise: the same captions in the same order. The whole lead is made at boot, by the BIOS's CD-block check (see
+  "Boot length"). The 0.10.0 note of "one more caption, title about 340 frames later" was a misreading: single
+  snapshots near the test's coin at frame 1850 caught the two runs 23 frames apart; MAME shows that caption as well.
 - **Puyo Puyo Sun, game select.** The sprites of the game select screen appear a few frames after MAME's (by about frame
   1990 against 1960).
 - **Guardian Force, title after a coin.** The title comes back 3 frames later than in MAME (black for 43 frames, MAME
@@ -117,8 +119,15 @@ logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is sup
   these games.
 - **Slave SH-2 interrupts.** The slave receives VBlank-OUT (MAME's ST-V driver does not raise it for the slave), and the
   SCU's HBlank-OUT lower cancels an HBlank-IN interrupt the slave has not taken yet (MAME's `HOLD_LINE` keeps it
-  pending). Details in `src/core/BRIMIR_FORK.md` (the `SetIRLHoldLine` row). No game shows an effect.
-- **Boot length.** Brimir's BIOS check ends about 30 frames before MAME's (about frame 1130-1165 against 1191).
+  pending). Details in `src/core/BRIMIR_FORK.md` (the `SetIRLHoldLine` row). No game shows an effect: with either
+  changed alone, Die Hard Arcade's first 2350 frames are identical.
+- **Boot length.** Brimir's BIOS check ends about 30 frames before MAME's (about frame 1130-1165 against 1191). Cause:
+  the BIOS (every dump here) looks for a CD block, polling CR1-CR4 at 0x25890018 for "\0CDBLOCK" up to 200,001 times
+  behind a "SYSTEM CHECKING, PLEASE WAIT A FEW SECONDS..." screen. MAME maps nothing at A-bus CS2 (reads 0), so the
+  poll runs out (about 32 frames with Die Hard Arcade); Brimir keeps the Saturn's CD block mapped in ST-V mode, it
+  answers, and the check passes at once. Unmapping it brings the screen back, but with Brimir's bus and SH-2 timing the
+  poll is slower and Die Hard Arcade's boot then ends 18 to 85 frames after MAME's (CS2 access 2 to 40 cycles; MAME runs
+  the poll at about one cycle per instruction with no bus wait), so it stays mapped: matching MAME would mean changing shared timing.
 - **Cartridge gaps** are filled with 0x00, as MAME 0.289 (`ROMREGION_ERASE00`); current MAME master fills them with 0xFF
   and notes that the `jp5` BIOS (`epr-17740.ic8`) needs it. No game here reads a gap with the verified BIOS dumps.
   (DaeJeon! SanJeon SuJeon's gaps read 0xFF: its scramble turns the 0x00 fill into 0xFF, as in MAME 0.289.)
