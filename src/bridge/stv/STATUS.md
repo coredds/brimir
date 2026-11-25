@@ -1,6 +1,6 @@
 # ST-V support: status
 
-Eight arcade games run on the ST-V board emulation in this folder. This file says what was checked, how, and where the
+The arcade games in the table below run on the ST-V board emulation in this folder. This file says what was checked, how, and where the
 behaviour differs from MAME (the reference). The design is in `docs/superpowers/specs/2026-11-21-stv-support-design.md`
 (not tracked); the changes to `src/core/` are listed in `src/core/BRIMIR_FORK.md`.
 
@@ -23,6 +23,7 @@ compared with MAME's.
 | `cotton2` | Cotton 2 | JUET | 3 buttons | Japan | full case with continues; visuals match MAME's by eye |
 | `grdforce` | Guardian Force | JUET | 3 buttons | Japan | full case with continues; credits (including continues) within a frame of MAME |
 | `rsgun` | Radiant Silvergun | JUET | 3 buttons + a 4th (see below) | Japan | full case with continues; the 315-5881 chip's 134 accesses equal to MAME's, the 128 decrypted longs checked in a test |
+| `shienryu` | Shienryu | JUET | 3 buttons | Japan | full case with continues; vertical (MAME's ROT270): upright under Screen Rotation Auto, BIOS screens included (the set's default EEPROM); screens match MAME's by eye |
 
 The BIOS is chosen from the game's regions in the order Japan, USA, Europe (then the game's other regions), or by the
 Saturn BIOS core option's region (`jp_*`, `us_*`, `eu_*`) when the game has that region. A game whose regions have no
@@ -79,13 +80,14 @@ test shows). Coin, Start per player; Service and Test on port 1 only.
   ignores writes, as MAME's unmapped space. (The registers themselves are decoded over 0x00400000-0x0040007F; MAME maps
   0x00400000-0x0040003F.)
 
-Not supported: ST-V games outside the eight above (the game database holds the ROM file lists of these eight only).
+Not supported: ST-V games outside the table above (the game database holds the ROM file lists of these games only).
 
 ## Saves and states
 
 - `<set>.srm` holds the backup RAM (32 KiB) and the EEPROM (128 bytes), 32,896 bytes. A file of another size (a Saturn
-  `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The EEPROM starts blank (0xFF), as MAME's
-  (none of these sets has a default image); the BIOS sets it up on first boot.
+  `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The EEPROM starts as MAME's: the set's
+  default image when its ROM_START has one (Shienryu's `eeprom-shienryu.bin`, which sets the cabinet up for the vertical
+  monitor and is part of the set), else blank (0xFF), and the BIOS sets it up on first boot.
 - Save states carry an ST-V block (cabinet I/O and EEPROM state, protection chip state, scheduler count) after the
   Saturn payload. It is meant to make run-ahead, rewind and netplay exact; run-ahead and save/load were checked in
   RetroArch on Baku Baku Animal, rewind and netplay were not (see "Frontend and platform checks"). The block is not

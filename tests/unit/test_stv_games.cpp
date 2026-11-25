@@ -486,6 +486,10 @@ TEST_CASE("stv: rsgun boots to the attract mode and takes one coin", "[.stv-rom]
     QuickBoot("rsgun", "epr-20091.ic8", 2450);
 }
 
+TEST_CASE("stv: shienryu boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][shienryu]") {
+    QuickBoot("shienryu", "epr-20091.ic8", 2800);
+}
+
 TEST_CASE("stv: colmns97 boots, takes coin and start, and plays for a minute", "[.stv-rom][colmns97]") {
     GameSession session("colmns97");
     if (!session.Load()) {
@@ -866,4 +870,68 @@ TEST_CASE("stv: rsgun sees the three buttons of both players in its input test",
     // The game reads no fourth button (MAME's plain ST-V ports give it one): Button 4 changes nothing.
     OpenInputTest(session, 2850);
     CheckInputTest(session, {kButton1, kButton2, kButton3}, 4, kButton4);
+}
+
+TEST_CASE("stv: shienryu boots upright, takes coin and start, and plays for a minute", "[.stv-rom][shienryu]") {
+    GameSession session("shienryu");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // The one vertical game (MAME's ROT270): under Screen Rotation Auto (the default) the picture is turned a quarter
+    // turn anticlockwise, portrait, and reported at 3:4
+    session.Core().SetRotationAuto();
+    CHECK(session.Core().GetEffectiveRotation() == stv::FindGame("shienryu")->rotation);
+    CHECK(session.Core().GetEffectiveRotation() == 270);
+    CHECK(session.Core().GetDisplayAspectRatio() == 3.0f / 4.0f);
+
+    // The BIOS checks the board; its default EEPROM sets the cabinet up for the vertical monitor, so the BIOS screens
+    // are drawn turned too (upright once rotated, 448x352 as in MAME). The game initialises its backup RAM, then the
+    // Warashi logo from about frame 1220, the title, the story over the clouds and the bosses, and from about frame
+    // 2700 the title with INSERT COIN(S) / CREDIT 0. No phantom credits. The frames that are mostly one colour are left
+    // out: the attract mode fades through black with CREDIT 0 at the bottom, and so does the game after Start.
+    AttractWatch watch(session, [&] { return session.VideoBackgroundShare() > 0.9; });
+    session.RunTo(600);
+    session.Save("brimir_frame600_bios_warning.png");
+    CHECK(session.Core().GetFramebufferWidth() == 448);
+    CHECK(session.Core().GetFramebufferHeight() == 352);
+    session.RunTo(1300);
+    CheckAttract(session, watch, 2750,
+                 {{1600, "brimir_frame1600_title.png"}, {1900, "brimir_frame1900_attract.png"},
+                  {2400, "brimir_frame2400_attract.png"}});
+    CHECK(session.Core().GetFramebufferWidth() == 240);
+    CHECK(session.Core().GetFramebufferHeight() == 320);
+    InsertCoin(session, 2800, 2850);
+
+    // Start takes the credit and the first stage begins (the STAGE 1-1 card over the carrier, then the forest). No
+    // frame looks like the attract mode any more. Once the ship has flown off the carrier, Up, Left, Down and Right
+    // move it that way on the turned screen.
+    session.RunTo(2900);
+    session.Tap(0, kStart);
+    session.RunTo(3700, [&] {
+        watch.Check();
+        const int frame = session.Frame();
+        uint16_t press = Button1Now(frame, 3000);
+        if (frame >= 3450 && frame < 3650) {
+            constexpr uint16_t kMoves[] = {kUp, kLeft, kDown, kRight};
+            press = kMoves[(frame - 3450) / 50] | (frame % 8 < 4 ? kButton1 : 0);
+        }
+        session.Press(0, press);
+        if (frame == 3050) {
+            session.Save("brimir_frame3050_stage_card.png");
+        } else if (frame >= 3450 && frame <= 3650 && frame % 50 == 0) {
+            session.Save("brimir_frame" + std::to_string(frame) + "_play_1p.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // Player 2 joins with a coin of its own
+    Player2Joins(session, watch.Checker());
+    session.RunTo(4000, watch.Checker());
+    CHECK(session.Credits() == 0);
+
+    // A minute of play: both ships fly about firing, now and then a bomb, with continues
+    PlayMinute(session, watch, kShooterScript, 4500, 6000, true);
 }
