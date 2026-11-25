@@ -177,6 +177,49 @@ TEST_CASE("stv loader: the GameInfo overload names the set in errors", "[stv]") 
     CHECK(error.find("b.bin") != std::string::npos);
 }
 
+// MAME's init_sanjeon, on every byte of the "cart" region (0x3000000 bytes, gaps included):
+//   x = v ^ 0xFF, then bitswap<8>(x, 7,2,5,1, 3,6,4,0), (4,6,5,7, 3,2,1,0), (7,6,5,4, 2,3,1,0), (7,0,5,4, 3,2,1,6),
+//   (3,6,5,4, 7,2,1,0). bitswap<8>(v, b7..b0) makes result bit n = v bit b_n. Following each bit of x through the five
+//   swaps (s1..s5, listing the result bits 7..0):
+//     s1 = x7 x2 x5 x1 x3 x6 x4 x0
+//     s2 = s1[4] s1[6] s1[5] s1[7] s1[3..0]  = x1 x2 x5 x7 x3 x6 x4 x0
+//     s3 = s2 with bits 3 and 2 exchanged     = x1 x2 x5 x7 x6 x3 x4 x0
+//     s4 = s3 with bits 6 and 0 exchanged     = x1 x0 x5 x7 x6 x3 x4 x2
+//     s5 = s4 with bits 7 and 3 exchanged     = x6 x0 x5 x7 x1 x3 x4 x2
+//   0x00: x = 0xFF, every bit set           -> 0xFF
+//   0xFF: x = 0x00                          -> 0x00
+//   0x01: x = 0xFE, x0 clear -> bit 6 clear -> 0xBF
+//   0x80: x = 0x7F, x7 clear -> bit 4 clear -> 0xEF
+//   0x02: x = 0xFD, x1 clear -> bit 3 clear -> 0xF7
+//   0x40: x = 0xBF, x6 clear -> bit 7 clear -> 0x7F
+// The gap fill 0x00 is in the region before the transform, so the SH-2 reads the gaps as 0xFF.
+TEST_CASE("stv loader: Scramble::SanJeon applies MAME's init_sanjeon transform to the whole image", "[stv]") {
+    TempDir dir("brimir_stv_ldr_sanjeon");
+    const auto zipPath = dir.path / "set.zip";
+    brimir::test::WriteTestZip(zipPath, {{"a.bin", {0x00, 0xFF, 0x01, 0x80, 0x02, 0x40}}, {"b.bin", {0x01, 0x80}}});
+    ZipReader zip(zipPath);
+    REQUIRE(zip.IsOpen());
+
+    static constexpr RomEntry kRoms[] = {{"a.bin", 0, 6, 0, Load::Plain}, {"b.bin", 9, 2, 0, Load::Byte16}};
+    static constexpr Region kRegions[] = {Region::Japan};
+    GameInfo game{"testset", "Test", kRegions, Controls::ThreeButtons, Chip::None, 0, 0, kRoms};
+
+    Bytes image;
+    std::string error;
+    SECTION("SanJeon") {
+        game.scramble = Scramble::SanJeon;
+        REQUIRE(BuildCartImage(zip, game, image, error));
+        CHECK(image == Bytes{0xFF, 0x00, 0xBF, 0xEF, 0xF7, 0x7F, 0xFF, 0xFF, 0xFF, 0xBF, 0xFF, 0xEF, 0xFF, 0xFF, 0xFF,
+                             0xFF});
+    }
+    SECTION("None leaves the image as loaded") {
+        REQUIRE(game.scramble == Scramble::None);
+        REQUIRE(BuildCartImage(zip, game, image, error));
+        CHECK(image == Bytes{0x00, 0xFF, 0x01, 0x80, 0x02, 0x40, 0x00, 0x00, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00,
+                             0x00});
+    }
+}
+
 TEST_CASE("stv loader: the default EEPROM image is the set's eeprom file, byte for byte, or blank", "[stv]") {
     TempDir dir("brimir_stv_ldr_eeprom");
     const GameInfo *shienryu = FindGame("shienryu");
@@ -250,21 +293,27 @@ TEST_CASE("stv loader: real sets build and carry the Sega header", "[.stv-rom][a
             REQUIRE(image.size() >= 0x300000);
             CHECK(image.size() <= ymir::cart::kSTVGameROMMaxSize);
 
-            // The SH-2 reads the header, "SEGA SEGASATURN " or "SEGA ST-V(TITAN)", from 0x02200000 in every set (the
-            // IC7 position, or the plain reload of IC13).
-            std::string text;
-            for (size_t i = 0; i < 16; ++i) {
-                text.push_back(static_cast<char>(image[0x200000 + i]));
+            // The SH-2 reads the header, "SEGA SEGASATURN " or "SEGA ST-V(TITAN)", from 0x02200000 in every set that
+            // loads a file there (the IC7 position, or the plain reload of IC13); sanjeon has none.
+            const bool loadsAt200000 = std::any_of(game.roms.begin(), game.roms.end(),
+                                                   [](const RomEntry &rom) { return rom.offset == 0x200000; });
+            if (loadsAt200000) {
+                std::string text;
+                for (size_t i = 0; i < 16; ++i) {
+                    text.push_back(static_cast<char>(image[0x200000 + i]));
+                }
+                INFO("header at 0x02200000: " << text);
+                CHECK(text.rfind("SEGA", 0) == 0);
             }
-            INFO("header at 0x02200000: " << text);
-            CHECK(text.rfind("SEGA", 0) == 0);
 
-            // Sets with an IC13 (Byte16 at offset 1) also expose the header at 0x02000000, on odd bytes only.
+            // Sets with an IC13 (Byte16 at offset 1) also expose the header at 0x02000000, on odd bytes only. The
+            // even bytes are the gap fill, 0x00, which sanjeon's scramble turns into 0xFF.
             if (game.roms[0].load == Load::Byte16 && (game.roms[0].offset & 1)) {
+                const uint8_t gap = game.scramble == Scramble::SanJeon ? 0xFF : 0x00;
                 std::string odd;
                 for (size_t i = 0; i < 16; ++i) {
                     odd.push_back(static_cast<char>(image[game.roms[0].offset + 2 * i]));
-                    CHECK(image[2 * i] == 0x00);
+                    CHECK(image[2 * i] == gap);
                 }
                 INFO("IC13 odd bytes: " << odd);
                 CHECK(odd.rfind("SEGA", 0) == 0);

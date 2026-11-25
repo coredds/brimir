@@ -310,7 +310,7 @@ TEST_CASE("ST-V detect: a zip with a non-ASCII name is detected", "[stv]") {
 
 TEST_CASE("ST-V game database: every game is well formed", "[stv]") {
     const auto games = brimir::stv::AllGames();
-    REQUIRE(games.size() == 11);
+    REQUIRE(games.size() == 12);
 
     std::set<std::string> names;
     for (const GameInfo &game : games) {
@@ -379,6 +379,29 @@ TEST_CASE("ST-V game database: the games' details", "[stv]") {
     CHECK(regionsOf("shienryu") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
     CHECK(regionsOf("ffreveng") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
     CHECK(regionsOf("sss") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
+    // sanjeon: "(AJTUE 990412 V1.000)", in the title's order
+    CHECK(regionsOf("sanjeon") ==
+          std::vector<Region>{Region::Asia, Region::Japan, Region::Taiwan, Region::USA, Region::Europe});
+
+    // Only sanjeon is scrambled (init_sanjeon); no chip, inputs stv, no eeprom region
+    for (const auto &game : brimir::stv::AllGames()) {
+        INFO(game.shortName);
+        CHECK(game.scramble == (std::string(game.shortName) == "sanjeon" ? brimir::stv::Scramble::SanJeon
+                                                                         : brimir::stv::Scramble::None));
+    }
+    const GameInfo &sanjeon = Game("sanjeon");
+    CHECK(sanjeon.chip == Chip::None);
+    CHECK(sanjeon.controls == Controls::ThreeButtons);
+    CHECK(sanjeon.eeprom.file == nullptr);
+    CHECK(DistinctFiles(sanjeon) == 12);
+    REQUIRE(sanjeon.roms.size() == 12);
+    CHECK(sanjeon.roms[0].load == Load::Byte16);
+    CHECK(sanjeon.roms[0].offset == 0x1);
+    CHECK(sanjeon.roms[0].size == 0x200000);
+    CHECK(sanjeon.roms[1].load == Load::Plain);
+    CHECK(sanjeon.roms[1].offset == 0x400000);
+    CHECK(sanjeon.roms[11].offset == 0x1800000);
+    CHECK(sanjeon.roms[11].size == 0x400000);
 
     // Steep Slope Sliders: the program ROM loaded as ROM_LOAD16_BYTE, ROM_RELOAD, then plain twice; five data files
     const GameInfo &sss = Game("sss");

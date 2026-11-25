@@ -34,6 +34,42 @@ size_t MappedEnd(const RomEntry &entry, Load load) {
     return load == Load::Byte16 ? size_t(entry.offset) + 2 * (size - 1) + 1 : size_t(entry.offset) + size;
 }
 
+// MAME's bitswap<8>(v, b7, ..., b0): result bit n is v's bit b_n.
+constexpr uint8_t BitSwap8(uint8_t v, int b7, int b6, int b5, int b4, int b3, int b2, int b1, int b0) {
+    const int bits[8] = {b0, b1, b2, b3, b4, b5, b6, b7};
+    uint8_t r = 0;
+    for (int n = 0; n < 8; ++n) {
+        r |= static_cast<uint8_t>(((v >> bits[n]) & 1) << n);
+    }
+    return r;
+}
+
+// stv_state::init_sanjeon (MAME 0.289 src/mame/sega/stv.cpp), step for step.
+constexpr uint8_t SanJeonByte(uint8_t v) {
+    v ^= 0xFF;
+    v = BitSwap8(v, 7, 2, 5, 1, 3, 6, 4, 0);
+    v = BitSwap8(v, 4, 6, 5, 7, 3, 2, 1, 0);
+    v = BitSwap8(v, 7, 6, 5, 4, 2, 3, 1, 0);
+    v = BitSwap8(v, 7, 0, 5, 4, 3, 2, 1, 6);
+    v = BitSwap8(v, 3, 6, 5, 4, 7, 2, 1, 0);
+    return v;
+}
+
+// MAME applies the transform to the first 0x3000000 bytes of the "cart" region after loading, gaps included. It is
+// the same for every byte, so the host order of MAME's region (32-bit words swapped on a little-endian host) does not
+// change the result: the image here, the SH-2's byte order, takes it byte for byte. The image never exceeds 0x3000000.
+void ApplyScramble(Scramble scramble, std::vector<uint8_t> &image) {
+    if (scramble != Scramble::SanJeon) return;
+    std::array<uint8_t, 256> table{};
+    for (size_t v = 0; v < table.size(); ++v) {
+        table[v] = SanJeonByte(static_cast<uint8_t>(v));
+    }
+    const size_t end = std::min<size_t>(image.size(), 0x3000000);
+    for (size_t i = 0; i < end; ++i) {
+        image[i] = table[image[i]];
+    }
+}
+
 void AppendName(std::string &list, const std::string &name) {
     if (!list.empty()) {
         list += ", ";
@@ -163,6 +199,7 @@ bool BuildCartImage(ZipReader &zip, std::span<const RomEntry> roms, std::vector<
 
 bool BuildCartImage(ZipReader &zip, const GameInfo &game, std::vector<uint8_t> &image, std::string &error) {
     if (BuildCartImage(zip, game.roms, image, error)) {
+        ApplyScramble(game.scramble, image);
         return true;
     }
     error = std::string(game.shortName) + ": " + error;

@@ -3,8 +3,8 @@
 // Licensed under GPL-3.0
 //
 // Transcribed from MAME's src/mame/sega/stv.cpp. Each ROM list follows the ROM_START block of its set line by line;
-// the region lists follow the country letters of the GAME title (J, U, E, T, L) and the key is the set's
-// ROM_PARAMETER( ":315_5881:key", ... ). All sets are ROT0 but shienryu, ROT270: MAME turns its picture a quarter
+// the region lists follow the country letters of the GAME title (A, J, U, E, T, L) in its order, and the key is
+// the set's ROM_PARAMETER( ":315_5881:key", ... ). All sets are ROT0 but shienryu, ROT270: MAME turns its picture a quarter
 // turn anticlockwise, which is CoreWrapper's rotation step at 270.
 
 #include "stv_game_db.hpp"
@@ -18,6 +18,7 @@ constexpr Region kJET[] = {Region::Japan, Region::Europe, Region::Taiwan};
 constexpr Region kUET[] = {Region::USA, Region::Europe, Region::Taiwan};
 constexpr Region kJUET[] = {Region::Japan, Region::USA, Region::Europe, Region::Taiwan};
 constexpr Region kJUETL[] = {Region::Japan, Region::USA, Region::Europe, Region::Taiwan, Region::LatinAmerica};
+constexpr Region kAJTUE[] = {Region::Asia, Region::Japan, Region::Taiwan, Region::USA, Region::Europe};
 
 // bakubaku: ROM_LOAD16_BYTE, then ROM_RELOAD_PLAIN twice
 constexpr RomEntry kBakubakuRoms[] = {
@@ -137,6 +138,23 @@ constexpr RomEntry kSssRoms[] = {
     {"mpr21493.6", 0x1400000, 0x0400000, 0xefb2d271, Load::WordSwap},
 };
 
+// sanjeon: ROM_LOAD16_BYTE without reloads (nothing at 0x200000: the header is on the odd bytes from 0x1), then plain
+// files; the whole region is scrambled (init_sanjeon)
+constexpr RomEntry kSanjeonRoms[] = {
+    {"ic11", 0x0000001, 0x0200000, 0x9abae8d4, Load::Byte16},
+    {"ic13", 0x0400000, 0x0200000, 0xf72c1d13, Load::Plain},
+    {"ic14", 0x0600000, 0x0200000, 0xbcd72105, Load::Plain},
+    {"ic15", 0x0800000, 0x0200000, 0x8c9c8352, Load::Plain},
+    {"ic16", 0x0a00000, 0x0200000, 0x07e11512, Load::Plain},
+    {"ic17", 0x0c00000, 0x0200000, 0x46b7b344, Load::Plain},
+    {"ic18", 0x0e00000, 0x0200000, 0xd48404e1, Load::Plain},
+    {"ic19", 0x1000000, 0x0200000, 0x33d23bb9, Load::Plain},
+    {"ic20", 0x1200000, 0x0200000, 0xf8cc1038, Load::Plain},
+    {"ic21", 0x1400000, 0x0200000, 0x74ceb649, Load::Plain},
+    {"ic22", 0x1600000, 0x0200000, 0x85f31277, Load::Plain},
+    {"ic12", 0x1800000, 0x0400000, 0xd5ebc84e, Load::Plain},
+};
+
 constexpr GameInfo kGames[] = {
     {"bakubaku", "Baku Baku Animal", kJapan, Controls::ThreeButtons, Chip::None, 0, 0, kBakubakuRoms},
     {"colmns97", "Columns '97", kJET, Controls::ThreeButtons, Chip::None, 0, 0, kColmns97Roms},
@@ -156,6 +174,8 @@ constexpr GameInfo kGames[] = {
     // The default EEPROM is MAME's "preconfigured to 1 player"
     {"sss", "Steep Slope Sliders", kJUET, Controls::ThreeButtons, Chip::Crypt315_5881, 0x052b6901, 0, kSssRoms,
      {"sss.nv", 0x3473b2f3}},
+    {"sanjeon", "DaeJeon! SanJeon SuJeon", kAJTUE, Controls::ThreeButtons, Chip::None, 0, 0, kSanjeonRoms, {},
+     Scramble::SanJeon},
 };
 
 } // namespace

@@ -20,10 +20,11 @@ namespace brimir::stv {
 // Builds the cartridge as the SH-2 sees it from 0x02000000: byte i of the image is the byte at 0x02000000 + i, in the
 // SH-2's big-endian order, which is the order STVGameROMCartridge::LoadROM expects. Gaps are 0x00 (MAME's ROMREGION_ERASE00).
 // The image is the highest mapped byte rounded up to a power of two, at most ymir::cart::kSTVGameROMMaxSize.
+// The game's Scramble is then applied to the whole image, gaps included (as MAME's driver init does to its region).
 // On failure returns false with a message in error naming the missing or mis-sized files; image is then unspecified.
 bool BuildCartImage(ZipReader &zip, const GameInfo &game, std::vector<uint8_t> &image, std::string &error);
 
-// The same for a bare entry list (used by the tests).
+// The same for a bare entry list (used by the tests), without a scramble.
 bool BuildCartImage(ZipReader &zip, std::span<const RomEntry> roms, std::vector<uint8_t> &image, std::string &error);
 
 // The 93C46's contents on a new cabinet (64 cells, big-endian, as STVIOBoard::LoadEEPROM takes them): the set's

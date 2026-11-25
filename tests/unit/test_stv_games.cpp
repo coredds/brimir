@@ -1182,3 +1182,59 @@ TEST_CASE("stv: sss sees the two buttons of player 1 in its input test", "[.stv-
 TEST_CASE("stv: sss boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][sss]") {
     QuickBoot("sss", "epr-20091.ic8", 2950);
 }
+
+TEST_CASE("stv: sanjeon boots, takes coin and start, and plays for a minute", "[.stv-rom][sanjeon]") {
+    GameSession session("sanjeon");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // AJTUE: Japan is one of its regions, so the Japan BIOS
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // The cartridge is scrambled (MAME's init_sanjeon); unscrambled at load, the BIOS finds the game. After the board
+    // check: the SEGA logo, the intro on the rainy quay, the kart race demo and the title. No phantom credits. The
+    // frames that are mostly one colour (the logo on white, the fades) are left out.
+    AttractWatch watch(session, [&] { return session.VideoBackgroundShare() > 0.9; });
+    session.RunTo(1300);
+    CheckAttract(session, watch, 2450, {{2100, "brimir_frame2100_attract.png"}, {2200, "brimir_frame2200_attract.png"}});
+    InsertCoin(session, 2500, 2600); // the title, CREDIT 1, PRESS START BUTTON
+
+    // Start takes the credit and leads to CHARACTER SELECT; Button 1 now and then picks the character and skips the
+    // round card and the how-to-play screens, then the first minigame against the computer (air hockey). No frame looks
+    // like the attract mode any more.
+    session.Tap(0, kStart);
+    session.RunTo(4300, [&] {
+        watch.Check();
+        const int frame = session.Frame();
+        session.Press(0, Button1Now(frame, 2700));
+        if (frame == 2800) {
+            session.Save("brimir_frame2800_character_select.png");
+        } else if (frame == 4000) {
+            session.Save("brimir_frame4000_play_cpu.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // A two-player game: player 2 breaks in (the red CHALLENGE screen) with a coin of its own and picks a character
+    // with Button 1; the two-player match starts with the next minigame. The credit comes at 4306 in both emulators and
+    // Start takes it at 4336 (MAME 4332).
+    Player2Joins(session, watch.Checker());
+    session.RunTo(4500, [&] {
+        watch.Check();
+        session.Press(1, BothSelect(session.Frame(), 4400, 4500));
+        if (session.Frame() == 4400) {
+            session.Save("brimir_frame4400_challenge.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // A minute of play for both players: the lever and the buttons through the minigames (a direction duel on a stage,
+    // then a kart race). MAME, on the same inputs, shows the same screens at 6000 and 7000 and the same race and money
+    // at the end.
+    PlayMinute(session, watch, kPuzzleScript, 6000, 7000);
+}
+
+TEST_CASE("stv: sanjeon boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][sanjeon]") {
+    QuickBoot("sanjeon", "epr-20091.ic8", 2450);
+}

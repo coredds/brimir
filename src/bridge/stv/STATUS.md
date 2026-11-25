@@ -26,6 +26,7 @@ compared with MAME's.
 | `shienryu` | Shienryu | JUET | 3 buttons | Japan | full case with continues; vertical (MAME's ROT270): upright under Screen Rotation Auto, BIOS screens included (the set's default EEPROM); screens match MAME's by eye |
 | `ffreveng` | Final Fight Revenge | JUET | 6 buttons (the game reads 5) | Japan | full case; the 315-5881's uncompressed path: the game's 16 decrypted longs equal to MAME's in every round (403 in MAME, 401 in Brimir over 7600 frames), checked in a test; buttons 1-5 of both players proven in the game's input test |
 | `sss` | Steep Slope Sliders | JUET | 3 buttons (the game reads 2), one player | Japan | full case for one player (see below); the 315-5881's compressed path over a whole block: the 7344 decompressed longs equal to MAME's, checked in a test; the play minute shows the same timer and points as MAME's at three frames; buttons 1-2 proven in the game's input test |
+| `sanjeon` | DaeJeon! SanJeon SuJeon | AJTUE | 3 buttons | Japan | full case; the cartridge's scramble (see below); credits within 4 frames of MAME; from Start on, the screens match MAME's at every compared frame (the minigames, their timers and the money) |
 
 The BIOS is chosen from the game's regions in the order Japan, USA, Europe (then the game's other regions), or by the
 Saturn BIOS core option's region (`jp_*`, `us_*`, `eu_*`) when the game has that region. A game whose regions have no
@@ -63,6 +64,12 @@ cartridge ("OPERATION OF THIS CARTRIDGE IS UNAVAILABLE WITH SYSTEM ASSIGNMENTS")
 player 1 with SW 1 and SW 2 only; player 2's coin is a credit, but player 2's Start does nothing, in MAME as here. Its
 full case therefore checks that instead of a second player joining.
 
+DaeJeon! SanJeon SuJeon's cartridge is scrambled: every byte is stored inverted with its bits shuffled. The core undoes
+it at load with MAME's `init_sanjeon` transform (XOR 0xFF, then five bit swaps), over the whole cartridge image, gaps
+included (so the SH-2 reads the gaps as 0xFF, as in MAME). libretro-stv's COMPATIBILITY.md lists the game as a 315-5838
+game, but its own database gives it no chip and the same transform; MAME's transform alone runs the game here, to the
+same screens as MAME's, so the set needs no protection chip.
+
 ## Known differences from MAME
 
 - **Die Hard Arcade, attract pacing.** The intro shows one more caption than MAME and the title comes about 340 frames
@@ -72,7 +79,10 @@ full case therefore checks that instead of a second player joining.
   1990 against 1960).
 - **Guardian Force, title after a coin.** The title comes back 3 frames later than in MAME (black for 43 frames, MAME
   40), probably load or decompression time. The demo's player path drifts a little as well.
-- **Other attract drift.** Cotton 2's scene changes are a few dozen frames off MAME's in either direction.
+- **Other attract drift.** Cotton 2's scene changes are a few dozen frames off MAME's in either direction. DaeJeon!
+  SanJeon SuJeon's intro matches MAME's at frames 2100-2200, but some scene cuts come earlier (by frame 2300 the kart
+  race demo shows where MAME still shows the caption card before it, up to about 100 frames ahead); after Start the
+  game is in step with MAME's.
 - **315-5881 paths on real data.** Radiant Silvergun uses the chip once, for a boot self-check that decompresses one
   block (the compressed path). Final Fight Revenge reads only the uncompressed path: from the end of the BIOS check
   to the end of play, the same 16 longs of one uncompressed block (header 0x0001FFFF), over and over; no compressed
@@ -96,6 +106,7 @@ full case therefore checks that instead of a second player joining.
 - **Boot length.** Brimir's BIOS check ends about 30 frames before MAME's (about frame 1130-1165 against 1191).
 - **Cartridge gaps** are filled with 0x00, as MAME 0.289 (`ROMREGION_ERASE00`); current MAME master fills them with 0xFF
   and notes that the `jp5` BIOS (`epr-17740.ic8`) needs it. No game here reads a gap with the verified BIOS dumps.
+  (DaeJeon! SanJeon SuJeon's gaps read 0xFF: its scramble turns the 0x00 fill into 0xFF, as in MAME 0.289.)
 - **The IOGA's page.** Only the IOGA registers answer in the 64 KiB page at 0x00400000; the rest of the page reads 0 and
   ignores writes, as MAME's unmapped space. (The registers themselves are decoded over 0x00400000-0x0040007F; MAME maps
   0x00400000-0x0040003F.)
@@ -164,7 +175,7 @@ build\bin\brimir_tests.exe "[.stv-rom][rsgun]"                # everything about
 build\bin\brimir_tests.exe "[.stv-rom]"                       # all of it
 ```
 
-On the development PC (Release, MSVC) the quick tag takes about two minutes and the whole `[.stv-rom]` suite (38 cases)
+On the development PC (Release, MSVC) the quick tag takes about two minutes and the whole `[.stv-rom]` suite (40 cases)
 about 14 minutes; under WSL with GCC 14 the whole suite took about 9 minutes and passed.
 
 Each game has a tag with its set name; `[all-games]` is on the cases that walk the whole database. Set

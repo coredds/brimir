@@ -19,6 +19,10 @@ enum class Controls : uint8_t { ThreeButtons, SixButtons, RadiantSilvergun };
 
 enum class Chip : uint8_t { None, Crypt315_5881 };
 
+// A fixed transform of every cartridge byte, applied once to the built image (MAME's driver init):
+//   SanJeon  init_sanjeon: each byte XOR 0xFF, then a sequence of bit swaps
+enum class Scramble : uint8_t { None, SanJeon };
+
 // MAME's ROM loading macros, as used by the supported sets:
 //   WordSwap  ROM_LOAD16_WORD_SWAP
 //   Byte16    ROM_LOAD16_BYTE
@@ -54,6 +58,7 @@ struct GameInfo {
     uint16_t rotation; // degrees (0, 90, 180, 270): the libretro rotation the game needs to appear upright
     std::span<const RomEntry> roms;
     DefaultEEPROM eeprom = {};
+    Scramble scramble = Scramble::None;
 };
 
 std::span<const GameInfo> AllGames();
