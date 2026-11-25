@@ -562,6 +562,10 @@ public:
     /// @brief The rotation the output uses now: the explicit value, or under Auto the loaded ST-V game's (0 without one)
     int GetEffectiveRotation() const;
 
+    /// @brief The display aspect ratio the core reports to the frontend (display only): 4:3 for the picture, and the
+    /// inverse (3:4) while the effective rotation is 90 or 270, whatever set it
+    float GetDisplayAspectRatio() const;
+
     /// @brief Set overscan crop in pixels from each edge
     /// @param horizontal Total horizontal pixels to crop (from both edges)
     /// @param vertical Total vertical pixels to crop (from both edges)

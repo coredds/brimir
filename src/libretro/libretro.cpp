@@ -31,6 +31,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // Libretro callbacks
@@ -92,6 +93,7 @@ static brimir::PeripheralKind g_portKinds[2] = {brimir::PeripheralKind::ControlP
 // RETRO_ENVIRONMENT_SET_GEOMETRY on its first frame, even at the same resolution.
 static unsigned int g_lastWidth = 0;
 static unsigned int g_lastHeight = 0;
+static float g_lastAspect = 0.0f; // the aspect ratio last reported: it turns with the effective rotation
 static size_t g_profileFrameCount = 0;
 
 static void reset_frame_state(void);
@@ -212,6 +214,7 @@ static void apply_cheats(void) {
 static void reset_frame_state(void) {
     g_lastWidth = 0;
     g_lastHeight = 0;
+    g_lastAspect = 0.0f;
     g_profileFrameCount = 0;
     g_deviceReport = {};
     g_deviceReportLogged = false;
@@ -234,6 +237,26 @@ static unsigned max_geometry_height(void) {
     if (g_vulkanRequested) return kVulkanMaxSize;
 #endif
     return kMaxHeight;
+}
+
+// SET_GEOMETRY when the frame size or the aspect ratio (4:3, 3:4 under a 90/270 effective rotation: a rotation option
+// change, or content that is rotated or not under Auto) differs from what the frontend was last told. Display only.
+static bool update_geometry(unsigned width, unsigned height) {
+    const float aspect = g_core->GetDisplayAspectRatio();
+    if (!environ_cb || (width == g_lastWidth && height == g_lastHeight && aspect == g_lastAspect)) {
+        return false;
+    }
+    struct retro_game_geometry geo = {};
+    geo.base_width = width;
+    geo.base_height = height;
+    geo.max_width = max_geometry_width();
+    geo.max_height = max_geometry_height();
+    geo.aspect_ratio = aspect;
+    environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
+    g_lastWidth = width;
+    g_lastHeight = height;
+    g_lastAspect = aspect;
+    return true;
 }
 
 // Helper function for logging
@@ -831,17 +854,7 @@ static void present_vulkan_frame(void) {
     }
     // A change of the internal resolution is a base-size change: N x the native output, within the maximum declared at
     // load (SET_GEOMETRY only, never SET_SYSTEM_AV_INFO).
-    if (environ_cb && (width != g_lastWidth || height != g_lastHeight)) {
-        struct retro_game_geometry geo = {};
-        geo.base_width = width;
-        geo.base_height = height;
-        geo.max_width = max_geometry_width();
-        geo.max_height = max_geometry_height();
-        geo.aspect_ratio = 4.0f / 3.0f;
-        environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
-        g_lastWidth = width;
-        g_lastHeight = height;
-    }
+    update_geometry(width, height);
     video_cb(RETRO_HW_FRAME_BUFFER_VALID, width, height, 0);
 }
 #endif
@@ -1234,6 +1247,11 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info) {
     info->geometry.max_width = max_geometry_width();
     info->geometry.max_height = max_geometry_height();
     info->geometry.aspect_ratio = 4.0f / 3.0f;
+    if (g_core && g_core->GetDisplayAspectRatio() < 1.0f) {
+        // Rotated 90/270 (an option value, or the loaded game under Auto): the picture is turned
+        std::swap(info->geometry.base_width, info->geometry.base_height);
+        info->geometry.aspect_ratio = g_core->GetDisplayAspectRatio();
+    }
 
     // Fallback timing. The actual regional framerate (NTSC/PAL) is set once the
     // disc region is known via update_system_av_info_for_region() in retro_load_game.
@@ -1474,17 +1492,7 @@ RETRO_API void retro_run(void) {
         // Update geometry whenever dimensions change, including the first frame.
         // retro_get_system_av_info() reports a fixed fallback base size, so we
         // correct it here as soon as the running content produces its first frame.
-        if (environ_cb && (width != g_lastWidth || height != g_lastHeight)) {
-            struct retro_game_geometry geo = {};
-            geo.base_width = width;
-            geo.base_height = height;
-            geo.max_width = max_geometry_width();
-            geo.max_height = max_geometry_height();
-            geo.aspect_ratio = 4.0f / 3.0f;
-            environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geo);
-            g_lastWidth = width;
-            g_lastHeight = height;
-        }
+        update_geometry(width, height);
         
         size_t shownPitch = pitch;
         const void* shown = frame_with_crosshairs(fb, width, height, shownPitch);

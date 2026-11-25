@@ -3012,6 +3012,11 @@ int CoreWrapper::GetEffectiveRotation() const {
     return m_testSTVRotation >= 0 ? m_testSTVRotation : static_cast<int>(game->rotation);
 }
 
+float CoreWrapper::GetDisplayAspectRatio() const {
+    const int rotation = GetEffectiveRotation();
+    return (rotation == 90 || rotation == 270) ? 3.0f / 4.0f : 4.0f / 3.0f;
+}
+
 void CoreWrapper::SetOverscanCrop(int horizontal, int vertical) {
     if (horizontal < 0) horizontal = 0;
     if (vertical < 0) vertical = 0;

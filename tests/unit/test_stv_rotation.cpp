@@ -141,6 +141,55 @@ TEST_CASE("stv rotation: auto follows a rotated game, an explicit value override
     CHECK(again.height == plain.width);
 }
 
+// The aspect ratio the core reports to the frontend turns with the picture: 4:3, and 3:4 at 90 and 270 (display only)
+TEST_CASE("stv rotation: the reported aspect ratio is inverted at 90 and 270, whatever set the rotation", "[stv]") {
+    constexpr float k43 = 4.0f / 3.0f;
+    constexpr float k34 = 3.0f / 4.0f;
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+
+    // Explicit values, Saturn content (no game)
+    CHECK(core.GetDisplayAspectRatio() == k43);
+    core.SetRotation(0);
+    CHECK(core.GetDisplayAspectRatio() == k43);
+    core.SetRotation(90);
+    CHECK(core.GetDisplayAspectRatio() == k34);
+    core.SetRotation(180);
+    CHECK(core.GetDisplayAspectRatio() == k43);
+    core.SetRotation(270);
+    CHECK(core.GetDisplayAspectRatio() == k34);
+
+    // Auto: Saturn content stays 4:3
+    core.SetRotationAuto();
+    CHECK(core.GetDisplayAspectRatio() == k43);
+
+    // Auto with a rotated ST-V game, then switching content in the same core
+    Session session("brimir_stv_rotation_aspect");
+    REQUIRE(session.Load(core));
+    Quiet(core);
+    CHECK(core.GetDisplayAspectRatio() == k43); // the database's rotation (0)
+    core.SetSTVRotationForTesting(90);
+    CHECK(core.GetDisplayAspectRatio() == k34);
+    core.SetSTVRotationForTesting(270);
+    CHECK(core.GetDisplayAspectRatio() == k34);
+    core.SetSTVRotationForTesting(180);
+    CHECK(core.GetDisplayAspectRatio() == k43);
+    core.SetSTVRotationForTesting(270);
+
+    // an explicit value wins over the game, in both directions
+    core.SetRotation(0);
+    CHECK(core.GetDisplayAspectRatio() == k43);
+    core.SetRotation(90);
+    CHECK(core.GetDisplayAspectRatio() == k34);
+    core.SetRotationAuto();
+    CHECK(core.GetDisplayAspectRatio() == k34);
+
+    core.UnloadGame();
+    CHECK(core.GetDisplayAspectRatio() == k43);
+    LoadSaturnBios(core);
+    CHECK(core.GetDisplayAspectRatio() == k43);
+}
+
 TEST_CASE("stv rotation: auto never rotates Saturn content, also after a rotated ST-V game", "[stv]") {
     Session session("brimir_stv_rotation_saturn");
     CoreWrapper core;
