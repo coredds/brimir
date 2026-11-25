@@ -1,7 +1,7 @@
 # Brimir Roadmap
 
 **Status**: Active — version 0.10.0. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
-**Last Updated**: 2026-11-23 - v0.10.0 added ST-V arcade support (eight games)
+**Last Updated**: 2026-11-23 - v0.10.0 added ST-V arcade support (eight games); five more games and Screen Rotation Auto are unreleased
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes). The release history is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -34,7 +34,7 @@ Open items below are tagged:
 - **SH-2 JIT, experimental** — opt-in x86-64 native backend and IR-interpreter backend (see item 20 below for what is open)
 - **Accuracy options** — SH-2 cache emulation, CD Block low-level emulation, SCSP step granularity
 - **Android (arm64) core** — tested on a Galaxy A56 (Vulkan at 1x)
-- **ST-V arcade support** — eight games from MAME ROM sets: Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force and Radiant Silvergun (with its 315-5881 protection chip), checked against MAME 0.289 (board emulation in `src/bridge/stv/`)
+- **ST-V arcade support** — thirteen games from MAME ROM sets: Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force, Radiant Silvergun, Shienryu (upright under Screen Rotation Auto), Final Fight Revenge, Steep Slope Sliders (the 315-5881 protection chip), DaeJeon! SanJeon SuJeon and Decathlete (the 315-5838 chip, checked against libretro-stv), the others against MAME 0.289 (board emulation in `src/bridge/stv/`)
 
 ---
 
@@ -127,7 +127,7 @@ Netplay peers must use the same time zone: the save state holds the clock, but t
 ### 25. More ST-V Arcade Games
 **Layer**: Bridge + small hooks in the core | **Target**: Post-1.0
 
-Eight games are done (see "Done"). Open: more games from MAME's ST-V database (each needs its ROM list and a check against MAME), other protection chips beyond the 315-5881, rewind and netplay checks with ST-V games, the other seven games with save states and run-ahead, a physical Android device, and the known differences from MAME (attract-mode pacing, SMPC battery settings not saved, the 315-5881 uncompressed path unchecked; see `src/bridge/stv/STATUS.md`). The old branch `feature/stv-support` stays as reference. Big differentiator - no RetroArch core does ST-V well.
+Thirteen games are done (see "Done"; the 315-5881 and 315-5838 chips and SanJeon's scramble are in). Open: more games from MAME's ST-V database (each needs its ROM list and a check against MAME), rewind and netplay checks with ST-V games, the games other than Baku Baku Animal and Decathlete with save states and run-ahead, a physical Android device, the ruling on the CD block (real ST-V hardware has none; Brimir keeps the Saturn's mapped, so every game boots about 23-30 frames ahead of MAME; unmapping it would lengthen each boot by 44-111 frames with Brimir's timing), and the known differences from MAME (attract-mode pacing, Steep Slope Sliders' haze, Final Fight Revenge's Chinatown health bars, the 315-5881's block-to-block switch checked on synthetic data only; see `src/bridge/stv/STATUS.md`). The old branch `feature/stv-support` stays as reference. Big differentiator - no RetroArch core does ST-V well.
 
 ---
 
@@ -167,4 +167,4 @@ JIT stable, 85%+ compatibility, RetroArch core inclusion (which also removes the
 | HD textures | No | Yes | Mods | Yes | Yes | Open |
 | TATE rotation | Yes | Yes | Via RA | No | No | Done |
 | Netplay | RetroArch netplay | Rollback | Yes | No | No | Done |
-| ST-V arcade | Yes, 8 games | No | N/A | N/A | N/A | Done (more games open) |
+| ST-V arcade | Yes, 13 games | No | N/A | N/A | N/A | Done (more games open) |

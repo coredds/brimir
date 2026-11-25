@@ -155,6 +155,8 @@ uint8_t STV3155838::DecompressedByte() {
 }
 
 uint16_t STV3155838::ReadData() {
+    // High byte first, then low, on purpose: the order is observable (each byte advances the decoder), and MAME's
+    // data_r evaluation order is unspecified
     const uint8_t hi = DecompressedByte();
     const uint8_t lo = DecompressedByte();
     return static_cast<uint16_t>(hi << 8 | lo);

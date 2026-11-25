@@ -4,7 +4,14 @@ A Sega Saturn and Sega ST-V emulation core for libretro, built on the [Ymir](htt
 
 ## Overview
 
-Brimir is a libretro core that wraps Ymir's cycle-accurate hardware layer. It provides accurate Saturn emulation with optimized software rendering, an optional Vulkan renderer and full VDP1/VDP2 support, and it also runs eight ST-V arcade games.
+Brimir is a libretro core that wraps Ymir's cycle-accurate hardware layer. It provides accurate Saturn emulation with optimized software rendering, an optional Vulkan renderer and full VDP1/VDP2 support, and it also runs thirteen ST-V arcade games.
+
+## What's New since 0.10.0 (unreleased)
+
+- **Five more ST-V games** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0, thirteen in all. Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). See [ST-V arcade games](#st-v-arcade-games).
+- **Screen Rotation: Auto** - the new default turns vertical ST-V games upright (Shienryu) and never rotates Saturn games; the rotated picture is reported as 3:4. **If you ran 0.10.0, your saved setting is "None"**: choose Auto in Quick Menu > Core Options > Video > Screen Rotation (TATE), or Shienryu comes up on its side.
+- **ST-V saves** - the SMPC's battery settings are saved too, so an ST-V `<set>.srm` is now 32,901 bytes; a 0.10.0 file (32,896 bytes) still loads. 0.10.0 ST-V save states still load.
+- **ST-V game defaults** - each set's own default EEPROM image is used (Shienryu sets up the cabinet for its vertical monitor, Steep Slope Sliders for one player).
 
 ## What's New in 0.10.0
 
@@ -24,7 +31,7 @@ The history of every release is in [CHANGELOG.md](CHANGELOG.md).
 - M68000 sound CPU emulation
 - SCU DSP and DMA emulation
 - CHD and ISO disc format support via libchdr
-- Eight Sega ST-V arcade games from MAME ROM sets (see [ST-V arcade games](#st-v-arcade-games))
+- Thirteen Sega ST-V arcade games from MAME ROM sets (see [ST-V arcade games](#st-v-arcade-games))
 - Save states (LZ4-compressed) and backup RAM persistence
 - SRAM managed as a single source of truth for libretro `.srm` files
 - Per-region persistent SMPC/RTC data
@@ -77,7 +84,7 @@ On Android the Vulkan renderer ran at full speed at 1x on the one phone tried, a
 ## Known Limitations
 
 - **Interlaced / high-resolution performance** — The software VDP2 renderer can be CPU-bound in interlaced titles such as *Virtua Fighter 2* on slower CPUs. When the core cannot complete a frame within the NTSC/PAL frame budget, RetroArch compensates by stretching or dropping audio, causing music to cut out or slow down while video remains smooth. Deinterlacing Mode = `None` provides the best performance in these titles.
-- **ST-V** - Only the eight games listed under [ST-V arcade games](#st-v-arcade-games). Attract-mode timing and a few transitions differ from MAME by some frames (Die Hard Arcade's intro by about 340), and the SMPC's battery settings are not saved; `src/bridge/stv/STATUS.md` has the list.
+- **ST-V** - Only the thirteen games listed under [ST-V arcade games](#st-v-arcade-games). Attract-mode timing differs from MAME by some frames: every game boots about 23-30 frames ahead of MAME (measured on Die Hard Arcade), because Brimir keeps the Saturn's CD block mapped and the BIOS's check for it passes at once, while MAME's times out; some scene changes drift by a few dozen frames, DaeJeon! SanJeon SuJeon's by up to about 100. Steep Slope Sliders shows its distant scenery in a haze where MAME draws it dark, and Final Fight Revenge draws one stage's health bars solid where MAME draws them half transparent. Decathlete (which MAME does not run) was checked against libretro-stv only. `src/bridge/stv/STATUS.md` has the list.
 - **Archived Saturn discs** - Not supported: a `.zip` is read as an ST-V ROM set only, and RetroArch does not unpack any archive (`.zip`, `.7z`) for the core. Extract the disc image or convert it to CHD.
 - **Controllers** - Ports 1 and 2 only (Ymir emulates no multitap). The six-axis Mission Stick, dual Mission Sticks, Twin-Stick and Stunner are not offered.
 - **CD Block LLE** — Low-level CD Block emulation is a work in progress in Ymir. With the real ROMs (`cdb106.bin` v1.06, `cdb105.bin` v1.05) the BIOS menu, Sega Rally Championship, Virtua Fighter 2, Burning Rangers, Guardian Heroes and Panzer Dragoon II Zwei boot to their intros and attract modes and run exactly with run-ahead and from a state on another instance; boots take about 0.2-2.5 s longer (11-152 frames) than with the high-level CD Block. Other games are untested.
@@ -216,8 +223,8 @@ the game's saves; the second instance runs a few frames ahead).
 
 ## ST-V arcade games
 
-Brimir runs eight Sega ST-V (Titan Video) arcade games from their MAME ROM sets. The ST-V board is a Saturn with a
-cartridge ROM board and arcade I/O, so it runs on the same core with the same renderers; only these eight sets are
+Brimir runs thirteen Sega ST-V (Titan Video) arcade games from their MAME ROM sets. The ST-V board is a Saturn with a
+cartridge ROM board and arcade I/O, so it runs on the same core with the same renderers; only these thirteen sets are
 supported:
 
 | MAME set | Game | Controls |
@@ -230,6 +237,22 @@ supported:
 | `cotton2` | Cotton 2 | 3 buttons |
 | `grdforce` | Guardian Force | 3 buttons |
 | `rsgun` | Radiant Silvergun | 3 buttons (plus a 4th that the game does not read) |
+| `shienryu` | Shienryu (vertical, see below) | 3 buttons |
+| `ffreveng` | Final Fight Revenge | 6 buttons (the game reads buttons 1-5; button 6 does nothing, in MAME too) |
+| `sss` | Steep Slope Sliders | 3 buttons (the game reads 2); one player |
+| `sanjeon` | DaeJeon! SanJeon SuJeon | 3 buttons |
+| `decathlt` | Decathlete (V1.001) | 3 buttons |
+
+Decathlete is the one game MAME does not run (its title comes up with wrong colours there), so it was checked against
+libretro-stv instead; only `decathlt` (V1.001), not `decathlto` (V1.000), is supported. Steep Slope Sliders is a
+one-player game: player 2's coin gives a credit, but player 2's Start does nothing, as in MAME.
+
+**Vertical games.** Shienryu is a vertical-monitor game, and the cabinet sends its picture turned on its side. With
+Screen Rotation (TATE) at `Auto` (the default) the core turns it upright and reports a 3:4 picture; Saturn games and the
+other ST-V games are never rotated by Auto. `None`, `90°`, `180°` and `270°` override Auto for any content. **If you ran
+0.10.0, your saved setting is "None"** (the 0.10.0 default was "None" and RetroArch keeps what it saved): pick `Auto`
+in Quick Menu > Core Options > Video > Screen Rotation (TATE), or Shienryu comes up lying on its side (and the BIOS's
+own screens with it). Shienryu's default EEPROM, part of its ROM set, sets the cabinet up for the vertical monitor.
 
 **ROM sets.** Load the MAME `.zip` of the game (for example `bakubaku.zip`) through RetroArch's Load Content; the set is
 recognised by its name and its file list (the extension alone is never enough), and `.bin`/`.rom` files are never taken
@@ -243,7 +266,7 @@ core takes the one for the game's regions: Japan first, then USA, then Europe, o
 when the game has it (so Die Hard Arcade, which has no Japan version, uses the USA BIOS). MAME's file names, with the
 older MAME names of the same dumps also accepted. This is the complete list the core looks for, in the order it tries
 them (file names are matched without regard to case). Within a region the verified dumps come first (dumps whose CRC-32
-was checked against MAME's; the eight games were run with `epr-20091.ic8`, and Die Hard Arcade with `epr-17952a.ic8`),
+was checked against MAME's; the games were run with `epr-20091.ic8`, and Die Hard Arcade with `epr-17952a.ic8`),
 then the dumps that are accepted but were never run with this core, so a verified one wins when both are there:
 
 | Region | Verified | Accepted, not verified |
@@ -273,11 +296,14 @@ A coin is needed before Start: press Select once for one credit. The Test switch
 the cursor, Test selects), which also has the game's own input test.
 
 **Saves.** The cabinet's settings (the EEPROM) and the backup RAM with the high scores are saved to `<set>.srm` in the
-save folder (32,901 bytes: the backup RAM, the EEPROM and the SMPC's battery settings). A 0.10.0 `.srm` (32,896 bytes) still loads and is saved in the new size; a `.srm` of another size, such as a Saturn one, is not used. Save states and run-ahead (all
-three modes: single instance, second instance with the software renderer, and second instance with the Vulkan renderer,
-where RetroArch falls back to one instance) were tried in RetroArch on Windows with Baku Baku Animal; the other seven
-games were not tried with them, and rewind and netplay were not tested for ST-V at all. The core's own state for these
-games is not compatible between versions yet.
+save folder (32,901 bytes: the backup RAM of 32,768 bytes, the EEPROM of 128 bytes and five bytes of the SMPC's battery settings,
+which 0.10.0 did not save). A 0.10.0 `.srm` (32,896 bytes) still loads, with those settings at their default, and
+is saved in the new size at the next save; a `.srm` of another size, such as a Saturn one, is not used. Save states
+and run-ahead (all three modes: single instance, second instance with the software renderer, and second instance with
+the Vulkan renderer, where RetroArch falls back to one instance) were tried in RetroArch on Windows with Baku Baku
+Animal; a save and a load of a state was also tried on Decathlete. The other games were not tried with them, and rewind
+and netplay were not tested for ST-V at all. Save states from 0.10.0 still load; states of ST-V games are not
+compatible with other sets or other BIOS files.
 
 **Archived Saturn discs.** A `.zip` is read only as an ST-V ROM set (a zip that is not one is refused with a message),
 and the core tells RetroArch not to unpack archives (it has to read the ST-V zip itself), which RetroArch cannot ask for
@@ -594,7 +620,7 @@ Licensed under the GNU General Public License v3.0 (GPL-3.0), the same license a
 
 Brimir is built on **[Ymir](https://github.com/StrikerX3/ymir)**, a cycle-accurate Sega Saturn emulator by **StrikerX3**. The hardware layer under `src/core/` is synced from upstream Ymir — all Saturn CPU, VDP, audio, and peripheral emulation is Ymir's work. The SH-2 files are a Brimir-maintained fork of Ymir's SH-2 with hooks for the SH-2 JIT, plus a read-only page-table accessor for the JIT in `ymir/sys/bus.hpp`; see `src/core/BRIMIR_FORK.md`. Apart from these, Brimir uses the hardware layer unmodified and wraps it in a libretro core, adding performance optimizations and frontend integration. Both projects are licensed under GPL.
 
-The ST-V support follows **[MAME](https://www.mamedev.org/)**, and some of its code is derived from MAME's: the 315-5881 decryption and decompression chip (`src/bridge/stv/stv_315_5881.cpp`/`.hpp`, from `src/mame/sega/315-5881_crypt.cpp`; BSD-3-Clause, copyright Andreas Naive, Olivier Galibert, David Haywood), the 315-5838 compression and encryption chip (`src/bridge/stv/stv_315_5838.cpp`/`.hpp`, from `src/mame/sega/315-5838_317-0229_comp.cpp`; BSD-3-Clause, copyright David Haywood, Samuel Neves, Peter Wilhelmsen, Morten Shearman Kirkegaard), the 93C46 serial EEPROM (`src/bridge/stv/stv_io.cpp`, from `src/devices/machine/eepromser.cpp`; BSD-3-Clause, copyright Aaron Giles) and the protection register handlers (`src/bridge/stv/stv_cartridge.cpp`, from `src/mame/sega/stv.cpp`; LGPL-2.1-or-later, copyright David Haywood, Angelo Salese, Olivier Galibert, Mariusz Wojcieszek, R. Belmont). The BSD-3-Clause notices are kept in those files' headers. Where the 315-5838's connection to the cartridge departs from MAME (which does not run Decathlete), it follows the behaviour of **[libretro-stv](https://github.com/beudbeud/libretro-stv)**, the Mednafen-based core that does; no code is taken from it. The game database (`stv_game_db.cpp`) transcribes the ROM lists and keys of MAME's `stv.cpp`.
+The ST-V support follows **[MAME](https://www.mamedev.org/)**, and some of its code is derived from MAME's: the 315-5881 decryption and decompression chip (`src/bridge/stv/stv_315_5881.cpp`/`.hpp`, from `src/mame/sega/315-5881_crypt.cpp`; BSD-3-Clause, copyright Andreas Naive, Olivier Galibert, David Haywood), the 315-5838 compression and encryption chip (`src/bridge/stv/stv_315_5838.cpp`/`.hpp`, from `src/mame/sega/315-5838_317-0229_comp.cpp`; BSD-3-Clause, copyright David Haywood, Samuel Neves, Peter Wilhelmsen, Morten Shearman Kirkegaard), the 93C46 serial EEPROM (`src/bridge/stv/stv_io.cpp`, from `src/devices/machine/eepromser.cpp`; BSD-3-Clause, copyright Aaron Giles) and the protection register handlers (`src/bridge/stv/stv_cartridge.cpp`, from `src/mame/sega/stv.cpp`; LGPL-2.1-or-later, copyright David Haywood, Angelo Salese, Olivier Galibert, Mariusz Wojcieszek, R. Belmont). The BSD-3-Clause notices are kept in those files' headers. Where the 315-5838's connection to the cartridge departs from MAME (which does not run Decathlete), it follows the behaviour of **[libretro-stv](https://github.com/beudbeud/libretro-stv)**, the Mednafen-based core that does; no code is taken from it. The game database (`stv_game_db.cpp`) transcribes the ROM lists and keys of MAME's `stv.cpp`, and the descrambling of DaeJeon! SanJeon SuJeon's cartridge (`stv_loader.cpp`) follows its `init_sanjeon` (the per-set default EEPROM images are read from the user's own ROM sets, not shipped). The ST-V BIOS and game ROMs are never part of Brimir.
 
 ## Contributing
 

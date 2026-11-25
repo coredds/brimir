@@ -1,8 +1,9 @@
 # ST-V support: status
 
-The arcade games in the table below run on the ST-V board emulation in this folder. This file says what was checked, how, and where the
-behaviour differs from MAME (the reference). The design is in `docs/superpowers/specs/2026-11-21-stv-support-design.md`
-(not tracked); the changes to `src/core/` are listed in `src/core/BRIMIR_FORK.md`.
+The thirteen arcade games in the table below run on the ST-V board emulation in this folder. This file says what was
+checked, how, and where the behaviour differs from MAME (the reference). The design is in
+`docs/superpowers/specs/2026-11-21-stv-support-design.md` (not tracked); the changes to `src/core/` are listed in
+`src/core/BRIMIR_FORK.md`.
 
 ## Games
 
@@ -27,7 +28,7 @@ compared with MAME's.
 | `ffreveng` | Final Fight Revenge | JUET | 6 buttons (the game reads 5) | Japan | full case; the 315-5881's uncompressed path: the game's 16 decrypted longs equal to MAME's in every round (403 in MAME, 401 in Brimir over 7600 frames), checked in a test; buttons 1-5 of both players proven in the game's input test |
 | `sss` | Steep Slope Sliders | JUET | 3 buttons (the game reads 2), one player | Japan | full case for one player (see below); the 315-5881's compressed path over a whole block: the 7344 decompressed longs equal to MAME's, checked in a test; the play minute shows the same timer and points as MAME's at three frames; buttons 1-2 proven in the game's input test |
 | `sanjeon` | DaeJeon! SanJeon SuJeon | AJTUE | 3 buttons | Japan | full case; the cartridge's scramble (see below); credits within 4 frames of MAME; from Start on, the screens match MAME's at every compared frame (the minigames, their timers and the money) |
-| `decathlt` | Decathlete (V1.001) | JUET | 3 buttons | Japan | full case, compared with libretro-stv (MAME does not run it, see below); the 315-5838's data stream equal to libretro-stv's (209,536 words over the first 1800 frames, byte for byte); a state saved inside one of its blocks continues identically in a fresh core |
+| `decathlt` | Decathlete (V1.001) | JUET | 3 buttons | Japan | full case, compared with libretro-stv (MAME does not run it, see below); the 315-5838's data stream equal to libretro-stv's (209,536 words over the first 1800 frames, byte for byte); a state saved inside one of the game's real blocks (the test starts the block itself, through the bank window with the game's uploaded tables, since Brimir finishes every block inside one frame) continues identically in a fresh core |
 
 The BIOS is chosen from the game's regions in the order Japan, USA, Europe (then the game's other regions), or by the
 Saturn BIOS core option's region (`jp_*`, `us_*`, `eu_*`) when the game has that region. A game whose regions have no
@@ -49,8 +50,8 @@ and was never run here; MAME was run with `-bios jp1` (`epr-20091.ic8`) to match
   may not work.
 
 A `.zip` the reader cannot parse (damaged, truncated, zip64) is refused as unreadable rather than tried as a Saturn disc,
-and every ROM file's data is checked against the CRC-32 in the archive when the cartridge image is built. Load failures of
-zip content are shown on screen through `RETRO_ENVIRONMENT_SET_MESSAGE` as well as logged. The disk control interface
+and every ROM file's data is checked against the CRC-32 in the archive when the cartridge image is built. Load failures
+of zip content are shown on screen through `RETRO_ENVIRONMENT_SET_MESSAGE` as well as logged. The disk control interface
 refuses eject, insert and image changes while an ST-V game runs (image 0 answers with an empty path). File names are
 handled as UTF-8, so non-ASCII zip names and folders work on Windows.
 
@@ -104,7 +105,8 @@ logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is sup
 - **Steep Slope Sliders, the haze over the scenery.** Brimir draws the far scenery and the sky pale, as in a haze; MAME
   draws them dark (a black sky in daylight). The game turns on the VDP2 line colour screen for RBG0 and the sprites
   (LNCLEN 0x0030, colour calculation on for both), which MAME 0.289's VDP2 does not draw (`saturn_v.cpp` calls
-  its line colour pass only under `TEST_FUNCTIONS`, defined 0, with a TODO). The VDP2 code is shared with the Saturn and not changed for ST-V.
+  its line colour pass only under `TEST_FUNCTIONS`, defined 0, with a TODO). The VDP2 code is shared with the Saturn
+  and not changed for ST-V; Brimir's picture is probably the more accurate one.
 - **Final Fight Revenge, HUD on some stages.** On the Chinatown stage MAME draws the top health bars half transparent;
   Brimir draws them solid, as both draw them on the other stages seen. Not investigated (MAME marks the game's graphics
   imperfect; the VDP code is shared with the Saturn and not changed for ST-V).
@@ -121,13 +123,18 @@ logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is sup
   SCU's HBlank-OUT lower cancels an HBlank-IN interrupt the slave has not taken yet (MAME's `HOLD_LINE` keeps it
   pending). Details in `src/core/BRIMIR_FORK.md` (the `SetIRLHoldLine` row). No game shows an effect: with either
   changed alone, Die Hard Arcade's first 2350 frames are identical.
-- **Boot length.** Brimir's BIOS check ends about 30 frames before MAME's (about frame 1130-1165 against 1191). Cause:
-  the BIOS (every dump here) looks for a CD block, polling CR1-CR4 at 0x25890018 for "\0CDBLOCK" up to 200,001 times
-  behind a "SYSTEM CHECKING, PLEASE WAIT A FEW SECONDS..." screen. MAME maps nothing at A-bus CS2 (reads 0), so the
-  poll runs out (about 32 frames with Die Hard Arcade); Brimir keeps the Saturn's CD block mapped in ST-V mode, it
-  answers, and the check passes at once. Unmapping it brings the screen back, but with Brimir's bus and SH-2 timing the
-  poll is slower and Die Hard Arcade's boot then ends 18 to 85 frames after MAME's (CS2 access 2 to 40 cycles; MAME runs
-  the poll at about one cycle per instruction with no bus wait), so it stays mapped: matching MAME would mean changing shared timing.
+- **Boot length.** Brimir's BIOS check ends about 30 frames before MAME's (about frame 1130-1165 against 1191), and
+  every game boots 23-30 frames ahead of MAME. Measured on Die Hard Arcade (23 frames from the FBI screen on); the
+  other games were not measured one by one, but they run the same BIOS check. Cause: the BIOS (every dump here) looks
+  for a CD block, polling CR1-CR4 at 0x25890018 for "\0CDBLOCK" up to 200,001 times behind a "SYSTEM CHECKING, PLEASE
+  WAIT A FEW SECONDS..." screen. MAME maps nothing at A-bus CS2 (reads 0), so the poll runs out (about 32 frames with
+  Die Hard Arcade); Brimir keeps the Saturn's CD block mapped in ST-V mode, it answers, and the check passes at once.
+  Unmapping it brings the screen back, but with Brimir's bus and SH-2 timing the poll is slower and Die Hard Arcade's
+  boot then ends 18 to 85 frames after MAME's (CS2 access 2 to 40 cycles; MAME runs the poll at about one cycle per
+  instruction with no bus wait), so it stays mapped: matching MAME would mean changing shared timing. A real ST-V has
+  no CD block, so unmapping would be the more faithful choice; it is left for the developer to decide (it lengthens
+  every game's boot by 44-111 frames with Brimir's timing, the real wait length being unknown, and moves every
+  `[.stv-rom]` schedule).
 - **Cartridge gaps** are filled with 0x00, as MAME 0.289 (`ROMREGION_ERASE00`); current MAME master fills them with 0xFF
   and notes that the `jp5` BIOS (`epr-17740.ic8`) needs it. No game here reads a gap with the verified BIOS dumps.
   (DaeJeon! SanJeon SuJeon's gaps read 0xFF: its scramble turns the 0x00 fill into 0xFF, as in MAME 0.289.)
@@ -141,23 +148,37 @@ Not supported: ST-V games outside the table above (the game database holds the R
 
 - `<set>.srm` holds the backup RAM (32 KiB), the EEPROM (128 bytes) and the SMPC's five SMEM bytes, 32,901 bytes. A
   0.10.0 file (32,896 bytes, no SMEM) is accepted, its SMEM at MAME's default, and written in the new size at unload. A
-  file of another size (a Saturn `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The EEPROM starts as MAME's: the set's
-  default image when its ROM_START has one (Shienryu's `eeprom-shienryu.bin`, which sets the cabinet up for the vertical
-  monitor, and Steep Slope Sliders' `sss.nv`, its one-player assignment; both are part of the set), else blank (0xFF), and the BIOS sets it up on first boot.
-- Save states carry an ST-V block (cabinet I/O and EEPROM state, protection chip state, scheduler count) after the
-  Saturn payload. It is meant to make run-ahead, rewind and netplay exact; run-ahead and save/load were checked in
-  RetroArch on Baku Baku Animal, rewind and netplay were not (see "Frontend and platform checks"). The block is not
-  versioned for compatibility yet: the format is unreleased. A state from another game or another BIOS is refused.
+  file of another size (a Saturn `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The
+  EEPROM starts as MAME's: the set's default image when its ROM_START has one (Shienryu's `eeprom-shienryu.bin`, which
+  sets the cabinet up for the vertical monitor, and Steep Slope Sliders' `sss.nv`, its one-player assignment; both are
+  part of the set), else blank (0xFF), and the BIOS sets it up on first boot.
+- Save states carry an ST-V block (cabinet I/O and EEPROM state, the protection chips' state, scheduler count) after
+  the Saturn payload. It is meant to make run-ahead, rewind and netplay exact; run-ahead and save/load were checked in
+  RetroArch on Baku Baku Animal (and save/load on Decathlete), rewind and netplay were not (see "Frontend and platform
+  checks"). The block is versioned: version 1 is 0.10.0's, version 2 adds the 315-5838's state; a version 1 block
+  still loads (the chip at its reset value; unit tests, and a Baku Baku Animal state saved by a 0.10.0 build continued
+  for 300 identical frames) and a block is always saved in version 2. A state from another game or another BIOS is
+  refused.
 - Saturn save states are byte-identical to master's.
 
 ## Frontend and platform checks
 
-Run by Task 13b with RetroArch 1.22.2 (a scratch copy, never the developer's install) and the Android emulator; the
-tests above load through `CoreWrapper` and cannot see frontend behaviour.
+Run with RetroArch 1.22.2 (a scratch copy, never the developer's install) and the Android emulator; the tests above load
+through `CoreWrapper` and cannot see frontend behaviour. The first eight games and Android were run for 0.10.0; the five
+newer games were run for the release after it (Windows only).
 
 Verified:
-- All eight games reach their attract mode in RetroArch on Windows, with the software and the Vulkan renderer (16 runs,
-  clean exits, the BIOS chosen as in the table above).
+- All eight 0.10.0 games reach their attract mode in RetroArch on Windows, with the software and the Vulkan renderer
+  (16 runs, clean exits, the BIOS chosen as in the table above).
+- The five newer games (Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon, Decathlete) reach
+  their attract mode the same way (10 runs, software and Vulkan, screenshots at 30, 50 and 70 s, clean exits, no
+  error or warning in the logs, a 32,901-byte `.srm` after each). Shienryu is upright and 3:4 with Screen Rotation at
+  Auto; with the option at None the same run shows it lying on its side at 4:3 (what a user who ran 0.10.0 sees until
+  they choose Auto).
+- Decathlete, save state and load state in RetroArch (software renderer): a state taken on the title screen, then
+  another coin and Start (the game moved on to its first event's screen), and the load brought the title back, with
+  one credit (the credit line blinks with "PRESS START BUTTON" on this screen, so the second coin's count was not
+  caught on a screenshot).
 - Coin, Start and play through RetroArch's own input path (its network RetroPad), on Baku Baku Animal with both renderers:
   coin gives a credit, Start and B start the game.
 - Baku Baku Animal: save state and load state (the credit count goes back), run-ahead in all three modes (single instance;
@@ -180,7 +201,8 @@ Not verified, left for the developer's manual test:
 - Rewind and netplay with an ST-V game (the state block is in the state and the stream is deterministic, but neither was
   run).
 - A physical Android phone (the arm64 core passed the ELF checks only) and Android's 16 KB page images.
-- Save states and run-ahead on the other seven games, and `.srm` persistence on them.
+- Save states and run-ahead on the games other than Baku Baku Animal (and, for save states, Decathlete), and `.srm`
+  persistence beyond the sizes written; rewind and netplay on any of them; the five newer games on Android.
 - Sound and gamepad feel on a real pad; Golden Axe: The Duel's six buttons and two players through RetroArch (the six
   buttons are proven in the game's own input test through `CoreWrapper`); Radiant Silvergun and Die Hard Arcade by hand.
 - RetroArch's frame-related network commands are ignored with single-instance run-ahead (a RetroArch limitation seen

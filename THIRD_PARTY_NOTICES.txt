@@ -166,14 +166,21 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ==============================================================================
 URL:      https://github.com/mamedev/mame
 Licence:  LGPL-2.1-or-later, used by Brimir under the GPL-3.0
-Used in:  all downloads (src/bridge/stv/stv_cartridge.cpp, stv_io.cpp, stv_game_db.cpp, stv_bios.cpp)
+Used in:  all downloads (src/bridge/stv/stv_cartridge.cpp, stv_io.cpp, stv_game_db.cpp,
+          stv_bios.cpp, stv_loader.cpp)
 
 What it covers: the protection register handlers of stv_cartridge.cpp
 (ReadProtectionRegister, WriteProtectionRegister) are derived from stv_state::
 common_prot_r and common_prot_w, and its 315-5838 connection (IsComp5838Read,
-WriteComp5838) from decathlt_prot_r, decathlt_prot_srcaddr_w and init_decathlt; the input port layout of stv_io.cpp follows the
-driver; the game list (stv_game_db.cpp) and the BIOS file list (stv_bios.cpp) are
-transcribed from its ROM definitions (names, sizes, CRC-32 values, keys).
+WriteComp5838) from decathlt_prot_r, decathlt_prot_srcaddr_w and init_decathlt;
+the input port layout of stv_io.cpp follows the driver; the game list
+(stv_game_db.cpp) and the BIOS file list (stv_bios.cpp) are transcribed from its ROM
+definitions (names, sizes, CRC-32 values, keys, and which sets have a default
+EEPROM image); the descrambling of DaeJeon! SanJeon SuJeon's cartridge
+(SanJeonByte in stv_loader.cpp) follows init_sanjeon step for step.
+
+The default EEPROM images (eeprom-shienryu.bin and sss.nv) are not part of Brimir: the
+core reads them from the user's own ROM set, as MAME does.
 
 ------------------------------------------------------------------------------
 Copyright (C) David Haywood, Angelo Salese, Olivier Galibert, Mariusz Wojcieszek,
