@@ -310,7 +310,7 @@ TEST_CASE("ST-V detect: a zip with a non-ASCII name is detected", "[stv]") {
 
 TEST_CASE("ST-V game database: every game is well formed", "[stv]") {
     const auto games = brimir::stv::AllGames();
-    REQUIRE(games.size() == 9);
+    REQUIRE(games.size() == 10);
 
     std::set<std::string> names;
     for (const GameInfo &game : games) {
@@ -346,6 +346,11 @@ TEST_CASE("ST-V game database: the games' details", "[stv]") {
     CHECK(Game("rsgun").cryptKey == 0x05272d01);
     CHECK(Game("rsgun").controls == Controls::RadiantSilvergun);
     CHECK(Game("gaxeduel").controls == Controls::SixButtons);
+    // ffreveng: ROM_PARAMETER( ":315_5881:key", "0524ac01" ), inputs stv6b
+    CHECK(Game("ffreveng").chip == Chip::Crypt315_5881);
+    CHECK(Game("ffreveng").cryptKey == 0x0524ac01);
+    CHECK(Game("ffreveng").controls == Controls::SixButtons);
+    CHECK(Game("ffreveng").eeprom.file == nullptr);
     for (const char *name : {"bakubaku", "colmns97", "puyosun", "diehard", "cotton2", "grdforce", "shienryu"}) {
         CHECK(Game(name).chip == Chip::None);
         CHECK(Game(name).controls == Controls::ThreeButtons);
@@ -366,6 +371,16 @@ TEST_CASE("ST-V game database: the games' details", "[stv]") {
           std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan, Region::LatinAmerica});
     CHECK(regionsOf("rsgun") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
     CHECK(regionsOf("shienryu") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
+    CHECK(regionsOf("ffreveng") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
+
+    // Final Fight Revenge: the program ROM loaded once as ROM_LOAD16_BYTE (no reloads), then seven word-swapped files
+    const GameInfo &ffr = Game("ffreveng");
+    CHECK(DistinctFiles(ffr) == 8);
+    REQUIRE(ffr.roms.size() == 8);
+    CHECK(ffr.roms[0].load == Load::Byte16);
+    CHECK(ffr.roms[0].offset == 0x1);
+    CHECK(ffr.roms[1].offset == 0x200000);
+    CHECK(ffr.roms[7].offset == 0x1800000);
 
     // Puyo Puyo Sun: nine files, the header file reloaded with the previous flags once and plain twice
     const GameInfo &puyo = Game("puyosun");

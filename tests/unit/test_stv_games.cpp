@@ -379,10 +379,11 @@ void ChangedCentre(GameSession &session, const std::vector<uint32_t> &idlePixels
 // In the INPUT TEST (UP, DOWN, LEFT, RIGHT and the switches for 1P and 2P, each OFF until pressed) every button of
 // either player turns one entry ON: as many different screens as buttons, all different from the idle one, which comes
 // back on release. The entry that changes is in the player's column (1P left of 60% of the width, 2P right of it), one
-// row lower for each button. `slotsPerPlayer` is how many 60-frame slots a player gets; `unusedButton` is one the game
-// does not read (0 when there is none): it changes nothing.
+// row lower for each button, or with `perRow` buttons to a row, left to right along the row and then one row lower.
+// `slotsPerPlayer` is how many 60-frame slots a player gets; `unusedButton` is one the game does not read (0 when there
+// is none): it changes nothing.
 void CheckInputTest(GameSession &session, const std::vector<uint16_t> &buttons, unsigned slotsPerPlayer,
-                    uint16_t unusedButton = 0) {
+                    uint16_t unusedButton = 0, unsigned perRow = 1) {
     session.RunTo(2990);
     session.Save("brimir_frame2990_input_test.png");
     const uint64_t idle = session.VideoHash();
@@ -391,6 +392,7 @@ void CheckInputTest(GameSession &session, const std::vector<uint16_t> &buttons, 
     std::set<uint64_t> pressed;
     for (unsigned player = 0; player < 2; player++) {
         unsigned lastRow = 0;
+        unsigned lastColumn = 0;
         for (unsigned b = 0; b < buttons.size(); b++) {
             INFO("player " << player + 1 << " SW " << b + 1);
             session.RunTo(3000 + static_cast<int>(player * slotsPerPlayer + b) * 60);
@@ -403,8 +405,15 @@ void CheckInputTest(GameSession &session, const std::vector<uint16_t> &buttons, 
             ChangedCentre(session, idlePixels, cx, cy);
             INFO("changed pixels centred at " << cx << "," << cy);
             CHECK((player == 0 ? cx < width * 6 / 10 : cx > width * 6 / 10));
-            CHECK(cy > lastRow);
-            lastRow = cy;
+            if (b % perRow == 0) {
+                CHECK(cy > lastRow);
+                lastRow = cy;
+            } else {
+                CHECK(cy + 2 >= lastRow);
+                CHECK(cy <= lastRow + 2);
+                CHECK(cx > lastColumn);
+            }
+            lastColumn = cx;
             session.Save("brimir_input_test_p" + std::to_string(player + 1) + "_sw" + std::to_string(b + 1) + ".png");
             session.RunTo(session.Frame() + 10);
             session.Press(player, 0);
@@ -488,6 +497,10 @@ TEST_CASE("stv: rsgun boots to the attract mode and takes one coin", "[.stv-rom]
 
 TEST_CASE("stv: shienryu boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][shienryu]") {
     QuickBoot("shienryu", "epr-20091.ic8", 2800);
+}
+
+TEST_CASE("stv: ffreveng boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][ffreveng]") {
+    QuickBoot("ffreveng", "epr-20091.ic8", 2450);
 }
 
 TEST_CASE("stv: colmns97 boots, takes coin and start, and plays for a minute", "[.stv-rom][colmns97]") {
@@ -934,4 +947,104 @@ TEST_CASE("stv: shienryu boots upright, takes coin and start, and plays for a mi
 
     // A minute of play: both ships fly about firing, now and then a bomb, with continues
     PlayMinute(session, watch, kShooterScript, 4500, 6000, true);
+}
+
+TEST_CASE("stv: ffreveng's 315-5881 reads the game's uncompressed block as in MAME", "[.stv-rom][ffreveng]") {
+    GameSession session("ffreveng");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // The game's only use of the chip (MAME 0.289, watchpoints on 0x4FFFFF0-0x4FFFFFF through boot, attract and play):
+    // from the end of the BIOS check the code at 0x06010230 disables the chip, sets the ROM address 0x001349CA (words)
+    // and the subkey 0x10D9; then about once a frame the code at 0x06010292 enables it, reads one long at 0x4FFFFFC
+    // and disables it again, 16 longs in all, and it starts over. The block's header (logged from Brimir's chip in a
+    // local build) is 0x0001FFFF: not compressed, 256 lines of 512 bytes, so these are the chip's plain decrypted
+    // words. MAME's values, the same in all of its 403 rounds over 7600 frames of boot, attract and play:
+    static constexpr uint32_t kMame[16] = {0x7C1F2D57, 0x1CCF2933, 0x18AD2511, 0x3DD55A9F, 0x3996671D, 0x100F1067,
+                                           0x563F2496, 0x184F2073, 0x52571009, 0x31123954, 0x20AB18A7, 0x5A5849D3,
+                                           0x00005E97, 0x62D85695, 0x396D4DF2, 0x5A7524E8};
+    auto &bus = session.Core().GetSaturn()->mainBus;
+    int mismatches = 0;
+    for (int round = 0; round < 2; round++) {
+        bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
+        bus.Write<uint16_t>(0x04FF'FFF8, 0x49CA);
+        bus.Write<uint16_t>(0x04FF'FFFA, 0x0013);
+        bus.Write<uint16_t>(0x04FF'FFFC, 0x10D9);
+        for (uint32_t i = 0; i < 16; i++) {
+            bus.Write<uint8_t>(0x04FF'FFF1, 0x01);
+            const uint32_t value = bus.Read<uint32_t>(0x04FF'FFFC);
+            bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
+            if (value != kMame[i]) {
+                UNSCOPED_INFO("round " << round << " long " << i << ": " << std::hex << value << " expected "
+                                       << kMame[i] << std::dec);
+                ++mismatches;
+            }
+        }
+    }
+    CHECK(mismatches == 0);
+}
+
+TEST_CASE("stv: ffreveng boots, takes coin and start, and plays for a minute", "[.stv-rom][ffreveng]") {
+    GameSession session("ffreveng");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // The BIOS checks the board, then from about frame 1150 the WIN RANKING, the intro over a riveted wall with INSERT
+    // COIN(S) / CREDIT 0, a demo fight and the CAPCOM logo. No phantom credits. The black frames between scenes are
+    // left out: the game fades through black too.
+    AttractWatch watch(session, [&] { return session.VideoUniform(); });
+    session.RunTo(1300);
+    CheckAttract(session, watch, 2400, {{1400, "brimir_frame1400_ranking.png"}, {2000, "brimir_frame2000_attract.png"}});
+    InsertCoin(session, 2450, 2500);
+
+    // Start takes the credit and leads to PLAYER SELECT; Button 1 now and then picks the fighter, then the round against
+    // the computer starts. No frame looks like the attract mode any more.
+    session.RunTo(2550);
+    session.Tap(0, kStart);
+    session.RunTo(3300, [&] {
+        watch.Check();
+        const int frame = session.Frame();
+        session.Press(0, Button1Now(frame));
+        if (frame == 2600) {
+            session.Save("brimir_frame2600_player_select.png");
+        } else if (frame == 3200) {
+            session.Save("brimir_frame3200_play_cpu.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // Player 2 challenges with a coin of its own (HERE COMES A NEW CHALLENGER); both pick their fighter with Button 1
+    Player2Joins(session, watch.Checker());
+    session.RunTo(4000, [&] {
+        watch.Check();
+        const int frame = session.Frame();
+        const uint16_t press = BothSelect(frame, 3400, 3800);
+        session.Press(0, press);
+        session.Press(1, press);
+        if (frame == 3400) {
+            session.Save("brimir_frame3400_challenger.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // A minute of play: both players walk, jump, crouch and use the five buttons the game reads
+    const std::vector<uint16_t> script = {kRight, kButton1, kRight, kButton4, kRight, 0,        kButton2, kButton5,
+                                          kLeft,  kButton3, kUp,    kButton1, kDown,  kButton2, kRight,   kRight,
+                                          0,      kButton4, kRight, kButton5, kLeft,  kButton3, kUp,      kDown};
+    PlayMinute(session, watch, script, 4500, 6000);
+}
+
+TEST_CASE("stv: ffreveng sees the five buttons of both players in its input test", "[.stv-rom][ffreveng]") {
+    GameSession session("ffreveng");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // The INPUT TEST shows SW 1-3 in one row and SW 4-5 in the next for each player: the game reads buttons 1-5
+    // (PORTA/PORTB bits 0-2 and PORTF), not button 6, which MAME's stv6b ports give it and whose press shows nothing in
+    // MAME's input test either. Button 6 changes nothing.
+    OpenInputTest(session, 2900);
+    CheckInputTest(session, {kButton1, kButton2, kButton3, kButton4, kButton5}, 6, kButton6, 3);
 }

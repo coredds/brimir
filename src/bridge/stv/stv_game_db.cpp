@@ -112,6 +112,18 @@ constexpr RomEntry kShienryuRoms[] = {
     {"mpr19633.3", 0x0800000, 0x0400000, 0xe2f0b037, Load::WordSwap},
 };
 
+// ffreveng: the program ROM is ROM_LOAD16_BYTE without reloads (the even bytes of its 2 MiB stay at the gap fill)
+constexpr RomEntry kFfrevengRoms[] = {
+    {"ffr110.ic35", 0x0000001, 0x0100000, 0x3ffea541, Load::Byte16},
+    {"opr21872.7", 0x0200000, 0x0200000, 0x32d36fee, Load::WordSwap},
+    {"mpr21873.2", 0x0400000, 0x0400000, 0xdac5bd98, Load::WordSwap},
+    {"mpr21874.3", 0x0800000, 0x0400000, 0x0a7be2f1, Load::WordSwap},
+    {"mpr21875.4", 0x0c00000, 0x0400000, 0xccb75029, Load::WordSwap},
+    {"mpr21876.5", 0x1000000, 0x0400000, 0xbb92a7fc, Load::WordSwap},
+    {"mpr21877.6", 0x1400000, 0x0400000, 0xc22a4a75, Load::WordSwap},
+    {"opr21878.1", 0x1800000, 0x0200000, 0x2ea4a64d, Load::WordSwap},
+};
+
 constexpr GameInfo kGames[] = {
     {"bakubaku", "Baku Baku Animal", kJapan, Controls::ThreeButtons, Chip::None, 0, 0, kBakubakuRoms},
     {"colmns97", "Columns '97", kJET, Controls::ThreeButtons, Chip::None, 0, 0, kColmns97Roms},
@@ -126,6 +138,8 @@ constexpr GameInfo kGames[] = {
     // (with a blank one they come out sideways once the picture is rotated for the game)
     {"shienryu", "Shienryu", kJUET, Controls::ThreeButtons, Chip::None, 0, 270, kShienryuRoms,
      {"eeprom-shienryu.bin", 0x98db6925}},
+    {"ffreveng", "Final Fight Revenge", kJUET, Controls::SixButtons, Chip::Crypt315_5881, 0x0524ac01, 0,
+     kFfrevengRoms},
 };
 
 } // namespace

@@ -24,6 +24,7 @@ compared with MAME's.
 | `grdforce` | Guardian Force | JUET | 3 buttons | Japan | full case with continues; credits (including continues) within a frame of MAME |
 | `rsgun` | Radiant Silvergun | JUET | 3 buttons + a 4th (see below) | Japan | full case with continues; the 315-5881 chip's 134 accesses equal to MAME's, the 128 decrypted longs checked in a test |
 | `shienryu` | Shienryu | JUET | 3 buttons | Japan | full case with continues; vertical (MAME's ROT270): upright under Screen Rotation Auto, BIOS screens included (the set's default EEPROM); screens match MAME's by eye |
+| `ffreveng` | Final Fight Revenge | JUET | 6 buttons (the game reads 5) | Japan | full case; the 315-5881's uncompressed path: the game's 16 decrypted longs equal to MAME's in every round (403 in MAME, 401 in Brimir over 7600 frames), checked in a test; buttons 1-5 of both players proven in the game's input test |
 
 The BIOS is chosen from the game's regions in the order Japan, USA, Europe (then the game's other regions), or by the
 Saturn BIOS core option's region (`jp_*`, `us_*`, `eu_*`) when the game has that region. A game whose regions have no
@@ -50,7 +51,8 @@ zip content are shown on screen through `RETRO_ENVIRONMENT_SET_MESSAGE` as well 
 refuses eject, insert and image changes while an ST-V game runs (image 0 answers with an empty path). File names are
 handled as UTF-8, so non-ASCII zip names and folders work on Windows.
 
-Controls follow MAME's input ports: directions, buttons 1-3 on every game, buttons 4-6 on Golden Axe: The Duel, and
+Controls follow MAME's input ports: directions, buttons 1-3 on every game, buttons 4-6 on Golden Axe: The Duel and Final
+Fight Revenge (MAME's `stv6b`; Final Fight Revenge reads only buttons 1-5, as its input test shows in MAME and here), and
 button 4 on Radiant Silvergun (MAME gives it the plain `stv` ports; the game itself reads only buttons 1-3, as its input
 test shows). Coin, Start per player; Service and Test on port 1 only.
 
@@ -64,9 +66,13 @@ test shows). Coin, Start per player; Service and Test on port 1 only.
 - **Guardian Force, title after a coin.** The title comes back 3 frames later than in MAME (black for 43 frames, MAME
   40), probably load or decompression time. The demo's player path drifts a little as well.
 - **Other attract drift.** Cotton 2's scene changes are a few dozen frames off MAME's in either direction.
-- **315-5881 uncompressed path.** Radiant Silvergun uses the chip once, for a boot self-check that decompresses one
-  block, so only the compressed path was checked on real data. The uncompressed path (a block header without the
-  compression flag) is the port of MAME's code and was exercised on noise ROMs in unit tests only.
+- **315-5881 paths on real data.** Radiant Silvergun uses the chip once, for a boot self-check that decompresses one
+  block (the compressed path). Final Fight Revenge reads only the uncompressed path: from the end of the BIOS check
+  to the end of play, the same 16 longs of one uncompressed block (header 0x0001FFFF), over and over; no compressed
+  block. Both games' values equal MAME's. Neither game reads past an uncompressed block's end into the next header.
+- **Final Fight Revenge, HUD on some stages.** On the Chinatown stage MAME draws the top health bars half transparent;
+  Brimir draws them solid, as both draw them on the other stages seen. Not investigated (MAME marks the game's graphics
+  imperfect; the VDP code is shared with the Saturn and not changed for ST-V).
 - **SMPC settings (SMEM) are not persisted.** MAME keeps the SMPC's five bytes of battery memory for ST-V
   (`smem.nv`); here they start from MAME's defaults at every load. The ST-V BIOS never sends SETSMEM and nothing visible
   depends on it with these games.
@@ -144,8 +150,8 @@ build\bin\brimir_tests.exe "[.stv-rom][rsgun]"                # everything about
 build\bin\brimir_tests.exe "[.stv-rom]"                       # all of it
 ```
 
-On the development PC (Release, MSVC) the quick tag takes about 100 seconds and the whole `[.stv-rom]` suite (28 cases)
-about 11 minutes; under WSL with GCC 14 the whole suite took about 9 minutes and passed.
+On the development PC (Release, MSVC) the quick tag takes about two minutes and the whole `[.stv-rom]` suite (34 cases)
+about 13 minutes; under WSL with GCC 14 the whole suite took about 9 minutes and passed.
 
 Each game has a tag with its set name; `[all-games]` is on the cases that walk the whole database. Set
 `BRIMIR_STV_SCREENS_DIR` to a folder to get PNG screenshots of the key frames (`<folder>/<set>/`) for comparison with
