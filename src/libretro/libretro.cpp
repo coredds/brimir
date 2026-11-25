@@ -1919,6 +1919,20 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 #endif
     apply_core_options(true);
 
+    // A vertical ST-V game under an explicit Screen Rotation that does not turn it upright: say how to fix it, once
+    if (environ_cb) {
+        const brimir::stv::GameInfo* stvGame = g_core->GetSTVGame();
+        const char* hint = brimir_rotation_hint(get_option_value("brimir_rotation", "auto"), stvGame != nullptr,
+                                                stvGame != nullptr ? static_cast<int>(stvGame->rotation) : 0);
+        if (hint != nullptr) {
+            brimir_log(RETRO_LOG_INFO, "%s", hint);
+            static std::string text;
+            text = hint;
+            retro_message message{text.c_str(), 300};
+            environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+        }
+    }
+
 #ifdef BRIMIR_VULKAN
     g_loadingContent = false;
     // The renderer applies at content load. With Vulkan the frontend builds the context after this function

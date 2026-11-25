@@ -605,6 +605,20 @@ std::string brimir_internal_resolution_cap_note(unsigned requested) {
     return "Internal resolution " + std::to_string(requested) +
            "x is not available on Android (it can freeze some phone GPUs); using 1x";
 }
+const char* brimir_rotation_hint(const char* rotationOption, bool stv, int gameRotation) {
+    if (!stv || gameRotation == 0 || rotationOption == nullptr || std::strcmp(rotationOption, "auto") == 0) {
+        return nullptr;
+    }
+    // As CoreWrapper::SetRotation reads the value: anything but 90, 180 or 270 is no rotation
+    int chosen = std::atoi(rotationOption);
+    if (chosen != 90 && chosen != 180 && chosen != 270) {
+        chosen = 0;
+    }
+    if (chosen == gameRotation) {
+        return nullptr;
+    }
+    return "Vertical game: set Screen Rotation to Auto (Quick Menu > Core Options > Video) to show it upright";
+}
 brimir::CartridgeChoice brimir_cartridge_choice(const char* value) {
     using brimir::CartridgeChoice;
     static const struct {

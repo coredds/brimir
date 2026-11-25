@@ -52,3 +52,9 @@ unsigned brimir_internal_resolution_scale(const char* value, bool android, unsig
 
 // The one-line log text for a cap: the requested value and why it was lowered to 1x.
 std::string brimir_internal_resolution_cap_note(unsigned requested);
+
+// The on-screen hint for a vertical ST-V game shown with a Screen Rotation that is not Auto: `rotationOption` is the
+// brimir_rotation value (nullptr or "auto" is Auto), `stv` whether ST-V content is loaded and `gameRotation` the game's
+// database rotation in degrees. Returns nullptr (no hint) under Auto, for Saturn content, for an upright game, and when
+// the chosen rotation equals the game's.
+const char* brimir_rotation_hint(const char* rotationOption, bool stv, int gameRotation);

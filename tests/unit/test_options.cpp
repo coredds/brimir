@@ -639,3 +639,29 @@ TEST_CASE("Core options have no internal resolution option without Vulkan", "[op
     }
 }
 #endif
+
+TEST_CASE("Rotation hint: a vertical ST-V game under an explicit rotation that does not upright it", "[options][libretro][stv]") {
+    // Shienryu's database rotation is 270; 0 is "None" (the 0.10.0 default, still saved by users of 0.10.0)
+    const char* hint = brimir_rotation_hint("0", true, 270);
+    REQUIRE(hint != nullptr);
+    CHECK(std::strstr(hint, "set Screen Rotation to Auto") != nullptr);
+    CHECK(std::strstr(hint, "Quick Menu > Core Options > Video") != nullptr);
+    CHECK(brimir_rotation_hint("90", true, 270) != nullptr);
+    CHECK(brimir_rotation_hint("180", true, 270) != nullptr);
+    CHECK(brimir_rotation_hint("90", true, 90) == nullptr);
+    CHECK(brimir_rotation_hint("0", true, 90) != nullptr);
+    // an unknown value is read as no rotation, as the core does
+    CHECK(brimir_rotation_hint("bogus", true, 270) != nullptr);
+}
+
+TEST_CASE("Rotation hint: none under Auto, for Saturn content, for an upright game or a matching rotation",
+          "[options][libretro][stv]") {
+    CHECK(brimir_rotation_hint("auto", true, 270) == nullptr);
+    CHECK(brimir_rotation_hint(nullptr, true, 270) == nullptr);
+    CHECK(brimir_rotation_hint("0", false, 0) == nullptr);
+    CHECK(brimir_rotation_hint("90", false, 0) == nullptr);
+    CHECK(brimir_rotation_hint("0", true, 0) == nullptr);
+    CHECK(brimir_rotation_hint("90", true, 0) == nullptr);
+    CHECK(brimir_rotation_hint("270", true, 270) == nullptr);
+    CHECK(brimir_rotation_hint("90", false, 270) == nullptr);
+}
