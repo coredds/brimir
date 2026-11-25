@@ -124,6 +124,19 @@ constexpr RomEntry kFfrevengRoms[] = {
     {"opr21878.1", 0x1800000, 0x0200000, 0x2ea4a64d, Load::WordSwap},
 };
 
+// sss: ROM_LOAD16_BYTE, ROM_RELOAD, then ROM_RELOAD_PLAIN twice
+constexpr RomEntry kSssRoms[] = {
+    {"epr21488.13", 0x0000001, 0x0080000, 0x71c9def1, Load::Byte16},
+    {"epr21488.13", 0x0100001, 0x0080000, 0x71c9def1, Load::Reload},
+    {"epr21488.13", 0x0200000, 0x0080000, 0x71c9def1, Load::Plain},
+    {"epr21488.13", 0x0300000, 0x0080000, 0x71c9def1, Load::Plain},
+    {"mpr21489.2", 0x0400000, 0x0400000, 0x4c85152b, Load::WordSwap},
+    {"mpr21490.3", 0x0800000, 0x0400000, 0x03da67f8, Load::WordSwap},
+    {"mpr21491.4", 0x0c00000, 0x0400000, 0xcf7ee784, Load::WordSwap},
+    {"mpr21492.5", 0x1000000, 0x0400000, 0x57753894, Load::WordSwap},
+    {"mpr21493.6", 0x1400000, 0x0400000, 0xefb2d271, Load::WordSwap},
+};
+
 constexpr GameInfo kGames[] = {
     {"bakubaku", "Baku Baku Animal", kJapan, Controls::ThreeButtons, Chip::None, 0, 0, kBakubakuRoms},
     {"colmns97", "Columns '97", kJET, Controls::ThreeButtons, Chip::None, 0, 0, kColmns97Roms},
@@ -140,6 +153,9 @@ constexpr GameInfo kGames[] = {
      {"eeprom-shienryu.bin", 0x98db6925}},
     {"ffreveng", "Final Fight Revenge", kJUET, Controls::SixButtons, Chip::Crypt315_5881, 0x0524ac01, 0,
      kFfrevengRoms},
+    // The default EEPROM is MAME's "preconfigured to 1 player"
+    {"sss", "Steep Slope Sliders", kJUET, Controls::ThreeButtons, Chip::Crypt315_5881, 0x052b6901, 0, kSssRoms,
+     {"sss.nv", 0x3473b2f3}},
 };
 
 } // namespace

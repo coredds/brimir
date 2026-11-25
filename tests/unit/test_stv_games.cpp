@@ -1048,3 +1048,137 @@ TEST_CASE("stv: ffreveng sees the five buttons of both players in its input test
     OpenInputTest(session, 2900);
     CheckInputTest(session, {kButton1, kButton2, kButton3, kButton4, kButton5}, 6, kButton6, 3);
 }
+
+TEST_CASE("stv: sss's 315-5881 decompresses the game's boot block as in MAME", "[.stv-rom][sss]") {
+    GameSession session("sss");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // The game's only use of the chip (MAME 0.289, watchpoints on 0x4FFFFF0-0x4FFFFFF through boot, attract and play):
+    // at the end of the BIOS check the code at 0x06007A64 disables the chip, sets the ROM address 0x00A60000 (words)
+    // and the subkey 0x2C5B, enables it and reads 7344 longs at 0x4FFFFFC. The block's header (logged from Brimir's
+    // chip in a local build) is 0x0002D787: compressed, 136 lines of 216 bytes, 29,376 bytes = exactly the 7344 longs,
+    // so the whole block is read to its last line and the next header never. MAME's values: an 8-bit picture, the
+    // 64-bit FNV-1a of their bytes (big-endian, in order) and three of them.
+    auto &bus = session.Core().GetSaturn()->mainBus;
+    bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
+    bus.Write<uint16_t>(0x04FF'FFF8, 0x0000);
+    bus.Write<uint16_t>(0x04FF'FFFA, 0x00A6);
+    bus.Write<uint16_t>(0x04FF'FFFC, 0x2C5B);
+    bus.Write<uint8_t>(0x04FF'FFF1, 0x01);
+    uint64_t hash = 0xCBF2'9CE4'8422'2325ull;
+    std::vector<uint32_t> values;
+    for (uint32_t i = 0; i < 7344; i++) {
+        const uint32_t value = bus.Read<uint32_t>(0x04FF'FFFC);
+        values.push_back(value);
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            hash = (hash ^ ((value >> shift) & 0xFF)) * 0x0000'0100'0000'01B3ull;
+        }
+    }
+    bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
+    CHECK(values[27] == 0x8E8E'8686u);
+    CHECK(values[3000] == 0x5B5C'BFBFu);
+    CHECK(values[7343] == 0x2424'2424u);
+    CHECK(hash == 0xE1BE'C3C7'3F82'10B3ull);
+}
+
+TEST_CASE("stv: sss boots, takes coin and start, and plays for a minute", "[.stv-rom][sss]") {
+    GameSession session("sss");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // The BIOS checks the board (the set's default EEPROM gives the cabinet one player: with the BIOS's own two-player
+    // assignment the BIOS refuses the cartridge, in MAME too), then from about frame 1300 the CAPCOM and cave logos,
+    // the title with INSERT COIN(S) / CREDIT 0, and from about frame 2500 the demo run down the slope with its trick
+    // lessons. No phantom credits. The frames that are mostly one colour (the logos and fades on black) are left out.
+    AttractWatch watch(session, [&] { return session.VideoBackgroundShare() > 0.9; });
+    session.RunTo(1300);
+    CheckAttract(session, watch, 2950, {{2000, "brimir_frame2000_title.png"}, {2700, "brimir_frame2700_attract.png"}});
+    InsertCoin(session, 3000, 3050);
+
+    // Start takes the credit and leads to PLAYER SELECT; Button 1 now and then picks the rider and skips the coach's
+    // talk and the stage card, then the run down the first course begins. No frame looks like the attract mode any
+    // more.
+    session.RunTo(3300);
+    session.Tap(0, kStart);
+    session.RunTo(4100, [&] {
+        watch.Check();
+        const int frame = session.Frame();
+        session.Press(0, Button1Now(frame, 3400));
+        if (frame == 3400) {
+            session.Save("brimir_frame3400_player_select.png");
+        } else if (frame == 4000) {
+            session.Save("brimir_frame4000_play_1p.png");
+        }
+    });
+    CHECK(session.Credits() == 0);
+
+    // The cabinet is set up for one player (the default EEPROM's system assignment, which the game needs): player 2's
+    // coin is a credit, but player 2's Start does not join. MAME does the same (credit 1 after the coin, still 1 after
+    // the Start, a minute later too).
+    session.Press(0, 0);
+    session.Tap(1, kCoin);
+    session.RunTo(4130, watch.Checker());
+    CHECK(session.Credits() == 1);
+    session.Tap(1, kStart);
+    session.RunTo(4200, watch.Checker());
+    CHECK(session.Credits() == 1);
+
+    // A minute of play: the rider steers, jumps (Button 1) and spins (the lever and Button 2); Button 3, which the game
+    // does not read, and player 2's inputs change nothing. The run's timer has not run out by the end. MAME, on the
+    // same inputs, shows the same run: the same timer, trick and total points at 4700, 6200 and 7800.
+    const uint16_t lb = kLeft | kButton2;
+    const uint16_t rb = kRight | kButton2;
+    const std::vector<uint16_t> script = {kRight, kButton1, kRight, lb,       kLeft, 0,        kButton1, rb,
+                                          kLeft,  kButton3, kRight, kButton1, kLeft, kButton2, kRight,   kRight,
+                                          0,      lb,       kRight, rb,       kLeft, kButton3, kButton1, kLeft};
+    PlayMinute(session, watch, script, 4700, 6200);
+    CHECK(session.Credits() == 1);
+}
+
+TEST_CASE("stv: sss sees the two buttons of player 1 in its input test", "[.stv-rom][sss]") {
+    GameSession session("sss");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // A one-player game: the INPUT TEST shows PLAYER 1P only, with SW 1 and SW 2 (MAME's plain ST-V ports give it three
+    // buttons a player). Buttons 1 and 2 of player 1 turn their entry ON, SW 2 one row below SW 1; button 3 and every
+    // button of player 2 change nothing. MAME's input test shows the same.
+    OpenInputTest(session, 2900);
+    session.RunTo(2990);
+    session.Save("brimir_frame2990_input_test.png");
+    const uint64_t idle = session.VideoHash();
+    const std::vector<uint32_t> idlePixels = session.Pixels();
+    const auto press = [&](unsigned player, uint16_t button, const char *png = nullptr) {
+        session.Press(player, button);
+        session.RunTo(session.Frame() + 20);
+        const uint64_t hash = session.VideoHash();
+        if (png != nullptr) {
+            session.Save(png);
+        }
+        unsigned cx = 0, cy = 0;
+        ChangedCentre(session, idlePixels, cx, cy);
+        session.Press(player, 0);
+        session.RunTo(session.Frame() + 20);
+        CHECK(session.VideoHash() == idle);
+        return std::pair{hash, cy};
+    };
+    session.RunTo(3000);
+    const auto [sw1, sw1Row] = press(0, kButton1, "brimir_input_test_sw1.png");
+    const auto [sw2, sw2Row] = press(0, kButton2, "brimir_input_test_sw2.png");
+    CHECK(sw1 != idle);
+    CHECK(sw2 != idle);
+    CHECK(sw1 != sw2);
+    CHECK(sw2Row > sw1Row);
+    CHECK(press(0, kButton3).first == idle);
+    for (uint16_t button : {kButton1, kButton2, kButton3}) {
+        CHECK(press(1, button).first == idle);
+    }
+}
+
+TEST_CASE("stv: sss boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][sss]") {
+    QuickBoot("sss", "epr-20091.ic8", 2950);
+}

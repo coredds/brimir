@@ -310,7 +310,7 @@ TEST_CASE("ST-V detect: a zip with a non-ASCII name is detected", "[stv]") {
 
 TEST_CASE("ST-V game database: every game is well formed", "[stv]") {
     const auto games = brimir::stv::AllGames();
-    REQUIRE(games.size() == 10);
+    REQUIRE(games.size() == 11);
 
     std::set<std::string> names;
     for (const GameInfo &game : games) {
@@ -351,6 +351,12 @@ TEST_CASE("ST-V game database: the games' details", "[stv]") {
     CHECK(Game("ffreveng").cryptKey == 0x0524ac01);
     CHECK(Game("ffreveng").controls == Controls::SixButtons);
     CHECK(Game("ffreveng").eeprom.file == nullptr);
+    // sss: ROM_PARAMETER( ":315_5881:key", "052b6901" ), inputs stv, the "eeprom" region sss.nv
+    CHECK(Game("sss").chip == Chip::Crypt315_5881);
+    CHECK(Game("sss").cryptKey == 0x052b6901);
+    CHECK(Game("sss").controls == Controls::ThreeButtons);
+    CHECK(std::string(Game("sss").eeprom.file) == "sss.nv");
+    CHECK(Game("sss").eeprom.crc32 == 0x3473b2f3);
     for (const char *name : {"bakubaku", "colmns97", "puyosun", "diehard", "cotton2", "grdforce", "shienryu"}) {
         CHECK(Game(name).chip == Chip::None);
         CHECK(Game(name).controls == Controls::ThreeButtons);
@@ -372,6 +378,17 @@ TEST_CASE("ST-V game database: the games' details", "[stv]") {
     CHECK(regionsOf("rsgun") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
     CHECK(regionsOf("shienryu") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
     CHECK(regionsOf("ffreveng") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
+    CHECK(regionsOf("sss") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
+
+    // Steep Slope Sliders: the program ROM loaded as ROM_LOAD16_BYTE, ROM_RELOAD, then plain twice; five data files
+    const GameInfo &sss = Game("sss");
+    CHECK(DistinctFiles(sss) == 6);
+    REQUIRE(sss.roms.size() == 9);
+    CHECK(sss.roms[1].load == Load::Reload);
+    CHECK(sss.roms[1].offset == 0x100001);
+    CHECK(sss.roms[3].load == Load::Plain);
+    CHECK(sss.roms[3].offset == 0x300000);
+    CHECK(sss.roms[8].offset == 0x1400000);
 
     // Final Fight Revenge: the program ROM loaded once as ROM_LOAD16_BYTE (no reloads), then seven word-swapped files
     const GameInfo &ffr = Game("ffreveng");

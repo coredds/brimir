@@ -25,6 +25,7 @@ compared with MAME's.
 | `rsgun` | Radiant Silvergun | JUET | 3 buttons + a 4th (see below) | Japan | full case with continues; the 315-5881 chip's 134 accesses equal to MAME's, the 128 decrypted longs checked in a test |
 | `shienryu` | Shienryu | JUET | 3 buttons | Japan | full case with continues; vertical (MAME's ROT270): upright under Screen Rotation Auto, BIOS screens included (the set's default EEPROM); screens match MAME's by eye |
 | `ffreveng` | Final Fight Revenge | JUET | 6 buttons (the game reads 5) | Japan | full case; the 315-5881's uncompressed path: the game's 16 decrypted longs equal to MAME's in every round (403 in MAME, 401 in Brimir over 7600 frames), checked in a test; buttons 1-5 of both players proven in the game's input test |
+| `sss` | Steep Slope Sliders | JUET | 3 buttons (the game reads 2), one player | Japan | full case for one player (see below); the 315-5881's compressed path over a whole block: the 7344 decompressed longs equal to MAME's, checked in a test; the play minute shows the same timer and points as MAME's at three frames; buttons 1-2 proven in the game's input test |
 
 The BIOS is chosen from the game's regions in the order Japan, USA, Europe (then the game's other regions), or by the
 Saturn BIOS core option's region (`jp_*`, `us_*`, `eu_*`) when the game has that region. A game whose regions have no
@@ -56,6 +57,12 @@ Fight Revenge (MAME's `stv6b`; Final Fight Revenge reads only buttons 1-5, as it
 button 4 on Radiant Silvergun (MAME gives it the plain `stv` ports; the game itself reads only buttons 1-3, as its input
 test shows). Coin, Start per player; Service and Test on port 1 only.
 
+Steep Slope Sliders is a one-player game. Its set's default EEPROM (`sss.nv`, MAME's "preconfigured to 1 player")
+holds the system assignment it needs: with the BIOS's own two-player assignment (a blank EEPROM) the BIOS refuses the
+cartridge ("OPERATION OF THIS CARTRIDGE IS UNAVAILABLE WITH SYSTEM ASSIGNMENTS"), in MAME too. Its input test shows
+player 1 with SW 1 and SW 2 only; player 2's coin is a credit, but player 2's Start does nothing, in MAME as here. Its
+full case therefore checks that instead of a second player joining.
+
 ## Known differences from MAME
 
 - **Die Hard Arcade, attract pacing.** The intro shows one more caption than MAME and the title comes about 340 frames
@@ -69,7 +76,14 @@ test shows). Coin, Start per player; Service and Test on port 1 only.
 - **315-5881 paths on real data.** Radiant Silvergun uses the chip once, for a boot self-check that decompresses one
   block (the compressed path). Final Fight Revenge reads only the uncompressed path: from the end of the BIOS check
   to the end of play, the same 16 longs of one uncompressed block (header 0x0001FFFF), over and over; no compressed
-  block. Both games' values equal MAME's. Neither game reads past an uncompressed block's end into the next header.
+  block. Steep Slope Sliders also uses it once, at the end of the BIOS check: one compressed block (header 0x0002D787,
+  136 lines of 216 bytes) read to its last line, 7344 longs, and no next header. All three games' values equal MAME's.
+  No game here reads past a block's end into the next header, so the switch from one block to the next is checked on
+  synthetic data only.
+- **Steep Slope Sliders, the haze over the scenery.** Brimir draws the far scenery and the sky pale, as in a haze; MAME
+  draws them dark (a black sky in daylight). The game turns on the VDP2 line colour screen for RBG0 and the sprites
+  (LNCLEN 0x0030, colour calculation on for both), which MAME 0.289's VDP2 does not draw (`saturn_v.cpp` calls
+  its line colour pass only under `TEST_FUNCTIONS`, defined 0, with a TODO). The VDP2 code is shared with the Saturn and not changed for ST-V.
 - **Final Fight Revenge, HUD on some stages.** On the Chinatown stage MAME draws the top health bars half transparent;
   Brimir draws them solid, as both draw them on the other stages seen. Not investigated (MAME marks the game's graphics
   imperfect; the VDP code is shared with the Saturn and not changed for ST-V).
@@ -93,7 +107,7 @@ Not supported: ST-V games outside the table above (the game database holds the R
 - `<set>.srm` holds the backup RAM (32 KiB) and the EEPROM (128 bytes), 32,896 bytes. A file of another size (a Saturn
   `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The EEPROM starts as MAME's: the set's
   default image when its ROM_START has one (Shienryu's `eeprom-shienryu.bin`, which sets the cabinet up for the vertical
-  monitor and is part of the set), else blank (0xFF), and the BIOS sets it up on first boot.
+  monitor, and Steep Slope Sliders' `sss.nv`, its one-player assignment; both are part of the set), else blank (0xFF), and the BIOS sets it up on first boot.
 - Save states carry an ST-V block (cabinet I/O and EEPROM state, protection chip state, scheduler count) after the
   Saturn payload. It is meant to make run-ahead, rewind and netplay exact; run-ahead and save/load were checked in
   RetroArch on Baku Baku Animal, rewind and netplay were not (see "Frontend and platform checks"). The block is not
@@ -150,8 +164,8 @@ build\bin\brimir_tests.exe "[.stv-rom][rsgun]"                # everything about
 build\bin\brimir_tests.exe "[.stv-rom]"                       # all of it
 ```
 
-On the development PC (Release, MSVC) the quick tag takes about two minutes and the whole `[.stv-rom]` suite (34 cases)
-about 13 minutes; under WSL with GCC 14 the whole suite took about 9 minutes and passed.
+On the development PC (Release, MSVC) the quick tag takes about two minutes and the whole `[.stv-rom]` suite (38 cases)
+about 14 minutes; under WSL with GCC 14 the whole suite took about 9 minutes and passed.
 
 Each game has a tag with its set name; `[all-games]` is on the cases that walk the whole database. Set
 `BRIMIR_STV_SCREENS_DIR` to a folder to get PNG screenshots of the key frames (`<folder>/<set>/`) for comparison with
