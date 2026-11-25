@@ -273,7 +273,7 @@ A coin is needed before Start: press Select once for one credit. The Test switch
 the cursor, Test selects), which also has the game's own input test.
 
 **Saves.** The cabinet's settings (the EEPROM) and the backup RAM with the high scores are saved to `<set>.srm` in the
-save folder (32,896 bytes). A `.srm` of another size, such as a Saturn one, is not used. Save states and run-ahead (all
+save folder (32,901 bytes: the backup RAM, the EEPROM and the SMPC's battery settings). A 0.10.0 `.srm` (32,896 bytes) still loads and is saved in the new size; a `.srm` of another size, such as a Saturn one, is not used. Save states and run-ahead (all
 three modes: single instance, second instance with the software renderer, and second instance with the Vulkan renderer,
 where RetroArch falls back to one instance) were tried in RetroArch on Windows with Baku Baku Animal; the other seven
 games were not tried with them, and rewind and netplay were not tested for ST-V at all. The core's own state for these

@@ -175,7 +175,8 @@ public:
     void* GetSRAMData();
 
     /// @brief Get size of backup RAM (SRAM). In an ST-V session the save RAM is the internal backup RAM (32768 bytes)
-    /// followed by the cabinet EEPROM (128 bytes): 32896 bytes from the moment the game is loaded.
+    /// followed by the cabinet EEPROM (128 bytes) and the SMPC's five SMEM bytes: 32901 bytes from the moment the game is
+    /// loaded (0.10.0's 32896 bytes, without SMEM, is still accepted by SetSRAMData and the core's own file read).
     /// @return Size in bytes
     size_t GetSRAMSize() const;
 

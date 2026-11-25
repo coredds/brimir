@@ -30,10 +30,16 @@ namespace brimir::stv {
 
 inline constexpr size_t kSTVBiosSize = 512 * 1024;
 
-// The ST-V save RAM (the libretro .srm): the internal backup RAM's data bytes, then the cabinet's 93C46 cells
+// The ST-V save RAM (the libretro .srm): the internal backup RAM's data bytes, then the cabinet's 93C46 cells, then the
+// SMPC's battery memory as MAME keeps it (smpc_hle_device's m_smem[5], NVRAM "smem", DEFAULT_ALL_0): the four SMEM
+// bytes SETSMEM writes, then MAME's validity byte (0xFF once SETSMEM has run, else 0; its bit 7 is the status flag
+// INTBACK reports, Ymir's STE). The layout is told by its size: 0.10.0's .srm had no SMEM (kSTVSaveRAMSizeV1) and is
+// still accepted, its SMEM then MAME's default (all zero).
 inline constexpr size_t kSTVBackupRAMSize = 32 * 1024;
 inline constexpr size_t kSTVEEPROMSize = 128;
-inline constexpr size_t kSTVSaveRAMSize = kSTVBackupRAMSize + kSTVEEPROMSize;
+inline constexpr size_t kSTVSMEMSize = 5;
+inline constexpr size_t kSTVSaveRAMSizeV1 = kSTVBackupRAMSize + kSTVEEPROMSize;
+inline constexpr size_t kSTVSaveRAMSize = kSTVSaveRAMSizeV1 + kSTVSMEMSize;
 
 // The SMPC area code of the ST-V board, whatever BIOS region is chosen. It follows MAME: src/mame/sega/stv.cpp,
 // stv_state::stv (machine config) calls m_smpc_hle->set_region_code(1) ("1 - Japan, configured via jumpers"), and only

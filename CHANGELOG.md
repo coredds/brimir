@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Screen Rotation: Auto** - `brimir_rotation` has a new value `auto` (the new default): the rotation follows the game, so a vertical ST-V game is turned upright by itself and Saturn games are never rotated. `None`, `90°`, `180°` and `270°` keep their meaning and override the game for any content, so a saved `brimir_rotation = 0` still means "no rotation". Switching content in one session (an ST-V game, then a Saturn game) follows the new content. No game in the database is rotated yet; the rotation field of the database and the option are the groundwork for the vertical ST-V games.
+- **ST-V: the SMPC's battery settings are saved** - the five bytes of SMPC memory MAME keeps for the ST-V driver (`smem.nv`, default all zero) are now saved with the cabinet's `<set>.srm`, which grows from 32,896 to 32,901 bytes. A 0.10.0 `.srm` (32,896 bytes) still loads, with the settings at their default, and is saved in the new size; a `.srm` of any other size is refused as before. The clock is not kept, as in MAME, and ST-V sessions still never touch the Saturn settings and clock files.
 
 ### Fixed
 - **Aspect ratio of rotated pictures** - with an effective rotation of 90 or 270 (the option or, under Auto, the game) the core now reports 3:4 to the frontend instead of a fixed 4:3, so a turned picture is no longer squeezed; the geometry is updated when the rotation changes (option change, or content loaded afterwards). Display only: emulation and save states are unchanged.

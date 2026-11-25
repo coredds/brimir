@@ -1,5 +1,6 @@
-// The ST-V save RAM (the libretro .srm): the internal backup RAM followed by the cabinet EEPROM, 32896 bytes. The
-// layout, the first-frame handshake with the frontend, the cold state, the rejection of buffers and files of another
+// The ST-V save RAM (the libretro .srm): the internal backup RAM followed by the cabinet EEPROM and the SMPC's five
+// SMEM bytes, 32901 bytes (0.10.0's, without SMEM, was 32896 and is still accepted). The layout, the first-frame
+// handshake with the frontend, the cold state, SMEM's persistence, the rejection of buffers and files of another
 // size, and the proof that an ST-V session leaves the console's Saturn settings and RTC files alone. The [stv] cases
 // build a set from zero-filled files; the [.stv-rom] cases boot the real bakubaku (BRIMIR_STV_BIOS_DIR and
 // BRIMIR_STV_ROM_DIR, SKIP when unset).
@@ -36,6 +37,8 @@ namespace {
 
 constexpr size_t kBackup = stv::kSTVBackupRAMSize;
 constexpr size_t kTotal = stv::kSTVSaveRAMSize;
+constexpr size_t kEEPROMEnd = kBackup + stv::kSTVEEPROMSize;
+constexpr size_t kV1 = stv::kSTVSaveRAMSizeV1; // 0.10.0's .srm: backup RAM and EEPROM, no SMEM
 constexpr uint32_t kPDR1 = 0x010'0075;
 constexpr uint32_t kDDR1 = 0x010'0079;
 constexpr uint32_t kDDR2 = 0x010'007B;
@@ -77,7 +80,10 @@ std::map<std::string, std::vector<uint8_t>> Snapshot(const std::filesystem::path
     return files;
 }
 
-// A recognisable image: the backup RAM bytes count up, the EEPROM cells are 0xE0 + the byte offset
+// MAME's five SMEM bytes after a SETSMEM of 01 02 03 04: the four, then the validity byte 0xFF
+constexpr std::array<uint8_t, stv::kSTVSMEMSize> kSMEMSet = {0x01, 0x02, 0x03, 0x04, 0xFF};
+
+// A recognisable image: the backup RAM bytes count up, the EEPROM cells are 0xE0 + the byte offset, the SMEM is set
 std::vector<uint8_t> PatternImage() {
     std::vector<uint8_t> image(kTotal);
     for (size_t i = 0; i < kBackup; i++) {
@@ -86,7 +92,35 @@ std::vector<uint8_t> PatternImage() {
     for (size_t i = 0; i < stv::kSTVEEPROMSize; i++) {
         image[kBackup + i] = static_cast<uint8_t>(0xE0 + i);
     }
+    std::copy(kSMEMSet.begin(), kSMEMSet.end(), image.begin() + static_cast<std::ptrdiff_t>(kEEPROMEnd));
     return image;
+}
+
+std::vector<uint8_t> Cells(const std::vector<uint8_t> &image) {
+    return std::vector<uint8_t>(image.begin() + static_cast<std::ptrdiff_t>(kBackup),
+                                image.begin() + static_cast<std::ptrdiff_t>(kEEPROMEnd));
+}
+
+std::vector<uint8_t> SMEMBytes(const std::vector<uint8_t> &image) {
+    return std::vector<uint8_t>(image.begin() + static_cast<std::ptrdiff_t>(kEEPROMEnd), image.end());
+}
+
+// What the session's SMPC holds, in MAME's five-byte form
+std::vector<uint8_t> SessionSMEM(CoreWrapper &core) {
+    ymir::smpc::PersistentSMPCData data{};
+    core.GetSaturn()->SMPC.SavePersistentData(data);
+    std::vector<uint8_t> bytes(data.SMEM.begin(), data.SMEM.end());
+    bytes.push_back(data.STE ? 0xFF : 0x00);
+    return bytes;
+}
+
+// SETSMEM as the guest sends it: IREG0-3, then the command, run by the SMPC
+void SendSETSMEM(ymir::Saturn &saturn, std::array<uint8_t, 4> bytes) {
+    constexpr uint32_t kSMPCBase = 0x0010'0000;
+    for (size_t i = 0; i < 4; i++) {
+        saturn.mainBus.Write<uint8_t>(kSMPCBase + 0x01 + 2 * i, bytes[i]);
+    }
+    saturn.mainBus.Write<uint8_t>(kSMPCBase + 0x1F, 0x17);
 }
 
 // A zip of zero-filled files (bakubaku's unless another set is named; a default EEPROM image is there, with the
@@ -204,22 +238,24 @@ TEST_CASE("stv sram: the save RAM is the backup RAM and the EEPROM from the mome
 
     REQUIRE(session.Load(core));
     REQUIRE(core.IsSTVLoaded());
-    CHECK(core.GetSRAMSize() == 32896);
+    CHECK(core.GetSRAMSize() == 32901);
 
     // Before the first frame, when a frontend reads size and pointer and loads its .srm into the buffer: the cold state,
-    // all-zero backup RAM (not a formatted Saturn image) and a blank (0xFF) EEPROM, which the BIOS initialises
+    // all-zero backup RAM (not a formatted Saturn image), a blank (0xFF) EEPROM, which the BIOS initialises, and MAME's
+    // default SMEM (all five bytes zero)
     void *pointer = core.GetSRAMData();
     REQUIRE(pointer != nullptr);
     const std::vector<uint8_t> cold = Image(core);
     REQUIRE(cold.size() == kTotal);
     CHECK(AllEqual(cold, 0, kBackup, 0x00));
-    CHECK(AllEqual(cold, kBackup, kTotal, 0xFF));
+    CHECK(AllEqual(cold, kBackup, kEEPROMEnd, 0xFF));
+    CHECK(AllEqual(cold, kEEPROMEnd, kTotal, 0x00));
     CHECK(core.GetSRAMData() == pointer);
 
     Quiet(core);
     core.RunFrame();
     CHECK(core.GetSRAMData() == pointer); // never moves: a frontend's autosave thread keeps it
-    CHECK(core.GetSRAMSize() == 32896);
+    CHECK(core.GetSRAMSize() == 32901);
 
     core.UnloadGame();
     CHECK(core.GetSRAMSize() == 32768); // a Saturn's again
@@ -240,7 +276,7 @@ TEST_CASE("stv sram: a set with a default EEPROM image starts with it, and a .sr
         Quiet(core);
         const std::vector<uint8_t> cold = Image(core);
         CHECK(AllEqual(cold, 0, kBackup, 0x00));
-        CHECK(std::vector<uint8_t>(cold.begin() + kBackup, cold.end()) == session.eepromFile);
+        CHECK(Cells(cold) == session.eepromFile);
         CHECK(EEPROM(core) == session.eepromFile);
         core.RunFrame();
         CHECK(EEPROM(core) == session.eepromFile);
@@ -255,7 +291,7 @@ TEST_CASE("stv sram: a set with a default EEPROM image starts with it, and a .sr
     REQUIRE(session.Load(core));
     Quiet(core);
     core.RunFrame();
-    CHECK(EEPROM(core) == std::vector<uint8_t>(saved.begin() + kBackup, saved.end()));
+    CHECK(EEPROM(core) == Cells(saved));
 }
 
 TEST_CASE("stv sram: an EEPROM write by the 93C46 protocol is in the save RAM at offset 32768", "[stv]") {
@@ -273,7 +309,7 @@ TEST_CASE("stv sram: an EEPROM write by the 93C46 protocol is in the save RAM at
     CHECK(image[kBackup + 11] == 0x5A);
     CHECK(image[kBackup + 12] == 0xFF); // the neighbour cells are as they were
     CHECK(image[kBackup + 9] == 0xFF);
-    CHECK(std::equal(image.begin() + static_cast<std::ptrdiff_t>(kBackup), image.end(), EEPROM(core).begin()));
+    CHECK(Cells(image) == EEPROM(core));
 
     // a write to the internal backup RAM shows at the same offset as in a Saturn's save RAM: byte n of the image is
     // the backup RAM's byte n
@@ -302,7 +338,8 @@ TEST_CASE("stv sram: the frontend's buffer is copied in at the first frame, both
 
     core.RunFrame();
     CHECK(BackupRAM(core) == std::vector<uint8_t>(saved.begin(), saved.begin() + kBackup));
-    CHECK(EEPROM(core) == std::vector<uint8_t>(saved.begin() + kBackup, saved.end()));
+    CHECK(EEPROM(core) == Cells(saved));
+    CHECK(SessionSMEM(core) == SMEMBytes(saved));
     CHECK(core.GetSRAMData() == pointer);
     CHECK(Image(core) == saved);
     CHECK(core.TakeBackupRAMNotice().empty());
@@ -319,7 +356,8 @@ TEST_CASE("stv sram: SetSRAMData restores both parts and a save made by one sess
         REQUIRE(core.SetSRAMData(saved.data(), saved.size()));
         core.RunFrame();
         CHECK(BackupRAM(core) == std::vector<uint8_t>(saved.begin(), saved.begin() + kBackup));
-        CHECK(EEPROM(core) == std::vector<uint8_t>(saved.begin() + kBackup, saved.end()));
+        CHECK(EEPROM(core) == Cells(saved));
+        CHECK(SessionSMEM(core) == SMEMBytes(saved));
         core.UnloadGame(); // the core writes the .srm itself, as for a Saturn
     }
     REQUIRE(std::filesystem::exists(session.Srm()));
@@ -333,7 +371,8 @@ TEST_CASE("stv sram: SetSRAMData restores both parts and a save made by one sess
     CHECK(Image(next) == saved);
     next.RunFrame();
     CHECK(BackupRAM(next) == std::vector<uint8_t>(saved.begin(), saved.begin() + kBackup));
-    CHECK(EEPROM(next) == std::vector<uint8_t>(saved.begin() + kBackup, saved.end()));
+    CHECK(EEPROM(next) == Cells(saved));
+    CHECK(SessionSMEM(next) == SMEMBytes(saved));
 }
 
 TEST_CASE("stv sram: an all-zero image is not replaced by a formatted one", "[stv]") {
@@ -362,17 +401,21 @@ TEST_CASE("stv sram: a buffer of another size is rejected and the cold state is 
     CHECK_FALSE(core.SetSRAMData(saturnSized.data(), saturnSized.size()));
     const std::string notice = core.TakeBackupRAMNotice();
     CHECK(notice.find("32768") != std::string::npos);
-    CHECK(notice.find("32896") != std::string::npos);
+    CHECK(notice.find("32901") != std::string::npos);
 
-    const std::vector<uint8_t> tooLong(kTotal + 1, 0x5A);
-    CHECK_FALSE(core.SetSRAMData(tooLong.data(), tooLong.size()));
-    CHECK_FALSE(core.TakeBackupRAMNotice().empty());
+    // between the two layouts, and past the new one
+    for (const size_t size : {kV1 - 1, kV1 + 1, kV1 + 4, kTotal + 1}) {
+        const std::vector<uint8_t> wrong(size, 0x5A);
+        CHECK_FALSE(core.SetSRAMData(wrong.data(), wrong.size()));
+        CHECK_FALSE(core.TakeBackupRAMNotice().empty());
+    }
 
     core.RunFrame();
     CHECK(AllEqual(BackupRAM(core), 0, kBackup, 0x00));
     const std::vector<uint8_t> image = Image(core);
     CHECK(AllEqual(image, 0, kBackup, 0x00));
-    CHECK(AllEqual(image, kBackup, kTotal, 0xFF));
+    CHECK(AllEqual(image, kBackup, kEEPROMEnd, 0xFF));
+    CHECK(AllEqual(image, kEEPROMEnd, kTotal, 0x00));
 }
 
 TEST_CASE("stv sram: a .srm file of another size is rejected, logged, and replaced at unload", "[stv]") {
@@ -386,7 +429,7 @@ TEST_CASE("stv sram: a .srm file of another size is rejected, logged, and replac
     Quiet(core);
     const std::string notice = core.TakeBackupRAMNotice();
     CHECK(notice.find("32768") != std::string::npos);
-    CHECK(notice.find("32896") != std::string::npos);
+    CHECK(notice.find("32901") != std::string::npos);
     CHECK(notice.find("bakubaku.srm") != std::string::npos);
 
     // RetroArch loads a file of another size into the start of the buffer all the same (a partial load): the core
@@ -398,12 +441,201 @@ TEST_CASE("stv sram: a .srm file of another size is rejected, logged, and replac
     CHECK(AllEqual(BackupRAM(core), 0, kBackup, 0x00));
     const std::vector<uint8_t> image = Image(core);
     CHECK(AllEqual(image, 0, kBackup, 0x00));
-    CHECK(AllEqual(image, kBackup, kTotal, 0xFF));
+    CHECK(AllEqual(image, kBackup, kEEPROMEnd, 0xFF));
+    CHECK(AllEqual(image, kEEPROMEnd, kTotal, 0x00));
 
     core.UnloadGame();
     const std::vector<uint8_t> written = ReadBytes(session.Srm());
     REQUIRE(written.size() == kTotal);
     CHECK(AllEqual(written, 0, kBackup, 0x00));
+}
+
+// What the SMPC's SETSMEM writes in a session is the next session's SMEM (MAME's smem.nv: five bytes, kept with the
+// driver's other saves)
+TEST_CASE("stv sram: SMEM written by SETSMEM is in the .srm and in the next session's SMPC", "[stv]") {
+    Session session("brimir_stv_sram_smem");
+    {
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(session.Load(core));
+        Quiet(core);
+        core.RunFrame();
+        CHECK(SessionSMEM(core) == std::vector<uint8_t>(stv::kSTVSMEMSize, 0)); // MAME's default
+        SendSETSMEM(*core.GetSaturn(), {0x01, 0x02, 0x03, 0x04});
+        for (int i = 0; i < 3; i++) {
+            core.RunFrame();
+        }
+        CHECK(SessionSMEM(core) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+        CHECK(SMEMBytes(Image(core)) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+        core.UnloadGame();
+    }
+    const std::vector<uint8_t> written = ReadBytes(session.Srm());
+    REQUIRE(written.size() == kTotal);
+    CHECK(SMEMBytes(written) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+
+    // Next session, the core reading its own file (no frontend): SMEM is the saved one from the first frame
+    {
+        CoreWrapper next;
+        REQUIRE(next.Initialize());
+        REQUIRE(session.Load(next));
+        Quiet(next);
+        next.RunFrame();
+        CHECK(SessionSMEM(next) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+        // the INTBACK status report the BIOS reads is built from it
+        ymir::smpc::PersistentSMPCData data{};
+        next.GetSaturn()->SMPC.SavePersistentData(data);
+        CHECK(data.SMEM == std::array<uint8_t, 4>{0x01, 0x02, 0x03, 0x04});
+        CHECK(data.STE);
+        next.UnloadGame();
+    }
+
+    // Next session, a frontend that loads the file into the buffer
+    CoreWrapper frontend;
+    REQUIRE(frontend.Initialize());
+    REQUIRE(session.Load(frontend));
+    Quiet(frontend);
+    std::memcpy(frontend.GetSRAMData(), written.data(), written.size());
+    frontend.RunFrame();
+    CHECK(SessionSMEM(frontend) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+}
+
+TEST_CASE("stv sram: a new session's SMEM is MAME's default whatever the console's settings were", "[stv]") {
+    // a Saturn session's settings are not the cabinet's, and the cabinet's do not reach the console's
+    Session session("brimir_stv_sram_smem_console");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    ymir::smpc::PersistentSMPCData console{};
+    console.SMEM = {0x0A, 0x0B, 0x0C, 0x0D};
+    console.STE = true;
+    core.GetSaturn()->SMPC.LoadPersistentData(console);
+    WriteBytes(session.Srm(), PatternImage());
+
+    REQUIRE(session.Load(core));
+    Quiet(core);
+    core.RunFrame();
+    CHECK(SessionSMEM(core) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end())); // the .srm's, not the console's
+    core.UnloadGame();
+    ymir::smpc::PersistentSMPCData after{};
+    core.GetSaturn()->SMPC.SavePersistentData(after);
+    CHECK(after.SMEM == console.SMEM);
+    CHECK(after.STE);
+}
+
+// Review Focus 2: 0.10.0's .srm (backup RAM and EEPROM, 32896 bytes) is accepted; its SMEM is MAME's default and the next
+// save is in the new size
+TEST_CASE("stv sram: a 0.10.0 .srm of 32896 bytes loads whole, SMEM at MAME's default, and is saved in the new size",
+          "[stv]") {
+    Session session("brimir_stv_sram_old");
+    const std::vector<uint8_t> full = PatternImage();
+    const std::vector<uint8_t> old(full.begin(), full.begin() + static_cast<std::ptrdiff_t>(kV1));
+    REQUIRE(old.size() == 32896);
+
+    SECTION("the core reads its own file") {
+        WriteBytes(session.Srm(), old);
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(session.Load(core));
+        Quiet(core);
+        CHECK(core.GetSRAMSize() == kTotal);
+        const std::string notice = core.TakeBackupRAMNotice();
+        CHECK(notice.find("32896") != std::string::npos);
+        CHECK(notice.find("bakubaku.srm") != std::string::npos);
+        const std::vector<uint8_t> before = Image(core);
+        CHECK(std::vector<uint8_t>(before.begin(), before.begin() + static_cast<std::ptrdiff_t>(kV1)) == old);
+        CHECK(AllEqual(before, kV1, kTotal, 0x00));
+        core.RunFrame();
+        CHECK(BackupRAM(core) == std::vector<uint8_t>(old.begin(), old.begin() + static_cast<std::ptrdiff_t>(kBackup)));
+        CHECK(EEPROM(core) == Cells(old));
+        CHECK(SessionSMEM(core) == std::vector<uint8_t>(stv::kSTVSMEMSize, 0));
+        CHECK(core.GetLastError().empty());
+        core.UnloadGame();
+        const std::vector<uint8_t> written = ReadBytes(session.Srm());
+        REQUIRE(written.size() == kTotal);
+        CHECK(std::vector<uint8_t>(written.begin(), written.begin() + static_cast<std::ptrdiff_t>(kV1)) == old);
+        CHECK(AllEqual(written, kV1, kTotal, 0x00));
+    }
+
+    SECTION("RetroArch copies the file into the start of the larger buffer") {
+        WriteBytes(session.Srm(), old);
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(session.Load(core));
+        Quiet(core);
+        uint8_t *buffer = static_cast<uint8_t *>(core.GetSRAMData());
+        REQUIRE(buffer != nullptr);
+        std::memcpy(buffer, old.data(), old.size()); // min(file, buffer) bytes; the tail is what the core put there
+        core.RunFrame();
+        CHECK(BackupRAM(core) == std::vector<uint8_t>(old.begin(), old.begin() + static_cast<std::ptrdiff_t>(kBackup)));
+        CHECK(EEPROM(core) == Cells(old));
+        CHECK(SessionSMEM(core) == std::vector<uint8_t>(stv::kSTVSMEMSize, 0));
+        CHECK(core.GetSRAMData() == buffer);
+        CHECK(SMEMBytes(Image(core)) == std::vector<uint8_t>(stv::kSTVSMEMSize, 0));
+    }
+
+    SECTION("a frontend that hands the old size through SetSRAMData during play: both parts taken, SMEM kept") {
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(session.Load(core));
+        Quiet(core);
+        core.RunFrame();
+        SendSETSMEM(*core.GetSaturn(), {0x01, 0x02, 0x03, 0x04});
+        for (int i = 0; i < 3; i++) {
+            core.RunFrame();
+        }
+        REQUIRE(SessionSMEM(core) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+        void *pointer = core.GetSRAMData();
+
+        REQUIRE(core.SetSRAMData(old.data(), old.size()));
+        CHECK(core.TakeBackupRAMNotice().empty());
+        CHECK(core.GetSRAMData() == pointer);
+        CHECK(core.GetSRAMSize() == kTotal);
+        CHECK(BackupRAM(core) == std::vector<uint8_t>(old.begin(), old.begin() + static_cast<std::ptrdiff_t>(kBackup)));
+        CHECK(EEPROM(core) == Cells(old));
+        CHECK(SessionSMEM(core) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+        const std::vector<uint8_t> image = Image(core);
+        CHECK(SMEMBytes(image) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+        core.RunFrame();
+        CHECK(Image(core) == image);
+    }
+}
+
+// The frontend's buffer after a state load carries the state's SMEM, as it does the state's backup RAM and EEPROM
+TEST_CASE("stv sram: a state load puts the state's SMEM in the session and the frontend's buffer", "[stv]") {
+    Session session("brimir_stv_sram_state");
+    std::vector<uint8_t> state;
+    {
+        CoreWrapper source;
+        REQUIRE(source.Initialize());
+        REQUIRE(session.Load(source));
+        Quiet(source);
+        source.RunFrame();
+        SendSETSMEM(*source.GetSaturn(), {0x01, 0x02, 0x03, 0x04});
+        for (int i = 0; i < 3; i++) {
+            source.RunFrame();
+        }
+        REQUIRE(SessionSMEM(source) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+        state.resize(source.GetStateSize());
+        REQUIRE(source.SaveState(state.data(), state.size()));
+        uint32_t compressed = 0; // the state is the 16-byte header and the compressed payload
+        std::memcpy(&compressed, state.data() + 12, 4);
+        state.resize(16 + compressed);
+    }
+    std::filesystem::remove(session.Srm()); // the source session's unload wrote it: the next one starts cold
+
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(session.Load(core));
+    Quiet(core);
+    uint8_t *buffer = static_cast<uint8_t *>(core.GetSRAMData());
+    REQUIRE(buffer != nullptr);
+    core.RunFrame();
+    REQUIRE(SessionSMEM(core) == std::vector<uint8_t>(stv::kSTVSMEMSize, 0));
+
+    REQUIRE(core.LoadState(state.data(), state.size()));
+    CHECK(SessionSMEM(core) == std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
+    CHECK(core.GetSRAMData() == buffer);
+    CHECK(std::vector<uint8_t>(buffer + kEEPROMEnd, buffer + kTotal) ==
+          std::vector<uint8_t>(kSMEMSet.begin(), kSMEMSet.end()));
 }
 
 TEST_CASE("stv sram: no save RAM from a session that did not run is lost or invented", "[stv]") {
@@ -540,7 +772,7 @@ TEST_CASE("stv sram: bakubaku's BIOS initialises the blank EEPROM as it does in 
     Quiet(core);
 
     // MAME's chip is blank until the BIOS has run
-    CHECK(AllEqual(Image(core), kBackup, kTotal, 0xFF));
+    CHECK(AllEqual(Image(core), kBackup, kEEPROMEnd, 0xFF));
     for (int i = 0; i < 1300; i++) {
         core.RunFrame();
     }
@@ -596,12 +828,12 @@ TEST_CASE("stv sram: bakubaku's EEPROM and backup RAM survive a restart", "[.stv
     REQUIRE(pointer != nullptr);
     std::memcpy(pointer, first.data(), first.size());
     core.RunFrame();
-    CHECK(EEPROM(core) == std::vector<uint8_t>(first.begin() + static_cast<std::ptrdiff_t>(kBackup), first.end()));
+    CHECK(EEPROM(core) == Cells(first));
     CHECK(BackupRAM(core)[1234] == 0xC3);
     for (int i = 0; i < 1300; i++) {
         core.RunFrame();
     }
     CHECK(BackupRAM(core)[1234] == 0xC3);
-    CHECK(EEPROM(core) == std::vector<uint8_t>(first.begin() + static_cast<std::ptrdiff_t>(kBackup), first.end()));
+    CHECK(EEPROM(core) == Cells(first));
     CHECK(core.GetLastError().empty());
 }

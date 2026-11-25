@@ -111,9 +111,10 @@ logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is sup
   1639-1641). The screens are the same; the loading pauses are shorter. libretro-stv also boots later than Brimir and
   MAME (its first chip read at frame 1335, Brimir's at 1195), so its attract mode runs about 100 frames behind;
   after the coin and Start the two are within about 25 frames.
-- **SMPC settings (SMEM) are not persisted.** MAME keeps the SMPC's five bytes of battery memory for ST-V
-  (`smem.nv`); here they start from MAME's defaults at every load. The ST-V BIOS never sends SETSMEM and nothing visible
-  depends on it with these games.
+- **SMPC settings (SMEM)** are kept as MAME keeps them: five bytes (`smpc_hle_device::m_smem[5]`, NVRAM `smem`, default
+  all zero; four set by SETSMEM and a validity byte SETSMEM sets to 0xFF), saved in the tail of `<set>.srm`. The clock is
+  not kept (MAME does not keep it either). The ST-V BIOS never sends SETSMEM and nothing visible depends on it with
+  these games.
 - **Slave SH-2 interrupts.** The slave receives VBlank-OUT (MAME's ST-V driver does not raise it for the slave), and the
   SCU's HBlank-OUT lower cancels an HBlank-IN interrupt the slave has not taken yet (MAME's `HOLD_LINE` keeps it
   pending). Details in `src/core/BRIMIR_FORK.md` (the `SetIRLHoldLine` row). No game shows an effect.
@@ -129,8 +130,9 @@ Not supported: ST-V games outside the table above (the game database holds the R
 
 ## Saves and states
 
-- `<set>.srm` holds the backup RAM (32 KiB) and the EEPROM (128 bytes), 32,896 bytes. A file of another size (a Saturn
-  `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The EEPROM starts as MAME's: the set's
+- `<set>.srm` holds the backup RAM (32 KiB), the EEPROM (128 bytes) and the SMPC's five SMEM bytes, 32,901 bytes. A
+  0.10.0 file (32,896 bytes, no SMEM) is accepted, its SMEM at MAME's default, and written in the new size at unload. A
+  file of another size (a Saturn `.srm`, an older build's) is refused and logged; the cabinet then starts cold. The EEPROM starts as MAME's: the set's
   default image when its ROM_START has one (Shienryu's `eeprom-shienryu.bin`, which sets the cabinet up for the vertical
   monitor, and Steep Slope Sliders' `sss.nv`, its one-player assignment; both are part of the set), else blank (0xFF), and the BIOS sets it up on first boot.
 - Save states carry an ST-V block (cabinet I/O and EEPROM state, protection chip state, scheduler count) after the

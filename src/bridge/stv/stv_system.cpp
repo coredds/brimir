@@ -66,6 +66,7 @@ bool STVSystem::Attach(ymir::Saturn &saturn, const GameInfo &game, std::array<ui
     saturn.SMPC.SavePersistentData(m_prevSMPC);
     // The board starts with MAME's SMPC defaults, never the console's settings (the Saturn BIOS language, its clock):
     // MAME's smpc_hle_device keeps SMEM as NVRAM with DEFAULT_ALL_0 and runs the host's clock. Detach restores them.
+    // The cabinet's saved SMEM (the .srm's tail) replaces the default at the first frame, as the backup RAM does.
     saturn.SMPC.LoadPersistentData(ymir::smpc::PersistentSMPCData{});
 
     saturn.LoadIPL(std::span<uint8_t, kSTVBiosSize>(bios));

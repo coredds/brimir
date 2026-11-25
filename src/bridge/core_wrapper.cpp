@@ -235,6 +235,24 @@ void ResetInternalBackupRAM(ymir::Saturn &saturn) {
     assert(ok && "a 256 Kbit image always matches the internal backup RAM size");
 }
 
+// The ST-V .srm's SMEM tail is MAME's smpc_hle_device::m_smem[5] (NVRAM "smem", default all zero): the four bytes SETSMEM
+// writes, then the byte SETSMEM sets to 0xFF, whose bit 7 INTBACK reports (Ymir's STE; MAME's SETTIME does not touch it).
+void ReadSTVSMEM(const ymir::Saturn &saturn, uint8_t *out) {
+    ymir::smpc::PersistentSMPCData data{};
+    saturn.SMPC.SavePersistentData(data);
+    std::copy(data.SMEM.begin(), data.SMEM.end(), out);
+    out[4] = data.STE ? 0xFF : 0x00;
+}
+
+// Only SMEM and the flag: the clock the session runs is not the cabinet's saved state (MAME does not keep the RTC)
+void WriteSTVSMEM(ymir::Saturn &saturn, const uint8_t *in) {
+    ymir::smpc::PersistentSMPCData data{};
+    saturn.SMPC.SavePersistentData(data);
+    std::copy(in, in + data.SMEM.size(), data.SMEM.begin());
+    data.STE = (in[4] & 0x80) != 0;
+    saturn.SMPC.LoadPersistentData(data);
+}
+
 // The cartridge a choice inserts for a game whose database entry asks for gameCart (None for games not in it).
 ymir::db::Cartridge ResolveCartridge(brimir::CartridgeChoice choice, ymir::db::Cartridge gameCart) {
     using brimir::CartridgeChoice;
@@ -960,21 +978,31 @@ void CoreWrapper::PrepareSTVSaveRAM(const std::filesystem::path& gamePath, const
     // another size is not a save of this layout (an earlier build's raw 32 KiB backup RAM, a Saturn's): not used, and
     // replaced when the game is unloaded. RetroArch loads such a file into the start of the buffer all the same;
     // m_stvSrmRejected makes the first frame discard that.
+    // 0.10.0's file (backup RAM and EEPROM, no SMEM) is old, not wrong: loaded whole, its SMEM the default the buffer
+    // already holds (RetroArch copies min(file, buffer) bytes into the start of the buffer, leaving that tail), and
+    // the unload writes the new size.
     std::error_code error;
     if (!m_srmPath.empty() && std::filesystem::exists(m_srmPath, error) && !error) {
         const uintmax_t size = std::filesystem::file_size(m_srmPath, error);
-        if (!error && size == stv::kSTVSaveRAMSize) {
+        if (!error && (size == stv::kSTVSaveRAMSize || size == stv::kSTVSaveRAMSizeV1)) {
             std::ifstream file(m_srmPath, std::ios::binary);
-            std::vector<uint8_t> bytes(stv::kSTVSaveRAMSize);
+            std::vector<uint8_t> bytes(static_cast<size_t>(size));
             if (file && file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
                 std::copy(bytes.begin(), bytes.end(), m_sramData.begin());
+                if (size == stv::kSTVSaveRAMSizeV1) {
+                    m_backupRAMNotice = "ST-V save RAM file " + PathToUtf8(m_srmPath) + " is from an earlier version (" +
+                                        std::to_string(size) + " bytes, no SMPC settings): loaded, the SMPC settings "
+                                        "start at their default and the file is written with them (" +
+                                        std::to_string(stv::kSTVSaveRAMSize) + " bytes) when the game is unloaded";
+                }
             }
         } else if (!error) {
             m_stvSrmRejected = true;
             m_backupRAMNotice = "ST-V save RAM file " + PathToUtf8(m_srmPath) + " has " + std::to_string(size) +
                                 " bytes, not " + std::to_string(stv::kSTVSaveRAMSize) +
-                                " (backup RAM and EEPROM): not used, the cabinet starts cold and the file is "
-                                "replaced when the game is unloaded";
+                                " (backup RAM, EEPROM and SMPC settings; " + std::to_string(stv::kSTVSaveRAMSizeV1) +
+                                " without the settings is also read): not used, the cabinet starts cold and the file "
+                                "is replaced when the game is unloaded";
         }
     }
     m_sramInitialized = true;
@@ -1401,6 +1429,10 @@ void CoreWrapper::OnPersistSMPCData(const ymir::smpc::PersistentSMPCData &data, 
     if (!self) {
         return;
     }
+    // The cabinet's SMEM is its own (the ST-V .srm's tail), never the console's settings the files and m_savedSMEM hold
+    if (self->m_stv) {
+        return;
+    }
     // Only the guest changes the user's BIOS settings (SETSMEM, e.g. the BIOS settings screen); a state load applies
     // its own to the session alone, so the file keeps the user's and the session's clock (as before).
     if (self->m_saturn) {
@@ -1456,7 +1488,7 @@ size_t CoreWrapper::GetSRAMSize() const {
         return 0;
     }
 
-    // The ST-V save RAM is the backup RAM and the EEPROM, from the moment the game is loaded
+    // The ST-V save RAM is the backup RAM, the EEPROM and the SMPC's SMEM, from the moment the game is loaded
     if (m_stv) {
         return stv::kSTVSaveRAMSize;
     }
@@ -1490,17 +1522,34 @@ bool CoreWrapper::SetSRAMData(const uint8_t* data, size_t size) {
     if (!data || size == 0) {
         return false;
     }
-    if (size != GetSRAMSize()) {
+    // 0.10.0's layout (no SMEM) is taken for the backup RAM and the EEPROM; the SMEM stays as it is
+    const bool stvEarlierLayout = m_stv && size == stv::kSTVSaveRAMSizeV1;
+    if (size != GetSRAMSize() && !stvEarlierLayout) {
         if (m_stv) {
             m_backupRAMNotice = "ST-V save RAM of " + std::to_string(size) + " bytes rejected: the layout is " +
-                                std::to_string(stv::kSTVSaveRAMSize) +
-                                " bytes (backup RAM and EEPROM), the cabinet keeps its state";
+                                std::to_string(stv::kSTVSaveRAMSize) + " bytes (backup RAM, EEPROM and SMPC settings; " +
+                                std::to_string(stv::kSTVSaveRAMSizeV1) + " without the settings is also read), "
+                                "the cabinet keeps its state";
         }
         return false;
     }
 
     m_stvSrmRejected = false;
-    m_sramData.assign(data, data + size);
+    if (stvEarlierLayout) {
+        // In place (the frontend keeps the buffer's address). Until the first frame the SMEM is the buffer's tail (the
+        // file the core read, or the default); after it, the session's.
+        uint8_t smem[stv::kSTVSMEMSize];
+        if (m_sramFirstLoad && m_sramData.size() == stv::kSTVSaveRAMSize) {
+            std::copy(m_sramData.end() - stv::kSTVSMEMSize, m_sramData.end(), smem);
+        } else {
+            ReadSTVSMEM(*m_saturn, smem);
+        }
+        m_sramData.resize(stv::kSTVSaveRAMSize);
+        std::copy(data, data + size, m_sramData.begin());
+        std::copy(smem, smem + stv::kSTVSMEMSize, m_sramData.begin() + static_cast<std::ptrdiff_t>(size));
+    } else {
+        m_sramData.assign(data, data + size);
+    }
     m_sramDataFromFrontend = true;
 
     if (m_gameLoaded && m_saturn) {
@@ -1529,8 +1578,10 @@ void CoreWrapper::WriteSRAMToYmir() {
             bup.WriteByte(i * 2, m_sramData[i]);
         }
         std::array<uint8_t, stv::kSTVEEPROMSize> cells;
-        std::copy(m_sramData.begin() + stv::kSTVBackupRAMSize, m_sramData.end(), cells.begin());
+        const auto cellsBegin = m_sramData.begin() + static_cast<std::ptrdiff_t>(stv::kSTVBackupRAMSize);
+        std::copy(cellsBegin, cellsBegin + static_cast<std::ptrdiff_t>(cells.size()), cells.begin());
         m_stv->IO().LoadEEPROM(cells);
+        WriteSTVSMEM(*m_saturn, m_sramData.data() + stv::kSTVBackupRAMSize + stv::kSTVEEPROMSize);
         return;
     }
     // An all-zero image is unformatted backup RAM and holds no save (a .srm written by earlier versions from a session
@@ -1571,6 +1622,7 @@ void CoreWrapper::ReadSRAMFromYmir() {
     if (m_stv) {
         const auto& cells = m_stv->IO().GetEEPROM();
         std::copy(cells.begin(), cells.end(), m_sramData.begin() + static_cast<std::ptrdiff_t>(image.size()));
+        ReadSTVSMEM(*m_saturn, m_sramData.data() + image.size() + cells.size());
     }
 }
 
