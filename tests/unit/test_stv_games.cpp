@@ -973,29 +973,31 @@ TEST_CASE("stv: ffreveng's 315-5881 reads the game's uncompressed block as in MA
     // and the subkey 0x10D9; then about once a frame the code at 0x06010292 enables it, reads one long at 0x4FFFFFC
     // and disables it again, 16 longs in all, and it starts over. The block's header (logged from Brimir's chip in a
     // local build) is 0x0001FFFF: not compressed, 256 lines of 512 bytes, so these are the chip's plain decrypted
-    // words. MAME's values, the same in all of its 403 rounds over 7600 frames of boot, attract and play:
-    static constexpr uint32_t kMame[16] = {0x7C1F2D57, 0x1CCF2933, 0x18AD2511, 0x3DD55A9F, 0x3996671D, 0x100F1067,
-                                           0x563F2496, 0x184F2073, 0x52571009, 0x31123954, 0x20AB18A7, 0x5A5849D3,
-                                           0x00005E97, 0x62D85695, 0x396D4DF2, 0x5A7524E8};
+    // words. MAME's values were the same in all of its 403 rounds over 7600 frames of boot, attract and play: the
+    // 64-bit FNV-1a of their bytes (big-endian, in order) and the last long but three (0x00005E97).
     auto &bus = session.Core().GetSaturn()->mainBus;
-    int mismatches = 0;
     for (int round = 0; round < 2; round++) {
         bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
         bus.Write<uint16_t>(0x04FF'FFF8, 0x49CA);
         bus.Write<uint16_t>(0x04FF'FFFA, 0x0013);
         bus.Write<uint16_t>(0x04FF'FFFC, 0x10D9);
+        uint64_t hash = 0xCBF2'9CE4'8422'2325ull;
+        uint32_t spot = 0;
         for (uint32_t i = 0; i < 16; i++) {
             bus.Write<uint8_t>(0x04FF'FFF1, 0x01);
             const uint32_t value = bus.Read<uint32_t>(0x04FF'FFFC);
             bus.Write<uint8_t>(0x04FF'FFF1, 0x00);
-            if (value != kMame[i]) {
-                UNSCOPED_INFO("round " << round << " long " << i << ": " << std::hex << value << " expected "
-                                       << kMame[i] << std::dec);
-                ++mismatches;
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                hash = (hash ^ ((value >> shift) & 0xFF)) * 0x0000'0100'0000'01B3ull;
+            }
+            if (i == 12) {
+                spot = value;
             }
         }
+        INFO("round " << round << ": hash " << std::hex << hash);
+        CHECK(spot == 0x0000'5E97u);
+        CHECK(hash == 0x81FD'A77C'7CAC'EF67ull);
     }
-    CHECK(mismatches == 0);
 }
 
 TEST_CASE("stv: ffreveng boots, takes coin and start, and plays for a minute", "[.stv-rom][ffreveng]") {
