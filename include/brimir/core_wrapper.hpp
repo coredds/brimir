@@ -630,10 +630,6 @@ public:
 
     /// @brief Test seam: the loaded ST-V game's I/O board (coin, Start, buttons, EEPROM), or nullptr
     stv::STVIOBoard* GetSTVIOBoardForTesting() { return STVIOBoardOrNull(); }
-
-    /// @brief Test seam: the rotation Auto uses for the loaded ST-V game instead of the database's (until cleared
-    /// with -1; it never applies without an ST-V game)
-    void SetSTVRotationForTesting(int degrees) { m_testSTVRotation = degrees; }
 #endif
 
 private:
@@ -682,7 +678,6 @@ private:
     // Screen rotation (TATE mode)
     int m_rotation = 0; // 0, 90, 180, 270: the explicit value, used unless m_rotationAuto
     bool m_rotationAuto = true; // the rotation follows the content (GetEffectiveRotation)
-    int m_testSTVRotation = -1; // SetSTVRotationForTesting (-1: the database's)
 
     // Overscan crop in pixels (total from both edges)
     int m_overscanCropH = 0;

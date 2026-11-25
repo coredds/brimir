@@ -89,17 +89,20 @@ std::vector<uint8_t> PatternImage() {
     return image;
 }
 
-// A bakubaku zip of zero-filled files and an idle BIOS (stv_test_bios.hpp), a system and a save folder
+// A zip of zero-filled files (bakubaku's unless another set is named; a default EEPROM image is there, with the
+// database CRC-32) and an idle BIOS (stv_test_bios.hpp), a system and a save folder
 struct Session {
     TempDir dir;
+    std::string set;
     std::filesystem::path zip, saves, system;
+    std::vector<uint8_t> eepromFile; // the set's default EEPROM image as written, when it has one
 
-    explicit Session(const char *name) : dir(name) {
+    explicit Session(const char *name, const char *setName = "bakubaku") : dir(name), set(setName) {
         saves = dir.path / "saves";
         system = dir.path / "system";
         std::filesystem::create_directories(saves);
         std::filesystem::create_directories(system);
-        const stv::GameInfo *game = stv::FindGame("bakubaku");
+        const stv::GameInfo *game = stv::FindGame(set);
         REQUIRE(game != nullptr);
         std::vector<test::TestZipEntry> entries;
         std::set<std::string> seen;
@@ -113,7 +116,14 @@ struct Session {
             entry.deflate = true;
             entries.push_back(std::move(entry));
         }
-        zip = dir.path / "bakubaku.zip";
+        if (game->eeprom.file != nullptr) {
+            test::TestZipEntry entry;
+            entry.name = game->eeprom.file;
+            entry.data = test::DataWithCrc32(stv::kSTVEEPROMSize, game->eeprom.crc32);
+            eepromFile = entry.data;
+            entries.push_back(std::move(entry));
+        }
+        zip = dir.path / (set + ".zip");
         test::WriteTestZip(zip, entries);
         test::WriteIdleSTVBios(system / "epr-20091.ic8");
     }
@@ -122,7 +132,7 @@ struct Session {
         return core.LoadGame(Str(zip).c_str(), Str(saves).c_str(), Str(system).c_str());
     }
     std::filesystem::path Srm() const {
-        return saves / "bakubaku.srm";
+        return saves / (set + ".srm");
     }
 };
 
@@ -213,6 +223,39 @@ TEST_CASE("stv sram: the save RAM is the backup RAM and the EEPROM from the mome
 
     core.UnloadGame();
     CHECK(core.GetSRAMSize() == 32768); // a Saturn's again
+}
+
+// MAME's eeprom_base_device::nvram_default: with no NVRAM the chip holds the set's "eeprom" region (shienryu's sets
+// the cabinet up for its vertical monitor); a saved .srm still replaces it
+TEST_CASE("stv sram: a set with a default EEPROM image starts with it, and a .srm still wins", "[stv]") {
+    Session session("brimir_stv_sram_default_eeprom", "shienryu");
+    REQUIRE(session.eepromFile.size() == stv::kSTVEEPROMSize);
+    REQUIRE_FALSE(AllEqual(session.eepromFile, 0, stv::kSTVEEPROMSize, 0xFF));
+
+    {
+        CoreWrapper core;
+        REQUIRE(core.Initialize());
+        REQUIRE(session.Load(core));
+        REQUIRE(core.IsSTVLoaded());
+        Quiet(core);
+        const std::vector<uint8_t> cold = Image(core);
+        CHECK(AllEqual(cold, 0, kBackup, 0x00));
+        CHECK(std::vector<uint8_t>(cold.begin() + kBackup, cold.end()) == session.eepromFile);
+        CHECK(EEPROM(core) == session.eepromFile);
+        core.RunFrame();
+        CHECK(EEPROM(core) == session.eepromFile);
+        CHECK(core.GetLastError().empty());
+    }
+
+    // A save of the board replaces the default at the first frame
+    const std::vector<uint8_t> saved = PatternImage();
+    WriteBytes(session.Srm(), saved);
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    REQUIRE(session.Load(core));
+    Quiet(core);
+    core.RunFrame();
+    CHECK(EEPROM(core) == std::vector<uint8_t>(saved.begin() + kBackup, saved.end()));
 }
 
 TEST_CASE("stv sram: an EEPROM write by the 93C46 protocol is in the save RAM at offset 32768", "[stv]") {

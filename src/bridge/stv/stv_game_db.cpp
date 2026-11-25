@@ -4,7 +4,8 @@
 //
 // Transcribed from MAME's src/mame/sega/stv.cpp. Each ROM list follows the ROM_START block of its set line by line;
 // the region lists follow the country letters of the GAME title (J, U, E, T, L) and the key is the set's
-// ROM_PARAMETER( ":315_5881:key", ... ). All sets are ROT0.
+// ROM_PARAMETER( ":315_5881:key", ... ). All sets are ROT0 but shienryu, ROT270: MAME turns its picture a quarter
+// turn anticlockwise, which is CoreWrapper's rotation step at 270.
 
 #include "stv_game_db.hpp"
 
@@ -105,6 +106,12 @@ constexpr RomEntry kRsgunRoms[] = {
     {"mpr20962.5", 0x1000000, 0x0400000, 0xf1e6c7fc, Load::WordSwap},
 };
 
+constexpr RomEntry kShienryuRoms[] = {
+    {"mpr19631.7", 0x0200000, 0x0200000, 0x3a4b1abc, Load::WordSwap},
+    {"mpr19632.2", 0x0400000, 0x0400000, 0x985fae46, Load::WordSwap},
+    {"mpr19633.3", 0x0800000, 0x0400000, 0xe2f0b037, Load::WordSwap},
+};
+
 constexpr GameInfo kGames[] = {
     {"bakubaku", "Baku Baku Animal", kJapan, Controls::ThreeButtons, Chip::None, 0, 0, kBakubakuRoms},
     {"colmns97", "Columns '97", kJET, Controls::ThreeButtons, Chip::None, 0, 0, kColmns97Roms},
@@ -115,6 +122,10 @@ constexpr GameInfo kGames[] = {
     {"grdforce", "Guardian Force", kJUET, Controls::ThreeButtons, Chip::None, 0, 0, kGrdforceRoms},
     {"rsgun", "Radiant Silvergun", kJUET, Controls::RadiantSilvergun, Chip::Crypt315_5881, 0x05272d01, 0,
      kRsgunRoms},
+    // The default EEPROM sets the cabinet up for a vertical monitor: the BIOS draws its own screens turned to match
+    // (with a blank one they come out sideways once the picture is rotated for the game)
+    {"shienryu", "Shienryu", kJUET, Controls::ThreeButtons, Chip::None, 0, 270, kShienryuRoms,
+     {"eeprom-shienryu.bin", 0x98db6925}},
 };
 
 } // namespace

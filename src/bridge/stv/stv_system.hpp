@@ -37,7 +37,8 @@ inline constexpr size_t kSTVSaveRAMSize = kSTVBackupRAMSize + kSTVEEPROMSize;
 
 // The SMPC area code of the ST-V board, whatever BIOS region is chosen. It follows MAME: src/mame/sega/stv.cpp,
 // stv_state::stv (machine config) calls m_smpc_hle->set_region_code(1) ("1 - Japan, configured via jumpers"), and only
-// init_stv_us (the CD games, e.g. sfish2) overrides it with 4. All eight supported sets use init_stv or a wrapper of it.
+// init_stv_us (the CD games, e.g. sfish2) overrides it with 4. All supported sets use init_stv or a wrapper of it
+// (init_shienryu adds only DRC hints).
 inline constexpr uint8_t kSTVAreaCode = 1;
 
 class STVSystem {
@@ -48,11 +49,13 @@ public:
     STVSystem &operator=(const STVSystem &) = delete;
 
     // Makes the Saturn an ST-V board running `game` from cartridge image `cart` (BuildCartImage's) with `bios` (as
-    // LoadSTVBiosImage returns it), then hard-resets it and sets the SMPC area code. The Saturn must outlive this
+    // LoadSTVBiosImage returns it), then hard-resets it and sets the SMPC area code. `eeprom` is the 93C46's contents
+    // on a new cabinet (ReadDefaultEEPROM's 128 bytes); empty, every cell is 0xFFFF. The Saturn must outlive this
     // object or Detach must be called first. Returns false with a message in error when the system cannot be built;
     // the Saturn is then back as it was.
     bool Attach(ymir::Saturn &saturn, const GameInfo &game, std::array<uint8_t, kSTVBiosSize> &bios,
-                std::span<const uint8_t> cart, uint8_t areaCode, std::string &error);
+                std::span<const uint8_t> cart, uint8_t areaCode, std::string &error,
+                std::span<const uint8_t> eeprom = {});
 
     // Removes the ST-V hooks and the cartridge and restores what Attach found: the page of the bus the I/O board took,
     // the SMPC's mode, handlers, area code and persistent data. The IPL stays the ST-V BIOS and the internal backup

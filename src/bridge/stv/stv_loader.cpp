@@ -169,4 +169,27 @@ bool BuildCartImage(ZipReader &zip, const GameInfo &game, std::vector<uint8_t> &
     return false;
 }
 
+// ROM_REGION16_BE( 0x80, "eeprom", 0 ) with ROM_LOAD: the file's bytes are the region's, cell n the big-endian word at
+// 2n. MAME's eeprom_base_device::nvram_default reads the region the same way (16-bit cells, big-endian region).
+bool ReadDefaultEEPROM(ZipReader &zip, const GameInfo &game, std::array<uint8_t, 128> &cells, std::string &error) {
+    error.clear();
+    cells.fill(0xFF);
+    if (game.eeprom.file == nullptr) {
+        return true;
+    }
+    std::vector<uint8_t> data;
+    std::string reason;
+    if (!zip.ReadEntry(game.eeprom.file, data, reason)) {
+        error = std::string(game.shortName) + ": cannot read " + game.eeprom.file + ": " + reason;
+        return false;
+    }
+    if (data.size() != cells.size()) {
+        error = std::string(game.shortName) + ": " + game.eeprom.file + " has the wrong size (" +
+                std::to_string(data.size()) + " bytes, expected " + std::to_string(cells.size()) + ")";
+        return false;
+    }
+    std::copy(data.begin(), data.end(), cells.begin());
+    return true;
+}
+
 } // namespace brimir::stv

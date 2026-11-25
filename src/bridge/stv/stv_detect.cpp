@@ -27,21 +27,27 @@ struct Match {
     std::vector<std::string> missing; // absent, or present with a different CRC-32
 };
 
+void MatchFile(Match &match, const ZipReader &zip, const char *file, uint32_t crc32) {
+    match.total++;
+    if (!zip.HasEntry(file)) {
+        match.missing.emplace_back(file);
+        return;
+    }
+    match.present++;
+    const auto crc = zip.EntryCRC(file);
+    if (crc && *crc != crc32) match.missing.emplace_back(file);
+}
+
 Match MatchGame(const GameInfo &game, const ZipReader &zip) {
     Match match;
     std::set<std::string> seen;
     for (const RomEntry &rom : game.roms) {
         // A repeated file (ROM_RELOAD) is the same zip entry
         if (!seen.insert(rom.file).second) continue;
-        match.total++;
-        if (!zip.HasEntry(rom.file)) {
-            match.missing.emplace_back(rom.file);
-            continue;
-        }
-        match.present++;
-        const auto crc = zip.EntryCRC(rom.file);
-        if (crc && *crc != rom.crc32) match.missing.emplace_back(rom.file);
+        MatchFile(match, zip, rom.file, rom.crc32);
     }
+    // MAME needs the default EEPROM image as much as the ROMs
+    if (game.eeprom.file != nullptr) MatchFile(match, zip, game.eeprom.file, game.eeprom.crc32);
     return match;
 }
 

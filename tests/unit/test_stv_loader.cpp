@@ -9,6 +9,8 @@
 #include <stv/stv_loader.hpp>
 #include <stv/stv_zip.hpp>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -173,6 +175,57 @@ TEST_CASE("stv loader: the GameInfo overload names the set in errors", "[stv]") 
     CHECK_FALSE(BuildCartImage(zip, game, image, error));
     CHECK(error.find("testset") != std::string::npos);
     CHECK(error.find("b.bin") != std::string::npos);
+}
+
+TEST_CASE("stv loader: the default EEPROM image is the set's eeprom file, byte for byte, or blank", "[stv]") {
+    TempDir dir("brimir_stv_ldr_eeprom");
+    const GameInfo *shienryu = FindGame("shienryu");
+    REQUIRE(shienryu != nullptr);
+    REQUIRE(shienryu->eeprom.file != nullptr);
+    CHECK(std::string(shienryu->eeprom.file) == "eeprom-shienryu.bin");
+    CHECK(shienryu->eeprom.crc32 == 0x98db6925);
+
+    Bytes cellsFile(128);
+    for (size_t i = 0; i < cellsFile.size(); ++i) {
+        cellsFile[i] = static_cast<uint8_t>(i * 3 + 1);
+    }
+    std::array<uint8_t, 128> cells{};
+    std::string error;
+
+    // The file's bytes are the cells, big-endian (ROM_REGION16_BE): no swapping
+    const auto good = dir.path / "good.zip";
+    brimir::test::WriteTestZip(good, {{"eeprom-shienryu.bin", cellsFile}});
+    {
+        ZipReader zip(good);
+        REQUIRE(ReadDefaultEEPROM(zip, *shienryu, cells, error));
+        CHECK(error.empty());
+        CHECK(Bytes(cells.begin(), cells.end()) == cellsFile);
+    }
+
+    // A set without one: every cell 0xFFFF, whatever the zip holds
+    {
+        ZipReader zip(good);
+        cells.fill(0x12);
+        REQUIRE(ReadDefaultEEPROM(zip, *FindGame("bakubaku"), cells, error));
+        CHECK(std::all_of(cells.begin(), cells.end(), [](uint8_t b) { return b == 0xFF; }));
+    }
+
+    // Missing or of another size: refused, naming the file
+    const auto missing = dir.path / "missing.zip";
+    brimir::test::WriteTestZip(missing, {{"readme.txt", {0x41}}});
+    {
+        ZipReader zip(missing);
+        CHECK_FALSE(ReadDefaultEEPROM(zip, *shienryu, cells, error));
+        CHECK(error.find("eeprom-shienryu.bin") != std::string::npos);
+    }
+    const auto shortFile = dir.path / "short.zip";
+    brimir::test::WriteTestZip(shortFile, {{"eeprom-shienryu.bin", Bytes(64, 0x00)}});
+    {
+        ZipReader zip(shortFile);
+        CHECK_FALSE(ReadDefaultEEPROM(zip, *shienryu, cells, error));
+        CHECK(error.find("eeprom-shienryu.bin") != std::string::npos);
+        CHECK(error.find("64 bytes") != std::string::npos);
+    }
 }
 
 TEST_CASE("stv loader: real sets build and carry the Sega header", "[.stv-rom][all-games]") {

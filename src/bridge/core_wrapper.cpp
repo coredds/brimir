@@ -822,13 +822,14 @@ bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::f
         return false;
     }
     std::vector<uint8_t> cart;
+    std::array<uint8_t, stv::kSTVEEPROMSize> eeprom;
     {
         stv::ZipReader zip(gamePath);
         if (!zip.IsOpen()) {
             m_lastError = "Cannot read " + PathToUtf8(gamePath);
             return false;
         }
-        if (!stv::BuildCartImage(zip, game, cart, error)) {
+        if (!stv::BuildCartImage(zip, game, cart, error) || !stv::ReadDefaultEEPROM(zip, game, eeprom, error)) {
             m_lastError = error;
             return false;
         }
@@ -875,7 +876,7 @@ bool CoreWrapper::LoadSTVContent(const stv::DetectResult& detected, const std::f
 
     const uint8_t areaCode = stv::kSTVAreaCode; // MAME's, not derived from the BIOS region (see stv_system.hpp)
     m_stv = std::make_unique<stv::STVSystem>();
-    if (!m_stv->Attach(*m_saturn, game, *bios, cart, areaCode, error)) {
+    if (!m_stv->Attach(*m_saturn, game, *bios, cart, areaCode, error, eeprom)) {
         m_stv.reset();
         m_lastError = error;
         return false;
@@ -3009,7 +3010,7 @@ int CoreWrapper::GetEffectiveRotation() const {
     if (game == nullptr) {
         return 0;
     }
-    return m_testSTVRotation >= 0 ? m_testSTVRotation : static_cast<int>(game->rotation);
+    return static_cast<int>(game->rotation);
 }
 
 float CoreWrapper::GetDisplayAspectRatio() const {

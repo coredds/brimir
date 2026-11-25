@@ -9,6 +9,7 @@
 #include "stv_game_db.hpp"
 #include "stv_zip.hpp"
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -24,5 +25,10 @@ bool BuildCartImage(ZipReader &zip, const GameInfo &game, std::vector<uint8_t> &
 
 // The same for a bare entry list (used by the tests).
 bool BuildCartImage(ZipReader &zip, std::span<const RomEntry> roms, std::vector<uint8_t> &image, std::string &error);
+
+// The 93C46's contents on a new cabinet (64 cells, big-endian, as STVIOBoard::LoadEEPROM takes them): the set's
+// default EEPROM image (GameInfo::eeprom), or every cell 0xFFFF when it has none. False with a message in error when
+// the image is missing or not 128 bytes.
+bool ReadDefaultEEPROM(ZipReader &zip, const GameInfo &game, std::array<uint8_t, 128> &cells, std::string &error);
 
 } // namespace brimir::stv

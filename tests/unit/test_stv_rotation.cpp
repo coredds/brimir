@@ -1,7 +1,6 @@
-// Screen Rotation "Auto": the effective rotation follows the loaded ST-V game's database entry, an explicit value
-// (SetRotation) overrides it, and Saturn content is never rotated by Auto. No ST-V game of the database is rotated
-// until a vertical set is added, so the cases below give the loaded game a rotation through the test hook
-// (CoreWrapper::SetSTVRotationForTesting). Sessions use zero-filled sets and the idle BIOS (stv_test_bios.hpp).
+// Screen Rotation "Auto": the effective rotation follows the loaded ST-V game's database entry (Shienryu, MAME's
+// ROT270, is the vertical one), an explicit value (SetRotation) overrides it, and Saturn content is never rotated by
+// Auto. Sessions use zero-filled sets and the idle BIOS (stv_test_bios.hpp).
 
 #include "catch_amalgamated.hpp"
 
@@ -11,6 +10,7 @@
 #include <brimir/core_wrapper.hpp>
 
 #include <stv/stv_game_db.hpp>
+#include <stv/stv_system.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -26,7 +26,7 @@ namespace {
 
 struct TempDir {
     std::filesystem::path path;
-    explicit TempDir(const char *name) : path(std::filesystem::temp_directory_path() / name) {
+    explicit TempDir(const std::string &name) : path(std::filesystem::temp_directory_path() / name) {
         std::filesystem::remove_all(path);
         std::filesystem::create_directories(path);
     }
@@ -36,16 +36,17 @@ struct TempDir {
     }
 };
 
+// A zip of the set's files (zero-filled, with the database CRC-32s) and the idle BIOS
 struct Session {
     TempDir dir;
     std::filesystem::path zip, saves, system;
 
-    explicit Session(const char *name) : dir(name) {
+    Session(const char *name, const char *set) : dir(name) {
         saves = dir.path / "saves";
         system = dir.path / "system";
         std::filesystem::create_directories(saves);
         std::filesystem::create_directories(system);
-        const stv::GameInfo *info = stv::FindGame("bakubaku");
+        const stv::GameInfo *info = stv::FindGame(set);
         REQUIRE(info != nullptr);
         std::vector<test::TestZipEntry> entries;
         std::set<std::string> seen;
@@ -59,7 +60,13 @@ struct Session {
             entry.deflate = true;
             entries.push_back(std::move(entry));
         }
-        zip = dir.path / "bakubaku.zip";
+        if (info->eeprom.file != nullptr) {
+            test::TestZipEntry entry;
+            entry.name = info->eeprom.file;
+            entry.data = test::DataWithCrc32(stv::kSTVEEPROMSize, info->eeprom.crc32);
+            entries.push_back(std::move(entry));
+        }
+        zip = dir.path / (std::string(set) + ".zip");
         test::WriteTestZip(zip, entries);
         test::WriteIdleSTVBios(system / "epr-20091.ic8");
     }
@@ -93,22 +100,25 @@ Size RunAndMeasure(CoreWrapper &core) {
 } // namespace
 
 TEST_CASE("stv rotation: auto follows a rotated game, an explicit value overrides it", "[stv]") {
-    Session session("brimir_stv_rotation_auto");
     CoreWrapper core;
     REQUIRE(core.Initialize());
-    REQUIRE(session.Load(core));
-    Quiet(core);
-
-    // Auto with the database's own rotation (0 for this game)
     core.SetRotationAuto();
+
+    // Auto with a horizontal game
+    Session plainSet("brimir_stv_rotation_auto_plain", "bakubaku");
+    REQUIRE(plainSet.Load(core));
+    Quiet(core);
     CHECK(core.GetEffectiveRotation() == 0);
     const Size plain = RunAndMeasure(core);
     REQUIRE(plain.width > 0);
     REQUIRE(plain.height > 0);
     REQUIRE(plain.width != plain.height);
+    core.UnloadGame();
 
-    // Auto with a game that needs 270
-    core.SetSTVRotationForTesting(270);
+    // Auto with the vertical game: 270
+    Session vertical("brimir_stv_rotation_auto_vertical", "shienryu");
+    REQUIRE(vertical.Load(core));
+    Quiet(core);
     CHECK(core.GetEffectiveRotation() == 270);
     const Size turned = RunAndMeasure(core);
     CHECK(turned.width == plain.height);
@@ -141,6 +151,32 @@ TEST_CASE("stv rotation: auto follows a rotated game, an explicit value override
     CHECK(again.height == plain.width);
 }
 
+// MAME's ROT270 turns the native picture a quarter turn anticlockwise: its top-right corner is shown top left, its
+// top-left corner bottom left. Under Auto, Shienryu's frame takes the same turn.
+TEST_CASE("stv rotation: Shienryu's picture turns as MAME's ROT270 turns it", "[stv]") {
+    Session vertical("brimir_stv_rotation_direction", "shienryu");
+    CoreWrapper core;
+    REQUIRE(core.Initialize());
+    core.SetRotationAuto();
+    REQUIRE(vertical.Load(core));
+    Quiet(core);
+
+    constexpr uint32_t kW = 320, kH = 240;
+    std::vector<uint32_t> frame(static_cast<size_t>(kW) * kH, 0xFF000000);
+    frame[kW - 1] = 0xFF0000FF;                          // top right: red (XBGR)
+    frame[0] = 0xFF00FF00;                               // top left: green
+    frame[static_cast<size_t>(kH - 1) * kW] = 0xFFFF0000; // bottom left: blue
+    core.TestInjectFrame(frame.data(), kW, kH);
+
+    REQUIRE(core.GetFramebufferWidth() == kH);
+    REQUIRE(core.GetFramebufferHeight() == kW);
+    const auto *out = static_cast<const uint32_t *>(core.GetFramebuffer());
+    const size_t pitch = core.GetFramebufferPitch() / 4;
+    CHECK((out[0] & 0xFFFFFF) == 0xFF0000);                                    // top left: red
+    CHECK((out[static_cast<size_t>(kW - 1) * pitch] & 0xFFFFFF) == 0x00FF00);  // bottom left: green
+    CHECK((out[static_cast<size_t>(kW - 1) * pitch + kH - 1] & 0xFFFFFF) == 0x0000FF); // bottom right: blue
+}
+
 // The aspect ratio the core reports to the frontend turns with the picture: 4:3, and 3:4 at 90 and 270 (display only)
 TEST_CASE("stv rotation: the reported aspect ratio is inverted at 90 and 270, whatever set the rotation", "[stv]") {
     constexpr float k43 = 4.0f / 3.0f;
@@ -163,24 +199,25 @@ TEST_CASE("stv rotation: the reported aspect ratio is inverted at 90 and 270, wh
     core.SetRotationAuto();
     CHECK(core.GetDisplayAspectRatio() == k43);
 
-    // Auto with a rotated ST-V game, then switching content in the same core
-    Session session("brimir_stv_rotation_aspect");
-    REQUIRE(session.Load(core));
+    // Auto with a horizontal ST-V game, then the vertical one in the same core
+    Session plainSet("brimir_stv_rotation_aspect_plain", "bakubaku");
+    REQUIRE(plainSet.Load(core));
     Quiet(core);
-    CHECK(core.GetDisplayAspectRatio() == k43); // the database's rotation (0)
-    core.SetSTVRotationForTesting(90);
-    CHECK(core.GetDisplayAspectRatio() == k34);
-    core.SetSTVRotationForTesting(270);
-    CHECK(core.GetDisplayAspectRatio() == k34);
-    core.SetSTVRotationForTesting(180);
     CHECK(core.GetDisplayAspectRatio() == k43);
-    core.SetSTVRotationForTesting(270);
+    core.UnloadGame();
+
+    Session vertical("brimir_stv_rotation_aspect_vertical", "shienryu");
+    REQUIRE(vertical.Load(core));
+    Quiet(core);
+    CHECK(core.GetDisplayAspectRatio() == k34);
 
     // an explicit value wins over the game, in both directions
     core.SetRotation(0);
     CHECK(core.GetDisplayAspectRatio() == k43);
     core.SetRotation(90);
     CHECK(core.GetDisplayAspectRatio() == k34);
+    core.SetRotation(180);
+    CHECK(core.GetDisplayAspectRatio() == k43);
     core.SetRotationAuto();
     CHECK(core.GetDisplayAspectRatio() == k34);
 
@@ -191,7 +228,7 @@ TEST_CASE("stv rotation: the reported aspect ratio is inverted at 90 and 270, wh
 }
 
 TEST_CASE("stv rotation: auto never rotates Saturn content, also after a rotated ST-V game", "[stv]") {
-    Session session("brimir_stv_rotation_saturn");
+    Session vertical("brimir_stv_rotation_saturn", "shienryu");
     CoreWrapper core;
     REQUIRE(core.Initialize());
     core.SetRotationAuto();
@@ -203,10 +240,9 @@ TEST_CASE("stv rotation: auto never rotates Saturn content, also after a rotated
     const Size saturn = RunAndMeasure(core);
     REQUIRE(saturn.width > 0);
 
-    // A rotated ST-V game, then a Saturn session in the same core instance
-    REQUIRE(session.Load(core));
+    // The rotated ST-V game, then a Saturn session in the same core instance
+    REQUIRE(vertical.Load(core));
     Quiet(core);
-    core.SetSTVRotationForTesting(270);
     CHECK(core.GetEffectiveRotation() == 270);
     const Size turned = RunAndMeasure(core);
     CHECK(turned.width < turned.height); // 320x224 turned

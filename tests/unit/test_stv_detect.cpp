@@ -57,6 +57,13 @@ std::vector<brimir::test::TestZipEntry> GameEntries(const GameInfo &game, const 
         entry.crcOverride = rom.crc32;
         entries.push_back(std::move(entry));
     }
+    if (game.eeprom.file != nullptr && game.eeprom.file != skip) {
+        brimir::test::TestZipEntry entry;
+        entry.name = mangle ? mangle(game.eeprom.file) : std::string(game.eeprom.file);
+        entry.data.assign(128, 0xFF);
+        entry.crcOverride = game.eeprom.crc32;
+        entries.push_back(std::move(entry));
+    }
     return entries;
 }
 
@@ -141,6 +148,25 @@ TEST_CASE("ST-V detect: a set with a file missing is incomplete and names it", "
     REQUIRE(result.game != nullptr);
     CHECK(std::string(result.game->shortName) == "bakubaku");
     CHECK(result.missing == std::vector<std::string>{"mpr17973.5"});
+}
+
+// MAME will not run shienryu without its default EEPROM image: a set without it is incomplete
+TEST_CASE("ST-V detect: the default EEPROM image is part of the set", "[stv]") {
+    TempDir dir("brimir_stv_detect_eeprom");
+    const auto complete = dir.path / "complete.zip";
+    brimir::test::WriteTestZip(complete, GameEntries(Game("shienryu")));
+    const auto known = brimir::stv::DetectSTVContent(complete);
+    CHECK(known.kind == DetectKind::Known);
+    REQUIRE(known.game != nullptr);
+    CHECK(std::string(known.game->shortName) == "shienryu");
+
+    const auto zipPath = dir.path / "shienryu.zip";
+    brimir::test::WriteTestZip(zipPath, GameEntries(Game("shienryu"), "eeprom-shienryu.bin"));
+    const auto result = brimir::stv::DetectSTVContent(zipPath);
+    CHECK(result.kind == DetectKind::Incomplete);
+    REQUIRE(result.game != nullptr);
+    CHECK(std::string(result.game->shortName) == "shienryu");
+    CHECK(result.missing == std::vector<std::string>{"eeprom-shienryu.bin"});
 }
 
 TEST_CASE("ST-V detect: a split set holding half the files or more is incomplete", "[stv]") {
@@ -284,7 +310,7 @@ TEST_CASE("ST-V detect: a zip with a non-ASCII name is detected", "[stv]") {
 
 TEST_CASE("ST-V game database: every game is well formed", "[stv]") {
     const auto games = brimir::stv::AllGames();
-    REQUIRE(games.size() == 8);
+    REQUIRE(games.size() == 9);
 
     std::set<std::string> names;
     for (const GameInfo &game : games) {
@@ -311,7 +337,7 @@ TEST_CASE("ST-V game database: every game is well formed", "[stv]") {
     CHECK(brimir::stv::FindGame("nosuchgame") == nullptr);
 }
 
-TEST_CASE("ST-V game database: the eight games' details", "[stv]") {
+TEST_CASE("ST-V game database: the games' details", "[stv]") {
     using brimir::stv::Controls;
     using brimir::stv::Load;
     using brimir::stv::Region;
@@ -320,11 +346,15 @@ TEST_CASE("ST-V game database: the eight games' details", "[stv]") {
     CHECK(Game("rsgun").cryptKey == 0x05272d01);
     CHECK(Game("rsgun").controls == Controls::RadiantSilvergun);
     CHECK(Game("gaxeduel").controls == Controls::SixButtons);
-    for (const char *name : {"bakubaku", "colmns97", "puyosun", "diehard", "cotton2", "grdforce"}) {
+    for (const char *name : {"bakubaku", "colmns97", "puyosun", "diehard", "cotton2", "grdforce", "shienryu"}) {
         CHECK(Game(name).chip == Chip::None);
         CHECK(Game(name).controls == Controls::ThreeButtons);
     }
-    for (const auto &game : brimir::stv::AllGames()) CHECK(game.rotation == 0);
+    // Shienryu is the one vertical game (MAME's ROT270: a quarter turn anticlockwise); the others are ROT0
+    for (const auto &game : brimir::stv::AllGames()) {
+        INFO(game.shortName);
+        CHECK(game.rotation == (std::string(game.shortName) == "shienryu" ? 270 : 0));
+    }
 
     const auto regionsOf = [](const char *name) {
         return std::vector<Region>(Game(name).regions.begin(), Game(name).regions.end());
@@ -335,6 +365,7 @@ TEST_CASE("ST-V game database: the eight games' details", "[stv]") {
     CHECK(regionsOf("gaxeduel") ==
           std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan, Region::LatinAmerica});
     CHECK(regionsOf("rsgun") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
+    CHECK(regionsOf("shienryu") == std::vector<Region>{Region::Japan, Region::USA, Region::Europe, Region::Taiwan});
 
     // Puyo Puyo Sun: nine files, the header file reloaded with the previous flags once and plain twice
     const GameInfo &puyo = Game("puyosun");

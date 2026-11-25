@@ -36,6 +36,14 @@ struct RomEntry {
     Load load;
 };
 
+// The set's ROM_REGION16_BE( 0x80, "eeprom", 0 ): the 93C46's contents on a new cabinet (MAME's
+// eeprom_base_device::nvram_default copies the region when there is no NVRAM file). The file is 128 bytes, the 64
+// cells big-endian. A set without one starts with every cell 0xFFFF.
+struct DefaultEEPROM {
+    const char *file = nullptr;
+    uint32_t crc32 = 0;
+};
+
 struct GameInfo {
     const char *shortName; // MAME set name, e.g. "bakubaku"; also the save-state identity
     const char *title;
@@ -45,6 +53,7 @@ struct GameInfo {
     uint32_t cryptKey;
     uint16_t rotation; // degrees (0, 90, 180, 270): the libretro rotation the game needs to appear upright
     std::span<const RomEntry> roms;
+    DefaultEEPROM eeprom = {};
 };
 
 std::span<const GameInfo> AllGames();
