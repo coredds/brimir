@@ -27,6 +27,7 @@ compared with MAME's.
 | `ffreveng` | Final Fight Revenge | JUET | 6 buttons (the game reads 5) | Japan | full case; the 315-5881's uncompressed path: the game's 16 decrypted longs equal to MAME's in every round (403 in MAME, 401 in Brimir over 7600 frames), checked in a test; buttons 1-5 of both players proven in the game's input test |
 | `sss` | Steep Slope Sliders | JUET | 3 buttons (the game reads 2), one player | Japan | full case for one player (see below); the 315-5881's compressed path over a whole block: the 7344 decompressed longs equal to MAME's, checked in a test; the play minute shows the same timer and points as MAME's at three frames; buttons 1-2 proven in the game's input test |
 | `sanjeon` | DaeJeon! SanJeon SuJeon | AJTUE | 3 buttons | Japan | full case; the cartridge's scramble (see below); credits within 4 frames of MAME; from Start on, the screens match MAME's at every compared frame (the minigames, their timers and the money) |
+| `decathlt` | Decathlete (V1.001) | JUET | 3 buttons | Japan | full case, compared with libretro-stv (MAME does not run it, see below); the 315-5838's data stream equal to libretro-stv's (209,536 words over the first 1800 frames, byte for byte); a state saved inside one of its blocks continues identically in a fresh core |
 
 The BIOS is chosen from the game's regions in the order Japan, USA, Europe (then the game's other regions), or by the
 Saturn BIOS core option's region (`jp_*`, `us_*`, `eu_*`) when the game has that region. A game whose regions have no
@@ -70,6 +71,14 @@ included (so the SH-2 reads the gaps as 0xFF, as in MAME). libretro-stv's COMPAT
 game, but its own database gives it no chip and the same transform; MAME's transform alone runs the game here, to the
 same screens as MAME's, so the set needs no protection chip.
 
+Decathlete unpacks its graphics through the 315-5838 compression chip (`stv_315_5838.cpp`, from MAME's
+`315-5838_317-0229_comp.cpp`). MAME 0.289 marks the game not working (its title comes up with wrong colours), so the
+reference for this game is libretro-stv (Mednafen-based), which runs it: its trace of the chip's register writes and
+data words is identical to Brimir's over the attract mode and the start of play (the first 766,813 accesses of a 7200
+frame run; after that the two runs' games ask for different blocks as their timing drifts apart), and the screens match
+at every compared frame (title, character select with two players, the 100-metre dash). The boot itself (to the SEGA
+logo and the title fade) is in step with MAME's. Only `decathlt` (V1.001) is supported; `decathlto` (V1.000) is not.
+
 ## Known differences from MAME
 
 - **Die Hard Arcade, attract pacing.** The intro shows one more caption than MAME and the title comes about 340 frames
@@ -97,6 +106,11 @@ same screens as MAME's, so the set needs no protection chip.
 - **Final Fight Revenge, HUD on some stages.** On the Chinatown stage MAME draws the top health bars half transparent;
   Brimir draws them solid, as both draw them on the other stages seen. Not investigated (MAME marks the game's graphics
   imperfect; the VDP code is shared with the Saturn and not changed for ST-V).
+- **Decathlete, transfer speed and attract timing (against libretro-stv).** Brimir finishes each of the game's
+  315-5838 blocks inside one frame; libretro-stv spreads one over several (187,712 words over three frames at its
+  1639-1641). The screens are the same; the loading pauses are shorter. libretro-stv also boots later than Brimir and
+  MAME (its first chip read at frame 1335, Brimir's at 1195), so its attract mode runs about 100 frames behind;
+  after the coin and Start the two are within about 25 frames.
 - **SMPC settings (SMEM) are not persisted.** MAME keeps the SMPC's five bytes of battery memory for ST-V
   (`smem.nv`); here they start from MAME's defaults at every load. The ST-V BIOS never sends SETSMEM and nothing visible
   depends on it with these games.
@@ -175,7 +189,7 @@ build\bin\brimir_tests.exe "[.stv-rom][rsgun]"                # everything about
 build\bin\brimir_tests.exe "[.stv-rom]"                       # all of it
 ```
 
-On the development PC (Release, MSVC) the quick tag takes about two minutes and the whole `[.stv-rom]` suite (40 cases)
+On the development PC (Release, MSVC) the quick tag takes about two minutes and the whole `[.stv-rom]` suite (43 cases)
 about 14 minutes; under WSL with GCC 14 the whole suite took about 9 minutes and passed.
 
 Each game has a tag with its set name; `[all-games]` is on the cases that walk the whole database. Set

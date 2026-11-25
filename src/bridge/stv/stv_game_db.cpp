@@ -155,6 +155,18 @@ constexpr RomEntry kSanjeonRoms[] = {
     {"ic12", 0x1800000, 0x0400000, 0xd5ebc84e, Load::Plain},
 };
 
+// decathlt (V1.001): ROM_LOAD16_BYTE, then ROM_RELOAD_PLAIN twice
+constexpr RomEntry kDecathltRoms[] = {
+    {"epr18967a.13", 0x0000001, 0x0100000, 0xac59c186, Load::Byte16},
+    {"epr18967a.13", 0x0200000, 0x0100000, 0xac59c186, Load::Plain},
+    {"epr18967a.13", 0x0300000, 0x0100000, 0xac59c186, Load::Plain},
+    {"mpr18968.2", 0x0400000, 0x0400000, 0x11a891de, Load::WordSwap},
+    {"mpr18969.3", 0x0800000, 0x0400000, 0x199cc47d, Load::WordSwap},
+    {"mpr18970.4", 0x0c00000, 0x0400000, 0x8b7a509e, Load::WordSwap},
+    {"mpr18971.5", 0x1000000, 0x0400000, 0xc87c443b, Load::WordSwap},
+    {"mpr18972.6", 0x1400000, 0x0400000, 0x45c64fca, Load::WordSwap},
+};
+
 constexpr GameInfo kGames[] = {
     {"bakubaku", "Baku Baku Animal", kJapan, Controls::ThreeButtons, Chip::None, 0, 0, kBakubakuRoms},
     {"colmns97", "Columns '97", kJET, Controls::ThreeButtons, Chip::None, 0, 0, kColmns97Roms},
@@ -176,6 +188,8 @@ constexpr GameInfo kGames[] = {
      {"sss.nv", 0x3473b2f3}},
     {"sanjeon", "DaeJeon! SanJeon SuJeon", kAJTUE, Controls::ThreeButtons, Chip::None, 0, 0, kSanjeonRoms, {},
      Scramble::SanJeon},
+    // The 315-5838 decompresses graphics from the cartridge (init_decathlt)
+    {"decathlt", "Decathlete", kJUET, Controls::ThreeButtons, Chip::Comp315_5838, 0, 0, kDecathltRoms},
 };
 
 } // namespace

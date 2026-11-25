@@ -21,10 +21,12 @@
 
 #include <stv/stv_game_db.hpp>
 #include <stv/stv_input.hpp>
+#include <stv/stv_state.hpp>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <set>
@@ -62,7 +64,9 @@ constexpr uint32_t kBiosCredits = 0x0600'0740;
 // layer drives it. Every frame's audio is drained and its peak kept.
 class GameSession {
 public:
-    explicit GameSession(const char *set) : m_set(set), m_scratch((std::string("brimir_stv_game_") + set).c_str()) {}
+    // `tag` tells apart the scratch folders of two sessions of one game alive at once
+    explicit GameSession(const char *set, const std::string &tag = "")
+        : m_set(set), m_scratch((std::string("brimir_stv_game_") + set + tag).c_str()) {}
 
     // False (and the reason in Skipped()) when the folders or the zip are not there
     bool Load() {
@@ -294,8 +298,11 @@ const std::vector<uint16_t> kShooterScript = {
 // A minute of play for both players. With `continues` a credit is kept in hand (player 1 coins in whenever there is
 // none) and both players press Start every 400 frames, so whoever is shot down continues: shooters are short-lived.
 // Screens are saved at the two frames and at the end.
-void PlayMinute(GameSession &session, AttractWatch &watch, const std::vector<uint16_t> &script, int firstScreen,
-                int secondScreen, bool continues = false) {
+// `input` gives a player's buttons for a frame (the overload below plays a script with ScriptedInput).
+using PlayInput = std::function<uint16_t(int frame, unsigned player)>;
+
+void PlayMinute(GameSession &session, AttractWatch &watch, const PlayInput &input, int firstScreen, int secondScreen,
+                bool continues = false) {
     session.ResetAudioPeak();
     std::set<uint64_t> play;
     int coins = 0;
@@ -303,8 +310,8 @@ void PlayMinute(GameSession &session, AttractWatch &watch, const std::vector<uin
     const int playEnd = session.Frame() + 3600;
     session.RunTo(playEnd, [&] {
         const int frame = session.Frame();
-        uint16_t p1 = ScriptedInput(frame, 0, script);
-        uint16_t p2 = ScriptedInput(frame, 1, script);
+        uint16_t p1 = input(frame, 0);
+        uint16_t p2 = input(frame, 1);
         if (continues) {
             if (frame % 400 == 0 && session.Credits() == 0) {
                 coining = true;
@@ -335,6 +342,13 @@ void PlayMinute(GameSession &session, AttractWatch &watch, const std::vector<uin
     INFO("audio peak over the minute: " << session.AudioPeak());
     CHECK(session.AudioPeak() > 16);
     CHECK(session.Core().GetLastError().empty());
+}
+
+void PlayMinute(GameSession &session, AttractWatch &watch, const std::vector<uint16_t> &script, int firstScreen,
+                int secondScreen, bool continues = false) {
+    PlayMinute(
+        session, watch, [&script](int frame, unsigned player) { return ScriptedInput(frame, player, script); },
+        firstScreen, secondScreen, continues);
 }
 
 // The Test switch opens the ST-V TEST MENU with the cursor on EXIT; Service moves it, Test selects. Nine steps reach
@@ -1237,4 +1251,136 @@ TEST_CASE("stv: sanjeon boots, takes coin and start, and plays for a minute", "[
 
 TEST_CASE("stv: sanjeon boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][sanjeon]") {
     QuickBoot("sanjeon", "epr-20091.ic8", 2450);
+}
+
+namespace {
+
+// Decathlete's run: the two run buttons pressed in turn, as fast as the game counts them (each held 2 frames), the same
+// for both players
+uint16_t DecathlonRun(int frame, unsigned /*player*/) {
+    return (frame / 2) % 2 != 0 ? kButton2 : kButton1;
+}
+
+} // namespace
+
+TEST_CASE("stv: decathlt boots, takes coin and start, and plays for a minute", "[.stv-rom][decathlt]") {
+    GameSession session("decathlt");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // JUET: the Japan BIOS
+    INFO(session.Core().GetSTVLoadDescription());
+    CHECK(session.Core().GetSTVLoadDescription().find("epr-20091.ic8") != std::string::npos);
+
+    // After the board check the SEGA logo, the sky, the DecAthlete title (from about 1900) and from about 2600 the
+    // 100-METER DASH RANKING over the runners; the 315-5838 unpacks their graphics. No phantom credits. The frames that
+    // are mostly one colour (the logo on white, the fades) are left out. libretro-stv (MAME does not run the game)
+    // shows the same screens.
+    AttractWatch watch(session, [&] { return session.VideoBackgroundShare() > 0.9; });
+    session.RunTo(1300);
+    CheckAttract(session, watch, 2950, {{2000, "brimir_frame2000_title.png"}, {2800, "brimir_frame2800_ranking.png"}});
+    InsertCoin(session, 3000, 3050);
+
+    // Start takes the credit and leads to CHARACTER SELECT, ENTRY open for player 2 (エントリー受付中). No frame looks
+    // like the attract mode any more.
+    session.RunTo(3100, watch.Checker());
+    session.Tap(0, kStart);
+    session.RunTo(3200, watch.Checker());
+    CHECK(session.Credits() == 0);
+    session.Save("brimir_frame3200_character_select.png");
+
+    // Player 2 joins with a coin of its own; the select screen shows both athletes, its timer runs out and the first
+    // event, the 100-METER DASH, begins for the two of them
+    Player2Joins(session, watch.Checker());
+    session.RunTo(3400, watch.Checker());
+    CHECK(session.Credits() == 0);
+    session.Save("brimir_frame3400_character_select_2p.png");
+    session.RunTo(3900, watch.Checker());
+
+    // A minute of running for both players: the introductions, false starts (pressing before the gun, FLYING), then
+    // the race itself, both under the 13.00 s line. libretro-stv, on the same inputs, shows the same screens.
+    PlayMinute(session, watch, DecathlonRun, 5400, 7200);
+    CHECK(session.Credits() == 0);
+}
+
+TEST_CASE("stv: decathlt's 315-5838 state saved mid-block continues in a fresh core", "[.stv-rom][decathlt]") {
+    GameSession session("decathlt");
+    if (!session.Load()) {
+        SKIP(session.Skipped());
+    }
+    // Into the game for one player: by 4000 the chip has its tables and the game unpacks the next event's graphics at
+    // about 4110
+    session.RunTo(3000);
+    session.Tap(0, kCoin);
+    session.RunTo(3100);
+    session.Tap(0, kStart);
+    session.RunTo(4000);
+
+    // The game reads its blocks whole inside one frame, so a frame never ends inside one; the test starts one of the
+    // game's blocks (bank 2, source 0x023FE0: CHARACTER SELECT's, 15,488 words) and saves after 6000 of its words.
+    // libretro-stv's trace of the block: the 64-bit FNV-1a of its words (big-endian) is 0x2CE22CE133C10E95, word 6000
+    // is 0x2158 and the last 0x2424.
+    auto &bus = session.Core().GetSaturn()->mainBus;
+    bus.Write<uint16_t>(0x037F'FFF0, 0x0002);
+    bus.Write<uint16_t>(0x037F'FFF2, 0x3FE0);
+    uint64_t hash = 0xCBF2'9CE4'8422'2325ull;
+    const auto feed = [&hash](uint32_t value) {
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            hash = (hash ^ ((value >> shift) & 0xFF)) * 0x0000'0100'0000'01B3ull;
+        }
+    };
+    for (int i = 0; i < 3000; i++) {
+        feed(bus.Read<uint32_t>(0x037F'FFF8));
+    }
+    const uint64_t hashAtSave = hash;
+    stv::STVStateBlock saved{};
+    REQUIRE(session.Core().CaptureSTVState(saved));
+    CHECK(saved.comp5838.active == 1);
+    CHECK(saved.comp5838.bank == 2);
+    CHECK(saved.comp5838.srcStart == 0x023FE0);
+    CHECK(saved.comp5838.srcOffset > saved.comp5838.srcStart);
+    std::vector<uint8_t> state(session.Core().GetStateSize());
+    REQUIRE(session.Core().SaveState(state.data(), state.size()));
+
+    GameSession fresh("decathlt", "_fresh");
+    REQUIRE(fresh.Load());
+    REQUIRE(fresh.Core().LoadState(state.data(), state.size()));
+    stv::STVStateBlock loaded{};
+    REQUIRE(fresh.Core().CaptureSTVState(loaded));
+    CHECK(std::memcmp(&loaded.comp5838, &saved.comp5838, sizeof saved.comp5838) == 0);
+
+    // The rest of the block: the same words from both, and the whole block is libretro-stv's
+    auto &freshBus = fresh.Core().GetSaturn()->mainBus;
+    std::vector<uint32_t> rest;
+    std::vector<uint32_t> freshRest;
+    for (int i = 0; i < 4744; i++) {
+        rest.push_back(bus.Read<uint32_t>(0x037F'FFF8));
+        freshRest.push_back(freshBus.Read<uint32_t>(0x037F'FFF8));
+    }
+    CHECK(freshRest == rest);
+    for (const uint32_t value : freshRest) {
+        feed(value);
+    }
+    CHECK(freshRest.front() >> 16 == 0x2158);
+    CHECK(freshRest.back() == 0x2424'2424u);
+    CHECK(hash == 0x2CE2'2CE1'33C1'0E95ull);
+    CHECK(hash != hashAtSave);
+
+    // Then 300 frames from both: the same pictures, frame by frame, through the game's own transfers
+    std::vector<uint64_t> frames;
+    session.RunTo(4300, [&] { frames.push_back(session.VideoHash()); });
+    std::vector<uint64_t> freshFrames;
+    fresh.RunTo(300, [&] { freshFrames.push_back(fresh.VideoHash()); });
+    CHECK(freshFrames == frames);
+    CHECK(std::set<uint64_t>(frames.begin(), frames.end()).size() >= 30);
+    stv::STVStateBlock after{};
+    REQUIRE(session.Core().CaptureSTVState(after));
+    CHECK(after.comp5838.srcStart != 0x023FE0); // the game started blocks of its own
+    stv::STVStateBlock freshAfter{};
+    REQUIRE(fresh.Core().CaptureSTVState(freshAfter));
+    CHECK(std::memcmp(&freshAfter.comp5838, &after.comp5838, sizeof after.comp5838) == 0);
+}
+
+TEST_CASE("stv: decathlt boots to the attract mode and takes one coin", "[.stv-rom][.stv-rom-quick][decathlt]") {
+    QuickBoot("decathlt", "epr-20091.ic8", 2950);
 }
