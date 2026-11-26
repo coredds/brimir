@@ -107,11 +107,12 @@ fading in at 1850); the offset was not measured more finely. Only `decathlt` (V1
 - **Steep Slope Sliders, the haze over the scenery.** Brimir draws the far scenery and the sky pale, as in a haze; MAME
   draws them dark (a black sky in daylight). The game turns on the VDP2 line colour screen for RBG0 and the sprites
   (LNCLEN 0x0030, colour calculation on for both), which MAME 0.289's VDP2 does not draw (`saturn_v.cpp` calls
-  its line colour pass only under `TEST_FUNCTIONS`, defined 0, with a TODO). The VDP2 code is shared with the Saturn
-  and not changed for ST-V; Brimir's picture is probably the more accurate one.
+  its line colour pass only under `TEST_FUNCTIONS`, defined 0, with a TODO). **Brimir's picture is the correct one**
+  (confirmed by the developer, 2026-11-26): this is a MAME difference, not a Brimir one.
 - **Final Fight Revenge, HUD on some stages.** On the Chinatown stage MAME draws the top health bars half transparent;
-  Brimir draws them solid, as both draw them on the other stages seen. Not investigated (MAME marks the game's graphics
-  imperfect; the VDP code is shared with the Saturn and not changed for ST-V).
+  Brimir draws them solid, as both draw them on the other stages seen. **Brimir's picture is the correct one**
+  (confirmed by the developer, 2026-11-26; MAME marks the game's graphics imperfect): a MAME difference, not a Brimir
+  one.
 - **Decathlete, transfer speed and attract timing (against libretro-stv).** Brimir finishes each of the game's
   315-5838 blocks inside one frame; libretro-stv spreads one over several (187,712 words over three frames at its
   1639-1641). The screens are the same; the loading pauses are shorter. libretro-stv also boots later than Brimir and
