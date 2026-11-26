@@ -91,11 +91,12 @@ Working today:
 - native compiles on a background thread (`brimir_sh2_jit_compile_thread`, x86-64 with 4+ threads);
 - cheaper dispatch between scheduler slices.
 
-On x86-64 the JIT's SH-2 time is 5-28% below the interpreter's on six reference games, and about 5% below over a long Burning Rangers session. Lockstep against the interpreter stays identical (BIOS menu and six games, 36,000 frames each). See [design/sh2-x64-performance.md](design/sh2-x64-performance.md) and [design/sh2-validation.md](design/sh2-validation.md).
+Since the v0.8.0 performance round made the interpreter about 25% faster, the x86-64 JIT is slower than the interpreter: its SH-2 time is 18-73% higher on 7 of 9 test windows (faster only on the BIOS menu, -27%), and the whole frame with threaded VDP is 14-54% longer on most of them (evaluation of 2026-11-15, `docs/superpowers/records/2026-11-15-jit-evaluation/report.md`, local). The main costs are re-entering generated code every 32-cycle CPU slice, per-instruction exactness bookkeeping in the generated code, short blocks, and `RTE`/interrupt entry and polling loops falling back to the interpreter. Lockstep against the interpreter stays identical (BIOS menu and six games, 36,000 frames each). See [design/sh2-x64-performance.md](design/sh2-x64-performance.md) and [design/sh2-validation.md](design/sh2-validation.md).
 
-Not default-on yet:
-- a long Burning Rangers session still stutters while it loads a lot of new code (358 of 33,600 frames over 16.7 ms; the interpreter has none);
-- with threaded VDP (the default), the average frame is 2-6% longer than the interpreter's on some games, mostly time the emulation thread spends waiting for the VDP2 render thread.
+Decision (2026-11-26): the JIT stays as it is, experimental and off by default, with no further speed work on the x86-64 backend. Longer CPU slices would change emulated timing (Saturn accuracy comes first), and leaner exact code generation is a large rewrite with an uncertain gain. Performance work goes where it matters, ARM devices, starting with a measurement of where their time goes; an ARM64 JIT is only one possible answer to it.
+
+Still open on the JIT itself:
+- a long Burning Rangers session stutters while it loads a lot of new code (358 of 33,600 frames over 16.7 ms; the interpreter has none).
 
 Next steps, including moving block decoding off the emulation thread and milestone 3 (ARM64 backend), are listed in [design/sh2-jit.md](design/sh2-jit.md), "Where to pick up".
 
@@ -147,7 +148,7 @@ Thirteen games are done (see "Done"; the 315-5881 and 315-5838 chips and SanJeon
 
 ## Toward v1.0.0
 
-JIT stable, 85%+ compatibility, RetroArch core inclusion (which also removes the Android Core Info workaround: Brimir's `.info` in libretro's core info files).
+Full speed on the target devices (desktop and the tested Android phones; a JIT is one possible way, not a goal in itself), 85%+ compatibility, RetroArch core inclusion (which also removes the Android Core Info workaround: Brimir's `.info` in libretro's core info files).
 
 ---
 

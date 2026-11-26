@@ -440,11 +440,9 @@ static struct retro_core_option_v2_definition option_defs[] = {
         nullptr,
         "Experimental. Run the SH-2 CPUs through the JIT. It compiles all SH-2 instructions except "
         "exception entry/return and SLEEP to native code on x86-64 (through an IR interpreter on "
-        "other CPUs) and is validated to produce exactly the interpreter's results. On x86-64 its "
-        "SH-2 time is between about 5% and 28% below the interpreter's in the games tested, "
-        "but with threaded VDP rendering (the default) the average frame can still be slightly "
-        "longer than the interpreter's on some games, and it can still stutter (frame spikes) "
-        "while a game loads a lot of new code, over long sessions; on other CPUs it is much slower than the interpreter. For testing only. Not "
+        "other CPUs) and is validated to produce exactly the interpreter's results. It is currently "
+        "slower than the interpreter in most games (on x86-64 too) and can stutter (frame spikes) "
+        "while a game loads a lot of new code. For testing only; leave it off for play. Not "
         "used while SH-2 cache emulation is active.",
         nullptr,
         "system",
