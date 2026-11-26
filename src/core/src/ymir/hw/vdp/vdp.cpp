@@ -1232,9 +1232,9 @@ FORCE_INLINE uint64 VDP::VDP1CalcCommandTiming(uint32 cmdAddress, VDP1Command::C
     // HACK: rough cost estimates
 
     auto lineTiming = [&](CoordS32 coordA, CoordS32 coordB) -> uint32 {
-        const uint32 width = abs(coordB.x() - coordA.x());
-        const uint32 height = abs(coordB.y() - coordA.y());
-        return std::max(width, height);
+        LineStepper line{coordA, coordB};
+        line.SystemClip(state.sysClipH, state.sysClipV);
+        return line.Length();
     };
 
     auto quadTiming = [&](CoordS32 coordA, CoordS32 coordB, CoordS32 coordC, CoordS32 coordD) -> uint32 {

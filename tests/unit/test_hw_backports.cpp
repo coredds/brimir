@@ -3087,3 +3087,25 @@ TEST_CASE("VDP1 timing clipping area follows save states and hard resets", "[vdp
     };
     CHECK(VDP1DrawCycles(big, loadClipThenReset) > bigLoaded);
 }
+
+TEST_CASE("VDP1 distorted quad and line timing is limited to the system clipping area", "[vdp][vdp1][backport]") {
+    // Ymir 783035ee: each line of a distorted sprite or polygon, and each line of a polyline or line command, costs
+    // its length after system clipping (VDP1 slowdowns in Shining the Holy Ark's Aborigine Forest). Clip 159x99.
+    const auto clip = SystemClipCommand(159, 99);
+    const std::array<sint16, 8> inside{0, 0, 159, 0, 159, 99, 0, 99};
+    const std::array<sint16, 8> outside{-2000, -2000, 2000, -2000, 2000, 2000, -2000, 2000}; // 4000x4000
+
+    for (const uint16 command : {0x0002, 0x0004, 0x0005}) {
+        CAPTURE(command);
+        const uint64 in = VDP1DrawCycles({clip, VertexCommand(command, inside)});
+        const uint64 out = VDP1DrawCycles({clip, VertexCommand(command, outside)});
+        REQUIRE(in != 0);
+        CHECK(out != 0);
+        CHECK(out * 4 <= in * 5); // the clipped lines are a few pixels longer than the inside quad's (padding)
+    }
+
+    const uint64 lineIn = VDP1DrawCycles({clip, VertexCommand(0x0006, {0, 50, 159, 50, 0, 0, 0, 0})});
+    const uint64 lineOut = VDP1DrawCycles({clip, VertexCommand(0x0006, {-3000, 50, 3000, 50, 0, 0, 0, 0})});
+    REQUIRE(lineIn != 0);
+    CHECK(lineOut * 4 <= lineIn * 5);
+}
