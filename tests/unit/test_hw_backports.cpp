@@ -2958,3 +2958,132 @@ TEST_CASE("VDP2 TVSTAT.VBLANK reads 1 while TVMD.DISP is 0", "[vdp][vdp2][backpo
     saturn->mainBus.Write<uint16>(kVDP2TVMD, 0x8000);
     CHECK(RunUntil(*saturn, kTwoFrames, [&] { return !TVSTATVBlank(*saturn); }));
 }
+
+namespace {
+
+constexpr uint32 kVDP1VRAM = 0x5C0'0000;
+constexpr uint32 kVDP1EDSR = 0x5D0'0010;
+
+// A VDP1 command table entry: the 16 words at +0x00..+0x1E.
+using VDP1CommandWords = std::array<uint16, 16>;
+
+VDP1CommandWords SystemClipCommand(uint16 w, uint16 h) {
+    VDP1CommandWords cmd{};
+    cmd[0x00 / 2] = 0x0009;
+    cmd[0x14 / 2] = w;
+    cmd[0x16 / 2] = h;
+    return cmd;
+}
+
+VDP1CommandWords NormalSpriteCommand(uint16 widthDiv8, uint16 height) {
+    VDP1CommandWords cmd{};
+    cmd[0x00 / 2] = 0x0000;
+    cmd[0x04 / 2] = 0x00C0; // SPD and ECD off
+    cmd[0x0A / 2] = static_cast<uint16>((widthDiv8 << 8) | height);
+    return cmd;
+}
+
+// Command 1 (scaled sprite, zoom point 0), 2 (distorted sprite), 4 (polygon), 5 (polyline) or 6 (line) with vertices
+// A-D (scaled sprite: A and C are the corners; line: A and B).
+VDP1CommandWords VertexCommand(uint16 command, std::array<sint16, 8> xy) {
+    VDP1CommandWords cmd{};
+    cmd[0x00 / 2] = command;
+    cmd[0x04 / 2] = 0x00C0;
+    cmd[0x0A / 2] = 0x0101; // 8x1 texture
+    for (size_t i = 0; i < xy.size(); ++i) {
+        cmd[0x0C / 2 + i] = static_cast<uint16>(xy[i]);
+    }
+    return cmd;
+}
+
+// Runs a VDP1 command list (an end command is appended) on a fresh system and returns the scheduler cycles from the
+// draw start (PTMR = 1) to EDSR.CEF, or 0 if the draw does not end within maxCycles. setup runs before the list is
+// written.
+template <typename Setup>
+uint64 VDP1DrawCycles(const std::vector<VDP1CommandWords> &commands, Setup &&setup, uint64 maxCycles = 4'000'000) {
+    auto saturn = std::make_unique<Saturn>();
+    setup(*saturn);
+    ParkMasterSH2(*saturn);
+    uint32 address = kVDP1VRAM;
+    for (const auto &cmd : commands) {
+        for (size_t i = 0; i < cmd.size(); ++i) {
+            saturn->mainBus.Write<uint16>(address + i * 2, cmd[i]);
+        }
+        address += 0x20;
+    }
+    saturn->mainBus.Write<uint16>(address, 0x8000); // end
+
+    const uint64 start = saturn->GetSchedulerCount();
+    saturn->mainBus.Write<uint16>(kVDP1PTMR, 0x0001);
+    if (!RunUntil(*saturn, maxCycles, [&] { return (saturn->mainBus.Peek<uint16>(kVDP1EDSR) & 2) != 0; })) {
+        return 0;
+    }
+    return saturn->GetSchedulerCount() - start;
+}
+
+uint64 VDP1DrawCycles(const std::vector<VDP1CommandWords> &commands) {
+    return VDP1DrawCycles(commands, [](Saturn &) {});
+}
+
+} // namespace
+
+TEST_CASE("VDP1 sprite timing is limited to the system clipping area", "[vdp][vdp1][backport]") {
+    // Ymir 91358dc5: normal and scaled sprites cost at most the system clipping area (missing graphics in Astal's
+    // final boss fight). Clip 159x99; every sprite below costs 159 * 99.
+    const auto clip = SystemClipCommand(159, 99);
+
+    const uint64 normalInside = VDP1DrawCycles({clip, NormalSpriteCommand(20, 100)}); // 160x100
+    const uint64 normalOutside = VDP1DrawCycles({clip, NormalSpriteCommand(63, 255)}); // 504x255
+    REQUIRE(normalInside != 0);
+    CHECK(normalOutside == normalInside);
+
+    const uint64 scaledInside = VDP1DrawCycles({clip, VertexCommand(0x0001, {0, 0, 0, 0, 159, 99, 0, 0})});
+    const uint64 scaledOutside =
+        VDP1DrawCycles({clip, VertexCommand(0x0001, {-2000, -2000, 0, 0, 2000, 2000, 0, 0})}); // 4000x4000
+    REQUIRE(scaledInside != 0);
+    CHECK(scaledOutside == scaledInside);
+}
+
+TEST_CASE("VDP1 timing uses the clipping area of the command stream, whatever the renderer", "[vdp][vdp1][brimir]") {
+    // Brimir: the timing must not read the renderer's VDP1 state (VDPState::state1), which a threaded VDP1 render
+    // thread writes when it gets to the command, and the null renderer never writes.
+    const auto clip = SystemClipCommand(159, 99);
+    auto useNull = [](Saturn &saturn) { saturn.VDP.UseNullRenderer(); };
+
+    const uint64 inside = VDP1DrawCycles({clip, NormalSpriteCommand(20, 100)}, useNull);
+    const uint64 outside = VDP1DrawCycles({clip, NormalSpriteCommand(63, 255)}, useNull);
+    REQUIRE(inside != 0);
+    CHECK(outside == inside);
+
+    // Threaded and unthreaded software VDP1 time the same list identically
+    auto unthreaded = [](Saturn &saturn) { saturn.configuration.video.threadedVDP1 = false; };
+    const std::vector<VDP1CommandWords> list{clip, NormalSpriteCommand(63, 255), SystemClipCommand(319, 223),
+                                             NormalSpriteCommand(63, 255)};
+    CHECK(VDP1DrawCycles(list) == VDP1DrawCycles(list, unthreaded));
+    CHECK(VDP1DrawCycles(list, useNull) == VDP1DrawCycles(list, unthreaded));
+}
+
+TEST_CASE("VDP1 timing clipping area follows save states and hard resets", "[vdp][vdp1][brimir]") {
+    const std::vector<VDP1CommandWords> big{NormalSpriteCommand(63, 255)};
+    const std::vector<VDP1CommandWords> small{NormalSpriteCommand(20, 100)};
+
+    // A state whose system clipping area is 159x99, loaded into a system on the null renderer
+    auto loadClip = [](Saturn &saturn) {
+        saturn.VDP.UseNullRenderer();
+        auto state = std::make_unique<savestate::SaveState>();
+        saturn.SaveState(*state);
+        state->vdp.renderer.vdp1State.sysClipH = 159;
+        state->vdp.renderer.vdp1State.sysClipV = 99;
+        REQUIRE(saturn.LoadState(*state, true));
+    };
+    const uint64 bigLoaded = VDP1DrawCycles(big, loadClip);
+    REQUIRE(bigLoaded != 0);
+    CHECK(bigLoaded == VDP1DrawCycles(small, loadClip));
+
+    // A hard reset restores the default area (512x256), so the 504x255 sprite costs its full size again
+    auto loadClipThenReset = [&](Saturn &saturn) {
+        loadClip(saturn);
+        saturn.Reset(true);
+    };
+    CHECK(VDP1DrawCycles(big, loadClipThenReset) > bigLoaded);
+}

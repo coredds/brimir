@@ -92,6 +92,8 @@ void VDP::Reset(bool hard) {
     m_VDP1CtlState.Reset();
 
     if (hard) {
+        m_VDP1TimingClip = {}; // Brimir: as VDPState::Reset resets state1
+
         // Brimir: the Virtua Gun jitter starts over (its random numbers are emulation state)
         m_virtuaGunJitterState = kVirtuaGunJitterSeed;
         m_virtuaGunLastJitterX = 0;
@@ -583,6 +585,9 @@ void VDP::LoadState(const savestate::VDPSaveState &state, const savestate::Brimi
     m_VDP1CtlState.doVBlankErase = state.vdp1State.doVBlankErase;
     m_VDP1CtlState.spilloverCycles = state.vdp1State.spilloverCycles;
     m_VDP1TimingPenaltyCycles = state.vdp1State.timingPenalty;
+    // Brimir: the command timing's system clipping area (see m_VDP1TimingClip)
+    m_VDP1TimingClip.sysClipH = state.renderer.vdp1State.sysClipH;
+    m_VDP1TimingClip.sysClipV = state.renderer.vdp1State.sysClipV;
 
     if (ext != nullptr) {
         // Brimir: derive the timings from the TVMD they were derived from when the state was saved (a TVMD write
@@ -1150,6 +1155,11 @@ uint64 VDP::VDP1ProcessCommand() {
             return cycles;
         }
         m_renderer->VDP1ExecuteCommand(cmdAddress, control);
+        if (control.command == VDP1Command::CommandType::SystemClipping) {
+            // Brimir: the words the renderer's Set System Clipping reads (see m_VDP1TimingClip)
+            m_VDP1TimingClip.sysClipH = VDP1ReadVRAM<uint16>(cmdAddress + 0x14);
+            m_VDP1TimingClip.sysClipV = VDP1ReadVRAM<uint16>(cmdAddress + 0x16);
+        }
         cycles += VDP1CalcCommandTiming(cmdAddress, control);
     }
 
@@ -1216,6 +1226,9 @@ uint64 VDP::VDP1ProcessCommand() {
 FORCE_INLINE uint64 VDP::VDP1CalcCommandTiming(uint32 cmdAddress, VDP1Command::Control control) {
     uint64 cycles = 0;
 
+    // Brimir: the VDP's own copy of the system clipping area (see m_VDP1TimingClip); upstream reads m_state.state1
+    const VDP1TimingClip state = m_VDP1TimingClip;
+
     // HACK: rough cost estimates
 
     auto lineTiming = [&](CoordS32 coordA, CoordS32 coordB) -> uint32 {
@@ -1235,7 +1248,9 @@ FORCE_INLINE uint64 VDP::VDP1CalcCommandTiming(uint32 cmdAddress, VDP1Command::C
         return quadCycles;
     };
 
-    auto simpleQuadTiming = [&](uint32 width, uint32 height) -> uint32 { return width * height; };
+    auto simpleQuadTiming = [&](uint32 width, uint32 height) -> uint32 {
+        return std::min<uint32>(width, state.sysClipH) * std::min<uint32>(height, state.sysClipV);
+    };
 
     using enum VDP1Command::CommandType;
 

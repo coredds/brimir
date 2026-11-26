@@ -475,6 +475,15 @@ private:
     bool m_skipEmptyVDP1Table = false; // skip processing empty tables (first 0x400 bytes in VDP1 VRAM == 0x00)
     uint64 m_VDP1CyclesShift = 2;
 
+    // Brimir: the system clipping area the command timing uses, set when the VDP processes a Set System Clipping
+    // command. Upstream reads VDPState::state1, which the renderer writes: the threaded VDP1 render thread when it gets
+    // to the queued command (a race), the Vulkan renderer from its own front, the null renderer never. Reset with
+    // state1 on a hard reset, taken from the state's vdp1State on a load.
+    struct VDP1TimingClip {
+        uint16 sysClipH = kVDP1DefaultFBSizeH;
+        uint16 sysClipV = kVDP1DefaultFBSizeV;
+    } m_VDP1TimingClip;
+
     void VDP1SwapFramebuffer();
     void VDP1BeginFrame();
     void VDP1EndFrame();
