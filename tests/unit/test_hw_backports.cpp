@@ -2890,3 +2890,71 @@ TEST_CASE("VDP1 coordinate-only quad stepping equals the full stepping", "[vdp][
         REQUIRE((same && !coords.CanStep()));
     }
 }
+
+namespace {
+
+constexpr uint32 kVDP2TVMD = 0x5F8'0000;
+constexpr uint32 kVDP2TVSTAT = 0x5F8'0004;
+
+// About two NTSC frames of SH-2 cycles.
+constexpr uint64 kTwoFrames = 1'000'000;
+
+// Parks the master SH-2 in the `bra $; nop` loop (see ParkSlaveSH2) so the system can run without a BIOS.
+void ParkMasterSH2(Saturn &saturn) {
+    saturn.mainBus.Write<uint16>(kLoopAddr + 0, 0xAFFE); // bra $
+    saturn.mainBus.Write<uint16>(kLoopAddr + 2, 0x0009); // nop (delay slot)
+    saturn.masterSH2.GetProbe().PC() = kLoopAddr;
+}
+
+bool TVSTATVBlank(Saturn &saturn) {
+    return (saturn.mainBus.Peek<uint16>(kVDP2TVSTAT) >> 3) & 1;
+}
+
+// Runs the system until pred() holds or maxCycles pass; returns whether pred() held.
+template <typename Pred>
+bool RunUntil(Saturn &saturn, uint64 maxCycles, Pred &&pred) {
+    const uint64 start = saturn.GetSchedulerCount();
+    while (saturn.GetSchedulerCount() - start < maxCycles) {
+        if (pred()) {
+            return true;
+        }
+        saturn.StepMasterSH2();
+    }
+    return pred();
+}
+
+} // namespace
+
+TEST_CASE("VDP2 TVSTAT.VBLANK reads 1 while TVMD.DISP is 0", "[vdp][vdp2][backport]") {
+    // Ymir fd3e4398: clearing TVMD.DISP forces the VBLANK signal to 1, and VBlank OUT leaves it set while DISP is 0.
+    // Fixes Clockwork Knight 2 freezing before FMVs.
+    auto saturn = std::make_unique<Saturn>();
+    ParkMasterSH2(*saturn);
+
+    // Display on: VBLANK follows the beam; get into the active display area
+    saturn->mainBus.Write<uint16>(kVDP2TVMD, 0x8000);
+    REQUIRE(RunUntil(*saturn, kTwoFrames, [&] { return TVSTATVBlank(*saturn); }));
+    REQUIRE(RunUntil(*saturn, kTwoFrames, [&] { return !TVSTATVBlank(*saturn); }));
+
+    // Display off in the active display area: VBLANK is set at once
+    saturn->mainBus.Write<uint16>(kVDP2TVMD, 0x0000);
+    CHECK(TVSTATVBlank(*saturn));
+
+    // ... and stays set across the last line (VBlank OUT) for two frames
+    bool alwaysSet = true;
+    bool wrapped = false;
+    uint16 prevVCNT = saturn->VDP.GetProbe().GetVDP2Regs().VCNT;
+    RunUntil(*saturn, kTwoFrames, [&] {
+        const uint16 vcnt = saturn->VDP.GetProbe().GetVDP2Regs().VCNT;
+        wrapped = wrapped || vcnt < prevVCNT;
+        prevVCNT = vcnt;
+        alwaysSet = alwaysSet && TVSTATVBlank(*saturn);
+        return false;
+    });
+    CHECK(wrapped);
+    CHECK(alwaysSet);
+
+    // Display on again: VBLANK clears at the next VBlank OUT
+    saturn->mainBus.Write<uint16>(kVDP2TVMD, 0x8000);
+    CHECK(RunUntil(*saturn, kTwoFrames, [&] { return !TVSTATVBlank(*saturn); }));
+}
