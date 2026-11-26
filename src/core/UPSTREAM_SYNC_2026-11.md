@@ -673,13 +673,15 @@ Brimir-side notes:
 - `91358dc5` and `783035ee`: the command timing (`VDP::VDP1CalcCommandTiming`) is computed by the VDP for every
   renderer; the Vulkan renderer (`src/gpu`) and the software renderer have no copy of it, so there is nothing to
   mirror. Upstream reads the system clipping area from `m_state.state1`, which the renderer's Set System Clipping
-  command writes: with threaded VDP1 (Brimir's default) the VDP1 render thread writes it whenever it gets to the queued
-  command (a data race, and the timing would depend on thread scheduling), the Vulkan renderer writes it from its own
-  VDP1 front, and the null renderer never writes it. Brimir keeps its own copy for the timing in the VDP
+  command writes: with threaded software VDP1 (Brimir's default, also the software VDP1 inside the Vulkan renderer when
+  VDP1 is not on the GPU) the VDP1 render thread writes it whenever it gets to the queued command (a data race, and the
+  timing would depend on thread scheduling); the Vulkan renderer's GPU VDP1 front writes it on the emulator thread, in
+  command order (not racy); the test-only null renderer never writes it. Brimir keeps its own copy for the timing in the VDP
   (`VDP::m_VDP1TimingClip`, marked `// Brimir:`): set when the VDP processes a Set System Clipping command (from VDP1
   VRAM, the words the renderer reads), reset with `state1` on a hard reset and taken from the state's
-  `vdp1State.sysClipH/V` on a load, so the timing depends on the command stream only. No save-state format change (it
-  always equals the saved `state1` values once the renderers have caught up). `783035ee` also adds a leftover debug
+  `vdp1State.sysClipH/V` on a load, so the timing depends on the command stream only. No save-state format change (with
+  the software and Vulkan renderers it equals the saved `state1` values once the renderers have caught up; the
+  test-only null renderer never writes `state1`). `783035ee` also adds a leftover debug
   block to `VDP::VDP1ProcessCommand` (`__debugbreak()` when one command costs 500,000 cycles or more, then a second
   timing call, and a per-command `devlog::debug` line); not taken (MSVC-only intrinsic, would stop a release build
   in a debugger, and no behaviour).

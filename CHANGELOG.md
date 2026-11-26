@@ -10,7 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Three game fixes from upstream Ymir** (by StrikerX3; Ymir `fd3e4398`, `91358dc5`, `783035ee`, synced 2026-11-26): Clockwork Knight 2 no longer freezes before its FMVs (turning the display off now reads as vertical blank until it is turned back on); Astal's final boss fight no longer loses graphics, and Shining the Holy Ark's Aborigine Forest no longer slows down, because sprites, polygons and lines drawn partly outside the screen no longer keep the VDP1 busy for the part that is clipped away. Brimir times the VDP1 commands from its own record of the clipping area, so the timing is the same with the software and the Vulkan renderer and with threaded VDP1. **Verified locally:** unit tests for each fix; Astal from boot and from a gameplay state runs deterministically (lockstep), and Astal and Virtua Fighter 2 run within 1 % of their previous speed; the final boss fight itself was not reached. **Not verified in-game:** Clockwork Knight 2 and Shining the Holy Ark (not available here).
+- **Three game fixes from upstream Ymir** (by StrikerX3; Ymir `fd3e4398`, `91358dc5`, `783035ee`, synced 2026-11-26):
+  - Clockwork Knight 2 no longer freezes before its FMVs: turning the display off now reads as vertical blank until it is turned back on (upstream's fix; not verified in-game here).
+  - Astal's final boss fight no longer loses graphics (upstream's fix; not verified in-game here: the fight was not reached).
+  - Shining the Holy Ark's Aborigine Forest no longer slows down (upstream's fix; not verified in-game here).
+
+  The two VDP1 fixes stop sprites, polygons and lines drawn partly outside the screen from keeping the VDP1 busy for the part that is clipped away. Brimir times the VDP1 commands from its own record of the clipping area, so the timing is the same with the software and the Vulkan renderer and with threaded VDP1. **Verified locally:** unit tests for each fix; Astal from boot and from a gameplay state runs deterministically (lockstep). Speed, measured on gameplay states (3 runs per batch): Virtua Fighter 2 about +0.8 to +1.9 % per frame across batches, Astal within noise; the cause is likely the per-line clipped timing of polygons, not established.
 
 ## [0.11.0] - 2026-11-25
 

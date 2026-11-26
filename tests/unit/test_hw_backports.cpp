@@ -3095,17 +3095,31 @@ TEST_CASE("VDP1 distorted quad and line timing is limited to the system clipping
     const std::array<sint16, 8> inside{0, 0, 159, 0, 159, 99, 0, 99};
     const std::array<sint16, 8> outside{-2000, -2000, 2000, -2000, 2000, 2000, -2000, 2000}; // 4000x4000
 
-    for (const uint16 command : {0x0002, 0x0004, 0x0005}) {
+    // The clipped geometry costs about as much as the matching inside geometry: not more (the bug), and not nearly
+    // nothing either. The clipped lines are a few pixels longer than the inside ones (SystemClip's padding). The cost of
+    // the list without the drawing command (fetches, draw start) is taken off both.
+    const uint64 base = VDP1DrawCycles({clip});
+    REQUIRE(base != 0);
+    auto checkClose = [&](uint64 in, uint64 out) {
+        REQUIRE(in > base);
+        REQUIRE(out != 0);
+        CAPTURE(base, in, out);
+        CHECK(out > base);
+        CHECK((out - base) * 4 <= (in - base) * 5);
+        CHECK((in - base) * 4 <= (out - base) * 5);
+    };
+
+    for (const uint16 command : {0x0002, 0x0004}) {
         CAPTURE(command);
-        const uint64 in = VDP1DrawCycles({clip, VertexCommand(command, inside)});
-        const uint64 out = VDP1DrawCycles({clip, VertexCommand(command, outside)});
-        REQUIRE(in != 0);
-        CHECK(out != 0);
-        CHECK(out * 4 <= in * 5); // the clipped lines are a few pixels longer than the inside quad's (padding)
+        checkClose(VDP1DrawCycles({clip, VertexCommand(command, inside)}),
+                   VDP1DrawCycles({clip, VertexCommand(command, outside)}));
     }
 
-    const uint64 lineIn = VDP1DrawCycles({clip, VertexCommand(0x0006, {0, 50, 159, 50, 0, 0, 0, 0})});
-    const uint64 lineOut = VDP1DrawCycles({clip, VertexCommand(0x0006, {-3000, 50, 3000, 50, 0, 0, 0, 0})});
-    REQUIRE(lineIn != 0);
-    CHECK(lineOut * 4 <= lineIn * 5);
+    // Polyline: the edges of the 4000x4000 square lie entirely outside the clipping area and rightly cost nothing, so
+    // use a band whose long edges cross it
+    checkClose(VDP1DrawCycles({clip, VertexCommand(0x0005, {0, 50, 159, 50, 159, 60, 0, 60})}),
+               VDP1DrawCycles({clip, VertexCommand(0x0005, {-2000, 50, 2000, 50, 2000, 60, -2000, 60})}));
+
+    checkClose(VDP1DrawCycles({clip, VertexCommand(0x0006, {0, 50, 159, 50, 0, 0, 0, 0})}),
+               VDP1DrawCycles({clip, VertexCommand(0x0006, {-3000, 50, 3000, 50, 0, 0, 0, 0})}));
 }
