@@ -1,4 +1,4 @@
-# Upstream Ymir sync triage, 2026-11 (2026-06-23..ff935379)
+# Upstream Ymir sync triage, 2026-11 (2026-06-23..ff935379, then ff935379..783035ee)
 
 Every upstream Ymir commit since Brimir's 2026-06-23 sync point that touches `libs/ymir-core` (532 non-merge
 commits, `main` from 2026-06-23 to `ff935379`, 2026-11-07), with Brimir's decision for each, plus one pre-range row
@@ -7,7 +7,9 @@ commits, `main` from 2026-06-23 to `ff935379`, 2026-11-07), with Brimir's decisi
 with Brimir's current code (not by hash: earlier backports in `CHANGELOG.md` sometimes cite other hashes), plus a
 whole-tree comparison of `src/core` with `libs/ymir-core` at `ff935379`: every upstream line Brimir lacks is explained
 by a row below. Spec: `docs/superpowers/specs/2026-11-10-upstream-ymir-sync-design.md`; `BRIMIR_FORK.md` section
-"2026-11 upstream sync".
+"2026-11 upstream sync". The follow-up range `ff935379..783035ee` (8 commits, 2026-11-26) has its own section, counts
+and table at the end ("Range ff935379..783035ee, 2026-11-26"); the counts and sections up to "Table" cover the first
+range only.
 
 - **take**: bring in (own commit `sync(core): <subject> (Ymir <hash>)`, the Brimir commit column is filled when it lands).
 - **already**: Brimir has the change (version that took it, or where it is).
@@ -636,3 +638,59 @@ Oldest first. Batch shown for takes.
 | `fe439e9` | 2026-10-26 | fix(vk): Improve compatibility with older versions of the Vulkan SDK | skip | Ymir graphics backend (out of scope) | |
 | `3df82cb` | 2026-10-31 | chore(vk): Avoid unnecessary copy of `VulkanSwapchain` | skip | Ymir graphics backend (out of scope) | |
 | `ff93537` | 2026-11-07 | fix(VDP): Assignment operator should return a reference to self, not a copy | take (perf/other) | `VDP2Memory::operator=` returns a copy, so every assignment (VDP2 render thread sync and reset, `PostLoadStateSync`) copies VRAM and CRAM a second time; return a reference. No output change. `vdp_state.hpp`, not in a Brimir row. | `59ecc50` |
+
+## Range ff935379..783035ee, 2026-11-26
+
+Every upstream non-merge commit after `ff935379` up to `783035ee` (`main`, 2026-11-26) that touches `libs/ymir-core`:
+8 commits, same decision rules and columns as the table above. New upstream base: `783035ee`.
+
+| Decision | Commits |
+|---|---|
+| take | 3 |
+| already | 0 |
+| ours-better | 0 |
+| skip | 5 |
+| **total** | **8** |
+
+| Batch (takes) | Commits |
+|---|---|
+| vdp1 | 2 |
+| vdp2 | 1 |
+
+Skips: 5 Ymir GPU renderers and graphics backends (`vdp_renderer_hw_d3d12.cpp`, `ymir/gpu/vulkan/vulkan_swap_chain.*`
+and Ymir's app; none of these files is in Brimir).
+
+What this means for games: Clockwork Knight 2 no longer freezes before its FMVs (`fd3e4398`), Astal's final boss fight
+no longer loses graphics (`91358dc5`), and Shining the Holy Ark's Aborigine Forest no longer has VDP1 slowdowns
+(`783035ee`). The two VDP1 takes change only how long a VDP1 command list takes (the VDP1 draw end and the
+VDP1-busy time the game sees), not what is drawn.
+
+Brimir-side notes:
+
+- `fd3e4398` touches `VDP::VDP2WriteReg` and `VDP::BeginVPhaseLastLine` (`vdp.cpp`) and `VDP2Regs::ReadTVSTAT`
+  (`vdp2_regs.hpp`); none is in a Brimir row, so the change is verbatim. TVSTAT is VDP state shared by both renderers;
+  no `src/gpu` change.
+- `91358dc5` and `783035ee`: the command timing (`VDP::VDP1CalcCommandTiming`) is computed by the VDP for every
+  renderer; the Vulkan renderer (`src/gpu`) and the software renderer have no copy of it, so there is nothing to
+  mirror. Upstream reads the system clipping area from `m_state.state1`, which the renderer's Set System Clipping
+  command writes: with threaded VDP1 (Brimir's default) the VDP1 render thread writes it whenever it gets to the queued
+  command (a data race, and the timing would depend on thread scheduling), the Vulkan renderer writes it from its own
+  VDP1 front, and the null renderer never writes it. Brimir keeps its own copy for the timing in the VDP
+  (`VDP::m_VDP1TimingClip`, marked `// Brimir:`): set when the VDP processes a Set System Clipping command (from VDP1
+  VRAM, the words the renderer reads), reset with `state1` on a hard reset and taken from the state's
+  `vdp1State.sysClipH/V` on a load, so the timing depends on the command stream only. No save-state format change (it
+  always equals the saved `state1` values once the renderers have caught up). `783035ee` also adds a leftover debug
+  block to `VDP::VDP1ProcessCommand` (`__debugbreak()` when one command costs 500,000 cycles or more, then a second
+  timing call, and a per-command `devlog::debug` line); not taken (MSVC-only intrinsic, would stop a release build
+  in a debugger, and no behaviour).
+
+| Upstream hash | Date | Subject | Decision | Reason | Brimir commit |
+|---|---|---|---|---|---|
+| `64d4945` | 2026-11-17 | fix(vk): Require `Unorm` surface format to fix washed out colors in some systems | skip | Ymir graphics backend (`vulkan_swap_chain.cpp`, out of scope) | |
+| `774744b` | 2026-11-17 | chore(vk): Code style changes | skip | Ymir graphics backend (`vulkan_swap_chain.cpp`, out of scope) | |
+| `c11a8c9` | 2026-11-17 | fix(vk): Don't eat error message when acquiring the first swapchain image | skip | Ymir graphics backend (`vulkan_swap_chain.cpp`, out of scope) | |
+| `aefadf4` | 2026-11-17 | fix(vk): Fix startup crash when using Vulkan on Wayland | skip | Ymir graphics backend and app (`vulkan_swap_chain.*`, `gfx_context_impl_vulkan.cpp`, out of scope) | |
+| `0fdabbd` | 2026-11-19 | fix(vdp-d3d12): Fix out-of-bounds writes when switching resolution | skip | Ymir GPU renderer (`vdp_renderer_hw_d3d12.cpp`, out of scope) | |
+| `fd3e439` | 2026-11-25 | fix(VDP2): Force TVSTAT.VBLANK signal to asserted when TVMD.DISP is not asserted | take (vdp2) | a TVMD write with DISP = 0 sets TVSTAT.VBLANK, and VBlank OUT clears it only while DISP = 1 (Clockwork Knight 2 freezes before FMVs, upstream #729, #762). `ReadTVSTAT` is reworded to the bit field (same value). Verbatim. | |
+| `91358dc` | 2026-11-26 | fix(VDP1): Limit simple quad timing calculations to system clipping area | take (vdp1) | normal and scaled sprites cost at most the system clipping area (missing graphics in Astal's final boss fight, upstream #976). Brimir reads the clipping area from its own copy (see the notes above). | |
+| `783035e` | 2026-11-26 | fix(VDP1): Limit distorted quad timing calculations to system clipping area | take (vdp1) | the per-line cost of distorted sprites, polygons, polylines and lines is the length of the line after `LineStepper::SystemClip` (VDP1 slowdowns in Shining the Holy Ark's Aborigine Forest, upstream #922). The debug block it adds to `VDP1ProcessCommand` is not taken (see the notes above). | |
