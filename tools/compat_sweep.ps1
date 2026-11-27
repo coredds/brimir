@@ -14,7 +14,9 @@
   Output (-OutDir): <game>\f<k>.png, <game>\summary.json (the bench's --sweep-summary), <game>\run.log,
   <game>\result.json, <game>\sheet.png, results.json, index.md, sweep.log, and sweep.done when the run has ended.
   Status per game: loaded (summary written, no load error), load error, crash (the process ended without a summary,
-  the exit code is recorded) or timeout (killed after -TimeoutMinutes of wall time).
+  the exit code is recorded), timeout (killed after -TimeoutMinutes of wall time) or log flood (killed while running
+  because run.log + run.err passed -LogFloodMB; the size reached is recorded as log_bytes_reached). After each game the
+  logs are cut to their first -LogLimitKB.
 
 .EXAMPLE
   pwsh tools\compat_sweep.ps1
@@ -32,6 +34,7 @@ param(
     [int]$ScreenshotEvery = 600,
     [double]$TimeoutMinutes = 15,
     [int]$LogLimitKB = 1024,
+    [int]$LogFloodMB = 64,
     [string]$Bench,
     [string]$Scratch = (Join-Path $env:LOCALAPPDATA 'Temp\opencode\compat-sweep'),
     [string[]]$Only,
@@ -114,19 +117,30 @@ function Invoke-Game([System.IO.FileInfo]$disc, [string]$gameOut) {
     $p = Start-Process -FilePath $Bench -ArgumentList $benchArgs -NoNewWindow -PassThru `
         -RedirectStandardOutput $logPath -RedirectStandardError $errPath
     $null = $p.Handle   # keeps the exit code available after exit
-    $timedOut = -not $p.WaitForExit($TimeoutMinutes * 60 * 1000)
-    if ($timedOut) {
+    # Wait in steps, watching the log size: a game that floods the log is stopped before it can fill the disk
+    $timedOut = $false; $flooded = $false; $logReached = 0
+    $deadline = $TimeoutMinutes * 60 * 1000
+    $floodMax = [int64]$LogFloodMB * 1MB
+    while (-not $p.WaitForExit(1000)) {
+        $logReached = (Get-LogBytes $logPath) + (Get-LogBytes $errPath)
+        if ($logReached -gt $floodMax) { $flooded = $true; break }
+        if ($sw.ElapsedMilliseconds -ge $deadline) { $timedOut = $true; break }
+    }
+    if ($timedOut -or $flooded) {
         & taskkill.exe /PID $p.Id /T /F *> $null
         $null = $p.WaitForExit(30000)
+        if ($flooded) { $logReached = (Get-LogBytes $logPath) + (Get-LogBytes $errPath) }
     }
     $sw.Stop()
-    $exit = if ($timedOut) { $null } else { $p.ExitCode }
+    $exit = if ($timedOut -or $flooded) { $null } else { $p.ExitCode }
     Limit-LogSize $logPath
     Limit-LogSize $errPath
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 
     $summary = Read-JsonFile $summaryPath
-    if ($timedOut) {
+    if ($flooded) {
+        $status = 'log flood'
+    } elseif ($timedOut) {
         $status = 'timeout'
     } elseif ($summary -and $summary.load_error) {
         $status = 'load error'
@@ -137,7 +151,17 @@ function Invoke-Game([System.IO.FileInfo]$disc, [string]$gameOut) {
     } else {
         $status = 'crash'
     }
-    return [ordered]@{ status = $status; exit_code = $exit; driver_wall_seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
+    $run = [ordered]@{ status = $status; exit_code = $exit; driver_wall_seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
+    if ($flooded) { $run.log_bytes_reached = $logReached }
+    return $run
+}
+
+# Size through an open handle: the directory entry of a file another process is writing can lag behind
+function Get-LogBytes([string]$path) {
+    try {
+        $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite, Delete')
+        try { return $fs.Length } finally { $fs.Dispose() }
+    } catch { return 0 }
 }
 
 function New-ContactSheet([string]$dir, [string]$title, [string]$outPng) {
@@ -193,7 +217,7 @@ function Build-Reports {
     $results = @($results | Sort-Object { $_.name.ToLowerInvariant() })
     $results | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutDir 'results.json') -Encoding utf8
 
-    $counts = [ordered]@{ loaded = 0; crash = 0; timeout = 0; 'load error' = 0; other = 0 }
+    $counts = [ordered]@{ loaded = 0; crash = 0; timeout = 0; 'log flood' = 0; 'load error' = 0; other = 0 }
     foreach ($r in $results) {
         if ($counts.Contains($r.status)) { $counts[$r.status]++ } else { $counts['other']++ }
     }
@@ -201,8 +225,8 @@ function Build-Reports {
     $md = New-Object System.Collections.Generic.List[string]
     $md.Add('# Saturn compatibility sweep')
     $md.Add('')
-    $md.Add(('{0} games. loaded {1}, crash {2}, timeout {3}, load error {4}{5}.' -f $results.Count, $counts['loaded'],
-            $counts['crash'], $counts['timeout'], $counts['load error'],
+    $md.Add(('{0} games. loaded {1}, crash {2}, timeout {3}, log flood {4}, load error {5}{6}.' -f $results.Count,
+            $counts['loaded'], $counts['crash'], $counts['timeout'], $counts['log flood'], $counts['load error'],
             $(if ($counts['other']) { ", other $($counts['other'])" } else { '' })))
     $first = $results | Select-Object -First 1
     if ($first -and $first.params) {
@@ -220,6 +244,7 @@ function Build-Reports {
         $s = $r.summary
         $status = $r.status
         if ($status -eq 'crash') { $status = 'crash (exit {0})' -f $r.exit_code }
+        if ($status -eq 'log flood' -and $r.log_bytes_reached) { $status = 'log flood ({0:N0} MB)' -f ($r.log_bytes_reached / 1MB) }
         if ($status -eq 'load error' -and $s) { $status = 'load error: ' + ($s.load_error -replace '\|', '/') }
         $ident = '-'; $peak = '-'; $sil = '-'; $bios = '-'; $cart = '-'
         if ($s -and -not $s.load_error) {
@@ -338,6 +363,7 @@ foreach ($disc in $discs) {
         sheet       = $null
     }
     if ($run.Contains('driver_error')) { $result.driver_error = $run.driver_error }
+    if ($run.Contains('log_bytes_reached')) { $result.log_bytes_reached = $run.log_bytes_reached }
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $gameOut 'result.json') -Encoding utf8
     $extra = if ($summary -and -not $summary.load_error) {
         ' bios {0}, cartridge {1}, {2} screenshots' -f $summary.bios, $summary.cartridge, @($result.screenshots).Count

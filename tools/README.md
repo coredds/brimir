@@ -299,6 +299,7 @@ included; the three options below default `--warmup` to 0 (give `--warmup` to ke
 ```powershell
 pwsh tools\compat_sweep.ps1 [-GameDir F:\OneDrive\Roms\saturn] [-BiosDir F:\OneDrive\Roms\BIOS] [-OutDir <dir>]
     [-Frames 10800] [-InputScript 'start:120/600,a:30/900'] [-ScreenshotEvery 600] [-TimeoutMinutes 15]
+    [-LogFloodMB 64] [-LogLimitKB 1024]
 ```
 
 Runs one `brimir_bench` process per top-level `*.chd` of `-GameDir` (default 10,800 frames, 3 minutes of emulated
@@ -317,10 +318,12 @@ screenshots in a grid, the frame number under each, via System.Drawing); and `re
 `index.md` (one line per game: status, longest identical-frame run, audio peak and longest silence, BIOS, cartridge,
 link to the sheet), `sweep.log` and `sweep.done` (written when the run has ended; remove it before starting a run you
 wait on). Status: `loaded` (the process wrote a summary and exited 0), `load error` (the summary has `load_error`),
-`crash` (the process ended without a summary; `exit_code` is recorded) or `timeout` (killed after `-TimeoutMinutes`).
-`result.json` also holds the SHA-256 of each screenshot. The bench prints the core's debug log to stdout; a game that
-floods it is cut to its first `-LogLimitKB` (1024) in `run.log`/`run.err` after the run (one game wrote 13 GB in the
-15 minutes, so keep some disk free; a timeout bounds it).
+`crash` (the process ended without a summary; `exit_code` is recorded), `timeout` (killed after `-TimeoutMinutes`) or
+`log flood` (see below). `result.json` also holds the SHA-256 of each screenshot. The bench prints the core's debug
+log to stdout, and one game wrote 13 GB of it in 15 minutes. So while a game runs the driver checks the size of
+`run.log` + `run.err` every second; past `-LogFloodMB` (64) it kills the process tree and records `log flood` with
+the size reached (`log_bytes_reached` in `result.json`, in MB in `index.md`); the screenshots taken until then stay.
+After every run the logs are cut to their first `-LogLimitKB` (1024; normal games write 0.1-0.2 MB).
 
 - `-Only 'Sega Rally*','Panzer*'`: only the games whose name (without `.chd`) matches a wildcard; the other games'
   folders in `-OutDir` stay, so use another `-OutDir` for a trial run. Run it with `pwsh -Command "& ..."` when a
