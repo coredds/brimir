@@ -157,6 +157,7 @@ docs/
 !CHANGELOG.md
 !LICENSE.md
 !ROADMAP.md
+!COMPATIBILITY.md
 
 # Packaging
 *.deb
