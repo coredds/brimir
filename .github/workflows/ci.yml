@@ -31,8 +31,8 @@ jobs:
           arch: amd64
 
       - name: Configure CMake
-        # The core's developer log off: ctest's capture of its output doubled the Windows test step (the Linux jobs keep
-        # it on, so test_dev_log still runs)
+        # The core's developer log is on in test builds by default; off here, because ctest's capture of its output
+        # doubled the Windows test step (the Linux jobs keep it on, so test_dev_log still runs)
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRIMIR_BUILD_TESTS=ON -DBrimir_ENABLE_DEVLOG=OFF
 
       - name: Build

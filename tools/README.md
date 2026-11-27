@@ -12,6 +12,12 @@ Build:
 cmake --build build --target brimir_bench
 ```
 
+**Developer log.** The core's developer log (Ymir's `devlog`, printed to stdout) is compiled out by default, as in
+the release cores; it is on in builds configured with `-DBRIMIR_BUILD_TESTS=ON` (the unit test `test_dev_log` needs it)
+and can be set with `-DBrimir_ENABLE_DEVLOG=ON|OFF`. Formatting the log costs time (a game that logged thousands of
+lines per frame ran at 16 fps instead of 290 fps), so benchmark with a build without tests, for example
+`cmake -B build-release -G Ninja -DBRIMIR_BUILD_TESTS=OFF`, and expect the bench's stdout to be only its own lines.
+
 Run `brimir_bench --help` for all options.
 
 Benchmark a game from boot (no controller input, so it stays on the title or
@@ -245,8 +251,9 @@ frame 0 320x224 65d0bc3658c2307f
 
 `<i>` counts from 0, then the frame size and a 64-bit FNV-1a hash of the width, the height and the XRGB8888 pixels
 (`tools/frame_hash.hpp`, shared with `brimir_vkhost`, so the two tools' lines compare directly). The hash is computed
-outside the timed region. It cannot be combined with `--lockstep` or `--dump-at`. The Ymir core library also logs
-to stdout, so filter for lines that start with `frame `.
+outside the timed region. It cannot be combined with `--lockstep` or `--dump-at`. A core built with the developer
+log on (the default in builds with `BRIMIR_BUILD_TESTS=ON`, see "Developer log" below) also logs to stdout, so filter
+for lines that start with `frame `.
 
 ### Audio hashes, per-frame states, fixed RTC
 
@@ -319,8 +326,10 @@ screenshots in a grid, the frame number under each, via System.Drawing); and `re
 link to the sheet), `sweep.log` and `sweep.done` (written when the run has ended; remove it before starting a run you
 wait on). Status: `loaded` (the process wrote a summary and exited 0), `load error` (the summary has `load_error`),
 `crash` (the process ended without a summary; `exit_code` is recorded), `timeout` (killed after `-TimeoutMinutes`) or
-`log flood` (see below). `result.json` also holds the SHA-256 of each screenshot. The bench prints the core's debug
-log to stdout, and one game wrote 13 GB of it in 15 minutes. So while a game runs the driver checks the size of
+`log flood` (see below). `result.json` also holds the SHA-256 of each screenshot. A bench built with the core's developer
+log on (`-DBRIMIR_BUILD_TESTS=ON`, the default `build\bin` of a test build) prints it to stdout, and one game wrote 13 GB
+of it in 15 minutes (and ran at 4 fps). Use a build without tests (`-DBRIMIR_BUILD_TESTS=OFF`, log off) for sweeps, with
+`-Bench`. So while a game runs the driver checks the size of
 `run.log` + `run.err` every second; past `-LogFloodMB` (64) it kills the process tree and records `log flood` with
 the size reached (`log_bytes_reached` in `result.json`, in MB in `index.md`); the screenshots taken until then stay.
 After every run the logs are cut to their first `-LogLimitKB` (1024; normal games write 0.1-0.2 MB).
@@ -434,7 +443,7 @@ frame the core outputs.
 | `--defer-image-read N` | with `--vulkan` (not with `--grow-mask`): read each `set_image` image N (1-2) displayed frames later, from the handles copied at `video_refresh` as RetroArch's threaded video path keeps them (the latest legal read: before the core's next `wait_sync_index` for that sync index on the 3-slot ring). The core destroying such an image or its view before the read (wrapped `vkDestroyImage` / `vkDestroyImageView`) fails the run; reads still pending are done before a reinit, a sync-mask change and at the end. Dupes repeat the frame before them, in order |
 
 Without `--save-dir` the save directory is a fresh temporary directory that is removed on exit. Core log messages go to stderr,
-prefixed `[core <level>]` (`[core#2 ...]` for the run-ahead instance); the Ymir library's own log lines go to stdout,
+prefixed `[core <level>]` (`[core#2 ...]` for the run-ahead instance); the Ymir library's own log lines (only in a build with the developer log on) go to stdout,
 so filter hash output for lines that start with `frame `. Exit codes: 0 success, 1 usage error, 2 load or setup
 failure, 3 a check failed (the `vkhost: FAILED:` lines say which), 4 `--vulkan` without a usable Vulkan device.
 

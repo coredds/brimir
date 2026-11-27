@@ -1,7 +1,7 @@
 # Saturn compatibility
 
 Results of an automated sweep over 46 Saturn titles (48 discs) on 2026-11-27, with Brimir built from commit `f4b7e07`
-(the emulation core at upstream Ymir `783035ee`). Each disc ran for 10,800 frames (3 minutes of Saturn time) with a
+(the emulation core at upstream Ymir `783035ee`); Albert Odyssey was rerun after the developer log was turned off. Each disc ran for 10,800 frames (3 minutes of Saturn time) with a
 scripted controller and a screenshot every 600 frames; the screenshots were checked by eye. "How far" is how far the
 script got, not how far the game can be played: nobody played these games to the end.
 
@@ -13,20 +13,21 @@ upstream's current `1526ade4`, with the same BIOS, settings, input and frame cou
 
 | Status | Titles |
 |---|---|
-| Works (reaches gameplay or the attract mode) | 43 |
+| Works (reaches gameplay or the attract mode) | 44 |
 | Minor issue (cosmetic, audio or speed) | 0 |
-| Major issue (hang, black or garbled screen, wrong behaviour, unplayable speed) | 2 |
+| Major issue (hang, black or garbled screen, wrong behaviour, unplayable speed) | 1 |
 | Does not boot | 1 |
 
-The three problems have two causes:
+The first sweep found three problems, with two causes (Albert Odyssey, the third, has been fixed and rerun):
 
 - **Shinrei Jusatsushi Taroumaru, Baroque:** Ymir too. Both are broken by an upstream change that Brimir took in its
   2026-11-26 sync (`fd3e4398`, VBLANK reads as 1 while the display is off). Upstream replaced it the next day with
   `71f2968d` ("Fixes 100+ regressions"), which fixes both games in the Ymir runs. Brimir needs that sync.
-- **Albert Odyssey:** Brimir only. The emulation matches Ymir frame for frame, but the game sends the VDP1 an invalid
-  command thousands of times per frame, and Brimir's release build prints a debug log line for each one (Brimir
-  builds with the developer log on; Ymir's release builds have it off). The game slows to about 4 frames per second
-  and writes gigabytes of log.
+- **Albert Odyssey:** Brimir only, fixed. The emulation matches Ymir frame for frame, but the game sends the VDP1 an
+  invalid command thousands of times per frame, and the build the sweep used printed a debug log line for each one
+  (Brimir built with the developer log on; Ymir's release builds have it off). The game slowed to about 4 frames per
+  second and wrote gigabytes of log. Brimir now builds with the developer log off, and the rerun runs all 10,800
+  frames in 40 seconds.
 
 ## Titles
 
@@ -35,7 +36,7 @@ disc 2 is listed as "expected" when it shows the screen it is supposed to show w
 
 | Title | Status | How far the sweep got | Notes |
 |---|---|---|---|
-| Albert Odyssey - Legend of Eldean (USA) | major | Title, intro, first town (frame 4,799 of 10,800 before the 15-minute limit) | Brimir only. From about frame 2,400 it runs at about 4 fps: each frame logs thousands of `VDP1-Command \| Invalid command F` debug lines (13 GB of log in 15 minutes). Screens match Ymir `783035ee`, which runs all 10,800 frames at full speed with its log off. |
+| Albert Odyssey - Legend of Eldean (USA) | works | Title, intro, first town, village scenes with fights (all 10,800 frames) | The first sweep (developer log on) ran at about 4 fps from frame 2,400 (each frame logged thousands of `VDP1-Command \| Invalid command F` lines; 13 GB of log in 15 minutes) and reached frame 4,799. Fixed by building without the developer log, as Ymir does; the rerun matches the first run's screenshots up to frame 4,799. |
 | Astal (USA) | works | Title, stage 1 | |
 | Baroque (Japan, English patch) | major | Title, menus, new save, name entry, opening movie; then black and frozen from frame 4,696 to the end | Ymir too at `783035ee` (same black screen, bit for bit, once a leftover upstream debug break that stops Ymir there is removed). Fixed upstream in `71f2968d`: upstream's current version reaches the first dungeon. |
 | Batsugun (Japan) | works | Gameplay, continue screens | |

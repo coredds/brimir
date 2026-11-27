@@ -125,8 +125,10 @@ set(Brimir_VERSION_PRERELEASE "")
 set(Brimir_VERSION_BUILD "")
 set(Brimir_VERSION "0.11.0")
 set(Brimir_DEV_BUILD OFF)
-# The core's developer log, printed to stdout. CI turns it off for the test jobs where ctest slows down on the output.
-option(Brimir_ENABLE_DEVLOG "Print the core's developer log to stdout" ON)
+# The core's developer log, printed to stdout (RetroArch users never see it, and formatting it costs time: Albert Odyssey
+# fell to 4 fps on thousands of logged invalid VDP1 commands per frame). Off by default; on in test builds, so
+# test_dev_log (logging must never throw, issue #7) runs. Developers can pass -DBrimir_ENABLE_DEVLOG=ON.
+option(Brimir_ENABLE_DEVLOG "Print the core's developer log to stdout" ${BRIMIR_BUILD_TESTS})
 set(Brimir_ENABLE_DEV_ASSERTIONS OFF)
 
 # Add core emulator library

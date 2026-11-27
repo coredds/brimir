@@ -475,6 +475,8 @@ cmake --build build-release --target brimir_libretro -j$(nproc)
 
 LTO applies to optimized configurations, not Debug. To disable it completely, set both `BRIMIR_LTO=OFF` and `Brimir_ENABLE_IPO=OFF`. Optional `Brimir_AVX2=ON` raises the x64 CPU requirements and is not enabled in the portable release builds.
 
+The core's developer log (printed to stdout, invisible in RetroArch) is compiled out of normal builds, because formatting it can cost a lot of time in a game that triggers it often; it is on in builds with `-DBRIMIR_BUILD_TESTS=ON`, and `-DBrimir_ENABLE_DEVLOG=ON` turns it on for debugging.
+
 On Windows, run the commands from a *Developer PowerShell for VS 2022* (or any shell with the MSVC environment loaded) when using the Ninja generator.
 
 ### Vulkan renderer

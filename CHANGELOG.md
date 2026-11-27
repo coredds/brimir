@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Albert Odyssey - Legend of Eldean slowed to a crawl** - the developer log is now off in release cores. It was on in every build and printed to stdout, which RetroArch never shows, but formatting each line cost time: Albert Odyssey sends the VDP1 an invalid command thousands of times per frame and fell to about 4 fps from about frame 2,400 of the scripted run. It now runs all 10,800 frames of the compatibility sweep at about 290 fps (3.4 ms per frame; 62 ms per frame with the log on), with the same frames. Any game that hit a logged condition benefits. The log stays on in builds with `BRIMIR_BUILD_TESTS=ON`; developers can set `-DBrimir_ENABLE_DEVLOG=ON`.
 - **Three game fixes from upstream Ymir** (by StrikerX3; Ymir `fd3e4398` as corrected by `71f2968d`, `91358dc5`, `783035ee`, synced 2026-11-26 and 2026-11-27):
   - Clockwork Knight 2 no longer freezes before its FMVs: while the display is off, the game reads the screen status as vertical blank (upstream's fix; not verified in-game here).
   - Astal's final boss fight no longer loses graphics (upstream's fix; not verified in-game here: the fight was not reached).
