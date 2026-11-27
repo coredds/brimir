@@ -9,7 +9,13 @@
   the game database inserts (as brimir_cartridge=auto does), --fixed-rtc so reruns are identical, an input script and
   a screenshot every -ScreenshotEvery frames. Nothing is written into -BiosDir or -GameDir; the BIOS files and the
   RTC settings files are copied into a fresh scratch system directory per game (the core rewrites the RTC files) and
-  the scratch is deleted at the end.
+  the scratch is deleted at the end. -Scratch is a parent folder: the work happens in its subfolder 'sweep-work', which
+  holds a marker file, and the driver deletes only such a subfolder (it refuses any other, so a mistyped -Scratch
+  cannot make it delete something else).
+
+  Use a bench built without tests (-Bench <build>\bin\brimir_bench.exe): the core's developer log is on in a test
+  build, and a game that logs a lot then runs very slowly (the driver stops it as a log flood). Give -OutDir for a new
+  run, or the records folder is overwritten.
 
   Output (-OutDir): <game>\f<k>.png, <game>\summary.json (the bench's --sweep-summary), <game>\run.log,
   <game>\result.json, <game>\sheet.png, results.json, index.md, sweep.log, and sweep.done when the run has ended.
@@ -19,7 +25,7 @@
   logs are cut to their first -LogLimitKB.
 
 .EXAMPLE
-  pwsh tools\compat_sweep.ps1
+  pwsh tools\compat_sweep.ps1 -Bench build-release\bin\brimir_bench.exe -OutDir C:\Temp\sweep
   pwsh tools\compat_sweep.ps1 -Only 'Sega Rally*','Panzer*' -OutDir C:\Temp\rerun
   pwsh tools\compat_sweep.ps1 -SheetsOnly                      # rebuild sheets, results.json and index.md only
   pwsh tools\compat_sweep.ps1 -CompareWith C:\Temp\first       # compare -OutDir's games with another sweep's
@@ -47,6 +53,8 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 if (-not $OutDir) { $OutDir = Join-Path $repo 'docs\superpowers\records\2026-11-27-compat-sweep' }
 if (-not $Bench) { $Bench = Join-Path $repo 'build\bin\brimir_bench.exe' }
+$ScratchWork = Join-Path $Scratch 'sweep-work'
+$ScratchMarker = '.compat-sweep-scratch'
 
 # The files Brimir accepts as Saturn BIOS (src/bridge/bios_select.cpp), the two ROM cartridge dumps the core looks
 # for in the system folder, and the configured RTC settings (BIOS language and clock; one per BIOS region)
@@ -67,6 +75,17 @@ function Write-Log([string]$msg) {
     $line = '{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $msg
     Write-Host $line
     if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding utf8 }
+}
+
+# Deletes only a folder this script made (named sweep-work, holding the marker file); a -Scratch that points at anything
+# else is refused rather than emptied
+function Remove-ScratchWork {
+    if (-not (Test-Path -LiteralPath $ScratchWork)) { return }
+    $marker = Join-Path $ScratchWork $ScratchMarker
+    if ((Split-Path -Leaf $ScratchWork) -ne 'sweep-work' -or -not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+        throw "refusing to delete '$ScratchWork': it is not a compat_sweep scratch folder (no $ScratchMarker file in it); give another -Scratch"
+    }
+    Remove-Item -LiteralPath $ScratchWork -Recurse -Force
 }
 
 function Read-JsonFile([string]$path) {
@@ -105,9 +124,9 @@ function Invoke-Game([System.IO.FileInfo]$disc, [string]$gameOut) {
     $logPath = Join-Path $gameOut 'run.log'
     $errPath = Join-Path $gameOut 'run.err'
 
-    $work = Join-Path $Scratch 'work'
+    $work = Join-Path $ScratchWork 'work'
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
-    Copy-Item -LiteralPath (Join-Path $Scratch 'system') -Destination $work -Recurse
+    Copy-Item -LiteralPath (Join-Path $ScratchWork 'system') -Destination $work -Recurse
 
     $benchArgs = @('--game', "`"$($disc.FullName)`"", '--system-dir', "`"$work`"", '--frames', $Frames,
         '--screenshot-every', $ScreenshotEvery, "`"$gameOut`"", '--input-script', $InputScript,
@@ -308,6 +327,12 @@ if ($SheetsOnly) {
 }
 
 if (-not (Test-Path -LiteralPath $Bench)) { throw "brimir_bench not found: $Bench (build target brimir_bench)" }
+Remove-ScratchWork   # refuses a -Scratch that is not ours before anything else is touched
+# A test build has the developer log on; a game that logs a lot then crawls and is stopped as a log flood
+$cache = Join-Path (Split-Path -Parent (Split-Path -Parent $Bench)) 'CMakeCache.txt'
+if ((Test-Path -LiteralPath $cache) -and (Select-String -LiteralPath $cache -Pattern '^Brimir_ENABLE_DEVLOG:BOOL=ON' -Quiet)) {
+    Write-Warning "$Bench comes from a build with the developer log on (Brimir_ENABLE_DEVLOG=ON in its CMakeCache.txt): a game that logs a lot will run very slowly. Use a build without tests (see COMPATIBILITY.md, How to reproduce)."
+}
 $doneMarker = Join-Path $OutDir 'sweep.done'
 Remove-Item -LiteralPath $doneMarker -ErrorAction SilentlyContinue
 
@@ -321,9 +346,9 @@ if ($Only) {
 if ($discs.Count -eq 0) { throw "no CHD games selected in $GameDir" }
 
 # Scratch system directory: copies only (BiosDir stays untouched)
-$template = Join-Path $Scratch 'system'
-if (Test-Path -LiteralPath $Scratch) { Remove-Item -LiteralPath $Scratch -Recurse -Force }
+$template = Join-Path $ScratchWork 'system'
 New-Item -ItemType Directory -Force -Path $template | Out-Null
+Set-Content -LiteralPath (Join-Path $ScratchWork $ScratchMarker) -Value 'created by tools/compat_sweep.ps1; the script deletes this folder when the run ends' -Encoding ascii
 $copied = @()
 foreach ($f in $SystemFiles) {
     $src = Join-Path $BiosDir $f
@@ -374,7 +399,9 @@ foreach ($disc in $discs) {
 $total.Stop()
 
 $counts = Build-Reports
-if (-not $KeepScratch) { Remove-Item -LiteralPath $Scratch -Recurse -Force -ErrorAction SilentlyContinue }
+if (-not $KeepScratch) {
+    try { Remove-ScratchWork } catch { Write-Log ("scratch not removed: " + $_.Exception.Message) }
+}
 $line = "done: {0} games in {1:N1} min; {2}" -f $discs.Count, $total.Elapsed.TotalMinutes,
     (($counts.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ', ')
 Write-Log $line

@@ -56,7 +56,8 @@ bash tools/android/build.sh x86_64 --tests      # the core plus brimir_tests and
 
 The script configures `build-android-<abi>` (Ninja), builds `brimir_libretro` (and with `--tests` also `brimir_tests` and
 `brimir_bench`) and prints the core's path on its last line. Without `--tests` it configures with
-`-DBRIMIR_BUILD_TESTS=OFF`.
+`-DBRIMIR_BUILD_TESTS=OFF -DBrimir_ENABLE_DEVLOG=OFF` (with `--tests`, both are ON), so a reused build directory
+follows the mode (CMake caches the developer log option).
 
 From Windows PowerShell, through WSL:
 

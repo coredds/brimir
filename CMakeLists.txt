@@ -125,9 +125,11 @@ set(Brimir_VERSION_PRERELEASE "")
 set(Brimir_VERSION_BUILD "")
 set(Brimir_VERSION "0.11.0")
 set(Brimir_DEV_BUILD OFF)
-# The core's developer log, printed to stdout (RetroArch users never see it, and formatting it costs time: Albert Odyssey
+# The core's developer log, printed to stdout (RetroArch's log does not capture it, and formatting it costs time: Albert Odyssey
 # fell to 4 fps on thousands of logged invalid VDP1 commands per frame). Off by default; on in test builds, so
 # test_dev_log (logging must never throw, issue #7) runs. Developers can pass -DBrimir_ENABLE_DEVLOG=ON.
+# The default is computed once: an existing build directory keeps its cached value when BRIMIR_BUILD_TESTS changes, so
+# pass -DBrimir_ENABLE_DEVLOG=ON|OFF explicitly when reusing one (tools/android/build.sh does).
 option(Brimir_ENABLE_DEVLOG "Print the core's developer log to stdout" ${BRIMIR_BUILD_TESTS})
 set(Brimir_ENABLE_DEV_ASSERTIONS OFF)
 

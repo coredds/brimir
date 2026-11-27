@@ -14,7 +14,8 @@ cmake --build build --target brimir_bench
 
 **Developer log.** The core's developer log (Ymir's `devlog`, printed to stdout) is compiled out by default, as in
 the release cores; it is on in builds configured with `-DBRIMIR_BUILD_TESTS=ON` (the unit test `test_dev_log` needs it)
-and can be set with `-DBrimir_ENABLE_DEVLOG=ON|OFF`. Formatting the log costs time (a game that logged thousands of
+and can be set with `-DBrimir_ENABLE_DEVLOG=ON|OFF`. CMake caches the option, so an existing build directory keeps the
+value it was first configured with; pass it explicitly or use a fresh directory. Formatting the log costs time (a game that logged thousands of
 lines per frame ran at 16 fps instead of 290 fps), so benchmark with a build without tests, for example
 `cmake -B build-release -G Ninja -DBRIMIR_BUILD_TESTS=OFF`, and expect the bench's stdout to be only its own lines.
 
@@ -252,7 +253,7 @@ frame 0 320x224 65d0bc3658c2307f
 `<i>` counts from 0, then the frame size and a 64-bit FNV-1a hash of the width, the height and the XRGB8888 pixels
 (`tools/frame_hash.hpp`, shared with `brimir_vkhost`, so the two tools' lines compare directly). The hash is computed
 outside the timed region. It cannot be combined with `--lockstep` or `--dump-at`. A core built with the developer
-log on (the default in builds with `BRIMIR_BUILD_TESTS=ON`, see "Developer log" below) also logs to stdout, so filter
+log on (the default in builds with `BRIMIR_BUILD_TESTS=ON`, see "Developer log" above) also logs to stdout, so filter
 for lines that start with `frame `.
 
 ### Audio hashes, per-frame states, fixed RTC
@@ -306,16 +307,26 @@ included; the three options below default `--warmup` to 0 (give `--warmup` to ke
 ```powershell
 pwsh tools\compat_sweep.ps1 [-GameDir F:\OneDrive\Roms\saturn] [-BiosDir F:\OneDrive\Roms\BIOS] [-OutDir <dir>]
     [-Frames 10800] [-InputScript 'start:120/600,a:30/900'] [-ScreenshotEvery 600] [-TimeoutMinutes 15]
-    [-LogFloodMB 64] [-LogLimitKB 1024]
+    [-LogFloodMB 64] [-LogLimitKB 1024] [-Bench <brimir_bench.exe>] [-Scratch <dir>] [-KeepScratch]
+    [-Only <wildcard>,...] [-SheetsOnly] [-CompareWith <other OutDir>]
 ```
+
+Give `-Bench` a bench from a build without tests (log off, see "Developer log" above), for example
+`cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release`, then `cmake --build build-release --target brimir_bench`
+and `-Bench build-release\bin\brimir_bench.exe`; the default is `build\bin\brimir_bench.exe`, which is a test build
+with the log on (the driver warns when the build's `CMakeCache.txt` says so). Give `-OutDir` for a new run: the default
+is the records folder, and a run replaces the folders of the games it runs there.
 
 Runs one `brimir_bench` process per top-level `*.chd` of `-GameDir` (default 10,800 frames, 3 minutes of emulated
 time, one screenshot every 600 frames), so a crash or hang ends only that game and the sweep goes on. Each run uses
 the options above: BIOS Auto, `--fixed-rtc`, the game database's cartridge, the software renderer, default core
 settings. The BIOS files Brimir accepts, the two ROM cartridge dumps (`mpr-18811-mx.ic1`, `mpr-19367-mx.ic1`) and
 `brimir_saturn_rtc_<jp|us_eu>.smpc` are copied from `-BiosDir` into a scratch system directory
-(`%LOCALAPPDATA%\Temp\opencode\compat-sweep`, `-Scratch`), freshly for each game because the core rewrites the RTC
-files; nothing is written into `-BiosDir` or `-GameDir`, and the scratch is deleted at the end (`-KeepScratch`). The
+(the subfolder `sweep-work` of `-Scratch`, default `%LOCALAPPDATA%\Temp\opencode\compat-sweep`), freshly for each game
+because the core rewrites the RTC files; nothing is written into `-BiosDir` or `-GameDir`, and the scratch is deleted at
+the end (`-KeepScratch` keeps it). The driver deletes only a `sweep-work` folder that holds its marker file
+`.compat-sweep-scratch` and refuses any other (it stops with an error, so a mistyped `-Scratch` cannot empty a folder
+that is not its own). The
 default input script holds Start for 120 frames every 600 and A for 30 frames every 900 (Start gets past title
 screens, A confirms a menu; the periods differ so the two also come apart).
 
@@ -326,13 +337,14 @@ screenshots in a grid, the frame number under each, via System.Drawing); and `re
 link to the sheet), `sweep.log` and `sweep.done` (written when the run has ended; remove it before starting a run you
 wait on). Status: `loaded` (the process wrote a summary and exited 0), `load error` (the summary has `load_error`),
 `crash` (the process ended without a summary; `exit_code` is recorded), `timeout` (killed after `-TimeoutMinutes`) or
-`log flood` (see below). `result.json` also holds the SHA-256 of each screenshot. A bench built with the core's developer
-log on (`-DBRIMIR_BUILD_TESTS=ON`, the default `build\bin` of a test build) prints it to stdout, and one game wrote 13 GB
-of it in 15 minutes (and ran at 4 fps). Use a build without tests (`-DBRIMIR_BUILD_TESTS=OFF`, log off) for sweeps, with
-`-Bench`. So while a game runs the driver checks the size of
-`run.log` + `run.err` every second; past `-LogFloodMB` (64) it kills the process tree and records `log flood` with
-the size reached (`log_bytes_reached` in `result.json`, in MB in `index.md`); the screenshots taken until then stay.
-After every run the logs are cut to their first `-LogLimitKB` (1024; normal games write 0.1-0.2 MB).
+`log flood` (see below). `result.json` also holds the SHA-256 of each screenshot.
+
+A bench built with the core's developer log on (a test build, `-DBRIMIR_BUILD_TESTS=ON`, such as the default
+`build\bin`) prints the log to stdout, and one game wrote 13 GB of it in 15 minutes and ran at 4 fps. Sweep with a bench
+from a build without tests (log off, `-Bench` above). As a guard, the driver checks the size of `run.log` + `run.err`
+every second while a game runs; past `-LogFloodMB` (64) it kills the process tree and records `log flood` with the size
+reached (`log_bytes_reached` in `result.json`, in MB in `index.md`); the screenshots taken until then stay. After every
+run the logs are cut to their first `-LogLimitKB` (1024; normal games write 0.1-0.2 MB).
 
 - `-Only 'Sega Rally*','Panzer*'`: only the games whose name (without `.chd`) matches a wildcard; the other games'
   folders in `-OutDir` stay, so use another `-OutDir` for a trial run. Run it with `pwsh -Command "& ..."` when a

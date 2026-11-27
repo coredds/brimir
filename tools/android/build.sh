@@ -54,10 +54,10 @@ CONFIG_ARGS=(
 )
 TARGETS=(brimir_libretro)
 if [ "$TESTS" = 1 ]; then
-    CONFIG_ARGS+=(-DBRIMIR_BUILD_TESTS=ON)
+    CONFIG_ARGS+=(-DBRIMIR_BUILD_TESTS=ON -DBrimir_ENABLE_DEVLOG=ON)
     TARGETS+=(brimir_tests brimir_bench)
 else
-    CONFIG_ARGS+=(-DBRIMIR_BUILD_TESTS=OFF)
+    CONFIG_ARGS+=(-DBRIMIR_BUILD_TESTS=OFF -DBrimir_ENABLE_DEVLOG=OFF)
 fi
 
 cmake "${CONFIG_ARGS[@]}"
