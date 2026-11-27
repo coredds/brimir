@@ -1154,6 +1154,7 @@ uint64 VDP::VDP1ProcessCommand() {
             m_VDP1TimingClip.sysClipV = VDP1ReadVRAM<uint16>(cmdAddress + 0x16);
         }
         cycles += VDP1CalcCommandTiming(cmdAddress, control);
+        devlog::trace<grp::vdp1_cmd>("Command {:04X} @ {:05X} costs {} cycles", control.u16, cmdAddress, cycles);
     }
 
     // Go to the next command
