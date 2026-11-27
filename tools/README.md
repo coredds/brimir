@@ -294,6 +294,42 @@ included; the three options below default `--warmup` to 0 (give `--warmup` to ke
   ST-V set, the load description) and `cartridge` (what was inserted, `none` for no cartridge) with
   `cartridge_message`. The audio is drained after every frame for it.
 
+#### `compat_sweep.ps1` - the sweep over a game folder
+
+```powershell
+pwsh tools\compat_sweep.ps1 [-GameDir F:\OneDrive\Roms\saturn] [-BiosDir F:\OneDrive\Roms\BIOS] [-OutDir <dir>]
+    [-Frames 10800] [-InputScript 'start:120/600,a:30/900'] [-ScreenshotEvery 600] [-TimeoutMinutes 15]
+```
+
+Runs one `brimir_bench` process per top-level `*.chd` of `-GameDir` (default 10,800 frames, 3 minutes of emulated
+time, one screenshot every 600 frames), so a crash or hang ends only that game and the sweep goes on. Each run uses
+the options above: BIOS Auto, `--fixed-rtc`, the game database's cartridge, the software renderer, default core
+settings. The BIOS files Brimir accepts, the two ROM cartridge dumps (`mpr-18811-mx.ic1`, `mpr-19367-mx.ic1`) and
+`brimir_saturn_rtc_<jp|us_eu>.smpc` are copied from `-BiosDir` into a scratch system directory
+(`%LOCALAPPDATA%\Temp\opencode\compat-sweep`, `-Scratch`), freshly for each game because the core rewrites the RTC
+files; nothing is written into `-BiosDir` or `-GameDir`, and the scratch is deleted at the end (`-KeepScratch`). The
+default input script holds Start for 120 frames every 600 and A for 30 frames every 900 (Start gets past title
+screens, A confirms a menu; the periods differ so the two also come apart).
+
+`-OutDir` (default `docs\superpowers\records\2026-11-27-compat-sweep`, git-ignored) gets per game a folder with the
+screenshots `f<k>.png`, `summary.json`, `run.log`/`run.err` (the bench's output), `result.json` and `sheet.png` (the
+screenshots in a grid, the frame number under each, via System.Drawing); and `results.json` (all games),
+`index.md` (one line per game: status, longest identical-frame run, audio peak and longest silence, BIOS, cartridge,
+link to the sheet), `sweep.log` and `sweep.done` (written when the run has ended; remove it before starting a run you
+wait on). Status: `loaded` (the process wrote a summary and exited 0), `load error` (the summary has `load_error`),
+`crash` (the process ended without a summary; `exit_code` is recorded) or `timeout` (killed after `-TimeoutMinutes`).
+`result.json` also holds the SHA-256 of each screenshot. The bench prints the core's debug log to stdout; a game that
+floods it is cut to its first `-LogLimitKB` (1024) in `run.log`/`run.err` after the run (one game wrote 13 GB in the
+15 minutes, so keep some disk free; a timeout bounds it).
+
+- `-Only 'Sega Rally*','Panzer*'`: only the games whose name (without `.chd`) matches a wildcard; the other games'
+  folders in `-OutDir` stay, so use another `-OutDir` for a trial run. Run it with `pwsh -Command "& ..."` when a
+  pattern holds a space or quote.
+- `-SheetsOnly`: rebuild the sheets, `results.json` and `index.md` from the folders already in `-OutDir`.
+- `-CompareWith <other OutDir>`: compare the games of `-OutDir` with the same games of another sweep (status,
+  summary fields without the wall time, screenshot hashes); exit 0 when all are identical. With `--fixed-rtc` two
+  sweeps of the same build are identical.
+
 ### Instruction and I/O traces (test and diagnostic builds)
 
 Built only with `-DBRIMIR_BUILD_TESTS=ON` or `-DBRIMIR_TRACE=ON` (`tools/bench_trace.hpp`); release builds do not have
