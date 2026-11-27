@@ -129,6 +129,8 @@ add_executable(brimir_tests
     unit/test_vkhost_sample_points.cpp
     # brimir_bench's --audio-hash and --save-state-every hashes (tools/stream_hash.hpp, header-only)
     unit/test_bench_stream_hash.cpp
+    # brimir_bench's compatibility sweep options (tools/bench_sweep.hpp, header-only)
+    unit/test_bench_sweep.cpp
     # brimir_bench's --trace-msh2 and --trace-io (tools/bench_trace.hpp, header-only)
     unit/test_bench_trace.cpp
     # ST-V: zip reader (stored/deflated entries, case-insensitive base names), I/O board, 93C46 EEPROM, protection state

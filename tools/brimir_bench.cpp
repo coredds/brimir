@@ -10,6 +10,7 @@
 #include <brimir/jit/executor.hpp>
 #include <brimir/lockstep.hpp>
 
+#include "bench_sweep.hpp"
 #include "frame_hash.hpp"
 #include "stream_hash.hpp"
 #ifdef BRIMIR_BENCH_TRACE
@@ -63,6 +64,11 @@ struct Args {
     bool audioHash = false;    // --audio-hash: print a hash of each measured frame's PCM output
     int saveStateEvery = 0;    // --save-state-every N <dir>: write the core state after every Nth measured frame
     std::string saveStateDir;
+    int screenshotEvery = 0;   // --screenshot-every N <dir>: write a PNG of the output frame after every Nth frame
+    std::string screenshotDir;
+    std::string inputScriptSpec; // --input-script <spec>: port 1 Control Pad presses (tools/bench_sweep.hpp)
+    brimir_tools::InputScript inputScript;
+    std::string sweepSummary;  // --sweep-summary <file>: JSON summary of the run
     bool fixedRtc = false;     // --fixed-rtc: process on UTC; without --state, RTC on the virtual clock at the lockstep date
     bool backendGiven = false; // --jit-backend given explicitly
     brimir::jit::BackendKind backend = brimir::jit::DefaultBackend();
@@ -81,16 +87,20 @@ enum class ParseResult { Ok, Help, Error };
 void PrintUsage(std::FILE* out) {
     std::fputs(
         "Usage: brimir_bench --bios <file> [--game <cue|chd|ccd|mds|iso|m3u>] [--system-dir <dir>]\n"
+        "       brimir_bench --game <cue|chd|ccd|mds|iso|m3u> --system-dir <dir>   (BIOS chosen as brimir_bios=auto)\n"
         "                    [--state <file>] [--frames N] [--warmup N] [--sh2-jit [--jit-backend ir|x64] [--jit-sync-compile]]\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
         "                    [--sh2-jit [--jit-backend ir|x64] [--jit-sync-compile]] --dump-at N --dump-state <file>\n"
         "       brimir_bench --bios <file> [--game <file>] [--system-dir <dir>] [--state <file>]\n"
         "                    --lockstep N [--lockstep-reload K] [--jit-backend ir|x64] [--jit-sync-compile]\n"
         "       (all forms also accept --no-cd-preload and --no-threaded-vdp; the first form also --hash,\n"
-        "       --audio-hash, --save-state-every N <dir> and --fixed-rtc)\n"
+        "       --audio-hash, --save-state-every N <dir>, --fixed-rtc, --screenshot-every N <dir>,\n"
+        "       --input-script <spec> and --sweep-summary <file>)\n"
         "       brimir_bench --help\n"
         "\n"
-        "  --bios        Saturn BIOS image (required, except for an ST-V game)\n"
+        "  --bios        Saturn BIOS image (required, except for an ST-V game, or a disc with --system-dir: then\n"
+        "                the BIOS is chosen as the core's brimir_bios=auto does, by the disc's region, from the\n"
+        "                BIOS files in --system-dir)\n"
         "  --game        disc image to load (omit to benchmark the BIOS menu), or an ST-V ROM set (.zip), which\n"
         "                takes its BIOS from --system-dir (MAME's ST-V BIOS file names, e.g. epr-20091.ic8)\n"
         "  --system-dir  directory holding brimir_saturn_rtc_<jp|us_eu>.smpc (BIOS language/clock\n"
@@ -148,6 +158,23 @@ void PrintUsage(std::FILE* out) {
         "                (which always does this). Also runs the process on UTC (with or without --state), so\n"
         "                the RTC timestamp and the date the guest reads do not depend on the host's time zone:\n"
         "                runs on different hosts and architectures produce the same states.\n"
+        "  --screenshot-every N <dir>\n"
+        "                after every Nth frame (frame k = k + 1 frames run, counted from 0 including the warmup:\n"
+        "                k = N-1, 2N-1, ...), write the output frame as RetroArch would show it (after the core's\n"
+        "                overscan crop and rotation) to <dir>/f<k>.png. <dir> must exist. N >= 1. Not with\n"
+        "                --lockstep or --dump-at.\n"
+        "  --input-script <spec>\n"
+        "                hold Saturn Control Pad buttons on port 1: button:hold/period items separated by commas,\n"
+        "                e.g. start:120/600,a:30/900 = Start is down for 120 frames at the start of every 600\n"
+        "                (frames 0-119, 600-719, ...), A for 30 of every 900. Buttons: up down left right start a b\n"
+        "                c x y z l r. Frames count from 0 including the warmup. Not with --lockstep or --dump-at.\n"
+        "  --sweep-summary <file>\n"
+        "                write a JSON summary of the run: frames run, the load error (a failed load also exits\n"
+        "                with 2), the longest run of identical frames (start, length), the audio peak and longest\n"
+        "                silent stretch (|sample| <= 16), the final master/slave SH-2 PC, wall seconds, the BIOS\n"
+        "                file and the cartridge inserted. Not with --lockstep or --dump-at.\n"
+        "  The three sweep options also run the frame loop without the warmup (--warmup 0) unless --warmup is given,\n"
+        "  so frame numbers count from the first frame.\n"
 #ifdef BRIMIR_BENCH_TRACE
         "  --trace-msh2 <file>\n"
         "                write '<frame> <PC hex8>' per master SH-2 instruction (warmup and measured frames,\n"
@@ -226,6 +253,19 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
             i += 2;
             continue;
         }
+        if (opt == "--screenshot-every") { // two values: N and the directory
+            if (i + 2 >= argc) {
+                std::fprintf(stderr, "--screenshot-every needs N and a directory\n");
+                return ParseResult::Error;
+            }
+            if (!ParseInt(argv[i + 1], args.screenshotEvery) || args.screenshotEvery == 0) {
+                std::fprintf(stderr, "Invalid --screenshot-every value: %s\n", argv[i + 1]);
+                return ParseResult::Error;
+            }
+            args.screenshotDir = argv[i + 2];
+            i += 2;
+            continue;
+        }
         if (i + 1 >= argc) {
             std::fprintf(stderr, "Missing value for %s\n", opt.c_str());
             return ParseResult::Error;
@@ -237,6 +277,15 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
             args.game = value;
         } else if (opt == "--system-dir") {
             args.systemDir = value;
+        } else if (opt == "--input-script") {
+            std::string error;
+            if (!brimir_tools::ParseInputScript(value, args.inputScript, error)) {
+                std::fprintf(stderr, "Invalid --input-script value: %s\n", error.c_str());
+                return ParseResult::Error;
+            }
+            args.inputScriptSpec = value;
+        } else if (opt == "--sweep-summary") {
+            args.sweepSummary = value;
         } else if (opt == "--state") {
             args.state = value;
         } else if (opt == "--dump-state") {
@@ -301,9 +350,22 @@ ParseResult ParseArgs(int argc, char** argv, Args& args) {
     // An ST-V zip brings its own BIOS (from --system-dir); everything else needs a Saturn BIOS
     const bool stvGame = !args.game.empty() &&
                          brimir::CoreWrapper::DetectContent(args.game.c_str()).kind != brimir::stv::DetectKind::NotZip;
-    if (args.bios.empty() && !stvGame) {
-        std::fprintf(stderr, "--bios is required\n");
+    // A disc without --bios gets the BIOS of its region from --system-dir (brimir_bios=auto)
+    if (args.bios.empty() && !stvGame && (args.game.empty() || args.systemDir.empty())) {
+        std::fprintf(stderr, args.game.empty() ? "--bios is required\n"
+                                               : "--bios is required, or --system-dir with the BIOS files for the "
+                                                 "automatic choice\n");
         return ParseResult::Error;
+    }
+    const bool sweepOptions =
+        args.screenshotEvery > 0 || !args.inputScriptSpec.empty() || !args.sweepSummary.empty();
+    if (sweepOptions && (args.lockstep >= 0 || args.dumpAt >= 0)) {
+        std::fprintf(stderr, "--screenshot-every, --input-script and --sweep-summary cannot be combined with "
+                             "--lockstep or --dump-at\n");
+        return ParseResult::Error;
+    }
+    if (sweepOptions && !args.warmupGiven) {
+        args.warmup = 0; // frame numbers count from the first frame
     }
     if ((args.dumpAt >= 0) != !args.dumpState.empty()) {
         std::fprintf(stderr, "--dump-at and --dump-state must be used together\n");
@@ -428,6 +490,17 @@ void PinUtcTimeZone() {
 #endif
 }
 
+// What the sweep summary reports about loading
+struct RunInfo {
+    std::string loadError;
+    std::string bios; // the BIOS file used (--bios, the automatic choice or the ST-V set's description)
+    std::string cartridge = "none";
+    std::string cartridgeMessage;
+};
+RunInfo g_runInfo;
+
+void WriteExceptionSummary(const Args& args, const char* what);
+
 int Run(const Args& args, const std::filesystem::path& saveDir, const std::filesystem::path& systemDir);
 
 } // namespace
@@ -463,6 +536,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (args.screenshotEvery > 0) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(args.screenshotDir, ec)) {
+            std::fprintf(stderr, "--screenshot-every directory does not exist: %s\n", args.screenshotDir.c_str());
+            return 2;
+        }
+    }
+
     std::filesystem::path runDir;
     if (!CreateRunDirectory(runDir)) {
         return 2;
@@ -487,14 +568,46 @@ int main(int argc, char** argv) {
         return Run(args, runDir, systemDir);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Error: %s\n", e.what());
+        WriteExceptionSummary(args, e.what());
         return 2;
     } catch (...) {
         std::fprintf(stderr, "Error: unknown exception\n");
+        WriteExceptionSummary(args, "unknown exception");
         return 2;
     }
 }
 
 namespace {
+
+// Writes the --sweep-summary file; false (message printed) when it cannot be written.
+bool WriteSweepSummary(const Args& args, const brimir_tools::SweepSummary& summary) {
+    std::ofstream out(args.sweepSummary, std::ios::binary | std::ios::trunc);
+    out << brimir_tools::FormatSweepSummary(summary);
+    out.close();
+    if (!out) {
+        std::fprintf(stderr, "Failed to write %s\n", args.sweepSummary.c_str());
+        return false;
+    }
+    return true;
+}
+
+// An exception that ended the run: no frame counts, the exception text as the error
+void WriteExceptionSummary(const Args& args, const char* what) {
+    if (args.sweepSummary.empty()) {
+        return;
+    }
+    brimir_tools::SweepSummary summary;
+    summary.loadError = std::string("exception: ") + what;
+    summary.bios = g_runInfo.bios;
+    WriteSweepSummary(args, summary);
+}
+
+// Prints a load failure, keeps it for the summary and returns the exit code
+int LoadFailure(const std::string& message) {
+    std::fprintf(stderr, "%s\n", message.c_str());
+    g_runInfo.loadError = message;
+    return 2;
+}
 
 // Initializes `core` and loads BIOS, game and save state per `args`. Returns 0 or exit code 2.
 int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesystem::path& saveDir,
@@ -505,12 +618,24 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
     }
     core.SetSH2JitEnabled(sh2Jit);
     if (!core.Initialize()) {
-        std::fprintf(stderr, "Failed to initialize the core\n");
-        return 2;
+        return LoadFailure("Failed to initialize the core");
     }
-    if (!args.bios.empty() && !core.LoadIPLFromFile(args.bios.c_str())) {
-        std::fprintf(stderr, "Failed to load BIOS: %s\n", args.bios.c_str());
-        return 2;
+    if (!args.bios.empty()) {
+        if (!core.LoadIPLFromFile(args.bios.c_str())) {
+            return LoadFailure("Failed to load BIOS: " + args.bios);
+        }
+        g_runInfo.bios = std::filesystem::path(args.bios).filename().string();
+    } else if (!args.game.empty() &&
+               brimir::CoreWrapper::DetectContent(args.game.c_str()).kind == brimir::stv::DetectKind::NotZip) {
+        // As the core's brimir_bios=auto (retro_load_game): the BIOS of the disc's region from the system directory
+        const std::string systemStr = systemDir.string();
+        const brimir::DiscRegion region =
+            brimir::DiscRegionFromAreaCodes(core.ReadContentAreaCodes(args.game.c_str()));
+        const std::string chosen = core.LoadAutoIPL(systemStr.c_str(), region);
+        if (chosen.empty()) {
+            return LoadFailure("Failed to load a BIOS automatically from " + systemStr);
+        }
+        g_runInfo.bios = chosen;
     }
 
     if (!args.game.empty()) {
@@ -518,16 +643,19 @@ int LoadContent(brimir::CoreWrapper& core, const Args& args, const std::filesyst
         const std::string systemStr = systemDir.string();
         core.SetDiscPreloadEnabled(args.cdPreload);
         if (!core.LoadGame(args.game.c_str(), saveStr.c_str(), systemStr.c_str())) {
-            std::fprintf(stderr, "Failed to load game: %s\n", core.GetLastError().c_str());
-            return 2;
+            return LoadFailure("Failed to load game: " + core.GetLastError());
         }
+        if (core.IsSTVLoaded()) {
+            g_runInfo.bios = core.GetSTVLoadDescription();
+        }
+        g_runInfo.cartridge = core.GetCartridgeDescription();
+        g_runInfo.cartridgeMessage = core.GetLastCartridgeMessage();
     }
 
     if (!args.state.empty()) {
         std::vector<uint8_t> data;
         if (!ReadFile(args.state, data) || !core.LoadState(data.data(), data.size())) {
-            std::fprintf(stderr, "Failed to load save state: %s\n", args.state.c_str());
-            return 2;
+            return LoadFailure("Failed to load save state: " + args.state);
         }
     }
 
@@ -805,8 +933,17 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         return 0;
     }
 
+    const auto wallStart = std::chrono::steady_clock::now();
     brimir::CoreWrapper core;
     if (const int rc = LoadContent(core, args, saveDir, systemDir, args.sh2Jit, false); rc != 0) {
+        if (!args.sweepSummary.empty()) {
+            brimir_tools::SweepSummary failed;
+            failed.loadError = g_runInfo.loadError;
+            failed.bios = g_runInfo.bios;
+            failed.cartridge = g_runInfo.cartridge;
+            failed.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+            WriteSweepSummary(args, failed);
+        }
         return rc;
     }
     if (args.fixedRtc && args.state.empty() && !brimir::ApplyFixedRtc(core, brimir::kDeterministicRtcDate)) {
@@ -819,8 +956,52 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     }
     int framesRun = 0;
     const auto runFrame = [&] {
-        trace.BeginFrame(framesRun++);
+        const int frame = framesRun++;
+        trace.BeginFrame(frame);
+        if (!args.inputScript.empty()) {
+            core.SetControllerState(0, brimir_tools::JoypadAt(args.inputScript, frame));
+        }
         core.RunFrame();
+    };
+
+    std::vector<int16_t> audioChunk(2048 * 2);
+    std::vector<int16_t> frameAudio;
+    // Drains the core's audio output (one frame's worth) into frameAudio.
+    const auto drainAudio = [&] {
+        frameAudio.clear();
+        while (const size_t n = core.GetAudioSamples(audioChunk.data(), 2048)) {
+            frameAudio.insert(frameAudio.end(), audioChunk.begin(),
+                              audioChunk.begin() + static_cast<std::ptrdiff_t>(n * 2));
+        }
+    };
+
+    // --screenshot-every and --sweep-summary, after every frame (warmup included): false (message printed) when a
+    // screenshot cannot be written
+    brimir_tools::SweepTracker sweepTracker;
+    const auto sweepAfterFrame = [&] {
+        const int frame = framesRun - 1;
+        const unsigned w = core.GetFramebufferWidth();
+        const unsigned h = core.GetFramebufferHeight();
+        const void* pixels = core.GetFramebuffer();
+        if (!args.sweepSummary.empty()) {
+            drainAudio();
+            const uint64_t hash =
+                pixels != nullptr && w != 0 && h != 0
+                    ? brimir_tools::HashFrame(w, h, pixels, core.GetFramebufferPitch())
+                    : 0;
+            sweepTracker.AddFrame(hash, frameAudio.data(), frameAudio.size() / 2);
+        }
+        if (args.screenshotEvery > 0 && (frame + 1) % args.screenshotEvery == 0) {
+            const std::vector<uint8_t> png = brimir_tools::EncodePng(w, h, pixels, core.GetFramebufferPitch());
+            const auto path = std::filesystem::path(args.screenshotDir) / ("f" + std::to_string(frame) + ".png");
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+            if (png.empty() || !out) {
+                std::fprintf(stderr, "Failed to write %s\n", path.string().c_str());
+                return false;
+            }
+        }
+        return true;
     };
 
     if (args.dumpAt >= 0) {
@@ -845,6 +1026,9 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
 
     for (int i = 0; i < args.warmup; ++i) {
         runFrame();
+        if (!sweepAfterFrame()) {
+            return 2;
+        }
     }
 
     core.SetProfilingEnabled(true);
@@ -864,16 +1048,6 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
     };
     std::vector<StreamHash> audioHashes;
     std::vector<StreamHash> stateHashes;
-    std::vector<int16_t> audioChunk(2048 * 2);
-    std::vector<int16_t> frameAudio;
-    // Drains the core's audio output (one frame's worth) into frameAudio.
-    const auto drainAudio = [&] {
-        frameAudio.clear();
-        while (const size_t n = core.GetAudioSamples(audioChunk.data(), 2048)) {
-            frameAudio.insert(frameAudio.end(), audioChunk.begin(),
-                              audioChunk.begin() + static_cast<std::ptrdiff_t>(n * 2));
-        }
-    };
     if (args.audioHash) {
         drainAudio(); // the warmup's output is not part of the window
     }
@@ -893,6 +1067,9 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         runFrame();
         const auto end = std::chrono::steady_clock::now();
         frameMs.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+        if (!sweepAfterFrame()) {
+            return 2;
+        }
         if (args.hash) {
             const unsigned w = core.GetFramebufferWidth();
             const unsigned h = core.GetFramebufferHeight();
@@ -900,7 +1077,9 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
                 {w, h, brimir_tools::HashFrame(w, h, core.GetFramebuffer(), core.GetFramebufferPitch())});
         }
         if (args.audioHash) {
-            drainAudio();
+            if (args.sweepSummary.empty()) { // else sweepAfterFrame drained this frame's audio
+                drainAudio();
+            }
             const size_t samples = frameAudio.size() / 2;
             audioHashes.push_back({i, samples, brimir_tools::HashAudio(frameAudio.data(), samples)});
         }
@@ -941,6 +1120,23 @@ int Run(const Args& args, const std::filesystem::path& saveDir, const std::files
         }
     }
     trace.Close();
+
+    if (!args.sweepSummary.empty()) {
+        brimir_tools::SweepSummary summary;
+        summary.stats = sweepTracker.Stats();
+        if (const ymir::Saturn* saturn = core.GetSaturn(); saturn != nullptr) {
+            summary.hasPC = true;
+            summary.masterPC = saturn->masterSH2.GetProbe().PC();
+            summary.slavePC = saturn->slaveSH2.GetProbe().PC();
+        }
+        summary.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+        summary.bios = g_runInfo.bios;
+        summary.cartridge = g_runInfo.cartridge;
+        summary.cartridgeMessage = g_runInfo.cartridgeMessage;
+        if (!WriteSweepSummary(args, summary)) {
+            return 2;
+        }
+    }
 
     for (size_t i = 0; i < frameHashes.size(); ++i) {
         std::printf("frame %zu %ux%u %016llx\n", i, frameHashes[i].w, frameHashes[i].h,

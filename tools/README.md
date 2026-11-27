@@ -270,6 +270,30 @@ Used by the performance harness (`tools/perf/`, `prove.ps1`) to prove a change l
 The lines are printed after the `frame` lines, outside the timed region; none of the three can be combined with
 `--lockstep` or `--dump-at` (`--fixed-rtc` only not with `--lockstep`).
 
+### Compatibility sweep (screenshots, input script, summary)
+
+For running many games unattended (`tools/bench_sweep.hpp`). Frame numbers count from 0 over all frames run, warmup
+included; the three options below default `--warmup` to 0 (give `--warmup` to keep one). None of them combines with
+`--lockstep` or `--dump-at`, and none changes what the other options print.
+
+- `--game <disc> --system-dir <dir>` without `--bios`: the BIOS is chosen as the core's `brimir_bios=auto` does: the
+  disc's region (its header's area codes) picks the BIOS file from `<dir>` (any available one if that region's is
+  missing). Copy the BIOS files and `brimir_saturn_rtc_<jp|us_eu>.smpc` into a scratch directory. With `--bios` the
+  behaviour is as before. The cartridge is the core's `brimir_cartridge=auto`: the game database's cartridge (the bench
+  never overrides the core's default), e.g. a 1 MB RAM cartridge for The King of Fighters '97.
+- `--screenshot-every N <dir>`: after frames k = N-1, 2N-1, ... (k + 1 frames run), a PNG of the output frame, as
+  RetroArch would show it (after the core's overscan crop and rotation), to `<dir>/f<k>.png`. `<dir>` must exist.
+- `--input-script <spec>`: Saturn Control Pad on port 1. `button:hold/period` items, comma separated: the button is
+  down for `hold` frames at the start of every `period` frames. `start:120/600,a:30/900` holds Start in frames 0-119,
+  600-719, ... and A in frames 0-29, 900-929, ... Buttons: `up down left right start a b c x y z l r`; anything else is
+  a usage error (exit 1).
+- `--sweep-summary <file>`: JSON with `frames_run`; `load_error` (null, or the text; a failed load also exits 2);
+  `identical_frames` (`start` and `length` of the longest run of frames with the same frame hash); `audio` (`peak`, and
+  the first frame and length in frames of the longest stretch where every sample has |sample| <= 16); `master_pc` and
+  `slave_pc` after the last frame (null on a failed load); `wall_seconds` (load included); `bios` (the file used; for an
+  ST-V set, the load description) and `cartridge` (what was inserted, `none` for no cartridge) with
+  `cartridge_message`. The audio is drained after every frame for it.
+
 ### Instruction and I/O traces (test and diagnostic builds)
 
 Built only with `-DBRIMIR_BUILD_TESTS=ON` or `-DBRIMIR_TRACE=ON` (`tools/bench_trace.hpp`); release builds do not have
