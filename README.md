@@ -6,6 +6,8 @@ A Sega Saturn and Sega ST-V emulation core for libretro, built on the [Ymir](htt
 
 Brimir is a libretro core that wraps Ymir's cycle-accurate hardware layer. It provides accurate Saturn emulation with optimized software rendering, an optional Vulkan renderer and full VDP1/VDP2 support, and it also runs thirteen ST-V arcade games.
 
+Compatibility: all 46 Saturn titles in the developer's collection (48 discs) work at the level the list states (2026-11-27 sweep; a small collection, not a percentage of the library). See [COMPATIBILITY.md](COMPATIBILITY.md).
+
 ## What's New in 0.11.0
 
 - **Five more ST-V games** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0, thirteen in all. Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). See [ST-V arcade games](#st-v-arcade-games).
@@ -475,7 +477,7 @@ cmake --build build-release --target brimir_libretro -j$(nproc)
 
 LTO applies to optimized configurations, not Debug. To disable it completely, set both `BRIMIR_LTO=OFF` and `Brimir_ENABLE_IPO=OFF`. Optional `Brimir_AVX2=ON` raises the x64 CPU requirements and is not enabled in the portable release builds.
 
-The core's developer log (printed to stdout, invisible in RetroArch) is compiled out of normal builds, because formatting it can cost a lot of time in a game that triggers it often; it is on in builds with `-DBRIMIR_BUILD_TESTS=ON`, and `-DBrimir_ENABLE_DEVLOG=ON` turns it on for debugging.
+The core's developer log (printed to stdout; RetroArch's log does not capture it) is compiled out of normal builds, because formatting it can cost a lot of time in a game that triggers it often; it is on in builds with `-DBRIMIR_BUILD_TESTS=ON`, and `-DBrimir_ENABLE_DEVLOG=ON` turns it on for debugging. The option is cached: an existing build directory keeps the value it was first configured with (and a later `-DBRIMIR_BUILD_TESTS` change does not move it), so pass `-DBrimir_ENABLE_DEVLOG=ON` or `OFF` explicitly when you reuse a directory, or use a fresh one.
 
 On Windows, run the commands from a *Developer PowerShell for VS 2022* (or any shell with the MSVC environment loaded) when using the Ninja generator.
 

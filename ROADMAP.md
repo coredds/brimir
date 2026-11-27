@@ -148,7 +148,7 @@ Thirteen games are done (see "Done"; the 315-5881 and 315-5838 chips and SanJeon
 
 ## Toward v1.0.0
 
-Full speed on the target devices (desktop and the tested Android phones; a JIT is one possible way, not a goal in itself), 85%+ compatibility, RetroArch core inclusion (which also removes the Android Core Info workaround: Brimir's `.info` in libretro's core info files).
+Full speed on the target devices (desktop and the tested Android phones; a JIT is one possible way, not a goal in itself), 85%+ compatibility (now: 46 of 46 games in the developer's collection work, 2026-11-27 sweep, see [COMPATIBILITY.md](COMPATIBILITY.md); the collection is small, so this does not yet show 85% of the library), RetroArch core inclusion (which also removes the Android Core Info workaround: Brimir's `.info` in libretro's core info files).
 
 ---
 
