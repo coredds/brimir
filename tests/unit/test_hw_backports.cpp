@@ -2906,8 +2906,19 @@ void ParkMasterSH2(Saturn &saturn) {
     saturn.masterSH2.GetProbe().PC() = kLoopAddr;
 }
 
+// TVSTAT.VBLANK as the CPU reads it.
 bool TVSTATVBlank(Saturn &saturn) {
+    return (saturn.mainBus.Read<uint16>(kVDP2TVSTAT) >> 3) & 1;
+}
+
+// TVSTAT.VBLANK as a debugger peek reads it.
+bool TVSTATVBlankPeek(Saturn &saturn) {
     return (saturn.mainBus.Peek<uint16>(kVDP2TVSTAT) >> 3) & 1;
+}
+
+// The stored TVSTAT.VBLANK bit.
+bool TVSTATVBlankStored(Saturn &saturn) {
+    return saturn.VDP.GetProbe().GetVDP2Regs().TVSTAT.VBLANK;
 }
 
 // Runs the system until pred() holds or maxCycles pass; returns whether pred() held.
@@ -2926,8 +2937,9 @@ bool RunUntil(Saturn &saturn, uint64 maxCycles, Pred &&pred) {
 } // namespace
 
 TEST_CASE("VDP2 TVSTAT.VBLANK reads 1 while TVMD.DISP is 0", "[vdp][vdp2][backport]") {
-    // Ymir fd3e4398: clearing TVMD.DISP forces the VBLANK signal to 1, and VBlank OUT leaves it set while DISP is 0.
-    // Fixes Clockwork Knight 2 freezing before FMVs.
+    // Ymir 71f2968d (replacing fd3e4398): while TVMD.DISP is 0 a CPU read of TVSTAT returns VBLANK = 1; the stored bit
+    // is not changed and still follows the beam, and a peek returns the stored bit. Fixes Clockwork Knight 2 freezing
+    // before FMVs without fd3e4398's regressions (Shinrei Jusatsushi Taroumaru, Baroque, upstream's 100+ games).
     auto saturn = std::make_unique<Saturn>();
     ParkMasterSH2(*saturn);
 
@@ -2936,25 +2948,37 @@ TEST_CASE("VDP2 TVSTAT.VBLANK reads 1 while TVMD.DISP is 0", "[vdp][vdp2][backpo
     REQUIRE(RunUntil(*saturn, kTwoFrames, [&] { return TVSTATVBlank(*saturn); }));
     REQUIRE(RunUntil(*saturn, kTwoFrames, [&] { return !TVSTATVBlank(*saturn); }));
 
-    // Display off in the active display area: VBLANK is set at once
+    // Display off in the active display area: reads return VBLANK = 1 at once, the stored bit stays 0
     saturn->mainBus.Write<uint16>(kVDP2TVMD, 0x0000);
     CHECK(TVSTATVBlank(*saturn));
+    CHECK_FALSE(TVSTATVBlankStored(*saturn));
+    CHECK_FALSE(TVSTATVBlankPeek(*saturn));
 
-    // ... and stays set across the last line (VBlank OUT) for two frames
+    // ... reads stay 1 for two frames, while the stored bit (and the peek) still goes 1 at VBlank IN and 0 at VBlank OUT
     bool alwaysSet = true;
     bool wrapped = false;
+    bool storedSet = false;
+    bool storedClearedAfterSet = false;
+    bool peekMatchesStored = true;
     uint16 prevVCNT = saturn->VDP.GetProbe().GetVDP2Regs().VCNT;
     RunUntil(*saturn, kTwoFrames, [&] {
         const uint16 vcnt = saturn->VDP.GetProbe().GetVDP2Regs().VCNT;
         wrapped = wrapped || vcnt < prevVCNT;
         prevVCNT = vcnt;
         alwaysSet = alwaysSet && TVSTATVBlank(*saturn);
+        const bool stored = TVSTATVBlankStored(*saturn);
+        storedSet = storedSet || stored;
+        storedClearedAfterSet = storedClearedAfterSet || (storedSet && !stored);
+        peekMatchesStored = peekMatchesStored && TVSTATVBlankPeek(*saturn) == stored;
         return false;
     });
     CHECK(wrapped);
     CHECK(alwaysSet);
+    CHECK(storedSet);
+    CHECK(storedClearedAfterSet);
+    CHECK(peekMatchesStored);
 
-    // Display on again: VBLANK clears at the next VBlank OUT
+    // Display on again: reads follow the beam (VBLANK clears in the active display area)
     saturn->mainBus.Write<uint16>(kVDP2TVMD, 0x8000);
     CHECK(RunUntil(*saturn, kTwoFrames, [&] { return !TVSTATVBlank(*saturn); }));
 }

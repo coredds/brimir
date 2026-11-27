@@ -509,11 +509,6 @@ FORCE_INLINE void VDP::VDP2WriteReg(uint32 address, uint16 value) {
                     m_state.regs2.TVMD.u16, (uint16)m_state.regs2.TVMD.HRESOn, (uint16)m_state.regs2.TVMD.VRESOn,
                     (uint16)m_state.regs2.TVMD.LSMDn, (uint16)m_state.regs2.TVMD.BDCLMD,
                     (uint16)m_state.regs2.TVMD.DISP, (m_state.regs2.TVMDDirty ? " (dirty)" : ""));
-
-                // Disabling TVMD.DISP forces the VBLANK signal to 1
-                if (!m_state.regs2.TVMD.DISP) {
-                    m_state.regs2.TVSTAT.VBLANK = 1;
-                }
             }
         }
     });
@@ -1055,9 +1050,7 @@ void VDP::BeginVPhaseLastLine() {
 
     m_renderer->VDP2BeginFrame();
 
-    if (m_state.regs2.TVMD.DISP) {
-        m_state.regs2.TVSTAT.VBLANK = 0;
-    }
+    m_state.regs2.TVSTAT.VBLANK = 0;
     m_cbVBlankStateChange(false);
 }
 
