@@ -10,12 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Three game fixes from upstream Ymir** (by StrikerX3; Ymir `fd3e4398`, `91358dc5`, `783035ee`, synced 2026-11-26):
-  - Clockwork Knight 2 no longer freezes before its FMVs: turning the display off now reads as vertical blank until it is turned back on (upstream's fix; not verified in-game here).
+- **Three game fixes from upstream Ymir** (by StrikerX3; Ymir `fd3e4398` as corrected by `71f2968d`, `91358dc5`, `783035ee`, synced 2026-11-26 and 2026-11-27):
+  - Clockwork Knight 2 no longer freezes before its FMVs: while the display is off, the game reads the screen status as vertical blank (upstream's fix; not verified in-game here).
   - Astal's final boss fight no longer loses graphics (upstream's fix; not verified in-game here: the fight was not reached).
   - Shining the Holy Ark's Aborigine Forest no longer slows down (upstream's fix; not verified in-game here).
 
   The two VDP1 fixes stop sprites, polygons and lines drawn partly outside the screen from keeping the VDP1 busy for the part that is clipped away. Brimir times the VDP1 commands from its own record of the clipping area, so the timing is the same with the software and the Vulkan renderer and with threaded VDP1. **Verified locally:** unit tests for each fix; Astal from boot and from a gameplay state runs deterministically (lockstep). Speed, measured on gameplay states (3 runs per batch): Virtua Fighter 2 about +0.8 to +1.9 % per frame across batches, Astal within noise; the cause is likely the per-line clipped timing of polygons, not established.
+- **A VBLANK change taken on 2026-11-26 broke Shinrei Jusatsushi Taroumaru and Baroque** (and, per upstream, 100+ games) — fixed by upstream's corrected version (Ymir `71f2968d`, synced 2026-11-27). The first version (`fd3e4398`) set the vertical blank bit itself when the display was turned off and kept it set; Taroumaru stayed black from power-on and Baroque froze after its opening movie. The corrected version only makes the game read vertical blank while the display is off and leaves the bit alone. **Verified locally:** in the 3-minute sweep run both games now get to gameplay (Taroumaru: title, character select and the first stage; Baroque: past the opening movie into the first dungeon); lockstep on the BIOS OK.
 
 ## [0.11.0] - 2026-11-25
 

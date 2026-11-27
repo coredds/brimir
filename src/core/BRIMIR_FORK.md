@@ -205,6 +205,13 @@ with `libs/ymir-core` at `ff935379`).
   boot and from a gameplay state). Speed on gameplay states (3 runs per batch, against the same tree with the core
   files at `ca2dc90`): Virtua Fighter 2 about +0.8 to +1.9 % per frame across batches, Astal within noise; the cause
   is likely the per-line clipped timing of polygons (`LineStepper` + `SystemClip` per scanline), not established.
+- Follow-up range `783035ee..1526ade4` (2026-11-27; section "Range 783035ee..1526ade4, 2026-11-27" of
+  `UPSTREAM_SYNC_2026-11.md`): 3 commits, 2 take, 1 skip (Ymir D3D12 renderer). Taken: `71f2968d`, upstream's
+  replacement for `fd3e4398` (TVSTAT reads return VBLANK = 1 while TVMD.DISP is 0, the stored bit is left alone; peek
+  reads and the save state see the stored bit), because `fd3e4398` left Shinrei Jusatsushi Taroumaru black and froze
+  Baroque (2026-11-27 compatibility sweep; upstream: 100+ games); and `02d295a7` (the per-command VDP1 cost log line,
+  `devlog::trace`; the debug block it removes was never taken). Both verbatim. Newest taken commit `02d295a7`; triaged
+  up to `1526ade4`, so the next sync starts after it.
 
 ## Brimir changes
 
@@ -294,8 +301,10 @@ whose CD block read FIFO cursors are out of range, which upstream's `CDBlock::Va
 
 ## Upstream SH-2 ports
 
-Fork base: upstream Ymir `783035ee` (2026-11-26), the follow-up of the 2026-11 upstream sync (`ff935379..783035ee`;
-see the "2026-11 upstream sync" section above and `UPSTREAM_SYNC_2026-11.md`). Before it: `ff935379` (2026-11-07), the
+Fork base: upstream Ymir `02d295a7` (2026-11-26; range triaged up to `1526ade4`, the next sync starts after it), the
+second follow-up of the 2026-11 upstream sync (`783035ee..1526ade4`, 2026-11-27; see the "2026-11 upstream sync"
+section above and `UPSTREAM_SYNC_2026-11.md`). Before it: `783035ee` (2026-11-26, `ff935379..783035ee`), and
+`ff935379` (2026-11-07), the
 triage of every upstream commit from the 2026-06-23 sync point; before that, the 2026-06-23 sync plus the backports
 listed in `CHANGELOG.md`.
 

@@ -1,4 +1,4 @@
-# Upstream Ymir sync triage, 2026-11 (2026-06-23..ff935379, then ff935379..783035ee)
+# Upstream Ymir sync triage, 2026-11 (2026-06-23..ff935379, then ff935379..783035ee and 783035ee..1526ade4)
 
 Every upstream Ymir commit since Brimir's 2026-06-23 sync point that touches `libs/ymir-core` (532 non-merge
 commits, `main` from 2026-06-23 to `ff935379`, 2026-11-07), with Brimir's decision for each, plus one pre-range row
@@ -8,7 +8,8 @@ with Brimir's current code (not by hash: earlier backports in `CHANGELOG.md` som
 whole-tree comparison of `src/core` with `libs/ymir-core` at `ff935379`: every upstream line Brimir lacks is explained
 by a row below. Spec: `docs/superpowers/specs/2026-11-10-upstream-ymir-sync-design.md`; `BRIMIR_FORK.md` section
 "2026-11 upstream sync". The follow-up range `ff935379..783035ee` (8 commits, 2026-11-26) has its own section, counts
-and table at the end ("Range ff935379..783035ee, 2026-11-26"); the counts and sections up to "Table" cover the first
+and table at the end ("Range ff935379..783035ee, 2026-11-26"), and so does `783035ee..1526ade4` (3 commits,
+2026-11-27, "Range 783035ee..1526ade4, 2026-11-27"); the counts and sections up to "Table" cover the first
 range only.
 
 - **take**: bring in (own commit `sync(core): <subject> (Ymir <hash>)`, the Brimir commit column is filled when it lands).
@@ -669,7 +670,7 @@ Brimir-side notes:
 
 - `fd3e4398` touches `VDP::VDP2WriteReg` and `VDP::BeginVPhaseLastLine` (`vdp.cpp`) and `VDP2Regs::ReadTVSTAT`
   (`vdp2_regs.hpp`); none is in a Brimir row, so the change is verbatim. TVSTAT is VDP state shared by both renderers;
-  no `src/gpu` change.
+  no `src/gpu` change. Its `vdp.cpp` part was undone by `71f2968d` on 2026-11-27 (next section).
 - `91358dc5` and `783035ee`: the command timing (`VDP::VDP1CalcCommandTiming`) is computed by the VDP for every
   renderer; the Vulkan renderer (`src/gpu`) and the software renderer have no copy of it, so there is nothing to
   mirror. Upstream reads the system clipping area from `m_state.state1`, which the renderer's Set System Clipping
@@ -693,6 +694,42 @@ Brimir-side notes:
 | `c11a8c9` | 2026-11-17 | fix(vk): Don't eat error message when acquiring the first swapchain image | skip | Ymir graphics backend (`vulkan_swap_chain.cpp`, out of scope) | |
 | `aefadf4` | 2026-11-17 | fix(vk): Fix startup crash when using Vulkan on Wayland | skip | Ymir graphics backend and app (`vulkan_swap_chain.*`, `gfx_context_impl_vulkan.cpp`, out of scope) | |
 | `0fdabbd` | 2026-11-19 | fix(vdp-d3d12): Fix out-of-bounds writes when switching resolution | skip | Ymir GPU renderer (`vdp_renderer_hw_d3d12.cpp`, out of scope) | |
-| `fd3e439` | 2026-11-25 | fix(VDP2): Force TVSTAT.VBLANK signal to asserted when TVMD.DISP is not asserted | take (vdp2) | a TVMD write with DISP = 0 sets TVSTAT.VBLANK, and VBlank OUT clears it only while DISP = 1 (Clockwork Knight 2 freezes before FMVs, upstream #729, #762). `ReadTVSTAT` is reworded to the bit field (same value). Verbatim. | `b8cf2d4` |
+| `fd3e439` | 2026-11-25 | fix(VDP2): Force TVSTAT.VBLANK signal to asserted when TVMD.DISP is not asserted | take (vdp2) | a TVMD write with DISP = 0 sets TVSTAT.VBLANK, and VBlank OUT clears it only while DISP = 1 (Clockwork Knight 2 freezes before FMVs, upstream #729, #762). `ReadTVSTAT` is reworded to the bit field (same value). Verbatim. Broke Shinrei Jusatsushi Taroumaru and Baroque (2026-11-27 compatibility sweep; upstream: 100+ games); replaced by `71f2968d` (range `783035ee..1526ade4` below). | `b8cf2d4` |
 | `91358dc` | 2026-11-26 | fix(VDP1): Limit simple quad timing calculations to system clipping area | take (vdp1) | normal and scaled sprites cost at most the system clipping area (missing graphics in Astal's final boss fight, upstream #976). Brimir reads the clipping area from its own copy (see the notes above). | `7d5ac94` |
 | `783035e` | 2026-11-26 | fix(VDP1): Limit distorted quad timing calculations to system clipping area | take (vdp1) | the per-line cost of distorted sprites, polygons, polylines and lines is the length of the line after `LineStepper::SystemClip` (VDP1 slowdowns in Shining the Holy Ark's Aborigine Forest, upstream #922). The debug block it adds to `VDP1ProcessCommand` is not taken (see the notes above). | `14b5409` |
+
+## Range 783035ee..1526ade4, 2026-11-27
+
+Every upstream non-merge commit after `783035ee` up to `1526ade4` (`main`, 2026-11-26) that touches `libs/ymir-core`:
+3 commits (the range's fourth, `dfe5d46d`, is CI only and touches no core file), same decision rules and columns as the tables above. Newest
+taken commit (fork base): `02d295a7`; the range is triaged up to `1526ade4`, so the next sync starts after it.
+
+| Decision | Commits |
+|---|---|
+| take | 2 |
+| already | 0 |
+| ours-better | 0 |
+| skip | 1 |
+| **total** | **3** |
+
+Why now: the 2026-11-27 compatibility sweep found that `fd3e4398` (taken 2026-11-26) leaves Shinrei Jusatsushi
+Taroumaru black from power-on and freezes Baroque after its opening movie, the same in upstream Ymir at `783035ee`
+(`docs/superpowers/records/2026-11-27-compat-sweep/causes.md`). Upstream's `71f2968d` replaces it ("Fixes 100+
+regressions").
+
+Brimir-side notes:
+
+- `71f2968d`: `VDP2Regs::ReadTVSTAT` returns VBLANK = 1 while TVMD.DISP is 0, on CPU reads only (`peek` reads, the
+  debugger and `VDPState::SaveState`, get the stored bit); the TVMD write no longer sets the stored bit and VBlank OUT
+  clears it unconditionally again. Verbatim; `ReadTVSTAT` is not in a Brimir row, and the save state still stores the
+  stored bit (no format change). The test `VDP2 TVSTAT.VBLANK reads 1 while TVMD.DISP is 0` is rewritten for it (CPU
+  read 1, stored bit and peek still following the beam); it failed against `fd3e4398`'s form.
+- `02d295a7` removes `783035ee`'s debug block (never taken here, see the previous section) and turns the per-command
+  cost line from `devlog::debug` into `devlog::trace`. Taken as that trace line, so `VDP1ProcessCommand` matches
+  upstream's resulting code (trace logging only, compiled out unless the `vdp1_cmd` group's trace level is on).
+
+| Upstream hash | Date | Subject | Decision | Reason | Brimir commit |
+|---|---|---|---|---|---|
+| `71f2968` | 2026-11-26 | fix(VDP2): Read TVSTAT.VBLANK as 1 when TVMD.DISP=0 instead of changing the bit directly | take (vdp2) | replaces `fd3e4398`: reads of TVSTAT return VBLANK = 1 while DISP = 0, the stored bit is left alone (fixes Taroumaru and Baroque here, 100+ games upstream; keeps the Clockwork Knight 2 fix). Verbatim. | `0c05550` |
+| `02d295a` | 2026-11-26 | chore: Remove debug code | take (other) | the debug block it removes was never taken; what remains is the per-command `devlog::trace` cost line, added. | `b45c7fe` |
+| `1526ade` | 2026-11-26 | fix(vdp-d3d12): Sync NBG2-3 vertical scroll base offset properly at the start of the frame | skip | Ymir GPU renderer (`vdp_renderer_hw_d3d12.cpp`, out of scope) | |
