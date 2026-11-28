@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 # Project information
 project(Brimir
-    VERSION 0.11.0
+    VERSION 0.11.1
     DESCRIPTION "Sega Saturn emulation libretro core"
     LANGUAGES CXX C
 )
@@ -120,10 +120,10 @@ include(cmake/YmirDeps.cmake)
 # Set Brimir core version variables
 set(Brimir_VERSION_MAJOR 0)
 set(Brimir_VERSION_MINOR 11)
-set(Brimir_VERSION_PATCH 0)
+set(Brimir_VERSION_PATCH 1)
 set(Brimir_VERSION_PRERELEASE "")
 set(Brimir_VERSION_BUILD "")
-set(Brimir_VERSION "0.11.0")
+set(Brimir_VERSION "0.11.1")
 set(Brimir_DEV_BUILD OFF)
 # The core's developer log, printed to stdout (RetroArch's log does not capture it, and formatting it costs time: Albert Odyssey
 # fell to 4 fps on thousands of logged invalid VDP1 commands per frame). Off by default; on in test builds, so

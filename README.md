@@ -8,12 +8,12 @@ Brimir is a libretro core that wraps Ymir's cycle-accurate hardware layer. It pr
 
 Compatibility: all 46 Saturn titles in the developer's collection (48 discs) work at the level the list states (2026-11-27 sweep; a small collection, not a percentage of the library). See [COMPATIBILITY.md](COMPATIBILITY.md).
 
-## What's New in 0.11.0
+## What's New in 0.11.1
 
-- **Five more ST-V games** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0, thirteen in all. Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). See [ST-V arcade games](#st-v-arcade-games).
-- **Screen Rotation: Auto** - the new default turns vertical ST-V games upright (Shienryu) and never rotates Saturn games; the rotated picture is reported as 3:4. **If you ran 0.10.0, your saved setting is "None"**: choose Auto in Quick Menu > Core Options > Video Settings > Screen Rotation (TATE), or Shienryu comes up on its side (the core shows a hint on screen when it loads a vertical game under another setting).
-- **ST-V saves** - the SMPC's battery settings are saved too, so an ST-V `<set>.srm` is now 32,901 bytes; a 0.10.0 file (32,896 bytes) still loads. 0.10.0 ST-V save states still load.
-- **ST-V game defaults** - each set's own default EEPROM image is used (Shienryu sets up the cabinet for its vertical monitor, Steep Slope Sliders for one player).
+- **Albert Odyssey no longer slows to a crawl** - the developer log is off in release cores; formatting its lines cost time, and Albert Odyssey logs thousands of invalid VDP1 commands per frame (about 4 fps from about frame 2,400 of the scripted run, about 290 fps now). Any game that hit a logged condition benefits.
+- **Three game fixes from upstream Ymir** - Clockwork Knight 2 no longer freezes before its FMVs, Astal's final boss fight no longer loses graphics, and Shining the Holy Ark's Aborigine Forest no longer slows down. They come from upstream Ymir and were not verified in-game here (unit tests and lockstep runs only).
+- **Compatibility list** - all 46 Saturn titles in the developer's collection work at the level [COMPATIBILITY.md](COMPATIBILITY.md) states, with the sweep tooling (`tools/compat_sweep.ps1`) that produced it.
+- Save states and saves are unchanged from 0.11.0 (Saturn and ST-V).
 
 The history of every release is in [CHANGELOG.md](CHANGELOG.md).
 

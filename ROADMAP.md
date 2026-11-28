@@ -1,7 +1,7 @@
 # Brimir Roadmap
 
-**Status**: Active — version 0.11.0. Every upstream Ymir core change up to `ff935379` (2026-11-07) is reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
-**Last Updated**: 2026-11-25 - v0.11.0 added five more ST-V games (thirteen in all), Screen Rotation Auto and the SMEM save; v0.10.0 added ST-V arcade support
+**Status**: Active — version 0.11.1. Every upstream Ymir core change up to `1526ade4` (2026-11-26) is reviewed (selective sync; see `src/core/UPSTREAM_SYNC_2026-11.md`)
+**Last Updated**: 2026-11-27 - v0.11.1 added the compatibility list and sweep tooling, turned the developer log off in release cores (Albert Odyssey's speed) and took three upstream game fixes; v0.11.0 added five more ST-V games (thirteen in all), Screen Rotation Auto and the SMEM save
 
 Gap-analysis-driven roadmap derived from comparing Brimir against mature RetroArch cores (Flycast, Beetle PSX, DuckStation, PCSX2, Genesis Plus GX, mGBA, bsnes). The release history is in [CHANGELOG.md](CHANGELOG.md).
 

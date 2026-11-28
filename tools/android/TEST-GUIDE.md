@@ -197,7 +197,7 @@ permission. On the A56 the core file copied to the phone was checked against the
 ### 7. Load the core
 
 Main Menu > **Load Core**. You should **see** `brimir_libretro_android.so` in the list (with "License: N/A") **[emulator]**.
-Tap it. Back at the Main Menu the title bar now reads `1.22.2 - Brimir (0.11.0)` (the RetroArch version, then Brimir
+Tap it. Back at the Main Menu the title bar now reads `1.22.2 - Brimir (0.11.1)` (the RetroArch version, then Brimir
 and its version) and the list has **Start Core** and **Load Content** **[emulator]**.
 
 If the core is not in the list: the file name changed (see step 2), or it is the wrong file.

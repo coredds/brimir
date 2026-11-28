@@ -296,11 +296,13 @@ jobs:
 
             ### ${{ github.ref_name }}
 
-            **Five more ST-V games (new)** - Shienryu, Final Fight Revenge, Steep Slope Sliders, DaeJeon! SanJeon SuJeon and Decathlete join the eight of 0.10.0 (Baku Baku Animal, Columns '97, Puyo Puyo Sun, Die Hard Arcade, Golden Axe: The Duel, Cotton 2, Guardian Force, Radiant Silvergun): thirteen in all, run from their MAME ROM sets (`.zip`). Decathlete needs the 315-5838 compression chip, written from MAME's code (MAME itself does not run the game; it was checked against libretro-stv). Each set's own default EEPROM is used, so Shienryu starts set up for the vertical monitor.
+            **Albert Odyssey - Legend of Eldean no longer slows to a crawl (fixed)** - the core's developer log is now off in release builds. Formatting its lines cost time, and Albert Odyssey sends the VDP1 an invalid command thousands of times per frame: it fell to about 4 fps from about frame 2,400 of a scripted run and now runs at about 290 fps. Any game that hit a logged condition benefits.
 
-            **Screen Rotation: Auto (new default)** - vertical ST-V games (Shienryu) are turned upright by themselves and shown at 3:4; Saturn games are never rotated. **If you ran 0.10.0, your saved setting is "None": choose Auto in Quick Menu > Core Options > Video Settings > Screen Rotation (TATE) for Shienryu**; the core shows a hint on screen when it loads a vertical game under another setting.
+            **Three game fixes from upstream Ymir (by StrikerX3)** - Clockwork Knight 2 no longer freezes before its FMVs, Astal's final boss fight no longer loses graphics, and Shining the Holy Ark's Aborigine Forest no longer slows down. They come from upstream Ymir and were not verified in-game here (unit tests and lockstep runs only; the Astal fight was not reached).
 
-            **ST-V saves** - the SMPC's battery settings are saved too, so an ST-V `<set>.srm` is now 32,901 bytes (0.10.0: 32,896). 0.10.0 saves and ST-V save states still load; Saturn saves and states are unchanged.
+            **Compatibility list (new)** - all 46 Saturn titles (48 discs) in the developer's collection work at the level the list states, from an unattended 3-minute run of each. The collection is small and not a sample of the library: [COMPATIBILITY.md](https://github.com/coredds/brimir/blob/master/COMPATIBILITY.md). The sweep tooling that produced it is in `tools/` (`compat_sweep.ps1`).
+
+            Saturn save states and ST-V saves and states are unchanged from 0.11.0.
 
             Put the ST-V BIOS (`epr-20091.ic8` Japan, `epr-17952a.ic8` USA, `epr-17954a.ic8` Europe, or MAME's other names) in RetroArch's system folder; no Saturn BIOS is needed. Select is the coin, L3 Service, R3 Test. A `.zip` is read only as an ST-V ROM set: a Saturn disc image inside a `.zip` or `.7z` does not load (extract it and load the `.cue`, or convert it to CHD). The unstripped Android core for crash reports is `brimir-${{ github.ref_name }}-android-arm64-symbols.zip`.
 
