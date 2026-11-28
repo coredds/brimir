@@ -13,7 +13,7 @@ Compatibility: all 46 Saturn titles in the developer's collection (48 discs) wor
 - **Albert Odyssey no longer slows to a crawl** - the developer log is off in release cores; formatting its lines cost time, and Albert Odyssey logs thousands of invalid VDP1 commands per frame (about 4 fps from about frame 2,400 of the scripted run, about 290 fps now). Any game that hit a logged condition benefits.
 - **Three game fixes from upstream Ymir** - Clockwork Knight 2 no longer freezes before its FMVs, Astal's final boss fight no longer loses graphics, and Shining the Holy Ark's Aborigine Forest no longer slows down. They come from upstream Ymir and were not verified in-game here (unit tests and lockstep runs only).
 - **Compatibility list** - all 46 Saturn titles in the developer's collection work at the level [COMPATIBILITY.md](COMPATIBILITY.md) states, with the sweep tooling (`tools/compat_sweep.ps1`) that produced it.
-- Save states and saves are unchanged from 0.11.0 (Saturn and ST-V).
+- Save and state files are unchanged in format from 0.11.0 (Saturn and ST-V), so a 0.11.0 state loads. VDP1 timing for partly off-screen commands and the screen-status read changed, so a game can play out slightly differently from a 0.11.0 state, and netplay peers must use the same Brimir version.
 
 The history of every release is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -117,7 +117,7 @@ with the controllers).
 - **Compatibility**: states from earlier Brimir releases load (states from very old development builds do not), except the v0.6.x states of Dezaemon 2 and Sega Ages: Galaxy
   Force II (they now get a backup memory cartridge under Cartridge = Auto; set Cartridge to None and reload the content
   to load them).
-- **Netplay**: both machines need the same BIOS and content, and should also use:
+- **Netplay**: both machines need the same BIOS and content and the same Brimir version (emulation timing changes between versions even when the state format does not, as from 0.11.0 to 0.11.1), and should also use:
   - the same core options, in particular SH-2 Cache Emulation and SCSP Step Granularity, which are not emulation state:
     a state saved with other values loads, keeps the local settings and logs a warning (once per content);
   - the same cheats, enabled alike: cheats are not in save states and write memory every frame;

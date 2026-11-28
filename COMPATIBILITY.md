@@ -33,7 +33,8 @@ The first sweep (earlier on 2026-11-27, with the emulation core at upstream Ymir
 44 titles that worked. All three are gone:
 
 - **Shinrei Jusatsushi Taroumaru and Baroque** broke in Brimir's 2026-11-26 sync, which took upstream's change
-  `fd3e4398` (VBLANK forced to 1 while the display is off). Taroumaru stayed black and silent from power-on; Baroque
+  `fd3e4398` (VBLANK forced to 1 while the display is off). This existed on master only, between 0.11.0 and 0.11.1;
+  no release had it. Taroumaru stayed black and silent from power-on; Baroque
   froze black after its opening movie. Upstream replaced the change the next day with `71f2968d` ("Fixes 100+
   regressions"); Brimir took that, and the post-sync sweep shows both games in gameplay (Taroumaru: title, character
   select, stage 1; Baroque: first dungeon). Upstream Ymir at `783035ee` shows the same black screens, so this was not a
@@ -48,7 +49,8 @@ The first sweep (earlier on 2026-11-27, with the emulation core at upstream Ymir
 ### Differences between the two sweeps
 
 The post-sync sweep was compared with the first one (same input, frames and `--fixed-rtc`): 38 games identical, 10
-different. Two are the fixed games and one is Albert Odyssey (above). The other differences came with the VBLANK
+different. Two are the games the first VBLANK change broke (on master only, between 0.11.0 and 0.11.1; no release
+had it) and one is Albert Odyssey (above). The other differences came with the VBLANK
 change and look like run-to-run content changes, not problems; they were only checked by eye:
 
 - **King of Fighters '97:** the same flow, but a different CPU opponent and stage from frame 599 on (probably a timing
